@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(plugin-dev:skill-development)",
+      "Skill(plugin-dev:plugin-structure)",
+      "Skill(plugin-dev:create-plugin)"
+    ]
+  },
+  "enabledPlugins": {
+    "plugin-dev@claude-plugins-official": true
+  }
+}
