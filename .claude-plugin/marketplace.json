@@ -1,0 +1,11 @@
+{
+  "name": "alignment-hive",
+  "owner": { "name": "Crazytieguy" },
+  "plugins": [
+    {
+      "name": "project-setup",
+      "source": "./plugins/project-setup",
+      "description": "Guidance for thoughtful project initialization"
+    }
+  ]
+}

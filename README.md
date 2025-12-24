@@ -2,6 +2,14 @@
 
 Claude Code infrastructure for the AI safety research community, starting with MATS.
 
+## Installation
+
+Add this marketplace to Claude Code:
+```
+/plugin marketplace add Crazytieguy/alignment-hive
+/plugin install project-setup@alignment-hive
+```
+
 ## What This Is
 
 Shared knowledge and tooling for AI agents working with alignment researchers:
@@ -15,9 +23,9 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 **Priority**: Technical infrastructure first, then content.
 
 ### Immediate Next Steps
-1. Create a Claude Code plugin with a simple example skill, validate it works (repo installable as marketplace, plugin auto-updates on changes)
+1. Test project-setup plugin locally, validate it works
 2. Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training) for memory system design
-3. Set up memory system with single "ask permission to submit" tier
+3. Set up memory system plugin with single "ask permission to submit" tier
 4. Test locally before setting up GitHub Action for processing
 
 ### Memory System Design Notes
