@@ -15,10 +15,10 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 **Priority**: Technical infrastructure first, then content.
 
 ### Immediate Next Steps
-1. Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training) for memory system design
-2. Set up memory system with single "ask permission to submit" tier
-3. Test locally before setting up GitHub Action for processing
-4. Create initial plugin with basic skills
+1. Create a Claude Code plugin with a simple example skill, validate it works (repo installable as marketplace, plugin auto-updates on changes)
+2. Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training) for memory system design
+3. Set up memory system with single "ask permission to submit" tier
+4. Test locally before setting up GitHub Action for processing
 
 ### Memory System Design Notes
 - Retrieval less important than storage (can improve later)
