@@ -23,16 +23,19 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 **Priority**: Technical infrastructure first, then content.
 
 ### Immediate Next Steps
-1. Test project-setup plugin locally, validate it works
-2. Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training) for memory system design
-3. Set up memory system plugin with single "ask permission to submit" tier
-4. Test locally before setting up GitHub Action for processing
+1. ~~Test project-setup plugin locally~~ Done
+2. ~~Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training)~~ Done
+3. Memory system: work through planned sessions (see [detailed plan](docs/memory-system-plan.md))
+   - Next: Session 1 - Privacy & Storage Architecture
 
-### Memory System Design Notes
-- Retrieval less important than storage (can improve later)
-- Storage should be "yankable" (removable on request)
-- Structure: single monolithic skill, sessions have labels/names/dates/descriptions
-- Index lists all sessions in greppable format
+### Memory System
+See [docs/memory-system-plan.md](docs/memory-system-plan.md) for detailed design and session plan.
+
+Key principles:
+- Storage over retrieval (can improve retrieval later)
+- Yankable (users can retract consent and remove data)
+- Human review required for all submissions
+- Privacy-conscious (sensitive data must not leak)
 
 ### Initial Skills to Create
 - Scholar handbook
