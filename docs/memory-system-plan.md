@@ -1,202 +1,131 @@
 # Memory System Plan
 
-Living document tracking the design and implementation of the alignment-hive memory system.
+A system for MATS researchers to contribute session learnings to a shared knowledge base.
 
-## Overview
+## Core Principles
 
-A system for MATS researchers to contribute session learnings to a shared knowledge base, retrievable by Claude in future sessions.
+- **Storage over retrieval**: Capture now; improve retrieval later
+- **Yankability**: Users can retract consent and remove their data
+- **Human review**: All content reviewed before merging
+- **Privacy-conscious**: Sensitive data must not leak
 
-### Core Principles
-- **Storage over retrieval**: Capture as much as possible now; retrieval can improve later
-- **Yankability**: Users can retract consent and have their data removed
-- **Human review**: All contributed content reviewed before merging
-- **Privacy-conscious**: Sensitive data must not leak into the shared repository
+## Session Progress
+
+- [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
+- [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
+- [ ] **Session 2: Hook Behavior & User Prompting** ← NEXT
+- [ ] Session 3: Structured Content Format
+- [ ] Session 4: Index Design
+- [ ] Session 5: First-Time Setup & Multi-Environment
+- [ ] Session 6: GitHub Action Processing Pipeline
+- [ ] Session 7: Retrieval Subagent
+- [ ] Session 8: Testing Strategy
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         USER SESSION                                │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼ SessionEnd hook
-┌─────────────────────────────────────────────────────────────────────┐
-│  Prompt user: "Submit this session to MATS memory?"                 │
-│  If approved → submit to processing pipeline                        │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼ Processing (GitHub Action or server)
-┌─────────────────────────────────────────────────────────────────────┐
-│  Claude inspects session → generates structured content             │
-│  Creates PR with structured content (raw data stored separately?)   │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼ Human review
-┌─────────────────────────────────────────────────────────────────────┐
-│  Reviewer merges PR → marketplace updates → users get new content   │
-└─────────────────────────────────────────────────────────────────────┘
+SETUP (one-time)
+  User runs login → Stytch device flow → JWT stored locally
+  Stytch webhook on signup → Convex → GitHub App invites to repo
 
-┌─────────────────────────────────────────────────────────────────────┐
-│                          RETRIEVAL                                  │
-│  Subagent invoked by main agent → searches index → returns context  │
-└─────────────────────────────────────────────────────────────────────┘
+TRANSCRIPT SUBMISSION (mechanism TBD in Session 2)
+  Reads JWT → uploads to Convex HTTP action
+        │
+        ▼
+CONVEX BACKEND
+  Validates JWT (Stytch JWKS) → stores in R2 → records metadata
+  Triggers GitHub Action via repository_dispatch
+        │
+        ▼
+GITHUB ACTION
+  Auth: shared secret → fetches transcript → runs Claude Code
+  Creates PR with extracted knowledge → uploads processing session to R2
+        │
+        ▼
+HUMAN REVIEW
+  Reviewer merges PR → marketplace updates → users get new content
+
+RETRIEVAL
+  Subagent searches index → returns context to main agent
 ```
 
-## Planned Sessions
+## Technology Decisions
 
-Ordered by foundation (earlier sessions inform later ones).
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| Auth | Stytch | First-class CLI device flow, JWT-based, invite-only built-in |
+| Backend | Convex | Real-time, supports custom JWT auth for Stytch |
+| File Storage | Cloudflare R2 | S3-compatible, zero egress, direct access for yankability |
+| Processing | GitHub Actions | Free CI minutes, Claude Code support |
+| Distribution | Git + plugin marketplace | Auto-updates via marketplace |
+| GitHub Action Auth | Shared secret | Convex-recommended for external services |
+| Repo Invitations | GitHub App | More secure than user OAuth tokens |
+| Label Generation | Derived from content | Reduces friction; AI extracts labels, not user input |
 
-### Session 1: Privacy & Storage Architecture
+## Open Questions
 
-**Why first**: Determines the fundamental split between what goes in git vs elsewhere. All other decisions depend on this.
+### Session 2: Hook Behavior
+- Does SessionEnd hook trigger reliably? On compaction?
+- Access to session_id and transcript_path?
+- Can hooks prompt for user input? Alternatives: notifications, Stop hook, user command
+- Hook timeout (60s default) - enough for uploads?
 
-**Questions to resolve**:
-- Do we store raw JSONL in git, or in a separate server?
-- If server: what's the minimum viable server? Who hosts it? How do we authenticate?
-- If git-only: how do we handle mistakes that leak sensitive data? (git history is permanent)
-- What sanitization is possible/reliable for raw session data?
-- Should we skip raw JSONL entirely and only store processed content (like the Sionic blog)?
-- Tradeoff: raw data enables reprocessing with improved pipelines, but increases privacy risk
-
-**Outcome**: Decision on storage architecture, documented rationale
-
-### Session 2: Hook Behavior & User Prompting
-
-**Why second**: Need to understand technical capabilities before designing the submission UX.
-
-**Questions to resolve**:
-- Does SessionEnd hook trigger reliably? What about on compaction?
-- Does the hook have access to session_id and transcript_path?
-- Can hooks prompt for user input? If not, what are the alternatives?
-  - System notifications
-  - Desktop app
-  - Stop hook that has Claude ask
-  - User-invoked command instead of automatic hook
-- Hook timeout constraints (default 60s) - enough for git operations?
-- What environment variables/context does the hook receive?
-
-**Experiments to run**:
-- Create test SessionEnd hook, observe when it fires
-- Test different prompting mechanisms
-- Measure time for git clone + branch + push
-
-**Outcome**: Chosen approach for submission UX, documented hook capabilities/limitations
-
-### Session 3: Structured Content Format
-
-**Why third**: Defines what we're actually storing. Informs index design and retrieval.
-
-**Questions to resolve**:
-- What metadata for each session? (date, author/pseudonym, project context, labels)
-- What structured content? Taking inspiration from Sionic blog:
-  - Goal/objective
-  - Key insights/learnings
-  - Failed attempts (often most valuable)
-  - Working configurations/code snippets
-  - Lessons learned
-- How detailed should descriptions be for retrieval matching?
-- Attribution format for yankability (needs to identify author without necessarily exposing name publicly)
-
-**Outcome**: Template/schema for structured session content
+### Session 3: Content Format
+- Metadata: date, author/pseudonym, project context, labels?
+- Structured content: goal, insights, failed attempts, code snippets, lessons?
+- Attribution format for yankability
 
 ### Session 4: Index Design
+- Monolithic vs per-session index files?
+- Format: greppable text, JSONL, other?
+- Concurrent PR handling
 
-**Why fourth**: Depends on content format decisions.
+### Session 5: Setup Flow
+- Where does alignment-hive clone live?
+- Multi-environment handling (local + cloud VM)
+- First-run experience
 
-**Questions to resolve**:
-- Single monolithic index file vs per-session index entries?
-- Format: greppable text, JSONL (for jq), or something else?
-- What fields in index entries? (id, date, author-id, labels, short description)
-- How to handle concurrent PRs updating the index?
-  - Option A: PRs don't touch index, regenerate on merge
-  - Option B: Each session folder has its own small index file, retrieval searches all of them
-- Where does the index live relative to session data?
+### Session 6: Processing Pipeline
+- How does Claude Code inspect sessions? (JSONL, /export, --resume)
+- Pipeline versioning
+- PR format, reviewer feedback loop
 
-**Outcome**: Index schema and update strategy
+### Session 7: Retrieval
+- Subagent trigger conditions
+- Tools: grep, jq, custom?
+- Context amount to return
 
-### Session 5: First-Time Setup & Multi-Environment
+### Session 8: Testing
+- Local testing approach
+- Staging branch/repo
+- Dry-run mode
 
-**Why fifth**: Can design setup flow once we know what needs to be configured.
+### Cross-Cutting
+- Consent model if expanding beyond MATS
+- Rollback procedure for leaked sensitive data
+- Plugin auto-update verification
+- Naming: memory? knowledge-base? sessions?
 
-**Questions to resolve**:
-- Where should the alignment-hive clone live? User-configurable path?
-- How to handle users with multiple environments (local machine, cloud VM, etc.)?
-- What's stored per-environment vs synced across environments?
-- First-run experience: what happens when user installs plugin for first time?
-- How to make re-setup painless (e.g., new cloud machine)?
+## Implementation Notes
 
-**Outcome**: Setup flow design, configuration schema
+### Shared Secret Setup
+```bash
+openssl rand -hex 32
+```
+- Convex: Dashboard → Settings → Environment Variables → `GITHUB_ACTION_SECRET`
+- GitHub: Repo → Settings → Secrets → Actions → `CONVEX_ACTION_SECRET`
 
-### Session 6: GitHub Action Processing Pipeline
+## Reference Documentation
 
-**Why sixth**: Depends on storage architecture, content format, and index design.
+- [Stytch Connected Apps CLI](https://stytch.com/docs/guides/connected-apps/cli-app)
+- [Stytch JWT Sessions](https://stytch.com/docs/guides/sessions/using-jwts)
+- [Convex Custom JWT Auth](https://docs.convex.dev/auth/advanced/custom-jwt)
+- [Convex R2 Component](https://www.convex.dev/components/cloudflare-r2)
+- [Convex HTTP Actions](https://docs.convex.dev/functions/http-actions)
 
-**Questions to resolve**:
-- How does Claude Code inspect the session?
-  - Read JSONL directly?
-  - Use /export for readable transcript?
-  - --resume to load as native context? (may not work on different machine)
-- How to handle the JSONL format? (schema not well documented)
-- Processing pipeline versioning - track which version processed each session
-- PR format: what files are created/modified?
-- How to enable reviewer feedback → Claude iteration before merge?
+## Future Features (v2+)
 
-**Outcome**: GitHub Action workflow implementation
-
-### Session 7: Retrieval Subagent
-
-**Why seventh**: Depends on index design and content format.
-
-**Questions to resolve**:
-- Subagent description: what triggers main agent to invoke it?
-- Tools available to subagent: grep, jq, custom search script?
-- How much context to return? (full session content vs summary)
-- Performance: how fast can it search as index grows?
-
-**Outcome**: Retrieval subagent implementation
-
-### Session 8: Testing Strategy
-
-**Why last**: Need the full system designed before we can test it.
-
-**Questions to resolve**:
-- How to test submission flow locally?
-- Use existing sessions from this machine as test data?
-- Staging branch/repo for integration testing?
-- Dry-run mode that shows what would happen without pushing?
-- What's the representative project to test with?
-
-**Outcome**: Test plan and initial test run
-
-## Open Questions (Cross-Cutting)
-
-These may come up in multiple sessions:
-
-- **Consent model**: Users consent per-session. How to handle consent changes if we expand access beyond MATS?
-- **Rollback procedure**: If sensitive data slips through review, what's the remediation process?
-- **Marketplace auto-update**: Verify if plugins auto-update or require manual `/plugin update`
-- **Naming**: What should we call the plugin/skill? (memory? knowledge-base? sessions?)
-
-## Design Decisions Log
-
-Record decisions as they're made:
-
-| Date | Decision | Rationale |
-|------|----------|-----------|
-| 2024-12-24 | Storage prioritized over retrieval | Can improve retrieval later; losing data is permanent |
-| 2024-12-24 | Human review required for all submissions | Quality control, privacy protection |
-| 2024-12-24 | Attribution required for yankability | Users must be able to identify and remove their data |
-| 2024-12-24 | Derive labels from content, not user input | Reduces friction; AI can extract this |
-
-## Session Notes
-
-### Session 0: Initial Planning (2024-12-24)
-
-Established overall architecture and identified key questions. See sections above.
-
-Key insight: Privacy/sanitization is more foundational than originally thought. The decision about whether to store raw JSONL in git (enabling reprocessing but risking leaks) vs a separate server (safer but more infrastructure) affects nearly everything else.
-
-Reference material reviewed:
-- [Claude Code Skills Training blog post](https://huggingface.co/blog/sionic-ai/claude-code-skills-training) - Sionic AI's approach with /retrospective and /advise commands
-- Existing project-setup plugin structure in this repo
-- Claude Code hooks/skills/commands documentation
+- User pre-review of extracted knowledge
+- Granular admin access permissions
+- Partial consent/redaction
+- Admin dashboard for debugging

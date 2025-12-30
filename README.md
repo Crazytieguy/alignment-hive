@@ -26,7 +26,8 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 1. ~~Test project-setup plugin locally~~ Done
 2. ~~Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training)~~ Done
 3. Memory system: work through planned sessions (see [detailed plan](docs/memory-system-plan.md))
-   - Next: Session 1 - Privacy & Storage Architecture
+   - ~~Session 1 - Privacy & Storage Architecture~~ Done (Stytch + Convex + R2)
+   - Next: Session 2 - Hook Behavior & User Prompting
 
 ### Memory System
 See [docs/memory-system-plan.md](docs/memory-system-plan.md) for detailed design and session plan.
