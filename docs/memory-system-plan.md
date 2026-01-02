@@ -13,23 +13,39 @@ A system for MATS researchers to contribute session learnings to a shared knowle
 
 - [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
 - [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
-- [ ] **Session 2: Hook Behavior & User Prompting** ← NEXT
-- [ ] Session 3: Structured Content Format
-- [ ] Session 4: Index Design
-- [ ] Session 5: First-Time Setup & Multi-Environment
-- [ ] Session 6: GitHub Action Processing Pipeline
-- [ ] Session 7: Retrieval Subagent
-- [ ] Session 8: Testing Strategy
+- [x] [Session 2](sessions/session-2-hook-behavior.md): Hook Behavior & User Prompting
+- [ ] **Session 3: Plugin Naming** ← NEXT
+- [ ] Session 4: Hook Output Testing
+- [ ] Session 5: Ideas Discussion
+- [ ] Session 6: First-Time Setup & Multi-Environment
+- [ ] Session 7: JSONL Format Deep Dive
+- [ ] Session 8: Processing Pipeline (content format + index + GitHub Action)
+- [ ] Session 9: Retrieval Subagent
+- [ ] Session 10: Testing Strategy
 
 ## Architecture
 
 ```
 SETUP (one-time)
-  User runs login → Stytch device flow → JWT stored locally
+  User runs login → Stytch device flow → JWT stored in ~/.claude/alignment-hive/
   Stytch webhook on signup → Convex → GitHub App invites to repo
 
-TRANSCRIPT SUBMISSION (mechanism TBD in Session 2)
-  Reads JWT → uploads to Convex HTTP action
+PLUGIN INSTALLATION (per-project)
+  User installs plugin at project scope
+  Plugin presence = participation
+
+SESSION TRACKING (continuous)
+  Stop hook → Convex heartbeat (upsert session_id, timestamp, line_count)
+  SessionStart hook → register session, check for pending/ready sessions
+
+SUBMISSION FLOW
+  SessionStart checks local session files:
+    - Sessions < 24h old: display to user (can exclude)
+    - Sessions > 24h old: queue for submission
+  Background script (10 min delay) → final opt-out window → upload if not excluded
+
+TRANSCRIPT UPLOAD
+  Background script reads JWT → uploads transcript to Convex
         │
         ▼
 CONVEX BACKEND
@@ -39,7 +55,8 @@ CONVEX BACKEND
         ▼
 GITHUB ACTION
   Auth: shared secret → fetches transcript → runs Claude Code
-  Creates PR with extracted knowledge → uploads processing session to R2
+  Creates PR with extracted knowledge (or rejects if PII/not useful)
+  Uploads processing session to R2 for admin review
         │
         ▼
 HUMAN REVIEW
@@ -61,41 +78,118 @@ RETRIEVAL
 | GitHub Action Auth | Shared secret | Convex-recommended for external services |
 | Repo Invitations | GitHub App | More secure than user OAuth tokens |
 | Label Generation | Derived from content | Reduces friction; AI extracts labels, not user input |
+| Plugin Scope | Project-level | Installed per-project; plugin presence = participation |
+| Session Detection | Stop hook heartbeat | Reliable; fires after every Claude response |
+| Submission Trigger | SessionStart hook | Checks for ready sessions; client controls timing |
+| Submission Delay | 24h inactivity + 10min final window | Handles long sessions; gives opt-out opportunity |
+
+## Hooks
+
+| Hook | Purpose |
+|------|---------|
+| Stop | Heartbeat to Convex (upsert session_id, timestamp, line_count) |
+| SessionStart | Register session, display pending sessions, submit ready sessions, show reminders |
+
+### Hook Data Available
+
+**SessionStart:**
+- `session_id`, `transcript_path`, `cwd`
+- `source`: `startup` | `resume` | `compact`
+
+**Stop:**
+- `session_id`, `transcript_path`, `cwd`
+- `stop_hook_active`, `permission_mode`
+
+### SessionStart Behavior
+
+1. Check local session files for readiness (based on file modified time)
+2. Display sessions < 24h (pending, can exclude)
+3. For sessions > 24h: launch background script with 10-min delay
+4. Background script checks for exclusion, uploads if not excluded
+
+## State Management
+
+### Local State (source of truth)
+
+Location: `~/.claude/alignment-hive/`
+
+| Data | Purpose |
+|------|---------|
+| `auth.json` | JWT token from Stytch |
+| `sessions/<session-id>.json` | Status: pending, submitted, excluded |
+
+Session readiness determined from local transcript file modified time (no Convex query needed).
+
+### Convex State (replicated for stats/debugging)
+
+```
+sessions:
+  _id: auto-generated
+  session_id: string        # from Claude Code
+  user_id: string
+  project: string
+  line_count: number
+  last_activity: timestamp
+  status: pending | submitted | excluded
+  transcript_r2_key: string | null
+```
+
+Note: Schema details subject to change during implementation.
+
+## Convex API
+
+```
+POST session/heartbeat
+  - Upsert session (create if new, update timestamp + line_count)
+  - Called by Stop hook
+
+POST session/upload
+  - Upload transcript to R2
+  - Trigger processing pipeline
+  - Called by background submission script
+
+POST session/exclude
+  - Record exclusion (for stats)
+  - Called when user excludes a session
+```
 
 ## Open Questions
 
-### Session 2: Hook Behavior
-- Does SessionEnd hook trigger reliably? On compaction?
-- Access to session_id and transcript_path?
-- Can hooks prompt for user input? Alternatives: notifications, Stop hook, user command
-- Hook timeout (60s default) - enough for uploads?
+### Session 3: Plugin Naming
+- Name for the memory system plugin
 
-### Session 3: Content Format
-- Metadata: date, author/pseudonym, project context, labels?
-- Structured content: goal, insights, failed attempts, code snippets, lessons?
-- Attribution format for yankability
+### Session 4: Hook Output Testing
+- How to display info to user without polluting Claude's context?
+- Test: plain stdout, JSON with systemMessage, suppressOutput
+- Test: slash command with disable-model-invocation
 
-### Session 4: Index Design
-- Monolithic vs per-session index files?
-- Format: greppable text, JSONL, other?
-- Concurrent PR handling
+### Session 5: Ideas Discussion
+- Ideas from time away from computer
+- Any architectural changes needed
 
-### Session 5: Setup Flow
-- Where does alignment-hive clone live?
+### Session 6: First-Time Setup
+- Login flow implementation
+- CLI tool vs slash commands for user actions
 - Multi-environment handling (local + cloud VM)
-- First-run experience
+- First-run experience and reminders
 
-### Session 6: Processing Pipeline
-- How does Claude Code inspect sessions? (JSONL, /export, --resume)
-- Pipeline versioning
-- PR format, reviewer feedback loop
+### Session 7: JSONL Format
+- Full reverse-engineering of transcript format
+- Summary entry structure and purpose
+- Session description source (for display to user)
 
-### Session 7: Retrieval
+### Session 8: Processing Pipeline
+- Content format and metadata extraction
+- Index design (monolithic vs per-session, format)
+- GitHub Action implementation
+- PR format, rejection criteria
+
+### Session 9: Retrieval
 - Subagent trigger conditions
 - Tools: grep, jq, custom?
 - Context amount to return
 
-### Session 8: Testing
+### Session 10: Testing
 - Local testing approach
 - Staging branch/repo
 - Dry-run mode
@@ -125,7 +219,11 @@ openssl rand -hex 32
 
 ## Future Features (v2+)
 
+- Web dashboard for session management (view pending/submitted, batch actions, trust rules)
+- Yanking (user requests data deletion after submission)
 - User pre-review of extracted knowledge
 - Granular admin access permissions
 - Partial consent/redaction
 - Admin dashboard for debugging
+- Windows support (if not easy to include in v1)
+- Claude Code for web support
