@@ -9,14 +9,20 @@ A system for MATS researchers to contribute session learnings to a shared knowle
 - **Human review**: All content reviewed before merging
 - **Privacy-conscious**: Sensitive data must not leak
 
+## Design Session Workflow
+
+1. **During session**: Explore, test, discuss. Confirm decisions before moving on
+2. **At session end**: Claude writes up the session file documenting what was tested and decided, then updates the plan (this file)
+3. **Plan updates**: This file contains current design state and future plans, not reasoning (that lives in session files)
+
 ## Session Progress
 
 - [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
 - [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
 - [x] [Session 2](sessions/session-2-hook-behavior.md): Hook Behavior & User Prompting
 - [x] Session 3: Plugin Naming (hive-mind)
-- [ ] **Session 4: Hook Output Testing** ← NEXT
-- [ ] Session 5: Ideas Discussion
+- [x] [Session 4](sessions/session-4-hook-output.md): Hook Output Testing
+- [ ] **Session 5: Ideas Discussion** ← NEXT
 - [ ] Session 6: First-Time Setup & Multi-Environment
 - [ ] Session 7: JSONL Format Deep Dive
 - [ ] Session 8: Processing Pipeline (content format + index + GitHub Action)
@@ -82,6 +88,7 @@ RETRIEVAL
 | Session Detection | Stop hook heartbeat | Reliable; fires after every Claude response |
 | Submission Trigger | SessionStart hook | Checks for ready sessions; client controls timing |
 | Submission Delay | 24h inactivity + 10min final window | Handles long sessions; gives opt-out opportunity |
+| Hook User Output | `{"systemMessage": "..."}` JSON | Shows to user, not Claude; supports newlines |
 
 ## Hooks
 
@@ -99,6 +106,15 @@ RETRIEVAL
 **Stop:**
 - `session_id`, `transcript_path`, `cwd`
 - `stop_hook_active`, `permission_mode`
+
+### Hook Output Format
+
+To display messages to user without polluting Claude's context:
+```bash
+echo '{"systemMessage": "Line 1\nLine 2\nLine 3"}'
+```
+
+Note: First line gets `SessionStart:startup says:` prepended by Claude Code.
 
 ### SessionStart Behavior
 
@@ -154,11 +170,6 @@ POST session/exclude
 ```
 
 ## Open Questions
-
-### Session 4: Hook Output Testing
-- How to display info to user without polluting Claude's context?
-- Test: plain stdout, JSON with systemMessage, suppressOutput
-- Test: slash command with disable-model-invocation
 
 ### Session 5: Ideas Discussion
 - Ideas from time away from computer

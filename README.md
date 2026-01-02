@@ -29,7 +29,8 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
    - ~~Session 1 - Privacy & Storage Architecture~~ Done (Stytch + Convex + R2)
    - ~~Session 2 - Hook Behavior & User Prompting~~ Done (Stop + SessionStart, project-scoped plugin)
    - ~~Session 3 - Plugin Naming~~ Done (hive-mind)
-   - Next: Session 4 - Hook Output Testing
+   - ~~Session 4 - Hook Output Testing~~ Done (systemMessage JSON)
+   - Next: Session 5 - Ideas Discussion
 
 ### hive-mind
 See [docs/hive-mind-plan.md](docs/hive-mind-plan.md) for detailed design and session plan.
