@@ -1,4 +1,4 @@
-# Memory System Plan
+# hive-mind Plan
 
 A system for MATS researchers to contribute session learnings to a shared knowledge base.
 
@@ -14,8 +14,8 @@ A system for MATS researchers to contribute session learnings to a shared knowle
 - [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
 - [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
 - [x] [Session 2](sessions/session-2-hook-behavior.md): Hook Behavior & User Prompting
-- [ ] **Session 3: Plugin Naming** ← NEXT
-- [ ] Session 4: Hook Output Testing
+- [x] Session 3: Plugin Naming (hive-mind)
+- [ ] **Session 4: Hook Output Testing** ← NEXT
 - [ ] Session 5: Ideas Discussion
 - [ ] Session 6: First-Time Setup & Multi-Environment
 - [ ] Session 7: JSONL Format Deep Dive
@@ -155,9 +155,6 @@ POST session/exclude
 
 ## Open Questions
 
-### Session 3: Plugin Naming
-- Name for the memory system plugin
-
 ### Session 4: Hook Output Testing
 - How to display info to user without polluting Claude's context?
 - Test: plain stdout, JSON with systemMessage, suppressOutput
@@ -198,7 +195,6 @@ POST session/exclude
 - Consent model if expanding beyond MATS
 - Rollback procedure for leaked sensitive data
 - Plugin auto-update verification
-- Naming: memory? knowledge-base? sessions?
 
 ## Implementation Notes
 

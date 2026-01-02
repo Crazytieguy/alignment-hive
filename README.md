@@ -15,7 +15,7 @@ Add this marketplace to Claude Code:
 Shared knowledge and tooling for AI agents working with alignment researchers:
 
 - **Plugin/skills marketplace** - Curated plugins with basic stuff like scholar handbook
-- **Memory system** - Learning from sessions, optimized for simplicity and minimal intrusiveness
+- **hive-mind** - Shared learnings from sessions, optimized for simplicity and minimal intrusiveness
 - **Common workflow skills** - Connect to compute, write SRPs, prepare lightning talks, etc.
 
 ## Current Plan
@@ -25,13 +25,14 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 ### Immediate Next Steps
 1. ~~Test project-setup plugin locally~~ Done
 2. ~~Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training)~~ Done
-3. Memory system: work through planned sessions (see [detailed plan](docs/memory-system-plan.md))
+3. hive-mind: work through planned sessions (see [detailed plan](docs/hive-mind-plan.md))
    - ~~Session 1 - Privacy & Storage Architecture~~ Done (Stytch + Convex + R2)
    - ~~Session 2 - Hook Behavior & User Prompting~~ Done (Stop + SessionStart, project-scoped plugin)
-   - Next: Session 3 - Plugin Naming
+   - ~~Session 3 - Plugin Naming~~ Done (hive-mind)
+   - Next: Session 4 - Hook Output Testing
 
-### Memory System
-See [docs/memory-system-plan.md](docs/memory-system-plan.md) for detailed design and session plan.
+### hive-mind
+See [docs/hive-mind-plan.md](docs/hive-mind-plan.md) for detailed design and session plan.
 
 Key principles:
 - Storage over retrieval (can improve retrieval later)
@@ -39,7 +40,7 @@ Key principles:
 - Human review required for all submissions
 - Privacy-conscious (sensitive data must not leak)
 
-Note: The project-setup skill should recommend installing the memory system plugin during setup.
+Note: The project-setup skill should recommend installing the hive-mind plugin during setup.
 
 ### Initial Skills to Create
 - Scholar handbook
