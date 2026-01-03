@@ -26,9 +26,10 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 4](sessions/session-4-hook-output.md): Hook Output Testing
 - [x] [Session 5](sessions/session-5-ideas-discussion.md): Ideas Discussion
 - [x] [Session 6](sessions/session-6-setup-auth.md): First-Time Setup & Multi-Environment
-- [ ] **Session 7: JSONL Format Deep Dive** ← NEXT
-- [ ] Session 8: Local Extraction & Retrieval
-- [ ] Session 9: Testing Strategy
+- [ ] **Session 7: TypeScript/Bun Migration** (replace bash scripts with TS, discuss tradeoffs) ← NEXT
+- [ ] Session 8: JSONL Format Deep Dive
+- [ ] Session 9: Local Extraction & Retrieval
+- [ ] Session 10: Testing Strategy
 
 ### v2 Design
 - [ ] Processing Pipeline (Fly.io)
@@ -51,6 +52,8 @@ A system for alignment researchers to contribute session learnings to a shared k
 | Retrieval | Local JSONL + jq/scripts |
 
 ### Authentication
+
+**Purpose**: WorkOS auth identifies users for session submission (v1) and gates access to shared hive-mind data (v2). It is NOT for repo access (the repo is public).
 
 User runs `scripts/login.sh` → WorkOS device flow → tokens stored in `~/.claude/hive-mind/auth.json`. SessionStart hook auto-refreshes expired tokens.
 
