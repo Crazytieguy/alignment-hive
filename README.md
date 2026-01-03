@@ -26,11 +26,9 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 1. ~~Test project-setup plugin locally~~ Done
 2. ~~Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training)~~ Done
 3. hive-mind: work through planned sessions (see [detailed plan](docs/hive-mind-plan.md))
-   - ~~Session 1 - Privacy & Storage Architecture~~ Done (Stytch + Convex + R2)
-   - ~~Session 2 - Hook Behavior & User Prompting~~ Done (Stop + SessionStart, project-scoped plugin)
-   - ~~Session 3 - Plugin Naming~~ Done (hive-mind)
-   - ~~Session 4 - Hook Output Testing~~ Done (systemMessage JSON)
-   - Next: Session 5 - Ideas Discussion
+   - v1 design: Sessions 0-5 done, 6-9 remaining
+   - Next: Session 6 - First-Time Setup & Multi-Environment
+   - Implementation starts after v1 design complete
 
 ### hive-mind
 See [docs/hive-mind-plan.md](docs/hive-mind-plan.md) for detailed design and session plan.
