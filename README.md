@@ -26,8 +26,8 @@ Shared knowledge and tooling for AI agents working with alignment researchers:
 1. ~~Test project-setup plugin locally~~ Done
 2. ~~Read [Claude Code Skills Training](https://huggingface.co/blog/sionic-ai/claude-code-skills-training)~~ Done
 3. hive-mind: design sessions + implementation (see [detailed plan](docs/hive-mind-plan.md))
-   - Sessions 0-6 done (auth flow implemented)
-   - Next: Session 7 - JSONL Format Deep Dive
+   - Sessions 0-7 done (TypeScript CLI implemented)
+   - Next: Session 8 - JSONL Format Deep Dive
 
 ### hive-mind
 See [docs/hive-mind-plan.md](docs/hive-mind-plan.md) for detailed design and session plan.

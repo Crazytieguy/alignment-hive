@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hive-mind-cli/**'
+      - 'plugins/hive-mind/cli.js'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'hive-mind-cli/**'
+      - 'plugins/hive-mind/cli.js'
+
+jobs:
+  check-bundle:
+    name: Check hive-mind CLI
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: cd hive-mind-cli && bun install
+
+      - name: Typecheck
+        run: cd hive-mind-cli && bun run typecheck
+
+      - name: Build
+        run: cd hive-mind-cli && bun run build
+
+      - name: Verify bundle is up to date
+        run: |
+          if ! git diff --exit-code plugins/hive-mind/cli.js; then
+            echo "::error::Bundle is out of date. Run 'cd hive-mind-cli && bun run build' and commit."
+            exit 1
+          fi
