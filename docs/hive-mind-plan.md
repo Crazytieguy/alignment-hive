@@ -26,10 +26,11 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 4](sessions/session-4-hook-output.md): Hook Output Testing
 - [x] [Session 5](sessions/session-5-ideas-discussion.md): Ideas Discussion
 - [x] [Session 6](sessions/session-6-setup-auth.md): First-Time Setup & Multi-Environment
-- [ ] **Session 7: TypeScript/Bun Migration** (replace bash scripts with TS, discuss tradeoffs) ← NEXT
-- [ ] Session 8: JSONL Format Deep Dive
+- [x] [Session 7](sessions/session-7-typescript-migration.md): TypeScript/Bun Migration
+- [ ] **Session 8: JSONL Format Deep Dive** ← NEXT
 - [ ] Session 9: Local Extraction & Retrieval
 - [ ] Session 10: Testing Strategy
+- [ ] Session 11: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
 
 ### v2 Design
 - [ ] Processing Pipeline (Fly.io)
@@ -45,17 +46,18 @@ A system for alignment researchers to contribute session learnings to a shared k
 
 | Component | Choice |
 |-----------|--------|
-| Auth | WorkOS (hosted AuthKit) |
+| CLI | TypeScript + Bun (bundled to `plugins/hive-mind/cli.js`) |
+| Auth | WorkOS (device authorization flow, client_id only) |
 | Backend | Convex |
 | File Storage | Cloudflare R2 |
 | Local Extraction | Deterministic code (no AI) |
-| Retrieval | Local JSONL + jq/scripts |
+| Retrieval | Local JSONL + scripts |
 
 ### Authentication
 
 **Purpose**: WorkOS auth identifies users for session submission (v1) and gates access to shared hive-mind data (v2). It is NOT for repo access (the repo is public).
 
-User runs `scripts/login.sh` → WorkOS device flow → tokens stored in `~/.claude/hive-mind/auth.json`. SessionStart hook auto-refreshes expired tokens.
+User runs `bun ~/.claude/plugins/hive-mind/cli.js login` → WorkOS device flow → tokens stored in `~/.claude/hive-mind/auth.json`. SessionStart hook auto-refreshes expired tokens.
 
 **Credentials**: Client ID embedded in code (public). API key needed for Convex (secret, store securely). Currently using staging; switch to production for launch.
 
@@ -71,10 +73,10 @@ User runs `scripts/login.sh` → WorkOS device flow → tokens stored in `~/.cla
 
 Single hook handles auth check, session tracking, extraction, heartbeats, and submission. Must be idempotent (may run from parallel sessions, use last-write-wins).
 
-**Current behavior** (implemented):
-1. Check for missing dependencies (jq, curl) with platform-specific install instructions
-2. Check auth status, silently refresh if token expired
-3. Display login instructions if not authenticated, or "Logged in as {name}" if authenticated
+**Current behavior** (implemented in TypeScript):
+1. Check auth status, silently refresh if token expired
+2. If not authenticated: display login command and optional shell alias setup
+3. If authenticated: display "Logged in as {name}"
 
 **Future behavior** (to implement):
 1. Scan raw session files in `transcript_path` parent folder
@@ -148,20 +150,20 @@ Subagent reads `sessions/index.md` for navigation, uses jq/scripts to explore se
 
 ## v1 Open Questions
 
-### Session 7: JSONL Format
+### Session 8: JSONL Format
 - Full reverse-engineering of transcript format
 - Summary entry structure and purpose
 - Session description source (for display to user)
 - Reference: https://github.com/simonw/claude-code-transcripts
 
-### Session 8: Local Extraction & Retrieval
+### Session 9: Local Extraction & Retrieval
 - Extraction format: thinner JSONL with sanitization
 - Sanitization library for API key patterns
 - `sessions/index.md` format
 - Retrieval subagent design (jq, scripts, or custom tools)
 - Guidance for navigating JSONL effectively
 
-### Session 9: Testing
+### Session 10: Testing
 - Local testing approach
 - Staging environment
 - Dry-run mode

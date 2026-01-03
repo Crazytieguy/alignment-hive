@@ -4,9 +4,13 @@
       "Skill(plugin-dev:skill-development)",
       "Skill(plugin-dev:plugin-structure)",
       "Skill(plugin-dev:create-plugin)",
+      "Skill(plugin-dev:hook-development)",
       "WebSearch",
       "WebFetch(domain:workos.com)",
-      "WebFetch(domain:docs.convex.dev)"
+      "WebFetch(domain:docs.convex.dev)",
+      "Bash(bun install:*)",
+      "Bash(bun run build:*)",
+      "Bash(bun run typecheck:*)"
     ]
   },
   "enabledPlugins": {
