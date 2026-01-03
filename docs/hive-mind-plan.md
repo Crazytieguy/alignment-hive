@@ -8,6 +8,7 @@ A system for MATS researchers to contribute session learnings to a shared knowle
 - **Yankability**: Users can retract consent and remove their data
 - **Human review**: All content reviewed before merging
 - **Privacy-conscious**: Sensitive data must not leak
+- **Local-first**: Provide immediate value through local knowledge before remote features
 
 ## Design Session Workflow
 
@@ -17,166 +18,125 @@ A system for MATS researchers to contribute session learnings to a shared knowle
 
 ## Session Progress
 
+### v1 Design
 - [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
 - [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
 - [x] [Session 2](sessions/session-2-hook-behavior.md): Hook Behavior & User Prompting
-- [x] Session 3: Plugin Naming (hive-mind)
+- [x] Session 3: Plugin Naming
 - [x] [Session 4](sessions/session-4-hook-output.md): Hook Output Testing
-- [ ] **Session 5: Ideas Discussion** ← NEXT
-- [ ] Session 6: First-Time Setup & Multi-Environment
+- [x] [Session 5](sessions/session-5-ideas-discussion.md): Ideas Discussion
+- [ ] **Session 6: First-Time Setup & Multi-Environment** ← NEXT
 - [ ] Session 7: JSONL Format Deep Dive
-- [ ] Session 8: Processing Pipeline (content format + index + GitHub Action)
-- [ ] Session 9: Retrieval Subagent
-- [ ] Session 10: Testing Strategy
+- [ ] Session 8: Local Extraction & Retrieval
+- [ ] Session 9: Testing Strategy
 
-## Architecture
+### v1 Implementation
+Starts after v1 design sessions complete.
 
-```
-SETUP (one-time)
-  User runs login → Stytch device flow → JWT stored in ~/.claude/alignment-hive/
-  Stytch webhook on signup → Convex → GitHub App invites to repo
+### v2 Design
+- [ ] Processing Pipeline (Fly.io)
+- [ ] Admin Web App
 
-PLUGIN INSTALLATION (per-project)
-  User installs plugin at project scope
-  Plugin presence = participation
+## v1 Architecture
 
-SESSION TRACKING (continuous)
-  Stop hook → Convex heartbeat (upsert session_id, timestamp, line_count)
-  SessionStart hook → register session, check for pending/ready sessions
+### Technology Stack
 
-SUBMISSION FLOW
-  SessionStart checks local session files:
-    - Sessions < 24h old: display to user (can exclude)
-    - Sessions > 24h old: queue for submission
-  Background script (10 min delay) → final opt-out window → upload if not excluded
+| Component | Choice |
+|-----------|--------|
+| Auth | WorkOS |
+| Backend | Convex |
+| File Storage | Cloudflare R2 |
+| Local Extraction | Deterministic code (no AI) |
+| Retrieval | Local JSONL + jq/scripts |
 
-TRANSCRIPT UPLOAD
-  Background script reads JWT → uploads transcript to Convex
-        │
-        ▼
-CONVEX BACKEND
-  Validates JWT (Stytch JWKS) → stores in R2 → records metadata
-  Triggers GitHub Action via repository_dispatch
-        │
-        ▼
-GITHUB ACTION
-  Auth: shared secret → fetches transcript → runs Claude Code
-  Creates PR with extracted knowledge (or rejects if PII/not useful)
-  Uploads processing session to R2 for admin review
-        │
-        ▼
-HUMAN REVIEW
-  Reviewer merges PR → marketplace updates → users get new content
+### Setup (one-time)
 
-RETRIEVAL
-  Subagent searches index → returns context to main agent
-```
+User runs login command → WorkOS device flow → JWT stored in `~/.claude/hive-mind/auth.json`
 
-## Technology Decisions
+### Plugin Installation (per-project)
 
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Auth | Stytch | First-class CLI device flow, JWT-based, invite-only built-in |
-| Backend | Convex | Real-time, supports custom JWT auth for Stytch |
-| File Storage | Cloudflare R2 | S3-compatible, zero egress, direct access for yankability |
-| Processing | GitHub Actions | Free CI minutes, Claude Code support |
-| Distribution | Git + plugin marketplace | Auto-updates via marketplace |
-| GitHub Action Auth | Shared secret | Convex-recommended for external services |
-| Repo Invitations | GitHub App | More secure than user OAuth tokens |
-| Label Generation | Derived from content | Reduces friction; AI extracts labels, not user input |
-| Plugin Scope | Project-level | Installed per-project; plugin presence = participation |
-| Session Detection | Stop hook heartbeat | Reliable; fires after every Claude response |
-| Submission Trigger | SessionStart hook | Checks for ready sessions; client controls timing |
-| Submission Delay | 24h inactivity + 10min final window | Handles long sessions; gives opt-out opportunity |
-| Hook User Output | `{"systemMessage": "..."}` JSON | Shows to user, not Claude; supports newlines |
+- Plugin installed at project scope
+- Plugin presence = participation
+- Creates `.claude/hive-mind/` in project folder
 
-## Hooks
+### SessionStart Hook
 
-| Hook | Purpose |
-|------|---------|
-| Stop | Heartbeat to Convex (upsert session_id, timestamp, line_count) |
-| SessionStart | Register session, display pending sessions, submit ready sessions, show reminders |
+Single hook handles all session tracking, extraction, heartbeats, and submission. Must be idempotent (may run from parallel sessions, use last-write-wins).
 
-### Hook Data Available
-
-**SessionStart:**
+**Data available:**
 - `session_id`, `transcript_path`, `cwd`
 - `source`: `startup` | `resume` | `compact`
+- `transcript_path` parent folder contains all raw session JSONL files for the project
 
-**Stop:**
-- `session_id`, `transcript_path`, `cwd`
-- `stop_hook_active`, `permission_mode`
+**Behavior:**
+1. Scan raw session files in `transcript_path` parent folder
+2. Compare to `state.json` → find untracked or modified sessions
+3. For each relevant session:
+   - Extract: sanitize (API key patterns etc.), remove bloat
+   - Write to `.claude/hive-mind/sessions/<id>.jsonl`
+   - Update `state.json` with extraction details
+   - Update `sessions/index.md` with session description
+4. Send heartbeats to Convex (last message timestamp from session content)
+5. Display sessions < 24h (pending, can exclude via editing state.json)
+6. For sessions > 24h: launch background script with 10-min delay
+7. Background script checks for exclusion, uploads extracted JSONL if not excluded
 
-### Hook Output Format
-
-To display messages to user without polluting Claude's context:
+**Output format** (shows to user, not Claude):
 ```bash
 echo '{"systemMessage": "Line 1\nLine 2\nLine 3"}'
 ```
-
 Note: First line gets `SessionStart:startup says:` prepended by Claude Code.
 
-### SessionStart Behavior
+### Local State
 
-1. Check local session files for readiness (based on file modified time)
-2. Display sessions < 24h (pending, can exclude)
-3. For sessions > 24h: launch background script with 10-min delay
-4. Background script checks for exclusion, uploads if not excluded
+**Global** (`~/.claude/hive-mind/`):
+- `auth.json` - JWT token from WorkOS
 
-## State Management
+**Per-project** (`.claude/hive-mind/`):
+- `sessions/<session-id>.jsonl` - Extracted session (sanitized, bloat removed)
+- `sessions/index.md` - Short descriptions for retrieval agent navigation
+- `state.json` - Status per session: pending, submitted, excluded; extraction details
 
-### Local State (source of truth)
+User decides whether to gitignore `.claude/hive-mind/` (may be useful for collaborators or multi-environment).
 
-Location: `~/.claude/alignment-hive/`
+Session readiness determined from raw transcript file modified time.
 
-| Data | Purpose |
-|------|---------|
-| `auth.json` | JWT token from Stytch |
-| `sessions/<session-id>.json` | Status: pending, submitted, excluded |
-
-Session readiness determined from local transcript file modified time (no Convex query needed).
-
-### Convex State (replicated for stats/debugging)
+### Convex State
 
 ```
 sessions:
   _id: auto-generated
-  session_id: string        # from Claude Code
+  session_id: string
   user_id: string
   project: string
   line_count: number
-  last_activity: timestamp
+  last_activity: timestamp  # from session content
   status: pending | submitted | excluded
   transcript_r2_key: string | null
 ```
 
-Note: Schema details subject to change during implementation.
+Schema details subject to change during implementation.
 
-## Convex API
+### Convex API
 
 ```
 POST session/heartbeat
-  - Upsert session (create if new, update timestamp + line_count)
-  - Called by Stop hook
+  - Upsert session (create if new, update timestamp + line_count + status)
+  - Called by SessionStart hook for all sessions (including excluded)
 
 POST session/upload
-  - Upload transcript to R2
-  - Trigger processing pipeline
+  - Upload extracted transcript to R2
   - Called by background submission script
-
-POST session/exclude
-  - Record exclusion (for stats)
-  - Called when user excludes a session
 ```
 
-## Open Questions
+### Local Retrieval
 
-### Session 5: Ideas Discussion
-- Ideas from time away from computer
-- Any architectural changes needed
+Subagent reads `sessions/index.md` for navigation, uses jq/scripts to explore session JSONL files. Can get trajectory (truncated) then dive into details.
+
+## v1 Open Questions
 
 ### Session 6: First-Time Setup
-- Login flow implementation
+- Login flow implementation (WorkOS device flow)
 - CLI tool vs slash commands for user actions
 - Multi-environment handling (local + cloud VM)
 - First-run experience and reminders
@@ -185,52 +145,74 @@ POST session/exclude
 - Full reverse-engineering of transcript format
 - Summary entry structure and purpose
 - Session description source (for display to user)
+- Reference: https://github.com/simonw/claude-code-transcripts
 
-### Session 8: Processing Pipeline
-- Content format and metadata extraction
-- Index design (monolithic vs per-session, format)
-- GitHub Action implementation
-- PR format, rejection criteria
+### Session 8: Local Extraction & Retrieval
+- Extraction format: thinner JSONL with sanitization
+- Sanitization library for API key patterns
+- `sessions/index.md` format
+- Retrieval subagent design (jq, scripts, or custom tools)
+- Guidance for navigating JSONL effectively
 
-### Session 9: Retrieval
-- Subagent trigger conditions
-- Tools: grep, jq, custom?
-- Context amount to return
-
-### Session 10: Testing
+### Session 9: Testing
 - Local testing approach
-- Staging branch/repo
+- Staging environment
 - Dry-run mode
 
 ### Cross-Cutting
+- Graceful degradation when Convex unavailable
 - Consent model if expanding beyond MATS
 - Rollback procedure for leaked sensitive data
-- Plugin auto-update verification
 
-## Implementation Notes
+## v2 Architecture
 
-### Shared Secret Setup
+### Remote Processing
+
+Convex triggers Fly.io machine (spin up per job) to run Claude Code for indexing and cross-session insights. Results stored in R2, job state tracked in Convex.
+
+**Shared secret setup:**
 ```bash
 openssl rand -hex 32
 ```
-- Convex: Dashboard → Settings → Environment Variables → `GITHUB_ACTION_SECRET`
-- GitHub: Repo → Settings → Secrets → Actions → `CONVEX_ACTION_SECRET`
+- Convex: `FLY_ACTION_SECRET`
+- Fly.io: `CONVEX_ACTION_SECRET`
+
+**Processing hierarchy:** raw extraction → indexing → cross-session insights/reindexing
+
+### Remote Retrieval
+
+Subagent fetches from R2 via pre-signed URLs from Convex. Merges local + remote knowledge.
+
+### Admin Web App
+
+For processing pipeline management:
+- Review index/content updates
+- Manage processing jobs and versions
+- View statistics
+- Browse uploaded sessions
+
+## v2 Open Questions
+
+- Fly.io machine setup and lifecycle
+- Job state tracking in Convex
+- Error handling and retries
+- Admin web app design
+- Queueing to limit concurrent processing jobs
+
+## Future Features
+
+- User web dashboard for session management
+- Yanking (user requests data deletion after submission)
+- Granular admin access permissions
+- Partial consent/redaction
+- Windows support (if not easy to include in v1)
+- Claude Code for web support
 
 ## Reference Documentation
 
-- [Stytch Connected Apps CLI](https://stytch.com/docs/guides/connected-apps/cli-app)
-- [Stytch JWT Sessions](https://stytch.com/docs/guides/sessions/using-jwts)
+- [WorkOS CLI Auth](https://workos.com/docs/user-management/sessions/cli-auth)
 - [Convex Custom JWT Auth](https://docs.convex.dev/auth/advanced/custom-jwt)
 - [Convex R2 Component](https://www.convex.dev/components/cloudflare-r2)
 - [Convex HTTP Actions](https://docs.convex.dev/functions/http-actions)
-
-## Future Features (v2+)
-
-- Web dashboard for session management (view pending/submitted, batch actions, trust rules)
-- Yanking (user requests data deletion after submission)
-- User pre-review of extracted knowledge
-- Granular admin access permissions
-- Partial consent/redaction
-- Admin dashboard for debugging
-- Windows support (if not easy to include in v1)
-- Claude Code for web support
+- [Fly.io Machines API](https://fly.io/docs/machines/api/)
+- [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) - JSONL format reference
