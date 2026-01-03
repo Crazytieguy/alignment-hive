@@ -54,4 +54,4 @@ Note: The project-setup skill should recommend installing the hive-mind plugin d
 
 ## Contributing
 
-Scholars can open PRs (not push to main). QC process TBD.
+This is a public repo. Scholars can fork, clone, and open PRs. Direct pushes to `main` are blocked - all changes go through PR review.

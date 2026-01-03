@@ -40,3 +40,18 @@ Some plugins by project type:
 - **TypeScript/JavaScript**: `typescript-lsp`, `frontend-design`
 - **Rust**: `rust-analyzer-lsp`
 - **Agent development**: `agent-sdk-dev`
+
+## MATS / Alignment Researchers
+
+Ask if the user wants to install hive-mind - shared knowledge from other researchers' Claude sessions, plus your sessions contribute back. Requires an invite (MATS scholars: check your email).
+
+```json
+{
+  "enabledPlugins": {
+    "hive-mind@alignment-hive": true
+  },
+  "pluginMarketplaces": {
+    "alignment-hive": "Crazytieguy/alignment-hive"
+  }
+}
+```
