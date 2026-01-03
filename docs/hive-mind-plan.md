@@ -1,6 +1,6 @@
 # hive-mind Plan
 
-A system for MATS researchers to contribute session learnings to a shared knowledge base.
+A system for alignment researchers to contribute session learnings to a shared knowledge base.
 
 ## Core Principles
 
@@ -12,30 +12,31 @@ A system for MATS researchers to contribute session learnings to a shared knowle
 
 ## Design Session Workflow
 
-1. **During session**: Explore, test, discuss. Confirm decisions before moving on
+1. **During session**: Explore, test, discuss. Implement when appropriate.
 2. **At session end**: Claude writes up the session file documenting what was tested and decided, then updates the plan (this file)
 3. **Plan updates**: This file contains current design state and future plans, not reasoning (that lives in session files)
 
 ## Session Progress
 
-### v1 Design
+### v1 Design & Implementation
 - [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
 - [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
 - [x] [Session 2](sessions/session-2-hook-behavior.md): Hook Behavior & User Prompting
 - [x] Session 3: Plugin Naming
 - [x] [Session 4](sessions/session-4-hook-output.md): Hook Output Testing
 - [x] [Session 5](sessions/session-5-ideas-discussion.md): Ideas Discussion
-- [ ] **Session 6: First-Time Setup & Multi-Environment** ← NEXT
-- [ ] Session 7: JSONL Format Deep Dive
+- [x] [Session 6](sessions/session-6-setup-auth.md): First-Time Setup & Multi-Environment
+- [ ] **Session 7: JSONL Format Deep Dive** ← NEXT
 - [ ] Session 8: Local Extraction & Retrieval
 - [ ] Session 9: Testing Strategy
-
-### v1 Implementation
-Starts after v1 design sessions complete.
 
 ### v2 Design
 - [ ] Processing Pipeline (Fly.io)
 - [ ] Admin Web App
+
+## Implementation Status
+
+**Plugin skeleton**: `plugins/hive-mind/` - authentication flow implemented and tested. See code for details.
 
 ## v1 Architecture
 
@@ -43,15 +44,19 @@ Starts after v1 design sessions complete.
 
 | Component | Choice |
 |-----------|--------|
-| Auth | WorkOS |
+| Auth | WorkOS (hosted AuthKit) |
 | Backend | Convex |
 | File Storage | Cloudflare R2 |
 | Local Extraction | Deterministic code (no AI) |
 | Retrieval | Local JSONL + jq/scripts |
 
-### Setup (one-time)
+### Authentication
 
-User runs login command → WorkOS device flow → JWT stored in `~/.claude/hive-mind/auth.json`
+User runs `scripts/login.sh` → WorkOS device flow → tokens stored in `~/.claude/hive-mind/auth.json`. SessionStart hook auto-refreshes expired tokens.
+
+**Credentials**: Client ID embedded in code (public). API key needed for Convex (secret, store securely). Currently using staging; switch to production for launch.
+
+**Multi-environment**: Each machine independent (auth per-machine, transcripts per-machine, extracted sessions per-project).
 
 ### Plugin Installation (per-project)
 
@@ -61,14 +66,14 @@ User runs login command → WorkOS device flow → JWT stored in `~/.claude/hive
 
 ### SessionStart Hook
 
-Single hook handles all session tracking, extraction, heartbeats, and submission. Must be idempotent (may run from parallel sessions, use last-write-wins).
+Single hook handles auth check, session tracking, extraction, heartbeats, and submission. Must be idempotent (may run from parallel sessions, use last-write-wins).
 
-**Data available:**
-- `session_id`, `transcript_path`, `cwd`
-- `source`: `startup` | `resume` | `compact`
-- `transcript_path` parent folder contains all raw session JSONL files for the project
+**Current behavior** (implemented):
+1. Check for missing dependencies (jq, curl) with platform-specific install instructions
+2. Check auth status, silently refresh if token expired
+3. Display login instructions if not authenticated, or "Logged in as {name}" if authenticated
 
-**Behavior:**
+**Future behavior** (to implement):
 1. Scan raw session files in `transcript_path` parent folder
 2. Compare to `state.json` → find untracked or modified sessions
 3. For each relevant session:
@@ -81,6 +86,11 @@ Single hook handles all session tracking, extraction, heartbeats, and submission
 6. For sessions > 24h: launch background script with 10-min delay
 7. Background script checks for exclusion, uploads extracted JSONL if not excluded
 
+**Hook data available:**
+- `session_id`, `transcript_path`, `cwd`
+- `source`: `startup` | `resume` | `compact`
+- `transcript_path` parent folder contains all raw session JSONL files for the project
+
 **Output format** (shows to user, not Claude):
 ```bash
 echo '{"systemMessage": "Line 1\nLine 2\nLine 3"}'
@@ -90,14 +100,14 @@ Note: First line gets `SessionStart:startup says:` prepended by Claude Code.
 ### Local State
 
 **Global** (`~/.claude/hive-mind/`):
-- `auth.json` - JWT token from WorkOS
+- `auth.json` - JWT tokens from WorkOS (access_token, refresh_token, user info)
 
 **Per-project** (`.claude/hive-mind/`):
 - `sessions/<session-id>.jsonl` - Extracted session (sanitized, bloat removed)
 - `sessions/index.md` - Short descriptions for retrieval agent navigation
 - `state.json` - Status per session: pending, submitted, excluded; extraction details
 
-User decides whether to gitignore `.claude/hive-mind/` (may be useful for collaborators or multi-environment).
+User decides whether to gitignore `.claude/hive-mind/` (default: not gitignored, so users see what's created).
 
 Session readiness determined from raw transcript file modified time.
 
@@ -134,12 +144,6 @@ POST session/upload
 Subagent reads `sessions/index.md` for navigation, uses jq/scripts to explore session JSONL files. Can get trajectory (truncated) then dive into details.
 
 ## v1 Open Questions
-
-### Session 6: First-Time Setup
-- Login flow implementation (WorkOS device flow)
-- CLI tool vs slash commands for user actions
-- Multi-environment handling (local + cloud VM)
-- First-run experience and reminders
 
 ### Session 7: JSONL Format
 - Full reverse-engineering of transcript format
@@ -210,7 +214,7 @@ For processing pipeline management:
 
 ## Reference Documentation
 
-- [WorkOS CLI Auth](https://workos.com/docs/user-management/sessions/cli-auth)
+- [WorkOS CLI Auth](https://workos.com/docs/user-management/cli-auth)
 - [Convex Custom JWT Auth](https://docs.convex.dev/auth/advanced/custom-jwt)
 - [Convex R2 Component](https://www.convex.dev/components/cloudflare-r2)
 - [Convex HTTP Actions](https://docs.convex.dev/functions/http-actions)
