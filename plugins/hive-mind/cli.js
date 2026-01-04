@@ -370,7 +370,7 @@ function sanitizeString(content) {
   }
   return result;
 }
-async function sanitizeDeep(value, depth = 0) {
+function sanitizeDeep(value, depth = 0) {
   if (depth > MAX_SANITIZE_DEPTH) {
     return value;
   }
@@ -381,13 +381,12 @@ async function sanitizeDeep(value, depth = 0) {
     return sanitizeString(value);
   }
   if (Array.isArray(value)) {
-    const sanitized = await Promise.all(value.map((item) => sanitizeDeep(item, depth + 1)));
-    return sanitized;
+    return value.map((item) => sanitizeDeep(item, depth + 1));
   }
   if (typeof value === "object") {
     const result = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = await sanitizeDeep(val, depth + 1);
+      result[key] = sanitizeDeep(val, depth + 1);
     }
     return result;
   }
