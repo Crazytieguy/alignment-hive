@@ -28,8 +28,10 @@ export async function sessionStart(): Promise<void> {
     if (extracted > 0) {
       messages.push(extractedMessage(extracted));
     }
-  } catch {
-    // Silent failure for extraction - don't block the session
+  } catch (error) {
+    // Show error to user via systemMessage (Claude only sees "hook success")
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    messages.push(`Extraction failed: ${errorMsg}`);
   }
 
   // Output all messages together
