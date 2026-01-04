@@ -17,9 +17,6 @@ import {
 
 const HIVE_MIND_VERSION = "0.1";
 
-/**
- * Entry types to skip during extraction
- */
 const SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
 
 /**
@@ -37,15 +34,9 @@ const STRIP_FIELDS = new Set([
   "todos",
 ]);
 
-/**
- * Fields to strip from message object
- */
 const STRIP_MESSAGE_FIELDS = new Set(["id", "usage"]);
 
-/**
- * Declarative mapping of tool names to fields to keep.
- * Special cases (like Read with nested file object) are handled separately.
- */
+// Special cases (Read with nested file object) handled in transformToolResult
 const TOOL_FIELD_MAPPINGS: Record<string, string[]> = {
   Edit: ["filePath", "oldString", "newString", "structuredPatch"],
   Write: ["filePath", "content"],
@@ -57,10 +48,6 @@ const TOOL_FIELD_MAPPINGS: Record<string, string[]> = {
   Task: ["agentId", "prompt", "status", "content"],
 };
 
-/**
- * Parse a JSONL file line by line, yielding parsed entries.
- * Malformed lines are skipped with optional debug logging.
- */
 export function* parseJsonl(content: string): Generator<unknown> {
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
@@ -76,9 +63,6 @@ export function* parseJsonl(content: string): Generator<unknown> {
   }
 }
 
-/**
- * Calculate decoded size from base64 string, accounting for padding.
- */
 function getBase64DecodedSize(base64: string): number {
   if (!base64) return 0;
   // Remove padding characters for accurate calculation
@@ -86,10 +70,7 @@ function getBase64DecodedSize(base64: string): number {
   return Math.floor(((base64.length - paddingCount) * 3) / 4);
 }
 
-/**
- * Transform a content block, replacing base64 data with size placeholders.
- * Uses discriminated union parsing for proper type narrowing.
- */
+/** Replace base64 data with size placeholders. */
 function transformContentBlock(block: ContentBlock) {
   // Try to parse as known block type for proper narrowing
   const parsed = KnownContentBlockSchema.safeParse(block);
@@ -139,18 +120,12 @@ function transformContentBlock(block: ContentBlock) {
   return block;
 }
 
-/**
- * Transform message content, handling both string and array formats.
- */
 function transformMessageContent(content: string | ContentBlock[] | undefined) {
   if (!content) return content;
   if (typeof content === "string") return content;
   return content.map(transformContentBlock);
 }
 
-/**
- * Pick specified fields from an object, excluding undefined values.
- */
 function pickFields(
   obj: Record<string, unknown>,
   fields: string[],
@@ -164,10 +139,6 @@ function pickFields(
   return result;
 }
 
-/**
- * Transform tool results to remove bloat while keeping useful info.
- * Uses declarative TOOL_FIELD_MAPPINGS for most tools.
- */
 function transformToolResult(toolName: string, result: unknown): unknown {
   if (!result || typeof result !== "object") return result;
   const r = result as Record<string, unknown>;
@@ -194,13 +165,8 @@ function transformToolResult(toolName: string, result: unknown): unknown {
   return result;
 }
 
-/**
- * Get tool name from sourceToolUseID by looking at assistant message content.
- * This is a simplified approach - we just return undefined if we can't determine it.
- */
+/** Infer tool name from result structure patterns. */
 function getToolNameFromUserEntry(entry: UserEntry): string | undefined {
-  // The tool name is typically embedded in the structure
-  // For now, we'll infer from common patterns in the toolUseResult
   const result = entry.toolUseResult;
   if (!result || typeof result !== "object" || Array.isArray(result))
     return undefined;
@@ -221,9 +187,6 @@ function getToolNameFromUserEntry(entry: UserEntry): string | undefined {
   return undefined;
 }
 
-/**
- * Strip unwanted fields from an entry.
- */
 function stripFields(entry: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
@@ -249,10 +212,7 @@ function stripFields(entry: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
-/**
- * Extract and transform a single entry.
- * Returns null if the entry should be skipped.
- */
+/** Returns null for entries that should be skipped. */
 function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
   // Parse with discriminated union for proper type narrowing
   const entry = parseKnownEntry(rawEntry);
@@ -309,10 +269,7 @@ function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
   return null;
 }
 
-/**
- * Find the best summary for a session.
- * Returns the summary where leafUuid exists in the same session.
- */
+/** Returns the summary where leafUuid exists in the same session. */
 function findValidSummary(
   entries: Array<Record<string, unknown>>,
 ): string | undefined {
@@ -346,18 +303,12 @@ function findValidSummary(
   return undefined;
 }
 
-/**
- * Options for session extraction.
- */
 interface ExtractSessionOptions {
   rawPath: string;
   outputPath: string;
   agentId?: string;
 }
 
-/**
- * Extract a single session file.
- */
 export async function extractSession(options: ExtractSessionOptions) {
   const { rawPath, outputPath, agentId } = options;
 
@@ -432,9 +383,6 @@ export async function extractSession(options: ExtractSessionOptions) {
   return { messageCount: entries.length, summary };
 }
 
-/**
- * Read metadata from an extracted session file (first line only).
- */
 export async function readExtractedMeta(
   extractedPath: string,
 ): Promise<HiveMindMeta | null> {
@@ -450,26 +398,17 @@ export async function readExtractedMeta(
   }
 }
 
-/**
- * Get the Claude Code projects directory for a given cwd.
- */
 export function getProjectsDir(cwd: string): string {
   // Encode cwd: replace / with -
   const encoded = cwd.replace(/\//g, "-");
   return join(homedir(), ".claude", "projects", encoded);
 }
 
-/**
- * Get the hive-mind sessions directory for a project.
- */
 export function getHiveMindSessionsDir(projectCwd: string): string {
   return join(projectCwd, ".claude", "hive-mind", "sessions");
 }
 
-/**
- * Find all session files in the raw sessions directory.
- * Returns both regular sessions and agent sessions.
- */
+/** Returns both regular sessions and agent sessions. */
 export async function findRawSessions(rawDir: string) {
   try {
     const files = await readdir(rawDir);
@@ -494,9 +433,6 @@ export async function findRawSessions(rawDir: string) {
   }
 }
 
-/**
- * Check if a raw session needs extraction.
- */
 export async function needsExtraction(
   rawPath: string,
   extractedPath: string,
@@ -515,10 +451,6 @@ export async function needsExtraction(
   }
 }
 
-/**
- * Extract all sessions in a project that need extraction.
- * Returns the number of sessions extracted (including agent sessions).
- */
 export async function extractAllSessions(cwd: string, transcriptPath?: string) {
   // Determine raw sessions directory
   const rawDir = transcriptPath ? dirname(transcriptPath) : getProjectsDir(cwd);
