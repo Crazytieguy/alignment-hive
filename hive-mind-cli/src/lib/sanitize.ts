@@ -160,7 +160,7 @@ export function sanitizeString(content: string): string {
  * Recursively sanitize all strings in an object or array.
  * Returns a new object/array with sanitized strings.
  */
-export async function sanitizeDeep<T>(value: T, depth = 0): Promise<T> {
+export function sanitizeDeep<T>(value: T, depth = 0): T {
   // Prevent stack overflow from deeply nested or circular structures
   if (depth > MAX_SANITIZE_DEPTH) {
     return value;
@@ -175,16 +175,13 @@ export async function sanitizeDeep<T>(value: T, depth = 0): Promise<T> {
   }
 
   if (Array.isArray(value)) {
-    const sanitized = await Promise.all(
-      value.map((item) => sanitizeDeep(item, depth + 1)),
-    );
-    return sanitized as T;
+    return value.map((item) => sanitizeDeep(item, depth + 1)) as T;
   }
 
   if (typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = await sanitizeDeep(val, depth + 1);
+      result[key] = sanitizeDeep(val, depth + 1);
     }
     return result as T;
   }
