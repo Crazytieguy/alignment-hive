@@ -18,7 +18,7 @@ A system for alignment researchers to contribute session learnings to a shared k
 
 ## Session Progress
 
-### v1 Design & Implementation
+### v0.1 Design & Implementation
 - [x] [Session 0](sessions/session-0-initial-planning.md): Initial Planning
 - [x] [Session 1](sessions/session-1-privacy-storage.md): Privacy & Storage Architecture
 - [x] [Session 2](sessions/session-2-hook-behavior.md): Hook Behavior & User Prompting
@@ -28,11 +28,14 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 6](sessions/session-6-setup-auth.md): First-Time Setup & Multi-Environment
 - [x] [Session 7](sessions/session-7-typescript-migration.md): TypeScript/Bun Migration
 - [x] [Session 8](sessions/session-8-jsonl-format.md): JSONL Format Deep Dive
-- [ ] **Session 9: Local Extraction & Retrieval** ← NEXT
-- [ ] Session 10: Testing Strategy
-- [ ] Session 11: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
+- [x] Session 9: Local Extraction & Retrieval (plan only, see `~/.claude/plans/purrfect-orbiting-bentley.md`)
+- [ ] **Session 10: Extraction & Retrieval Implementation** ← NEXT
+- [ ] Session 11: Convex Submission (heartbeats, background upload, R2 storage)
+- [ ] Session 12: Local Audit Server (view/audit sessions, manage submission status)
+- [ ] Session 13: Testing Strategy
+- [ ] Session 14: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
 
-### v2 Design
+### v0.2 Design
 - [ ] Processing Pipeline (Fly.io)
 - [ ] Admin Web App
 
@@ -40,7 +43,7 @@ A system for alignment researchers to contribute session learnings to a shared k
 
 **Plugin skeleton**: `plugins/hive-mind/` - authentication flow implemented and tested. See code for details.
 
-## v1 Architecture
+## v0.1 Architecture
 
 ### Technology Stack
 
@@ -55,7 +58,7 @@ A system for alignment researchers to contribute session learnings to a shared k
 
 ### Authentication
 
-**Purpose**: WorkOS auth identifies users for session submission (v1) and gates access to shared hive-mind data (v2). It is NOT for repo access (the repo is public).
+**Purpose**: WorkOS auth identifies users for session submission (v0.1) and gates access to shared hive-mind data (v0.2). It is NOT for repo access (the repo is public).
 
 User runs `bun ~/.claude/plugins/hive-mind/cli.js login` → WorkOS device flow → tokens stored in `~/.claude/hive-mind/auth.json`. SessionStart hook auto-refreshes expired tokens.
 
@@ -80,16 +83,14 @@ Single hook handles auth check, session tracking, extraction, heartbeats, and su
 
 **Future behavior** (to implement):
 1. Scan raw session files in `transcript_path` parent folder
-2. Compare to `state.json` → find untracked or modified sessions
-3. For each relevant session:
-   - Extract: sanitize (API key patterns etc.), remove bloat
-   - Write to `.claude/hive-mind/sessions/<id>.jsonl`
-   - Update `state.json` with extraction details
-   - Update `sessions/index.md` with session description
-4. Send heartbeats to Convex (last message timestamp from session content)
-5. Display sessions < 24h (pending, can exclude via editing state.json)
-6. For sessions > 24h: launch background script with 10-min delay
-7. Background script checks for exclusion, uploads extracted JSONL if not excluded
+2. For each session file, read first line of extracted file (if exists) to get metadata
+3. Compare `rawMtime` in metadata to current file mtime → find new/modified sessions
+4. For each relevant session:
+   - Extract: sanitize (Secretlint), remove bloat, transform tool results
+   - Write to `.claude/hive-mind/sessions/<id>.jsonl` with metadata first line
+5. Log: "Extracted N new sessions"
+
+TODO: Session 11 (Convex Submission) adds heartbeats, 24h review period, and background upload.
 
 **Hook data available:**
 - `session_id`, `transcript_path`, `cwd`
@@ -108,13 +109,13 @@ Note: First line gets `SessionStart:startup says:` prepended by Claude Code.
 - `auth.json` - JWT tokens from WorkOS (access_token, refresh_token, user info)
 
 **Per-project** (`.claude/hive-mind/`):
-- `sessions/<session-id>.jsonl` - Extracted session (sanitized, bloat removed)
-- `sessions/index.md` - Short descriptions for retrieval agent navigation
-- `state.json` - Status per session: pending, submitted, excluded; extraction details
+- `sessions/<session-id>.jsonl` - Self-contained extracted session:
+  - Line 1: Metadata (extraction info, summary, message count, raw file mtime)
+  - Lines 2+: Extracted message entries (sanitized, bloat removed)
+
+No separate `state.json` or `index.md` - metadata lives in each session file's first line. This avoids git merge conflicts when syncing across machines.
 
 User decides whether to gitignore `.claude/hive-mind/` (default: not gitignored, so users see what's created).
-
-Session readiness determined from raw transcript file modified time.
 
 ### Convex State
 
@@ -146,9 +147,14 @@ POST session/upload
 
 ### Local Retrieval
 
-Subagent reads `sessions/index.md` for navigation, uses jq/scripts to explore session JSONL files. Can get trajectory (truncated) then dive into details.
+Retrieval agent uses CLI commands:
+- `hive-mind index` - Build index from session metadata first-lines
+- `hive-mind scan <id> [--tokens-per-msg=N]` - Scan session with smart truncation
+- `hive-mind read <id> <indices>` - Get full content for specific messages
 
-## v1 Open Questions
+Workflow: index → identify candidates → scan with appropriate detail → read specific messages.
+
+## v0.1 Session Details
 
 ### Session 8: JSONL Format (Completed)
 
@@ -160,24 +166,39 @@ See [claude-code-jsonl-format.md](claude-code-jsonl-format.md) for full referenc
 - **Summary bug**: ~80% of summaries contaminated from other sessions ([#2597](https://github.com/anthropics/claude-code/issues/2597)); only trust summaries where `leafUuid` exists in same file
 - **Storage bloat**: Base64 content (56%), duplicate file reads, `originalFile` in edits → 92% reduction possible with cleaning
 
-### Session 9: Local Extraction & Retrieval
-- Extraction format: thinner JSONL with sanitization
-- Sanitization library for API key patterns
-- `sessions/index.md` format
-- Retrieval subagent design (jq, scripts, or custom tools)
-- Guidance for navigating JSONL effectively
+### Session 9: Local Extraction & Retrieval (Completed)
 
-### Session 10: Testing
+See plan file `~/.claude/plans/purrfect-orbiting-bentley.md` for detailed design:
+- Secretlint for sanitization (Anthropic, OpenAI, AWS, GitHub, etc.)
+- Metadata-in-first-line state management (no separate state.json)
+- CLI commands: `index`, `scan`, `read`
+- Retrieval agent with smart truncation (`--tokens-per-msg`)
+- Zod v4 schemas with `z.looseObject()` for resilience
+
+### Session 11: Convex Submission
+
+Implement remote submission using existing Convex State and Convex API design (see v0.1 Architecture above):
+- Heartbeat endpoint (upsert session metadata)
+- Upload endpoint (R2 storage)
+- Background submission script (delay after 24h review period)
+- Status tracking (pending, submitted, excluded)
+- Graceful degradation when Convex unavailable
+
+### Session 12: Local Audit Server
+- Local web server in CLI for viewing/auditing extracted sessions
+- Manage submission status (exclude sessions before upload)
+- Browse session content in browser
+
+### Session 13: Testing
 - Local testing approach
 - Staging environment
 - Dry-run mode
 
 ### Cross-Cutting
-- Graceful degradation when Convex unavailable
 - Consent model if expanding beyond MATS
 - Rollback procedure for leaked sensitive data
 
-## v2 Architecture
+## v0.2 Architecture
 
 ### Remote Processing
 
@@ -204,7 +225,7 @@ For processing pipeline management:
 - View statistics
 - Browse uploaded sessions
 
-## v2 Open Questions
+## v0.2 Session Details
 
 - Fly.io machine setup and lifecycle
 - Job state tracking in Convex
@@ -218,7 +239,7 @@ For processing pipeline management:
 - Yanking (user requests data deletion after submission)
 - Granular admin access permissions
 - Partial consent/redaction
-- Windows support (if not easy to include in v1)
+- Windows support (if not easy to include in v0.1)
 - Claude Code for web support
 
 ## Reference Documentation

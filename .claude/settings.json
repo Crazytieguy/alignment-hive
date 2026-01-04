@@ -8,6 +8,7 @@
       "WebSearch",
       "WebFetch(domain:workos.com)",
       "WebFetch(domain:docs.convex.dev)",
+      "WebFetch(domain:zod.dev)",
       "Bash(bun install:*)",
       "Bash(bun run build:*)",
       "Bash(bun run typecheck:*)"
