@@ -26,6 +26,10 @@ export function loggedInMessage(displayName: string): string {
   return `hive-mind: Logged in as ${displayName}`;
 }
 
+export function extractedMessage(count: number): string {
+  return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
+}
+
 export function bunNotInstalledHook(): string {
   return "hive-mind requires Bun.\\nInstall: curl -fsSL https://bun.sh/install | bash";
 }
@@ -50,13 +54,16 @@ export const login = {
   confirmCode: "Confirm this code matches:",
   browserOpened: "Browser opened. Confirm the code matches and approve.",
   openManually: "Open the URL in your browser, then confirm the code.",
-  waiting: (seconds: number) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waiting: (seconds: number) =>
+    `Waiting for authentication... (expires in ${seconds}s)`,
   waitingProgress: (elapsed: number) => `Waiting... (${elapsed}s elapsed)`,
   success: "Authentication successful!",
   welcomeNamed: (name: string, email: string) => `Welcome, ${name} (${email})!`,
   welcomeEmail: (email: string) => `Logged in as: ${email}`,
-  contributing: "Your Claude Code sessions will now contribute to the hive-mind.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before they're submitted.",
+  contributing:
+    "Your Claude Code sessions will now contribute to the hive-mind.",
+  reviewPeriod:
+    "You'll have 24 hours to review and exclude sessions before they're submitted.",
   timeout: "Authentication timed out. Please try again.",
   startFailed: (error: string) => `Failed to start authentication: ${error}`,
   authFailed: (error: string) => `Authentication failed: ${error}`,

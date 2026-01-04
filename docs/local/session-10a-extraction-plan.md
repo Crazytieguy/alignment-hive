@@ -9,8 +9,10 @@ Process raw Claude Code sessions into sanitized, compact JSONL files. This sessi
 ## Dependencies to Install
 
 ```bash
-bun add @secretlint/core @secretlint/secretlint-rule-preset-recommend zod
+bun add zod
 ```
+
+Note: We originally planned to use Secretlint, but replaced it with a custom implementation based on gitleaks patterns due to performance issues (Secretlint's profiler blocked Bun's event loop).
 
 ## Key Design Decisions
 
@@ -46,19 +48,22 @@ Zod v4 schemas for JSONL parsing with resilience to future Claude Code changes.
 | `file-history-snapshot` | Skip |
 | `queue-operation` | Skip |
 
-### 2. Sanitization (`src/lib/sanitize.ts`)
+### 2. Sanitization (`src/lib/sanitize.ts` + `src/lib/secret-rules.ts`)
 
-Wrap Secretlint for programmatic use with recursive string sanitization.
-
-**Configuration:**
-- Dependencies: `@secretlint/core`, `@secretlint/secretlint-rule-preset-recommend`
-- Covers: Anthropic, OpenAI, AWS, GitHub, private keys, database strings, etc.
-- Aggressive redaction (false positives acceptable)
-- Replace detected secrets with `[REDACTED:<rule-name>]`
+Custom secret detection based on gitleaks patterns (220 rules ported from https://github.com/gitleaks/gitleaks).
 
 **Implementation:**
-- Recursive sanitization function that handles nested objects/arrays
-- Apply to all string content in extracted entries
+- `secret-rules.ts`: Auto-generated file with regex patterns, entropy thresholds, and keywords
+- `sanitize.ts`: Detection engine with Shannon entropy filtering and keyword pre-filtering
+- Covers: Anthropic, OpenAI, AWS, GitHub, Slack, Azure, and 200+ other services
+- Aggressive redaction (false positives acceptable)
+- Replace detected secrets with `[REDACTED:<rule-id>]`
+
+**Key details:**
+- Entropy filtering rejects low-randomness matches (e.g., `ghp_xxxx...` rejected, real tokens pass)
+- Keyword pre-filter for performance (rules with keywords only checked if keyword present)
+- Rules without keywords (like AWS access tokens) always run
+- Recursive sanitization handles nested objects/arrays
 
 ### 3. Extraction (`src/lib/extraction.ts`)
 
@@ -132,7 +137,7 @@ Add extraction to the existing SessionStart flow (after auth check).
 ## Extracted Session File Format
 
 ```jsonl
-{"_type":"hive-mind-meta","version":"0.1","sessionId":"abc123","extractedAt":"2025-01-04T12:00:00Z","rawMtime":"2025-01-04T10:00:00Z","messageCount":45,"summary":"Session title","rawPath":"~/.claude/projects/-Users-yoav-project/abc123.jsonl"}
+{"_type":"hive-mind-meta","version":"0.1","sessionId":"abc123","machineId":"uuid-here","extractedAt":"2025-01-04T12:00:00Z","rawMtime":"2025-01-04T10:00:00Z","messageCount":45,"summary":"Session title","rawPath":"~/.claude/projects/-Users-yoav-project/abc123.jsonl"}
 {"type":"summary","summary":"Hook behavior testing","leafUuid":"..."}
 {"type":"user","uuid":"...","parentUuid":null,"timestamp":"...","message":{"role":"user","content":"..."}}
 {"type":"assistant","uuid":"...","parentUuid":"...","timestamp":"...","message":{"role":"assistant","content":[...]}}
@@ -152,14 +157,20 @@ hive-mind-cli/
 │   │   └── session-start.ts      # MODIFIED: add extraction
 │   └── lib/
 │       ├── auth.ts
-│       ├── config.ts
+│       ├── config.ts             # MODIFIED: add getMachineId
 │       ├── messages.ts
 │       ├── output.ts
 │       ├── extraction.ts         # NEW
 │       ├── extraction.test.ts    # NEW
 │       ├── sanitize.ts           # NEW
 │       ├── sanitize.test.ts      # NEW
+│       ├── secret-rules.ts       # NEW (auto-generated from gitleaks)
+│       ├── gitleaks.test.ts      # NEW (ported test cases)
 │       └── schemas.ts            # NEW
+
+~/.claude/hive-mind/              # Global state
+├── auth.json                     # JWT tokens (existing)
+└── machine-id                    # Random UUID for anonymous tracking (NEW)
 
 .claude/hive-mind/                # Per-project, created on extraction
 └── sessions/

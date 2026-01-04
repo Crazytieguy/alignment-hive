@@ -29,12 +29,12 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 7](sessions/session-7-typescript-migration.md): TypeScript/Bun Migration
 - [x] [Session 8](sessions/session-8-jsonl-format.md): JSONL Format Deep Dive
 - [x] Session 9: Local Extraction & Retrieval (design only)
-- [ ] **Session 10A: Extraction Implementation** ← NEXT (see `local/session-10a-extraction-plan.md`)
-- [ ] Session 10B: Local Retrieval (see `local/session-10b-retrieval-plan.md`) ← after 10A
-- [ ] Session 11: Convex Submission (heartbeats, background upload, R2 storage) ← after 10A
-- [ ] Session 12: Local Audit Server (view/audit sessions, manage submission status) ← after 10A
+- [x] Session 10A: Extraction Implementation
+- [ ] **Session 10B: Local Retrieval** ← NEXT (see `local/session-10b-retrieval-plan.md`)
+- [ ] Session 11: Convex Submission (heartbeats, background upload, R2 storage)
+- [ ] Session 12: Local Audit Server (view/audit sessions, manage submission status)
 
-**Concurrency note**: Sessions 10B, 11, and 12 can run in parallel after 10A completes. They share no modified files except `cli.ts` (each adds commands as separate import blocks).
+**Concurrency note**: Sessions 10B, 11, and 12 can now run in parallel. They share no modified files except `cli.ts` (each adds commands as separate import blocks).
 - [ ] Session 13: Testing Strategy
 - [ ] Session 14: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
 
@@ -113,10 +113,11 @@ Note: First line gets `SessionStart:startup says:` prepended by Claude Code.
 
 **Global** (`~/.claude/hive-mind/`):
 - `auth.json` - JWT tokens from WorkOS (access_token, refresh_token, user info)
+- `machine-id` - Random UUID for anonymous tracking (generated on first use)
 
 **Per-project** (`.claude/hive-mind/`):
 - `sessions/<session-id>.jsonl` - Self-contained extracted session:
-  - Line 1: Metadata (extraction info, summary, message count, raw file mtime)
+  - Line 1: Metadata (extraction info, machineId, summary, message count, raw file mtime)
   - Lines 2+: Extracted message entries (sanitized, bloat removed)
 
 No separate `state.json` or `index.md` - metadata lives in each session file's first line. This avoids git merge conflicts when syncing across machines.
@@ -208,6 +209,8 @@ Implement remote submission using existing Convex State and Convex API design (s
 - Background submission script (delay after 24h review period)
 - Status tracking (pending, submitted, excluded)
 - Graceful degradation when Convex unavailable
+
+**Privacy note:** Before authentication, only `machineId` is sent to Convex (for anonymous install tracking). No session data or other metadata is sent until the user authenticates. This allows counting plugin installations while respecting privacy.
 
 ### Session 12: Local Audit Server
 - Local web server in CLI for viewing/auditing extracted sessions
