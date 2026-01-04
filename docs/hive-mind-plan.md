@@ -28,10 +28,13 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 6](sessions/session-6-setup-auth.md): First-Time Setup & Multi-Environment
 - [x] [Session 7](sessions/session-7-typescript-migration.md): TypeScript/Bun Migration
 - [x] [Session 8](sessions/session-8-jsonl-format.md): JSONL Format Deep Dive
-- [x] Session 9: Local Extraction & Retrieval (plan only, see `~/.claude/plans/purrfect-orbiting-bentley.md`)
-- [ ] **Session 10: Extraction & Retrieval Implementation** ← NEXT
-- [ ] Session 11: Convex Submission (heartbeats, background upload, R2 storage)
-- [ ] Session 12: Local Audit Server (view/audit sessions, manage submission status)
+- [x] Session 9: Local Extraction & Retrieval (design only)
+- [ ] **Session 10A: Extraction Implementation** ← NEXT (see `local/session-10a-extraction-plan.md`)
+- [ ] Session 10B: Local Retrieval (see `local/session-10b-retrieval-plan.md`) ← after 10A
+- [ ] Session 11: Convex Submission (heartbeats, background upload, R2 storage) ← after 10A
+- [ ] Session 12: Local Audit Server (view/audit sessions, manage submission status) ← after 10A
+
+**Concurrency note**: Sessions 10B, 11, and 12 can run in parallel after 10A completes. They share no modified files except `cli.ts` (each adds commands as separate import blocks).
 - [ ] Session 13: Testing Strategy
 - [ ] Session 14: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
 
@@ -81,7 +84,7 @@ Single hook handles auth check, session tracking, extraction, heartbeats, and su
 2. If not authenticated: display login command and optional shell alias setup
 3. If authenticated: display "Logged in as {name}"
 
-**Future behavior** (to implement):
+**Session 10A adds** (extraction):
 1. Scan raw session files in `transcript_path` parent folder
 2. For each session file, read first line of extracted file (if exists) to get metadata
 3. Compare `rawMtime` in metadata to current file mtime → find new/modified sessions
@@ -90,7 +93,10 @@ Single hook handles auth check, session tracking, extraction, heartbeats, and su
    - Write to `.claude/hive-mind/sessions/<id>.jsonl` with metadata first line
 5. Log: "Extracted N new sessions"
 
-TODO: Session 11 (Convex Submission) adds heartbeats, 24h review period, and background upload.
+**Session 11 adds** (submission, separate code section for easy parallel development):
+- Heartbeat calls for all sessions
+- 24h review period tracking
+- Background upload trigger
 
 **Hook data available:**
 - `session_id`, `transcript_path`, `cwd`
@@ -168,12 +174,31 @@ See [claude-code-jsonl-format.md](claude-code-jsonl-format.md) for full referenc
 
 ### Session 9: Local Extraction & Retrieval (Completed)
 
-See plan file `~/.claude/plans/purrfect-orbiting-bentley.md` for detailed design:
-- Secretlint for sanitization (Anthropic, OpenAI, AWS, GitHub, etc.)
-- Metadata-in-first-line state management (no separate state.json)
-- CLI commands: `index`, `scan`, `read`
-- Retrieval agent with smart truncation (`--tokens-per-msg`)
-- Zod v4 schemas with `z.looseObject()` for resilience
+Design decisions documented in Session 10A/10B plans below.
+
+### Session 10A: Extraction Implementation
+
+Foundation for all downstream work. Creates the extracted session files that retrieval, submission, and audit all read from.
+
+**Scope** (see `local/session-10a-extraction-plan.md`):
+- Zod v4 schemas for JSONL parsing
+- Secretlint sanitization
+- Extraction logic (transform, sanitize, write)
+- SessionStart hook integration (extraction only, not submission)
+- Tests for extraction and sanitization
+
+**Key outputs**:
+- `src/lib/schemas.ts`, `src/lib/sanitize.ts`, `src/lib/extraction.ts`
+- `.claude/hive-mind/sessions/<id>.jsonl` files created on session start
+
+### Session 10B: Local Retrieval
+
+CLI tools and agent for searching past sessions. Depends on 10A (reads extracted files).
+
+**Scope** (see `local/session-10b-retrieval-plan.md`):
+- CLI commands: `index`, `scan <id>`, `read <id> <indices>`
+- Retrieval agent with smart truncation
+- Tuning on real session data
 
 ### Session 11: Convex Submission
 
