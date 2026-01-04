@@ -629,6 +629,8 @@ A "leaf" is a message whose `uuid` is not referenced as any other message's `par
 
 Files named `agent-<id>.jsonl` contain subagent conversations (from Task tool).
 
+**File naming convention**: Claude Code uses the `agent-` prefix to identify subagent transcripts. The `<id>` is a short hex identifier (e.g., `agent-a051da9.jsonl`). This naming pattern is the canonical way to distinguish agent sessions from main sessions.
+
 ### Characteristics
 
 - All messages have `isSidechain: true`
