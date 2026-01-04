@@ -4,7 +4,7 @@ Identified during code review of the extraction implementation.
 
 ## Todos
 
-- [ ] **Make `sanitizeDeep` synchronous**
+- [x] **Make `sanitizeDeep` synchronous**
 
   `sanitize.ts:163` - Function is marked async and uses `Promise.all`, but all actual work is synchronous (`sanitizeString` is sync). Remove async/await to eliminate unnecessary overhead.
 
@@ -16,13 +16,13 @@ Identified during code review of the extraction implementation.
 
   Fallback if not faster or too error-prone: cap hook extraction to 10 sessions, show message suggesting `hive-mind extract` for bulk. Could also offer extraction during login flow.
 
-- [ ] **Hook error handling**
+- [x] **Hook error handling**
 
   Currently `session-start.ts:29-31` silently catches extraction errors. Per `docs/sessions/session-4-hook-output.md`: use exit 0 + `{"systemMessage": "Error: ..."}` so user sees errors but Claude only sees "hook success". Exit code 2 would add stderr to Claude's context (blocking error).
 
   Before implementing: run a quick experiment to verify exit code 2 behavior matches the docs (session-4 didn't test this explicitly).
 
-- [ ] **Remove redundant comments**
+- [x] **Remove redundant comments**
 
   Comments that just repeat function/variable names add noise. Scan all files in `src/lib/` and `src/commands/` for comments that don't add value beyond what the code already says.
 
@@ -30,7 +30,7 @@ Identified during code review of the extraction implementation.
 
   Keep comments that explain non-obvious decisions: `schemas.ts:26-28` (recursive typing limitation), `secret-rules.ts:1-9` (gitleaks provenance).
 
-- [ ] **Zod schema refactor**
+- [ ] **Zod schema refactor** *(deferred - complexity vs benefit)*
 
   Goal: drop specific fields while preserving unknown ones (forward compatibility). Solution: `z.looseObject()` + `.transform()` with destructuring. Tested in this session:
   ```typescript
@@ -43,6 +43,8 @@ Identified during code review of the extraction implementation.
 
   Also: use getter pattern for recursive content blocks per https://zod.dev/api?id=recursive-objects - avoids `z.unknown()` for tool_result content.
 
-- [ ] **Document agent session convention**
+  **Why deferred**: Requires adding all strippable fields to schemas just to transform them away, plus transforms at both entry and nested message level. Changes inferred types. Current approach with type assertions works correctly and is simpler.
+
+- [x] **Document agent session convention**
 
   `extraction.ts:481` detects agent sessions by `agent-*.jsonl` filename prefix. This mirrors Claude Code's native convention. Add note to `docs/claude-code-jsonl-format.md` explaining this pattern.
