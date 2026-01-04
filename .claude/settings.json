@@ -11,7 +11,9 @@
       "WebFetch(domain:zod.dev)",
       "Bash(bun install:*)",
       "Bash(bun run build:*)",
-      "Bash(bun run typecheck:*)"
+      "Bash(bun run typecheck:*)",
+      "Bash(bun test:*)",
+      "Bash(bun run lint:*)"
     ]
   },
   "enabledPlugins": {

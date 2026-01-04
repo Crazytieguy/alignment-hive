@@ -1,10 +1,12 @@
 #!/usr/bin/env bun
 
+import { extract } from "./commands/extract";
 import { login } from "./commands/login";
 import { sessionStart } from "./commands/session-start";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
+  extract: { description: "Extract sessions for retrieval", handler: extract },
   login: { description: "Authenticate with hive-mind", handler: login },
   "session-start": { description: "SessionStart hook", handler: sessionStart },
 } as const;
@@ -22,7 +24,12 @@ function printUsage(): void {
 async function main(): Promise<void> {
   const command = process.argv[2];
 
-  if (!command || command === "help" || command === "--help" || command === "-h") {
+  if (
+    !command ||
+    command === "help" ||
+    command === "--help" ||
+    command === "-h"
+  ) {
     printUsage();
     if (!command) process.exit(1);
     return;

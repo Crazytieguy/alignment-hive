@@ -1,17 +1,39 @@
-import { createInterface } from "readline";
+import { createInterface } from "node:readline";
+import { z } from "zod";
 import {
+  AuthDataSchema,
   checkAuthStatus,
   getUserDisplayName,
   loadAuthData,
   refreshToken,
   saveAuthData,
-  type AuthData,
 } from "../lib/auth";
 import { WORKOS_CLIENT_ID } from "../lib/config";
 import { login as msg } from "../lib/messages";
-import { colors, printError, printInfo, printSuccess, printWarning } from "../lib/output";
+import {
+  colors,
+  printError,
+  printInfo,
+  printSuccess,
+  printWarning,
+} from "../lib/output";
 
 const WORKOS_API_URL = "https://api.workos.com/user_management";
+
+// Zod schemas for WorkOS device auth responses
+const DeviceAuthResponseSchema = z.object({
+  device_code: z.string(),
+  user_code: z.string(),
+  verification_uri: z.string(),
+  verification_uri_complete: z.string(),
+  interval: z.number(),
+  expires_in: z.number(),
+});
+
+const ErrorResponseSchema = z.object({
+  error: z.string(),
+  error_description: z.string().optional(),
+});
 
 async function confirm(message: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -79,15 +101,6 @@ async function tryRefresh(): Promise<boolean> {
   return false;
 }
 
-interface DeviceAuthResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete: string;
-  interval: number;
-  expires_in: number;
-}
-
 async function deviceAuthFlow(): Promise<void> {
   printInfo(msg.starting);
   console.log("");
@@ -100,13 +113,24 @@ async function deviceAuthFlow(): Promise<void> {
 
   const data = await response.json();
 
-  if (data.error) {
-    printError(msg.startFailed(data.error));
-    if (data.error_description) console.log(data.error_description);
+  // Check for error response
+  const errorResult = ErrorResponseSchema.safeParse(data);
+  if (errorResult.success && errorResult.data.error) {
+    printError(msg.startFailed(errorResult.data.error));
+    if (errorResult.data.error_description) {
+      console.log(errorResult.data.error_description);
+    }
     process.exit(1);
   }
 
-  const deviceAuth = data as DeviceAuthResponse;
+  // Validate device auth response
+  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
+  if (!deviceAuthResult.success) {
+    printError("Unexpected response from authentication server");
+    process.exit(1);
+  }
+
+  const deviceAuth = deviceAuthResult.data;
 
   console.log("\u2501".repeat(65));
   console.log("");
@@ -150,19 +174,20 @@ async function deviceAuthFlow(): Promise<void> {
 
     const tokenData = await tokenResponse.json();
 
-    if (!tokenData.error) {
-      const authData = tokenData as AuthData;
-      await saveAuthData(authData);
+    // Try to parse as successful auth response
+    const authResult = AuthDataSchema.safeParse(tokenData);
+    if (authResult.success) {
+      await saveAuthData(authResult.data);
 
       console.log("");
       printSuccess(msg.success);
       console.log("");
 
-      const displayName = getUserDisplayName(authData.user);
-      if (authData.user.first_name) {
-        console.log(msg.welcomeNamed(displayName, authData.user.email));
+      const displayName = getUserDisplayName(authResult.data.user);
+      if (authResult.data.user.first_name) {
+        console.log(msg.welcomeNamed(displayName, authResult.data.user.email));
       } else {
-        console.log(msg.welcomeEmail(authData.user.email));
+        console.log(msg.welcomeEmail(authResult.data.user.email));
       }
       console.log("");
       console.log(msg.contributing);
@@ -171,19 +196,25 @@ async function deviceAuthFlow(): Promise<void> {
       return;
     }
 
-    if (tokenData.error === "authorization_pending") {
+    // Check for known error states
+    const errorData = tokenData as {
+      error?: string;
+      error_description?: string;
+    };
+
+    if (errorData.error === "authorization_pending") {
       process.stdout.write(`\r  ${msg.waitingProgress(elapsed)}`);
       continue;
     }
 
-    if (tokenData.error === "slow_down") {
+    if (errorData.error === "slow_down") {
       interval += 1000;
       continue;
     }
 
     console.log("");
-    printError(msg.authFailed(tokenData.error));
-    if (tokenData.error_description) console.log(tokenData.error_description);
+    printError(msg.authFailed(errorData.error || "unknown error"));
+    if (errorData.error_description) console.log(errorData.error_description);
     process.exit(1);
   }
 
@@ -194,7 +225,7 @@ async function deviceAuthFlow(): Promise<void> {
 export async function login(): Promise<void> {
   console.log("");
   console.log(`  ${msg.header}`);
-  console.log("  " + "\u2500".repeat(15));
+  console.log(`  ${"\u2500".repeat(15)}`);
   console.log("");
 
   if (!(await checkExistingAuth())) return;

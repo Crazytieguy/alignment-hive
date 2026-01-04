@@ -1,20 +1,24 @@
-import { mkdir } from "fs/promises";
+import { mkdir } from "node:fs/promises";
+import { z } from "zod";
 import { AUTH_DIR, AUTH_FILE, WORKOS_CLIENT_ID } from "./config";
 
 const WORKOS_API_URL = "https://api.workos.com/user_management";
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  first_name?: string;
-  last_name?: string;
-}
+const AuthUserSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+});
 
-export interface AuthData {
-  access_token: string;
-  refresh_token: string;
-  user: AuthUser;
-}
+export const AuthDataSchema = z.object({
+  access_token: z.string(),
+  refresh_token: z.string(),
+  user: AuthUserSchema,
+});
+
+export type AuthUser = z.infer<typeof AuthUserSchema>;
+export type AuthData = z.infer<typeof AuthDataSchema>;
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -43,7 +47,9 @@ export async function loadAuthData(): Promise<AuthData | null> {
   try {
     const file = Bun.file(AUTH_FILE);
     if (!(await file.exists())) return null;
-    return (await file.json()) as AuthData;
+    const data = await file.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
@@ -54,7 +60,9 @@ export async function saveAuthData(data: AuthData): Promise<void> {
   await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
-export async function refreshToken(refreshTokenValue: string): Promise<AuthData | null> {
+export async function refreshToken(
+  refreshTokenValue: string,
+): Promise<AuthData | null> {
   try {
     const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
       method: "POST",
@@ -67,8 +75,8 @@ export async function refreshToken(refreshTokenValue: string): Promise<AuthData 
     });
 
     const data = await response.json();
-    if (data.error) return null;
-    return data as AuthData;
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
@@ -80,7 +88,9 @@ export interface AuthStatus {
   needsLogin: boolean;
 }
 
-export async function checkAuthStatus(attemptRefresh = true): Promise<AuthStatus> {
+export async function checkAuthStatus(
+  attemptRefresh = true,
+): Promise<AuthStatus> {
   const authData = await loadAuthData();
 
   if (!authData?.access_token) {
