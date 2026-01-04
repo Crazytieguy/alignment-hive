@@ -30,7 +30,7 @@ Identified during code review of the extraction implementation.
 
   Keep comments that explain non-obvious decisions: `schemas.ts:26-28` (recursive typing limitation), `secret-rules.ts:1-9` (gitleaks provenance).
 
-- [ ] **Zod schema refactor** *(deferred - complexity vs benefit)*
+- [ ] **Zod schema refactor**
 
   Goal: drop specific fields while preserving unknown ones (forward compatibility). Solution: `z.looseObject()` + `.transform()` with destructuring. Tested in this session:
   ```typescript
@@ -42,8 +42,6 @@ Identified during code review of the extraction implementation.
   This eliminates the type assertion at `extraction.ts:277`.
 
   Also: use getter pattern for recursive content blocks per https://zod.dev/api?id=recursive-objects - avoids `z.unknown()` for tool_result content.
-
-  **Why deferred**: Requires adding all strippable fields to schemas just to transform them away, plus transforms at both entry and nested message level. Changes inferred types. Current approach with type assertions works correctly and is simpler.
 
 - [x] **Document agent session convention**
 
