@@ -27,8 +27,8 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 5](sessions/session-5-ideas-discussion.md): Ideas Discussion
 - [x] [Session 6](sessions/session-6-setup-auth.md): First-Time Setup & Multi-Environment
 - [x] [Session 7](sessions/session-7-typescript-migration.md): TypeScript/Bun Migration
-- [ ] **Session 8: JSONL Format Deep Dive** ← NEXT
-- [ ] Session 9: Local Extraction & Retrieval
+- [x] [Session 8](sessions/session-8-jsonl-format.md): JSONL Format Deep Dive
+- [ ] **Session 9: Local Extraction & Retrieval** ← NEXT
 - [ ] Session 10: Testing Strategy
 - [ ] Session 11: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
 
@@ -150,11 +150,15 @@ Subagent reads `sessions/index.md` for navigation, uses jq/scripts to explore se
 
 ## v1 Open Questions
 
-### Session 8: JSONL Format
-- Full reverse-engineering of transcript format
-- Summary entry structure and purpose
-- Session description source (for display to user)
-- Reference: https://github.com/simonw/claude-code-transcripts
+### Session 8: JSONL Format (Completed)
+
+See [claude-code-jsonl-format.md](claude-code-jsonl-format.md) for full reference.
+
+**Key findings:**
+- Entry types: `summary`, `user`, `assistant`, `system`, `file-history-snapshot`, `queue-operation`
+- Conversation chain: `uuid` → `parentUuid` links; branches from `/rewind`
+- **Summary bug**: ~80% of summaries contaminated from other sessions ([#2597](https://github.com/anthropics/claude-code/issues/2597)); only trust summaries where `leafUuid` exists in same file
+- **Storage bloat**: Base64 content (56%), duplicate file reads, `originalFile` in edits → 92% reduction possible with cleaning
 
 ### Session 9: Local Extraction & Retrieval
 - Extraction format: thinner JSONL with sanitization
@@ -219,9 +223,10 @@ For processing pipeline management:
 
 ## Reference Documentation
 
+- [Claude Code JSONL Format](claude-code-jsonl-format.md) - Internal format reference
+- [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) - Simon Willison's transcript viewer
 - [WorkOS CLI Auth](https://workos.com/docs/user-management/cli-auth)
 - [Convex Custom JWT Auth](https://docs.convex.dev/auth/advanced/custom-jwt)
 - [Convex R2 Component](https://www.convex.dev/components/cloudflare-r2)
 - [Convex HTTP Actions](https://docs.convex.dev/functions/http-actions)
 - [Fly.io Machines API](https://fly.io/docs/machines/api/)
-- [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) - JSONL format reference
