@@ -14805,7 +14805,10 @@ async function sessionStart() {
     if (extracted > 0) {
       messages.push(extractedMessage(extracted));
     }
-  } catch {}
+  } catch (error48) {
+    const errorMsg = error48 instanceof Error ? error48.message : String(error48);
+    messages.push(`Extraction failed: ${errorMsg}`);
+  }
   if (messages.length > 0) {
     hookOutput(messages.join(`
 `));
