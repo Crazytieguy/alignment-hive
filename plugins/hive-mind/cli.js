@@ -11,17 +11,17 @@ var __export = (target, all) => {
     });
 };
 
-// src/commands/extract.ts
+// cli/commands/extract.ts
 import { basename as basename2, join as join3 } from "path";
 
-// src/lib/extraction.ts
+// cli/lib/extraction.ts
 import { createReadStream } from "fs";
-import { mkdir as mkdir2, readdir, readFile as readFile2, stat, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
 import { homedir as homedir2 } from "os";
 import { basename, dirname, join as join2 } from "path";
 
-// src/lib/config.ts
+// cli/lib/config.ts
 import { randomUUID } from "crypto";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -58,7 +58,7 @@ function getShellConfig() {
   return { file: "~/.profile", sourceCmd: "source ~/.profile" };
 }
 
-// src/lib/secret-rules.ts
+// cli/lib/secret-rules.ts
 var SECRET_RULES = [
   { id: "1password-secret-key", regex: new RegExp("\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b", "g"), entropy: 3.8, keywords: ["a3-"] },
   { id: "1password-service-account-token", regex: new RegExp("ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}", "g"), entropy: 4, keywords: ["ops_"] },
@@ -283,7 +283,7 @@ var SECRET_RULES = [
 ];
 var ALL_KEYWORDS = ["-----begin", "4b1d", "<add key=", "_gitlab_session=", "_mmk", "a3-", "absk", "adafruit", "adobe", "age-secret-key-1", "airtable", "aiza", "akcp", "algolia", "alibaba", "api-", "api_org_", "asana", "atlasv1", "beamer", "bedrock-api-key-", "bitbucket", "bittrex", "clojars_", "cloudflare", "cmvmd", "codecov", "coinbase", "confluent", "contentful", "curl", "dapi", "datadog", "discord", "dnkey", "doo_v1_", "dop_v1_", "dor_v1_", "dp.pt.", "droneci", "dropbox", "dt0c01.", "duffel_", "etsy", "ey", "eyjrijoi", "ezak", "eztk", "facebook", "fastly", "finicity", "finnhub", "fio-u-", "flickr", "flwpubk_test", "flwseck_test", "freshbooks", "gho_", "ghp_", "ghr_", "github_pat_", "gitter", "glagent-", "glc_", "glcbt-", "gldt-", "glffct-", "glft-", "glimt-", "gloas-", "glpat-", "glptt-", "glrt-", "glsa_", "glsoat-", "gr1348941", "heroku", "hf_", "hooks.slack.com", "hrku-aa", "hubspot", "hvb.", "ico-", "intercom", "kraken", "kucoin", "launchdarkly", "lin_api_", "linear", "looker", "ltai", "mailchimp", "mailgun", "mapbox", "mattermost", "meraki", "netlify", "npm_", "nrak", "nrii-", "nrjs-", "ntn_", "okta", "ops_", "p8e-", "plaid", "pmak-", "pnu_", "pplx-", "pscale_oauth_", "pscale_pw_", "pscale_tkn_", "pul-", "pypi-ageichlwas5vcmc", "q~", "rapidapi", "rdme_", "rubygems_", "secret", "secret_key", "sendbird", "sentry", "sg.", "sha256~", "shippo_", "shpat_", "shpca_", "shppa_", "shpss_", "sk", "sk-ant-admin01", "sk-ant-api03", "sm_aat", "sm_pat", "sm_sat", "sntrys_eyjpyxqio", "sntryu_", "snyk", "sonar", "squarespace", "sumo", "t3blbkfj", "telegr", "tfp_", "tk-us-", "travis", "twitch", "twitter", "xapp", "xkeysib-", "xoxb", "xoxe-", "yandex", "zendesk"];
 
-// src/lib/sanitize.ts
+// cli/lib/sanitize.ts
 var MAX_SANITIZE_DEPTH = 100;
 var MIN_SECRET_LENGTH = 8;
 function mightContainSecrets(content) {
@@ -350,8 +350,8 @@ function detectSecrets(content) {
   matches.sort((a, b) => a.start - b.start);
   const deduped = [];
   for (const m of matches) {
-    const last = deduped[deduped.length - 1];
-    if (!last || m.start >= last.end) {
+    const last = deduped.at(-1);
+    if (last === undefined || m.start >= last.end) {
       deduped.push(m);
     }
   }
@@ -2634,7 +2634,7 @@ class Doc {
 var version = {
   major: 4,
   minor: 3,
-  patch: 4
+  patch: 5
 };
 
 // node_modules/zod/v4/core/schemas.js
@@ -13927,7 +13927,7 @@ function date4(params) {
 
 // node_modules/zod/v4/classic/external.js
 config(en_default());
-// src/lib/schemas.ts
+// cli/lib/schemas.ts
 var TextBlockSchema = exports_external.looseObject({
   type: exports_external.literal("text"),
   text: exports_external.string()
@@ -14073,7 +14073,7 @@ var HiveMindMetaSchema = exports_external.object({
   parentSessionId: exports_external.string().optional()
 });
 
-// src/lib/extraction.ts
+// cli/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
 var INCLUDED_ENTRY_TYPES = ["user", "assistant", "summary", "system"];
 function* parseJsonl(content) {
@@ -14255,7 +14255,7 @@ async function extractAllSessions(cwd, transcriptPath) {
   return extracted;
 }
 
-// src/lib/output.ts
+// cli/lib/output.ts
 var colors = {
   red: (s) => `\x1B[31m${s}\x1B[0m`,
   green: (s) => `\x1B[32m${s}\x1B[0m`,
@@ -14278,7 +14278,7 @@ function printWarning(message) {
   console.log(colors.yellow(message));
 }
 
-// src/commands/extract.ts
+// cli/commands/extract.ts
 async function extract() {
   const cwd = process.cwd();
   const rawDir = getProjectsDir(cwd);
@@ -14338,10 +14338,10 @@ async function extract() {
   console.log(`Output: ${extractedDir}`);
 }
 
-// src/commands/login.ts
+// cli/commands/login.ts
 import { createInterface as createInterface2 } from "readline";
 
-// src/lib/auth.ts
+// cli/lib/auth.ts
 import { mkdir as mkdir3 } from "fs/promises";
 var WORKOS_API_URL = "https://api.workos.com/user_management";
 var AuthUserSchema = exports_external.object({
@@ -14432,7 +14432,7 @@ function getUserDisplayName(user) {
   return user.first_name || user.email;
 }
 
-// src/lib/messages.ts
+// cli/lib/messages.ts
 function getCliPath() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   if (pluginRoot) {
@@ -14482,7 +14482,7 @@ var login = {
   authFailed: (error48) => `Authentication failed: ${error48}`
 };
 
-// src/commands/login.ts
+// cli/commands/login.ts
 var WORKOS_API_URL2 = "https://api.workos.com/user_management";
 var DeviceAuthResponseSchema = exports_external.object({
   device_code: exports_external.string(),
@@ -14658,7 +14658,7 @@ async function login2() {
   await deviceAuthFlow();
 }
 
-// src/commands/session-start.ts
+// cli/commands/session-start.ts
 async function sessionStart() {
   const messages = [];
   const status = await checkAuthStatus(true);
@@ -14684,7 +14684,7 @@ async function sessionStart() {
   }
 }
 
-// src/cli.ts
+// cli/cli.ts
 var COMMANDS = {
   extract: { description: "Extract sessions for retrieval", handler: extract },
   login: { description: "Authenticate with hive-mind", handler: login2 },
@@ -14706,13 +14706,13 @@ async function main() {
       process.exit(1);
     return;
   }
-  const cmd = COMMANDS[command];
-  if (!cmd) {
+  if (!(command in COMMANDS)) {
     printError(`Unknown command: ${command}`);
     console.log("");
     printUsage();
     process.exit(1);
   }
+  const cmd = COMMANDS[command];
   try {
     await cmd.handler();
   } catch (error48) {

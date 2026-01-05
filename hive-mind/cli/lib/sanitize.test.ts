@@ -124,7 +124,7 @@ describe("sanitizeDeep", () => {
     const sanitized = await sanitizeDeep(nested);
 
     // Navigate to the deepest level
-    let current = sanitized as Record<string, unknown>;
+    let current = sanitized;
     for (let i = 0; i < 50; i++) {
       current = current.child as Record<string, unknown>;
     }

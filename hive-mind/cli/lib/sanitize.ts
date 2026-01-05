@@ -63,12 +63,12 @@ function shannonEntropy(data: string): number {
  * Detect secrets in a string using gitleaks patterns.
  * Returns all matches with their positions and entropy.
  */
-export function detectSecrets(content: string): SecretMatch[] {
+export function detectSecrets(content: string): Array<SecretMatch> {
   if (content.length < MIN_SECRET_LENGTH) {
     return [];
   }
 
-  const matches: SecretMatch[] = [];
+  const matches: Array<SecretMatch> = [];
 
   // Quick pre-filter: skip strings that don't contain any keywords
   // This is an optimization - rules without keywords will still run
@@ -121,10 +121,10 @@ export function detectSecrets(content: string): SecretMatch[] {
   matches.sort((a, b) => a.start - b.start);
 
   // Dedupe overlapping matches (keep the first/longest)
-  const deduped: SecretMatch[] = [];
+  const deduped: Array<SecretMatch> = [];
   for (const m of matches) {
-    const last = deduped[deduped.length - 1];
-    if (!last || m.start >= last.end) {
+    const last = deduped.at(-1);
+    if (last === undefined || m.start >= last.end) {
       deduped.push(m);
     }
   }

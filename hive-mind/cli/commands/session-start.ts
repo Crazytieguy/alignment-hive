@@ -8,7 +8,7 @@ import {
 import { hookOutput } from "../lib/output";
 
 export async function sessionStart(): Promise<void> {
-  const messages: string[] = [];
+  const messages: Array<string> = [];
 
   // 1. Check auth status
   const status = await checkAuthStatus(true);

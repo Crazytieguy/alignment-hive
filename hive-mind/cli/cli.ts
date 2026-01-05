@@ -35,13 +35,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  const cmd = COMMANDS[command as CommandName];
-  if (!cmd) {
+  if (!(command in COMMANDS)) {
     printError(`Unknown command: ${command}`);
     console.log("");
     printUsage();
     process.exit(1);
   }
+
+  const cmd = COMMANDS[command as CommandName];
 
   try {
     await cmd.handler();
