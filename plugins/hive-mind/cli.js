@@ -15,7 +15,9 @@ var __export = (target, all) => {
 import { basename as basename2, join as join3 } from "path";
 
 // src/lib/extraction.ts
+import { createReadStream } from "fs";
 import { mkdir as mkdir2, readdir, readFile as readFile2, stat, writeFile as writeFile2 } from "fs/promises";
+import { createInterface } from "readline";
 import { homedir as homedir2 } from "os";
 import { basename, dirname, join as join2 } from "path";
 
@@ -14069,7 +14071,7 @@ var HiveMindMetaSchema = exports_external.object({
 
 // src/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
-var SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
+var INCLUDED_ENTRY_TYPES = ["user", "assistant", "summary", "system"];
 function* parseJsonl(content) {
   for (const line of content.split(`
 `)) {
@@ -14085,9 +14087,6 @@ function* parseJsonl(content) {
     }
   }
 }
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 function transformEntry(rawEntry) {
   const entry = parseKnownEntry(rawEntry);
   if (!entry) {
@@ -14096,10 +14095,7 @@ function transformEntry(rawEntry) {
     }
     return null;
   }
-  if (SKIP_ENTRY_TYPES.has(entry.type)) {
-    return null;
-  }
-  if (entry.type === "user" || entry.type === "assistant" || entry.type === "summary" || entry.type === "system") {
+  if (INCLUDED_ENTRY_TYPES.includes(entry.type)) {
     return entry;
   }
   return null;
@@ -14133,20 +14129,19 @@ async function extractSession(options) {
     getMachineId()
   ]);
   const entries = [];
-  let parentSessionId;
   for (const rawEntry of parseJsonl(content)) {
-    if (agentId && !parentSessionId && isRecord(rawEntry)) {
-      if (typeof rawEntry.sessionId === "string") {
-        parentSessionId = rawEntry.sessionId;
-      }
-    }
     const transformed = transformEntry(rawEntry);
     if (transformed) {
       entries.push(transformed);
     }
   }
+  const hasAssistantMessage = entries.some((e) => e.type === "assistant");
+  if (!hasAssistantMessage) {
+    return null;
+  }
+  const parentSessionId = agentId ? entries.find((e) => ("sessionId" in e) && typeof e.sessionId === "string")?.sessionId : undefined;
   const summary = findValidSummary(entries);
-  const sessionId = agentId || basename(rawPath, ".jsonl");
+  const sessionId = basename(rawPath, ".jsonl");
   const meta3 = {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
@@ -14171,11 +14166,22 @@ async function extractSession(options) {
 `);
   return { messageCount: entries.length, summary };
 }
+async function readFirstLine(filePath) {
+  const stream = createReadStream(filePath, { encoding: "utf-8" });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      stream.destroy();
+      return line;
+    }
+    return null;
+  } finally {
+    rl.close();
+  }
+}
 async function readExtractedMeta(extractedPath) {
   try {
-    const content = await readFile2(extractedPath, "utf-8");
-    const firstLine = content.split(`
-`)[0];
+    const firstLine = await readFirstLine(extractedPath);
     if (!firstLine)
       return null;
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
@@ -14232,10 +14238,12 @@ async function extractAllSessions(cwd, transcriptPath) {
     const extractedPath = join2(extractedDir, basename(rawPath));
     if (await needsExtraction(rawPath, extractedPath)) {
       try {
-        await extractSession({ rawPath, outputPath: extractedPath, agentId });
-        extracted++;
+        const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
+        if (result) {
+          extracted++;
+        }
       } catch (error48) {
-        const id = agentId || basename(rawPath, ".jsonl");
+        const id = basename(rawPath, ".jsonl");
         console.error(`Failed to extract ${id}:`, error48);
       }
     }
@@ -14321,7 +14329,7 @@ async function extract() {
 }
 
 // src/commands/login.ts
-import { createInterface } from "readline";
+import { createInterface as createInterface2 } from "readline";
 
 // src/lib/auth.ts
 import { mkdir as mkdir3 } from "fs/promises";
@@ -14479,7 +14487,7 @@ var ErrorResponseSchema = exports_external.object({
   error_description: exports_external.string().optional()
 });
 async function confirm(message) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl = createInterface2({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
     rl.question(`${message} [y/N] `, (answer) => {
       rl.close();
