@@ -13943,7 +13943,9 @@ var ToolUseBlockSchema = exports_external.looseObject({
 var ToolResultBlockSchema = exports_external.looseObject({
   type: exports_external.literal("tool_result"),
   tool_use_id: exports_external.string(),
-  content: exports_external.union([exports_external.string(), exports_external.array(exports_external.unknown())])
+  get content() {
+    return exports_external.union([exports_external.string(), exports_external.array(ContentBlockSchema)]);
+  }
 });
 var Base64SourceSchema = exports_external.object({
   type: exports_external.literal("base64"),
@@ -13979,13 +13981,20 @@ var BaseMessageSchema = exports_external.looseObject({
   role: exports_external.string(),
   content: MessageContentSchema.optional()
 });
-var UserMessageObjectSchema = BaseMessageSchema;
+var UserMessageObjectSchema = exports_external.looseObject({
+  role: exports_external.string(),
+  content: MessageContentSchema.optional(),
+  id: exports_external.string().optional(),
+  usage: exports_external.unknown().optional()
+}).transform(({ id, usage, ...rest }) => rest);
 var AssistantMessageObjectSchema = exports_external.looseObject({
   role: exports_external.string(),
   content: MessageContentSchema.optional(),
   model: exports_external.string().optional(),
-  stop_reason: exports_external.string().optional()
-});
+  stop_reason: exports_external.string().optional(),
+  id: exports_external.string().optional(),
+  usage: exports_external.unknown().optional()
+}).transform(({ id, usage, ...rest }) => rest);
 var SummaryEntrySchema = exports_external.looseObject({
   type: exports_external.literal("summary"),
   summary: exports_external.string(),
@@ -14002,16 +14011,25 @@ var UserEntrySchema = exports_external.looseObject({
   version: exports_external.string().optional(),
   message: UserMessageObjectSchema,
   toolUseResult: exports_external.unknown().optional(),
-  sourceToolUseID: exports_external.string().optional()
-});
+  sourceToolUseID: exports_external.string().optional(),
+  requestId: exports_external.string().optional(),
+  slug: exports_external.string().optional(),
+  userType: exports_external.string().optional(),
+  imagePasteIds: exports_external.array(exports_external.string()).optional(),
+  thinkingMetadata: exports_external.unknown().optional(),
+  todos: exports_external.unknown().optional()
+}).transform(({ requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest);
 var AssistantEntrySchema = exports_external.looseObject({
   type: exports_external.literal("assistant"),
   uuid: exports_external.string(),
   parentUuid: exports_external.string().nullable(),
   timestamp: exports_external.string(),
   sessionId: exports_external.string().optional(),
-  message: AssistantMessageObjectSchema
-});
+  message: AssistantMessageObjectSchema,
+  requestId: exports_external.string().optional(),
+  slug: exports_external.string().optional(),
+  userType: exports_external.string().optional()
+}).transform(({ requestId, slug, userType, ...rest }) => rest);
 var SystemEntrySchema = exports_external.looseObject({
   type: exports_external.literal("system"),
   subtype: exports_external.string().optional(),
@@ -14058,15 +14076,6 @@ var HiveMindMetaSchema = exports_external.object({
 // src/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
 var SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
-var STRIP_FIELDS = new Set([
-  "requestId",
-  "slug",
-  "userType",
-  "imagePasteIds",
-  "thinkingMetadata",
-  "todos"
-]);
-var STRIP_MESSAGE_FIELDS = new Set(["id", "usage"]);
 var TOOL_FIELD_MAPPINGS = {
   Edit: ["filePath", "oldString", "newString", "structuredPatch"],
   Write: ["filePath", "content"],
@@ -14098,6 +14107,9 @@ function getBase64DecodedSize(base643) {
   const paddingCount = (base643.match(/=+$/) || [""])[0].length;
   return Math.floor((base643.length - paddingCount) * 3 / 4);
 }
+function isContentBlock(value) {
+  return isRecord(value) && typeof value.type === "string";
+}
 function transformContentBlock(block) {
   const parsed = KnownContentBlockSchema.safeParse(block);
   if (parsed.success) {
@@ -14126,7 +14138,7 @@ function transformContentBlock(block) {
         const transformed = {
           type: "tool_result",
           tool_use_id: knownBlock.tool_use_id,
-          content: knownBlock.content.map((c) => typeof c === "object" && c !== null && ("type" in c) ? transformContentBlock(c) : c)
+          content: knownBlock.content.map((c) => isContentBlock(c) ? transformContentBlock(c) : c)
         };
         return transformed;
       }
@@ -14141,6 +14153,9 @@ function transformMessageContent(content) {
     return content;
   return content.map(transformContentBlock);
 }
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function pickFields(obj, fields) {
   const result = {};
   for (const field of fields) {
@@ -14151,68 +14166,46 @@ function pickFields(obj, fields) {
   return result;
 }
 function transformToolResult(toolName, result) {
-  if (!result || typeof result !== "object")
+  if (!isRecord(result))
     return result;
-  const r = result;
   if (toolName === "Read") {
-    if (r.file && typeof r.file === "object") {
-      const file2 = r.file;
+    if (isRecord(result.file)) {
       return {
-        file: pickFields(file2, ["filePath", "numLines", "totalLines"]),
-        isImage: r.isImage
+        file: pickFields(result.file, ["filePath", "numLines", "totalLines"]),
+        isImage: result.isImage
       };
     }
-    return { isImage: r.isImage };
+    return { isImage: result.isImage };
   }
   const fields = TOOL_FIELD_MAPPINGS[toolName];
   if (fields) {
-    return pickFields(r, fields);
+    return pickFields(result, fields);
   }
   return result;
 }
 function getToolNameFromUserEntry(entry) {
   const result = entry.toolUseResult;
-  if (!result || typeof result !== "object" || Array.isArray(result))
+  if (!isRecord(result))
     return;
-  const r = result;
-  if ("file" in r && typeof r.file === "object")
+  if (isRecord(result.file))
     return "Read";
-  if ("structuredPatch" in r || "originalFile" in r)
+  if ("structuredPatch" in result || "originalFile" in result)
     return "Edit";
-  if ("filePath" in r && "content" in r && !("structuredPatch" in r))
+  if ("filePath" in result && "content" in result && !("structuredPatch" in result))
     return "Write";
-  if ("command" in r && (("stdout" in r) || ("exitCode" in r)))
+  if ("command" in result && (("stdout" in result) || ("exitCode" in result)))
     return "Bash";
-  if ("filenames" in r && "numFiles" in r && !("content" in r))
+  if ("filenames" in result && "numFiles" in result && !("content" in result))
     return "Glob";
-  if ("filenames" in r && "content" in r)
+  if ("filenames" in result && "content" in result)
     return "Grep";
-  if ("url" in r && "prompt" in r)
+  if ("url" in result && "prompt" in result)
     return "WebFetch";
-  if ("query" in r && "results" in r)
+  if ("query" in result && "results" in result)
     return "WebSearch";
-  if ("agentId" in r && "prompt" in r)
+  if ("agentId" in result && "prompt" in result)
     return "Task";
   return;
-}
-function stripFields(entry) {
-  const result = {};
-  for (const [key, value] of Object.entries(entry)) {
-    if (STRIP_FIELDS.has(key))
-      continue;
-    if (key === "message" && value && typeof value === "object") {
-      const message = {};
-      for (const [mkey, mvalue] of Object.entries(value)) {
-        if (!STRIP_MESSAGE_FIELDS.has(mkey)) {
-          message[mkey] = mvalue;
-        }
-      }
-      result[key] = message;
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
 }
 function transformEntry(rawEntry) {
   const entry = parseKnownEntry(rawEntry);
@@ -14225,27 +14218,28 @@ function transformEntry(rawEntry) {
   if (SKIP_ENTRY_TYPES.has(entry.type)) {
     return null;
   }
-  if (entry.type === "user" || entry.type === "assistant") {
-    const transformedContent = transformMessageContent(entry.message?.content);
-    const stripped = stripFields(entry);
-    const strippedMessage = stripped.message;
+  if (entry.type === "user") {
+    const { message, toolUseResult, ...rest } = entry;
+    const transformedContent = transformMessageContent(message?.content);
     const result = {
-      ...stripped,
-      message: {
-        ...strippedMessage,
-        content: transformedContent
-      }
+      ...rest,
+      message: { ...message, content: transformedContent }
     };
-    if (entry.type === "user") {
-      if (entry.toolUseResult) {
-        const toolName = getToolNameFromUserEntry(entry);
-        result.toolUseResult = transformToolResult(toolName || "unknown", entry.toolUseResult);
-      }
+    if (toolUseResult !== undefined) {
+      result.toolUseResult = toolUseResult ? transformToolResult(getToolNameFromUserEntry(entry) ?? "unknown", toolUseResult) : toolUseResult;
     }
     return result;
   }
+  if (entry.type === "assistant") {
+    const { message, ...rest } = entry;
+    const transformedContent = transformMessageContent(message?.content);
+    return {
+      ...rest,
+      message: { ...message, content: transformedContent }
+    };
+  }
   if (entry.type === "summary" || entry.type === "system") {
-    return stripFields(entry);
+    return { ...entry };
   }
   return null;
 }
@@ -14253,13 +14247,13 @@ function findValidSummary(entries) {
   const uuids = new Set;
   const summaries = [];
   for (const entry of entries) {
-    if (entry.uuid && typeof entry.uuid === "string") {
+    if (typeof entry.uuid === "string") {
       uuids.add(entry.uuid);
     }
-    if (entry.type === "summary") {
+    if (entry.type === "summary" && typeof entry.summary === "string") {
       summaries.push({
         summary: entry.summary,
-        leafUuid: entry.leafUuid
+        leafUuid: typeof entry.leafUuid === "string" ? entry.leafUuid : undefined
       });
     }
   }
@@ -14283,10 +14277,9 @@ async function extractSession(options) {
   const entries = [];
   let parentSessionId;
   for (const rawEntry of parseJsonl(content)) {
-    if (agentId && !parentSessionId && rawEntry && typeof rawEntry === "object") {
-      const entry = rawEntry;
-      if (typeof entry.sessionId === "string") {
-        parentSessionId = entry.sessionId;
+    if (agentId && !parentSessionId && isRecord(rawEntry)) {
+      if (typeof rawEntry.sessionId === "string") {
+        parentSessionId = rawEntry.sessionId;
       }
     }
     const transformed = transformEntry(rawEntry);

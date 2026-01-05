@@ -19,24 +19,6 @@ const HIVE_MIND_VERSION = "0.1";
 
 const SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
 
-/**
- * Fields to remove from entries (low value for retrieval)
- * Plan specifies: requestId, slug, userType
- * Additional: imagePasteIds (image IDs), thinkingMetadata (thinking block metadata),
- *             todos (todo list state) - all low value for retrieval
- */
-const STRIP_FIELDS = new Set([
-  "requestId",
-  "slug",
-  "userType",
-  "imagePasteIds",
-  "thinkingMetadata",
-  "todos",
-]);
-
-const STRIP_MESSAGE_FIELDS = new Set(["id", "usage"]);
-
-// Special cases (Read with nested file object) handled in transformToolResult
 const TOOL_FIELD_MAPPINGS: Record<string, string[]> = {
   Edit: ["filePath", "oldString", "newString", "structuredPatch"],
   Write: ["filePath", "content"],
@@ -70,9 +52,11 @@ function getBase64DecodedSize(base64: string): number {
   return Math.floor(((base64.length - paddingCount) * 3) / 4);
 }
 
-/** Replace base64 data with size placeholders. */
+function isContentBlock(value: unknown): value is ContentBlock {
+  return isRecord(value) && typeof value.type === "string";
+}
+
 function transformContentBlock(block: ContentBlock) {
-  // Try to parse as known block type for proper narrowing
   const parsed = KnownContentBlockSchema.safeParse(block);
   if (parsed.success) {
     const knownBlock = parsed.data;
@@ -98,17 +82,13 @@ function transformContentBlock(block: ContentBlock) {
       }
     }
 
-    // tool_result blocks may contain nested content with base64
-    // Cast needed because ToolResultBlockSchema.content uses z.unknown() for recursive types
     if (knownBlock.type === "tool_result") {
       if (Array.isArray(knownBlock.content)) {
         const transformed: TransformedToolResultBlock = {
           type: "tool_result",
           tool_use_id: knownBlock.tool_use_id,
           content: knownBlock.content.map((c) =>
-            typeof c === "object" && c !== null && "type" in c
-              ? transformContentBlock(c as ContentBlock)
-              : c,
+            isContentBlock(c) ? transformContentBlock(c) : c,
           ),
         };
         return transformed;
@@ -116,7 +96,6 @@ function transformContentBlock(block: ContentBlock) {
     }
   }
 
-  // Pass through unchanged (text, thinking, tool_use, unknown types, etc.)
   return block;
 }
 
@@ -124,6 +103,10 @@ function transformMessageContent(content: string | ContentBlock[] | undefined) {
   if (!content) return content;
   if (typeof content === "string") return content;
   return content.map(transformContentBlock);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function pickFields(
@@ -140,132 +123,93 @@ function pickFields(
 }
 
 function transformToolResult(toolName: string, result: unknown): unknown {
-  if (!result || typeof result !== "object") return result;
-  const r = result as Record<string, unknown>;
+  if (!isRecord(result)) return result;
 
-  // Special case: Read tool has nested file object
   if (toolName === "Read") {
-    if (r.file && typeof r.file === "object") {
-      const file = r.file as Record<string, unknown>;
+    if (isRecord(result.file)) {
       return {
-        file: pickFields(file, ["filePath", "numLines", "totalLines"]),
-        isImage: r.isImage,
+        file: pickFields(result.file, ["filePath", "numLines", "totalLines"]),
+        isImage: result.isImage,
       };
     }
-    return { isImage: r.isImage };
+    return { isImage: result.isImage };
   }
 
-  // Use declarative mapping for other tools
   const fields = TOOL_FIELD_MAPPINGS[toolName];
   if (fields) {
-    return pickFields(r, fields);
+    return pickFields(result, fields);
   }
 
-  // Unknown tool: pass through (will be sanitized later)
   return result;
 }
 
-/** Infer tool name from result structure patterns. */
 function getToolNameFromUserEntry(entry: UserEntry): string | undefined {
   const result = entry.toolUseResult;
-  if (!result || typeof result !== "object" || Array.isArray(result))
-    return undefined;
-  const r = result as Record<string, unknown>;
+  if (!isRecord(result)) return undefined;
 
-  // Common patterns to identify tool types
-  if ("file" in r && typeof r.file === "object") return "Read";
-  if ("structuredPatch" in r || "originalFile" in r) return "Edit";
-  if ("filePath" in r && "content" in r && !("structuredPatch" in r))
+  if (isRecord(result.file)) return "Read";
+  if ("structuredPatch" in result || "originalFile" in result) return "Edit";
+  if ("filePath" in result && "content" in result && !("structuredPatch" in result))
     return "Write";
-  if ("command" in r && ("stdout" in r || "exitCode" in r)) return "Bash";
-  if ("filenames" in r && "numFiles" in r && !("content" in r)) return "Glob";
-  if ("filenames" in r && "content" in r) return "Grep";
-  if ("url" in r && "prompt" in r) return "WebFetch";
-  if ("query" in r && "results" in r) return "WebSearch";
-  if ("agentId" in r && "prompt" in r) return "Task";
+  if ("command" in result && ("stdout" in result || "exitCode" in result)) return "Bash";
+  if ("filenames" in result && "numFiles" in result && !("content" in result)) return "Glob";
+  if ("filenames" in result && "content" in result) return "Grep";
+  if ("url" in result && "prompt" in result) return "WebFetch";
+  if ("query" in result && "results" in result) return "WebSearch";
+  if ("agentId" in result && "prompt" in result) return "Task";
 
   return undefined;
 }
 
-function stripFields(entry: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(entry)) {
-    if (STRIP_FIELDS.has(key)) continue;
-
-    if (key === "message" && value && typeof value === "object") {
-      // Strip fields from message object too
-      const message: Record<string, unknown> = {};
-      for (const [mkey, mvalue] of Object.entries(
-        value as Record<string, unknown>,
-      )) {
-        if (!STRIP_MESSAGE_FIELDS.has(mkey)) {
-          message[mkey] = mvalue;
-        }
-      }
-      result[key] = message;
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
-}
-
 /** Returns null for entries that should be skipped. */
 function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
-  // Parse with discriminated union for proper type narrowing
   const entry = parseKnownEntry(rawEntry);
   if (!entry) {
-    // Unknown entry type - skip with debug logging
     if (process.env.DEBUG) {
       console.warn("Skipping unknown entry type");
     }
     return null;
   }
 
-  // Skip file-history-snapshot and queue-operation
   if (SKIP_ENTRY_TYPES.has(entry.type)) {
     return null;
   }
 
-  // Handle each entry type - TypeScript now properly narrows the type
-  if (entry.type === "user" || entry.type === "assistant") {
-    const transformedContent = transformMessageContent(entry.message?.content);
+  // Schema transforms already stripped low-value fields (requestId, slug, userType, etc.)
+  // Here we transform content (replace base64 with size) and tool results
 
-    // Strip fields - use type assertion for Record conversion since we know it's safe
-    const stripped = stripFields(entry as Record<string, unknown>);
-    const strippedMessage = stripped.message as
-      | Record<string, unknown>
-      | undefined;
+  if (entry.type === "user") {
+    const { message, toolUseResult, ...rest } = entry;
+    const transformedContent = transformMessageContent(message?.content);
 
     const result: Record<string, unknown> = {
-      ...stripped,
-      message: {
-        ...strippedMessage,
-        content: transformedContent,
-      },
+      ...rest,
+      message: { ...message, content: transformedContent },
     };
 
-    // User entries may have tool results
-    if (entry.type === "user") {
-      if (entry.toolUseResult) {
-        const toolName = getToolNameFromUserEntry(entry);
-        result.toolUseResult = transformToolResult(
-          toolName || "unknown",
-          entry.toolUseResult,
-        );
-      }
+    if (toolUseResult !== undefined) {
+      result.toolUseResult = toolUseResult
+        ? transformToolResult(getToolNameFromUserEntry(entry) ?? "unknown", toolUseResult)
+        : toolUseResult; // preserve null as-is
     }
 
     return result;
   }
 
-  if (entry.type === "summary" || entry.type === "system") {
-    return stripFields(entry as Record<string, unknown>);
+  if (entry.type === "assistant") {
+    const { message, ...rest } = entry;
+    const transformedContent = transformMessageContent(message?.content);
+
+    return {
+      ...rest,
+      message: { ...message, content: transformedContent },
+    };
   }
 
-  // Unknown type that somehow passed the schema - skip
+  if (entry.type === "summary" || entry.type === "system") {
+    return { ...entry };
+  }
+
   return null;
 }
 
@@ -277,13 +221,13 @@ function findValidSummary(
   const summaries: Array<{ summary: string; leafUuid?: string }> = [];
 
   for (const entry of entries) {
-    if (entry.uuid && typeof entry.uuid === "string") {
+    if (typeof entry.uuid === "string") {
       uuids.add(entry.uuid);
     }
-    if (entry.type === "summary") {
+    if (entry.type === "summary" && typeof entry.summary === "string") {
       summaries.push({
-        summary: entry.summary as string,
-        leafUuid: entry.leafUuid as string | undefined,
+        summary: entry.summary,
+        leafUuid: typeof entry.leafUuid === "string" ? entry.leafUuid : undefined,
       });
     }
   }
@@ -324,16 +268,9 @@ export async function extractSession(options: ExtractSessionOptions) {
   let parentSessionId: string | undefined;
 
   for (const rawEntry of parseJsonl(content)) {
-    // Extract parent session ID from first entry of agent sessions
-    if (
-      agentId &&
-      !parentSessionId &&
-      rawEntry &&
-      typeof rawEntry === "object"
-    ) {
-      const entry = rawEntry as Record<string, unknown>;
-      if (typeof entry.sessionId === "string") {
-        parentSessionId = entry.sessionId;
+    if (agentId && !parentSessionId && isRecord(rawEntry)) {
+      if (typeof rawEntry.sessionId === "string") {
+        parentSessionId = rawEntry.sessionId;
       }
     }
 
