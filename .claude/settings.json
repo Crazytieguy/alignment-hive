@@ -13,7 +13,10 @@
       "Bash(bun run build:*)",
       "Bash(bun run typecheck:*)",
       "Bash(bun test:*)",
-      "Bash(bun run lint:*)"
+      "Bash(bun run lint:*)",
+      "Bash(bun run lint:fix:*)",
+      "Bash(bun run dev)",
+      "Bash(bun run cli:build)"
     ]
   },
   "enabledPlugins": {

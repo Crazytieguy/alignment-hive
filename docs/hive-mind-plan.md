@@ -53,11 +53,17 @@ A system for alignment researchers to contribute session learnings to a shared k
 | Component | Choice |
 |-----------|--------|
 | CLI | TypeScript + Bun (bundled to `plugins/hive-mind/cli.js`) |
-| Auth | WorkOS (device authorization flow, client_id only) |
+| Web App | TanStack Start + React |
+| Auth | WorkOS AuthKit (web) + device flow (CLI) |
 | Backend | Convex |
 | File Storage | Cloudflare R2 |
 | Local Extraction | Deterministic code (no AI) |
 | Retrieval | Local JSONL + scripts |
+
+**Package structure**: All code lives in `hive-mind/` at repo root:
+- `hive-mind/cli/` - CLI source
+- `hive-mind/src/` - TanStack Start web app
+- `hive-mind/convex/` - Convex backend functions
 
 ### Authentication
 
@@ -189,7 +195,7 @@ Foundation for all downstream work. Creates the extracted session files that ret
 - Tests for extraction and sanitization
 
 **Key outputs**:
-- `src/lib/schemas.ts`, `src/lib/sanitize.ts`, `src/lib/extraction.ts`
+- `cli/lib/schemas.ts`, `cli/lib/sanitize.ts`, `cli/lib/extraction.ts`
 - `.claude/hive-mind/sessions/<id>.jsonl` files created on session start
 
 ### Session 10B: Local Retrieval

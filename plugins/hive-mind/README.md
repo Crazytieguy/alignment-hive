@@ -6,16 +6,27 @@ See [docs/hive-mind-plan.md](../../docs/hive-mind-plan.md) for detailed design a
 
 ## Development
 
-The CLI source lives in `hive-mind-cli/` at the repo root, bundled output goes to `plugins/hive-mind/cli.js`.
+The hive-mind package lives in `hive-mind/` at the repo root:
+- `hive-mind/src/` - TanStack Start web app
+- `hive-mind/cli/` - CLI source, bundled to `plugins/hive-mind/cli.js`
+- `hive-mind/convex/` - Convex backend functions
 
 ```bash
-cd hive-mind-cli
-bun install        # Install dependencies
-bun run typecheck  # Type check
-bun run build      # Bundle to plugins/hive-mind/cli.js
-bun run dev <cmd>  # Run directly without bundling
+cd hive-mind
+bun install          # Install dependencies
+bun run dev          # Run web app + Convex dev server
+bun run lint         # Typecheck + ESLint
+bun run test         # Run tests
+bun run cli:build    # Bundle CLI to plugins/hive-mind/cli.js
+bun run cli:dev <cmd> # Run CLI directly without bundling
 ```
 
-A pre-commit hook auto-rebuilds when source changes. Run `scripts/install-hooks.sh` from the repo root to install it.
+### Git hooks
 
-User-facing strings are centralized in `src/lib/messages.ts` for easy review and updates.
+A pre-commit hook auto-rebuilds the CLI when source changes. To enable:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+User-facing CLI strings are centralized in `cli/lib/messages.ts` for easy review and updates.

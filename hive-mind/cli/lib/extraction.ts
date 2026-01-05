@@ -1,16 +1,17 @@
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getMachineId } from "./config";
 import { sanitizeDeep } from "./sanitize";
 import {
-  type HiveMindMeta,
+  
   HiveMindMetaSchema,
-  type KnownEntry,
-  parseKnownEntry,
+  
+  parseKnownEntry
 } from "./schemas";
+import type {HiveMindMeta, KnownEntry} from "./schemas";
 
 const HIVE_MIND_VERSION = "0.1" as const;
 
@@ -49,7 +50,7 @@ function transformEntry(rawEntry: unknown) {
 type ExtractedEntry = Exclude<ReturnType<typeof transformEntry>, null>;
 
 /** Returns the summary where leafUuid exists in the same session. */
-function findValidSummary(entries: ExtractedEntry[]) {
+function findValidSummary(entries: Array<ExtractedEntry>) {
   const uuids = new Set<string>();
   const summaries: Array<{ summary: string; leafUuid?: string }> = [];
 
@@ -91,7 +92,7 @@ export async function extractSession(options: ExtractSessionOptions) {
     getMachineId(),
   ]);
 
-  const entries: ExtractedEntry[] = [];
+  const entries: Array<ExtractedEntry> = [];
 
   for (const rawEntry of parseJsonl(content)) {
     const transformed = transformEntry(rawEntry);
