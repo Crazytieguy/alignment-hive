@@ -119,11 +119,11 @@ Note: First line gets `SessionStart:startup says:` prepended by Claude Code.
 
 **Global** (`~/.claude/hive-mind/`):
 - `auth.json` - JWT tokens from WorkOS (access_token, refresh_token, user info)
-- `machine-id` - Random UUID for anonymous tracking (generated on first use)
 
 **Per-project** (`.claude/hive-mind/`):
+- `checkout-id` - Random UUID per checkout (gitignored, so each worktree gets its own)
 - `sessions/<session-id>.jsonl` - Self-contained extracted session:
-  - Line 1: Metadata (extraction info, machineId, summary, message count, raw file mtime)
+  - Line 1: Metadata (extraction info, checkoutId, summary, message count, raw file mtime)
   - Lines 2+: Extracted message entries (sanitized, bloat removed)
 
 No separate `state.json` or `index.md` - metadata lives in each session file's first line. This avoids git merge conflicts when syncing across machines.
@@ -216,7 +216,7 @@ Implement remote submission using existing Convex State and Convex API design (s
 - Status tracking (pending, submitted, excluded)
 - Graceful degradation when Convex unavailable
 
-**Privacy note:** Before authentication, only `machineId` is sent to Convex (for anonymous install tracking). No session data or other metadata is sent until the user authenticates. This allows counting plugin installations while respecting privacy.
+**Privacy note:** Before authentication, only `checkoutId` is sent to Convex (for anonymous install tracking). No session data or other metadata is sent until the user authenticates. This allows counting plugin installations while respecting privacy.
 
 ### Session 12: Local Audit Server
 - Local web server in CLI for viewing/auditing extracted sessions

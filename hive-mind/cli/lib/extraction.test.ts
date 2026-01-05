@@ -361,9 +361,9 @@ describe("metadata line", () => {
       expect(meta._type).toBe("hive-mind-meta");
       expect(meta.version).toBe("0.1");
       expect(meta.sessionId).toBe("test-session");
-      expect(meta.machineId).toBeDefined();
-      expect(typeof meta.machineId).toBe("string");
-      expect(meta.machineId.length).toBeGreaterThan(0);
+      expect(meta.checkoutId).toBeDefined();
+      expect(typeof meta.checkoutId).toBe("string");
+      expect(meta.checkoutId.length).toBeGreaterThan(0);
       expect(meta.messageCount).toBe(3); // summary + user + assistant
       expect(meta.summary).toBe("Test session");
       expect(meta.rawPath).toBe(rawPath);
