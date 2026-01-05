@@ -17,21 +17,12 @@ export const ToolUseBlockSchema = z.looseObject({
   input: z.record(z.string(), z.unknown()),
 });
 
-// Getter defers evaluation to handle circular reference with ContentBlockSchema
-export const ToolResultBlockSchema = z.looseObject({
-  type: z.literal("tool_result"),
-  tool_use_id: z.string(),
-  get content(): z.ZodUnion<[z.ZodString, z.ZodArray<z.ZodTypeAny>]> {
-    return z.union([z.string(), z.array(ContentBlockSchema)]);
-  },
-});
-
-// Strip base64 data, keep metadata
+// Strip base64 data, keep metadata (data is optional for self-compatibility)
 const Base64SourceSchema = z
   .looseObject({
     type: z.literal("base64"),
     media_type: z.string(),
-    data: z.string(),
+    data: z.string().optional(),
   })
   .transform(({ data, ...rest }) => rest);
 
@@ -45,6 +36,22 @@ export const DocumentBlockSchema = z.looseObject({
   source: Base64SourceSchema,
 });
 
+export const UnknownContentBlockSchema = z.looseObject({ type: z.string() });
+
+// Content blocks allowed inside tool_result.content (no recursive tool_result)
+const ToolResultContentBlockSchema = z.union([
+  TextBlockSchema,
+  ImageBlockSchema,
+  DocumentBlockSchema,
+  UnknownContentBlockSchema,
+]);
+
+export const ToolResultBlockSchema = z.looseObject({
+  type: z.literal("tool_result"),
+  tool_use_id: z.string(),
+  content: z.union([z.string(), z.array(ToolResultContentBlockSchema)]).optional(),
+});
+
 export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   TextBlockSchema,
   ThinkingBlockSchema,
@@ -53,8 +60,6 @@ export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   ImageBlockSchema,
   DocumentBlockSchema,
 ]);
-
-export const UnknownContentBlockSchema = z.looseObject({ type: z.string() });
 
 export const ContentBlockSchema = z.union([
   KnownContentBlockSchema,
@@ -69,7 +74,7 @@ export const MessageContentSchema = z.union([
   z.array(ContentBlockSchema),
 ]);
 
-// Transform strips id/usage fields (low retrieval value)
+// Transform strips id field (low retrieval value); usage kept for analytics
 export const UserMessageObjectSchema = z
   .looseObject({
     role: z.string(),
@@ -77,7 +82,7 @@ export const UserMessageObjectSchema = z
     id: z.string().optional(),
     usage: z.unknown().optional(),
   })
-  .transform(({ id, usage, ...rest }) => rest);
+  .transform(({ id, ...rest }) => rest);
 
 export const AssistantMessageObjectSchema = z
   .looseObject({
@@ -88,7 +93,7 @@ export const AssistantMessageObjectSchema = z
     id: z.string().optional(),
     usage: z.unknown().optional(),
   })
-  .transform(({ id, usage, ...rest }) => rest);
+  .transform(({ id, ...rest }) => rest);
 
 export const SummaryEntrySchema = z.looseObject({
   type: z.literal("summary"),
@@ -117,9 +122,7 @@ export const UserEntrySchema = z
     thinkingMetadata: z.unknown().optional(),
     todos: z.unknown().optional(),
   })
-  .transform(
-    ({ toolUseResult, requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest,
-  );
+  .transform(({ toolUseResult, requestId, slug, userType, ...rest }) => rest);
 
 // Transform strips low-value fields: requestId, slug, userType
 export const AssistantEntrySchema = z
@@ -189,3 +192,29 @@ export const HiveMindMetaSchema = z.object({
 });
 
 export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;
+
+/**
+ * SELF-COMPATIBILITY CONSTRAINT:
+ * All schemas with transforms must accept both original AND transformed data.
+ * This allows the same schemas to be used for initial extraction and later retrieval.
+ * To maintain this: make all stripped fields optional (not required).
+ *
+ * The type assertions below enforce this at compile time.
+ */
+
+// Compile-time assertion: output type must be assignable to input type
+type AssertSelfCompatible<T extends z.ZodType> = z.output<T> extends z.input<T> ? true : never;
+
+// These will cause compile errors if schemas are not self-compatible
+const _assertBase64Source: AssertSelfCompatible<typeof Base64SourceSchema> = true;
+const _assertUserMessage: AssertSelfCompatible<typeof UserMessageObjectSchema> = true;
+const _assertAssistantMessage: AssertSelfCompatible<typeof AssistantMessageObjectSchema> = true;
+const _assertUserEntry: AssertSelfCompatible<typeof UserEntrySchema> = true;
+const _assertAssistantEntry: AssertSelfCompatible<typeof AssistantEntrySchema> = true;
+
+// Suppress unused variable warnings
+void _assertBase64Source;
+void _assertUserMessage;
+void _assertAssistantMessage;
+void _assertUserEntry;
+void _assertAssistantEntry;
