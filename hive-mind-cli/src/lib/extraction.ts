@@ -1,4 +1,6 @@
+import { createReadStream } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getMachineId } from "./config";
@@ -12,7 +14,7 @@ import {
 
 const HIVE_MIND_VERSION = "0.1" as const;
 
-const SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"] as const);
+const INCLUDED_ENTRY_TYPES = ["user", "assistant", "summary", "system"] as const;
 
 export function* parseJsonl(content: string) {
   for (const line of content.split("\n")) {
@@ -28,10 +30,6 @@ export function* parseJsonl(content: string) {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function transformEntry(rawEntry: unknown) {
   const entry = parseKnownEntry(rawEntry);
   if (!entry) {
@@ -41,16 +39,7 @@ function transformEntry(rawEntry: unknown) {
     return null;
   }
 
-  if (SKIP_ENTRY_TYPES.has(entry.type as "file-history-snapshot" | "queue-operation")) {
-    return null;
-  }
-
-  if (
-    entry.type === "user" ||
-    entry.type === "assistant" ||
-    entry.type === "summary" ||
-    entry.type === "system"
-  ) {
+  if (INCLUDED_ENTRY_TYPES.includes(entry.type as (typeof INCLUDED_ENTRY_TYPES)[number])) {
     return entry;
   }
 
@@ -104,24 +93,26 @@ export async function extractSession(options: ExtractSessionOptions) {
 
   const entries: ExtractedEntry[] = [];
 
-  // For agent sessions, extract parentSessionId from first entry
-  let parentSessionId: string | undefined;
-
   for (const rawEntry of parseJsonl(content)) {
-    if (agentId && !parentSessionId && isRecord(rawEntry)) {
-      if (typeof rawEntry.sessionId === "string") {
-        parentSessionId = rawEntry.sessionId;
-      }
-    }
-
     const transformed = transformEntry(rawEntry);
     if (transformed) {
       entries.push(transformed);
     }
   }
 
+  // Skip sessions with no assistant messages
+  const hasAssistantMessage = entries.some((e) => e.type === "assistant");
+  if (!hasAssistantMessage) {
+    return null;
+  }
+
+  // For agent sessions, extract parentSessionId from first entry with sessionId
+  const parentSessionId = agentId
+    ? entries.find((e): e is ExtractedEntry & { sessionId: string } => "sessionId" in e && typeof e.sessionId === "string")?.sessionId
+    : undefined;
+
   const summary = findValidSummary(entries);
-  const sessionId = agentId || basename(rawPath, ".jsonl");
+  const sessionId = basename(rawPath, ".jsonl");
 
   const meta: HiveMindMeta = {
     _type: "hive-mind-meta",
@@ -152,12 +143,26 @@ export async function extractSession(options: ExtractSessionOptions) {
   return { messageCount: entries.length, summary };
 }
 
+async function readFirstLine(filePath: string): Promise<string | null> {
+  const stream = createReadStream(filePath, { encoding: "utf-8" });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+  try {
+    for await (const line of rl) {
+      stream.destroy();
+      return line;
+    }
+    return null;
+  } finally {
+    rl.close();
+  }
+}
+
 export async function readExtractedMeta(
   extractedPath: string,
 ): Promise<HiveMindMeta | null> {
   try {
-    const content = await readFile(extractedPath, "utf-8");
-    const firstLine = content.split("\n")[0];
+    const firstLine = await readFirstLine(extractedPath);
     if (!firstLine) return null;
 
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
@@ -236,11 +241,13 @@ export async function extractAllSessions(cwd: string, transcriptPath?: string) {
 
     if (await needsExtraction(rawPath, extractedPath)) {
       try {
-        await extractSession({ rawPath, outputPath: extractedPath, agentId });
-        extracted++;
+        const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
+        if (result) {
+          extracted++;
+        }
       } catch (error) {
         // Log but continue with other sessions
-        const id = agentId || basename(rawPath, ".jsonl");
+        const id = basename(rawPath, ".jsonl");
         console.error(`Failed to extract ${id}:`, error);
       }
     }

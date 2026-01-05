@@ -67,7 +67,8 @@ describe("transformEntry", () => {
       );
 
       const result = await extractSession({ rawPath, outputPath: outPath });
-      expect(result.messageCount).toBe(2); // user + assistant, not file-history-snapshot
+      expect(result).not.toBeNull();
+      expect(result!.messageCount).toBe(2); // user + assistant, not file-history-snapshot
     } finally {
       await rm(tempDir, { recursive: true });
     }
@@ -99,11 +100,19 @@ describe("transformEntry", () => {
             operation: "enqueue",
             content: "test",
           }),
+          JSON.stringify({
+            type: "assistant",
+            uuid: "2",
+            parentUuid: "1",
+            timestamp: "2025-01-01",
+            message: { role: "assistant", content: "hi" },
+          }),
         ].join("\n"),
       );
 
       const result = await extractSession({ rawPath, outputPath: outPath });
-      expect(result.messageCount).toBe(1);
+      expect(result).not.toBeNull();
+      expect(result!.messageCount).toBe(2); // user + assistant, not queue-operation
     } finally {
       await rm(tempDir, { recursive: true });
     }
@@ -147,7 +156,15 @@ describe("content block transformation", () => {
         },
       };
 
-      await writeFile(rawPath, JSON.stringify(userEntry));
+      const assistantEntry = {
+        type: "assistant",
+        uuid: "2",
+        parentUuid: "1",
+        timestamp: "2025-01-01",
+        message: { role: "assistant", content: "I see the image" },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join("\n"));
       await extractSession({ rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, "utf-8");
@@ -204,7 +221,15 @@ describe("content block transformation", () => {
         },
       };
 
-      await writeFile(rawPath, JSON.stringify(userEntry));
+      const assistantEntry = {
+        type: "assistant",
+        uuid: "2",
+        parentUuid: "1",
+        timestamp: "2025-01-01",
+        message: { role: "assistant", content: "I see the document" },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join("\n"));
       await extractSession({ rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, "utf-8");
@@ -256,7 +281,15 @@ describe("metadata stripping", () => {
         },
       };
 
-      await writeFile(rawPath, JSON.stringify(userEntry));
+      const assistantEntry = {
+        type: "assistant",
+        uuid: "2",
+        parentUuid: "1",
+        timestamp: "2025-01-01",
+        message: { role: "assistant", content: "hi" },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join("\n"));
       await extractSession({ rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, "utf-8");
@@ -434,6 +467,13 @@ describe("system entries", () => {
             timestamp: "2025-01-01",
             message: { role: "user", content: "hello" },
           }),
+          JSON.stringify({
+            type: "assistant",
+            uuid: "2",
+            parentUuid: "1",
+            timestamp: "2025-01-01",
+            message: { role: "assistant", content: "hi" },
+          }),
         ].join("\n"),
       );
 
@@ -441,7 +481,7 @@ describe("system entries", () => {
 
       const output = await readFile(outPath, "utf-8");
       const lines = output.trim().split("\n");
-      expect(lines.length).toBe(3); // meta + system + user
+      expect(lines.length).toBe(4); // meta + system + user + assistant
 
       const systemEntry = JSON.parse(lines[1]);
       expect(systemEntry.type).toBe("system");
@@ -471,15 +511,8 @@ describe("edge cases", () => {
       await writeFile(rawPath, "");
       const result = await extractSession({ rawPath, outputPath: outPath });
 
-      expect(result.messageCount).toBe(0);
-      expect(result.summary).toBeUndefined();
-
-      const output = await readFile(outPath, "utf-8");
-      const lines = output.trim().split("\n");
-      // Only metadata line
-      expect(lines.length).toBe(1);
-      const meta = JSON.parse(lines[0]);
-      expect(meta.messageCount).toBe(0);
+      // Empty file has no assistant messages, so should return null
+      expect(result).toBeNull();
     } finally {
       await rm(tempDir, { recursive: true });
     }
@@ -507,7 +540,15 @@ describe("edge cases", () => {
         toolUseResult: { command: "ls", stdout: "file.txt" },
       };
 
-      await writeFile(rawPath, JSON.stringify(userEntry));
+      const assistantEntry = {
+        type: "assistant",
+        uuid: "2",
+        parentUuid: "1",
+        timestamp: "2025-01-01",
+        message: { role: "assistant", content: "hi" },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join("\n"));
       await extractSession({ rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, "utf-8");
@@ -542,7 +583,15 @@ describe("edge cases", () => {
         message: { role: "user", content: "just a simple string message" },
       };
 
-      await writeFile(rawPath, JSON.stringify(userEntry));
+      const assistantEntry = {
+        type: "assistant",
+        uuid: "2",
+        parentUuid: "1",
+        timestamp: "2025-01-01",
+        message: { role: "assistant", content: "response" },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join("\n"));
       await extractSession({ rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, "utf-8");
@@ -596,7 +645,15 @@ describe("edge cases", () => {
         },
       };
 
-      await writeFile(rawPath, JSON.stringify(userEntry));
+      const assistantEntry = {
+        type: "assistant",
+        uuid: "2",
+        parentUuid: "1",
+        timestamp: "2025-01-01",
+        message: { role: "assistant", content: "Got it" },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join("\n"));
       await extractSession({ rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, "utf-8");
@@ -643,16 +700,24 @@ describe("edge cases", () => {
             message: { role: "user", content: "hello" },
           }),
           JSON.stringify({ type: "another-unknown", foo: "bar" }),
+          JSON.stringify({
+            type: "assistant",
+            uuid: "2",
+            parentUuid: "1",
+            timestamp: "2025-01-01",
+            message: { role: "assistant", content: "hi" },
+          }),
         ].join("\n"),
       );
 
       const result = await extractSession({ rawPath, outputPath: outPath });
-      // Only the user entry should be extracted
-      expect(result.messageCount).toBe(1);
+      expect(result).not.toBeNull();
+      // user + assistant entries should be extracted, unknown types skipped
+      expect(result!.messageCount).toBe(2);
 
       const output = await readFile(outPath, "utf-8");
       const lines = output.trim().split("\n");
-      expect(lines.length).toBe(2); // meta + user
+      expect(lines.length).toBe(3); // meta + user + assistant
     } finally {
       await rm(tempDir, { recursive: true });
     }
