@@ -14010,15 +14010,15 @@ var UserEntrySchema = exports_external.looseObject({
   gitBranch: exports_external.string().optional(),
   version: exports_external.string().optional(),
   message: UserMessageObjectSchema,
-  toolUseResult: exports_external.unknown().optional(),
   sourceToolUseID: exports_external.string().optional(),
+  toolUseResult: exports_external.unknown().optional(),
   requestId: exports_external.string().optional(),
   slug: exports_external.string().optional(),
   userType: exports_external.string().optional(),
   imagePasteIds: exports_external.array(exports_external.string()).optional(),
   thinkingMetadata: exports_external.unknown().optional(),
   todos: exports_external.unknown().optional()
-}).transform(({ requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest);
+}).transform(({ toolUseResult, requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest);
 var AssistantEntrySchema = exports_external.looseObject({
   type: exports_external.literal("assistant"),
   uuid: exports_external.string(),
@@ -14076,16 +14076,6 @@ var HiveMindMetaSchema = exports_external.object({
 // src/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
 var SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
-var TOOL_FIELD_MAPPINGS = {
-  Edit: ["filePath", "oldString", "newString", "structuredPatch"],
-  Write: ["filePath", "content"],
-  Bash: ["command", "stdout", "stderr", "exitCode", "interrupted"],
-  Glob: ["filenames", "numFiles", "truncated"],
-  Grep: ["filenames", "content", "numFiles"],
-  WebFetch: ["url", "prompt", "content"],
-  WebSearch: ["query", "results"],
-  Task: ["agentId", "prompt", "status", "content"]
-};
 function* parseJsonl(content) {
   for (const line of content.split(`
 `)) {
@@ -14101,6 +14091,9 @@ function* parseJsonl(content) {
     }
   }
 }
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function getBase64DecodedSize(base643) {
   if (!base643)
     return 0;
@@ -14112,100 +14105,27 @@ function isContentBlock(value) {
 }
 function transformContentBlock(block) {
   const parsed = KnownContentBlockSchema.safeParse(block);
-  if (parsed.success) {
-    const knownBlock = parsed.data;
-    if (knownBlock.type === "image") {
-      if (knownBlock.source.type === "base64") {
-        const transformed = {
-          type: "image",
-          size: getBase64DecodedSize(knownBlock.source.data)
-        };
-        return transformed;
-      }
-    }
-    if (knownBlock.type === "document") {
-      if (knownBlock.source.type === "base64") {
-        const transformed = {
-          type: "document",
-          media_type: knownBlock.source.media_type,
-          size: getBase64DecodedSize(knownBlock.source.data)
-        };
-        return transformed;
-      }
-    }
-    if (knownBlock.type === "tool_result") {
-      if (Array.isArray(knownBlock.content)) {
-        const transformed = {
-          type: "tool_result",
-          tool_use_id: knownBlock.tool_use_id,
-          content: knownBlock.content.map((c) => isContentBlock(c) ? transformContentBlock(c) : c)
-        };
-        return transformed;
-      }
-    }
+  if (!parsed.success)
+    return block;
+  const knownBlock = parsed.data;
+  if (knownBlock.type === "image" && knownBlock.source.type === "base64") {
+    return { type: "image", size: getBase64DecodedSize(knownBlock.source.data) };
+  }
+  if (knownBlock.type === "document" && knownBlock.source.type === "base64") {
+    return {
+      type: "document",
+      media_type: knownBlock.source.media_type,
+      size: getBase64DecodedSize(knownBlock.source.data)
+    };
+  }
+  if (knownBlock.type === "tool_result" && Array.isArray(knownBlock.content)) {
+    return {
+      type: "tool_result",
+      tool_use_id: knownBlock.tool_use_id,
+      content: knownBlock.content.map((c) => isContentBlock(c) ? transformContentBlock(c) : c)
+    };
   }
   return block;
-}
-function transformMessageContent(content) {
-  if (!content)
-    return content;
-  if (typeof content === "string")
-    return content;
-  return content.map(transformContentBlock);
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function pickFields(obj, fields) {
-  const result = {};
-  for (const field of fields) {
-    if (obj[field] !== undefined) {
-      result[field] = obj[field];
-    }
-  }
-  return result;
-}
-function transformToolResult(toolName, result) {
-  if (!isRecord(result))
-    return result;
-  if (toolName === "Read") {
-    if (isRecord(result.file)) {
-      return {
-        file: pickFields(result.file, ["filePath", "numLines", "totalLines"]),
-        isImage: result.isImage
-      };
-    }
-    return { isImage: result.isImage };
-  }
-  const fields = TOOL_FIELD_MAPPINGS[toolName];
-  if (fields) {
-    return pickFields(result, fields);
-  }
-  return result;
-}
-function getToolNameFromUserEntry(entry) {
-  const result = entry.toolUseResult;
-  if (!isRecord(result))
-    return;
-  if (isRecord(result.file))
-    return "Read";
-  if ("structuredPatch" in result || "originalFile" in result)
-    return "Edit";
-  if ("filePath" in result && "content" in result && !("structuredPatch" in result))
-    return "Write";
-  if ("command" in result && (("stdout" in result) || ("exitCode" in result)))
-    return "Bash";
-  if ("filenames" in result && "numFiles" in result && !("content" in result))
-    return "Glob";
-  if ("filenames" in result && "content" in result)
-    return "Grep";
-  if ("url" in result && "prompt" in result)
-    return "WebFetch";
-  if ("query" in result && "results" in result)
-    return "WebSearch";
-  if ("agentId" in result && "prompt" in result)
-    return "Task";
-  return;
 }
 function transformEntry(rawEntry) {
   const entry = parseKnownEntry(rawEntry);
@@ -14218,21 +14138,10 @@ function transformEntry(rawEntry) {
   if (SKIP_ENTRY_TYPES.has(entry.type)) {
     return null;
   }
-  if (entry.type === "user") {
-    const { message, toolUseResult, ...rest } = entry;
-    const transformedContent = transformMessageContent(message?.content);
-    const result = {
-      ...rest,
-      message: { ...message, content: transformedContent }
-    };
-    if (toolUseResult !== undefined) {
-      result.toolUseResult = toolUseResult ? transformToolResult(getToolNameFromUserEntry(entry) ?? "unknown", toolUseResult) : toolUseResult;
-    }
-    return result;
-  }
-  if (entry.type === "assistant") {
+  if (entry.type === "user" || entry.type === "assistant") {
     const { message, ...rest } = entry;
-    const transformedContent = transformMessageContent(message?.content);
+    const content = message?.content;
+    const transformedContent = content && Array.isArray(content) ? content.map(transformContentBlock) : content;
     return {
       ...rest,
       message: { ...message, content: transformedContent }

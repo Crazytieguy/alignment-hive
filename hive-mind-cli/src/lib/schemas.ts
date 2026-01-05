@@ -98,7 +98,7 @@ export const SummaryEntrySchema = z.looseObject({
   leafUuid: z.string().optional(),
 });
 
-// Transform strips low-value fields: requestId, slug, userType, imagePasteIds, thinkingMetadata, todos
+// Transform strips low-value fields (toolUseResult is redundant with message.content tool_result blocks)
 export const UserEntrySchema = z
   .looseObject({
     type: z.literal("user"),
@@ -110,8 +110,8 @@ export const UserEntrySchema = z
     gitBranch: z.string().optional(),
     version: z.string().optional(),
     message: UserMessageObjectSchema,
-    toolUseResult: z.unknown().optional(),
     sourceToolUseID: z.string().optional(),
+    toolUseResult: z.unknown().optional(),
     requestId: z.string().optional(),
     slug: z.string().optional(),
     userType: z.string().optional(),
@@ -120,7 +120,7 @@ export const UserEntrySchema = z
     todos: z.unknown().optional(),
   })
   .transform(
-    ({ requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest,
+    ({ toolUseResult, requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest,
   );
 
 // Transform strips low-value fields: requestId, slug, userType

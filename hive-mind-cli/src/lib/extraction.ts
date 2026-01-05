@@ -12,23 +12,11 @@ import {
   type TransformedDocumentBlock,
   type TransformedImageBlock,
   type TransformedToolResultBlock,
-  type UserEntry,
 } from "./schemas";
 
 const HIVE_MIND_VERSION = "0.1";
 
 const SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
-
-const TOOL_FIELD_MAPPINGS: Record<string, string[]> = {
-  Edit: ["filePath", "oldString", "newString", "structuredPatch"],
-  Write: ["filePath", "content"],
-  Bash: ["command", "stdout", "stderr", "exitCode", "interrupted"],
-  Glob: ["filenames", "numFiles", "truncated"],
-  Grep: ["filenames", "content", "numFiles"],
-  WebFetch: ["url", "prompt", "content"],
-  WebSearch: ["query", "results"],
-  Task: ["agentId", "prompt", "status", "content"],
-};
 
 export function* parseJsonl(content: string): Generator<unknown> {
   for (const line of content.split("\n")) {
@@ -45,9 +33,12 @@ export function* parseJsonl(content: string): Generator<unknown> {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function getBase64DecodedSize(base64: string): number {
   if (!base64) return 0;
-  // Remove padding characters for accurate calculation
   const paddingCount = (base64.match(/=+$/) || [""])[0].length;
   return Math.floor(((base64.length - paddingCount) * 3) / 4);
 }
@@ -56,112 +47,35 @@ function isContentBlock(value: unknown): value is ContentBlock {
   return isRecord(value) && typeof value.type === "string";
 }
 
-function transformContentBlock(block: ContentBlock) {
+function transformContentBlock(block: ContentBlock): ContentBlock | TransformedImageBlock | TransformedDocumentBlock | TransformedToolResultBlock {
   const parsed = KnownContentBlockSchema.safeParse(block);
-  if (parsed.success) {
-    const knownBlock = parsed.data;
+  if (!parsed.success) return block;
 
-    if (knownBlock.type === "image") {
-      if (knownBlock.source.type === "base64") {
-        const transformed: TransformedImageBlock = {
-          type: "image",
-          size: getBase64DecodedSize(knownBlock.source.data),
-        };
-        return transformed;
-      }
-    }
+  const knownBlock = parsed.data;
 
-    if (knownBlock.type === "document") {
-      if (knownBlock.source.type === "base64") {
-        const transformed: TransformedDocumentBlock = {
-          type: "document",
-          media_type: knownBlock.source.media_type,
-          size: getBase64DecodedSize(knownBlock.source.data),
-        };
-        return transformed;
-      }
-    }
+  if (knownBlock.type === "image" && knownBlock.source.type === "base64") {
+    return { type: "image", size: getBase64DecodedSize(knownBlock.source.data) };
+  }
 
-    if (knownBlock.type === "tool_result") {
-      if (Array.isArray(knownBlock.content)) {
-        const transformed: TransformedToolResultBlock = {
-          type: "tool_result",
-          tool_use_id: knownBlock.tool_use_id,
-          content: knownBlock.content.map((c) =>
-            isContentBlock(c) ? transformContentBlock(c) : c,
-          ),
-        };
-        return transformed;
-      }
-    }
+  if (knownBlock.type === "document" && knownBlock.source.type === "base64") {
+    return {
+      type: "document",
+      media_type: knownBlock.source.media_type,
+      size: getBase64DecodedSize(knownBlock.source.data),
+    };
+  }
+
+  if (knownBlock.type === "tool_result" && Array.isArray(knownBlock.content)) {
+    return {
+      type: "tool_result",
+      tool_use_id: knownBlock.tool_use_id,
+      content: knownBlock.content.map((c) => (isContentBlock(c) ? transformContentBlock(c) : c)),
+    };
   }
 
   return block;
 }
 
-function transformMessageContent(content: string | ContentBlock[] | undefined) {
-  if (!content) return content;
-  if (typeof content === "string") return content;
-  return content.map(transformContentBlock);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function pickFields(
-  obj: Record<string, unknown>,
-  fields: string[],
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const field of fields) {
-    if (obj[field] !== undefined) {
-      result[field] = obj[field];
-    }
-  }
-  return result;
-}
-
-function transformToolResult(toolName: string, result: unknown): unknown {
-  if (!isRecord(result)) return result;
-
-  if (toolName === "Read") {
-    if (isRecord(result.file)) {
-      return {
-        file: pickFields(result.file, ["filePath", "numLines", "totalLines"]),
-        isImage: result.isImage,
-      };
-    }
-    return { isImage: result.isImage };
-  }
-
-  const fields = TOOL_FIELD_MAPPINGS[toolName];
-  if (fields) {
-    return pickFields(result, fields);
-  }
-
-  return result;
-}
-
-function getToolNameFromUserEntry(entry: UserEntry): string | undefined {
-  const result = entry.toolUseResult;
-  if (!isRecord(result)) return undefined;
-
-  if (isRecord(result.file)) return "Read";
-  if ("structuredPatch" in result || "originalFile" in result) return "Edit";
-  if ("filePath" in result && "content" in result && !("structuredPatch" in result))
-    return "Write";
-  if ("command" in result && ("stdout" in result || "exitCode" in result)) return "Bash";
-  if ("filenames" in result && "numFiles" in result && !("content" in result)) return "Glob";
-  if ("filenames" in result && "content" in result) return "Grep";
-  if ("url" in result && "prompt" in result) return "WebFetch";
-  if ("query" in result && "results" in result) return "WebSearch";
-  if ("agentId" in result && "prompt" in result) return "Task";
-
-  return undefined;
-}
-
-/** Returns null for entries that should be skipped. */
 function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
   const entry = parseKnownEntry(rawEntry);
   if (!entry) {
@@ -175,30 +89,14 @@ function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
     return null;
   }
 
-  // Schema transforms already stripped low-value fields (requestId, slug, userType, etc.)
-  // Here we transform content (replace base64 with size) and tool results
+  // Schema transforms already stripped low-value fields
+  // Here we only transform base64 content to size placeholders
 
-  if (entry.type === "user") {
-    const { message, toolUseResult, ...rest } = entry;
-    const transformedContent = transformMessageContent(message?.content);
-
-    const result: Record<string, unknown> = {
-      ...rest,
-      message: { ...message, content: transformedContent },
-    };
-
-    if (toolUseResult !== undefined) {
-      result.toolUseResult = toolUseResult
-        ? transformToolResult(getToolNameFromUserEntry(entry) ?? "unknown", toolUseResult)
-        : toolUseResult; // preserve null as-is
-    }
-
-    return result;
-  }
-
-  if (entry.type === "assistant") {
+  if (entry.type === "user" || entry.type === "assistant") {
     const { message, ...rest } = entry;
-    const transformedContent = transformMessageContent(message?.content);
+    const content = message?.content;
+    const transformedContent =
+      content && Array.isArray(content) ? content.map(transformContentBlock) : content;
 
     return {
       ...rest,
