@@ -29,15 +29,27 @@ import { join } from "path";
 var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CYZ10VVZPJVRQBJESK1A";
 var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 var AUTH_FILE = join(AUTH_DIR, "auth.json");
-var MACHINE_ID_FILE = join(AUTH_DIR, "machine-id");
-async function getMachineId() {
+async function getCheckoutId(hiveMindDir) {
+  const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
-    const id = await readFile(MACHINE_ID_FILE, "utf-8");
+    const id = await readFile(checkoutIdFile, "utf-8");
     return id.trim();
   } catch {
     const id = randomUUID();
-    await mkdir(AUTH_DIR, { recursive: true });
-    await writeFile(MACHINE_ID_FILE, id);
+    await mkdir(hiveMindDir, { recursive: true });
+    await writeFile(checkoutIdFile, id);
+    const gitignorePath = join(hiveMindDir, ".gitignore");
+    try {
+      const existing = await readFile(gitignorePath, "utf-8");
+      if (!existing.includes("checkout-id")) {
+        await writeFile(gitignorePath, `${existing.trimEnd()}
+checkout-id
+`);
+      }
+    } catch {
+      await writeFile(gitignorePath, `checkout-id
+`);
+    }
     return id;
   }
 }
@@ -14063,7 +14075,7 @@ var HiveMindMetaSchema = exports_external.object({
   _type: exports_external.literal("hive-mind-meta"),
   version: exports_external.string(),
   sessionId: exports_external.string(),
-  machineId: exports_external.string(),
+  checkoutId: exports_external.string(),
   extractedAt: exports_external.string(),
   rawMtime: exports_external.string(),
   messageCount: exports_external.number(),
@@ -14127,10 +14139,11 @@ function findValidSummary(entries) {
 }
 async function extractSession(options) {
   const { rawPath, outputPath, agentId } = options;
-  const [content, rawStat, machineId] = await Promise.all([
+  const hiveMindDir = dirname(dirname(outputPath));
+  const [content, rawStat, checkoutId] = await Promise.all([
     readFile2(rawPath, "utf-8"),
     stat(rawPath),
-    getMachineId()
+    getCheckoutId(hiveMindDir)
   ]);
   const entries = [];
   for (const rawEntry of parseJsonl(content)) {
@@ -14150,7 +14163,7 @@ async function extractSession(options) {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
     sessionId,
-    machineId,
+    checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime: rawStat.mtime.toISOString(),
     messageCount: entries.length,

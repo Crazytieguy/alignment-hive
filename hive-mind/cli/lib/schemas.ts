@@ -181,7 +181,7 @@ export const HiveMindMetaSchema = z.object({
   _type: z.literal("hive-mind-meta"),
   version: z.string(),
   sessionId: z.string(),
-  machineId: z.string(),
+  checkoutId: z.string(),
   extractedAt: z.string(),
   rawMtime: z.string(),
   messageCount: z.number(),

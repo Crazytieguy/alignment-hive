@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { getMachineId } from "./config";
+import { getCheckoutId } from "./config";
 import { sanitizeDeep } from "./sanitize";
 import {
   
@@ -86,10 +86,14 @@ interface ExtractSessionOptions {
 export async function extractSession(options: ExtractSessionOptions) {
   const { rawPath, outputPath, agentId } = options;
 
-  const [content, rawStat, machineId] = await Promise.all([
+  // outputPath is <cwd>/.claude/hive-mind/sessions/<id>.jsonl
+  // hiveMindDir is <cwd>/.claude/hive-mind
+  const hiveMindDir = dirname(dirname(outputPath));
+
+  const [content, rawStat, checkoutId] = await Promise.all([
     readFile(rawPath, "utf-8"),
     stat(rawPath),
-    getMachineId(),
+    getCheckoutId(hiveMindDir),
   ]);
 
   const entries: Array<ExtractedEntry> = [];
@@ -119,7 +123,7 @@ export async function extractSession(options: ExtractSessionOptions) {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
     sessionId,
-    machineId,
+    checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime: rawStat.mtime.toISOString(),
     messageCount: entries.length,

@@ -8,20 +8,30 @@ export const WORKOS_CLIENT_ID =
 
 export const AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 export const AUTH_FILE = join(AUTH_DIR, "auth.json");
-export const MACHINE_ID_FILE = join(AUTH_DIR, "machine-id");
-
 /**
- * Get or create a persistent machine ID for anonymous tracking.
- * Generated on first call, persisted in ~/.claude/hive-mind/machine-id
+ * Get or create a persistent checkout ID for this project checkout.
+ * Project-scoped and gitignored - each worktree gets its own ID.
+ * @param hiveMindDir - The .claude/hive-mind directory for the project
  */
-export async function getMachineId() {
+export async function getCheckoutId(hiveMindDir: string) {
+  const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
-    const id = await readFile(MACHINE_ID_FILE, "utf-8");
+    const id = await readFile(checkoutIdFile, "utf-8");
     return id.trim();
   } catch {
     const id = randomUUID();
-    await mkdir(AUTH_DIR, { recursive: true });
-    await writeFile(MACHINE_ID_FILE, id);
+    await mkdir(hiveMindDir, { recursive: true });
+    await writeFile(checkoutIdFile, id);
+    // Ensure checkout-id is gitignored (worktree-specific)
+    const gitignorePath = join(hiveMindDir, ".gitignore");
+    try {
+      const existing = await readFile(gitignorePath, "utf-8");
+      if (!existing.includes("checkout-id")) {
+        await writeFile(gitignorePath, `${existing.trimEnd()}\ncheckout-id\n`);
+      }
+    } catch {
+      await writeFile(gitignorePath, "checkout-id\n");
+    }
     return id;
   }
 }
