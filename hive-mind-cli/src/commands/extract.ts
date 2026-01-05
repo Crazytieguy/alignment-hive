@@ -42,26 +42,31 @@ export async function extract(): Promise<void> {
     return;
   }
 
-  printInfo(`Extracting ${toExtract.length} sessions...`);
+  printInfo(`Processing ${toExtract.length} sessions...`);
   console.log("");
 
   let extracted = 0;
+  let skipped = 0;
   let failed = 0;
 
   for (let i = 0; i < toExtract.length; i++) {
     const session = toExtract[i];
     const { path: rawPath, agentId } = session;
-    const id = agentId || basename(rawPath, ".jsonl");
+    const id = basename(rawPath, ".jsonl");
 
     // Use same filename as original
     const extractedPath = join(extractedDir, basename(rawPath));
 
     const progress = `[${i + 1}/${toExtract.length}]`;
-    process.stdout.write(`\r  ${progress} Extracting ${id.slice(0, 8)}...`);
+    process.stdout.write(`\r  ${progress} Processing ${id.slice(0, 8)}...`);
 
     try {
-      await extractSession({ rawPath, outputPath: extractedPath, agentId });
-      extracted++;
+      const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
+      if (result) {
+        extracted++;
+      } else {
+        skipped++;
+      }
     } catch (error) {
       failed++;
       console.log("");
@@ -72,11 +77,10 @@ export async function extract(): Promise<void> {
   console.log("");
   console.log("");
 
-  if (failed === 0) {
-    printSuccess(`Extracted ${extracted} sessions successfully.`);
-  } else {
-    printSuccess(`Extracted ${extracted} sessions, ${failed} failed.`);
-  }
+  const parts = [`Extracted ${extracted} sessions`];
+  if (skipped > 0) parts.push(`${skipped} skipped (empty)`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  printSuccess(parts.join(", ") + ".");
 
   console.log(`Output: ${extractedDir}`);
 }
