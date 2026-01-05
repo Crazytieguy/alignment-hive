@@ -14,6 +14,8 @@ Identified during code review of the extraction implementation.
 
   Important: verify this doesn't break anything - e.g., redaction markers appearing in unexpected places, JSON structure corruption, or edge cases with escaped strings.
 
+  Otherwise can also reduce sanitization calls by skipping repetitive and always-benign fields (look at some session files in .claude/hive-mind/sessions to identify patterns)
+  
   Fallback if not faster or too error-prone: cap hook extraction to 10 sessions, show message suggesting `hive-mind extract` for bulk. Could also offer extraction during login flow.
 
 - [x] **Hook error handling**
