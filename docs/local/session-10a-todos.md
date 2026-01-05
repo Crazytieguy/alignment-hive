@@ -46,3 +46,13 @@ Identified during code review of the extraction implementation.
 - [x] **Document agent session convention**
 
   `extraction.ts:481` detects agent sessions by `agent-*.jsonl` filename prefix. This mirrors Claude Code's native convention. Add note to `docs/claude-code-jsonl-format.md` explaining this pattern.
+
+- [ ] **Snapshot testing for extraction**
+
+  Replace most unit tests with snapshot tests. Collect 5-10 diverse raw sessions from different projects, store them as fixtures, and snapshot the extracted output. This catches regressions more comprehensively than targeted assertions.
+
+  Requirements:
+  - Diverse sessions: different project types, agent sessions, long/short sessions, various tool uses
+  - Ideally from different projects (not just alignment-hive)
+  - Normalize temporal fields (`extractedAt`, `rawMtime`, `machineId`) for deterministic snapshots
+  - Keep a few targeted unit tests for edge cases (e.g., summary validation logic)

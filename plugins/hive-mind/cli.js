@@ -13926,6 +13926,12 @@ function date4(params) {
 // node_modules/zod/v4/classic/external.js
 config(en_default());
 // src/lib/schemas.ts
+function getBase64DecodedSize(base643) {
+  if (!base643)
+    return 0;
+  const paddingCount = (base643.match(/=+$/) || [""])[0].length;
+  return Math.floor((base643.length - paddingCount) * 3 / 4);
+}
 var TextBlockSchema = exports_external.looseObject({
   type: exports_external.literal("text"),
   text: exports_external.string()
@@ -13955,11 +13961,18 @@ var Base64SourceSchema = exports_external.object({
 var ImageBlockSchema = exports_external.looseObject({
   type: exports_external.literal("image"),
   source: Base64SourceSchema
-});
+}).transform((img) => ({
+  type: "image",
+  size: getBase64DecodedSize(img.source.data)
+}));
 var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
-});
+}).transform((doc2) => ({
+  type: "document",
+  media_type: doc2.source.media_type,
+  size: getBase64DecodedSize(doc2.source.data)
+}));
 var KnownContentBlockSchema = exports_external.discriminatedUnion("type", [
   TextBlockSchema,
   ThinkingBlockSchema,
@@ -13977,10 +13990,6 @@ var MessageContentSchema = exports_external.union([
   exports_external.string(),
   exports_external.array(ContentBlockSchema)
 ]);
-var BaseMessageSchema = exports_external.looseObject({
-  role: exports_external.string(),
-  content: MessageContentSchema.optional()
-});
 var UserMessageObjectSchema = exports_external.looseObject({
   role: exports_external.string(),
   content: MessageContentSchema.optional(),
@@ -14053,8 +14062,6 @@ var KnownEntrySchema = exports_external.discriminatedUnion("type", [
   FileHistorySnapshotSchema,
   QueueOperationSchema
 ]);
-var UnknownEntrySchema = exports_external.looseObject({ type: exports_external.string() });
-var EntrySchema = exports_external.union([KnownEntrySchema, UnknownEntrySchema]);
 function parseKnownEntry(data) {
   const parsed = KnownEntrySchema.safeParse(data);
   return parsed.success ? parsed.data : null;
@@ -14094,39 +14101,6 @@ function* parseJsonl(content) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function getBase64DecodedSize(base643) {
-  if (!base643)
-    return 0;
-  const paddingCount = (base643.match(/=+$/) || [""])[0].length;
-  return Math.floor((base643.length - paddingCount) * 3 / 4);
-}
-function isContentBlock(value) {
-  return isRecord(value) && typeof value.type === "string";
-}
-function transformContentBlock(block) {
-  const parsed = KnownContentBlockSchema.safeParse(block);
-  if (!parsed.success)
-    return block;
-  const knownBlock = parsed.data;
-  if (knownBlock.type === "image" && knownBlock.source.type === "base64") {
-    return { type: "image", size: getBase64DecodedSize(knownBlock.source.data) };
-  }
-  if (knownBlock.type === "document" && knownBlock.source.type === "base64") {
-    return {
-      type: "document",
-      media_type: knownBlock.source.media_type,
-      size: getBase64DecodedSize(knownBlock.source.data)
-    };
-  }
-  if (knownBlock.type === "tool_result" && Array.isArray(knownBlock.content)) {
-    return {
-      type: "tool_result",
-      tool_use_id: knownBlock.tool_use_id,
-      content: knownBlock.content.map((c) => isContentBlock(c) ? transformContentBlock(c) : c)
-    };
-  }
-  return block;
-}
 function transformEntry(rawEntry) {
   const entry = parseKnownEntry(rawEntry);
   if (!entry) {
@@ -14138,17 +14112,8 @@ function transformEntry(rawEntry) {
   if (SKIP_ENTRY_TYPES.has(entry.type)) {
     return null;
   }
-  if (entry.type === "user" || entry.type === "assistant") {
-    const { message, ...rest } = entry;
-    const content = message?.content;
-    const transformedContent = content && Array.isArray(content) ? content.map(transformContentBlock) : content;
-    return {
-      ...rest,
-      message: { ...message, content: transformedContent }
-    };
-  }
-  if (entry.type === "summary" || entry.type === "system") {
-    return { ...entry };
+  if (entry.type === "user" || entry.type === "assistant" || entry.type === "summary" || entry.type === "system") {
+    return entry;
   }
   return null;
 }
@@ -14156,13 +14121,13 @@ function findValidSummary(entries) {
   const uuids = new Set;
   const summaries = [];
   for (const entry of entries) {
-    if (typeof entry.uuid === "string") {
+    if ("uuid" in entry && typeof entry.uuid === "string") {
       uuids.add(entry.uuid);
     }
-    if (entry.type === "summary" && typeof entry.summary === "string") {
+    if (entry.type === "summary") {
       summaries.push({
         summary: entry.summary,
-        leafUuid: typeof entry.leafUuid === "string" ? entry.leafUuid : undefined
+        leafUuid: entry.leafUuid
       });
     }
   }
@@ -14171,10 +14136,7 @@ function findValidSummary(entries) {
       return s.summary;
     }
   }
-  if (summaries.length > 0) {
-    return summaries[summaries.length - 1].summary;
-  }
-  return;
+  return summaries.at(-1)?.summary;
 }
 async function extractSession(options) {
   const { rawPath, outputPath, agentId } = options;
@@ -14211,7 +14173,7 @@ async function extractSession(options) {
     ...agentId && { agentId },
     ...parentSessionId && { parentSessionId }
   };
-  const sanitizedEntries = await Promise.all(entries.map((e) => sanitizeDeep(e)));
+  const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
   await mkdir2(dirname(outputPath), { recursive: true });
   const lines = [
     JSON.stringify(meta3),
