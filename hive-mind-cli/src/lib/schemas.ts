@@ -1,11 +1,5 @@
 import { z } from "zod";
 
-/**
- * Schemas for parsing Claude Code JSONL entries.
- * Uses z.looseObject() to allow unknown fields for forward compatibility.
- */
-
-// Content block types in messages
 export const TextBlockSchema = z.looseObject({
   type: z.literal("text"),
   text: z.string(),
@@ -23,16 +17,15 @@ export const ToolUseBlockSchema = z.looseObject({
   input: z.record(z.string(), z.unknown()),
 });
 
-// Note: content uses z.unknown() because tool_result can contain nested content blocks
-// recursively. Full recursive typing with z.lazy() causes TypeScript inference issues.
-// The extraction code handles this with a minimal cast.
+// Getter defers evaluation to handle circular reference with ContentBlockSchema
 export const ToolResultBlockSchema = z.looseObject({
   type: z.literal("tool_result"),
   tool_use_id: z.string(),
-  content: z.union([z.string(), z.array(z.unknown())]),
+  get content(): z.ZodUnion<[z.ZodString, z.ZodArray<z.ZodTypeAny>]> {
+    return z.union([z.string(), z.array(ContentBlockSchema)]);
+  },
 });
 
-// Shared schema for base64-encoded content (images, documents)
 const Base64SourceSchema = z.object({
   type: z.literal("base64"),
   media_type: z.string(),
@@ -49,7 +42,6 @@ export const DocumentBlockSchema = z.looseObject({
   source: Base64SourceSchema,
 });
 
-// Known content blocks with discriminated union for proper type narrowing
 export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   TextBlockSchema,
   ThinkingBlockSchema,
@@ -59,10 +51,8 @@ export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   DocumentBlockSchema,
 ]);
 
-// Schema for unknown block types (forward compatibility)
 export const UnknownContentBlockSchema = z.looseObject({ type: z.string() });
 
-// Combined schema that accepts both known and unknown content blocks
 export const ContentBlockSchema = z.union([
   KnownContentBlockSchema,
   UnknownContentBlockSchema,
@@ -71,62 +61,83 @@ export const ContentBlockSchema = z.union([
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 export type KnownContentBlock = z.infer<typeof KnownContentBlockSchema>;
 
-// Message content can be string or array of content blocks
 export const MessageContentSchema = z.union([
   z.string(),
   z.array(ContentBlockSchema),
 ]);
 
-// Base message shape
 const BaseMessageSchema = z.looseObject({
   role: z.string(),
   content: MessageContentSchema.optional(),
 });
 
-// User message includes optional model field
-export const UserMessageObjectSchema = BaseMessageSchema;
+// Transform strips id/usage fields (low retrieval value)
+export const UserMessageObjectSchema = z
+  .looseObject({
+    role: z.string(),
+    content: MessageContentSchema.optional(),
+    id: z.string().optional(),
+    usage: z.unknown().optional(),
+  })
+  .transform(({ id, usage, ...rest }) => rest);
 
-// Assistant message includes model, usage, stop_reason
-export const AssistantMessageObjectSchema = z.looseObject({
-  role: z.string(),
-  content: MessageContentSchema.optional(),
-  model: z.string().optional(),
-  stop_reason: z.string().optional(),
-});
+export const AssistantMessageObjectSchema = z
+  .looseObject({
+    role: z.string(),
+    content: MessageContentSchema.optional(),
+    model: z.string().optional(),
+    stop_reason: z.string().optional(),
+    id: z.string().optional(),
+    usage: z.unknown().optional(),
+  })
+  .transform(({ id, usage, ...rest }) => rest);
 
-// Summary entry
 export const SummaryEntrySchema = z.looseObject({
   type: z.literal("summary"),
   summary: z.string(),
   leafUuid: z.string().optional(),
 });
 
-// User entry
-export const UserEntrySchema = z.looseObject({
-  type: z.literal("user"),
-  uuid: z.string(),
-  parentUuid: z.string().nullable(),
-  timestamp: z.string(),
-  sessionId: z.string().optional(),
-  cwd: z.string().optional(),
-  gitBranch: z.string().optional(),
-  version: z.string().optional(),
-  message: UserMessageObjectSchema,
-  toolUseResult: z.unknown().optional(),
-  sourceToolUseID: z.string().optional(),
-});
+// Transform strips low-value fields: requestId, slug, userType, imagePasteIds, thinkingMetadata, todos
+export const UserEntrySchema = z
+  .looseObject({
+    type: z.literal("user"),
+    uuid: z.string(),
+    parentUuid: z.string().nullable(),
+    timestamp: z.string(),
+    sessionId: z.string().optional(),
+    cwd: z.string().optional(),
+    gitBranch: z.string().optional(),
+    version: z.string().optional(),
+    message: UserMessageObjectSchema,
+    toolUseResult: z.unknown().optional(),
+    sourceToolUseID: z.string().optional(),
+    requestId: z.string().optional(),
+    slug: z.string().optional(),
+    userType: z.string().optional(),
+    imagePasteIds: z.array(z.string()).optional(),
+    thinkingMetadata: z.unknown().optional(),
+    todos: z.unknown().optional(),
+  })
+  .transform(
+    ({ requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest,
+  );
 
-// Assistant entry
-export const AssistantEntrySchema = z.looseObject({
-  type: z.literal("assistant"),
-  uuid: z.string(),
-  parentUuid: z.string().nullable(),
-  timestamp: z.string(),
-  sessionId: z.string().optional(),
-  message: AssistantMessageObjectSchema,
-});
+// Transform strips low-value fields: requestId, slug, userType
+export const AssistantEntrySchema = z
+  .looseObject({
+    type: z.literal("assistant"),
+    uuid: z.string(),
+    parentUuid: z.string().nullable(),
+    timestamp: z.string(),
+    sessionId: z.string().optional(),
+    message: AssistantMessageObjectSchema,
+    requestId: z.string().optional(),
+    slug: z.string().optional(),
+    userType: z.string().optional(),
+  })
+  .transform(({ requestId, slug, userType, ...rest }) => rest);
 
-// System entry
 export const SystemEntrySchema = z.looseObject({
   type: z.literal("system"),
   subtype: z.string().optional(),
@@ -137,7 +148,6 @@ export const SystemEntrySchema = z.looseObject({
   level: z.string().optional(),
 });
 
-// Entry types we want to skip
 export const FileHistorySnapshotSchema = z.looseObject({
   type: z.literal("file-history-snapshot"),
 });
@@ -146,7 +156,6 @@ export const QueueOperationSchema = z.looseObject({
   type: z.literal("queue-operation"),
 });
 
-// Known entry types with discriminated union for proper type narrowing
 export const KnownEntrySchema = z.discriminatedUnion("type", [
   SummaryEntrySchema,
   UserEntrySchema,
@@ -156,10 +165,8 @@ export const KnownEntrySchema = z.discriminatedUnion("type", [
   QueueOperationSchema,
 ]);
 
-// Schema for unknown entry types (forward compatibility)
 export const UnknownEntrySchema = z.looseObject({ type: z.string() });
 
-// Combined schema that accepts both known and unknown entry types
 export const EntrySchema = z.union([KnownEntrySchema, UnknownEntrySchema]);
 
 export type Entry = z.infer<typeof EntrySchema>;
@@ -169,16 +176,11 @@ export type UserEntry = z.infer<typeof UserEntrySchema>;
 export type AssistantEntry = z.infer<typeof AssistantEntrySchema>;
 export type SystemEntry = z.infer<typeof SystemEntrySchema>;
 
-/**
- * Parse an entry, returning a properly typed known entry or null for unknown types.
- * This enables TypeScript's discriminated union narrowing for known types.
- */
 export function parseKnownEntry(data: unknown): KnownEntry | null {
   const parsed = KnownEntrySchema.safeParse(data);
   return parsed.success ? parsed.data : null;
 }
 
-// Hive-mind metadata (first line of extracted files)
 export const HiveMindMetaSchema = z.object({
   _type: z.literal("hive-mind-meta"),
   version: z.string(),
@@ -189,16 +191,13 @@ export const HiveMindMetaSchema = z.object({
   messageCount: z.number(),
   summary: z.string().optional(),
   rawPath: z.string(),
-  // Agent session fields (only present for agent sessions)
   agentId: z.string().optional(),
   parentSessionId: z.string().optional(),
 });
 
 export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;
 
-// Transformed content block types (after extraction processing)
-// These represent the shape of content blocks after base64 data is replaced with size info
-
+// Content block types after base64 data is replaced with size info
 export interface TransformedImageBlock {
   type: "image";
   size: number;
@@ -210,14 +209,12 @@ export interface TransformedDocumentBlock {
   size: number;
 }
 
-// Tool result with potentially transformed nested content
 export interface TransformedToolResultBlock {
   type: "tool_result";
   tool_use_id: string;
   content: string | Array<TransformedContentBlock | unknown>;
 }
 
-// Union of all possible content block shapes after transformation
 export type TransformedContentBlock =
   | z.infer<typeof TextBlockSchema>
   | z.infer<typeof ThinkingBlockSchema>
@@ -225,4 +222,4 @@ export type TransformedContentBlock =
   | TransformedToolResultBlock
   | TransformedImageBlock
   | TransformedDocumentBlock
-  | { type: string; [key: string]: unknown }; // catch-all for unknown types
+  | { type: string; [key: string]: unknown };
