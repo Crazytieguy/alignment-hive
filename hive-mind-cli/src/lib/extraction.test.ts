@@ -111,7 +111,7 @@ describe("transformEntry", () => {
 });
 
 describe("content block transformation", () => {
-  test("replaces image base64 with size placeholder", async () => {
+  test("strips base64 data from image blocks", async () => {
     const { extractSession } = await import("./extraction");
     const { mkdtemp, writeFile, readFile, rm } = await import(
       "node:fs/promises"
@@ -156,9 +156,9 @@ describe("content block transformation", () => {
 
       const imageBlock = extracted.message.content[0];
       expect(imageBlock.type).toBe("image");
-      expect(imageBlock.size).toBe(75); // 100 * 3/4
-      expect(imageBlock.source).toBeUndefined();
-      expect(imageBlock.data).toBeUndefined();
+      expect(imageBlock.source.type).toBe("base64");
+      expect(imageBlock.source.media_type).toBe("image/png");
+      expect(imageBlock.source.data).toBeUndefined();
 
       // Text block should be unchanged
       expect(extracted.message.content[1]).toEqual({
@@ -170,7 +170,7 @@ describe("content block transformation", () => {
     }
   });
 
-  test("replaces document base64 with size placeholder", async () => {
+  test("strips base64 data from document blocks", async () => {
     const { extractSession } = await import("./extraction");
     const { mkdtemp, writeFile, readFile, rm } = await import(
       "node:fs/promises"
@@ -213,9 +213,9 @@ describe("content block transformation", () => {
 
       const docBlock = extracted.message.content[0];
       expect(docBlock.type).toBe("document");
-      expect(docBlock.media_type).toBe("application/pdf");
-      expect(docBlock.size).toBe(150); // 200 * 3/4
-      expect(docBlock.source).toBeUndefined();
+      expect(docBlock.source.type).toBe("base64");
+      expect(docBlock.source.media_type).toBe("application/pdf");
+      expect(docBlock.source.data).toBeUndefined();
     } finally {
       await rm(tempDir, { recursive: true });
     }
@@ -555,54 +555,6 @@ describe("edge cases", () => {
     }
   });
 
-  test("handles base64 with padding in size calculation", async () => {
-    const { extractSession } = await import("./extraction");
-    const { mkdtemp, writeFile, readFile, rm } = await import(
-      "node:fs/promises"
-    );
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-
-    const tempDir = await mkdtemp(join(tmpdir(), "hive-test-"));
-    const rawPath = join(tempDir, "test-session.jsonl");
-    const outPath = join(tempDir, "out", "test-session.jsonl");
-
-    try {
-      // "Hello" encodes to "SGVsbG8=" (8 chars with 1 padding = 5 bytes decoded)
-      const userEntry = {
-        type: "user",
-        uuid: "1",
-        parentUuid: null,
-        timestamp: "2025-01-01",
-        message: {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: "image/png",
-                data: "SGVsbG8=",
-              },
-            },
-          ],
-        },
-      };
-
-      await writeFile(rawPath, JSON.stringify(userEntry));
-      await extractSession({ rawPath, outputPath: outPath });
-
-      const output = await readFile(outPath, "utf-8");
-      const lines = output.trim().split("\n");
-      const extracted = JSON.parse(lines[1]);
-
-      // (8 - 1) * 3 / 4 = 5.25 → floor = 5
-      expect(extracted.message.content[0].size).toBe(5);
-    } finally {
-      await rm(tempDir, { recursive: true });
-    }
-  });
-
   test("handles nested tool_result with base64 content", async () => {
     const { extractSession } = await import("./extraction");
     const { mkdtemp, writeFile, readFile, rm } = await import(
@@ -654,8 +606,9 @@ describe("edge cases", () => {
       const toolResult = extracted.message.content[0];
       expect(toolResult.type).toBe("tool_result");
       expect(toolResult.content[0].type).toBe("image");
-      expect(toolResult.content[0].size).toBe(75);
-      expect(toolResult.content[0].source).toBeUndefined();
+      expect(toolResult.content[0].source.type).toBe("base64");
+      expect(toolResult.content[0].source.media_type).toBe("image/png");
+      expect(toolResult.content[0].source.data).toBeUndefined();
       expect(toolResult.content[1]).toEqual({
         type: "text",
         text: "Image result",

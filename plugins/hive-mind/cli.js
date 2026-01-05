@@ -13926,12 +13926,6 @@ function date4(params) {
 // node_modules/zod/v4/classic/external.js
 config(en_default());
 // src/lib/schemas.ts
-function getBase64DecodedSize(base643) {
-  if (!base643)
-    return 0;
-  const paddingCount = (base643.match(/=+$/) || [""])[0].length;
-  return Math.floor((base643.length - paddingCount) * 3 / 4);
-}
 var TextBlockSchema = exports_external.looseObject({
   type: exports_external.literal("text"),
   text: exports_external.string()
@@ -13953,26 +13947,19 @@ var ToolResultBlockSchema = exports_external.looseObject({
     return exports_external.union([exports_external.string(), exports_external.array(ContentBlockSchema)]);
   }
 });
-var Base64SourceSchema = exports_external.object({
+var Base64SourceSchema = exports_external.looseObject({
   type: exports_external.literal("base64"),
   media_type: exports_external.string(),
   data: exports_external.string()
-});
+}).transform(({ data, ...rest }) => rest);
 var ImageBlockSchema = exports_external.looseObject({
   type: exports_external.literal("image"),
   source: Base64SourceSchema
-}).transform((img) => ({
-  type: "image",
-  size: getBase64DecodedSize(img.source.data)
-}));
+});
 var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
-}).transform((doc2) => ({
-  type: "document",
-  media_type: doc2.source.media_type,
-  size: getBase64DecodedSize(doc2.source.data)
-}));
+});
 var KnownContentBlockSchema = exports_external.discriminatedUnion("type", [
   TextBlockSchema,
   ThinkingBlockSchema,

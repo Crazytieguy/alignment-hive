@@ -1,11 +1,5 @@
 import { z } from "zod";
 
-function getBase64DecodedSize(base64: string) {
-  if (!base64) return 0;
-  const paddingCount = (base64.match(/=+$/) || [""])[0].length;
-  return Math.floor(((base64.length - paddingCount) * 3) / 4);
-}
-
 export const TextBlockSchema = z.looseObject({
   type: z.literal("text"),
   text: z.string(),
@@ -32,34 +26,24 @@ export const ToolResultBlockSchema = z.looseObject({
   },
 });
 
-const Base64SourceSchema = z.object({
-  type: z.literal("base64"),
-  media_type: z.string(),
-  data: z.string(),
+// Strip base64 data, keep metadata
+const Base64SourceSchema = z
+  .looseObject({
+    type: z.literal("base64"),
+    media_type: z.string(),
+    data: z.string(),
+  })
+  .transform(({ data, ...rest }) => rest);
+
+export const ImageBlockSchema = z.looseObject({
+  type: z.literal("image"),
+  source: Base64SourceSchema,
 });
 
-// Transform replaces base64 data with decoded size
-export const ImageBlockSchema = z
-  .looseObject({
-    type: z.literal("image"),
-    source: Base64SourceSchema,
-  })
-  .transform((img) => ({
-    type: "image" as const,
-    size: getBase64DecodedSize(img.source.data),
-  }));
-
-// Transform replaces base64 data with decoded size
-export const DocumentBlockSchema = z
-  .looseObject({
-    type: z.literal("document"),
-    source: Base64SourceSchema,
-  })
-  .transform((doc) => ({
-    type: "document" as const,
-    media_type: doc.source.media_type,
-    size: getBase64DecodedSize(doc.source.data),
-  }));
+export const DocumentBlockSchema = z.looseObject({
+  type: z.literal("document"),
+  source: Base64SourceSchema,
+});
 
 export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   TextBlockSchema,
