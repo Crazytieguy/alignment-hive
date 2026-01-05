@@ -4,28 +4,23 @@ import { basename, dirname, join } from "node:path";
 import { getMachineId } from "./config";
 import { sanitizeDeep } from "./sanitize";
 import {
-  type ContentBlock,
   type HiveMindMeta,
   HiveMindMetaSchema,
-  KnownContentBlockSchema,
+  type KnownEntry,
   parseKnownEntry,
-  type TransformedDocumentBlock,
-  type TransformedImageBlock,
-  type TransformedToolResultBlock,
 } from "./schemas";
 
-const HIVE_MIND_VERSION = "0.1";
+const HIVE_MIND_VERSION = "0.1" as const;
 
-const SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"]);
+const SKIP_ENTRY_TYPES = new Set(["file-history-snapshot", "queue-operation"] as const);
 
-export function* parseJsonl(content: string): Generator<unknown> {
+export function* parseJsonl(content: string) {
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      yield JSON.parse(trimmed);
+      yield JSON.parse(trimmed) as unknown;
     } catch (error) {
-      // Skip malformed lines, log in debug mode
       if (process.env.DEBUG) {
         console.warn("Skipping malformed JSONL line:", error);
       }
@@ -37,46 +32,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function getBase64DecodedSize(base64: string): number {
-  if (!base64) return 0;
-  const paddingCount = (base64.match(/=+$/) || [""])[0].length;
-  return Math.floor(((base64.length - paddingCount) * 3) / 4);
-}
-
-function isContentBlock(value: unknown): value is ContentBlock {
-  return isRecord(value) && typeof value.type === "string";
-}
-
-function transformContentBlock(block: ContentBlock): ContentBlock | TransformedImageBlock | TransformedDocumentBlock | TransformedToolResultBlock {
-  const parsed = KnownContentBlockSchema.safeParse(block);
-  if (!parsed.success) return block;
-
-  const knownBlock = parsed.data;
-
-  if (knownBlock.type === "image" && knownBlock.source.type === "base64") {
-    return { type: "image", size: getBase64DecodedSize(knownBlock.source.data) };
-  }
-
-  if (knownBlock.type === "document" && knownBlock.source.type === "base64") {
-    return {
-      type: "document",
-      media_type: knownBlock.source.media_type,
-      size: getBase64DecodedSize(knownBlock.source.data),
-    };
-  }
-
-  if (knownBlock.type === "tool_result" && Array.isArray(knownBlock.content)) {
-    return {
-      type: "tool_result",
-      tool_use_id: knownBlock.tool_use_id,
-      content: knownBlock.content.map((c) => (isContentBlock(c) ? transformContentBlock(c) : c)),
-    };
-  }
-
-  return block;
-}
-
-function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
+function transformEntry(rawEntry: unknown) {
   const entry = parseKnownEntry(rawEntry);
   if (!entry) {
     if (process.env.DEBUG) {
@@ -85,47 +41,37 @@ function transformEntry(rawEntry: unknown): Record<string, unknown> | null {
     return null;
   }
 
-  if (SKIP_ENTRY_TYPES.has(entry.type)) {
+  if (SKIP_ENTRY_TYPES.has(entry.type as "file-history-snapshot" | "queue-operation")) {
     return null;
   }
 
-  // Schema transforms already stripped low-value fields
-  // Here we only transform base64 content to size placeholders
-
-  if (entry.type === "user" || entry.type === "assistant") {
-    const { message, ...rest } = entry;
-    const content = message?.content;
-    const transformedContent =
-      content && Array.isArray(content) ? content.map(transformContentBlock) : content;
-
-    return {
-      ...rest,
-      message: { ...message, content: transformedContent },
-    };
-  }
-
-  if (entry.type === "summary" || entry.type === "system") {
-    return { ...entry };
+  if (
+    entry.type === "user" ||
+    entry.type === "assistant" ||
+    entry.type === "summary" ||
+    entry.type === "system"
+  ) {
+    return entry;
   }
 
   return null;
 }
 
+type ExtractedEntry = Exclude<ReturnType<typeof transformEntry>, null>;
+
 /** Returns the summary where leafUuid exists in the same session. */
-function findValidSummary(
-  entries: Array<Record<string, unknown>>,
-): string | undefined {
+function findValidSummary(entries: ExtractedEntry[]) {
   const uuids = new Set<string>();
   const summaries: Array<{ summary: string; leafUuid?: string }> = [];
 
   for (const entry of entries) {
-    if (typeof entry.uuid === "string") {
+    if ("uuid" in entry && typeof entry.uuid === "string") {
       uuids.add(entry.uuid);
     }
-    if (entry.type === "summary" && typeof entry.summary === "string") {
+    if (entry.type === "summary") {
       summaries.push({
         summary: entry.summary,
-        leafUuid: typeof entry.leafUuid === "string" ? entry.leafUuid : undefined,
+        leafUuid: entry.leafUuid,
       });
     }
   }
@@ -138,11 +84,7 @@ function findValidSummary(
   }
 
   // Fallback: return the last summary if no valid one found
-  if (summaries.length > 0) {
-    return summaries[summaries.length - 1].summary;
-  }
-
-  return undefined;
+  return summaries.at(-1)?.summary;
 }
 
 interface ExtractSessionOptions {
@@ -160,7 +102,7 @@ export async function extractSession(options: ExtractSessionOptions) {
     getMachineId(),
   ]);
 
-  const entries: Array<Record<string, unknown>> = [];
+  const entries: ExtractedEntry[] = [];
 
   // For agent sessions, extract parentSessionId from first entry
   let parentSessionId: string | undefined;
@@ -178,13 +120,9 @@ export async function extractSession(options: ExtractSessionOptions) {
     }
   }
 
-  // Find valid summary
   const summary = findValidSummary(entries);
-
-  // Determine session ID from filename (for agents, use agentId)
   const sessionId = agentId || basename(rawPath, ".jsonl");
 
-  // Create metadata
   const meta: HiveMindMeta = {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
@@ -195,15 +133,11 @@ export async function extractSession(options: ExtractSessionOptions) {
     messageCount: entries.length,
     summary,
     rawPath,
-    // Agent-specific fields
     ...(agentId && { agentId }),
     ...(parentSessionId && { parentSessionId }),
   };
 
-  // Sanitize all entries
-  const sanitizedEntries = await Promise.all(
-    entries.map((e) => sanitizeDeep(e)),
-  );
+  const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
 
   // Write output
   await mkdir(dirname(outputPath), { recursive: true });

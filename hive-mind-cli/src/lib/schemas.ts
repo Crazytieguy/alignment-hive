@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+function getBase64DecodedSize(base64: string) {
+  if (!base64) return 0;
+  const paddingCount = (base64.match(/=+$/) || [""])[0].length;
+  return Math.floor(((base64.length - paddingCount) * 3) / 4);
+}
+
 export const TextBlockSchema = z.looseObject({
   type: z.literal("text"),
   text: z.string(),
@@ -32,15 +38,28 @@ const Base64SourceSchema = z.object({
   data: z.string(),
 });
 
-export const ImageBlockSchema = z.looseObject({
-  type: z.literal("image"),
-  source: Base64SourceSchema,
-});
+// Transform replaces base64 data with decoded size
+export const ImageBlockSchema = z
+  .looseObject({
+    type: z.literal("image"),
+    source: Base64SourceSchema,
+  })
+  .transform((img) => ({
+    type: "image" as const,
+    size: getBase64DecodedSize(img.source.data),
+  }));
 
-export const DocumentBlockSchema = z.looseObject({
-  type: z.literal("document"),
-  source: Base64SourceSchema,
-});
+// Transform replaces base64 data with decoded size
+export const DocumentBlockSchema = z
+  .looseObject({
+    type: z.literal("document"),
+    source: Base64SourceSchema,
+  })
+  .transform((doc) => ({
+    type: "document" as const,
+    media_type: doc.source.media_type,
+    size: getBase64DecodedSize(doc.source.data),
+  }));
 
 export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   TextBlockSchema,
@@ -65,11 +84,6 @@ export const MessageContentSchema = z.union([
   z.string(),
   z.array(ContentBlockSchema),
 ]);
-
-const BaseMessageSchema = z.looseObject({
-  role: z.string(),
-  content: MessageContentSchema.optional(),
-});
 
 // Transform strips id/usage fields (low retrieval value)
 export const UserMessageObjectSchema = z
@@ -165,11 +179,6 @@ export const KnownEntrySchema = z.discriminatedUnion("type", [
   QueueOperationSchema,
 ]);
 
-export const UnknownEntrySchema = z.looseObject({ type: z.string() });
-
-export const EntrySchema = z.union([KnownEntrySchema, UnknownEntrySchema]);
-
-export type Entry = z.infer<typeof EntrySchema>;
 export type KnownEntry = z.infer<typeof KnownEntrySchema>;
 export type SummaryEntry = z.infer<typeof SummaryEntrySchema>;
 export type UserEntry = z.infer<typeof UserEntrySchema>;
@@ -196,30 +205,3 @@ export const HiveMindMetaSchema = z.object({
 });
 
 export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;
-
-// Content block types after base64 data is replaced with size info
-export interface TransformedImageBlock {
-  type: "image";
-  size: number;
-}
-
-export interface TransformedDocumentBlock {
-  type: "document";
-  media_type: string;
-  size: number;
-}
-
-export interface TransformedToolResultBlock {
-  type: "tool_result";
-  tool_use_id: string;
-  content: string | Array<TransformedContentBlock | unknown>;
-}
-
-export type TransformedContentBlock =
-  | z.infer<typeof TextBlockSchema>
-  | z.infer<typeof ThinkingBlockSchema>
-  | z.infer<typeof ToolUseBlockSchema>
-  | TransformedToolResultBlock
-  | TransformedImageBlock
-  | TransformedDocumentBlock
-  | { type: string; [key: string]: unknown };
