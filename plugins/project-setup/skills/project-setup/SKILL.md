@@ -15,7 +15,7 @@ Consider spending the first session on architecture, research, and tooling rathe
 
 ## Tooling
 
-Consider modern tooling where appropriate. Examples: `uv` for Python, `vite` and `pnpm` for JavaScript/TypeScript.
+Consider modern tooling where appropriate. Examples: `uv` for Python, `vite` and `bun` for JavaScript/TypeScript.
 
 ## Living Documentation
 
@@ -23,7 +23,12 @@ A useful pattern: treat README.md as a working document that evolves with the pr
 
 ## Claude Code Plugins
 
-Browse available plugins at: https://github.com/anthropics/claude-plugins-official/tree/main/plugins
+Propose relevant plugins from the official marketplace (auto-installed):
+
+- **Python**: `pyright-lsp`
+- **TypeScript/JavaScript**: `typescript-lsp`, `frontend-design`
+- **Rust**: `rust-analyzer-lsp`
+- **Agent development**: `agent-sdk-dev`
 
 Install by adding to `.claude/settings.json`:
 
@@ -35,15 +40,9 @@ Install by adding to `.claude/settings.json`:
 }
 ```
 
-Some plugins by project type:
-- **Python**: `pyright-lsp`
-- **TypeScript/JavaScript**: `typescript-lsp`, `frontend-design`
-- **Rust**: `rust-analyzer-lsp`
-- **Agent development**: `agent-sdk-dev`
-
 ## MATS / Alignment Researchers
 
-Ask if the user wants to install hive-mind - shared knowledge from other researchers' Claude sessions, plus your sessions contribute back. Requires an invite (MATS scholars: check your email).
+Ask if the user wants to install hive-mind - local memory retrieval system, plus shared knowledge from other researchers' Claude sessions, and your sessions contribute back. Sharing requires an invite (MATS scholars: check your email).
 
 ```json
 {
