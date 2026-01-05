@@ -248,7 +248,7 @@ describe("content block transformation", () => {
 });
 
 describe("metadata stripping", () => {
-  test("strips requestId, slug, userType from entries", async () => {
+  test("strips low-value fields, keeps usage", async () => {
     const { extractSession } = await import("./extraction");
     const { mkdtemp, writeFile, readFile, rm } = await import(
       "node:fs/promises"
@@ -300,13 +300,13 @@ describe("metadata stripping", () => {
       expect(extracted.uuid).toBe("1");
       expect(extracted.sessionId).toBe("sess-123");
       expect(extracted.cwd).toBe("/home/user");
+      expect(extracted.message.usage).toEqual({ input: 100, output: 50 });
 
       // Should strip these
       expect(extracted.requestId).toBeUndefined();
       expect(extracted.slug).toBeUndefined();
       expect(extracted.userType).toBeUndefined();
       expect(extracted.message.id).toBeUndefined();
-      expect(extracted.message.usage).toBeUndefined();
     } finally {
       await rm(tempDir, { recursive: true });
     }

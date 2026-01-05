@@ -13942,17 +13942,10 @@ var ToolUseBlockSchema = exports_external.looseObject({
   name: exports_external.string(),
   input: exports_external.record(exports_external.string(), exports_external.unknown())
 });
-var ToolResultBlockSchema = exports_external.looseObject({
-  type: exports_external.literal("tool_result"),
-  tool_use_id: exports_external.string(),
-  get content() {
-    return exports_external.union([exports_external.string(), exports_external.array(ContentBlockSchema)]);
-  }
-});
 var Base64SourceSchema = exports_external.looseObject({
   type: exports_external.literal("base64"),
   media_type: exports_external.string(),
-  data: exports_external.string()
+  data: exports_external.string().optional()
 }).transform(({ data, ...rest }) => rest);
 var ImageBlockSchema = exports_external.looseObject({
   type: exports_external.literal("image"),
@@ -13962,6 +13955,18 @@ var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
 });
+var UnknownContentBlockSchema = exports_external.looseObject({ type: exports_external.string() });
+var ToolResultContentBlockSchema = exports_external.union([
+  TextBlockSchema,
+  ImageBlockSchema,
+  DocumentBlockSchema,
+  UnknownContentBlockSchema
+]);
+var ToolResultBlockSchema = exports_external.looseObject({
+  type: exports_external.literal("tool_result"),
+  tool_use_id: exports_external.string(),
+  content: exports_external.union([exports_external.string(), exports_external.array(ToolResultContentBlockSchema)]).optional()
+});
 var KnownContentBlockSchema = exports_external.discriminatedUnion("type", [
   TextBlockSchema,
   ThinkingBlockSchema,
@@ -13970,7 +13975,6 @@ var KnownContentBlockSchema = exports_external.discriminatedUnion("type", [
   ImageBlockSchema,
   DocumentBlockSchema
 ]);
-var UnknownContentBlockSchema = exports_external.looseObject({ type: exports_external.string() });
 var ContentBlockSchema = exports_external.union([
   KnownContentBlockSchema,
   UnknownContentBlockSchema
@@ -13984,7 +13988,7 @@ var UserMessageObjectSchema = exports_external.looseObject({
   content: MessageContentSchema.optional(),
   id: exports_external.string().optional(),
   usage: exports_external.unknown().optional()
-}).transform(({ id, usage, ...rest }) => rest);
+}).transform(({ id, ...rest }) => rest);
 var AssistantMessageObjectSchema = exports_external.looseObject({
   role: exports_external.string(),
   content: MessageContentSchema.optional(),
@@ -13992,7 +13996,7 @@ var AssistantMessageObjectSchema = exports_external.looseObject({
   stop_reason: exports_external.string().optional(),
   id: exports_external.string().optional(),
   usage: exports_external.unknown().optional()
-}).transform(({ id, usage, ...rest }) => rest);
+}).transform(({ id, ...rest }) => rest);
 var SummaryEntrySchema = exports_external.looseObject({
   type: exports_external.literal("summary"),
   summary: exports_external.string(),
@@ -14016,7 +14020,7 @@ var UserEntrySchema = exports_external.looseObject({
   imagePasteIds: exports_external.array(exports_external.string()).optional(),
   thinkingMetadata: exports_external.unknown().optional(),
   todos: exports_external.unknown().optional()
-}).transform(({ toolUseResult, requestId, slug, userType, imagePasteIds, thinkingMetadata, todos, ...rest }) => rest);
+}).transform(({ toolUseResult, requestId, slug, userType, ...rest }) => rest);
 var AssistantEntrySchema = exports_external.looseObject({
   type: exports_external.literal("assistant"),
   uuid: exports_external.string(),
