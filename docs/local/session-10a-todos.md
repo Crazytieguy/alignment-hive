@@ -30,7 +30,7 @@ Identified during code review of the extraction implementation.
 
   Keep comments that explain non-obvious decisions: `schemas.ts:26-28` (recursive typing limitation), `secret-rules.ts:1-9` (gitleaks provenance).
 
-- [ ] **Zod schema refactor**
+- [x] **Zod schema refactor**
 
   Goal: drop specific fields while preserving unknown ones (forward compatibility). Solution: `z.looseObject()` + `.transform()` with destructuring. Tested in this session:
   ```typescript
