@@ -370,7 +370,7 @@ function formatKnownBlock(
       return formatTextBlock(block.text);
 
     case "thinking":
-      return `<thinking>\n${block.thinking}\n</thinking>`;
+      return formatXmlElement("thinking", [], block.thinking);
 
     case "tool_use":
       return formatToolUseBlock(block, toolResults);
@@ -472,10 +472,7 @@ function formatValue(value: unknown): string {
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  if (Array.isArray(value)) {
-    return value.map(formatValue).join("\n");
-  }
-  if (typeof value === "object") {
+  if (Array.isArray(value) || typeof value === "object") {
     return JSON.stringify(value, null, 2);
   }
   return String(value);

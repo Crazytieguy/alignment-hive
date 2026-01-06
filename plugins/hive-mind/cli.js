@@ -15159,9 +15159,7 @@ function formatKnownBlock(block, toolResults) {
     case "text":
       return formatTextBlock(block.text);
     case "thinking":
-      return `<thinking>
-${block.thinking}
-</thinking>`;
+      return formatXmlElement("thinking", [], block.thinking);
     case "tool_use":
       return formatToolUseBlock(block, toolResults);
     case "tool_result":
@@ -15237,11 +15235,7 @@ function formatValue(value) {
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  if (Array.isArray(value)) {
-    return value.map(formatValue).join(`
-`);
-  }
-  if (typeof value === "object") {
+  if (Array.isArray(value) || typeof value === "object") {
     return JSON.stringify(value, null, 2);
   }
   return String(value);

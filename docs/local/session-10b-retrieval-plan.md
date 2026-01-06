@@ -214,73 +214,70 @@ const COMMANDS = {
 
 ---
 
-# Session 10B-2: Smart Truncation
+# Session 10B-2: Simple Line Redaction
 
 ## Goal
 
-Add truncation to `read` command. Heavy experimentation session - figure out what fields are unhelpful, what thresholds make sense, simplify if over-engineered, complexify if over-simplified.
+Add simple redaction to `read` command as MVP for compression/scanning. Start simple and iterate.
+
+**Key insight from 10B-1 snapshots:** The vast majority of content is Edit calls, Write calls, tool results, and thinking blocks - and most of the time these aren't helpful for scanning. Start with aggressive redaction and refine.
 
 ## Behavior
 
-- `read <id>` (all lines) → heavy truncation by default
-- `read <id> 5` (single line) → no truncation (full content)
-- `read <id> 1-10` (range) → moderate truncation
-- `read <id> --no-truncation` → force full content regardless of line count
-- Optional: `--truncation=<level>` for explicit control
+- `read <id>` (all lines) → redacted (first line only of multi-line content)
+- `read <id> 5` (single line) → full content (no redaction)
+- `read <id> --full` → force full content for all lines
 
-## Truncation Strategy (Starting Point - Subject to Experimentation)
+## Redaction Strategy (MVP)
 
-**Linear scaling based on lines requested:**
-- 1 line: no truncation
-- 10 lines: moderate truncation
-- 100+ lines: heavy truncation
+**Simple rule:** For any multi-line text content, show only the first line followed by `[+N lines]`.
 
-**Base limits (at moderate truncation, ~10 lines) - calibrate on real data:**
+Applies uniformly to:
+- Tool result content (file contents, command output, etc.)
+- Thinking blocks
+- Text blocks
+- Tool use parameters
 
-| Content Type | Base Limit (chars) |
-|--------------|-------------------|
-| user plain text | 200 |
-| user tool_result: Bash stdout | 150 |
-| user tool_result: Glob/Grep filenames | 100 |
-| user tool_result: Edit old/new strings | 80 |
-| user tool_result: Read file content | 100 |
-| user tool_result: WebFetch content | 100 |
-| user tool_result: Task output | 100 |
-| assistant text | 80 |
-| assistant thinking | 50 |
-| assistant tool_use params | 60 |
-| system content | 80 |
-
-**Scaling formula:** `limit = base * scale_factor(lines_requested)`
-- Example: `scale_factor = clamp(0.5, 5.0, 10 / lines_requested)`
-
-**Fields to conditionally drop/hide:**
-- `structuredPatch` from Edit results (large, redundant with old/new)
-- Repeating fields if same as previous entry: model, cwd, gitBranch
-- Full file contents beyond limit
+**No content-type-specific limits initially.** Keep it simple and see what's missing before adding complexity.
 
 ## Files to Modify
 
 | File | Action |
 |------|--------|
-| `hive-mind/cli/commands/read.ts` | MODIFY - add truncation logic |
-| `hive-mind/cli/lib/format.ts` | MODIFY - add truncation support |
-| `hive-mind/cli/lib/truncation.ts` | CREATE - truncation utilities |
+| `hive-mind/cli/commands/read.ts` | MODIFY - add redaction mode |
+| `hive-mind/cli/lib/format.ts` | MODIFY - add redaction support |
 
 ## Implementation Notes
 
-- `formatEntry(entry, { truncate: boolean, limit: number, prevEntry?: Entry })`
-- Truncate with `...` suffix when content exceeds limit
-- Show `[N chars truncated]` or similar indicator
-- Preserve structure (still show block markers, just truncated content)
-- Track previous entry to detect repeating fields
+- `formatSession(entries, { redact: boolean })`
+- `formatEntry(entry, { lineNumber, toolResults, parentIndicator, redact })`
+- Redaction function: `redactMultiline(text: string) → string`
+  - If single line, return as-is
+  - If multi-line, return `${firstLine}\n[+${remainingLines} lines]`
+
+## Optional: XML Format Optimization
+
+If redaction produces good results but tokens are still high, consider optimizing the XML format:
+- Remove redundant closing tags for empty elements
+- Shorter attribute names
+- Remove attributes that repeat (model same across all entries)
+
+**Only add this if needed** - test redaction first.
+
+## Summaries Investigation Notes
+
+From 10B-1 investigation:
+- Agent sessions never have summaries (they're too short to trigger compaction)
+- Some main sessions lack summaries (session ended before compaction)
+- Summaries have `leafUuid` referencing the last message of summarized branch
+- No evidence of cross-session summaries (summaries are in their own session file)
+- **Index change:** Remove agent sessions from index output since they lack summaries
 
 ## Experimentation Focus
 
-- Which fields are usually unhelpful or cost too many tokens?
-- What thresholds produce useful overviews vs too much noise?
-- Is the linear scaling formula right, or does it need adjustment?
-- Should some content types be hidden entirely at high truncation levels?
+- Is first-line-only redaction too aggressive? Too little?
+- Which content types need special handling?
+- Is XML format optimization worth the complexity?
 
 ---
 
@@ -361,15 +358,14 @@ Update `plugins/hive-mind/plugin.json` to register the agents directory.
 - [x] Implement snapshot tests
 - [x] **Experiment and iterate**: Subagent reviews led to cleaner format (removed cwd/branch, tool IDs, text wrappers)
 
-## 10B-2: Smart Truncation
-- [ ] Create `cli/lib/truncation.ts`
-- [ ] Update `cli/lib/format.ts` with truncation support
-- [ ] Update `cli/commands/read.ts` with truncation logic
-- [ ] Add `--no-truncation` flag
-- [ ] Implement conditional field dropping (repeating model, cwd, gitBranch)
-- [ ] Calibrate limits on real data
-- [ ] Update snapshot tests
-- [ ] **Experiment and iterate**: Test various line counts, adjust thresholds, simplify or complexify as needed
+## 10B-2: Simple Line Redaction
+- [ ] Add `redactMultiline()` function to `format.ts`
+- [ ] Update `formatSession()` with `{ redact: boolean }` option
+- [ ] Update `read` command: default redacted, `--full` for full content
+- [ ] Single line requests get full content automatically
+- [ ] Remove agent sessions from `index` output (no summaries)
+- [ ] Update snapshot tests with redacted versions
+- [ ] **Experiment and iterate**: Test redaction, add complexity only if needed
 
 ## 10B-3: Retrieval Subagent
 - [ ] Load `/plugin-dev:agent-development` skill
