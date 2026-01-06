@@ -109,13 +109,13 @@ export async function read(): Promise<void> {
 
   // Format and output entries
   for (const { index, raw } of entriesToOutput) {
-    const entry = parseKnownEntry(raw);
-    if (!entry) {
+    const result = parseKnownEntry(raw);
+    if (!result.data) {
       console.log(`${index}|unknown`);
       continue;
     }
 
-    const formatted = formatEntry(entry, { lineNumber: index });
+    const formatted = formatEntry(result.data, { lineNumber: index });
     if (formatted) {
       console.log(formatted);
       console.log(""); // Blank line between entries

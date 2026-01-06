@@ -15324,12 +15324,12 @@ Examples:`);
     return;
   }
   for (const { index: index2, raw } of entriesToOutput) {
-    const entry = parseKnownEntry(raw);
-    if (!entry) {
+    const result = parseKnownEntry(raw);
+    if (!result.data) {
       console.log(`${index2}|unknown`);
       continue;
     }
-    const formatted = formatEntry(entry, { lineNumber: index2 });
+    const formatted = formatEntry(result.data, { lineNumber: index2 });
     if (formatted) {
       console.log(formatted);
       console.log("");
