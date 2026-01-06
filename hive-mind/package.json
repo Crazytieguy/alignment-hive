@@ -43,6 +43,7 @@
     "dotenv": "^17.2.3",
     "npm-run-all2": "^8.0.4",
     "prettier": "^3.5.3",
+    "smol-toml": "^1.6.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vite": "^7.1.8",

@@ -14,6 +14,33 @@ const MAX_SANITIZE_DEPTH = 100;
 // Minimum string length to scan for secrets
 const MIN_SECRET_LENGTH = 8;
 
+// Keys whose string values are structurally safe and never contain secrets.
+// These are skipped during sanitization for performance.
+const SAFE_KEYS = new Set([
+  // UUIDs and IDs
+  "uuid",
+  "parentUuid",
+  "sessionId",
+  "tool_use_id",
+  "sourceToolUseID",
+  "id",
+  // Type discriminators and enums
+  "type",
+  "role",
+  "subtype",
+  "level",
+  "stop_reason",
+  // Metadata
+  "timestamp",
+  "version",
+  "model",
+  "media_type",
+  "name",
+  // Paths (may contain usernames but not API keys)
+  "cwd",
+  "gitBranch",
+]);
+
 /**
  * Quick check if a string might contain secrets.
  * Returns false if string contains none of the keywords.
@@ -59,11 +86,23 @@ function shannonEntropy(data: string): number {
   return entropy;
 }
 
+// Timing stats for DEBUG mode
+let _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
+export function getDetectSecretsStats() {
+  return _stats;
+}
+export function resetDetectSecretsStats() {
+  _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
+}
+
 /**
  * Detect secrets in a string using gitleaks patterns.
  * Returns all matches with their positions and entropy.
  */
 export function detectSecrets(content: string): Array<SecretMatch> {
+  const t0 = process.env.DEBUG ? performance.now() : 0;
+  _stats.calls++;
+
   if (content.length < MIN_SECRET_LENGTH) {
     return [];
   }
@@ -74,6 +113,7 @@ export function detectSecrets(content: string): Array<SecretMatch> {
   // This is an optimization - rules without keywords will still run
   const lowerContent = content.toLowerCase();
   const hasAnyKeyword = mightContainSecrets(content);
+  if (hasAnyKeyword) _stats.keywordHits++;
 
   for (const rule of SECRET_RULES) {
     // Per-rule keyword filter: skip rules whose keywords don't match
@@ -84,6 +124,7 @@ export function detectSecrets(content: string): Array<SecretMatch> {
       const hasKeyword = rule.keywords.some((k) => lowerContent.includes(k));
       if (!hasKeyword) continue;
     }
+    _stats.regexRuns++;
     // Reset regex state for global matching
     rule.regex.lastIndex = 0;
 
@@ -129,6 +170,10 @@ export function detectSecrets(content: string): Array<SecretMatch> {
     }
   }
 
+  if (process.env.DEBUG) {
+    _stats.totalMs += performance.now() - t0;
+  }
+
   return deduped;
 }
 
@@ -159,6 +204,7 @@ export function sanitizeString(content: string): string {
 /**
  * Recursively sanitize all strings in an object or array.
  * Returns a new object/array with sanitized strings.
+ * Skips known-safe keys (UUIDs, timestamps, type fields) for performance.
  */
 export function sanitizeDeep<T>(value: T, depth = 0): T {
   // Prevent stack overflow from deeply nested or circular structures
@@ -181,7 +227,12 @@ export function sanitizeDeep<T>(value: T, depth = 0): T {
   if (typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = sanitizeDeep(val, depth + 1);
+      // Skip sanitization for known-safe string fields
+      if (SAFE_KEYS.has(key) && typeof val === "string") {
+        result[key] = val;
+      } else {
+        result[key] = sanitizeDeep(val, depth + 1);
+      }
     }
     return result as T;
   }

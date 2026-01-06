@@ -1,14 +1,12 @@
 #!/usr/bin/env bun
 
-import { extract } from "./commands/extract";
 import { login } from "./commands/login";
 import { sessionStart } from "./commands/session-start";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
-  extract: { description: "Extract sessions for retrieval", handler: extract },
   login: { description: "Authenticate with hive-mind", handler: login },
-  "session-start": { description: "SessionStart hook", handler: sessionStart },
+  "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
 } as const;
 
 type CommandName = keyof typeof COMMANDS;
