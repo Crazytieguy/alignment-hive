@@ -152,3 +152,47 @@ describe("sanitizeString edge cases", () => {
     expect(sanitized).toBe("");
   });
 });
+
+describe("SAFE_KEYS optimization", () => {
+  test("skips sanitization for known-safe string fields", async () => {
+    // These fields are in SAFE_KEYS and should not be sanitized even if they
+    // look like they might contain secrets
+    const input = {
+      uuid: "ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs", // Would match github-pat
+      type: "user",
+      timestamp: "2025-01-01T00:00:00Z",
+      sessionId: "sess-12345",
+      // This field is NOT in SAFE_KEYS and should be sanitized
+      content: TEST_GITHUB_TOKEN,
+    };
+
+    const sanitized = await sanitizeDeep(input);
+
+    // Safe keys should be passed through unchanged
+    expect(sanitized.uuid).toBe(input.uuid);
+    expect(sanitized.type).toBe(input.type);
+    expect(sanitized.timestamp).toBe(input.timestamp);
+    expect(sanitized.sessionId).toBe(input.sessionId);
+
+    // Non-safe keys should be sanitized
+    expect(sanitized.content).toContain("[REDACTED:");
+    expect(sanitized.content).not.toContain("ghp_");
+  });
+
+  test("sanitizes non-string safe key values", async () => {
+    // If a safe key has a non-string value (like an object), it should still
+    // be recursively processed
+    const input = {
+      type: {
+        nested: TEST_GITHUB_TOKEN,
+      },
+    };
+
+    const sanitized = (await sanitizeDeep(input)) as {
+      type: { nested: string };
+    };
+
+    // The nested string should be sanitized because type's value is an object
+    expect(sanitized.type.nested).toContain("[REDACTED:");
+  });
+});

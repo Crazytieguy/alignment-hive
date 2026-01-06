@@ -8,15 +8,24 @@ Identified during code review of the extraction implementation.
 
   `sanitize.ts:163` - Function is marked async and uses `Promise.all`, but all actual work is synchronous (`sanitizeString` is sync). Remove async/await to eliminate unnecessary overhead.
 
-- [ ] **Benchmark string-level sanitization**
+- [x] **Benchmark string-level sanitization**
 
-  Current approach: recursively walk objects, call regex on each string. Alternative: run regex once on the fully serialized JSONL string. Test if this reduces the ~57ms/session extraction time.
+  Completed: Two optimizations implemented.
 
-  Important: verify this doesn't break anything - e.g., redaction markers appearing in unexpected places, JSON structure corruption, or edge cases with escaped strings.
+  **Results:**
+  1. SAFE_KEYS field-skipping: ~17% faster, 80% fewer detectSecrets calls
+  2. Regenerated secret-rules.ts with all keywords: **61-63% faster, 98% fewer regex runs**
 
-  Otherwise can also reduce sanitization calls by skipping repetitive and always-benign fields (look at some session files in .claude/hive-mind/sessions to identify patterns)
-  
-  Fallback if not faster or too error-prone: cap hook extraction to 10 sessions, show message suggesting `hive-mind extract` for bulk. Could also offer extraction during login flow.
+  String-level approach (regex on serialized JSON) was tested but rejected - actually slower because regexes run on much longer strings.
+
+  **Changes:**
+  - `sanitize.ts`: Added SAFE_KEYS set to skip safe fields (UUIDs, timestamps, type fields)
+  - `extraction.ts`: Added timing instrumentation (DEBUG mode)
+  - `sanitize.test.ts`: Added tests for SAFE_KEYS optimization
+  - `cli/scripts/generate-secret-rules.ts`: New script to generate secret-rules.ts from gitleaks with proper keywords
+  - `secret-rules.ts`: Regenerated - now all 220 rules have keywords (was 185/220)
+
+  **Key insight:** The original secret-rules.ts was missing keywords on 35 rules that gitleaks has. These "always-run" rules caused ~35 regex executions per string. With all keywords, regex runs dropped from ~35/call to ~0.7/call.
 
 - [x] **Hook error handling**
 

@@ -4,7 +4,7 @@ import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getCheckoutId } from "./config";
-import { sanitizeDeep } from "./sanitize";
+import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from "./sanitize";
 import {
   
   HiveMindMetaSchema,
@@ -96,6 +96,7 @@ export async function extractSession(options: ExtractSessionOptions) {
     getCheckoutId(hiveMindDir),
   ]);
 
+  const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries: Array<ExtractedEntry> = [];
 
   for (const rawEntry of parseJsonl(content)) {
@@ -103,6 +104,9 @@ export async function extractSession(options: ExtractSessionOptions) {
     if (transformed) {
       entries.push(transformed);
     }
+  }
+  if (process.env.DEBUG) {
+    console.log(`[extract] Parsing: ${(performance.now() - t0Parse).toFixed(2)}ms for ${entries.length} entries`);
   }
 
   // Skip sessions with no assistant messages
@@ -133,7 +137,14 @@ export async function extractSession(options: ExtractSessionOptions) {
     ...(parentSessionId && { parentSessionId }),
   };
 
+  resetDetectSecretsStats();
+  const t0 = performance.now();
   const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
+  const sanitizeMs = performance.now() - t0;
+  if (process.env.DEBUG) {
+    const stats = getDetectSecretsStats();
+    console.log(`[extract] Sanitization: ${sanitizeMs.toFixed(2)}ms for ${entries.length} entries | detectSecrets: ${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs, ${stats.totalMs.toFixed(2)}ms`);
+  }
 
   // Write output
   await mkdir(dirname(outputPath), { recursive: true });
@@ -163,7 +174,7 @@ async function readFirstLine(filePath: string): Promise<string | null> {
   }
 }
 
-export async function readExtractedMeta(
+async function readExtractedMeta(
   extractedPath: string,
 ): Promise<HiveMindMeta | null> {
   try {
@@ -177,18 +188,18 @@ export async function readExtractedMeta(
   }
 }
 
-export function getProjectsDir(cwd: string): string {
+function getProjectsDir(cwd: string): string {
   // Encode cwd: replace / with -
   const encoded = cwd.replace(/\//g, "-");
   return join(homedir(), ".claude", "projects", encoded);
 }
 
-export function getHiveMindSessionsDir(projectCwd: string): string {
+function getHiveMindSessionsDir(projectCwd: string): string {
   return join(projectCwd, ".claude", "hive-mind", "sessions");
 }
 
 /** Returns both regular sessions and agent sessions. */
-export async function findRawSessions(rawDir: string) {
+async function findRawSessions(rawDir: string) {
   try {
     const files = await readdir(rawDir);
     const sessions: Array<{ path: string; agentId?: string }> = [];
@@ -212,7 +223,7 @@ export async function findRawSessions(rawDir: string) {
   }
 }
 
-export async function needsExtraction(
+async function needsExtraction(
   rawPath: string,
   extractedPath: string,
 ): Promise<boolean> {

@@ -260,4 +260,118 @@ describe("Other Services", () => {
       }
     });
   });
+
+  describe("1password-secret-key", () => {
+    test("detects valid secrets", () => {
+      // From gitleaks whitepaper examples
+      const secrets = [
+        "A3-ASWWYB-798JRYLJVD4-23DC2-86TVM-H43EB",
+        "A3-ASWWYB-798JRY-LJVD4-23DC2-86TVM-H43EB",
+      ];
+      for (const secret of secrets) {
+        expect(detectSecrets(secret).length).toBeGreaterThan(0);
+      }
+    });
+
+    test("rejects false positives", () => {
+      const notSecrets = [
+        "A3-XXXXXX-XXXXXXXXXXX-XXXXX-XXXXX-XXXXX", // low entropy placeholder
+      ];
+      for (const s of notSecrets) {
+        const matches = detectSecrets(s);
+        expect(matches.some((m) => m.ruleId === "1password-secret-key")).toBe(
+          false,
+        );
+      }
+    });
+  });
+
+  describe("google-api-key", () => {
+    test("detects valid secrets", () => {
+      // From gitleaks test cases
+      const secrets = ["AIzaSyNHxIf32IQ1a1yjl3ZJIqKZqzLAK1XhDk-"];
+      for (const secret of secrets) {
+        expect(detectSecrets(secret).length).toBeGreaterThan(0);
+      }
+    });
+
+    test("rejects false positives", () => {
+      const notSecrets = [
+        // Insufficient entropy (all similar characters)
+        'apiKey: "AIzaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+      ];
+      for (const s of notSecrets) {
+        const matches = detectSecrets(s);
+        expect(matches.some((m) => m.ruleId === "gcp-api-key")).toBe(false);
+      }
+    });
+  });
+});
+
+// Tests for regex conversion edge cases (ported from gitleaks)
+describe("Regex Conversion", () => {
+  describe("multiline patterns ((?s:.) converted to [\\s\\S])", () => {
+    test("kubernetes-secret-yaml detects secrets with kind before data", () => {
+      // From gitleaks: kind: Secret before data section
+      const k8sSecret = `apiVersion: v1
+kind: Secret
+metadata:
+  name: my-secret
+data:
+  password: c2VjcmV0cGFzc3dvcmQ=`;
+      const matches = detectSecrets(k8sSecret);
+      expect(matches.some((m) => m.ruleId === "kubernetes-secret-yaml")).toBe(
+        true,
+      );
+    });
+
+    test("kubernetes-secret-yaml detects secrets with data before kind", () => {
+      // From gitleaks: data section before kind: Secret (alternate ordering)
+      const k8sSecret = `apiVersion: v1
+metadata:
+  name: my-secret
+data:
+  password: c2VjcmV0cGFzc3dvcmQ=
+kind: Secret`;
+      const matches = detectSecrets(k8sSecret);
+      expect(matches.some((m) => m.ruleId === "kubernetes-secret-yaml")).toBe(
+        true,
+      );
+    });
+
+    // Note: gitleaks rejects empty values and template variables, but our
+    // JS regex conversion is more aggressive (see secret-rules.ts header).
+    // This is acceptable: false positives (over-redaction) are safer than
+    // false negatives (missing secrets) for our use case.
+  });
+
+  describe("private-key detection", () => {
+    test("detects RSA private key", () => {
+      // From gitleaks: standard RSA private key format
+      const privateKey = `-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyf8DqJfIKWNNaLHN9qZjHPQzYpZmL
+klmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/ABCDEFGH
+-----END RSA PRIVATE KEY-----`;
+      const matches = detectSecrets(privateKey);
+      expect(matches.some((m) => m.ruleId === "private-key")).toBe(true);
+    });
+
+    test("detects PGP private key", () => {
+      // From gitleaks: PGP private key block
+      const privateKey = `-----BEGIN PGP PRIVATE KEY BLOCK-----
+lQPGBGRnZ2EBCADQjsT3n6jj4dJFVFbMaZNe9p4Ohfe3kTPJyiLZJR5Kj9mK8sd7
+-----END PGP PRIVATE KEY BLOCK-----`;
+      const matches = detectSecrets(privateKey);
+      expect(matches.some((m) => m.ruleId === "private-key")).toBe(true);
+    });
+
+    test("rejects minimal content private key format", () => {
+      // From gitleaks: private key format with minimal content should not match
+      const notPrivateKey = `-----BEGIN PRIVATE KEY-----
+anything
+-----END PRIVATE KEY-----`;
+      const matches = detectSecrets(notPrivateKey);
+      expect(matches.some((m) => m.ruleId === "private-key")).toBe(false);
+    });
+  });
 });
