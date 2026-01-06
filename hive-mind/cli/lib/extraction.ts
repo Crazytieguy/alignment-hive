@@ -179,7 +179,7 @@ async function readFirstLine(filePath: string): Promise<string | null> {
   }
 }
 
-async function readExtractedMeta(
+export async function readExtractedMeta(
   extractedPath: string,
 ): Promise<HiveMindMeta | null> {
   try {
@@ -199,7 +199,7 @@ function getProjectsDir(cwd: string): string {
   return join(homedir(), ".claude", "projects", encoded);
 }
 
-function getHiveMindSessionsDir(projectCwd: string): string {
+export function getHiveMindSessionsDir(projectCwd: string): string {
   return join(projectCwd, ".claude", "hive-mind", "sessions");
 }
 

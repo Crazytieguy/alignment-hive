@@ -11,8 +11,686 @@ var __export = (target, all) => {
     });
 };
 
-// cli/commands/login.ts
+// cli/commands/index.ts
+import { readdir as readdir2 } from "fs/promises";
+import { join as join3 } from "path";
+
+// cli/lib/extraction.ts
+import { createReadStream } from "fs";
+import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
+import { homedir as homedir2 } from "os";
+import { basename, dirname, join as join2 } from "path";
+
+// cli/lib/config.ts
+import { randomUUID } from "crypto";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { homedir } from "os";
+import { join } from "path";
+var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CYZ10VVZPJVRQBJESK1A";
+var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
+var AUTH_FILE = join(AUTH_DIR, "auth.json");
+async function getCheckoutId(hiveMindDir) {
+  const checkoutIdFile = join(hiveMindDir, "checkout-id");
+  try {
+    const id = await readFile(checkoutIdFile, "utf-8");
+    return id.trim();
+  } catch {
+    const id = randomUUID();
+    await mkdir(hiveMindDir, { recursive: true });
+    await writeFile(checkoutIdFile, id);
+    const gitignorePath = join(hiveMindDir, ".gitignore");
+    try {
+      const existing = await readFile(gitignorePath, "utf-8");
+      if (!existing.includes("checkout-id")) {
+        await writeFile(gitignorePath, `${existing.trimEnd()}
+checkout-id
+`);
+      }
+    } catch {
+      await writeFile(gitignorePath, `checkout-id
+`);
+    }
+    return id;
+  }
+}
+function getShellConfig() {
+  const shell = process.env.SHELL ?? "/bin/bash";
+  if (shell.includes("zsh")) {
+    return { file: "~/.zshrc", sourceCmd: "source ~/.zshrc" };
+  }
+  if (shell.includes("bash")) {
+    return { file: "~/.bashrc", sourceCmd: "source ~/.bashrc" };
+  }
+  if (shell.includes("fish")) {
+    return {
+      file: "~/.config/fish/config.fish",
+      sourceCmd: "source ~/.config/fish/config.fish"
+    };
+  }
+  return { file: "~/.profile", sourceCmd: "source ~/.profile" };
+}
+
+// cli/lib/secret-rules.ts
+var SECRET_RULES = [
+  { id: "1password-secret-key", regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"), entropy: 3.8, keywords: ["a3-"] },
+  { id: "1password-service-account-token", regex: new RegExp(`ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}`, "gi"), entropy: 4, keywords: ["ops_"] },
+  { id: "adafruit-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["adafruit"] },
+  { id: "adobe-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["adobe"] },
+  { id: "adobe-client-secret", regex: new RegExp(`\\b(p8e-[a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["p8e-"] },
+  { id: "age-secret-key", regex: new RegExp(`AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}`, "gi"), keywords: ["age-secret-key-1"] },
+  { id: "airtable-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["airtable"] },
+  { id: "airtable-personnal-access-token", regex: new RegExp(`\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b`, "gi"), keywords: ["airtable"] },
+  { id: "algolia-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["algolia"] },
+  { id: "alibaba-access-key-id", regex: new RegExp(`\\b(LTAI[a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["ltai"] },
+  { id: "alibaba-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["alibaba"] },
+  { id: "anthropic-admin-api-key", regex: new RegExp(`\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-admin01"] },
+  { id: "anthropic-api-key", regex: new RegExp(`\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-api03"] },
+  { id: "artifactory-api-key", regex: new RegExp(`\\bAKCp[A-Za-z0-9]{69}\\b`, "gi"), entropy: 4.5, keywords: ["akcp"] },
+  { id: "artifactory-reference-token", regex: new RegExp(`\\bcmVmd[A-Za-z0-9]{59}\\b`, "gi"), entropy: 4.5, keywords: ["cmvmd"] },
+  { id: "asana-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
+  { id: "asana-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
+  { id: "atlassian-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["atlassian", "confluence", "jira", "atatt3"] },
+  { id: "authress-service-client-access-key", regex: new RegExp(`\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sc_", "ext_", "scauth_", "authress_"] },
+  { id: "aws-access-token", regex: new RegExp(`\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b`, "gi"), entropy: 3, keywords: ["a3t", "akia", "asia", "abia", "acca"] },
+  { id: "aws-amazon-bedrock-api-key-long-lived", regex: new RegExp(`\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["absk"] },
+  { id: "aws-amazon-bedrock-api-key-short-lived", regex: new RegExp(`bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t`, "gi"), entropy: 3, keywords: ["bedrock-api-key-"] },
+  { id: "azure-ad-client-secret", regex: new RegExp(`(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`, "gi"), entropy: 3, keywords: ["q~"] },
+  { id: "beamer-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["beamer"] },
+  { id: "bitbucket-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
+  { id: "bitbucket-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
+  { id: "bittrex-access-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
+  { id: "bittrex-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
+  { id: "cisco-meraki-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["meraki"] },
+  { id: "clickhouse-cloud-api-secret-key", regex: new RegExp(`\\b(4b1d[A-Za-z0-9]{38})\\b`, "gi"), entropy: 3, keywords: ["4b1d"] },
+  { id: "clojars-api-token", regex: new RegExp(`CLOJARS_[a-z0-9]{60}`, "gi"), entropy: 2, keywords: ["clojars_"] },
+  { id: "cloudflare-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
+  { id: "cloudflare-global-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
+  { id: "cloudflare-origin-ca-key", regex: new RegExp(`\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare", "v1.0-"] },
+  { id: "codecov-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["codecov"] },
+  { id: "cohere-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["cohere", "co_api_key"] },
+  { id: "coinbase-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["coinbase"] },
+  { id: "confluent-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
+  { id: "confluent-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
+  { id: "contentful-delivery-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["contentful"] },
+  { id: "curl-auth-header", regex: new RegExp(`\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|$)`, "gi"), entropy: 2.75, keywords: ["curl"] },
+  { id: "curl-auth-user", regex: new RegExp(`\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|$)`, "gi"), entropy: 2, keywords: ["curl"] },
+  { id: "databricks-api-token", regex: new RegExp(`\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dapi"] },
+  { id: "datadog-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["datadog"] },
+  { id: "defined-networking-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dnkey"] },
+  { id: "digitalocean-access-token", regex: new RegExp(`\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["doo_v1_"] },
+  { id: "digitalocean-pat", regex: new RegExp(`\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dop_v1_"] },
+  { id: "digitalocean-refresh-token", regex: new RegExp(`\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dor_v1_"] },
+  { id: "discord-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["discord"] },
+  { id: "discord-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
+  { id: "discord-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
+  { id: "doppler-api-token", regex: new RegExp(`dp\\.pt\\.[a-z0-9]{43}`, "gi"), entropy: 2, keywords: ["dp.pt."] },
+  { id: "droneci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["droneci"] },
+  { id: "dropbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
+  { id: "dropbox-long-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
+  { id: "dropbox-short-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
+  { id: "duffel-api-token", regex: new RegExp(`duffel_(?:test|live)_[a-z0-9_\\-=]{43}`, "gi"), entropy: 2, keywords: ["duffel_"] },
+  { id: "dynatrace-api-token", regex: new RegExp(`dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}`, "gi"), entropy: 4, keywords: ["dt0c01."] },
+  { id: "easypost-api-token", regex: new RegExp(`\\bEZAK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["ezak"] },
+  { id: "easypost-test-api-token", regex: new RegExp(`\\bEZTK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["eztk"] },
+  { id: "etsy-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["etsy"] },
+  { id: "facebook-access-token", regex: new RegExp(`\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
+  { id: "facebook-page-access-token", regex: new RegExp(`\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["eaam", "eaac"] },
+  { id: "facebook-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
+  { id: "fastly-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["fastly"] },
+  { id: "finicity-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
+  { id: "finicity-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
+  { id: "finnhub-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finnhub"] },
+  { id: "flickr-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["flickr"] },
+  { id: "flutterwave-encryption-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{12}`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
+  { id: "flutterwave-public-key", regex: new RegExp(`FLWPUBK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwpubk_test"] },
+  { id: "flutterwave-secret-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
+  { id: "flyio-access-token", regex: new RegExp(`\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["fo1_", "fm1", "fm2_"] },
+  { id: "frameio-api-token", regex: new RegExp(`fio-u-[a-z0-9\\-_=]{64}`, "gi"), keywords: ["fio-u-"] },
+  { id: "freemius-secret-key", regex: new RegExp(`["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`, "gi"), keywords: ["secret_key"] },
+  { id: "freshbooks-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["freshbooks"] },
+  { id: "gcp-api-key", regex: new RegExp(`\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["aiza"] },
+  { id: "generic-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:access|auth|(?:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"] },
+  { id: "github-app-token", regex: new RegExp(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghu_", "ghs_"] },
+  { id: "github-fine-grained-pat", regex: new RegExp(`github_pat_\\w{82}`, "gi"), entropy: 3, keywords: ["github_pat_"] },
+  { id: "github-oauth", regex: new RegExp(`gho_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["gho_"] },
+  { id: "github-pat", regex: new RegExp(`ghp_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghp_"] },
+  { id: "github-refresh-token", regex: new RegExp(`ghr_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghr_"] },
+  { id: "gitlab-cicd-job-token", regex: new RegExp(`glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}`, "gi"), entropy: 3, keywords: ["glcbt-"] },
+  { id: "gitlab-deploy-token", regex: new RegExp(`gldt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["gldt-"] },
+  { id: "gitlab-feature-flag-client-token", regex: new RegExp(`glffct-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glffct-"] },
+  { id: "gitlab-feed-token", regex: new RegExp(`glft-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glft-"] },
+  { id: "gitlab-incoming-mail-token", regex: new RegExp(`glimt-[0-9a-zA-Z_\\-]{25}`, "gi"), entropy: 3, keywords: ["glimt-"] },
+  { id: "gitlab-kubernetes-agent-token", regex: new RegExp(`glagent-[0-9a-zA-Z_\\-]{50}`, "gi"), entropy: 3, keywords: ["glagent-"] },
+  { id: "gitlab-oauth-app-secret", regex: new RegExp(`gloas-[0-9a-zA-Z_\\-]{64}`, "gi"), entropy: 3, keywords: ["gloas-"] },
+  { id: "gitlab-pat", regex: new RegExp(`glpat-[\\w-]{20}`, "gi"), entropy: 3, keywords: ["glpat-"] },
+  { id: "gitlab-pat-routable", regex: new RegExp(`\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glpat-"] },
+  { id: "gitlab-ptt", regex: new RegExp(`glptt-[0-9a-f]{40}`, "gi"), entropy: 3, keywords: ["glptt-"] },
+  { id: "gitlab-rrt", regex: new RegExp(`GR1348941[\\w-]{20}`, "gi"), entropy: 3, keywords: ["gr1348941"] },
+  { id: "gitlab-runner-authentication-token", regex: new RegExp(`glrt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glrt-"] },
+  { id: "gitlab-runner-authentication-token-routable", regex: new RegExp(`\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glrt-"] },
+  { id: "gitlab-scim-token", regex: new RegExp(`glsoat-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glsoat-"] },
+  { id: "gitlab-session-cookie", regex: new RegExp(`_gitlab_session=[0-9a-z]{32}`, "gi"), entropy: 3, keywords: ["_gitlab_session="] },
+  { id: "gitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["gitter"] },
+  { id: "gocardless-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["live_", "gocardless"] },
+  { id: "grafana-api-key", regex: new RegExp(`\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["eyjrijoi"] },
+  { id: "grafana-cloud-api-token", regex: new RegExp(`\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glc_"] },
+  { id: "grafana-service-account-token", regex: new RegExp(`\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glsa_"] },
+  { id: "harness-api-key", regex: new RegExp(`(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}`, "gi"), keywords: ["pat.", "sat."] },
+  { id: "hashicorp-tf-api-token", regex: new RegExp(`[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}`, "gi"), entropy: 3.5, keywords: ["atlasv1"] },
+  { id: "hashicorp-tf-password", regex: new RegExp(`[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["administrator_login_password", "password"] },
+  { id: "heroku-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["heroku"] },
+  { id: "heroku-api-key-v2", regex: new RegExp(`\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hrku-aa"] },
+  { id: "hubspot-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["hubspot"] },
+  { id: "huggingface-access-token", regex: new RegExp(`\\b(hf_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["hf_"] },
+  { id: "huggingface-organization-api-token", regex: new RegExp(`\\b(api_org_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["api_org_"] },
+  { id: "infracost-api-token", regex: new RegExp(`\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ico-"] },
+  { id: "intercom-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["intercom"] },
+  { id: "intra42-client-secret", regex: new RegExp(`\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["intra", "s-s4t2ud-", "s-s4t2af-"] },
+  { id: "jfrog-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
+  { id: "jfrog-identity-token", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
+  { id: "jwt", regex: new RegExp(`\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ey"] },
+  { id: "kraken-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kraken"] },
+  { id: "kubernetes-secret-yaml", regex: new RegExp(`(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?[\\s\\S]{0,200}?\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))[\\s\\S]{0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`, "gi"), keywords: ["secret"] },
+  { id: "kucoin-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
+  { id: "kucoin-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
+  { id: "launchdarkly-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["launchdarkly"] },
+  { id: "linear-api-key", regex: new RegExp(`lin_api_[a-z0-9]{40}`, "gi"), entropy: 2, keywords: ["lin_api_"] },
+  { id: "linear-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linear"] },
+  { id: "linkedin-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
+  { id: "linkedin-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
+  { id: "lob-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_", "live_"] },
+  { id: "lob-pub-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_pub", "live_pub", "_pub"] },
+  { id: "looker-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
+  { id: "looker-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
+  { id: "mailchimp-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailchimp"] },
+  { id: "mailgun-private-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
+  { id: "mailgun-pub-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
+  { id: "mailgun-signing-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
+  { id: "mapbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mapbox"] },
+  { id: "mattermost-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mattermost"] },
+  { id: "maxmind-license-key", regex: new RegExp(`\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["_mmk"] },
+  { id: "messagebird-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
+  { id: "messagebird-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
+  { id: "microsoft-teams-webhook", regex: new RegExp(`https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}`, "gi"), keywords: ["webhook.office.com", "webhookb2", "incomingwebhook"] },
+  { id: "netlify-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["netlify"] },
+  { id: "new-relic-browser-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrjs-"] },
+  { id: "new-relic-insert-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrii-"] },
+  { id: "new-relic-user-api-id", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["new-relic", "newrelic", "new_relic"] },
+  { id: "new-relic-user-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrak"] },
+  { id: "notion-api-token", regex: new RegExp(`\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["ntn_"] },
+  { id: "npm-access-token", regex: new RegExp(`\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["npm_"] },
+  { id: "nuget-config-password", regex: new RegExp(`<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>`, "gi"), entropy: 1, keywords: ["<add key="] },
+  { id: "nytimes-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nytimes", "new-york-times", "newyorktimes"] },
+  { id: "octopus-deploy-api-key", regex: new RegExp(`\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["api-"] },
+  { id: "okta-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["okta"] },
+  { id: "openai-api-key", regex: new RegExp(`\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["t3blbkfj"] },
+  { id: "openshift-user-token", regex: new RegExp(`\\b(sha256~[\\w-]{43})(?:[^\\w-]|$)`, "gi"), entropy: 3.5, keywords: ["sha256~"] },
+  { id: "perplexity-api-key", regex: new RegExp(`\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`, "gi"), entropy: 4, keywords: ["pplx-"] },
+  { id: "plaid-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["plaid"] },
+  { id: "plaid-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
+  { id: "plaid-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
+  { id: "planetscale-api-token", regex: new RegExp(`\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_tkn_"] },
+  { id: "planetscale-oauth-token", regex: new RegExp(`\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_oauth_"] },
+  { id: "planetscale-password", regex: new RegExp(`\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_pw_"] },
+  { id: "postman-api-token", regex: new RegExp(`\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pmak-"] },
+  { id: "prefect-api-token", regex: new RegExp(`\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pnu_"] },
+  { id: "private-key", regex: new RegExp(`-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----`, "gi"), keywords: ["-----begin"] },
+  { id: "privateai-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["privateai", "private_ai", "private-ai"] },
+  { id: "pulumi-api-token", regex: new RegExp(`\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pul-"] },
+  { id: "pypi-upload-token", regex: new RegExp(`pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}`, "gi"), entropy: 3, keywords: ["pypi-ageichlwas5vcmc"] },
+  { id: "rapidapi-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["rapidapi"] },
+  { id: "readme-api-token", regex: new RegExp(`\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rdme_"] },
+  { id: "rubygems-api-token", regex: new RegExp(`\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rubygems_"] },
+  { id: "scalingo-api-token", regex: new RegExp(`\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["tk-us-"] },
+  { id: "sendbird-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
+  { id: "sendbird-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
+  { id: "sendgrid-api-token", regex: new RegExp(`\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sg."] },
+  { id: "sendinblue-api-token", regex: new RegExp(`\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["xkeysib-"] },
+  { id: "sentry-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sentry"] },
+  { id: "sentry-org-token", regex: new RegExp(`\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|$)`, "gi"), entropy: 4.5, keywords: ["sntrys_eyjpyxqio"] },
+  { id: "sentry-user-token", regex: new RegExp(`\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["sntryu_"] },
+  { id: "settlemint-application-access-token", regex: new RegExp(`\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_aat"] },
+  { id: "settlemint-personal-access-token", regex: new RegExp(`\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_pat"] },
+  { id: "settlemint-service-access-token", regex: new RegExp(`\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_sat"] },
+  { id: "shippo-api-token", regex: new RegExp(`\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["shippo_"] },
+  { id: "shopify-access-token", regex: new RegExp(`shpat_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpat_"] },
+  { id: "shopify-custom-access-token", regex: new RegExp(`shpca_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpca_"] },
+  { id: "shopify-private-app-access-token", regex: new RegExp(`shppa_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shppa_"] },
+  { id: "shopify-shared-secret", regex: new RegExp(`shpss_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpss_"] },
+  { id: "sidekiq-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bundle_enterprise__contribsys__com", "bundle_gems__contribsys__com"] },
+  { id: "sidekiq-sensitive-url", regex: new RegExp(`\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)`, "gi"), keywords: ["gems.contribsys.com", "enterprise.contribsys.com"] },
+  { id: "slack-app-token", regex: new RegExp(`xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+`, "gi"), entropy: 2, keywords: ["xapp"] },
+  { id: "slack-bot-token", regex: new RegExp(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`, "gi"), entropy: 3, keywords: ["xoxb"] },
+  { id: "slack-config-access-token", regex: new RegExp(`xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}`, "gi"), entropy: 2, keywords: ["xoxe.xoxb-", "xoxe.xoxp-"] },
+  { id: "slack-config-refresh-token", regex: new RegExp(`xoxe-\\d-[A-Z0-9]{146}`, "gi"), entropy: 2, keywords: ["xoxe-"] },
+  { id: "slack-legacy-bot-token", regex: new RegExp(`xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}`, "gi"), entropy: 2, keywords: ["xoxb"] },
+  { id: "slack-legacy-token", regex: new RegExp(`xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+`, "gi"), entropy: 2, keywords: ["xoxo", "xoxs"] },
+  { id: "slack-legacy-workspace-token", regex: new RegExp(`xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}`, "gi"), entropy: 2, keywords: ["xoxa", "xoxr"] },
+  { id: "slack-user-token", regex: new RegExp(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`, "gi"), entropy: 2, keywords: ["xoxp-", "xoxe-"] },
+  { id: "slack-webhook-url", regex: new RegExp(`(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}`, "gi"), keywords: ["hooks.slack.com"] },
+  { id: "snyk-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["snyk"] },
+  { id: "sonar-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sonar"] },
+  { id: "sourcegraph-access-token", regex: new RegExp(`\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sgp_", "sourcegraph"] },
+  { id: "square-access-token", regex: new RegExp(`\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sq0atp-", "eaaa"] },
+  { id: "squarespace-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["squarespace"] },
+  { id: "stripe-access-token", regex: new RegExp(`\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"] },
+  { id: "sumologic-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
+  { id: "sumologic-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
+  { id: "telegram-bot-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["telegr"] },
+  { id: "travisci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["travis"] },
+  { id: "twilio-api-key", regex: new RegExp(`SK[0-9a-fA-F]{32}`, "gi"), entropy: 3, keywords: ["sk"] },
+  { id: "twitch-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitch"] },
+  { id: "twitter-access-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
+  { id: "twitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
+  { id: "twitter-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
+  { id: "twitter-api-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
+  { id: "twitter-bearer-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
+  { id: "typeform-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["tfp_"] },
+  { id: "vault-batch-token", regex: new RegExp(`\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hvb."] },
+  { id: "vault-service-token", regex: new RegExp(`\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["hvs.", "s."] },
+  { id: "yandex-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
+  { id: "yandex-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
+  { id: "yandex-aws-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
+  { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["zendesk"] }
+];
+var ALL_KEYWORDS = new Set([
+  "-----begin",
+  "4b1d",
+  "<add key=",
+  "_gitlab_session=",
+  "_mmk",
+  "_pub",
+  "a3-",
+  "a3t",
+  "abia",
+  "absk",
+  "acca",
+  "access",
+  "adafruit",
+  "administrator_login_password",
+  "adobe",
+  "age-secret-key-1",
+  "airtable",
+  "aiza",
+  "akcp",
+  "akia",
+  "algolia",
+  "alibaba",
+  "api",
+  "api-",
+  "api_org_",
+  "artifactory",
+  "asana",
+  "asia",
+  "atatt3",
+  "atlassian",
+  "atlasv1",
+  "auth",
+  "authress_",
+  "beamer",
+  "bedrock-api-key-",
+  "bintray",
+  "bitbucket",
+  "bittrex",
+  "bundle_enterprise__contribsys__com",
+  "bundle_gems__contribsys__com",
+  "clojars_",
+  "cloudflare",
+  "cmvmd",
+  "co_api_key",
+  "codecov",
+  "cohere",
+  "coinbase",
+  "confluence",
+  "confluent",
+  "contentful",
+  "credential",
+  "creds",
+  "curl",
+  "dapi",
+  "datadog",
+  "discord",
+  "dnkey",
+  "doo_v1_",
+  "dop_v1_",
+  "dor_v1_",
+  "dp.pt.",
+  "droneci",
+  "dropbox",
+  "dt0c01.",
+  "duffel_",
+  "eaaa",
+  "eaac",
+  "eaam",
+  "enterprise.contribsys.com",
+  "etsy",
+  "ext_",
+  "ey",
+  "eyjrijoi",
+  "ezak",
+  "eztk",
+  "facebook",
+  "fastly",
+  "finicity",
+  "finnhub",
+  "fio-u-",
+  "flickr",
+  "flwpubk_test",
+  "flwseck_test",
+  "fm1",
+  "fm2_",
+  "fo1_",
+  "freshbooks",
+  "gems.contribsys.com",
+  "gho_",
+  "ghp_",
+  "ghr_",
+  "ghs_",
+  "ghu_",
+  "github_pat_",
+  "gitter",
+  "glagent-",
+  "glc_",
+  "glcbt-",
+  "gldt-",
+  "glffct-",
+  "glft-",
+  "glimt-",
+  "gloas-",
+  "glpat-",
+  "glptt-",
+  "glrt-",
+  "glsa_",
+  "glsoat-",
+  "gocardless",
+  "gr1348941",
+  "heroku",
+  "hf_",
+  "hooks.slack.com",
+  "hrku-aa",
+  "hubspot",
+  "hvb.",
+  "hvs.",
+  "ico-",
+  "incomingwebhook",
+  "intercom",
+  "intra",
+  "jfrog",
+  "jira",
+  "key",
+  "kraken",
+  "kucoin",
+  "launchdarkly",
+  "lin_api_",
+  "linear",
+  "linked-in",
+  "linked_in",
+  "linkedin",
+  "live_",
+  "live_pub",
+  "looker",
+  "ltai",
+  "mailchimp",
+  "mailgun",
+  "mapbox",
+  "mattermost",
+  "meraki",
+  "message-bird",
+  "message_bird",
+  "messagebird",
+  "netlify",
+  "new-relic",
+  "new-york-times",
+  "new_relic",
+  "newrelic",
+  "newyorktimes",
+  "npm_",
+  "nrak",
+  "nrii-",
+  "nrjs-",
+  "ntn_",
+  "nytimes",
+  "okta",
+  "ops_",
+  "p8e-",
+  "passwd",
+  "password",
+  "pat.",
+  "plaid",
+  "pmak-",
+  "pnu_",
+  "pplx-",
+  "private-ai",
+  "private_ai",
+  "privateai",
+  "pscale_oauth_",
+  "pscale_pw_",
+  "pscale_tkn_",
+  "pul-",
+  "pypi-ageichlwas5vcmc",
+  "q~",
+  "rapidapi",
+  "rdme_",
+  "rk_live",
+  "rk_prod",
+  "rk_test",
+  "rubygems_",
+  "s-s4t2af-",
+  "s-s4t2ud-",
+  "s.",
+  "sat.",
+  "sc_",
+  "scauth_",
+  "secret",
+  "secret_key",
+  "sendbird",
+  "sentry",
+  "sg.",
+  "sgp_",
+  "sha256~",
+  "shippo_",
+  "shpat_",
+  "shpca_",
+  "shppa_",
+  "shpss_",
+  "sk",
+  "sk-ant-admin01",
+  "sk-ant-api03",
+  "sk_live",
+  "sk_prod",
+  "sk_test",
+  "sm_aat",
+  "sm_pat",
+  "sm_sat",
+  "sntrys_eyjpyxqio",
+  "sntryu_",
+  "snyk",
+  "sonar",
+  "sourcegraph",
+  "sq0atp-",
+  "squarespace",
+  "sumo",
+  "t3blbkfj",
+  "telegr",
+  "test_",
+  "test_pub",
+  "tfp_",
+  "tk-us-",
+  "token",
+  "travis",
+  "twitch",
+  "twitter",
+  "v1.0-",
+  "webhook.office.com",
+  "webhookb2",
+  "xapp",
+  "xkeysib-",
+  "xoxa",
+  "xoxb",
+  "xoxe-",
+  "xoxe.xoxb-",
+  "xoxe.xoxp-",
+  "xoxo",
+  "xoxp-",
+  "xoxr",
+  "xoxs",
+  "xray",
+  "yandex",
+  "zendesk",
+  "zxlk"
+]);
+
+// cli/lib/sanitize.ts
+var MAX_SANITIZE_DEPTH = 100;
+var MIN_SECRET_LENGTH = 8;
+var SAFE_KEYS = new Set([
+  "uuid",
+  "parentUuid",
+  "sessionId",
+  "tool_use_id",
+  "sourceToolUseID",
+  "id",
+  "type",
+  "role",
+  "subtype",
+  "level",
+  "stop_reason",
+  "timestamp",
+  "version",
+  "model",
+  "media_type",
+  "name",
+  "cwd",
+  "gitBranch"
+]);
+function mightContainSecrets(content) {
+  const lower = content.toLowerCase();
+  for (const keyword of ALL_KEYWORDS) {
+    if (lower.includes(keyword)) {
+      return true;
+    }
+  }
+  return false;
+}
+function shannonEntropy(data) {
+  if (!data)
+    return 0;
+  const charCounts = new Map;
+  for (const char of data) {
+    charCounts.set(char, (charCounts.get(char) || 0) + 1);
+  }
+  let entropy = 0;
+  const len = data.length;
+  for (const count of charCounts.values()) {
+    const freq = count / len;
+    entropy -= freq * Math.log2(freq);
+  }
+  return entropy;
+}
+var _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
+function getDetectSecretsStats() {
+  return _stats;
+}
+function resetDetectSecretsStats() {
+  _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
+}
+function detectSecrets(content) {
+  const t0 = process.env.DEBUG ? performance.now() : 0;
+  _stats.calls++;
+  if (content.length < MIN_SECRET_LENGTH) {
+    return [];
+  }
+  const matches = [];
+  const lowerContent = content.toLowerCase();
+  const hasAnyKeyword = mightContainSecrets(content);
+  if (hasAnyKeyword)
+    _stats.keywordHits++;
+  for (const rule of SECRET_RULES) {
+    if (rule.keywords && rule.keywords.length > 0) {
+      if (!hasAnyKeyword)
+        continue;
+      const hasKeyword = rule.keywords.some((k) => lowerContent.includes(k));
+      if (!hasKeyword)
+        continue;
+    }
+    _stats.regexRuns++;
+    rule.regex.lastIndex = 0;
+    let match;
+    while ((match = rule.regex.exec(content)) !== null) {
+      const secretValue = match[1] || match[0];
+      const start = match.index;
+      const end = start + match[0].length;
+      const entropy = rule.entropy ? shannonEntropy(secretValue) : undefined;
+      if (rule.entropy && entropy !== undefined && entropy < rule.entropy) {
+        continue;
+      }
+      matches.push({
+        ruleId: rule.id,
+        match: match[0],
+        start,
+        end,
+        entropy
+      });
+      if (match[0].length === 0) {
+        rule.regex.lastIndex++;
+      }
+    }
+  }
+  matches.sort((a, b) => a.start - b.start);
+  const deduped = [];
+  for (const m of matches) {
+    const last = deduped.at(-1);
+    if (last === undefined || m.start >= last.end) {
+      deduped.push(m);
+    }
+  }
+  if (process.env.DEBUG) {
+    _stats.totalMs += performance.now() - t0;
+  }
+  return deduped;
+}
+function sanitizeString(content) {
+  if (content.length < MIN_SECRET_LENGTH) {
+    return content;
+  }
+  const secrets = detectSecrets(content);
+  if (secrets.length === 0) {
+    return content;
+  }
+  let result = content;
+  for (let i = secrets.length - 1;i >= 0; i--) {
+    const secret = secrets[i];
+    result = `${result.slice(0, secret.start)}[REDACTED:${secret.ruleId}]${result.slice(secret.end)}`;
+  }
+  return result;
+}
+function sanitizeDeep(value, depth = 0) {
+  if (depth > MAX_SANITIZE_DEPTH) {
+    return value;
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return sanitizeString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeDeep(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const result = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (SAFE_KEYS.has(key) && typeof val === "string") {
+        result[key] = val;
+      } else {
+        result[key] = sanitizeDeep(val, depth + 1);
+      }
+    }
+    return result;
+  }
+  return value;
+}
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -13546,1025 +14224,6 @@ function date4(params) {
 
 // node_modules/zod/v4/classic/external.js
 config(en_default());
-// cli/lib/auth.ts
-import { mkdir as mkdir2 } from "fs/promises";
-
-// cli/lib/config.ts
-import { randomUUID } from "crypto";
-import { mkdir, readFile, writeFile } from "fs/promises";
-import { homedir } from "os";
-import { join } from "path";
-var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CYZ10VVZPJVRQBJESK1A";
-var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
-var AUTH_FILE = join(AUTH_DIR, "auth.json");
-async function getCheckoutId(hiveMindDir) {
-  const checkoutIdFile = join(hiveMindDir, "checkout-id");
-  try {
-    const id = await readFile(checkoutIdFile, "utf-8");
-    return id.trim();
-  } catch {
-    const id = randomUUID();
-    await mkdir(hiveMindDir, { recursive: true });
-    await writeFile(checkoutIdFile, id);
-    const gitignorePath = join(hiveMindDir, ".gitignore");
-    try {
-      const existing = await readFile(gitignorePath, "utf-8");
-      if (!existing.includes("checkout-id")) {
-        await writeFile(gitignorePath, `${existing.trimEnd()}
-checkout-id
-`);
-      }
-    } catch {
-      await writeFile(gitignorePath, `checkout-id
-`);
-    }
-    return id;
-  }
-}
-function getShellConfig() {
-  const shell = process.env.SHELL ?? "/bin/bash";
-  if (shell.includes("zsh")) {
-    return { file: "~/.zshrc", sourceCmd: "source ~/.zshrc" };
-  }
-  if (shell.includes("bash")) {
-    return { file: "~/.bashrc", sourceCmd: "source ~/.bashrc" };
-  }
-  if (shell.includes("fish")) {
-    return {
-      file: "~/.config/fish/config.fish",
-      sourceCmd: "source ~/.config/fish/config.fish"
-    };
-  }
-  return { file: "~/.profile", sourceCmd: "source ~/.profile" };
-}
-
-// cli/lib/auth.ts
-var WORKOS_API_URL = "https://api.workos.com/user_management";
-var AuthUserSchema = exports_external.object({
-  id: exports_external.string(),
-  email: exports_external.string(),
-  first_name: exports_external.string().optional(),
-  last_name: exports_external.string().optional()
-});
-var AuthDataSchema = exports_external.object({
-  access_token: exports_external.string(),
-  refresh_token: exports_external.string(),
-  user: AuthUserSchema
-});
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
-function isTokenExpired(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number")
-    return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
-}
-async function loadAuthData() {
-  try {
-    const file2 = Bun.file(AUTH_FILE);
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function saveAuthData(data) {
-  await mkdir2(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
-}
-async function refreshToken(refreshTokenValue) {
-  try {
-    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const data = await response.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function checkAuthStatus(attemptRefresh = true) {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
-    return { authenticated: false, needsLogin: true };
-  }
-  if (isTokenExpired(authData.access_token)) {
-    if (!attemptRefresh || !authData.refresh_token) {
-      return { authenticated: false, needsLogin: true };
-    }
-    const newAuthData = await refreshToken(authData.refresh_token);
-    if (!newAuthData) {
-      return { authenticated: false, needsLogin: true };
-    }
-    await saveAuthData(newAuthData);
-    return { authenticated: true, user: newAuthData.user, needsLogin: false };
-  }
-  return { authenticated: true, user: authData.user, needsLogin: false };
-}
-function getUserDisplayName(user) {
-  return user.first_name || user.email;
-}
-
-// cli/lib/messages.ts
-function getCliPath() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return "~/.claude/plugins/hive-mind/cli.js";
-}
-function notLoggedInMessage() {
-  const cliPath = getCliPath();
-  const shell = getShellConfig();
-  return [
-    "hive-mind: Not logged in",
-    "  Login:",
-    `    bun ${cliPath} login`,
-    "",
-    "  Add CLI shortcut (optional):",
-    `    echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
-  ].join(`
-`);
-}
-function loggedInMessage(displayName) {
-  return `hive-mind: Logged in as ${displayName}`;
-}
-function extractedMessage(count) {
-  return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
-}
-var login = {
-  header: "hive-mind login",
-  alreadyLoggedIn: "You're already logged in.",
-  confirmRelogin: "Do you want to log in again?",
-  refreshing: "Attempting to refresh existing session...",
-  refreshSuccess: "Session refreshed successfully!",
-  starting: "Starting hive-mind authentication...",
-  visitUrl: "To authenticate, visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
-  browserOpened: "Browser opened. Confirm the code matches and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
-  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
-  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
-  success: "Authentication successful!",
-  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
-  welcomeEmail: (email3) => `Logged in as: ${email3}`,
-  contributing: "Your Claude Code sessions will now contribute to the hive-mind.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before they're submitted.",
-  timeout: "Authentication timed out. Please try again.",
-  startFailed: (error48) => `Failed to start authentication: ${error48}`,
-  authFailed: (error48) => `Authentication failed: ${error48}`
-};
-
-// cli/lib/output.ts
-var colors = {
-  red: (s) => `\x1B[31m${s}\x1B[0m`,
-  green: (s) => `\x1B[32m${s}\x1B[0m`,
-  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
-  blue: (s) => `\x1B[34m${s}\x1B[0m`
-};
-function hookOutput(message) {
-  console.log(JSON.stringify({ systemMessage: message }));
-}
-function printError(message) {
-  console.error(`${colors.red("Error:")} ${message}`);
-}
-function printSuccess(message) {
-  console.log(colors.green(message));
-}
-function printInfo(message) {
-  console.log(colors.blue(message));
-}
-function printWarning(message) {
-  console.log(colors.yellow(message));
-}
-
-// cli/commands/login.ts
-var WORKOS_API_URL2 = "https://api.workos.com/user_management";
-var DeviceAuthResponseSchema = exports_external.object({
-  device_code: exports_external.string(),
-  user_code: exports_external.string(),
-  verification_uri: exports_external.string(),
-  verification_uri_complete: exports_external.string(),
-  interval: exports_external.number(),
-  expires_in: exports_external.number()
-});
-var ErrorResponseSchema = exports_external.object({
-  error: exports_external.string(),
-  error_description: exports_external.string().optional()
-});
-async function confirm(message) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
-      rl.close();
-      resolve(answer.toLowerCase() === "y");
-    });
-  });
-}
-async function openBrowser(url2) {
-  try {
-    if (process.platform === "darwin") {
-      await Bun.spawn(["open", url2]).exited;
-      return true;
-    } else if (process.platform === "linux") {
-      try {
-        await Bun.spawn(["xdg-open", url2]).exited;
-        return true;
-      } catch {
-        try {
-          await Bun.spawn(["wslview", url2]).exited;
-          return true;
-        } catch {
-          return false;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function checkExistingAuth() {
-  const status = await checkAuthStatus(false);
-  if (status.authenticated && status.user) {
-    printWarning(login.alreadyLoggedIn);
-    console.log("");
-    return await confirm(login.confirmRelogin);
-  }
-  return true;
-}
-async function tryRefresh() {
-  const authData = await loadAuthData();
-  if (!authData?.refresh_token)
-    return false;
-  printInfo(login.refreshing);
-  const newAuthData = await refreshToken(authData.refresh_token);
-  if (newAuthData) {
-    await saveAuthData(newAuthData);
-    printSuccess(login.refreshSuccess);
-    return true;
-  }
-  return false;
-}
-async function deviceAuthFlow() {
-  printInfo(login.starting);
-  console.log("");
-  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
-  });
-  const data = await response.json();
-  const errorResult = ErrorResponseSchema.safeParse(data);
-  if (errorResult.success && errorResult.data.error) {
-    printError(login.startFailed(errorResult.data.error));
-    if (errorResult.data.error_description) {
-      console.log(errorResult.data.error_description);
-    }
-    process.exit(1);
-  }
-  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
-  if (!deviceAuthResult.success) {
-    printError("Unexpected response from authentication server");
-    process.exit(1);
-  }
-  const deviceAuth = deviceAuthResult.data;
-  console.log("\u2501".repeat(65));
-  console.log("");
-  console.log(`  ${login.visitUrl}`);
-  console.log("");
-  console.log(`    ${deviceAuth.verification_uri}`);
-  console.log("");
-  console.log(`  ${login.confirmCode}`);
-  console.log("");
-  console.log(`    ${colors.green(deviceAuth.user_code)}`);
-  console.log("");
-  console.log("\u2501".repeat(65));
-  console.log("");
-  if (await openBrowser(deviceAuth.verification_uri_complete)) {
-    printInfo(login.browserOpened);
-  } else {
-    printInfo(login.openManually);
-  }
-  console.log("");
-  printInfo(login.waiting(deviceAuth.expires_in));
-  let interval = deviceAuth.interval * 1000;
-  const startTime = Date.now();
-  const expiresAt = startTime + deviceAuth.expires_in * 1000;
-  while (Date.now() < expiresAt) {
-    await sleep(interval);
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: deviceAuth.device_code,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const tokenData = await tokenResponse.json();
-    const authResult = AuthDataSchema.safeParse(tokenData);
-    if (authResult.success) {
-      await saveAuthData(authResult.data);
-      console.log("");
-      printSuccess(login.success);
-      console.log("");
-      const displayName = getUserDisplayName(authResult.data.user);
-      if (authResult.data.user.first_name) {
-        console.log(login.welcomeNamed(displayName, authResult.data.user.email));
-      } else {
-        console.log(login.welcomeEmail(authResult.data.user.email));
-      }
-      console.log("");
-      console.log(login.contributing);
-      console.log(login.reviewPeriod);
-      return;
-    }
-    const errorData = tokenData;
-    if (errorData.error === "authorization_pending") {
-      process.stdout.write(`\r  ${login.waitingProgress(elapsed)}`);
-      continue;
-    }
-    if (errorData.error === "slow_down") {
-      interval += 1000;
-      continue;
-    }
-    console.log("");
-    printError(login.authFailed(errorData.error || "unknown error"));
-    if (errorData.error_description)
-      console.log(errorData.error_description);
-    process.exit(1);
-  }
-  printError(login.timeout);
-  process.exit(1);
-}
-async function login2() {
-  console.log("");
-  console.log(`  ${login.header}`);
-  console.log(`  ${"\u2500".repeat(15)}`);
-  console.log("");
-  if (!await checkExistingAuth())
-    return;
-  if (await tryRefresh())
-    return;
-  await deviceAuthFlow();
-}
-
-// cli/lib/extraction.ts
-import { createReadStream } from "fs";
-import { mkdir as mkdir3, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
-import { createInterface as createInterface2 } from "readline";
-import { homedir as homedir2 } from "os";
-import { basename, dirname, join as join2 } from "path";
-
-// cli/lib/secret-rules.ts
-var SECRET_RULES = [
-  { id: "1password-secret-key", regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"), entropy: 3.8, keywords: ["a3-"] },
-  { id: "1password-service-account-token", regex: new RegExp(`ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}`, "gi"), entropy: 4, keywords: ["ops_"] },
-  { id: "adafruit-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["adafruit"] },
-  { id: "adobe-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["adobe"] },
-  { id: "adobe-client-secret", regex: new RegExp(`\\b(p8e-[a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["p8e-"] },
-  { id: "age-secret-key", regex: new RegExp(`AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}`, "gi"), keywords: ["age-secret-key-1"] },
-  { id: "airtable-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["airtable"] },
-  { id: "airtable-personnal-access-token", regex: new RegExp(`\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b`, "gi"), keywords: ["airtable"] },
-  { id: "algolia-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["algolia"] },
-  { id: "alibaba-access-key-id", regex: new RegExp(`\\b(LTAI[a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["ltai"] },
-  { id: "alibaba-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["alibaba"] },
-  { id: "anthropic-admin-api-key", regex: new RegExp(`\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-admin01"] },
-  { id: "anthropic-api-key", regex: new RegExp(`\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-api03"] },
-  { id: "artifactory-api-key", regex: new RegExp(`\\bAKCp[A-Za-z0-9]{69}\\b`, "gi"), entropy: 4.5, keywords: ["akcp"] },
-  { id: "artifactory-reference-token", regex: new RegExp(`\\bcmVmd[A-Za-z0-9]{59}\\b`, "gi"), entropy: 4.5, keywords: ["cmvmd"] },
-  { id: "asana-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
-  { id: "asana-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
-  { id: "atlassian-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["atlassian", "confluence", "jira", "atatt3"] },
-  { id: "authress-service-client-access-key", regex: new RegExp(`\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sc_", "ext_", "scauth_", "authress_"] },
-  { id: "aws-access-token", regex: new RegExp(`\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b`, "gi"), entropy: 3, keywords: ["a3t", "akia", "asia", "abia", "acca"] },
-  { id: "aws-amazon-bedrock-api-key-long-lived", regex: new RegExp(`\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["absk"] },
-  { id: "aws-amazon-bedrock-api-key-short-lived", regex: new RegExp(`bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t`, "gi"), entropy: 3, keywords: ["bedrock-api-key-"] },
-  { id: "azure-ad-client-secret", regex: new RegExp(`(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`, "gi"), entropy: 3, keywords: ["q~"] },
-  { id: "beamer-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["beamer"] },
-  { id: "bitbucket-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
-  { id: "bitbucket-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
-  { id: "bittrex-access-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
-  { id: "bittrex-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
-  { id: "cisco-meraki-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["meraki"] },
-  { id: "clickhouse-cloud-api-secret-key", regex: new RegExp(`\\b(4b1d[A-Za-z0-9]{38})\\b`, "gi"), entropy: 3, keywords: ["4b1d"] },
-  { id: "clojars-api-token", regex: new RegExp(`CLOJARS_[a-z0-9]{60}`, "gi"), entropy: 2, keywords: ["clojars_"] },
-  { id: "cloudflare-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
-  { id: "cloudflare-global-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
-  { id: "cloudflare-origin-ca-key", regex: new RegExp(`\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare", "v1.0-"] },
-  { id: "codecov-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["codecov"] },
-  { id: "cohere-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["cohere", "co_api_key"] },
-  { id: "coinbase-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["coinbase"] },
-  { id: "confluent-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
-  { id: "confluent-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
-  { id: "contentful-delivery-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["contentful"] },
-  { id: "curl-auth-header", regex: new RegExp(`\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|$)`, "gi"), entropy: 2.75, keywords: ["curl"] },
-  { id: "curl-auth-user", regex: new RegExp(`\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|$)`, "gi"), entropy: 2, keywords: ["curl"] },
-  { id: "databricks-api-token", regex: new RegExp(`\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dapi"] },
-  { id: "datadog-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["datadog"] },
-  { id: "defined-networking-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dnkey"] },
-  { id: "digitalocean-access-token", regex: new RegExp(`\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["doo_v1_"] },
-  { id: "digitalocean-pat", regex: new RegExp(`\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dop_v1_"] },
-  { id: "digitalocean-refresh-token", regex: new RegExp(`\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dor_v1_"] },
-  { id: "discord-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["discord"] },
-  { id: "discord-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
-  { id: "discord-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
-  { id: "doppler-api-token", regex: new RegExp(`dp\\.pt\\.[a-z0-9]{43}`, "gi"), entropy: 2, keywords: ["dp.pt."] },
-  { id: "droneci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["droneci"] },
-  { id: "dropbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "dropbox-long-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "dropbox-short-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "duffel-api-token", regex: new RegExp(`duffel_(?:test|live)_[a-z0-9_\\-=]{43}`, "gi"), entropy: 2, keywords: ["duffel_"] },
-  { id: "dynatrace-api-token", regex: new RegExp(`dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}`, "gi"), entropy: 4, keywords: ["dt0c01."] },
-  { id: "easypost-api-token", regex: new RegExp(`\\bEZAK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["ezak"] },
-  { id: "easypost-test-api-token", regex: new RegExp(`\\bEZTK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["eztk"] },
-  { id: "etsy-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["etsy"] },
-  { id: "facebook-access-token", regex: new RegExp(`\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
-  { id: "facebook-page-access-token", regex: new RegExp(`\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["eaam", "eaac"] },
-  { id: "facebook-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
-  { id: "fastly-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["fastly"] },
-  { id: "finicity-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
-  { id: "finicity-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
-  { id: "finnhub-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finnhub"] },
-  { id: "flickr-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["flickr"] },
-  { id: "flutterwave-encryption-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{12}`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
-  { id: "flutterwave-public-key", regex: new RegExp(`FLWPUBK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwpubk_test"] },
-  { id: "flutterwave-secret-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
-  { id: "flyio-access-token", regex: new RegExp(`\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["fo1_", "fm1", "fm2_"] },
-  { id: "frameio-api-token", regex: new RegExp(`fio-u-[a-z0-9\\-_=]{64}`, "gi"), keywords: ["fio-u-"] },
-  { id: "freemius-secret-key", regex: new RegExp(`["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`, "gi"), keywords: ["secret_key"] },
-  { id: "freshbooks-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["freshbooks"] },
-  { id: "gcp-api-key", regex: new RegExp(`\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["aiza"] },
-  { id: "generic-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:access|auth|(?:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"] },
-  { id: "github-app-token", regex: new RegExp(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghu_", "ghs_"] },
-  { id: "github-fine-grained-pat", regex: new RegExp(`github_pat_\\w{82}`, "gi"), entropy: 3, keywords: ["github_pat_"] },
-  { id: "github-oauth", regex: new RegExp(`gho_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["gho_"] },
-  { id: "github-pat", regex: new RegExp(`ghp_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghp_"] },
-  { id: "github-refresh-token", regex: new RegExp(`ghr_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghr_"] },
-  { id: "gitlab-cicd-job-token", regex: new RegExp(`glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}`, "gi"), entropy: 3, keywords: ["glcbt-"] },
-  { id: "gitlab-deploy-token", regex: new RegExp(`gldt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["gldt-"] },
-  { id: "gitlab-feature-flag-client-token", regex: new RegExp(`glffct-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glffct-"] },
-  { id: "gitlab-feed-token", regex: new RegExp(`glft-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glft-"] },
-  { id: "gitlab-incoming-mail-token", regex: new RegExp(`glimt-[0-9a-zA-Z_\\-]{25}`, "gi"), entropy: 3, keywords: ["glimt-"] },
-  { id: "gitlab-kubernetes-agent-token", regex: new RegExp(`glagent-[0-9a-zA-Z_\\-]{50}`, "gi"), entropy: 3, keywords: ["glagent-"] },
-  { id: "gitlab-oauth-app-secret", regex: new RegExp(`gloas-[0-9a-zA-Z_\\-]{64}`, "gi"), entropy: 3, keywords: ["gloas-"] },
-  { id: "gitlab-pat", regex: new RegExp(`glpat-[\\w-]{20}`, "gi"), entropy: 3, keywords: ["glpat-"] },
-  { id: "gitlab-pat-routable", regex: new RegExp(`\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glpat-"] },
-  { id: "gitlab-ptt", regex: new RegExp(`glptt-[0-9a-f]{40}`, "gi"), entropy: 3, keywords: ["glptt-"] },
-  { id: "gitlab-rrt", regex: new RegExp(`GR1348941[\\w-]{20}`, "gi"), entropy: 3, keywords: ["gr1348941"] },
-  { id: "gitlab-runner-authentication-token", regex: new RegExp(`glrt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glrt-"] },
-  { id: "gitlab-runner-authentication-token-routable", regex: new RegExp(`\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glrt-"] },
-  { id: "gitlab-scim-token", regex: new RegExp(`glsoat-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glsoat-"] },
-  { id: "gitlab-session-cookie", regex: new RegExp(`_gitlab_session=[0-9a-z]{32}`, "gi"), entropy: 3, keywords: ["_gitlab_session="] },
-  { id: "gitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["gitter"] },
-  { id: "gocardless-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["live_", "gocardless"] },
-  { id: "grafana-api-key", regex: new RegExp(`\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["eyjrijoi"] },
-  { id: "grafana-cloud-api-token", regex: new RegExp(`\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glc_"] },
-  { id: "grafana-service-account-token", regex: new RegExp(`\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glsa_"] },
-  { id: "harness-api-key", regex: new RegExp(`(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}`, "gi"), keywords: ["pat.", "sat."] },
-  { id: "hashicorp-tf-api-token", regex: new RegExp(`[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}`, "gi"), entropy: 3.5, keywords: ["atlasv1"] },
-  { id: "hashicorp-tf-password", regex: new RegExp(`[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["administrator_login_password", "password"] },
-  { id: "heroku-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["heroku"] },
-  { id: "heroku-api-key-v2", regex: new RegExp(`\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hrku-aa"] },
-  { id: "hubspot-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["hubspot"] },
-  { id: "huggingface-access-token", regex: new RegExp(`\\b(hf_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["hf_"] },
-  { id: "huggingface-organization-api-token", regex: new RegExp(`\\b(api_org_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["api_org_"] },
-  { id: "infracost-api-token", regex: new RegExp(`\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ico-"] },
-  { id: "intercom-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["intercom"] },
-  { id: "intra42-client-secret", regex: new RegExp(`\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["intra", "s-s4t2ud-", "s-s4t2af-"] },
-  { id: "jfrog-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
-  { id: "jfrog-identity-token", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
-  { id: "jwt", regex: new RegExp(`\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ey"] },
-  { id: "kraken-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kraken"] },
-  { id: "kubernetes-secret-yaml", regex: new RegExp(`(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?[\\s\\S]{0,200}?\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))[\\s\\S]{0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`, "gi"), keywords: ["secret"] },
-  { id: "kucoin-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
-  { id: "kucoin-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
-  { id: "launchdarkly-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["launchdarkly"] },
-  { id: "linear-api-key", regex: new RegExp(`lin_api_[a-z0-9]{40}`, "gi"), entropy: 2, keywords: ["lin_api_"] },
-  { id: "linear-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linear"] },
-  { id: "linkedin-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
-  { id: "linkedin-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
-  { id: "lob-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_", "live_"] },
-  { id: "lob-pub-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_pub", "live_pub", "_pub"] },
-  { id: "looker-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
-  { id: "looker-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
-  { id: "mailchimp-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailchimp"] },
-  { id: "mailgun-private-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mailgun-pub-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mailgun-signing-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mapbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mapbox"] },
-  { id: "mattermost-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mattermost"] },
-  { id: "maxmind-license-key", regex: new RegExp(`\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["_mmk"] },
-  { id: "messagebird-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
-  { id: "messagebird-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
-  { id: "microsoft-teams-webhook", regex: new RegExp(`https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}`, "gi"), keywords: ["webhook.office.com", "webhookb2", "incomingwebhook"] },
-  { id: "netlify-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["netlify"] },
-  { id: "new-relic-browser-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrjs-"] },
-  { id: "new-relic-insert-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrii-"] },
-  { id: "new-relic-user-api-id", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["new-relic", "newrelic", "new_relic"] },
-  { id: "new-relic-user-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrak"] },
-  { id: "notion-api-token", regex: new RegExp(`\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["ntn_"] },
-  { id: "npm-access-token", regex: new RegExp(`\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["npm_"] },
-  { id: "nuget-config-password", regex: new RegExp(`<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>`, "gi"), entropy: 1, keywords: ["<add key="] },
-  { id: "nytimes-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nytimes", "new-york-times", "newyorktimes"] },
-  { id: "octopus-deploy-api-key", regex: new RegExp(`\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["api-"] },
-  { id: "okta-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["okta"] },
-  { id: "openai-api-key", regex: new RegExp(`\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["t3blbkfj"] },
-  { id: "openshift-user-token", regex: new RegExp(`\\b(sha256~[\\w-]{43})(?:[^\\w-]|$)`, "gi"), entropy: 3.5, keywords: ["sha256~"] },
-  { id: "perplexity-api-key", regex: new RegExp(`\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`, "gi"), entropy: 4, keywords: ["pplx-"] },
-  { id: "plaid-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["plaid"] },
-  { id: "plaid-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
-  { id: "plaid-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
-  { id: "planetscale-api-token", regex: new RegExp(`\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_tkn_"] },
-  { id: "planetscale-oauth-token", regex: new RegExp(`\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_oauth_"] },
-  { id: "planetscale-password", regex: new RegExp(`\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_pw_"] },
-  { id: "postman-api-token", regex: new RegExp(`\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pmak-"] },
-  { id: "prefect-api-token", regex: new RegExp(`\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pnu_"] },
-  { id: "private-key", regex: new RegExp(`-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----`, "gi"), keywords: ["-----begin"] },
-  { id: "privateai-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["privateai", "private_ai", "private-ai"] },
-  { id: "pulumi-api-token", regex: new RegExp(`\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pul-"] },
-  { id: "pypi-upload-token", regex: new RegExp(`pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}`, "gi"), entropy: 3, keywords: ["pypi-ageichlwas5vcmc"] },
-  { id: "rapidapi-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["rapidapi"] },
-  { id: "readme-api-token", regex: new RegExp(`\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rdme_"] },
-  { id: "rubygems-api-token", regex: new RegExp(`\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rubygems_"] },
-  { id: "scalingo-api-token", regex: new RegExp(`\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["tk-us-"] },
-  { id: "sendbird-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
-  { id: "sendbird-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
-  { id: "sendgrid-api-token", regex: new RegExp(`\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sg."] },
-  { id: "sendinblue-api-token", regex: new RegExp(`\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["xkeysib-"] },
-  { id: "sentry-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sentry"] },
-  { id: "sentry-org-token", regex: new RegExp(`\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|$)`, "gi"), entropy: 4.5, keywords: ["sntrys_eyjpyxqio"] },
-  { id: "sentry-user-token", regex: new RegExp(`\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["sntryu_"] },
-  { id: "settlemint-application-access-token", regex: new RegExp(`\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_aat"] },
-  { id: "settlemint-personal-access-token", regex: new RegExp(`\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_pat"] },
-  { id: "settlemint-service-access-token", regex: new RegExp(`\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_sat"] },
-  { id: "shippo-api-token", regex: new RegExp(`\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["shippo_"] },
-  { id: "shopify-access-token", regex: new RegExp(`shpat_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpat_"] },
-  { id: "shopify-custom-access-token", regex: new RegExp(`shpca_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpca_"] },
-  { id: "shopify-private-app-access-token", regex: new RegExp(`shppa_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shppa_"] },
-  { id: "shopify-shared-secret", regex: new RegExp(`shpss_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpss_"] },
-  { id: "sidekiq-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bundle_enterprise__contribsys__com", "bundle_gems__contribsys__com"] },
-  { id: "sidekiq-sensitive-url", regex: new RegExp(`\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)`, "gi"), keywords: ["gems.contribsys.com", "enterprise.contribsys.com"] },
-  { id: "slack-app-token", regex: new RegExp(`xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+`, "gi"), entropy: 2, keywords: ["xapp"] },
-  { id: "slack-bot-token", regex: new RegExp(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`, "gi"), entropy: 3, keywords: ["xoxb"] },
-  { id: "slack-config-access-token", regex: new RegExp(`xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}`, "gi"), entropy: 2, keywords: ["xoxe.xoxb-", "xoxe.xoxp-"] },
-  { id: "slack-config-refresh-token", regex: new RegExp(`xoxe-\\d-[A-Z0-9]{146}`, "gi"), entropy: 2, keywords: ["xoxe-"] },
-  { id: "slack-legacy-bot-token", regex: new RegExp(`xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}`, "gi"), entropy: 2, keywords: ["xoxb"] },
-  { id: "slack-legacy-token", regex: new RegExp(`xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+`, "gi"), entropy: 2, keywords: ["xoxo", "xoxs"] },
-  { id: "slack-legacy-workspace-token", regex: new RegExp(`xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}`, "gi"), entropy: 2, keywords: ["xoxa", "xoxr"] },
-  { id: "slack-user-token", regex: new RegExp(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`, "gi"), entropy: 2, keywords: ["xoxp-", "xoxe-"] },
-  { id: "slack-webhook-url", regex: new RegExp(`(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}`, "gi"), keywords: ["hooks.slack.com"] },
-  { id: "snyk-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["snyk"] },
-  { id: "sonar-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sonar"] },
-  { id: "sourcegraph-access-token", regex: new RegExp(`\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sgp_", "sourcegraph"] },
-  { id: "square-access-token", regex: new RegExp(`\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sq0atp-", "eaaa"] },
-  { id: "squarespace-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["squarespace"] },
-  { id: "stripe-access-token", regex: new RegExp(`\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"] },
-  { id: "sumologic-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
-  { id: "sumologic-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
-  { id: "telegram-bot-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["telegr"] },
-  { id: "travisci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["travis"] },
-  { id: "twilio-api-key", regex: new RegExp(`SK[0-9a-fA-F]{32}`, "gi"), entropy: 3, keywords: ["sk"] },
-  { id: "twitch-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitch"] },
-  { id: "twitter-access-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-api-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-bearer-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "typeform-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["tfp_"] },
-  { id: "vault-batch-token", regex: new RegExp(`\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hvb."] },
-  { id: "vault-service-token", regex: new RegExp(`\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["hvs.", "s."] },
-  { id: "yandex-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "yandex-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "yandex-aws-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["zendesk"] }
-];
-var ALL_KEYWORDS = new Set([
-  "-----begin",
-  "4b1d",
-  "<add key=",
-  "_gitlab_session=",
-  "_mmk",
-  "_pub",
-  "a3-",
-  "a3t",
-  "abia",
-  "absk",
-  "acca",
-  "access",
-  "adafruit",
-  "administrator_login_password",
-  "adobe",
-  "age-secret-key-1",
-  "airtable",
-  "aiza",
-  "akcp",
-  "akia",
-  "algolia",
-  "alibaba",
-  "api",
-  "api-",
-  "api_org_",
-  "artifactory",
-  "asana",
-  "asia",
-  "atatt3",
-  "atlassian",
-  "atlasv1",
-  "auth",
-  "authress_",
-  "beamer",
-  "bedrock-api-key-",
-  "bintray",
-  "bitbucket",
-  "bittrex",
-  "bundle_enterprise__contribsys__com",
-  "bundle_gems__contribsys__com",
-  "clojars_",
-  "cloudflare",
-  "cmvmd",
-  "co_api_key",
-  "codecov",
-  "cohere",
-  "coinbase",
-  "confluence",
-  "confluent",
-  "contentful",
-  "credential",
-  "creds",
-  "curl",
-  "dapi",
-  "datadog",
-  "discord",
-  "dnkey",
-  "doo_v1_",
-  "dop_v1_",
-  "dor_v1_",
-  "dp.pt.",
-  "droneci",
-  "dropbox",
-  "dt0c01.",
-  "duffel_",
-  "eaaa",
-  "eaac",
-  "eaam",
-  "enterprise.contribsys.com",
-  "etsy",
-  "ext_",
-  "ey",
-  "eyjrijoi",
-  "ezak",
-  "eztk",
-  "facebook",
-  "fastly",
-  "finicity",
-  "finnhub",
-  "fio-u-",
-  "flickr",
-  "flwpubk_test",
-  "flwseck_test",
-  "fm1",
-  "fm2_",
-  "fo1_",
-  "freshbooks",
-  "gems.contribsys.com",
-  "gho_",
-  "ghp_",
-  "ghr_",
-  "ghs_",
-  "ghu_",
-  "github_pat_",
-  "gitter",
-  "glagent-",
-  "glc_",
-  "glcbt-",
-  "gldt-",
-  "glffct-",
-  "glft-",
-  "glimt-",
-  "gloas-",
-  "glpat-",
-  "glptt-",
-  "glrt-",
-  "glsa_",
-  "glsoat-",
-  "gocardless",
-  "gr1348941",
-  "heroku",
-  "hf_",
-  "hooks.slack.com",
-  "hrku-aa",
-  "hubspot",
-  "hvb.",
-  "hvs.",
-  "ico-",
-  "incomingwebhook",
-  "intercom",
-  "intra",
-  "jfrog",
-  "jira",
-  "key",
-  "kraken",
-  "kucoin",
-  "launchdarkly",
-  "lin_api_",
-  "linear",
-  "linked-in",
-  "linked_in",
-  "linkedin",
-  "live_",
-  "live_pub",
-  "looker",
-  "ltai",
-  "mailchimp",
-  "mailgun",
-  "mapbox",
-  "mattermost",
-  "meraki",
-  "message-bird",
-  "message_bird",
-  "messagebird",
-  "netlify",
-  "new-relic",
-  "new-york-times",
-  "new_relic",
-  "newrelic",
-  "newyorktimes",
-  "npm_",
-  "nrak",
-  "nrii-",
-  "nrjs-",
-  "ntn_",
-  "nytimes",
-  "okta",
-  "ops_",
-  "p8e-",
-  "passwd",
-  "password",
-  "pat.",
-  "plaid",
-  "pmak-",
-  "pnu_",
-  "pplx-",
-  "private-ai",
-  "private_ai",
-  "privateai",
-  "pscale_oauth_",
-  "pscale_pw_",
-  "pscale_tkn_",
-  "pul-",
-  "pypi-ageichlwas5vcmc",
-  "q~",
-  "rapidapi",
-  "rdme_",
-  "rk_live",
-  "rk_prod",
-  "rk_test",
-  "rubygems_",
-  "s-s4t2af-",
-  "s-s4t2ud-",
-  "s.",
-  "sat.",
-  "sc_",
-  "scauth_",
-  "secret",
-  "secret_key",
-  "sendbird",
-  "sentry",
-  "sg.",
-  "sgp_",
-  "sha256~",
-  "shippo_",
-  "shpat_",
-  "shpca_",
-  "shppa_",
-  "shpss_",
-  "sk",
-  "sk-ant-admin01",
-  "sk-ant-api03",
-  "sk_live",
-  "sk_prod",
-  "sk_test",
-  "sm_aat",
-  "sm_pat",
-  "sm_sat",
-  "sntrys_eyjpyxqio",
-  "sntryu_",
-  "snyk",
-  "sonar",
-  "sourcegraph",
-  "sq0atp-",
-  "squarespace",
-  "sumo",
-  "t3blbkfj",
-  "telegr",
-  "test_",
-  "test_pub",
-  "tfp_",
-  "tk-us-",
-  "token",
-  "travis",
-  "twitch",
-  "twitter",
-  "v1.0-",
-  "webhook.office.com",
-  "webhookb2",
-  "xapp",
-  "xkeysib-",
-  "xoxa",
-  "xoxb",
-  "xoxe-",
-  "xoxe.xoxb-",
-  "xoxe.xoxp-",
-  "xoxo",
-  "xoxp-",
-  "xoxr",
-  "xoxs",
-  "xray",
-  "yandex",
-  "zendesk",
-  "zxlk"
-]);
-
-// cli/lib/sanitize.ts
-var MAX_SANITIZE_DEPTH = 100;
-var MIN_SECRET_LENGTH = 8;
-var SAFE_KEYS = new Set([
-  "uuid",
-  "parentUuid",
-  "sessionId",
-  "tool_use_id",
-  "sourceToolUseID",
-  "id",
-  "type",
-  "role",
-  "subtype",
-  "level",
-  "stop_reason",
-  "timestamp",
-  "version",
-  "model",
-  "media_type",
-  "name",
-  "cwd",
-  "gitBranch"
-]);
-function mightContainSecrets(content) {
-  const lower = content.toLowerCase();
-  for (const keyword of ALL_KEYWORDS) {
-    if (lower.includes(keyword)) {
-      return true;
-    }
-  }
-  return false;
-}
-function shannonEntropy(data) {
-  if (!data)
-    return 0;
-  const charCounts = new Map;
-  for (const char of data) {
-    charCounts.set(char, (charCounts.get(char) || 0) + 1);
-  }
-  let entropy = 0;
-  const len = data.length;
-  for (const count of charCounts.values()) {
-    const freq = count / len;
-    entropy -= freq * Math.log2(freq);
-  }
-  return entropy;
-}
-var _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
-function getDetectSecretsStats() {
-  return _stats;
-}
-function resetDetectSecretsStats() {
-  _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
-}
-function detectSecrets(content) {
-  const t0 = process.env.DEBUG ? performance.now() : 0;
-  _stats.calls++;
-  if (content.length < MIN_SECRET_LENGTH) {
-    return [];
-  }
-  const matches = [];
-  const lowerContent = content.toLowerCase();
-  const hasAnyKeyword = mightContainSecrets(content);
-  if (hasAnyKeyword)
-    _stats.keywordHits++;
-  for (const rule of SECRET_RULES) {
-    if (rule.keywords && rule.keywords.length > 0) {
-      if (!hasAnyKeyword)
-        continue;
-      const hasKeyword = rule.keywords.some((k) => lowerContent.includes(k));
-      if (!hasKeyword)
-        continue;
-    }
-    _stats.regexRuns++;
-    rule.regex.lastIndex = 0;
-    let match;
-    while ((match = rule.regex.exec(content)) !== null) {
-      const secretValue = match[1] || match[0];
-      const start = match.index;
-      const end = start + match[0].length;
-      const entropy = rule.entropy ? shannonEntropy(secretValue) : undefined;
-      if (rule.entropy && entropy !== undefined && entropy < rule.entropy) {
-        continue;
-      }
-      matches.push({
-        ruleId: rule.id,
-        match: match[0],
-        start,
-        end,
-        entropy
-      });
-      if (match[0].length === 0) {
-        rule.regex.lastIndex++;
-      }
-    }
-  }
-  matches.sort((a, b) => a.start - b.start);
-  const deduped = [];
-  for (const m of matches) {
-    const last = deduped.at(-1);
-    if (last === undefined || m.start >= last.end) {
-      deduped.push(m);
-    }
-  }
-  if (process.env.DEBUG) {
-    _stats.totalMs += performance.now() - t0;
-  }
-  return deduped;
-}
-function sanitizeString(content) {
-  if (content.length < MIN_SECRET_LENGTH) {
-    return content;
-  }
-  const secrets = detectSecrets(content);
-  if (secrets.length === 0) {
-    return content;
-  }
-  let result = content;
-  for (let i = secrets.length - 1;i >= 0; i--) {
-    const secret = secrets[i];
-    result = `${result.slice(0, secret.start)}[REDACTED:${secret.ruleId}]${result.slice(secret.end)}`;
-  }
-  return result;
-}
-function sanitizeDeep(value, depth = 0) {
-  if (depth > MAX_SANITIZE_DEPTH) {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return value;
-  }
-  if (typeof value === "string") {
-    return sanitizeString(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeDeep(item, depth + 1));
-  }
-  if (typeof value === "object") {
-    const result = {};
-    for (const [key, val] of Object.entries(value)) {
-      if (SAFE_KEYS.has(key) && typeof val === "string") {
-        result[key] = val;
-      } else {
-        result[key] = sanitizeDeep(val, depth + 1);
-      }
-    }
-    return result;
-  }
-  return value;
-}
-
 // cli/lib/schemas.ts
 var TextBlockSchema = exports_external.looseObject({
   type: exports_external.literal("text"),
@@ -14835,7 +14494,7 @@ async function extractSession(options) {
     const stats = getDetectSecretsStats();
     console.log(`[extract] Sanitization: ${sanitizeMs.toFixed(2)}ms for ${entries.length} entries | detectSecrets: ${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs, ${stats.totalMs.toFixed(2)}ms`);
   }
-  await mkdir3(dirname(outputPath), { recursive: true });
+  await mkdir2(dirname(outputPath), { recursive: true });
   const lines = [
     JSON.stringify(meta3),
     ...sanitizedEntries.map((e) => JSON.stringify(e))
@@ -14847,7 +14506,7 @@ async function extractSession(options) {
 }
 async function readFirstLine(filePath) {
   const stream = createReadStream(filePath, { encoding: "utf-8" });
-  const rl = createInterface2({ input: stream, crlfDelay: Infinity });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
   try {
     for await (const line of rl) {
       stream.destroy();
@@ -14937,6 +14596,773 @@ async function extractAllSessions(cwd, transcriptPath) {
   return { extracted, schemaErrors };
 }
 
+// cli/lib/output.ts
+var colors = {
+  red: (s) => `\x1B[31m${s}\x1B[0m`,
+  green: (s) => `\x1B[32m${s}\x1B[0m`,
+  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
+  blue: (s) => `\x1B[34m${s}\x1B[0m`
+};
+function hookOutput(message) {
+  console.log(JSON.stringify({ systemMessage: message }));
+}
+function printError(message) {
+  console.error(`${colors.red("Error:")} ${message}`);
+}
+function printSuccess(message) {
+  console.log(colors.green(message));
+}
+function printInfo(message) {
+  console.log(colors.blue(message));
+}
+function printWarning(message) {
+  console.log(colors.yellow(message));
+}
+
+// cli/commands/index.ts
+async function index() {
+  const cwd = process.cwd();
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir2(sessionsDir);
+  } catch {
+    printError(`No sessions found. Run 'extract' first.`);
+    return;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (jsonlFiles.length === 0) {
+    printError(`No sessions found in ${sessionsDir}`);
+    return;
+  }
+  const sessions = [];
+  for (const file2 of jsonlFiles) {
+    const path = join3(sessionsDir, file2);
+    const meta3 = await readExtractedMeta(path);
+    if (meta3) {
+      sessions.push({ meta: meta3, path });
+    }
+  }
+  const parentSessions = [];
+  const agentSessions = [];
+  for (const session of sessions) {
+    if (session.meta.agentId) {
+      agentSessions.push(session);
+    } else {
+      parentSessions.push(session);
+    }
+  }
+  parentSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
+  const agentsByParent = new Map;
+  for (const agent of agentSessions) {
+    const parentId = agent.meta.parentSessionId;
+    if (parentId) {
+      const existing = agentsByParent.get(parentId) || [];
+      existing.push(agent);
+      agentsByParent.set(parentId, existing);
+    }
+  }
+  for (const agents of agentsByParent.values()) {
+    agents.sort((a, b) => a.meta.rawMtime.localeCompare(b.meta.rawMtime));
+  }
+  for (const session of parentSessions) {
+    console.log(formatSessionLine(session.meta));
+    const agents = agentsByParent.get(session.meta.sessionId);
+    if (agents) {
+      for (const agent of agents) {
+        console.log("  " + formatSessionLine(agent.meta));
+      }
+    }
+  }
+  const orphanAgents = agentSessions.filter((a) => !a.meta.parentSessionId || !parentSessions.some((p) => p.meta.sessionId === a.meta.parentSessionId));
+  if (orphanAgents.length > 0) {
+    orphanAgents.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
+    console.log(`
+(orphan agents)`);
+    for (const agent of orphanAgents) {
+      console.log("  " + formatSessionLine(agent.meta));
+    }
+  }
+}
+function formatSessionLine(meta3) {
+  const id = meta3.agentId || meta3.sessionId.slice(0, 16);
+  const datetime3 = meta3.rawMtime.slice(0, 16);
+  const count = String(meta3.messageCount);
+  const summary = meta3.summary || "";
+  return `${id} ${datetime3} ${count} ${summary}`;
+}
+
+// cli/commands/login.ts
+import { createInterface as createInterface2 } from "readline";
+
+// cli/lib/auth.ts
+import { mkdir as mkdir3 } from "fs/promises";
+var WORKOS_API_URL = "https://api.workos.com/user_management";
+var AuthUserSchema = exports_external.object({
+  id: exports_external.string(),
+  email: exports_external.string(),
+  first_name: exports_external.string().optional(),
+  last_name: exports_external.string().optional()
+});
+var AuthDataSchema = exports_external.object({
+  access_token: exports_external.string(),
+  refresh_token: exports_external.string(),
+  user: AuthUserSchema
+});
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number")
+    return true;
+  return payload.exp <= Math.floor(Date.now() / 1000);
+}
+async function loadAuthData() {
+  try {
+    const file2 = Bun.file(AUTH_FILE);
+    if (!await file2.exists())
+      return null;
+    const data = await file2.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+async function saveAuthData(data) {
+  await mkdir3(AUTH_DIR, { recursive: true });
+  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
+}
+async function refreshToken(refreshTokenValue) {
+  try {
+    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshTokenValue,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const data = await response.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+async function checkAuthStatus(attemptRefresh = true) {
+  const authData = await loadAuthData();
+  if (!authData?.access_token) {
+    return { authenticated: false, needsLogin: true };
+  }
+  if (isTokenExpired(authData.access_token)) {
+    if (!attemptRefresh || !authData.refresh_token) {
+      return { authenticated: false, needsLogin: true };
+    }
+    const newAuthData = await refreshToken(authData.refresh_token);
+    if (!newAuthData) {
+      return { authenticated: false, needsLogin: true };
+    }
+    await saveAuthData(newAuthData);
+    return { authenticated: true, user: newAuthData.user, needsLogin: false };
+  }
+  return { authenticated: true, user: authData.user, needsLogin: false };
+}
+function getUserDisplayName(user) {
+  return user.first_name || user.email;
+}
+
+// cli/lib/messages.ts
+function getCliPath() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (pluginRoot) {
+    return `${pluginRoot}/cli.js`;
+  }
+  return "~/.claude/plugins/hive-mind/cli.js";
+}
+function notLoggedInMessage() {
+  const cliPath = getCliPath();
+  const shell = getShellConfig();
+  return [
+    "hive-mind: Not logged in",
+    "  Login:",
+    `    bun ${cliPath} login`,
+    "",
+    "  Add CLI shortcut (optional):",
+    `    echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
+  ].join(`
+`);
+}
+function loggedInMessage(displayName) {
+  return `hive-mind: Logged in as ${displayName}`;
+}
+function extractedMessage(count) {
+  return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
+}
+var login = {
+  header: "hive-mind login",
+  alreadyLoggedIn: "You're already logged in.",
+  confirmRelogin: "Do you want to log in again?",
+  refreshing: "Attempting to refresh existing session...",
+  refreshSuccess: "Session refreshed successfully!",
+  starting: "Starting hive-mind authentication...",
+  visitUrl: "To authenticate, visit this URL in your browser:",
+  confirmCode: "Confirm this code matches:",
+  browserOpened: "Browser opened. Confirm the code matches and approve.",
+  openManually: "Open the URL in your browser, then confirm the code.",
+  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
+  success: "Authentication successful!",
+  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
+  welcomeEmail: (email3) => `Logged in as: ${email3}`,
+  contributing: "Your Claude Code sessions will now contribute to the hive-mind.",
+  reviewPeriod: "You'll have 24 hours to review and exclude sessions before they're submitted.",
+  timeout: "Authentication timed out. Please try again.",
+  startFailed: (error48) => `Failed to start authentication: ${error48}`,
+  authFailed: (error48) => `Authentication failed: ${error48}`
+};
+
+// cli/commands/login.ts
+var WORKOS_API_URL2 = "https://api.workos.com/user_management";
+var DeviceAuthResponseSchema = exports_external.object({
+  device_code: exports_external.string(),
+  user_code: exports_external.string(),
+  verification_uri: exports_external.string(),
+  verification_uri_complete: exports_external.string(),
+  interval: exports_external.number(),
+  expires_in: exports_external.number()
+});
+var ErrorResponseSchema = exports_external.object({
+  error: exports_external.string(),
+  error_description: exports_external.string().optional()
+});
+async function confirm(message) {
+  const rl = createInterface2({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${message} [y/N] `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === "y");
+    });
+  });
+}
+async function openBrowser(url2) {
+  try {
+    if (process.platform === "darwin") {
+      await Bun.spawn(["open", url2]).exited;
+      return true;
+    } else if (process.platform === "linux") {
+      try {
+        await Bun.spawn(["xdg-open", url2]).exited;
+        return true;
+      } catch {
+        try {
+          await Bun.spawn(["wslview", url2]).exited;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function checkExistingAuth() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    printWarning(login.alreadyLoggedIn);
+    console.log("");
+    return await confirm(login.confirmRelogin);
+  }
+  return true;
+}
+async function tryRefresh() {
+  const authData = await loadAuthData();
+  if (!authData?.refresh_token)
+    return false;
+  printInfo(login.refreshing);
+  const newAuthData = await refreshToken(authData.refresh_token);
+  if (newAuthData) {
+    await saveAuthData(newAuthData);
+    printSuccess(login.refreshSuccess);
+    return true;
+  }
+  return false;
+}
+async function deviceAuthFlow() {
+  printInfo(login.starting);
+  console.log("");
+  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
+  });
+  const data = await response.json();
+  const errorResult = ErrorResponseSchema.safeParse(data);
+  if (errorResult.success && errorResult.data.error) {
+    printError(login.startFailed(errorResult.data.error));
+    if (errorResult.data.error_description) {
+      console.log(errorResult.data.error_description);
+    }
+    process.exit(1);
+  }
+  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
+  if (!deviceAuthResult.success) {
+    printError("Unexpected response from authentication server");
+    process.exit(1);
+  }
+  const deviceAuth = deviceAuthResult.data;
+  console.log("\u2501".repeat(65));
+  console.log("");
+  console.log(`  ${login.visitUrl}`);
+  console.log("");
+  console.log(`    ${deviceAuth.verification_uri}`);
+  console.log("");
+  console.log(`  ${login.confirmCode}`);
+  console.log("");
+  console.log(`    ${colors.green(deviceAuth.user_code)}`);
+  console.log("");
+  console.log("\u2501".repeat(65));
+  console.log("");
+  if (await openBrowser(deviceAuth.verification_uri_complete)) {
+    printInfo(login.browserOpened);
+  } else {
+    printInfo(login.openManually);
+  }
+  console.log("");
+  printInfo(login.waiting(deviceAuth.expires_in));
+  let interval = deviceAuth.interval * 1000;
+  const startTime = Date.now();
+  const expiresAt = startTime + deviceAuth.expires_in * 1000;
+  while (Date.now() < expiresAt) {
+    await sleep(interval);
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceAuth.device_code,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const tokenData = await tokenResponse.json();
+    const authResult = AuthDataSchema.safeParse(tokenData);
+    if (authResult.success) {
+      await saveAuthData(authResult.data);
+      console.log("");
+      printSuccess(login.success);
+      console.log("");
+      const displayName = getUserDisplayName(authResult.data.user);
+      if (authResult.data.user.first_name) {
+        console.log(login.welcomeNamed(displayName, authResult.data.user.email));
+      } else {
+        console.log(login.welcomeEmail(authResult.data.user.email));
+      }
+      console.log("");
+      console.log(login.contributing);
+      console.log(login.reviewPeriod);
+      return;
+    }
+    const errorData = tokenData;
+    if (errorData.error === "authorization_pending") {
+      process.stdout.write(`\r  ${login.waitingProgress(elapsed)}`);
+      continue;
+    }
+    if (errorData.error === "slow_down") {
+      interval += 1000;
+      continue;
+    }
+    console.log("");
+    printError(login.authFailed(errorData.error || "unknown error"));
+    if (errorData.error_description)
+      console.log(errorData.error_description);
+    process.exit(1);
+  }
+  printError(login.timeout);
+  process.exit(1);
+}
+async function login2() {
+  console.log("");
+  console.log(`  ${login.header}`);
+  console.log(`  ${"\u2500".repeat(15)}`);
+  console.log("");
+  if (!await checkExistingAuth())
+    return;
+  if (await tryRefresh())
+    return;
+  await deviceAuthFlow();
+}
+
+// cli/commands/read.ts
+import { readFile as readFile3, readdir as readdir3 } from "fs/promises";
+import { join as join4 } from "path";
+
+// cli/lib/format.ts
+function isToolResultOnlyEntry(entry) {
+  const content = entry.message.content;
+  if (!Array.isArray(content))
+    return false;
+  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
+  if (meaningfulBlocks.length === 0)
+    return true;
+  return meaningfulBlocks.every((b) => b.type === "tool_result");
+}
+function formatEntry(entry, options) {
+  const { lineNumber, toolResults, parentIndicator } = options;
+  switch (entry.type) {
+    case "user":
+      if (toolResults && isToolResultOnlyEntry(entry)) {
+        return null;
+      }
+      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator);
+    case "assistant":
+      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator);
+    case "system":
+      return formatSystemEntry(entry, lineNumber);
+    case "summary":
+      return formatSummaryEntry(entry, lineNumber);
+    case "file-history-snapshot":
+    case "queue-operation":
+      return null;
+    default:
+      return null;
+  }
+}
+function formatUserEntry(entry, lineNumber, toolResults, parentIndicator) {
+  const attrs = [`line="${lineNumber}"`];
+  if (entry.timestamp) {
+    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
+  }
+  if (parentIndicator !== undefined) {
+    attrs.push(`parent="${parentIndicator}"`);
+  }
+  const content = formatMessageContent(entry.message.content, toolResults);
+  return formatXmlElement("user", attrs, content);
+}
+function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator) {
+  const attrs = [`line="${lineNumber}"`];
+  if (entry.timestamp) {
+    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
+  }
+  if (entry.message.model) {
+    attrs.push(`model="${entry.message.model}"`);
+  }
+  if (entry.message.stop_reason && entry.message.stop_reason !== "end_turn") {
+    attrs.push(`stop="${entry.message.stop_reason}"`);
+  }
+  if (parentIndicator !== undefined) {
+    attrs.push(`parent="${parentIndicator}"`);
+  }
+  const content = formatMessageContent(entry.message.content, toolResults);
+  return formatXmlElement("assistant", attrs, content);
+}
+function formatXmlElement(tag, attrs, content) {
+  const attrStr = attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
+  if (!content) {
+    return `<${tag}${attrStr}/>`;
+  }
+  if (!content.includes(`
+`)) {
+    return `<${tag}${attrStr}>${content}</${tag}>`;
+  }
+  return `<${tag}${attrStr}>
+${indent(content, 2)}
+</${tag}>`;
+}
+function formatSystemEntry(entry, lineNumber) {
+  const attrs = [`line="${lineNumber}"`];
+  if (entry.timestamp) {
+    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
+  }
+  if (entry.subtype) {
+    attrs.push(`subtype="${entry.subtype}"`);
+  }
+  if (entry.level && entry.level !== "info") {
+    attrs.push(`level="${entry.level}"`);
+  }
+  return formatXmlElement("system", attrs, entry.content || "");
+}
+function formatSummaryEntry(entry, lineNumber) {
+  const attrs = [`line="${lineNumber}"`];
+  return formatXmlElement("summary", attrs, entry.summary);
+}
+function formatTimestamp(iso) {
+  return iso.slice(0, 16);
+}
+function formatMessageContent(content, toolResults) {
+  if (!content)
+    return "";
+  if (typeof content === "string") {
+    return content;
+  }
+  const parts = [];
+  for (const block of content) {
+    if (isNoiseBlock(block))
+      continue;
+    if (toolResults && block.type === "tool_result")
+      continue;
+    const formatted = formatContentBlock(block, toolResults);
+    if (formatted) {
+      parts.push(formatted);
+    }
+  }
+  return parts.join(`
+`);
+}
+function isNoiseBlock(block) {
+  if (block.type === "tool_result" && "content" in block) {
+    const content = block.content;
+    if (typeof content === "string") {
+      if (content.startsWith("Todos have been modified successfully")) {
+        return true;
+      }
+    }
+  }
+  if (block.type === "text" && "text" in block) {
+    const text = block.text.trim();
+    if (text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>")) {
+      return true;
+    }
+  }
+  return false;
+}
+function formatContentBlock(block, toolResults) {
+  if (isKnownBlock(block)) {
+    return formatKnownBlock(block, toolResults);
+  }
+  return `<unknown type="${block.type}"/>`;
+}
+function isKnownBlock(block) {
+  return ["text", "thinking", "tool_use", "tool_result", "image", "document"].includes(block.type);
+}
+function formatKnownBlock(block, toolResults) {
+  switch (block.type) {
+    case "text":
+      return formatTextBlock(block.text);
+    case "thinking":
+      return `<thinking>
+${block.thinking}
+</thinking>`;
+    case "tool_use":
+      return formatToolUseBlock(block, toolResults);
+    case "tool_result":
+      return formatToolResultBlock(block);
+    case "image":
+      return `<image media_type="${block.source.media_type}"/>`;
+    case "document":
+      return `<document media_type="${block.source.media_type}"/>`;
+    default:
+      return null;
+  }
+}
+function formatTextBlock(text) {
+  return text;
+}
+function formatToolUseBlock(block, toolResults) {
+  const result = toolResults?.get(block.id);
+  const tagName = result ? "tool" : "tool_use";
+  const lines = [`<${tagName} name="${block.name}">`];
+  for (const [key, value] of Object.entries(block.input)) {
+    const formatted = formatValue(value);
+    if (formatted.includes(`
+`)) {
+      lines.push(`  <${key}>
+${indent(formatted, 4)}
+  </${key}>`);
+    } else {
+      lines.push(`  <${key}>${formatted}</${key}>`);
+    }
+  }
+  if (result) {
+    if (result.includes(`
+`)) {
+      lines.push(`  <result>
+${indent(result, 4)}
+  </result>`);
+    } else {
+      lines.push(`  <result>${result}</result>`);
+    }
+  }
+  lines.push(`</${tagName}>`);
+  return lines.join(`
+`);
+}
+function formatToolResultBlock(block) {
+  const lines = [`<tool_result>`];
+  if (block.content) {
+    if (typeof block.content === "string") {
+      lines.push(indent(block.content, 2));
+    } else {
+      for (const innerBlock of block.content) {
+        if (innerBlock.type === "text" && "text" in innerBlock) {
+          lines.push(indent(innerBlock.text, 2));
+        } else if (innerBlock.type === "image" && "source" in innerBlock) {
+          lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
+        } else if (innerBlock.type === "document" && "source" in innerBlock) {
+          lines.push(`  <document media_type="${innerBlock.source.media_type}"/>`);
+        }
+      }
+    }
+  }
+  lines.push("</tool_result>");
+  return lines.join(`
+`);
+}
+function formatValue(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(formatValue).join(`
+`);
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
+}
+function indent(text, spaces) {
+  const prefix = " ".repeat(spaces);
+  return text.split(`
+`).map((line) => line ? prefix + line : line).join(`
+`);
+}
+
+// cli/commands/read.ts
+async function read() {
+  const args = process.argv.slice(3);
+  if (args.length === 0) {
+    printError("Usage: read <session-id> [indices]");
+    console.log(`
+Examples:`);
+    console.log("  read 02ed           # all entries (prefix match)");
+    console.log("  read 02ed 5         # entry 5");
+    console.log("  read 02ed 5-10      # entries 5 through 10");
+    console.log("  read 02ed 1,5,10-15 # specific entries and ranges");
+    return;
+  }
+  const sessionIdPrefix = args[0];
+  const indicesArg = args[1];
+  const cwd = process.cwd();
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir3(sessionsDir);
+  } catch {
+    printError(`No sessions found. Run 'extract' first.`);
+    return;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const matches = jsonlFiles.filter((f) => {
+    const name = f.replace(".jsonl", "");
+    return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
+  });
+  if (matches.length === 0) {
+    printError(`No session found matching '${sessionIdPrefix}'`);
+    return;
+  }
+  if (matches.length > 1) {
+    printError(`Multiple sessions match '${sessionIdPrefix}':`);
+    for (const m of matches.slice(0, 5)) {
+      console.log(`  ${m.replace(".jsonl", "")}`);
+    }
+    if (matches.length > 5) {
+      console.log(`  ... and ${matches.length - 5} more`);
+    }
+    return;
+  }
+  const sessionFile = join4(sessionsDir, matches[0]);
+  let indices = null;
+  if (indicesArg) {
+    indices = parseIndices(indicesArg);
+    if (indices.size === 0) {
+      printError(`Invalid indices: ${indicesArg}`);
+      return;
+    }
+  }
+  const content = await readFile3(sessionFile, "utf-8");
+  const lines = Array.from(parseJsonl(content));
+  const entries = lines.slice(1);
+  if (entries.length === 0) {
+    printError("Session has no entries.");
+    return;
+  }
+  const entriesToOutput = [];
+  for (let i = 0;i < entries.length; i++) {
+    const userIndex = i + 1;
+    if (indices === null || indices.has(userIndex)) {
+      entriesToOutput.push({ index: userIndex, raw: entries[i] });
+    }
+  }
+  if (entriesToOutput.length === 0) {
+    printError(`No entries match indices: ${indicesArg}`);
+    return;
+  }
+  for (const { index: index2, raw } of entriesToOutput) {
+    const entry = parseKnownEntry(raw);
+    if (!entry) {
+      console.log(`${index2}|unknown`);
+      continue;
+    }
+    const formatted = formatEntry(entry, { lineNumber: index2 });
+    if (formatted) {
+      console.log(formatted);
+      console.log("");
+    }
+  }
+}
+function parseIndices(input) {
+  const result = new Set;
+  const parts = input.split(",");
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed)
+      continue;
+    if (trimmed.includes("-")) {
+      const [startStr, endStr] = trimmed.split("-");
+      const start = parseInt(startStr, 10);
+      const end = parseInt(endStr, 10);
+      if (isNaN(start) || isNaN(end) || start < 1 || end < start) {
+        continue;
+      }
+      for (let i = start;i <= end; i++) {
+        result.add(i);
+      }
+    } else {
+      const num = parseInt(trimmed, 10);
+      if (!isNaN(num) && num >= 1) {
+        result.add(num);
+      }
+    }
+  }
+  return result;
+}
+
 // cli/commands/session-start.ts
 async function sessionStart() {
   const messages = [];
@@ -14970,7 +15396,9 @@ async function sessionStart() {
 
 // cli/cli.ts
 var COMMANDS = {
+  index: { description: "List extracted sessions", handler: index },
   login: { description: "Authenticate with hive-mind", handler: login2 },
+  read: { description: "Read session entries", handler: read },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
 };
 function printUsage() {
