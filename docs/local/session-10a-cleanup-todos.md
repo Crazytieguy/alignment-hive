@@ -65,5 +65,5 @@ Identified during code review of the extraction implementation.
   Requirements:
   - Diverse sessions: different project types, agent sessions, long/short sessions, various tool uses
   - Ideally from different projects (not just alignment-hive)
-  - Normalize temporal fields (`extractedAt`, `rawMtime`, `machineId`) for deterministic snapshots
+  - Normalize temporal fields (`extractedAt`, `rawMtime`, `checkoutId`) for deterministic snapshots
   - Keep a few targeted unit tests for edge cases (e.g., summary validation logic)

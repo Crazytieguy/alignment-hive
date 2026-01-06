@@ -723,3 +723,39 @@ describe("edge cases", () => {
     }
   });
 });
+
+describe("schema completeness", () => {
+  test("all entries in raw session fixtures are parseable", async () => {
+    const { readdir, readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { parseKnownEntry } = await import("./schemas");
+
+    const fixturesDir = join(import.meta.dir, "fixtures");
+    const files = await readdir(fixturesDir);
+
+    for (const file of files.filter((f) => f.endsWith(".jsonl"))) {
+      const content = await readFile(join(fixturesDir, file), "utf-8");
+      for (const line of content.split("\n")) {
+        if (!line.trim()) continue;
+        const entry = JSON.parse(line);
+        parseKnownEntry(entry);
+      }
+    }
+  });
+
+  test("parseKnownEntry returns error for known type with invalid schema", async () => {
+    const { parseKnownEntry } = await import("./schemas");
+    const invalidUserEntry = { type: "user", uuid: "test-uuid" };
+    const result = parseKnownEntry(invalidUserEntry);
+    expect(result.data).toBeNull();
+    expect(result.error).toContain("user:");
+  });
+
+  test("parseKnownEntry returns null data for unknown types", async () => {
+    const { parseKnownEntry } = await import("./schemas");
+    const unknownEntry = { type: "future-unknown-type", data: "whatever" };
+    const result = parseKnownEntry(unknownEntry);
+    expect(result.data).toBeNull();
+    expect(result.error).toBeUndefined();
+  });
+});

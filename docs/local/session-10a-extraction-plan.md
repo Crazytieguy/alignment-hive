@@ -103,8 +103,11 @@ Core extraction logic: JSONL parsing, transformation, sanitization.
 
 **Skip** (low value for retrieval):
 - `requestId`, `message.id`
-- `message.usage`
 - `slug`, `userType`
+- `toolUseResult` (redundant with `tool_result` blocks)
+
+**Keep**:
+- `message.usage` (useful for analytics)
 
 ### 4. SessionStart Hook Integration (`src/commands/session-start.ts`)
 
@@ -137,7 +140,7 @@ Add extraction to the existing SessionStart flow (after auth check).
 ## Extracted Session File Format
 
 ```jsonl
-{"_type":"hive-mind-meta","version":"0.1","sessionId":"abc123","machineId":"uuid-here","extractedAt":"2025-01-04T12:00:00Z","rawMtime":"2025-01-04T10:00:00Z","messageCount":45,"summary":"Session title","rawPath":"~/.claude/projects/-Users-yoav-project/abc123.jsonl"}
+{"_type":"hive-mind-meta","version":"0.1","sessionId":"abc123","checkoutId":"uuid-here","extractedAt":"2025-01-04T12:00:00Z","rawMtime":"2025-01-04T10:00:00Z","messageCount":45,"summary":"Session title","rawPath":"~/.claude/projects/-Users-yoav-project/abc123.jsonl"}
 {"type":"summary","summary":"Hook behavior testing","leafUuid":"..."}
 {"type":"user","uuid":"...","parentUuid":null,"timestamp":"...","message":{"role":"user","content":"..."}}
 {"type":"assistant","uuid":"...","parentUuid":"...","timestamp":"...","message":{"role":"assistant","content":[...]}}
@@ -145,6 +148,11 @@ Add extraction to the existing SessionStart flow (after auth check).
 ```
 
 First line (`_type: "hive-mind-meta"`) distinguishes metadata from message entries.
+
+**Optional metadata fields:**
+- `agentId`: Present for agent sessions (e.g., `agent-a1b2c3d.jsonl`)
+- `parentSessionId`: For agent sessions, the parent session's ID
+- `schemaErrors`: Array of parsing errors if any known entry types failed to parse (indicates schema bug)
 
 ## File Structure After Completion
 
@@ -169,10 +177,10 @@ hive-mind-cli/
 │       └── schemas.ts            # NEW
 
 ~/.claude/hive-mind/              # Global state
-├── auth.json                     # JWT tokens (existing)
-└── machine-id                    # Random UUID for anonymous tracking (NEW)
+└── auth.json                     # JWT tokens (existing)
 
 .claude/hive-mind/                # Per-project, created on extraction
+├── checkout-id                   # Random UUID per checkout (gitignored)
 └── sessions/
     └── <session-id>.jsonl        # Self-contained: metadata line + extracted messages
 ```
