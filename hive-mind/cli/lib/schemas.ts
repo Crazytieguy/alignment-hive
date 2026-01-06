@@ -89,7 +89,7 @@ export const AssistantMessageObjectSchema = z
     role: z.string(),
     content: MessageContentSchema.optional(),
     model: z.string().optional(),
-    stop_reason: z.string().optional(),
+    stop_reason: z.string().nullish(),
     id: z.string().optional(),
     usage: z.unknown().optional(),
   })
@@ -118,7 +118,7 @@ export const UserEntrySchema = z
     requestId: z.string().optional(),
     slug: z.string().optional(),
     userType: z.string().optional(),
-    imagePasteIds: z.array(z.string()).optional(),
+    imagePasteIds: z.unknown(),
     thinkingMetadata: z.unknown().optional(),
     todos: z.unknown().optional(),
   })
@@ -172,9 +172,43 @@ export type UserEntry = z.infer<typeof UserEntrySchema>;
 export type AssistantEntry = z.infer<typeof AssistantEntrySchema>;
 export type SystemEntry = z.infer<typeof SystemEntrySchema>;
 
-export function parseKnownEntry(data: unknown): KnownEntry | null {
+const KNOWN_ENTRY_TYPES = [
+  "user",
+  "assistant",
+  "summary",
+  "system",
+  "file-history-snapshot",
+  "queue-operation",
+] as const;
+
+export function isKnownEntryType(
+  type: unknown,
+): type is (typeof KNOWN_ENTRY_TYPES)[number] {
+  return (
+    typeof type === "string" &&
+    KNOWN_ENTRY_TYPES.includes(type as (typeof KNOWN_ENTRY_TYPES)[number])
+  );
+}
+
+export type ParseResult =
+  | { data: KnownEntry; error?: undefined }
+  | { data: null; error?: string };
+
+export function parseKnownEntry(data: unknown): ParseResult {
   const parsed = KnownEntrySchema.safeParse(data);
-  return parsed.success ? parsed.data : null;
+  if (parsed.success) {
+    return { data: parsed.data };
+  }
+
+  const entryType = (data as { type?: unknown })?.type;
+  if (isKnownEntryType(entryType)) {
+    const errorDetails = parsed.error.issues
+      .map((e) => `${e.path.join(".")}: ${e.message}`)
+      .join("; ");
+    return { data: null, error: `${entryType}: ${errorDetails}` };
+  }
+
+  return { data: null };
 }
 
 export const HiveMindMetaSchema = z.object({
@@ -189,6 +223,7 @@ export const HiveMindMetaSchema = z.object({
   rawPath: z.string(),
   agentId: z.string().optional(),
   parentSessionId: z.string().optional(),
+  schemaErrors: z.array(z.string()).optional(),
 });
 
 export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;

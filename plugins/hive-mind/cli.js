@@ -14631,7 +14631,7 @@ var AssistantMessageObjectSchema = exports_external.looseObject({
   role: exports_external.string(),
   content: MessageContentSchema.optional(),
   model: exports_external.string().optional(),
-  stop_reason: exports_external.string().optional(),
+  stop_reason: exports_external.string().nullish(),
   id: exports_external.string().optional(),
   usage: exports_external.unknown().optional()
 }).transform(({ id, ...rest }) => rest);
@@ -14655,7 +14655,7 @@ var UserEntrySchema = exports_external.looseObject({
   requestId: exports_external.string().optional(),
   slug: exports_external.string().optional(),
   userType: exports_external.string().optional(),
-  imagePasteIds: exports_external.array(exports_external.string()).optional(),
+  imagePasteIds: exports_external.unknown(),
   thinkingMetadata: exports_external.unknown().optional(),
   todos: exports_external.unknown().optional()
 }).transform(({ toolUseResult, requestId, slug, userType, ...rest }) => rest);
@@ -14693,9 +14693,28 @@ var KnownEntrySchema = exports_external.discriminatedUnion("type", [
   FileHistorySnapshotSchema,
   QueueOperationSchema
 ]);
+var KNOWN_ENTRY_TYPES = [
+  "user",
+  "assistant",
+  "summary",
+  "system",
+  "file-history-snapshot",
+  "queue-operation"
+];
+function isKnownEntryType(type) {
+  return typeof type === "string" && KNOWN_ENTRY_TYPES.includes(type);
+}
 function parseKnownEntry(data) {
   const parsed = KnownEntrySchema.safeParse(data);
-  return parsed.success ? parsed.data : null;
+  if (parsed.success) {
+    return { data: parsed.data };
+  }
+  const entryType = data?.type;
+  if (isKnownEntryType(entryType)) {
+    const errorDetails = parsed.error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
+    return { data: null, error: `${entryType}: ${errorDetails}` };
+  }
+  return { data: null };
 }
 var HiveMindMetaSchema = exports_external.object({
   _type: exports_external.literal("hive-mind-meta"),
@@ -14708,7 +14727,8 @@ var HiveMindMetaSchema = exports_external.object({
   summary: exports_external.string().optional(),
   rawPath: exports_external.string(),
   agentId: exports_external.string().optional(),
-  parentSessionId: exports_external.string().optional()
+  parentSessionId: exports_external.string().optional(),
+  schemaErrors: exports_external.array(exports_external.string()).optional()
 });
 
 // cli/lib/extraction.ts
@@ -14730,17 +14750,17 @@ function* parseJsonl(content) {
   }
 }
 function transformEntry(rawEntry) {
-  const entry = parseKnownEntry(rawEntry);
-  if (!entry) {
-    if (process.env.DEBUG) {
-      console.warn("Skipping unknown entry type");
-    }
-    return null;
+  const result = parseKnownEntry(rawEntry);
+  if (result.error) {
+    return { entry: null, error: result.error };
   }
-  if (INCLUDED_ENTRY_TYPES.includes(entry.type)) {
-    return entry;
+  if (!result.data) {
+    return { entry: null };
   }
-  return null;
+  if (INCLUDED_ENTRY_TYPES.includes(result.data.type)) {
+    return { entry: result.data };
+  }
+  return { entry: null };
 }
 function findValidSummary(entries) {
   const uuids = new Set;
@@ -14773,10 +14793,14 @@ async function extractSession(options) {
   ]);
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries = [];
+  const schemaErrors = [];
   for (const rawEntry of parseJsonl(content)) {
-    const transformed = transformEntry(rawEntry);
-    if (transformed) {
-      entries.push(transformed);
+    const { entry, error: error48 } = transformEntry(rawEntry);
+    if (error48) {
+      schemaErrors.push(error48);
+    }
+    if (entry) {
+      entries.push(entry);
     }
   }
   if (process.env.DEBUG) {
@@ -14800,7 +14824,8 @@ async function extractSession(options) {
     summary,
     rawPath,
     ...agentId && { agentId },
-    ...parentSessionId && { parentSessionId }
+    ...parentSessionId && { parentSessionId },
+    ...schemaErrors.length > 0 && { schemaErrors }
   };
   resetDetectSecretsStats();
   const t0 = performance.now();
@@ -14818,7 +14843,7 @@ async function extractSession(options) {
   await writeFile2(outputPath, `${lines.join(`
 `)}
 `);
-  return { messageCount: entries.length, summary };
+  return { messageCount: entries.length, summary, schemaErrors };
 }
 async function readFirstLine(filePath) {
   const stream = createReadStream(filePath, { encoding: "utf-8" });
@@ -14887,6 +14912,7 @@ async function extractAllSessions(cwd, transcriptPath) {
   const extractedDir = getHiveMindSessionsDir(cwd);
   const rawSessions = await findRawSessions(rawDir);
   let extracted = 0;
+  const schemaErrors = [];
   for (const session of rawSessions) {
     const { path: rawPath, agentId } = session;
     const extractedPath = join2(extractedDir, basename(rawPath));
@@ -14895,6 +14921,12 @@ async function extractAllSessions(cwd, transcriptPath) {
         const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
         if (result) {
           extracted++;
+          if (result.schemaErrors.length > 0) {
+            schemaErrors.push({
+              sessionId: basename(rawPath, ".jsonl"),
+              errors: result.schemaErrors
+            });
+          }
         }
       } catch (error48) {
         const id = basename(rawPath, ".jsonl");
@@ -14902,7 +14934,7 @@ async function extractAllSessions(cwd, transcriptPath) {
       }
     }
   }
-  return extracted;
+  return { extracted, schemaErrors };
 }
 
 // cli/commands/session-start.ts
@@ -14917,9 +14949,14 @@ async function sessionStart() {
   const cwd = process.env.CWD || process.cwd();
   const transcriptPath = process.env.TRANSCRIPT_PATH;
   try {
-    const extracted = await extractAllSessions(cwd, transcriptPath);
+    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
     if (extracted > 0) {
       messages.push(extractedMessage(extracted));
+    }
+    if (schemaErrors.length > 0) {
+      const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
+      const uniqueErrors = [...new Set(schemaErrors.flatMap((s) => s.errors))];
+      messages.push(`Schema errors (${errorCount} entries in ${schemaErrors.length} sessions): ${uniqueErrors.join("; ")}`);
     }
   } catch (error48) {
     const errorMsg = error48 instanceof Error ? error48.message : String(error48);

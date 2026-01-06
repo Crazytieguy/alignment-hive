@@ -30,3 +30,12 @@ git config core.hooksPath .githooks
 ```
 
 User-facing CLI strings are centralized in `cli/lib/messages.ts` for easy review and updates.
+
+### Regenerating extracted sessions
+
+After schema or extraction changes, delete cached sessions and re-run extraction:
+
+```bash
+rm -rf .claude/hive-mind/sessions/*.jsonl
+CWD=$(pwd) bun cli/cli.ts session-start
+```

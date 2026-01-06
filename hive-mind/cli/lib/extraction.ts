@@ -31,23 +31,23 @@ export function* parseJsonl(content: string) {
   }
 }
 
-function transformEntry(rawEntry: unknown) {
-  const entry = parseKnownEntry(rawEntry);
-  if (!entry) {
-    if (process.env.DEBUG) {
-      console.warn("Skipping unknown entry type");
-    }
-    return null;
+function transformEntry(rawEntry: unknown): { entry: ExtractedEntry | null; error?: string } {
+  const result = parseKnownEntry(rawEntry);
+  if (result.error) {
+    return { entry: null, error: result.error };
+  }
+  if (!result.data) {
+    return { entry: null };
   }
 
-  if (INCLUDED_ENTRY_TYPES.includes(entry.type as (typeof INCLUDED_ENTRY_TYPES)[number])) {
-    return entry;
+  if (INCLUDED_ENTRY_TYPES.includes(result.data.type as (typeof INCLUDED_ENTRY_TYPES)[number])) {
+    return { entry: result.data as ExtractedEntry };
   }
 
-  return null;
+  return { entry: null };
 }
 
-type ExtractedEntry = Exclude<ReturnType<typeof transformEntry>, null>;
+type ExtractedEntry = Exclude<ReturnType<typeof parseKnownEntry>["data"], null>;
 
 /** Returns the summary where leafUuid exists in the same session. */
 function findValidSummary(entries: Array<ExtractedEntry>) {
@@ -98,11 +98,15 @@ export async function extractSession(options: ExtractSessionOptions) {
 
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries: Array<ExtractedEntry> = [];
+  const schemaErrors: string[] = [];
 
   for (const rawEntry of parseJsonl(content)) {
-    const transformed = transformEntry(rawEntry);
-    if (transformed) {
-      entries.push(transformed);
+    const { entry, error } = transformEntry(rawEntry);
+    if (error) {
+      schemaErrors.push(error);
+    }
+    if (entry) {
+      entries.push(entry);
     }
   }
   if (process.env.DEBUG) {
@@ -135,6 +139,7 @@ export async function extractSession(options: ExtractSessionOptions) {
     rawPath,
     ...(agentId && { agentId }),
     ...(parentSessionId && { parentSessionId }),
+    ...(schemaErrors.length > 0 && { schemaErrors }),
   };
 
   resetDetectSecretsStats();
@@ -156,7 +161,7 @@ export async function extractSession(options: ExtractSessionOptions) {
 
   await writeFile(outputPath, `${lines.join("\n")}\n`);
 
-  return { messageCount: entries.length, summary };
+  return { messageCount: entries.length, summary, schemaErrors };
 }
 
 async function readFirstLine(filePath: string): Promise<string | null> {
@@ -241,18 +246,21 @@ async function needsExtraction(
   }
 }
 
-export async function extractAllSessions(cwd: string, transcriptPath?: string) {
-  // Determine raw sessions directory
+export interface ExtractionResult {
+  extracted: number;
+  schemaErrors: Array<{ sessionId: string; errors: string[] }>;
+}
+
+export async function extractAllSessions(cwd: string, transcriptPath?: string): Promise<ExtractionResult> {
   const rawDir = transcriptPath ? dirname(transcriptPath) : getProjectsDir(cwd);
   const extractedDir = getHiveMindSessionsDir(cwd);
 
   const rawSessions = await findRawSessions(rawDir);
   let extracted = 0;
+  const schemaErrors: ExtractionResult["schemaErrors"] = [];
 
   for (const session of rawSessions) {
     const { path: rawPath, agentId } = session;
-
-    // Use same filename as original (agent-<id>.jsonl or <sessionId>.jsonl)
     const extractedPath = join(extractedDir, basename(rawPath));
 
     if (await needsExtraction(rawPath, extractedPath)) {
@@ -260,14 +268,19 @@ export async function extractAllSessions(cwd: string, transcriptPath?: string) {
         const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
         if (result) {
           extracted++;
+          if (result.schemaErrors.length > 0) {
+            schemaErrors.push({
+              sessionId: basename(rawPath, ".jsonl"),
+              errors: result.schemaErrors,
+            });
+          }
         }
       } catch (error) {
-        // Log but continue with other sessions
         const id = basename(rawPath, ".jsonl");
         console.error(`Failed to extract ${id}:`, error);
       }
     }
   }
 
-  return extracted;
+  return { extracted, schemaErrors };
 }

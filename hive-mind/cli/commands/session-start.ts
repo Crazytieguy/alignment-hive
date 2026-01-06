@@ -24,12 +24,18 @@ export async function sessionStart(): Promise<void> {
   const transcriptPath = process.env.TRANSCRIPT_PATH;
 
   try {
-    const extracted = await extractAllSessions(cwd, transcriptPath);
+    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
     if (extracted > 0) {
       messages.push(extractedMessage(extracted));
     }
+    if (schemaErrors.length > 0) {
+      const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
+      const uniqueErrors = [...new Set(schemaErrors.flatMap((s) => s.errors))];
+      messages.push(
+        `Schema errors (${errorCount} entries in ${schemaErrors.length} sessions): ${uniqueErrors.join("; ")}`,
+      );
+    }
   } catch (error) {
-    // Show error to user via systemMessage (Claude only sees "hook success")
     const errorMsg = error instanceof Error ? error.message : String(error);
     messages.push(`Extraction failed: ${errorMsg}`);
   }
