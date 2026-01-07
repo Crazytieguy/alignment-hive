@@ -17,7 +17,6 @@ export const ToolUseBlockSchema = z.looseObject({
   input: z.record(z.string(), z.unknown()),
 });
 
-// Strip base64 data, keep metadata (data is optional for self-compatibility)
 const Base64SourceSchema = z
   .looseObject({
     type: z.literal("base64"),
@@ -36,15 +35,13 @@ export const DocumentBlockSchema = z.looseObject({
   source: Base64SourceSchema,
 });
 
-export const UnknownContentBlockSchema = z.looseObject({ type: z.string() });
-
-// Content blocks allowed inside tool_result.content (no recursive tool_result)
 const ToolResultContentBlockSchema = z.union([
   TextBlockSchema,
   ImageBlockSchema,
   DocumentBlockSchema,
-  UnknownContentBlockSchema,
 ]);
+
+export type ToolResultContentBlock = z.infer<typeof ToolResultContentBlockSchema>;
 
 export const ToolResultBlockSchema = z.looseObject({
   type: z.literal("tool_result"),
@@ -61,20 +58,12 @@ export const KnownContentBlockSchema = z.discriminatedUnion("type", [
   DocumentBlockSchema,
 ]);
 
-export const ContentBlockSchema = z.union([
-  KnownContentBlockSchema,
-  UnknownContentBlockSchema,
-]);
+export const ContentBlockSchema = KnownContentBlockSchema;
 
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
-export type KnownContentBlock = z.infer<typeof KnownContentBlockSchema>;
 
-export const MessageContentSchema = z.union([
-  z.string(),
-  z.array(ContentBlockSchema),
-]);
+export const MessageContentSchema = z.union([z.string(), z.array(ContentBlockSchema)]);
 
-// Transform strips id field (low retrieval value); usage kept for analytics
 export const UserMessageObjectSchema = z
   .looseObject({
     role: z.string(),
@@ -101,7 +90,6 @@ export const SummaryEntrySchema = z.looseObject({
   leafUuid: z.string().optional(),
 });
 
-// Transform strips low-value fields (toolUseResult is redundant with message.content tool_result blocks)
 export const UserEntrySchema = z
   .looseObject({
     type: z.literal("user"),
@@ -122,9 +110,14 @@ export const UserEntrySchema = z
     thinkingMetadata: z.unknown().optional(),
     todos: z.unknown().optional(),
   })
-  .transform(({ toolUseResult, requestId, slug, userType, ...rest }) => rest);
+  .transform(({ toolUseResult, requestId, slug, userType, ...rest }) => {
+    const agentId =
+      toolUseResult && typeof toolUseResult === "object" && "agentId" in toolUseResult
+        ? (toolUseResult as { agentId?: string }).agentId
+        : undefined;
+    return { ...rest, ...(agentId && { agentId }) };
+  });
 
-// Transform strips low-value fields: requestId, slug, userType
 export const AssistantEntrySchema = z
   .looseObject({
     type: z.literal("assistant"),
@@ -181,18 +174,11 @@ const KNOWN_ENTRY_TYPES = [
   "queue-operation",
 ] as const;
 
-export function isKnownEntryType(
-  type: unknown,
-): type is (typeof KNOWN_ENTRY_TYPES)[number] {
-  return (
-    typeof type === "string" &&
-    KNOWN_ENTRY_TYPES.includes(type as (typeof KNOWN_ENTRY_TYPES)[number])
-  );
+export function isKnownEntryType(type: unknown): type is (typeof KNOWN_ENTRY_TYPES)[number] {
+  return typeof type === "string" && KNOWN_ENTRY_TYPES.includes(type as (typeof KNOWN_ENTRY_TYPES)[number]);
 }
 
-export type ParseResult =
-  | { data: KnownEntry; error?: undefined }
-  | { data: null; error?: string };
+export type ParseResult = { data: KnownEntry; error?: undefined } | { data: null; error?: string };
 
 export function parseKnownEntry(data: unknown): ParseResult {
   const parsed = KnownEntrySchema.safeParse(data);
@@ -200,11 +186,9 @@ export function parseKnownEntry(data: unknown): ParseResult {
     return { data: parsed.data };
   }
 
-  const entryType = (data as { type?: unknown })?.type;
+  const entryType = (data as { type?: unknown }).type;
   if (isKnownEntryType(entryType)) {
-    const errorDetails = parsed.error.issues
-      .map((e) => `${e.path.join(".")}: ${e.message}`)
-      .join("; ");
+    const errorDetails = parsed.error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
     return { data: null, error: `${entryType}: ${errorDetails}` };
   }
 
@@ -219,7 +203,6 @@ export const HiveMindMetaSchema = z.object({
   extractedAt: z.string(),
   rawMtime: z.string(),
   messageCount: z.number(),
-  summary: z.string().optional(),
   rawPath: z.string(),
   agentId: z.string().optional(),
   parentSessionId: z.string().optional(),
@@ -229,25 +212,15 @@ export const HiveMindMetaSchema = z.object({
 export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;
 
 /**
- * SELF-COMPATIBILITY CONSTRAINT:
- * All schemas with transforms must accept both original AND transformed data.
- * This allows the same schemas to be used for initial extraction and later retrieval.
- * To maintain this: make all stripped fields optional (not required).
- *
- * The type assertions below enforce this at compile time.
+ * SELF-COMPATIBILITY: Schemas with transforms must accept both original AND transformed data.
+ * Make all stripped fields optional. These assertions enforce this at compile time.
  */
-
-// Compile-time assertion: output type must be assignable to input type
 type AssertSelfCompatible<T extends z.ZodType> = z.output<T> extends z.input<T> ? true : never;
-
-// These will cause compile errors if schemas are not self-compatible
 const _assertBase64Source: AssertSelfCompatible<typeof Base64SourceSchema> = true;
 const _assertUserMessage: AssertSelfCompatible<typeof UserMessageObjectSchema> = true;
 const _assertAssistantMessage: AssertSelfCompatible<typeof AssistantMessageObjectSchema> = true;
 const _assertUserEntry: AssertSelfCompatible<typeof UserEntrySchema> = true;
 const _assertAssistantEntry: AssertSelfCompatible<typeof AssistantEntrySchema> = true;
-
-// Suppress unused variable warnings
 void _assertBase64Source;
 void _assertUserMessage;
 void _assertAssistantMessage;

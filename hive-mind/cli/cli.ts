@@ -1,11 +1,15 @@
 #!/usr/bin/env bun
 
+import { index } from "./commands/index";
 import { login } from "./commands/login";
+import { read } from "./commands/read";
 import { sessionStart } from "./commands/session-start";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
+  index: { description: "List extracted sessions", handler: index },
   login: { description: "Authenticate with hive-mind", handler: login },
+  read: { description: "Read session entries", handler: read },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
 } as const;
 

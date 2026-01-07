@@ -4,10 +4,12 @@ set -e
 # Rebuild CLI bundle if source changed
 if git diff --cached --name-only | grep -q "^hive-mind/cli/"; then
     echo "hive-mind CLI source changed, rebuilding..."
-    cd "$(git rev-parse --show-toplevel)/hive-mind"
+    ROOT="$(git rev-parse --show-toplevel)"
+    cd "$ROOT/hive-mind"
     bun run cli:build
-    if ! git diff --quiet ../plugins/hive-mind/cli.js 2>/dev/null; then
+    cd "$ROOT"
+    if ! git diff --quiet plugins/hive-mind/cli.js 2>/dev/null; then
         echo "Staging updated cli.js..."
-        git add ../plugins/hive-mind/cli.js
+        git add plugins/hive-mind/cli.js
     fi
 fi

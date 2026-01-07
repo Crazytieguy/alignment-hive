@@ -365,69 +365,9 @@ describe("metadata line", () => {
       expect(typeof meta.checkoutId).toBe("string");
       expect(meta.checkoutId.length).toBeGreaterThan(0);
       expect(meta.messageCount).toBe(3); // summary + user + assistant
-      expect(meta.summary).toBe("Test session");
       expect(meta.rawPath).toBe(rawPath);
       expect(meta.extractedAt).toBeDefined();
       expect(meta.rawMtime).toBeDefined();
-    } finally {
-      await rm(tempDir, { recursive: true });
-    }
-  });
-});
-
-describe("summary validation", () => {
-  test("uses summary with matching leafUuid", async () => {
-    const { extractSession } = await import("./extraction");
-    const { mkdtemp, writeFile, readFile, rm } = await import(
-      "node:fs/promises"
-    );
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-
-    const tempDir = await mkdtemp(join(tmpdir(), "hive-test-"));
-    const rawPath = join(tempDir, "test-session.jsonl");
-    const outPath = join(tempDir, "out", "test-session.jsonl");
-
-    try {
-      await writeFile(
-        rawPath,
-        [
-          // Contaminated summary (leafUuid doesn't exist in this file)
-          JSON.stringify({
-            type: "summary",
-            summary: "Wrong session",
-            leafUuid: "nonexistent",
-          }),
-          // Valid summary (leafUuid exists)
-          JSON.stringify({
-            type: "summary",
-            summary: "Correct session",
-            leafUuid: "2",
-          }),
-          JSON.stringify({
-            type: "user",
-            uuid: "1",
-            parentUuid: null,
-            timestamp: "2025-01-01",
-            message: { role: "user", content: "hello" },
-          }),
-          JSON.stringify({
-            type: "assistant",
-            uuid: "2",
-            parentUuid: "1",
-            timestamp: "2025-01-01",
-            message: { role: "assistant", content: "hi" },
-          }),
-        ].join("\n"),
-      );
-
-      await extractSession({ rawPath, outputPath: outPath });
-
-      const output = await readFile(outPath, "utf-8");
-      const lines = output.trim().split("\n");
-      const meta = JSON.parse(lines[0]);
-
-      expect(meta.summary).toBe("Correct session");
     } finally {
       await rm(tempDir, { recursive: true });
     }
