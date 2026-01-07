@@ -15090,15 +15090,6 @@ function truncateFirstLine(text, maxLen = MAX_CONTENT_SUMMARY_LEN) {
     return firstLine;
   return firstLine.slice(0, maxLen - 3) + "...";
 }
-function redactMultiline(text) {
-  const lines = text.split(`
-`);
-  if (lines.length <= 1)
-    return text;
-  const remaining = lines.length - 1;
-  return `${lines[0]}
-[+${remaining} lines]`;
-}
 function countLines(text) {
   if (!text)
     return 0;
@@ -15121,11 +15112,32 @@ function formatLineCount(text) {
   const count = countLines(text);
   return `${count}line${count === 1 ? "" : "s"}`;
 }
-function formatResultLines(result) {
-  return `returned=${countLines(result.content)}lines`;
+function shortenPath(path, cwd) {
+  if (!cwd)
+    return path;
+  if (path.startsWith(cwd + "/")) {
+    return path.slice(cwd.length + 1);
+  }
+  if (path === cwd) {
+    return ".";
+  }
+  return path;
 }
-function isSkippedEntryType(entry) {
-  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
+function indent(text, spaces) {
+  const prefix = " ".repeat(spaces);
+  return text.split(`
+`).map((line) => line ? prefix + line : line).join(`
+`);
+}
+function formatTimestamp(timestamp, prevDate, isFirst) {
+  if (!timestamp)
+    return "";
+  const date5 = timestamp.slice(0, 10);
+  const time3 = timestamp.slice(11, 16);
+  if (isFirst || !prevDate || date5 !== prevDate) {
+    return `${date5}T${time3}`;
+  }
+  return time3;
 }
 function formatSession(entries, options = {}) {
   const { redact = false } = options;
@@ -15145,6 +15157,12 @@ function formatSession(entries, options = {}) {
   });
   const uuidToLine = buildUuidMap(filteredEntries);
   const results = [];
+  if (redact) {
+    const header = buildSessionHeader(entries);
+    if (header) {
+      results.push(header);
+    }
+  }
   let prevUuid;
   let prevDate;
   let cwd;
@@ -15193,16 +15211,57 @@ function formatSession(entries, options = {}) {
       prevUuid = uuid3;
     }
   }
-  return results.join(`
-`);
+  const separator = redact ? `
+` : `
+
+`;
+  return results.join(separator);
+}
+function formatEntry(entry, options) {
+  const { lineNumber, toolResults, parentIndicator, redact = false, prevDate, isFirst, cwd } = options;
+  switch (entry.type) {
+    case "user":
+      if (toolResults && isToolResultOnlyEntry(entry))
+        return null;
+      return formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact);
+    case "assistant":
+      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact);
+    case "system":
+      return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact);
+    case "summary":
+      return formatSummaryEntry(entry, lineNumber, redact);
+    default:
+      return null;
+  }
+}
+function buildSessionHeader(entries) {
+  let model;
+  let gitBranch;
+  for (const entry of entries) {
+    if (!model && entry.type === "assistant" && entry.message.model) {
+      model = entry.message.model;
+    }
+    if (!gitBranch && entry.type === "user" && entry.gitBranch) {
+      gitBranch = entry.gitBranch;
+    }
+    if (model && gitBranch)
+      break;
+  }
+  const parts = ["#"];
+  if (model)
+    parts.push(`model=${model}`);
+  if (gitBranch)
+    parts.push(`branch=${gitBranch}`);
+  if (parts.length === 1)
+    return null;
+  return parts.join(" ");
 }
 function buildUuidMap(entries) {
   const map2 = new Map;
   let logicalLine = 0;
   for (const entry of entries) {
-    if (isSkippedEntryType(entry)) {
+    if (isSkippedEntryType(entry))
       continue;
-    }
     if (entry.type === "user") {
       const content = entry.message.content;
       if (Array.isArray(content)) {
@@ -15285,390 +15344,8 @@ function isToolResultOnlyEntry(entry) {
     return true;
   return meaningfulBlocks.every((b) => b.type === "tool_result");
 }
-function formatEntry(entry, options) {
-  const { redact = false } = options;
-  if (redact) {
-    return formatEntryCompact(entry, options);
-  }
-  return formatEntryXml(entry, options);
-}
-function formatEntryCompact(entry, options) {
-  const { lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd } = options;
-  switch (entry.type) {
-    case "user":
-      if (toolResults && isToolResultOnlyEntry(entry))
-        return null;
-      return formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst);
-    case "assistant":
-      return formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd);
-    case "system":
-      return formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst);
-    case "summary":
-      return formatSummaryEntryCompact(entry, lineNumber);
-    default:
-      return null;
-  }
-}
-function formatTimestampCompact(timestamp, prevDate, isFirst) {
-  if (!timestamp)
-    return "";
-  const date5 = timestamp.slice(0, 10);
-  const time3 = timestamp.slice(11, 16);
-  if (isFirst || !prevDate || date5 !== prevDate) {
-    return `${date5}T${time3}`;
-  }
-  return time3;
-}
-function formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("user");
-  if (parentIndicator !== undefined) {
-    parts.push(`parent=${parentIndicator}`);
-  }
-  const messageContent = formatMessageContentCompact(entry.message.content);
-  parts.push(messageContent);
-  return parts.join("|");
-}
-function formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd) {
-  const blocks = entry.message.content;
-  if (!blocks || typeof blocks === "string") {
-    const parts = [String(lineNumber)];
-    const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
-    if (ts)
-      parts.push(ts);
-    parts.push("assistant");
-    if (parentIndicator !== undefined) {
-      parts.push(`parent=${parentIndicator}`);
-    }
-    const text = typeof blocks === "string" ? blocks : "";
-    parts.push(formatQuotedSummary(text));
-    return parts.join("|");
-  }
-  const lines = [];
-  let blockIndex = 0;
-  for (const block of blocks) {
-    if (isNoiseBlock(block))
-      continue;
-    if (block.type === "tool_result")
-      continue;
-    const parts = [String(lineNumber)];
-    const ts = blockIndex === 0 ? formatTimestampCompact(entry.timestamp, prevDate, isFirst) : "";
-    if (ts)
-      parts.push(ts);
-    if (block.type === "thinking") {
-      parts.push("thinking");
-      parts.push(formatLineCount(block.thinking));
-    } else if (block.type === "text") {
-      parts.push("assistant");
-      if (blockIndex === 0 && parentIndicator !== undefined) {
-        parts.push(`parent=${parentIndicator}`);
-      }
-      parts.push(formatQuotedSummary(block.text));
-    } else if (block.type === "tool_use") {
-      parts.push("tool");
-      const toolLine = formatToolUseCompact(block, toolResults, cwd);
-      parts.push(toolLine);
-    }
-    lines.push(parts.join("|"));
-    blockIndex++;
-  }
-  return lines.length > 0 ? lines.join(`
-`) : null;
-}
-function formatToolUseCompact(block, toolResults, cwd) {
-  const result = toolResults?.get(block.id);
-  const name = block.name;
-  const input = block.input;
-  switch (name) {
-    case "Edit":
-      return formatEditToolCompact(input, result, cwd);
-    case "Read":
-      return formatReadToolCompact(input, result, cwd);
-    case "Write":
-      return formatWriteToolCompact(input, result, cwd);
-    case "Bash":
-      return formatBashToolCompact(input, result);
-    case "Grep":
-      return formatGrepToolCompact(input, result, cwd);
-    case "Glob":
-      return formatGlobToolCompact(input, result);
-    case "Task":
-      return formatTaskToolCompact(input, result);
-    case "TodoWrite":
-      return formatTodoWriteToolCompact(input);
-    case "AskUserQuestion":
-      return formatAskUserQuestionToolCompact(input, result);
-    case "ExitPlanMode":
-      return formatExitPlanModeToolCompact(input);
-    case "WebFetch":
-      return formatWebFetchToolCompact(input, result);
-    case "WebSearch":
-      return formatWebSearchToolCompact(input, result);
-    default:
-      return formatGenericToolCompact(name, input, result);
-  }
-}
-function formatEditToolCompact(input, result, cwd) {
-  const path = shortenPath(String(input.file_path || ""), cwd);
-  const oldStr = String(input.old_string || "");
-  const newStr = String(input.new_string || "");
-  const oldLines = countLines(oldStr);
-  const newLines = countLines(newStr);
-  return `Edit|${path}|-${oldLines}+${newLines}`;
-}
-function formatReadToolCompact(input, result, cwd) {
-  const path = shortenPath(String(input.file_path || ""), cwd);
-  const resultPart = result ? formatResultLines(result) : "returned=0lines";
-  return `Read|${path}|${resultPart}`;
-}
-function formatWriteToolCompact(input, result, cwd) {
-  const path = shortenPath(String(input.file_path || ""), cwd);
-  const content = String(input.content || "");
-  const lineCount = countLines(content);
-  return `Write|${path}|written=${lineCount}lines`;
-}
-function formatBashToolCompact(input, result) {
-  const command = String(input.command || "").trim();
-  const desc = input.description ? String(input.description) : undefined;
-  const parts = ["Bash"];
-  parts.push(`command="${escapeQuotes(truncateFirstLine(command))}"`);
-  if (desc) {
-    parts.push(`description="${escapeQuotes(desc)}"`);
-  }
-  if (result) {
-    parts.push(`returned=${formatQuotedSummary(result.content)}`);
-  }
-  return parts.join("|");
-}
-function formatGrepToolCompact(input, result, cwd) {
-  const pattern = String(input.pattern || "");
-  const path = input.path ? shortenPath(String(input.path), cwd) : "";
-  const parts = ["Grep", `pattern="${escapeQuotes(pattern)}"`];
-  if (path)
-    parts.push(path);
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join("|");
-}
-function formatGlobToolCompact(input, result) {
-  const pattern = String(input.pattern || "");
-  const parts = ["Glob", `pattern="${pattern}"`];
-  if (result) {
-    const files = result.content.split(`
-`).filter((l) => l.trim()).length;
-    parts.push(`returned=${files}files`);
-  }
-  return parts.join("|");
-}
-function formatTaskToolCompact(input, result) {
-  const desc = String(input.description || "");
-  const prompt = String(input.prompt || "");
-  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
-  const parts = ["Task"];
-  if (result?.agentId) {
-    parts.push(`agent_session="agent-${result.agentId}"`);
-  }
-  if (subagentType) {
-    parts.push(`subagent_type="${subagentType}"`);
-  }
-  parts.push(`description="${escapeQuotes(desc)}"`);
-  parts.push(`prompt=${countLines(prompt)}lines`);
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join("|");
-}
-function formatTodoWriteToolCompact(input) {
-  const todos = Array.isArray(input.todos) ? input.todos : [];
-  return `TodoWrite|todos=${todos.length}`;
-}
-function formatAskUserQuestionToolCompact(input, result) {
-  const questions = Array.isArray(input.questions) ? input.questions : [];
-  const parts = ["AskUserQuestion", `questions=${questions.length}`];
-  if (result) {
-    parts.push(`returned=${formatQuotedSummary(result.content)}`);
-  }
-  return parts.join("|");
-}
-function formatExitPlanModeToolCompact(input) {
-  const plan = input.plan ? String(input.plan) : "";
-  if (plan) {
-    return `ExitPlanMode|plan=${countLines(plan)}lines`;
-  }
-  return "ExitPlanMode";
-}
-function formatWebFetchToolCompact(input, result) {
-  const url2 = String(input.url || "");
-  const parts = ["WebFetch", `url="${url2}"`];
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join("|");
-}
-function formatWebSearchToolCompact(input, result) {
-  const query = String(input.query || "");
-  const parts = ["WebSearch", `query="${escapeQuotes(query)}"`];
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join("|");
-}
-function formatGenericToolCompact(name, input, result) {
-  const parts = [name];
-  const entries = Object.entries(input).slice(0, 3);
-  for (const [key, value] of entries) {
-    const str = typeof value === "string" ? value : JSON.stringify(value);
-    const short = truncateFirstLine(str);
-    parts.push(`${key}="${escapeQuotes(short)}"`);
-  }
-  if (result) {
-    parts.push(`returned=${formatQuotedSummary(result.content)}`);
-  }
-  return parts.join("|");
-}
-function shortenPath(path, cwd) {
-  if (!cwd)
-    return path;
-  if (path.startsWith(cwd + "/")) {
-    return path.slice(cwd.length + 1);
-  }
-  if (path === cwd) {
-    return ".";
-  }
-  return path;
-}
-function formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("system");
-  if (entry.subtype)
-    parts.push(`subtype=${entry.subtype}`);
-  if (entry.level && entry.level !== "info")
-    parts.push(`level=${entry.level}`);
-  if (entry.content) {
-    parts.push(formatQuotedSummary(entry.content));
-  }
-  return parts.join("|");
-}
-function formatSummaryEntryCompact(entry, lineNumber) {
-  return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
-}
-function formatMessageContentCompact(content) {
-  if (!content)
-    return '""';
-  if (typeof content === "string") {
-    return formatQuotedSummary(content);
-  }
-  const textParts = [];
-  for (const block of content) {
-    if (isNoiseBlock(block))
-      continue;
-    if (block.type === "tool_result")
-      continue;
-    if (block.type === "text") {
-      textParts.push(block.text);
-    }
-  }
-  if (textParts.length === 0)
-    return '""';
-  return formatQuotedSummary(textParts.join(`
-`));
-}
-function formatEntryXml(entry, options) {
-  const { lineNumber, toolResults, parentIndicator, redact = false } = options;
-  switch (entry.type) {
-    case "user":
-      if (toolResults && isToolResultOnlyEntry(entry))
-        return null;
-      return formatUserEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
-    case "assistant":
-      return formatAssistantEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
-    case "system":
-      return formatSystemEntryXml(entry, lineNumber, redact);
-    case "summary":
-      return formatSummaryEntryXml(entry, lineNumber);
-    default:
-      return null;
-  }
-}
-function formatUserEntryXml(entry, lineNumber, toolResults, parentIndicator, redact) {
-  const attrs = [`line="${lineNumber}"`];
-  if (entry.timestamp)
-    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  if (parentIndicator !== undefined)
-    attrs.push(`parent="${parentIndicator}"`);
-  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
-  return formatXmlElement("user", attrs, content);
-}
-function formatAssistantEntryXml(entry, lineNumber, toolResults, parentIndicator, redact) {
-  const attrs = [`line="${lineNumber}"`];
-  if (entry.timestamp)
-    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  if (entry.message.model)
-    attrs.push(`model="${entry.message.model}"`);
-  if (entry.message.stop_reason && entry.message.stop_reason !== "end_turn") {
-    attrs.push(`stop="${entry.message.stop_reason}"`);
-  }
-  if (parentIndicator !== undefined)
-    attrs.push(`parent="${parentIndicator}"`);
-  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
-  return formatXmlElement("assistant", attrs, content);
-}
-function formatXmlElement(tag, attrs, content) {
-  const attrStr = attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
-  if (!content)
-    return `<${tag}${attrStr}/>`;
-  if (!content.includes(`
-`))
-    return `<${tag}${attrStr}>${content}</${tag}>`;
-  return `<${tag}${attrStr}>
-${indent(content, 2)}
-</${tag}>`;
-}
-function formatSystemEntryXml(entry, lineNumber, redact) {
-  const attrs = [`line="${lineNumber}"`];
-  if (entry.timestamp)
-    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  if (entry.subtype)
-    attrs.push(`subtype="${entry.subtype}"`);
-  if (entry.level && entry.level !== "info")
-    attrs.push(`level="${entry.level}"`);
-  let content = entry.content || "";
-  if (redact) {
-    content = redactMultiline(content);
-  }
-  return formatXmlElement("system", attrs, content);
-}
-function formatSummaryEntryXml(entry, lineNumber) {
-  return formatXmlElement("summary", [`line="${lineNumber}"`], entry.summary);
-}
-function formatTimestamp(iso) {
-  return iso.slice(0, 16);
-}
-function formatMessageContentXml(content, toolResults, redact) {
-  if (!content)
-    return "";
-  if (typeof content === "string") {
-    return redact ? redactMultiline(content) : content;
-  }
-  const parts = [];
-  for (const block of content) {
-    if (isNoiseBlock(block))
-      continue;
-    if (toolResults && block.type === "tool_result")
-      continue;
-    const formatted = formatContentBlockXml(block, toolResults, redact);
-    if (formatted)
-      parts.push(formatted);
-  }
-  return parts.join(`
-`);
+function isSkippedEntryType(entry) {
+  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
 }
 function isNoiseBlock(block) {
   if (block.type === "tool_result" && "content" in block) {
@@ -15685,114 +15362,442 @@ function isNoiseBlock(block) {
   }
   return false;
 }
-function formatContentBlockXml(block, toolResults, redact) {
-  switch (block.type) {
-    case "text":
-      return redact ? redactMultiline(block.text) : block.text;
-    case "thinking":
-      return formatXmlElement("thinking", [], redact ? redactMultiline(block.thinking) : block.thinking);
-    case "tool_use":
-      return formatToolUseBlockXml(block, toolResults, redact);
-    case "tool_result":
-      return formatToolResultBlockXml(block, redact);
-    case "image":
-      return `<image media_type="${block.source.media_type}"/>`;
-    case "document":
-      return `<document media_type="${block.source.media_type}"/>`;
+function formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact) {
+  const parts = [String(lineNumber)];
+  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("user");
+  if (parentIndicator !== undefined) {
+    parts.push(`parent=${parentIndicator}`);
+  }
+  const content = getUserMessageContent(entry.message.content);
+  if (redact) {
+    parts.push(formatQuotedSummary(content));
+    return parts.join("|");
+  } else {
+    const header = parts.join("|");
+    if (!content)
+      return header;
+    return `${header}
+${indent(content, 2)}`;
   }
 }
-function formatToolUseBlockXml(block, toolResults, redact) {
-  const resultInfo = toolResults?.get(block.id);
-  const tagName = resultInfo ? "tool" : "tool_use";
-  const attrs = [`name="${block.name}"`];
-  if (block.name === "Task" && resultInfo?.agentId) {
-    attrs.push(`agent_session="agent-${resultInfo.agentId}"`);
-  }
-  const lines = [`<${tagName} ${attrs.join(" ")}>`];
-  for (const [key, value] of Object.entries(block.input)) {
-    let formatted = formatValue(value, key);
-    if (redact) {
-      formatted = redactMultiline(formatted);
-    }
-    if (formatted.includes(`
-`)) {
-      lines.push(`  <${key}>
-${indent(formatted, 4)}
-  </${key}>`);
-    } else {
-      lines.push(`  <${key}>${formatted}</${key}>`);
-    }
-  }
-  if (resultInfo) {
-    let resultContent = resultInfo.content;
-    if (redact) {
-      resultContent = redactMultiline(resultContent);
-    }
-    if (resultContent.includes(`
-`)) {
-      lines.push(`  <result>
-${indent(resultContent, 4)}
-  </result>`);
-    } else {
-      lines.push(`  <result>${resultContent}</result>`);
-    }
-  }
-  lines.push(`</${tagName}>`);
-  return lines.join(`
-`);
-}
-function formatToolResultBlockXml(block, redact) {
-  const lines = [`<tool_result>`];
-  if (block.content) {
-    if (typeof block.content === "string") {
-      const content = redact ? redactMultiline(block.content) : block.content;
-      lines.push(indent(content, 2));
-    } else {
-      for (const innerBlock of block.content) {
-        if (innerBlock.type === "text") {
-          const text = redact ? redactMultiline(innerBlock.text) : innerBlock.text;
-          lines.push(indent(text, 2));
-        } else if (innerBlock.type === "image") {
-          lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
-        } else {
-          lines.push(`  <document media_type="${innerBlock.source.media_type}"/>`);
-        }
-      }
-    }
-  }
-  lines.push("</tool_result>");
-  return lines.join(`
-`);
-}
-function formatValue(value, key) {
-  if (value === null || value === undefined)
+function getUserMessageContent(content) {
+  if (!content)
     return "";
-  if (typeof value === "string")
-    return value;
-  if (typeof value === "number" || typeof value === "boolean")
-    return String(value);
-  if (key === "todos" && Array.isArray(value))
-    return formatTodosAsXml(value);
-  if (Array.isArray(value) || typeof value === "object")
-    return JSON.stringify(value, null, 2);
-  return String(value);
+  if (typeof content === "string")
+    return content;
+  const textParts = [];
+  for (const block of content) {
+    if (isNoiseBlock(block))
+      continue;
+    if (block.type === "tool_result")
+      continue;
+    if (block.type === "text") {
+      textParts.push(block.text);
+    }
+  }
+  return textParts.join(`
+`);
 }
-function formatTodosAsXml(todos) {
+function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact) {
+  const blocks = entry.message.content;
+  if (!blocks || typeof blocks === "string") {
+    const text = typeof blocks === "string" ? blocks : "";
+    return formatTextEntry(lineNumber, entry.timestamp, text, parentIndicator, prevDate, isFirst, redact);
+  }
   const lines = [];
+  let blockIndex = 0;
+  for (const block of blocks) {
+    if (isNoiseBlock(block))
+      continue;
+    if (block.type === "tool_result")
+      continue;
+    const ts = blockIndex === 0 ? entry.timestamp : undefined;
+    const parent = blockIndex === 0 ? parentIndicator : undefined;
+    if (block.type === "thinking") {
+      lines.push(formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact));
+    } else if (block.type === "text") {
+      lines.push(formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact));
+    } else if (block.type === "tool_use") {
+      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact);
+      if (formatted)
+        lines.push(formatted);
+    }
+    blockIndex++;
+  }
+  return lines.length > 0 ? lines.join(`
+`) : null;
+}
+function formatThinkingEntry(lineNumber, timestamp, content, prevDate, isFirst, redact) {
+  const parts = [String(lineNumber)];
+  const ts = formatTimestamp(timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("thinking");
+  if (redact) {
+    parts.push(formatLineCount(content));
+    return parts.join("|");
+  } else {
+    const header = parts.join("|");
+    return `${header}
+${indent(content, 2)}`;
+  }
+}
+function formatTextEntry(lineNumber, timestamp, content, parentIndicator, prevDate, isFirst, redact) {
+  const parts = [String(lineNumber)];
+  const ts = formatTimestamp(timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("assistant");
+  if (parentIndicator !== undefined) {
+    parts.push(`parent=${parentIndicator}`);
+  }
+  if (redact) {
+    parts.push(formatQuotedSummary(content));
+    return parts.join("|");
+  } else {
+    const header = parts.join("|");
+    if (!content)
+      return header;
+    return `${header}
+${indent(content, 2)}`;
+  }
+}
+function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDate, isFirst, redact) {
+  const resultInfo = toolResults?.get(block.id);
+  const name = block.name;
+  const input = block.input;
+  const parts = [String(lineNumber)];
+  const ts = formatTimestamp(timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("tool");
+  parts.push(name);
+  const toolFormatter = getToolFormatter(name);
+  const { headerParams, multilineParams, suppressResult } = toolFormatter(input, resultInfo, cwd, redact);
+  parts.push(...headerParams);
+  if (redact) {
+    if (resultInfo && !suppressResult) {
+      parts.push(`result=${formatLineCount(resultInfo.content)}`);
+    }
+    return parts.join("|");
+  } else {
+    const header = parts.join("|");
+    const bodyLines = [];
+    for (const { name: paramName, content } of multilineParams) {
+      bodyLines.push(`[${paramName}]`);
+      bodyLines.push(indent(content, 2));
+    }
+    if (resultInfo) {
+      bodyLines.push("[result]");
+      bodyLines.push(indent(resultInfo.content, 2));
+    }
+    if (bodyLines.length === 0)
+      return header;
+    return `${header}
+${bodyLines.join(`
+`)}`;
+  }
+}
+function getToolFormatter(name) {
+  switch (name) {
+    case "Edit":
+      return formatEditTool;
+    case "Read":
+      return formatReadTool;
+    case "Write":
+      return formatWriteTool;
+    case "Bash":
+      return formatBashTool;
+    case "Grep":
+      return formatGrepTool;
+    case "Glob":
+      return formatGlobTool;
+    case "Task":
+      return formatTaskTool;
+    case "TodoWrite":
+      return formatTodoWriteTool;
+    case "AskUserQuestion":
+      return formatAskUserQuestionTool;
+    case "ExitPlanMode":
+      return formatExitPlanModeTool;
+    case "WebFetch":
+      return formatWebFetchTool;
+    case "WebSearch":
+      return formatWebSearchTool;
+    default:
+      return formatGenericTool;
+  }
+}
+function formatEditTool(input, result, cwd, redact) {
+  const path = shortenPath(String(input.file_path || ""), cwd);
+  const oldStr = String(input.old_string || "");
+  const newStr = String(input.new_string || "");
+  const oldLines = countLines(oldStr);
+  const newLines = countLines(newStr);
+  if (redact) {
+    return {
+      headerParams: [path, `-${oldLines}+${newLines}`],
+      multilineParams: [],
+      suppressResult: true
+    };
+  }
+  const multilineParams = [];
+  if (oldStr) {
+    multilineParams.push({ name: "old_string", content: oldStr });
+  }
+  if (newStr) {
+    multilineParams.push({ name: "new_string", content: newStr });
+  }
+  return {
+    headerParams: [`file_path=${path}`],
+    multilineParams
+  };
+}
+function formatReadTool(input, result, cwd, redact) {
+  const path = shortenPath(String(input.file_path || ""), cwd);
+  if (redact) {
+    const headerParams2 = [path];
+    if (input.offset !== undefined) {
+      headerParams2.push(`offset=${input.offset}`);
+    }
+    if (input.limit !== undefined) {
+      headerParams2.push(`limit=${input.limit}`);
+    }
+    return { headerParams: headerParams2, multilineParams: [] };
+  }
+  const headerParams = [`file_path=${path}`];
+  if (input.offset !== undefined) {
+    headerParams.push(`offset=${input.offset}`);
+  }
+  if (input.limit !== undefined) {
+    headerParams.push(`limit=${input.limit}`);
+  }
+  return { headerParams, multilineParams: [] };
+}
+function formatWriteTool(input, result, cwd, redact) {
+  const path = shortenPath(String(input.file_path || ""), cwd);
+  const content = String(input.content || "");
+  const lineCount = countLines(content);
+  if (redact) {
+    return {
+      headerParams: [path, `written=${lineCount}lines`],
+      multilineParams: [],
+      suppressResult: true
+    };
+  }
+  return {
+    headerParams: [`file_path=${path}`, `written=${lineCount}lines`],
+    multilineParams: []
+  };
+}
+function formatBashTool(input, result, cwd, redact) {
+  const command = String(input.command || "").trim();
+  const desc = input.description ? String(input.description) : undefined;
+  const headerParams = [];
+  headerParams.push(`command="${escapeQuotes(truncateFirstLine(command))}"`);
+  if (desc) {
+    headerParams.push(`description="${escapeQuotes(desc)}"`);
+  }
+  if (redact && result) {
+    headerParams.push(`result=${formatQuotedSummary(result.content)}`);
+    return { headerParams, multilineParams: [], suppressResult: true };
+  }
+  const multilineParams = [];
+  if (!redact && command.includes(`
+`)) {
+    multilineParams.push({ name: "command", content: command });
+  }
+  return { headerParams, multilineParams };
+}
+function formatGrepTool(input, result, cwd, redact) {
+  const pattern = String(input.pattern || "");
+  const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
+  const headerParams = [`pattern="${escapeQuotes(pattern)}"`];
+  if (path) {
+    headerParams.push(path);
+  }
+  if (input.output_mode) {
+    headerParams.push(`output_mode=${input.output_mode}`);
+  }
+  if (input.glob) {
+    headerParams.push(`glob="${input.glob}"`);
+  }
+  return { headerParams, multilineParams: [] };
+}
+function formatGlobTool(input, result, cwd, redact) {
+  const pattern = String(input.pattern || "");
+  const headerParams = [`pattern="${pattern}"`];
+  if (result) {
+    const files = result.content.split(`
+`).filter((l) => l.trim()).length;
+    headerParams.push(`result=${files}files`);
+  }
+  return {
+    headerParams,
+    multilineParams: [],
+    suppressResult: true
+  };
+}
+function formatTaskTool(input, result, cwd, redact) {
+  const desc = String(input.description || "");
+  const prompt = String(input.prompt || "");
+  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
+  if (redact) {
+    const headerParams2 = [];
+    if (result?.agentId) {
+      headerParams2.push(`agent_session=agent-${result.agentId}`);
+    }
+    if (subagentType) {
+      headerParams2.push(`subagent_type=${subagentType}`);
+    }
+    headerParams2.push(`description="${escapeQuotes(desc)}"`);
+    headerParams2.push(`prompt=${formatLineCount(prompt)}`);
+    return { headerParams: headerParams2, multilineParams: [] };
+  }
+  const headerParams = [];
+  if (result?.agentId) {
+    headerParams.push(`agent_session=agent-${result.agentId}`);
+  }
+  if (subagentType) {
+    headerParams.push(`subagent_type=${subagentType}`);
+  }
+  headerParams.push(`description="${escapeQuotes(desc)}"`);
+  return {
+    headerParams,
+    multilineParams: [{ name: "prompt", content: prompt }]
+  };
+}
+function formatTodoWriteTool(input, result, cwd, redact) {
+  const todos = Array.isArray(input.todos) ? input.todos : [];
+  if (redact) {
+    return {
+      headerParams: [`todos=${todos.length}`],
+      multilineParams: [],
+      suppressResult: true
+    };
+  }
+  const todoLines = [];
   for (const todo of todos) {
     if (typeof todo === "object" && todo !== null) {
       const t = todo;
-      lines.push(`<todo status="${t.status || "pending"}">${t.content || ""}</todo>`);
+      const status = t.status || "pending";
+      const marker = status === "completed" ? "[x]" : status === "in_progress" ? "[>]" : "[ ]";
+      todoLines.push(`${marker} ${t.content || ""}`);
     }
   }
-  return lines.join(`
-`);
+  return {
+    headerParams: [],
+    multilineParams: todoLines.length > 0 ? [{ name: "todos", content: todoLines.join(`
+`) }] : []
+  };
 }
-function indent(text, spaces) {
-  const prefix = " ".repeat(spaces);
-  return text.split(`
-`).map((line) => line ? prefix + line : line).join(`
-`);
+function formatAskUserQuestionTool(input, result, cwd, redact) {
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const headerParams = [`questions=${questions.length}`];
+  if (redact) {
+    if (result) {
+      headerParams.push(`result=${formatQuotedSummary(result.content)}`);
+    }
+    return {
+      headerParams,
+      multilineParams: [],
+      suppressResult: true
+    };
+  }
+  const questionLines = [];
+  for (let i = 0;i < questions.length; i++) {
+    const q = questions[i];
+    questionLines.push(`${i + 1}. ${q.question || ""}`);
+    if (q.options && Array.isArray(q.options)) {
+      for (const opt of q.options) {
+        questionLines.push(`   - ${opt.label || ""}`);
+      }
+    }
+  }
+  return {
+    headerParams: [],
+    multilineParams: questionLines.length > 0 ? [{ name: "questions", content: questionLines.join(`
+`) }] : []
+  };
+}
+function formatExitPlanModeTool(input, result, cwd, redact) {
+  const plan = input.plan ? String(input.plan) : "";
+  if (plan) {
+    return {
+      headerParams: [`plan=${formatLineCount(plan)}`],
+      multilineParams: [],
+      suppressResult: true
+    };
+  }
+  return { headerParams: [], multilineParams: [], suppressResult: true };
+}
+function formatWebFetchTool(input) {
+  const url2 = String(input.url || "");
+  return {
+    headerParams: [`url="${url2}"`],
+    multilineParams: []
+  };
+}
+function formatWebSearchTool(input) {
+  const query = String(input.query || "");
+  return {
+    headerParams: [`query="${escapeQuotes(query)}"`],
+    multilineParams: []
+  };
+}
+function formatGenericTool(input, result, cwd, redact) {
+  const headerParams = [];
+  const multilineParams = [];
+  for (const [key, value] of Object.entries(input)) {
+    if (value === null || value === undefined)
+      continue;
+    const str = typeof value === "string" ? value : JSON.stringify(value);
+    if (!redact && str.includes(`
+`)) {
+      multilineParams.push({ name: key, content: str });
+    } else {
+      const short = truncateFirstLine(str);
+      headerParams.push(`${key}="${escapeQuotes(short)}"`);
+    }
+    if (redact && headerParams.length >= 3)
+      break;
+  }
+  return { headerParams, multilineParams };
+}
+function formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact) {
+  const parts = [String(lineNumber)];
+  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("system");
+  if (entry.subtype)
+    parts.push(`subtype=${entry.subtype}`);
+  if (entry.level && entry.level !== "info")
+    parts.push(`level=${entry.level}`);
+  const content = entry.content || "";
+  if (redact) {
+    if (content) {
+      parts.push(formatQuotedSummary(content));
+    }
+    return parts.join("|");
+  } else {
+    const header = parts.join("|");
+    if (!content)
+      return header;
+    return `${header}
+${indent(content, 2)}`;
+  }
+}
+function formatSummaryEntry(entry, lineNumber, redact) {
+  if (redact) {
+    return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
+  } else {
+    return `${lineNumber}|summary
+${indent(entry.summary, 2)}`;
+  }
 }
 
 // cli/commands/read.ts

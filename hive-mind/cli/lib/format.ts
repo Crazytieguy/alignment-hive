@@ -1,9 +1,9 @@
 /**
  * Format module for token-efficient LLM output.
  *
- * Two modes:
- * - Full mode: XML format with complete content
- * - Redacted mode: Compact pipe-delimited format for scanning
+ * Two modes with the SAME header structure:
+ * - Compact mode: content summarized inline (e.g., `45lines`, `result=Nlines`)
+ * - Full mode: multi-line content rendered in indented blocks
  *
  * Tool calls are combined with their results in both modes.
  */
@@ -20,6 +20,10 @@ import type {
 
 const MAX_CONTENT_SUMMARY_LEN = 300;
 
+// ============================================================================
+// SHARED UTILITIES
+// ============================================================================
+
 function escapeQuotes(str: string): string {
   return str.replace(/"/g, '\\"');
 }
@@ -30,51 +34,11 @@ function truncateFirstLine(text: string, maxLen = MAX_CONTENT_SUMMARY_LEN): stri
   return firstLine.slice(0, maxLen - 3) + '...';
 }
 
-export interface ToolResultInfo {
-  content: string;
-  agentId?: string;
-}
-
-export interface FormatOptions {
-  lineNumber: number;
-  toolResults?: Map<string, ToolResultInfo>;
-  parentIndicator?: number | string;
-  redact?: boolean;
-  /** For compact format: previous timestamp's date portion */
-  prevDate?: string;
-  /** For compact format: is this the first entry? */
-  isFirst?: boolean;
-  /** Current working directory for relative path resolution */
-  cwd?: string;
-}
-
-export interface SessionFormatOptions {
-  redact?: boolean;
-}
-
-/**
- * Redact multi-line text to first line + line count.
- * Single-line text passes through unchanged.
- */
-export function redactMultiline(text: string): string {
-  const lines = text.split('\n');
-  if (lines.length <= 1) return text;
-  const remaining = lines.length - 1;
-  return `${lines[0]}\n[+${remaining} lines]`;
-}
-
-/**
- * Count lines in text.
- */
 function countLines(text: string): number {
   if (!text) return 0;
   return text.split('\n').length;
 }
 
-/**
- * Format text as quoted first line + count, or just quote if single line.
- * Returns `"first line" +Nlines` or `"single line content"`
- */
 function formatQuotedSummary(text: string, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN): string {
   if (!text) return '""';
   const lines = text.split('\n');
@@ -86,23 +50,72 @@ function formatQuotedSummary(text: string, maxFirstLineLen = MAX_CONTENT_SUMMARY
   return `"${escaped}" +${lines.length - 1}lines`;
 }
 
-/**
- * Format as just line count: `Nlines`
- */
 function formatLineCount(text: string): string {
   const count = countLines(text);
   return `${count}line${count === 1 ? '' : 's'}`;
 }
 
-/**
- * Format result content as `returned=Nlines`
- */
-function formatResultLines(result: ToolResultInfo): string {
-  return `returned=${countLines(result.content)}lines`;
+function shortenPath(path: string, cwd?: string): string {
+  if (!cwd) return path;
+  if (path.startsWith(cwd + '/')) {
+    return path.slice(cwd.length + 1);
+  }
+  if (path === cwd) {
+    return '.';
+  }
+  return path;
 }
 
-function isSkippedEntryType(entry: KnownEntry): boolean {
-  return entry.type === 'file-history-snapshot' || entry.type === 'queue-operation';
+function indent(text: string, spaces: number): string {
+  const prefix = ' '.repeat(spaces);
+  return text
+    .split('\n')
+    .map((line) => (line ? prefix + line : line))
+    .join('\n');
+}
+
+function formatTimestamp(timestamp: string | undefined, prevDate: string | undefined, isFirst?: boolean): string {
+  if (!timestamp) return '';
+  const date = timestamp.slice(0, 10);
+  const time = timestamp.slice(11, 16);
+  if (isFirst || !prevDate || date !== prevDate) {
+    return `${date}T${time}`;
+  }
+  return time;
+}
+
+// ============================================================================
+// TYPES AND INTERFACES
+// ============================================================================
+
+export interface ToolResultInfo {
+  content: string;
+  agentId?: string;
+}
+
+export interface FormatOptions {
+  lineNumber: number;
+  toolResults?: Map<string, ToolResultInfo>;
+  parentIndicator?: number | string;
+  redact?: boolean;
+  prevDate?: string;
+  isFirst?: boolean;
+  cwd?: string;
+}
+
+export interface SessionFormatOptions {
+  redact?: boolean;
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+export function redactMultiline(text: string): string {
+  const lines = text.split('\n');
+  if (lines.length <= 1) return text;
+  const remaining = lines.length - 1;
+  return `${lines[0]}\n[+${remaining} lines]`;
 }
 
 export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
@@ -129,13 +142,21 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
   const uuidToLine = buildUuidMap(filteredEntries);
 
   const results: Array<string> = [];
+
+  // For compact mode, add a header line with session-wide info
+  if (redact) {
+    const header = buildSessionHeader(entries);
+    if (header) {
+      results.push(header);
+    }
+  }
+
   let prevUuid: string | undefined;
   let prevDate: string | undefined;
   let cwd: string | undefined;
   let logicalLine = 0;
 
   for (const entry of filteredEntries) {
-    // Skip tool-result-only user entries (they're merged into tool calls)
     if (entry.type === 'user' && isToolResultOnlyEntry(entry)) {
       continue;
     }
@@ -144,7 +165,6 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
       continue;
     }
 
-    // Track cwd from user entries
     if (entry.type === 'user' && entry.cwd) {
       cwd = entry.cwd;
     }
@@ -190,16 +210,60 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
     }
   }
 
-  return results.join('\n');
+  // Full mode: extra newline between entries for readability
+  const separator = redact ? '\n' : '\n\n';
+  return results.join(separator);
+}
+
+export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
+  const { lineNumber, toolResults, parentIndicator, redact = false, prevDate, isFirst, cwd } = options;
+
+  switch (entry.type) {
+    case 'user':
+      if (toolResults && isToolResultOnlyEntry(entry)) return null;
+      return formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact);
+    case 'assistant':
+      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact);
+    case 'system':
+      return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact);
+    case 'summary':
+      return formatSummaryEntry(entry, lineNumber, redact);
+    default:
+      return null;
+  }
+}
+
+// ============================================================================
+// SESSION HELPERS
+// ============================================================================
+
+function buildSessionHeader(entries: Array<KnownEntry>): string | null {
+  let model: string | undefined;
+  let gitBranch: string | undefined;
+
+  for (const entry of entries) {
+    if (!model && entry.type === 'assistant' && entry.message.model) {
+      model = entry.message.model;
+    }
+    if (!gitBranch && entry.type === 'user' && entry.gitBranch) {
+      gitBranch = entry.gitBranch;
+    }
+    if (model && gitBranch) break;
+  }
+
+  const parts: Array<string> = ['#'];
+  if (model) parts.push(`model=${model}`);
+  if (gitBranch) parts.push(`branch=${gitBranch}`);
+
+  if (parts.length === 1) return null;
+  return parts.join(' ');
 }
 
 function buildUuidMap(entries: Array<KnownEntry>): Map<string, number> {
   const map = new Map<string, number>();
   let logicalLine = 0;
   for (const entry of entries) {
-    if (isSkippedEntryType(entry)) {
-      continue;
-    }
+    if (isSkippedEntryType(entry)) continue;
     if (entry.type === 'user') {
       const content = entry.message.content;
       if (Array.isArray(content)) {
@@ -289,477 +353,8 @@ function isToolResultOnlyEntry(entry: UserEntry): boolean {
   return meaningfulBlocks.every((b) => b.type === 'tool_result');
 }
 
-export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
-  const { redact = false } = options;
-
-  if (redact) {
-    return formatEntryCompact(entry, options);
-  }
-  return formatEntryXml(entry, options);
-}
-
-// ============================================================================
-// COMPACT FORMAT (redacted mode)
-// ============================================================================
-
-function formatEntryCompact(entry: KnownEntry, options: FormatOptions): string | null {
-  const { lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd } = options;
-
-  switch (entry.type) {
-    case 'user':
-      if (toolResults && isToolResultOnlyEntry(entry)) return null;
-      return formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst);
-    case 'assistant':
-      return formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd);
-    case 'system':
-      return formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst);
-    case 'summary':
-      return formatSummaryEntryCompact(entry, lineNumber);
-    default:
-      return null;
-  }
-}
-
-function formatTimestampCompact(timestamp: string | undefined, prevDate: string | undefined, isFirst?: boolean): string {
-  if (!timestamp) return '';
-  const date = timestamp.slice(0, 10);
-  const time = timestamp.slice(11, 16);
-  if (isFirst || !prevDate || date !== prevDate) {
-    return `${date}T${time}`;
-  }
-  return time;
-}
-
-function formatUserEntryCompact(
-  entry: UserEntry,
-  lineNumber: number,
-  toolResults?: Map<string, ToolResultInfo>,
-  parentIndicator?: number | string,
-  prevDate?: string,
-  isFirst?: boolean,
-): string {
-  const parts: Array<string> = [String(lineNumber)];
-
-  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
-
-  parts.push('user');
-
-  if (parentIndicator !== undefined) {
-    parts.push(`parent=${parentIndicator}`);
-  }
-
-  const messageContent = formatMessageContentCompact(entry.message.content);
-  parts.push(messageContent);
-
-  return parts.join('|');
-}
-
-function formatAssistantEntryCompact(
-  entry: AssistantEntry,
-  lineNumber: number,
-  toolResults?: Map<string, ToolResultInfo>,
-  parentIndicator?: number | string,
-  prevDate?: string,
-  isFirst?: boolean,
-  cwd?: string,
-): string | null {
-  // Assistant entries in compact mode get split into their content blocks
-  const blocks = entry.message.content;
-  if (!blocks || typeof blocks === 'string') {
-    // Simple text response
-    const parts: Array<string> = [String(lineNumber)];
-    const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
-    if (ts) parts.push(ts);
-    parts.push('assistant');
-    if (parentIndicator !== undefined) {
-      parts.push(`parent=${parentIndicator}`);
-    }
-    const text = typeof blocks === 'string' ? blocks : '';
-    parts.push(formatQuotedSummary(text));
-    return parts.join('|');
-  }
-
-  // Multiple content blocks - format each separately
-  const lines: Array<string> = [];
-  let blockIndex = 0;
-
-  for (const block of blocks) {
-    if (isNoiseBlock(block)) continue;
-    if (block.type === 'tool_result') continue;
-
-    const parts: Array<string> = [String(lineNumber)];
-    const ts = blockIndex === 0 ? formatTimestampCompact(entry.timestamp, prevDate, isFirst) : '';
-    if (ts) parts.push(ts);
-
-    if (block.type === 'thinking') {
-      parts.push('thinking');
-      parts.push(formatLineCount(block.thinking));
-    } else if (block.type === 'text') {
-      parts.push('assistant');
-      if (blockIndex === 0 && parentIndicator !== undefined) {
-        parts.push(`parent=${parentIndicator}`);
-      }
-      parts.push(formatQuotedSummary(block.text));
-    } else if (block.type === 'tool_use') {
-      parts.push('tool');
-      const toolLine = formatToolUseCompact(block, toolResults, cwd);
-      parts.push(toolLine);
-    }
-
-    lines.push(parts.join('|'));
-    blockIndex++;
-  }
-
-  return lines.length > 0 ? lines.join('\n') : null;
-}
-
-function formatToolUseCompact(
-  block: { id: string; name: string; input: Record<string, unknown> },
-  toolResults?: Map<string, ToolResultInfo>,
-  cwd?: string,
-): string {
-  const result = toolResults?.get(block.id);
-  const name = block.name;
-  const input = block.input;
-
-  switch (name) {
-    case 'Edit':
-      return formatEditToolCompact(input, result, cwd);
-    case 'Read':
-      return formatReadToolCompact(input, result, cwd);
-    case 'Write':
-      return formatWriteToolCompact(input, result, cwd);
-    case 'Bash':
-      return formatBashToolCompact(input, result);
-    case 'Grep':
-      return formatGrepToolCompact(input, result, cwd);
-    case 'Glob':
-      return formatGlobToolCompact(input, result);
-    case 'Task':
-      return formatTaskToolCompact(input, result);
-    case 'TodoWrite':
-      return formatTodoWriteToolCompact(input);
-    case 'AskUserQuestion':
-      return formatAskUserQuestionToolCompact(input, result);
-    case 'ExitPlanMode':
-      return formatExitPlanModeToolCompact(input);
-    case 'WebFetch':
-      return formatWebFetchToolCompact(input, result);
-    case 'WebSearch':
-      return formatWebSearchToolCompact(input, result);
-    default:
-      return formatGenericToolCompact(name, input, result);
-  }
-}
-
-function formatEditToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
-  const path = shortenPath(String(input.file_path || ''), cwd);
-  const oldStr = String(input.old_string || '');
-  const newStr = String(input.new_string || '');
-  const oldLines = countLines(oldStr);
-  const newLines = countLines(newStr);
-  return `Edit|${path}|-${oldLines}+${newLines}`;
-}
-
-function formatReadToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
-  const path = shortenPath(String(input.file_path || ''), cwd);
-  const resultPart = result ? formatResultLines(result) : 'returned=0lines';
-  return `Read|${path}|${resultPart}`;
-}
-
-function formatWriteToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
-  const path = shortenPath(String(input.file_path || ''), cwd);
-  const content = String(input.content || '');
-  const lineCount = countLines(content);
-  return `Write|${path}|written=${lineCount}lines`;
-}
-
-function formatBashToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const command = String(input.command || '').trim();
-  const desc = input.description ? String(input.description) : undefined;
-  const parts = ['Bash'];
-
-  parts.push(`command="${escapeQuotes(truncateFirstLine(command))}"`);
-
-  if (desc) {
-    parts.push(`description="${escapeQuotes(desc)}"`);
-  }
-
-  if (result) {
-    parts.push(`returned=${formatQuotedSummary(result.content)}`);
-  }
-
-  return parts.join('|');
-}
-
-function formatGrepToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
-  const pattern = String(input.pattern || '');
-  const path = input.path ? shortenPath(String(input.path), cwd) : '';
-  const parts = ['Grep', `pattern="${escapeQuotes(pattern)}"`];
-  if (path) parts.push(path);
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join('|');
-}
-
-function formatGlobToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const pattern = String(input.pattern || '');
-  const parts = ['Glob', `pattern="${pattern}"`];
-  if (result) {
-    // Count non-empty lines (file paths)
-    const files = result.content.split('\n').filter((l) => l.trim()).length;
-    parts.push(`returned=${files}files`);
-  }
-  return parts.join('|');
-}
-
-function formatTaskToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const desc = String(input.description || '');
-  const prompt = String(input.prompt || '');
-  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
-  const parts = ['Task'];
-
-  if (result?.agentId) {
-    parts.push(`agent_session="agent-${result.agentId}"`);
-  }
-
-  if (subagentType) {
-    parts.push(`subagent_type="${subagentType}"`);
-  }
-
-  parts.push(`description="${escapeQuotes(desc)}"`);
-  parts.push(`prompt=${countLines(prompt)}lines`);
-
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-
-  return parts.join('|');
-}
-
-function formatTodoWriteToolCompact(input: Record<string, unknown>): string {
-  const todos = Array.isArray(input.todos) ? input.todos : [];
-  return `TodoWrite|todos=${todos.length}`;
-}
-
-function formatAskUserQuestionToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const questions = Array.isArray(input.questions) ? input.questions : [];
-  const parts = ['AskUserQuestion', `questions=${questions.length}`];
-  if (result) {
-    parts.push(`returned=${formatQuotedSummary(result.content)}`);
-  }
-  return parts.join('|');
-}
-
-function formatExitPlanModeToolCompact(input: Record<string, unknown>): string {
-  const plan = input.plan ? String(input.plan) : '';
-  if (plan) {
-    return `ExitPlanMode|plan=${countLines(plan)}lines`;
-  }
-  return 'ExitPlanMode';
-}
-
-function formatWebFetchToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const url = String(input.url || '');
-  const parts = ['WebFetch', `url="${url}"`];
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join('|');
-}
-
-function formatWebSearchToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const query = String(input.query || '');
-  const parts = ['WebSearch', `query="${escapeQuotes(query)}"`];
-  if (result) {
-    parts.push(formatResultLines(result));
-  }
-  return parts.join('|');
-}
-
-function formatGenericToolCompact(name: string, input: Record<string, unknown>, result?: ToolResultInfo): string {
-  const parts = [name];
-
-  const entries = Object.entries(input).slice(0, 3);
-  for (const [key, value] of entries) {
-    const str = typeof value === 'string' ? value : JSON.stringify(value);
-    const short = truncateFirstLine(str);
-    parts.push(`${key}="${escapeQuotes(short)}"`);
-  }
-
-  if (result) {
-    parts.push(`returned=${formatQuotedSummary(result.content)}`);
-  }
-
-  return parts.join('|');
-}
-
-function shortenPath(path: string, cwd?: string): string {
-  if (!cwd) return path;
-  // Make path relative if it's inside cwd
-  if (path.startsWith(cwd + '/')) {
-    return path.slice(cwd.length + 1);
-  }
-  if (path === cwd) {
-    return '.';
-  }
-  return path;
-}
-
-function formatSystemEntryCompact(
-  entry: SystemEntry,
-  lineNumber: number,
-  prevDate?: string,
-  isFirst?: boolean,
-): string {
-  const parts: Array<string> = [String(lineNumber)];
-
-  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
-
-  parts.push('system');
-
-  if (entry.subtype) parts.push(`subtype=${entry.subtype}`);
-  if (entry.level && entry.level !== 'info') parts.push(`level=${entry.level}`);
-
-  if (entry.content) {
-    parts.push(formatQuotedSummary(entry.content));
-  }
-
-  return parts.join('|');
-}
-
-function formatSummaryEntryCompact(entry: SummaryEntry, lineNumber: number): string {
-  return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
-}
-
-function formatMessageContentCompact(content: string | Array<ContentBlock> | undefined): string {
-  if (!content) return '""';
-  if (typeof content === 'string') {
-    return formatQuotedSummary(content);
-  }
-
-  // For user entries with mixed content, show the text parts
-  const textParts: Array<string> = [];
-  for (const block of content) {
-    if (isNoiseBlock(block)) continue;
-    if (block.type === 'tool_result') continue;
-    if (block.type === 'text') {
-      textParts.push(block.text);
-    }
-  }
-
-  if (textParts.length === 0) return '""';
-  return formatQuotedSummary(textParts.join('\n'));
-}
-
-// ============================================================================
-// XML FORMAT (full mode)
-// ============================================================================
-
-function formatEntryXml(entry: KnownEntry, options: FormatOptions): string | null {
-  const { lineNumber, toolResults, parentIndicator, redact = false } = options;
-
-  switch (entry.type) {
-    case 'user':
-      if (toolResults && isToolResultOnlyEntry(entry)) return null;
-      return formatUserEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
-    case 'assistant':
-      return formatAssistantEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
-    case 'system':
-      return formatSystemEntryXml(entry, lineNumber, redact);
-    case 'summary':
-      return formatSummaryEntryXml(entry, lineNumber);
-    default:
-      return null;
-  }
-}
-
-function formatUserEntryXml(
-  entry: UserEntry,
-  lineNumber: number,
-  toolResults?: Map<string, ToolResultInfo>,
-  parentIndicator?: number | string,
-  redact?: boolean,
-): string {
-  const attrs: Array<string> = [`line="${lineNumber}"`];
-  if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
-
-  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
-  return formatXmlElement('user', attrs, content);
-}
-
-function formatAssistantEntryXml(
-  entry: AssistantEntry,
-  lineNumber: number,
-  toolResults?: Map<string, ToolResultInfo>,
-  parentIndicator?: number | string,
-  redact?: boolean,
-): string {
-  const attrs: Array<string> = [`line="${lineNumber}"`];
-  if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  if (entry.message.model) attrs.push(`model="${entry.message.model}"`);
-  if (entry.message.stop_reason && entry.message.stop_reason !== 'end_turn') {
-    attrs.push(`stop="${entry.message.stop_reason}"`);
-  }
-  if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
-
-  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
-  return formatXmlElement('assistant', attrs, content);
-}
-
-function formatXmlElement(tag: string, attrs: Array<string>, content: string): string {
-  const attrStr = attrs.length > 0 ? ` ${attrs.join(' ')}` : '';
-
-  if (!content) return `<${tag}${attrStr}/>`;
-  if (!content.includes('\n')) return `<${tag}${attrStr}>${content}</${tag}>`;
-
-  return `<${tag}${attrStr}>\n${indent(content, 2)}\n</${tag}>`;
-}
-
-function formatSystemEntryXml(entry: SystemEntry, lineNumber: number, redact?: boolean): string {
-  const attrs: Array<string> = [`line="${lineNumber}"`];
-  if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  if (entry.subtype) attrs.push(`subtype="${entry.subtype}"`);
-  if (entry.level && entry.level !== 'info') attrs.push(`level="${entry.level}"`);
-
-  let content = entry.content || '';
-  if (redact) {
-    content = redactMultiline(content);
-  }
-  return formatXmlElement('system', attrs, content);
-}
-
-function formatSummaryEntryXml(entry: SummaryEntry, lineNumber: number): string {
-  return formatXmlElement('summary', [`line="${lineNumber}"`], entry.summary);
-}
-
-function formatTimestamp(iso: string): string {
-  return iso.slice(0, 16);
-}
-
-function formatMessageContentXml(
-  content: string | Array<ContentBlock> | undefined,
-  toolResults?: Map<string, ToolResultInfo>,
-  redact?: boolean,
-): string {
-  if (!content) return '';
-  if (typeof content === 'string') {
-    return redact ? redactMultiline(content) : content;
-  }
-
-  const parts: Array<string> = [];
-  for (const block of content) {
-    if (isNoiseBlock(block)) continue;
-    if (toolResults && block.type === 'tool_result') continue;
-    const formatted = formatContentBlockXml(block, toolResults, redact);
-    if (formatted) parts.push(formatted);
-  }
-
-  return parts.join('\n');
+function isSkippedEntryType(entry: KnownEntry): boolean {
+  return entry.type === 'file-history-snapshot' || entry.type === 'queue-operation';
 }
 
 function isNoiseBlock(block: ContentBlock): boolean {
@@ -780,125 +375,653 @@ function isNoiseBlock(block: ContentBlock): boolean {
   return false;
 }
 
-function formatContentBlockXml(
-  block: ContentBlock,
-  toolResults?: Map<string, ToolResultInfo>,
+// ============================================================================
+// ENTRY FORMATTERS (shared structure, mode-specific content)
+// ============================================================================
+
+function formatUserEntry(
+  entry: UserEntry,
+  lineNumber: number,
+  parentIndicator?: number | string,
+  prevDate?: string,
+  isFirst?: boolean,
   redact?: boolean,
-): string | null {
-  switch (block.type) {
-    case 'text':
-      return redact ? redactMultiline(block.text) : block.text;
-    case 'thinking':
-      return formatXmlElement('thinking', [], redact ? redactMultiline(block.thinking) : block.thinking);
-    case 'tool_use':
-      return formatToolUseBlockXml(block, toolResults, redact);
-    case 'tool_result':
-      return formatToolResultBlockXml(block, redact);
-    case 'image':
-      return `<image media_type="${block.source.media_type}"/>`;
-    case 'document':
-      return `<document media_type="${block.source.media_type}"/>`;
+): string {
+  const parts: Array<string> = [String(lineNumber)];
+
+  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+
+  parts.push('user');
+
+  if (parentIndicator !== undefined) {
+    parts.push(`parent=${parentIndicator}`);
+  }
+
+  const content = getUserMessageContent(entry.message.content);
+
+  if (redact) {
+    // Compact: inline summary
+    parts.push(formatQuotedSummary(content));
+    return parts.join('|');
+  } else {
+    // Full: indented content
+    const header = parts.join('|');
+    if (!content) return header;
+    return `${header}\n${indent(content, 2)}`;
   }
 }
 
-function formatToolUseBlockXml(
+function getUserMessageContent(content: string | Array<ContentBlock> | undefined): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+
+  const textParts: Array<string> = [];
+  for (const block of content) {
+    if (isNoiseBlock(block)) continue;
+    if (block.type === 'tool_result') continue;
+    if (block.type === 'text') {
+      textParts.push(block.text);
+    }
+  }
+
+  return textParts.join('\n');
+}
+
+function formatAssistantEntry(
+  entry: AssistantEntry,
+  lineNumber: number,
+  toolResults?: Map<string, ToolResultInfo>,
+  parentIndicator?: number | string,
+  prevDate?: string,
+  isFirst?: boolean,
+  cwd?: string,
+  redact?: boolean,
+): string | null {
+  const blocks = entry.message.content;
+
+  // Simple text response (string content)
+  if (!blocks || typeof blocks === 'string') {
+    const text = typeof blocks === 'string' ? blocks : '';
+    return formatTextEntry(lineNumber, entry.timestamp, text, parentIndicator, prevDate, isFirst, redact);
+  }
+
+  // Multiple content blocks - format each as separate entry
+  const lines: Array<string> = [];
+  let blockIndex = 0;
+
+  for (const block of blocks) {
+    if (isNoiseBlock(block)) continue;
+    if (block.type === 'tool_result') continue;
+
+    const ts = blockIndex === 0 ? entry.timestamp : undefined;
+    const parent = blockIndex === 0 ? parentIndicator : undefined;
+
+    if (block.type === 'thinking') {
+      lines.push(formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact));
+    } else if (block.type === 'text') {
+      lines.push(formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact));
+    } else if (block.type === 'tool_use') {
+      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact);
+      if (formatted) lines.push(formatted);
+    }
+
+    blockIndex++;
+  }
+
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+function formatThinkingEntry(
+  lineNumber: number,
+  timestamp: string | undefined,
+  content: string,
+  prevDate?: string,
+  isFirst?: boolean,
+  redact?: boolean,
+): string {
+  const parts: Array<string> = [String(lineNumber)];
+
+  const ts = formatTimestamp(timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+
+  parts.push('thinking');
+
+  if (redact) {
+    // Compact: just line count
+    parts.push(formatLineCount(content));
+    return parts.join('|');
+  } else {
+    // Full: indented content
+    const header = parts.join('|');
+    return `${header}\n${indent(content, 2)}`;
+  }
+}
+
+function formatTextEntry(
+  lineNumber: number,
+  timestamp: string | undefined,
+  content: string,
+  parentIndicator?: number | string,
+  prevDate?: string,
+  isFirst?: boolean,
+  redact?: boolean,
+): string {
+  const parts: Array<string> = [String(lineNumber)];
+
+  const ts = formatTimestamp(timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+
+  parts.push('assistant');
+
+  if (parentIndicator !== undefined) {
+    parts.push(`parent=${parentIndicator}`);
+  }
+
+  if (redact) {
+    // Compact: inline summary
+    parts.push(formatQuotedSummary(content));
+    return parts.join('|');
+  } else {
+    // Full: indented content
+    const header = parts.join('|');
+    if (!content) return header;
+    return `${header}\n${indent(content, 2)}`;
+  }
+}
+
+function formatToolEntry(
+  lineNumber: number,
+  timestamp: string | undefined,
   block: { id: string; name: string; input: Record<string, unknown> },
   toolResults?: Map<string, ToolResultInfo>,
+  cwd?: string,
+  prevDate?: string,
+  isFirst?: boolean,
   redact?: boolean,
 ): string {
   const resultInfo = toolResults?.get(block.id);
-  const tagName = resultInfo ? 'tool' : 'tool_use';
+  const name = block.name;
+  const input = block.input;
 
-  const attrs = [`name="${block.name}"`];
-  if (block.name === 'Task' && resultInfo?.agentId) {
-    attrs.push(`agent_session="agent-${resultInfo.agentId}"`);
+  // Build header parts
+  const parts: Array<string> = [String(lineNumber)];
+  const ts = formatTimestamp(timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+  parts.push('tool');
+  parts.push(name);
+
+  // Tool-specific formatting
+  const toolFormatter = getToolFormatter(name);
+  const { headerParams, multilineParams, suppressResult } = toolFormatter(input, resultInfo, cwd, redact);
+
+  // Add single-line params to header
+  parts.push(...headerParams);
+
+  if (redact) {
+    // Compact: result summary in header (unless tool formatter already handled it)
+    if (resultInfo && !suppressResult) {
+      parts.push(`result=${formatLineCount(resultInfo.content)}`);
+    }
+    return parts.join('|');
+  } else {
+    // Full: multi-line params and result as indented blocks
+    const header = parts.join('|');
+    const bodyLines: Array<string> = [];
+
+    for (const { name: paramName, content } of multilineParams) {
+      bodyLines.push(`[${paramName}]`);
+      bodyLines.push(indent(content, 2));
+    }
+
+    if (resultInfo) {
+      bodyLines.push('[result]');
+      bodyLines.push(indent(resultInfo.content, 2));
+    }
+
+    if (bodyLines.length === 0) return header;
+    return `${header}\n${bodyLines.join('\n')}`;
   }
-
-  const lines: Array<string> = [`<${tagName} ${attrs.join(' ')}>`];
-
-  for (const [key, value] of Object.entries(block.input)) {
-    let formatted = formatValue(value, key);
-    if (redact) {
-      formatted = redactMultiline(formatted);
-    }
-    if (formatted.includes('\n')) {
-      lines.push(`  <${key}>\n${indent(formatted, 4)}\n  </${key}>`);
-    } else {
-      lines.push(`  <${key}>${formatted}</${key}>`);
-    }
-  }
-
-  if (resultInfo) {
-    let resultContent = resultInfo.content;
-    if (redact) {
-      resultContent = redactMultiline(resultContent);
-    }
-    if (resultContent.includes('\n')) {
-      lines.push(`  <result>\n${indent(resultContent, 4)}\n  </result>`);
-    } else {
-      lines.push(`  <result>${resultContent}</result>`);
-    }
-  }
-
-  lines.push(`</${tagName}>`);
-  return lines.join('\n');
 }
 
-function formatToolResultBlockXml(
-  block: {
-    tool_use_id: string;
-    content?: string | Array<ToolResultContentBlock>;
-  },
-  redact?: boolean,
-): string {
-  const lines: Array<string> = [`<tool_result>`];
+// ============================================================================
+// TOOL FORMATTERS
+// ============================================================================
 
-  if (block.content) {
-    if (typeof block.content === 'string') {
-      const content = redact ? redactMultiline(block.content) : block.content;
-      lines.push(indent(content, 2));
-    } else {
-      for (const innerBlock of block.content) {
-        if (innerBlock.type === 'text') {
-          const text = redact ? redactMultiline(innerBlock.text) : innerBlock.text;
-          lines.push(indent(text, 2));
-        } else if (innerBlock.type === 'image') {
-          lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
-        } else {
-          lines.push(`  <document media_type="${innerBlock.source.media_type}"/>`);
-        }
+interface ToolFormatResult {
+  headerParams: Array<string>;
+  multilineParams: Array<{ name: string; content: string }>;
+  /** If true, suppress the default result= suffix (tool already handled it) */
+  suppressResult?: boolean;
+}
+
+type ToolFormatter = (
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+) => ToolFormatResult;
+
+function getToolFormatter(name: string): ToolFormatter {
+  switch (name) {
+    case 'Edit':
+      return formatEditTool;
+    case 'Read':
+      return formatReadTool;
+    case 'Write':
+      return formatWriteTool;
+    case 'Bash':
+      return formatBashTool;
+    case 'Grep':
+      return formatGrepTool;
+    case 'Glob':
+      return formatGlobTool;
+    case 'Task':
+      return formatTaskTool;
+    case 'TodoWrite':
+      return formatTodoWriteTool;
+    case 'AskUserQuestion':
+      return formatAskUserQuestionTool;
+    case 'ExitPlanMode':
+      return formatExitPlanModeTool;
+    case 'WebFetch':
+      return formatWebFetchTool;
+    case 'WebSearch':
+      return formatWebSearchTool;
+    default:
+      return formatGenericTool;
+  }
+}
+
+function formatEditTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const oldStr = String(input.old_string || '');
+  const newStr = String(input.new_string || '');
+  const oldLines = countLines(oldStr);
+  const newLines = countLines(newStr);
+
+  if (redact) {
+    // Compact: path and diff stats, no result (diff stats are enough)
+    return {
+      headerParams: [path, `-${oldLines}+${newLines}`],
+      multilineParams: [],
+      suppressResult: true,
+    };
+  }
+
+  // Full mode: show old_string and new_string (no diff stats, content speaks for itself)
+  const multilineParams: Array<{ name: string; content: string }> = [];
+  if (oldStr) {
+    multilineParams.push({ name: 'old_string', content: oldStr });
+  }
+  if (newStr) {
+    multilineParams.push({ name: 'new_string', content: newStr });
+  }
+
+  return {
+    headerParams: [`file_path=${path}`],
+    multilineParams,
+  };
+}
+
+function formatReadTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+
+  if (redact) {
+    // Compact: path without prefix, offset/limit if present
+    const headerParams: Array<string> = [path];
+    if (input.offset !== undefined) {
+      headerParams.push(`offset=${input.offset}`);
+    }
+    if (input.limit !== undefined) {
+      headerParams.push(`limit=${input.limit}`);
+    }
+    return { headerParams, multilineParams: [] };
+  }
+
+  // Full mode: labeled params
+  const headerParams: Array<string> = [`file_path=${path}`];
+  if (input.offset !== undefined) {
+    headerParams.push(`offset=${input.offset}`);
+  }
+  if (input.limit !== undefined) {
+    headerParams.push(`limit=${input.limit}`);
+  }
+
+  return { headerParams, multilineParams: [] };
+}
+
+function formatWriteTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const content = String(input.content || '');
+  const lineCount = countLines(content);
+
+  if (redact) {
+    // Compact: path without prefix, written count, no result
+    return {
+      headerParams: [path, `written=${lineCount}lines`],
+      multilineParams: [],
+      suppressResult: true,
+    };
+  }
+
+  return {
+    headerParams: [`file_path=${path}`, `written=${lineCount}lines`],
+    multilineParams: [],
+  };
+}
+
+function formatBashTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const command = String(input.command || '').trim();
+  const desc = input.description ? String(input.description) : undefined;
+
+  const headerParams: Array<string> = [];
+  headerParams.push(`command="${escapeQuotes(truncateFirstLine(command))}"`);
+  if (desc) {
+    headerParams.push(`description="${escapeQuotes(desc)}"`);
+  }
+
+  if (redact && result) {
+    // Compact: show first line of result (useful context)
+    headerParams.push(`result=${formatQuotedSummary(result.content)}`);
+    return { headerParams, multilineParams: [], suppressResult: true };
+  }
+
+  const multilineParams: Array<{ name: string; content: string }> = [];
+
+  // If command is multi-line and not redacting, show full command
+  if (!redact && command.includes('\n')) {
+    multilineParams.push({ name: 'command', content: command });
+  }
+
+  return { headerParams, multilineParams };
+}
+
+function formatGrepTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const pattern = String(input.pattern || '');
+  const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
+
+  // Both modes: show pattern, path, and filtering params
+  const headerParams: Array<string> = [`pattern="${escapeQuotes(pattern)}"`];
+  if (path) {
+    headerParams.push(path);
+  }
+  if (input.output_mode) {
+    headerParams.push(`output_mode=${input.output_mode}`);
+  }
+  if (input.glob) {
+    headerParams.push(`glob="${input.glob}"`);
+  }
+
+  return { headerParams, multilineParams: [] };
+}
+
+function formatGlobTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const pattern = String(input.pattern || '');
+  const headerParams: Array<string> = [`pattern="${pattern}"`];
+
+  // For glob, count files instead of lines (custom result format)
+  if (result) {
+    const files = result.content.split('\n').filter((l) => l.trim()).length;
+    headerParams.push(`result=${files}files`);
+  }
+
+  return {
+    headerParams,
+    multilineParams: [],
+    suppressResult: true, // We added our own result format
+  };
+}
+
+function formatTaskTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const desc = String(input.description || '');
+  const prompt = String(input.prompt || '');
+  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
+
+  if (redact) {
+    // Compact: no quotes around simple values
+    const headerParams: Array<string> = [];
+    if (result?.agentId) {
+      headerParams.push(`agent_session=agent-${result.agentId}`);
+    }
+    if (subagentType) {
+      headerParams.push(`subagent_type=${subagentType}`);
+    }
+    headerParams.push(`description="${escapeQuotes(desc)}"`);
+    headerParams.push(`prompt=${formatLineCount(prompt)}`);
+    return { headerParams, multilineParams: [] };
+  }
+
+  // Full mode: labeled params, prompt as block
+  const headerParams: Array<string> = [];
+  if (result?.agentId) {
+    headerParams.push(`agent_session=agent-${result.agentId}`);
+  }
+  if (subagentType) {
+    headerParams.push(`subagent_type=${subagentType}`);
+  }
+  headerParams.push(`description="${escapeQuotes(desc)}"`);
+
+  return {
+    headerParams,
+    multilineParams: [{ name: 'prompt', content: prompt }],
+  };
+}
+
+function formatTodoWriteTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const todos = Array.isArray(input.todos) ? input.todos : [];
+
+  if (redact) {
+    // Compact: just count, no result (not useful)
+    return {
+      headerParams: [`todos=${todos.length}`],
+      multilineParams: [],
+      suppressResult: true,
+    };
+  }
+
+  // Full mode: show all todos with status markers (no count, content speaks for itself)
+  const todoLines: Array<string> = [];
+  for (const todo of todos) {
+    if (typeof todo === 'object' && todo !== null) {
+      const t = todo as { content?: string; status?: string };
+      const status = t.status || 'pending';
+      const marker = status === 'completed' ? '[x]' : status === 'in_progress' ? '[>]' : '[ ]';
+      todoLines.push(`${marker} ${t.content || ''}`);
+    }
+  }
+
+  return {
+    headerParams: [],
+    multilineParams: todoLines.length > 0 ? [{ name: 'todos', content: todoLines.join('\n') }] : [],
+  };
+}
+
+function formatAskUserQuestionTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const headerParams: Array<string> = [`questions=${questions.length}`];
+
+  if (redact) {
+    if (result) {
+      // Compact: show result summary as quoted text (more useful than line count)
+      headerParams.push(`result=${formatQuotedSummary(result.content)}`);
+    }
+    return {
+      headerParams,
+      multilineParams: [],
+      suppressResult: true,
+    };
+  }
+
+  // Full mode: show all questions (no count, content speaks for itself)
+  const questionLines: Array<string> = [];
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i] as { question?: string; header?: string; options?: Array<{ label?: string }> };
+    questionLines.push(`${i + 1}. ${q.question || ''}`);
+    if (q.options && Array.isArray(q.options)) {
+      for (const opt of q.options) {
+        questionLines.push(`   - ${opt.label || ''}`);
       }
     }
   }
 
-  lines.push('</tool_result>');
-  return lines.join('\n');
+  return {
+    headerParams: [],
+    multilineParams: questionLines.length > 0 ? [{ name: 'questions', content: questionLines.join('\n') }] : [],
+  };
 }
 
-function formatValue(value: unknown, key?: string): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (key === 'todos' && Array.isArray(value)) return formatTodosAsXml(value);
-  if (Array.isArray(value) || typeof value === 'object') return JSON.stringify(value, null, 2);
-  return String(value);
-}
+function formatExitPlanModeTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const plan = input.plan ? String(input.plan) : '';
 
-function formatTodosAsXml(todos: Array<unknown>): string {
-  const lines: Array<string> = [];
-  for (const todo of todos) {
-    if (typeof todo === 'object' && todo !== null) {
-      const t = todo as { content?: string; status?: string };
-      lines.push(`<todo status="${t.status || 'pending'}">${t.content || ''}</todo>`);
-    }
+  if (plan) {
+    return {
+      headerParams: [`plan=${formatLineCount(plan)}`],
+      multilineParams: [],
+      suppressResult: true, // Result not useful for ExitPlanMode
+    };
   }
-  return lines.join('\n');
+
+  return { headerParams: [], multilineParams: [], suppressResult: true };
 }
 
-function indent(text: string, spaces: number): string {
-  const prefix = ' '.repeat(spaces);
-  return text
-    .split('\n')
-    .map((line) => (line ? prefix + line : line))
-    .join('\n');
+function formatWebFetchTool(input: Record<string, unknown>): ToolFormatResult {
+  const url = String(input.url || '');
+  return {
+    headerParams: [`url="${url}"`],
+    multilineParams: [],
+  };
+}
+
+function formatWebSearchTool(input: Record<string, unknown>): ToolFormatResult {
+  const query = String(input.query || '');
+  return {
+    headerParams: [`query="${escapeQuotes(query)}"`],
+    multilineParams: [],
+  };
+}
+
+function formatGenericTool(
+  input: Record<string, unknown>,
+  result?: ToolResultInfo,
+  cwd?: string,
+  redact?: boolean,
+): ToolFormatResult {
+  const headerParams: Array<string> = [];
+  const multilineParams: Array<{ name: string; content: string }> = [];
+
+  for (const [key, value] of Object.entries(input)) {
+    if (value === null || value === undefined) continue;
+
+    const str = typeof value === 'string' ? value : JSON.stringify(value);
+
+    if (!redact && str.includes('\n')) {
+      // Full mode: multi-line values as blocks
+      multilineParams.push({ name: key, content: str });
+    } else {
+      // Single-line or compact: in header
+      const short = truncateFirstLine(str);
+      headerParams.push(`${key}="${escapeQuotes(short)}"`);
+    }
+
+    // Limit header params in compact mode
+    if (redact && headerParams.length >= 3) break;
+  }
+
+  return { headerParams, multilineParams };
+}
+
+// ============================================================================
+// SYSTEM AND SUMMARY ENTRIES
+// ============================================================================
+
+function formatSystemEntry(
+  entry: SystemEntry,
+  lineNumber: number,
+  prevDate?: string,
+  isFirst?: boolean,
+  redact?: boolean,
+): string {
+  const parts: Array<string> = [String(lineNumber)];
+
+  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+
+  parts.push('system');
+
+  if (entry.subtype) parts.push(`subtype=${entry.subtype}`);
+  if (entry.level && entry.level !== 'info') parts.push(`level=${entry.level}`);
+
+  const content = entry.content || '';
+
+  if (redact) {
+    // Compact: inline summary
+    if (content) {
+      parts.push(formatQuotedSummary(content));
+    }
+    return parts.join('|');
+  } else {
+    // Full: indented content
+    const header = parts.join('|');
+    if (!content) return header;
+    return `${header}\n${indent(content, 2)}`;
+  }
+}
+
+function formatSummaryEntry(entry: SummaryEntry, lineNumber: number, redact?: boolean): string {
+  if (redact) {
+    return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
+  } else {
+    return `${lineNumber}|summary\n${indent(entry.summary, 2)}`;
+  }
 }
