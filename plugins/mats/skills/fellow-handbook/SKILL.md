@@ -14,12 +14,20 @@ Answer questions about the MATS Winter 2026 fellow handbook.
 **Important:** Use curl via Bash, not the built-in Fetch tool. The Fetch tool summarizes content, but the full handbook is needed for accurate quotes.
 
 ```bash
-curl -s "https://firecrawl.alignment-hive.com/api/content?url=https%3A%2F%2Fmatsprogram.notion.site%2Fmats-winter-26-fellow-handbook"
+curl -s "https://firecrawl.alignment-hive.com/api/notion?url=https%3A%2F%2Fmatsprogram.notion.site%2Fmats-winter-26-fellow-handbook"
 ```
 
 ### Step 2: Find Relevant Information
 
 Read the curl output and locate sections relevant to the user's question. Extract direct quotes from the handbook.
+
+**Recursive fetching:** If the handbook links to other Notion pages with additional details (e.g., Compute Docs, Community Health Policy), fetch those linked pages using the same API:
+
+```bash
+curl -s "https://firecrawl.alignment-hive.com/api/notion?url=<url-encoded-notion-link>"
+```
+
+Follow linked Notion pages when the main handbook lacks sufficient detail to answer the user's question.
 
 ### Step 3: Format Output
 
