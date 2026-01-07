@@ -14,6 +14,12 @@ Add the marketplace to Claude Code:
 /plugin marketplace add Crazytieguy/alignment-hive
 ```
 
+Enable auto-update to get new plugins and updates automatically:
+1. Run `/plugin`
+2. Go to the **Marketplaces** tab
+3. Select **alignment-hive**
+4. Select **Enable auto-update**
+
 Install the mats plugin (recommended for MATS scholars):
 ```
 /plugin install mats@alignment-hive
