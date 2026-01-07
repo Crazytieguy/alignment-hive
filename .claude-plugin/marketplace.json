@@ -3,9 +3,9 @@
   "owner": { "name": "Crazytieguy" },
   "plugins": [
     {
-      "name": "project-setup",
-      "source": "./plugins/project-setup",
-      "description": "Guidance for thoughtful project initialization"
+      "name": "mats",
+      "source": "./plugins/mats",
+      "description": "Resources for MATS scholars"
     }
   ]
 }
