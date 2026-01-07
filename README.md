@@ -14,12 +14,14 @@ Add the marketplace to Claude Code:
 /plugin marketplace add Crazytieguy/alignment-hive
 ```
 
-Install the project-setup plugin (recommended for most users):
+Install the mats plugin (recommended for MATS scholars):
 ```
-/plugin install project-setup@alignment-hive
+/plugin install mats@alignment-hive
 ```
 
-It includes guidance on when to install other plugins from this marketplace.
+The mats plugin includes:
+- **project-setup** - Guidance for starting new projects with good architecture decisions
+- **fellow-handbook** - Quick lookup of MATS policies, compute access, housing, and program logistics
 
 ## Contributing
 
