@@ -214,62 +214,79 @@ const COMMANDS = {
 
 ---
 
-# Session 10B-2: Simple Line Redaction
-
-> **Note:** This plan is a rough first approximation. Expect iteration and changes during implementation.
+# Session 10B-2: Smart Redaction
 
 ## Goal
 
-Add simple redaction to `read` command as MVP for compression/scanning. Start simple and iterate.
+Add smart redaction to `read` command for token-efficient scanning. Tool-specific handling for optimal compression.
 
-**Key insight from 10B-1 snapshots:** The vast majority of content is Edit calls, Write calls, tool results, and thinking blocks - and most of the time these aren't helpful for scanning. Start with aggressive redaction and refine.
+## Behavior (Implemented)
 
-## Behavior
-
-- `read <id>` (all lines) → redacted (first line only of multi-line content)
-- `read <id> 5` (single line) → full content (no redaction)
-- `read <id> 1-10` (multiple lines) → full content (no redaction)
+- `read <id>` (all lines) → redacted (scanning mode)
+- `read <id> 5` (single line) → full content
+- `read <id> 1-10` (multiple lines) → full content
 - `read <id> --full` → force full content for all lines
 
-## Redaction Strategy (MVP)
+## MVP Implementation (Done)
 
-**Simple rule:** For any multi-line text content, show only the first line followed by `[+N lines]`.
+Basic `redactMultiline()` function: first line + `[+N lines]` applied uniformly.
 
-Applies uniformly to:
-- Tool result content (file contents, command output, etc.)
-- Thinking blocks
-- Text blocks
-- Tool use parameters
+## Tool-Specific Redaction (To Implement)
 
-**No content-type-specific limits initially.** Keep it simple and see what's missing before adding complexity.
+Based on snapshot analysis, each tool type gets specific handling:
 
-## Files to Modify
+| Tool | Include | Omit |
+|------|---------|------|
+| **Read** | path, line count | first line, full content |
+| **Edit** | path, old/new line counts | old/new content, result |
+| **Write** | path, line count | first line, full content |
+| **Bash** | command, first result line | remaining output |
+| **Glob** | pattern, file count | file list |
+| **Grep** | pattern, first match | remaining matches |
+| **WebFetch** | url, char/line count | content |
+| **WebSearch** | query, result count | results |
+| **Task** | description, agent_session, line count | prompt details, full result |
+| **thinking** | stub indicator only | all content |
+| **TodoWrite** | stub indicator only | todos, result message |
+| **AskUserQuestion** | question headers, answer summary | full options/structure |
 
-| File | Action |
-|------|--------|
-| `hive-mind/cli/commands/read.ts` | MODIFY - add redaction mode |
-| `hive-mind/cli/lib/format.ts` | MODIFY - add redaction support |
+### Additional Optimizations
 
-## Implementation Notes
+- **Remove `model` field** when same as previous message
+- **Remove `stop="tool_use"`** (noise)
+- **Timestamps**: Only include for genuine user prompts
+- **`parent="?"`**: Change to `parent="start"` (indicates user restarted)
+- **Long lines**: Truncate very long first lines (e.g., 200 char max)
 
-- `formatSession(entries, { redact: boolean })`
-- `formatEntry(entry, { lineNumber, toolResults, parentIndicator, redact })`
-- Redaction function: `redactMultiline(text: string) → string`
-  - If single line, return as-is
-  - If multi-line, return `${firstLine}\n[+${remainingLines} lines]`
+## Format Change (Pending)
 
-## Optional Optimizations (If Simple Redaction Isn't Enough)
+Current XML format has too much overhead for redacted mode where content is single-line.
 
-### XML Format Optimization
-If redaction produces good results but tokens are still high:
-- Remove redundant closing tags for empty elements
-- Shorter attribute names
-- Remove attributes that repeat (model same across all entries)
+**Direction**: More compact format similar to Claude Code UI:
+```
+1 user: Help me implement OAuth
+2 Read(src/auth.ts) 357 lines
+3 Edit(src/auth.ts) -35 +42 lines
+4 Bash(bun test) 5 pass [+12]
+5 assistant: Let me check the tests.
+```
 
-### Smart Truncation (Original Plan - Deferred)
-If simple redaction proves too aggressive or too uniform, consider content-type-specific limits:
+Format details to be finalized in next session.
 
-**Linear scaling based on lines requested:**
+## Summaries Investigation Notes
+
+From 10B-1 investigation:
+- Agent sessions never have summaries (too short to trigger compaction)
+- Some main sessions lack summaries (session ended before compaction)
+- Summaries have `leafUuid` referencing the last message of summarized branch
+- **Index**: Agent sessions excluded (no summaries)
+- **Fallback**: Sessions without summaries show first line of first user prompt
+
+## Deferred Ideas
+
+### Smart Truncation (If Simple Redaction Isn't Enough)
+
+Content-type-specific limits with linear scaling based on lines requested:
 - 1 line: no truncation
 - 10 lines: moderate truncation
 - 100+ lines: heavy truncation
@@ -298,28 +315,12 @@ If simple redaction proves too aggressive or too uniform, consider content-type-
 - Repeating fields if same as previous entry: model, cwd, gitBranch
 - Full file contents beyond limit
 
-## Summaries Investigation Notes
-
-From 10B-1 investigation:
-- Agent sessions never have summaries (they're too short to trigger compaction)
-- Some main sessions lack summaries (session ended before compaction)
-- Summaries have `leafUuid` referencing the last message of summarized branch
-- No evidence of cross-session summaries (summaries are in their own session file)
-- **Index change:** Remove agent sessions from index output since they lack summaries
-- **Fallback display:** For sessions without summaries, show first line of first user prompt (truncated)
-
-## Future: Git Commit Correlation
+### Git Commit Correlation
 
 Consider correlating git commit timestamps with Claude Code sessions to find related commits even if they weren't made by Claude. This could help with:
 - Finding commits that were made manually after Claude's work
 - Identifying sessions related to specific code changes
 - Building a timeline of session + commit activity
-
-## Experimentation Focus
-
-- Is first-line-only redaction too aggressive? Too little?
-- Which content types need special handling?
-- Is XML format optimization worth the complexity?
 
 ---
 
@@ -400,14 +401,15 @@ Update `plugins/hive-mind/plugin.json` to register the agents directory.
 - [x] Implement snapshot tests
 - [x] **Experiment and iterate**: Subagent reviews led to cleaner format (removed cwd/branch, tool IDs, text wrappers)
 
-## 10B-2: Simple Line Redaction
-- [ ] Add `redactMultiline()` function to `format.ts`
-- [ ] Update `formatSession()` with `{ redact: boolean }` option
-- [ ] Update `read` command: default redacted, `--full` for full content
-- [ ] Single line requests get full content automatically
-- [ ] Remove agent sessions from `index` output (no summaries)
-- [ ] Update snapshot tests with redacted versions
-- [ ] **Experiment and iterate**: Test redaction, add complexity only if needed
+## 10B-2: Smart Redaction
+- [x] Add `redactMultiline()` function to `format.ts` (MVP)
+- [x] Update `formatSession()` with `{ redact: boolean }` option
+- [x] Update `read` command: default redacted, `--full` for full content
+- [x] Single line requests get full content automatically
+- [x] Update snapshot tests with redacted versions (all 8 sessions)
+- [ ] Tool-specific redaction (see table in plan)
+- [ ] Additional optimizations (model dedup, stop removal, timestamps, parent="start", line truncation)
+- [ ] **Format change**: Switch from XML to compact format (pending next session)
 
 ## 10B-3: Retrieval Subagent
 - [ ] Load `/plugin-dev:agent-development` skill

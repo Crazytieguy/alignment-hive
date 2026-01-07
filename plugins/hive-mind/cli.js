@@ -15079,6 +15079,109 @@ import { readFile as readFile3, readdir as readdir3 } from "fs/promises";
 import { join as join4 } from "path";
 
 // cli/lib/format.ts
+function redactMultiline(text) {
+  const lines = text.split(`
+`);
+  if (lines.length <= 1)
+    return text;
+  const remaining = lines.length - 1;
+  return `${lines[0]}
+[+${remaining} lines]`;
+}
+function formatSession(entries, options = {}) {
+  const { redact = false } = options;
+  const toolResults = collectToolResults(entries, redact);
+  const uuidToLine = buildUuidMap(entries);
+  const results = [];
+  let prevUuid;
+  for (let i = 0;i < entries.length; i++) {
+    const entry = entries[i];
+    const lineNumber = i + 1;
+    let parentIndicator;
+    const parentUuid = getParentUuid(entry);
+    if (prevUuid) {
+      if (parentUuid && parentUuid !== prevUuid) {
+        parentIndicator = uuidToLine.get(parentUuid);
+      } else if (!parentUuid && getUuid(entry)) {
+        parentIndicator = "?";
+      }
+    }
+    const formatted = formatEntry(entry, { lineNumber, toolResults, parentIndicator, redact });
+    if (formatted) {
+      results.push(formatted);
+    }
+    const uuid3 = getUuid(entry);
+    if (uuid3) {
+      prevUuid = uuid3;
+    }
+  }
+  return results.join(`
+
+`);
+}
+function buildUuidMap(entries) {
+  const map2 = new Map;
+  for (let i = 0;i < entries.length; i++) {
+    const uuid3 = getUuid(entries[i]);
+    if (uuid3) {
+      map2.set(uuid3, i + 1);
+    }
+  }
+  return map2;
+}
+function getUuid(entry) {
+  if ("uuid" in entry && typeof entry.uuid === "string") {
+    return entry.uuid;
+  }
+  return;
+}
+function getParentUuid(entry) {
+  if ("parentUuid" in entry && typeof entry.parentUuid === "string") {
+    return entry.parentUuid;
+  }
+  return;
+}
+function collectToolResults(entries, redact) {
+  const results = new Map;
+  for (const entry of entries) {
+    if (entry.type !== "user")
+      continue;
+    const content = entry.message.content;
+    if (!Array.isArray(content))
+      continue;
+    const agentId = "agentId" in entry ? entry.agentId : undefined;
+    for (const block of content) {
+      if (block.type === "tool_result" && "tool_use_id" in block) {
+        let formatted = formatToolResultContent(block.content);
+        if (formatted) {
+          if (redact) {
+            formatted = redactMultiline(formatted);
+          }
+          results.set(block.tool_use_id, { content: formatted, agentId });
+        }
+      }
+    }
+  }
+  return results;
+}
+function formatToolResultContent(content) {
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const parts = [];
+  for (const block of content) {
+    if (block.type === "text" && "text" in block) {
+      parts.push(block.text);
+    } else if (block.type === "image" && "source" in block) {
+      parts.push(`<image media_type="${block.source.media_type}"/>`);
+    } else if (block.type === "document" && "source" in block) {
+      parts.push(`<document media_type="${block.source.media_type}"/>`);
+    }
+  }
+  return parts.join(`
+`);
+}
 function isToolResultOnlyEntry(entry) {
   const content = entry.message.content;
   if (!Array.isArray(content))
@@ -15089,16 +15192,16 @@ function isToolResultOnlyEntry(entry) {
   return meaningfulBlocks.every((b) => b.type === "tool_result");
 }
 function formatEntry(entry, options) {
-  const { lineNumber, toolResults, parentIndicator } = options;
+  const { lineNumber, toolResults, parentIndicator, redact = false } = options;
   switch (entry.type) {
     case "user":
       if (toolResults && isToolResultOnlyEntry(entry))
         return null;
-      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator);
+      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator, redact);
     case "assistant":
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator);
+      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, redact);
     case "system":
-      return formatSystemEntry(entry, lineNumber);
+      return formatSystemEntry(entry, lineNumber, redact);
     case "summary":
       return formatSummaryEntry(entry, lineNumber);
     case "file-history-snapshot":
@@ -15108,16 +15211,16 @@ function formatEntry(entry, options) {
       return null;
   }
 }
-function formatUserEntry(entry, lineNumber, toolResults, parentIndicator) {
+function formatUserEntry(entry, lineNumber, toolResults, parentIndicator, redact) {
   const attrs = [`line="${lineNumber}"`];
   if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
   if (parentIndicator !== undefined)
     attrs.push(`parent="${parentIndicator}"`);
-  const content = formatMessageContent(entry.message.content, toolResults);
+  const content = formatMessageContent(entry.message.content, toolResults, redact);
   return formatXmlElement("user", attrs, content);
 }
-function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator) {
+function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, redact) {
   const attrs = [`line="${lineNumber}"`];
   if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
@@ -15128,7 +15231,7 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator) {
   }
   if (parentIndicator !== undefined)
     attrs.push(`parent="${parentIndicator}"`);
-  const content = formatMessageContent(entry.message.content, toolResults);
+  const content = formatMessageContent(entry.message.content, toolResults, redact);
   return formatXmlElement("assistant", attrs, content);
 }
 function formatXmlElement(tag, attrs, content) {
@@ -15142,7 +15245,7 @@ function formatXmlElement(tag, attrs, content) {
 ${indent(content, 2)}
 </${tag}>`;
 }
-function formatSystemEntry(entry, lineNumber) {
+function formatSystemEntry(entry, lineNumber, redact) {
   const attrs = [`line="${lineNumber}"`];
   if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
@@ -15150,7 +15253,11 @@ function formatSystemEntry(entry, lineNumber) {
     attrs.push(`subtype="${entry.subtype}"`);
   if (entry.level && entry.level !== "info")
     attrs.push(`level="${entry.level}"`);
-  return formatXmlElement("system", attrs, entry.content || "");
+  let content = entry.content || "";
+  if (redact) {
+    content = redactMultiline(content);
+  }
+  return formatXmlElement("system", attrs, content);
 }
 function formatSummaryEntry(entry, lineNumber) {
   return formatXmlElement("summary", [`line="${lineNumber}"`], entry.summary);
@@ -15158,18 +15265,19 @@ function formatSummaryEntry(entry, lineNumber) {
 function formatTimestamp(iso) {
   return iso.slice(0, 16);
 }
-function formatMessageContent(content, toolResults) {
+function formatMessageContent(content, toolResults, redact) {
   if (!content)
     return "";
-  if (typeof content === "string")
-    return content;
+  if (typeof content === "string") {
+    return redact ? redactMultiline(content) : content;
+  }
   const parts = [];
   for (const block of content) {
     if (isNoiseBlock(block))
       continue;
     if (toolResults && block.type === "tool_result")
       continue;
-    const formatted = formatContentBlock(block, toolResults);
+    const formatted = formatContentBlock(block, toolResults, redact);
     if (formatted)
       parts.push(formatted);
   }
@@ -15191,23 +15299,23 @@ function isNoiseBlock(block) {
   }
   return false;
 }
-function formatContentBlock(block, toolResults) {
+function formatContentBlock(block, toolResults, redact) {
   switch (block.type) {
     case "text":
-      return block.text;
+      return redact ? redactMultiline(block.text) : block.text;
     case "thinking":
-      return formatXmlElement("thinking", [], block.thinking);
+      return formatXmlElement("thinking", [], redact ? redactMultiline(block.thinking) : block.thinking);
     case "tool_use":
-      return formatToolUseBlock(block, toolResults);
+      return formatToolUseBlock(block, toolResults, redact);
     case "tool_result":
-      return formatToolResultBlock(block);
+      return formatToolResultBlock(block, redact);
     case "image":
       return `<image media_type="${block.source.media_type}"/>`;
     case "document":
       return `<document media_type="${block.source.media_type}"/>`;
   }
 }
-function formatToolUseBlock(block, toolResults) {
+function formatToolUseBlock(block, toolResults, redact) {
   const resultInfo = toolResults?.get(block.id);
   const tagName = resultInfo ? "tool" : "tool_use";
   const attrs = [`name="${block.name}"`];
@@ -15216,7 +15324,10 @@ function formatToolUseBlock(block, toolResults) {
   }
   const lines = [`<${tagName} ${attrs.join(" ")}>`];
   for (const [key, value] of Object.entries(block.input)) {
-    const formatted = formatValue(value, key);
+    let formatted = formatValue(value, key);
+    if (redact) {
+      formatted = redactMultiline(formatted);
+    }
     if (formatted.includes(`
 `)) {
       lines.push(`  <${key}>
@@ -15240,15 +15351,17 @@ ${indent(resultInfo.content, 4)}
   return lines.join(`
 `);
 }
-function formatToolResultBlock(block) {
+function formatToolResultBlock(block, redact) {
   const lines = [`<tool_result>`];
   if (block.content) {
     if (typeof block.content === "string") {
-      lines.push(indent(block.content, 2));
+      const content = redact ? redactMultiline(block.content) : block.content;
+      lines.push(indent(content, 2));
     } else {
       for (const innerBlock of block.content) {
         if (innerBlock.type === "text") {
-          lines.push(indent(innerBlock.text, 2));
+          const text = redact ? redactMultiline(innerBlock.text) : innerBlock.text;
+          lines.push(indent(text, 2));
         } else if (innerBlock.type === "image") {
           lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
         } else {
@@ -15296,17 +15409,20 @@ function indent(text, spaces) {
 async function read() {
   const args = process.argv.slice(3);
   if (args.length === 0) {
-    printError("Usage: read <session-id> [indices]");
+    printError("Usage: read <session-id> [indices] [--full]");
     console.log(`
 Examples:`);
-    console.log("  read 02ed           # all entries (prefix match)");
-    console.log("  read 02ed 5         # entry 5");
-    console.log("  read 02ed 5-10      # entries 5 through 10");
-    console.log("  read 02ed 1,5,10-15 # specific entries and ranges");
+    console.log("  read 02ed           # all entries (redacted for scanning)");
+    console.log("  read 02ed --full    # all entries (full content)");
+    console.log("  read 02ed 5         # entry 5 (full content)");
+    console.log("  read 02ed 5-10      # entries 5 through 10 (full content)");
+    console.log("  read 02ed 1,5,10-15 # specific entries and ranges (full content)");
     return;
   }
-  const sessionIdPrefix = args[0];
-  const indicesArg = args[1];
+  const fullFlag = args.includes("--full");
+  const filteredArgs = args.filter((a) => a !== "--full");
+  const sessionIdPrefix = filteredArgs[0];
+  const indicesArg = filteredArgs[1];
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
@@ -15346,33 +15462,40 @@ Examples:`);
   }
   const content = await readFile3(sessionFile, "utf-8");
   const lines = Array.from(parseJsonl(content));
-  const entries = lines.slice(1);
-  if (entries.length === 0) {
+  const rawEntries = lines.slice(1);
+  if (rawEntries.length === 0) {
     printError("Session has no entries.");
     return;
   }
-  const entriesToOutput = [];
-  for (let i = 0;i < entries.length; i++) {
-    const userIndex = i + 1;
-    if (indices === null || indices.has(userIndex)) {
-      entriesToOutput.push({ index: userIndex, raw: entries[i] });
-    }
-  }
-  if (entriesToOutput.length === 0) {
-    printError(`No entries match indices: ${indicesArg}`);
-    return;
-  }
-  for (const { index: index2, raw } of entriesToOutput) {
+  const allEntries = [];
+  for (const raw of rawEntries) {
     const result = parseKnownEntry(raw);
-    if (!result.data) {
-      console.log(`${index2}|unknown`);
-      continue;
+    if (result.data) {
+      allEntries.push(result.data);
     }
-    const formatted = formatEntry(result.data, { lineNumber: index2 });
-    if (formatted) {
-      console.log(formatted);
-      console.log("");
+  }
+  if (indices === null) {
+    const redact = !fullFlag;
+    const output = formatSession(allEntries, { redact });
+    console.log(output);
+  } else {
+    const outputs = [];
+    for (let i = 0;i < allEntries.length; i++) {
+      const userIndex = i + 1;
+      if (indices.has(userIndex)) {
+        const formatted = formatEntry(allEntries[i], { lineNumber: userIndex });
+        if (formatted) {
+          outputs.push(formatted);
+        }
+      }
     }
+    if (outputs.length === 0) {
+      printError(`No entries match indices: ${indicesArg}`);
+      return;
+    }
+    console.log(outputs.join(`
+
+`));
   }
 }
 function parseIndices(input) {

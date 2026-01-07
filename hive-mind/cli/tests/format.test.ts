@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parseJsonl } from "../lib/extraction";
-import { formatSession } from "../lib/format";
+import { formatSession, redactMultiline } from "../lib/format";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
 
@@ -22,7 +22,7 @@ const TEST_SESSIONS = [
   { prefix: "5e41ef2f", name: "5e41ef2f-no-summary-67-entries" },
 ];
 
-async function formatFullSession(sessionPrefix: string): Promise<string> {
+async function loadSessionEntries(sessionPrefix: string): Promise<Array<KnownEntry>> {
   const files = await readdir(sessionsDir);
   const match = files.find(f => f.startsWith(sessionPrefix) && f.endsWith(".jsonl"));
   if (!match) throw new Error(`No session matching ${sessionPrefix}`);
@@ -31,7 +31,6 @@ async function formatFullSession(sessionPrefix: string): Promise<string> {
   const lines = Array.from(parseJsonl(content));
   const rawEntries = lines.slice(1); // Skip metadata
 
-  // Parse all entries
   const entries: Array<KnownEntry> = [];
   for (const raw of rawEntries) {
     const result = parseKnownEntry(raw);
@@ -39,8 +38,12 @@ async function formatFullSession(sessionPrefix: string): Promise<string> {
       entries.push(result.data);
     }
   }
+  return entries;
+}
 
-  return formatSession(entries);
+async function formatFullSession(sessionPrefix: string, redact = false): Promise<string> {
+  const entries = await loadSessionEntries(sessionPrefix);
+  return formatSession(entries, { redact });
 }
 
 async function readSnapshot(name: string): Promise<string | null> {
@@ -56,10 +59,63 @@ async function writeSnapshot(name: string, content: string): Promise<void> {
   await writeFile(join(snapshotsDir, `${name}.txt`), content);
 }
 
+describe("redactMultiline", () => {
+  test("single line passes through unchanged", () => {
+    expect(redactMultiline("hello world")).toBe("hello world");
+  });
+
+  test("empty string passes through", () => {
+    expect(redactMultiline("")).toBe("");
+  });
+
+  test("two lines shows first line + count", () => {
+    expect(redactMultiline("line1\nline2")).toBe("line1\n[+1 lines]");
+  });
+
+  test("many lines shows first line + count", () => {
+    const input = "first line\nsecond\nthird\nfourth\nfifth";
+    expect(redactMultiline(input)).toBe("first line\n[+4 lines]");
+  });
+
+  test("handles trailing newline", () => {
+    expect(redactMultiline("line1\nline2\n")).toBe("line1\n[+2 lines]");
+  });
+});
+
 describe("format full sessions", () => {
   for (const { prefix, name } of TEST_SESSIONS) {
     test(name, async () => {
       const output = await formatFullSession(prefix);
+      const existing = await readSnapshot(name);
+
+      if (existing === null || process.env.UPDATE_SNAPSHOTS) {
+        await writeSnapshot(name, output);
+        if (existing === null) {
+          console.log(`Created snapshot: ${name}.txt`);
+        }
+      } else {
+        expect(output).toBe(existing);
+      }
+    });
+  }
+});
+
+describe("format redacted sessions", () => {
+  // Test all sessions with redaction for comparison
+  const REDACTED_SESSIONS = [
+    { prefix: "agent-ac1684a", name: "agent-ac1684a-2-entries-redacted" },
+    { prefix: "agent-a6b700c", name: "agent-a6b700c-9-entries-redacted" },
+    { prefix: "agent-a78d046", name: "agent-a78d046-15-entries-redacted" },
+    { prefix: "agent-aaf8774", name: "agent-aaf8774-orphan-38-entries-redacted" },
+    { prefix: "efbbb724", name: "efbbb724-with-thinking-57-entries-redacted" },
+    { prefix: "cb6aa757", name: "cb6aa757-with-summary-38-entries-redacted" },
+    { prefix: "f968233b", name: "f968233b-41-entries-redacted" },
+    { prefix: "5e41ef2f", name: "5e41ef2f-no-summary-67-entries-redacted" },
+  ];
+
+  for (const { prefix, name } of REDACTED_SESSIONS) {
+    test(name, async () => {
+      const output = await formatFullSession(prefix, true);
       const existing = await readSnapshot(name);
 
       if (existing === null || process.env.UPDATE_SNAPSHOTS) {

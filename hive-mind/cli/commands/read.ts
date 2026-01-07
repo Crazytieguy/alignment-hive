@@ -2,36 +2,46 @@
  * Read command - read session entries.
  *
  * Usage:
- *   read <session-id>           - all entries
- *   read <session-id> 5         - entry 5 (1-indexed)
- *   read <session-id> 5-10      - entries 5 through 10
- *   read <session-id> 1,5,10-15 - specific entries and ranges
+ *   read <session-id>           - all entries (redacted for scanning)
+ *   read <session-id> 5         - entry 5 (full content)
+ *   read <session-id> 5-10      - entries 5 through 10 (full content)
+ *   read <session-id> 1,5,10-15 - specific entries and ranges (full content)
+ *   read <session-id> --full    - all entries (full content)
  *
  * Session ID supports prefix matching (e.g., "02ed" matches "02ed589a-...")
+ *
+ * Redaction: When reading all entries, multi-line content is redacted to first
+ * line + line count (e.g., "[+42 lines]"). This allows quick scanning of session
+ * content. Request specific indices to see full content.
  */
 
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
-import { formatEntry } from "../lib/format";
+import { formatEntry, formatSession } from "../lib/format";
 import { printError } from "../lib/output";
 import { parseKnownEntry } from "../lib/schemas";
+import type { KnownEntry } from "../lib/schemas";
 
 export async function read(): Promise<void> {
   const args = process.argv.slice(3);
 
   if (args.length === 0) {
-    printError("Usage: read <session-id> [indices]");
+    printError("Usage: read <session-id> [indices] [--full]");
     console.log("\nExamples:");
-    console.log("  read 02ed           # all entries (prefix match)");
-    console.log("  read 02ed 5         # entry 5");
-    console.log("  read 02ed 5-10      # entries 5 through 10");
-    console.log("  read 02ed 1,5,10-15 # specific entries and ranges");
+    console.log("  read 02ed           # all entries (redacted for scanning)");
+    console.log("  read 02ed --full    # all entries (full content)");
+    console.log("  read 02ed 5         # entry 5 (full content)");
+    console.log("  read 02ed 5-10      # entries 5 through 10 (full content)");
+    console.log("  read 02ed 1,5,10-15 # specific entries and ranges (full content)");
     return;
   }
 
-  const sessionIdPrefix = args[0];
-  const indicesArg = args[1];
+  // Parse args: session-id, optional indices, optional --full flag
+  const fullFlag = args.includes("--full");
+  const filteredArgs = args.filter((a) => a !== "--full");
+  const sessionIdPrefix = filteredArgs[0];
+  const indicesArg = filteredArgs[1];
 
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
@@ -85,41 +95,48 @@ export async function read(): Promise<void> {
 
   // Skip metadata (line 0), entries start at line 1
   // User-facing indices are 1-indexed (entry 1 = lines[1])
-  const entries = lines.slice(1);
+  const rawEntries = lines.slice(1);
 
-  if (entries.length === 0) {
+  if (rawEntries.length === 0) {
     printError("Session has no entries.");
     return;
   }
 
-  // Determine which entries to output
-  const entriesToOutput: Array<{ index: number; raw: unknown }> = [];
-
-  for (let i = 0; i < entries.length; i++) {
-    const userIndex = i + 1; // 1-indexed for user
-    if (indices === null || indices.has(userIndex)) {
-      entriesToOutput.push({ index: userIndex, raw: entries[i] });
-    }
-  }
-
-  if (entriesToOutput.length === 0) {
-    printError(`No entries match indices: ${indicesArg}`);
-    return;
-  }
-
-  // Format and output entries
-  for (const { index, raw } of entriesToOutput) {
+  // Parse all entries
+  const allEntries: Array<KnownEntry> = [];
+  for (const raw of rawEntries) {
     const result = parseKnownEntry(raw);
-    if (!result.data) {
-      console.log(`${index}|unknown`);
-      continue;
+    if (result.data) {
+      allEntries.push(result.data);
+    }
+  }
+
+  if (indices === null) {
+    // All entries mode: use formatSession
+    // Redact unless --full flag is set
+    const redact = !fullFlag;
+    const output = formatSession(allEntries, { redact });
+    console.log(output);
+  } else {
+    // Specific indices mode: use formatEntry with correct line numbers
+    // Always full content (no redaction) for specific indices
+    const outputs: Array<string> = [];
+    for (let i = 0; i < allEntries.length; i++) {
+      const userIndex = i + 1;
+      if (indices.has(userIndex)) {
+        const formatted = formatEntry(allEntries[i], { lineNumber: userIndex });
+        if (formatted) {
+          outputs.push(formatted);
+        }
+      }
     }
 
-    const formatted = formatEntry(result.data, { lineNumber: index });
-    if (formatted) {
-      console.log(formatted);
-      console.log(""); // Blank line between entries
+    if (outputs.length === 0) {
+      printError(`No entries match indices: ${indicesArg}`);
+      return;
     }
+
+    console.log(outputs.join("\n\n"));
   }
 }
 

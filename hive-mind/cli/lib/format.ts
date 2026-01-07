@@ -1,6 +1,7 @@
 /**
  * Format module for token-efficient LLM output.
- * Tool calls are combined with their results. No truncation here (10B-2 adds that).
+ * Tool calls are combined with their results.
+ * Supports redaction mode (first line + line count) for scanning.
  */
 
 import type {
@@ -22,10 +23,27 @@ export interface FormatOptions {
   lineNumber: number;
   toolResults?: Map<string, ToolResultInfo>;
   parentIndicator?: number | string;
+  redact?: boolean;
 }
 
-export function formatSession(entries: Array<KnownEntry>): string {
-  const toolResults = collectToolResults(entries);
+export interface SessionFormatOptions {
+  redact?: boolean;
+}
+
+/**
+ * Redact multi-line text to first line + line count.
+ * Single-line text passes through unchanged.
+ */
+export function redactMultiline(text: string): string {
+  const lines = text.split('\n');
+  if (lines.length <= 1) return text;
+  const remaining = lines.length - 1;
+  return `${lines[0]}\n[+${remaining} lines]`;
+}
+
+export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
+  const { redact = false } = options;
+  const toolResults = collectToolResults(entries, redact);
   const uuidToLine = buildUuidMap(entries);
 
   const results: Array<string> = [];
@@ -45,7 +63,7 @@ export function formatSession(entries: Array<KnownEntry>): string {
       }
     }
 
-    const formatted = formatEntry(entry, { lineNumber, toolResults, parentIndicator });
+    const formatted = formatEntry(entry, { lineNumber, toolResults, parentIndicator, redact });
     if (formatted) {
       results.push(formatted);
     }
@@ -84,7 +102,7 @@ function getParentUuid(entry: KnownEntry): string | undefined {
   return undefined;
 }
 
-function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultInfo> {
+function collectToolResults(entries: Array<KnownEntry>, redact: boolean): Map<string, ToolResultInfo> {
   const results = new Map<string, ToolResultInfo>();
 
   for (const entry of entries) {
@@ -96,8 +114,11 @@ function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultI
 
     for (const block of content) {
       if (block.type === 'tool_result' && 'tool_use_id' in block) {
-        const formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
+        let formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
         if (formatted) {
+          if (redact) {
+            formatted = redactMultiline(formatted);
+          }
           results.set(block.tool_use_id, { content: formatted, agentId });
         }
       }
@@ -135,16 +156,16 @@ function isToolResultOnlyEntry(entry: UserEntry): boolean {
 }
 
 export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
-  const { lineNumber, toolResults, parentIndicator } = options;
+  const { lineNumber, toolResults, parentIndicator, redact = false } = options;
 
   switch (entry.type) {
     case 'user':
       if (toolResults && isToolResultOnlyEntry(entry)) return null;
-      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator);
+      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator, redact);
     case 'assistant':
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator);
+      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, redact);
     case 'system':
-      return formatSystemEntry(entry, lineNumber);
+      return formatSystemEntry(entry, lineNumber, redact);
     case 'summary':
       return formatSummaryEntry(entry, lineNumber);
     case 'file-history-snapshot':
@@ -160,12 +181,13 @@ function formatUserEntry(
   lineNumber: number,
   toolResults?: Map<string, ToolResultInfo>,
   parentIndicator?: number | string,
+  redact?: boolean,
 ): string {
   const attrs: Array<string> = [`line="${lineNumber}"`];
   if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
   if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
 
-  const content = formatMessageContent(entry.message.content, toolResults);
+  const content = formatMessageContent(entry.message.content, toolResults, redact);
   return formatXmlElement('user', attrs, content);
 }
 
@@ -174,6 +196,7 @@ function formatAssistantEntry(
   lineNumber: number,
   toolResults?: Map<string, ToolResultInfo>,
   parentIndicator?: number | string,
+  redact?: boolean,
 ): string {
   const attrs: Array<string> = [`line="${lineNumber}"`];
   if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
@@ -183,7 +206,7 @@ function formatAssistantEntry(
   }
   if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
 
-  const content = formatMessageContent(entry.message.content, toolResults);
+  const content = formatMessageContent(entry.message.content, toolResults, redact);
   return formatXmlElement('assistant', attrs, content);
 }
 
@@ -196,13 +219,17 @@ function formatXmlElement(tag: string, attrs: Array<string>, content: string): s
   return `<${tag}${attrStr}>\n${indent(content, 2)}\n</${tag}>`;
 }
 
-function formatSystemEntry(entry: SystemEntry, lineNumber: number): string {
+function formatSystemEntry(entry: SystemEntry, lineNumber: number, redact?: boolean): string {
   const attrs: Array<string> = [`line="${lineNumber}"`];
   if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
   if (entry.subtype) attrs.push(`subtype="${entry.subtype}"`);
   if (entry.level && entry.level !== 'info') attrs.push(`level="${entry.level}"`);
 
-  return formatXmlElement('system', attrs, entry.content || '');
+  let content = entry.content || '';
+  if (redact) {
+    content = redactMultiline(content);
+  }
+  return formatXmlElement('system', attrs, content);
 }
 
 function formatSummaryEntry(entry: SummaryEntry, lineNumber: number): string {
@@ -216,15 +243,18 @@ function formatTimestamp(iso: string): string {
 function formatMessageContent(
   content: string | Array<ContentBlock> | undefined,
   toolResults?: Map<string, ToolResultInfo>,
+  redact?: boolean,
 ): string {
   if (!content) return '';
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string') {
+    return redact ? redactMultiline(content) : content;
+  }
 
   const parts: Array<string> = [];
   for (const block of content) {
     if (isNoiseBlock(block)) continue;
     if (toolResults && block.type === 'tool_result') continue;
-    const formatted = formatContentBlock(block, toolResults);
+    const formatted = formatContentBlock(block, toolResults, redact);
     if (formatted) parts.push(formatted);
   }
 
@@ -249,16 +279,16 @@ function isNoiseBlock(block: ContentBlock): boolean {
   return false;
 }
 
-function formatContentBlock(block: ContentBlock, toolResults?: Map<string, ToolResultInfo>): string | null {
+function formatContentBlock(block: ContentBlock, toolResults?: Map<string, ToolResultInfo>, redact?: boolean): string | null {
   switch (block.type) {
     case 'text':
-      return block.text;
+      return redact ? redactMultiline(block.text) : block.text;
     case 'thinking':
-      return formatXmlElement('thinking', [], block.thinking);
+      return formatXmlElement('thinking', [], redact ? redactMultiline(block.thinking) : block.thinking);
     case 'tool_use':
-      return formatToolUseBlock(block, toolResults);
+      return formatToolUseBlock(block, toolResults, redact);
     case 'tool_result':
-      return formatToolResultBlock(block);
+      return formatToolResultBlock(block, redact);
     case 'image':
       return `<image media_type="${block.source.media_type}"/>`;
     case 'document':
@@ -269,6 +299,7 @@ function formatContentBlock(block: ContentBlock, toolResults?: Map<string, ToolR
 function formatToolUseBlock(
   block: { id: string; name: string; input: Record<string, unknown> },
   toolResults?: Map<string, ToolResultInfo>,
+  redact?: boolean,
 ): string {
   const resultInfo = toolResults?.get(block.id);
   const tagName = resultInfo ? 'tool' : 'tool_use';
@@ -281,7 +312,10 @@ function formatToolUseBlock(
   const lines: Array<string> = [`<${tagName} ${attrs.join(' ')}>`];
 
   for (const [key, value] of Object.entries(block.input)) {
-    const formatted = formatValue(value, key);
+    let formatted = formatValue(value, key);
+    if (redact) {
+      formatted = redactMultiline(formatted);
+    }
     if (formatted.includes('\n')) {
       lines.push(`  <${key}>\n${indent(formatted, 4)}\n  </${key}>`);
     } else {
@@ -290,6 +324,7 @@ function formatToolUseBlock(
   }
 
   if (resultInfo) {
+    // Result content already redacted in collectToolResults if needed
     if (resultInfo.content.includes('\n')) {
       lines.push(`  <result>\n${indent(resultInfo.content, 4)}\n  </result>`);
     } else {
@@ -301,19 +336,24 @@ function formatToolUseBlock(
   return lines.join('\n');
 }
 
-function formatToolResultBlock(block: {
-  tool_use_id: string;
-  content?: string | Array<ToolResultContentBlock>;
-}): string {
+function formatToolResultBlock(
+  block: {
+    tool_use_id: string;
+    content?: string | Array<ToolResultContentBlock>;
+  },
+  redact?: boolean,
+): string {
   const lines: Array<string> = [`<tool_result>`];
 
   if (block.content) {
     if (typeof block.content === 'string') {
-      lines.push(indent(block.content, 2));
+      const content = redact ? redactMultiline(block.content) : block.content;
+      lines.push(indent(content, 2));
     } else {
       for (const innerBlock of block.content) {
         if (innerBlock.type === 'text') {
-          lines.push(indent(innerBlock.text, 2));
+          const text = redact ? redactMultiline(innerBlock.text) : innerBlock.text;
+          lines.push(indent(text, 2));
         } else if (innerBlock.type === 'image') {
           lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
         } else {
