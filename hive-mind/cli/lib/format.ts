@@ -1,61 +1,47 @@
 /**
  * Format module for token-efficient LLM output.
- *
- * Design principles:
- * - Position-based fields (no field name prefixes)
- * - XML tags for structured multi-field content
- * - Tool calls combined with their results
- * - No truncation in this module (Session 10B-2 adds that)
+ * Tool calls are combined with their results. No truncation here (10B-2 adds that).
  */
 
 import type {
-  KnownEntry,
-  ContentBlock,
-  KnownContentBlock,
-  UserEntry,
   AssistantEntry,
-  SystemEntry,
+  ContentBlock,
+  KnownEntry,
   SummaryEntry,
-} from "./schemas";
+  SystemEntry,
+  ToolResultContentBlock,
+  UserEntry,
+} from './schemas';
+
+export interface ToolResultInfo {
+  content: string;
+  agentId?: string;
+}
 
 export interface FormatOptions {
   lineNumber: number;
-  /** Map of tool_use_id -> formatted result content */
-  toolResults?: Map<string, string>;
-  /** Parent indicator for branching: line number, or "?" for unknown parent */
+  toolResults?: Map<string, ToolResultInfo>;
   parentIndicator?: number | string;
 }
 
-/**
- * Format a complete session, combining tool_use with tool_result.
- * This is the preferred entry point for formatting.
- */
-export function formatSession(entries: KnownEntry[]): string {
-  // First pass: collect all tool_result content and build uuid->lineNumber map
+export function formatSession(entries: Array<KnownEntry>): string {
   const toolResults = collectToolResults(entries);
   const uuidToLine = buildUuidMap(entries);
 
-  // Second pass: format entries with branching info
-  const results: string[] = [];
+  const results: Array<string> = [];
   let prevUuid: string | undefined;
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     const lineNumber = i + 1;
 
-    // Check if this entry branches from a non-sequential parent
-    // A branch occurs when:
-    // 1. Entry has a parentUuid that doesn't match the previous entry's uuid
-    // 2. Entry has null parentUuid but previous entry had a uuid (new thread/unknown parent)
     let parentIndicator: string | number | undefined;
     const parentUuid = getParentUuid(entry);
     if (prevUuid) {
       if (parentUuid && parentUuid !== prevUuid) {
-        // Branching to a different parent - show line number
         parentIndicator = uuidToLine.get(parentUuid);
       } else if (!parentUuid && getUuid(entry)) {
-        // Unknown parent (null) after existing messages - show "?"
-        parentIndicator = "?";
+        parentIndicator = '?';
       }
     }
 
@@ -64,20 +50,16 @@ export function formatSession(entries: KnownEntry[]): string {
       results.push(formatted);
     }
 
-    // Track uuid for next iteration
     const uuid = getUuid(entry);
     if (uuid) {
       prevUuid = uuid;
     }
   }
 
-  return results.join("\n\n");
+  return results.join('\n\n');
 }
 
-/**
- * Build a map of uuid -> line number for branching display.
- */
-function buildUuidMap(entries: KnownEntry[]): Map<string, number> {
+function buildUuidMap(entries: Array<KnownEntry>): Map<string, number> {
   const map = new Map<string, number>();
   for (let i = 0; i < entries.length; i++) {
     const uuid = getUuid(entries[i]);
@@ -88,42 +70,35 @@ function buildUuidMap(entries: KnownEntry[]): Map<string, number> {
   return map;
 }
 
-/**
- * Get uuid from an entry if it has one.
- */
 function getUuid(entry: KnownEntry): string | undefined {
-  if ("uuid" in entry && typeof entry.uuid === "string") {
+  if ('uuid' in entry && typeof entry.uuid === 'string') {
     return entry.uuid;
   }
   return undefined;
 }
 
-/**
- * Get parentUuid from an entry if it has one.
- */
 function getParentUuid(entry: KnownEntry): string | undefined {
-  if ("parentUuid" in entry && typeof entry.parentUuid === "string") {
+  if ('parentUuid' in entry && typeof entry.parentUuid === 'string') {
     return entry.parentUuid;
   }
   return undefined;
 }
 
-/**
- * Collect tool_result content from user entries into a map.
- */
-function collectToolResults(entries: KnownEntry[]): Map<string, string> {
-  const results = new Map<string, string>();
+function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultInfo> {
+  const results = new Map<string, ToolResultInfo>();
 
   for (const entry of entries) {
-    if (entry.type !== "user") continue;
+    if (entry.type !== 'user') continue;
     const content = entry.message.content;
     if (!Array.isArray(content)) continue;
 
+    const agentId = 'agentId' in entry ? (entry.agentId) : undefined;
+
     for (const block of content) {
-      if (block.type === "tool_result" && "tool_use_id" in block) {
-        const formatted = formatToolResultContent(block.content);
+      if (block.type === 'tool_result' && 'tool_use_id' in block) {
+        const formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
         if (formatted) {
-          results.set(block.tool_use_id, formatted);
+          results.set(block.tool_use_id, { content: formatted, agentId });
         }
       }
     }
@@ -132,67 +107,48 @@ function collectToolResults(entries: KnownEntry[]): Map<string, string> {
   return results;
 }
 
-/**
- * Format tool_result content (without the wrapper tag).
- */
-function formatToolResultContent(content: string | ContentBlock[] | undefined): string {
-  if (!content) return "";
+function formatToolResultContent(content: string | Array<ContentBlock> | undefined): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
 
-  if (typeof content === "string") {
-    return content;
-  }
-
-  const parts: string[] = [];
+  const parts: Array<string> = [];
   for (const block of content) {
-    if (block.type === "text" && "text" in block) {
+    if (block.type === 'text' && 'text' in block) {
       parts.push(block.text);
-    } else if (block.type === "image" && "source" in block) {
+    } else if (block.type === 'image' && 'source' in block) {
       parts.push(`<image media_type="${block.source.media_type}"/>`);
-    } else if (block.type === "document" && "source" in block) {
+    } else if (block.type === 'document' && 'source' in block) {
       parts.push(`<document media_type="${block.source.media_type}"/>`);
     }
   }
-  return parts.join("\n");
+  return parts.join('\n');
 }
 
-/**
- * Check if a user entry contains only tool_result blocks (should be skipped).
- */
 function isToolResultOnlyEntry(entry: UserEntry): boolean {
   const content = entry.message.content;
   if (!Array.isArray(content)) return false;
 
-  // Filter out noise blocks first
   const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
   if (meaningfulBlocks.length === 0) return true;
 
-  // Check if all remaining blocks are tool_result
-  return meaningfulBlocks.every((b) => b.type === "tool_result");
+  return meaningfulBlocks.every((b) => b.type === 'tool_result');
 }
 
-/**
- * Format an entry for output.
- * Returns the formatted string representation.
- */
 export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
   const { lineNumber, toolResults, parentIndicator } = options;
 
   switch (entry.type) {
-    case "user":
-      // Skip entries that only contain tool_result (they're merged into tool_use)
-      if (toolResults && isToolResultOnlyEntry(entry)) {
-        return null;
-      }
+    case 'user':
+      if (toolResults && isToolResultOnlyEntry(entry)) return null;
       return formatUserEntry(entry, lineNumber, toolResults, parentIndicator);
-    case "assistant":
+    case 'assistant':
       return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator);
-    case "system":
+    case 'system':
       return formatSystemEntry(entry, lineNumber);
-    case "summary":
+    case 'summary':
       return formatSummaryEntry(entry, lineNumber);
-    case "file-history-snapshot":
-    case "queue-operation":
-      // Skip these - low retrieval value
+    case 'file-history-snapshot':
+    case 'queue-operation':
       return null;
     default:
       return null;
@@ -202,138 +158,90 @@ export function formatEntry(entry: KnownEntry, options: FormatOptions): string |
 function formatUserEntry(
   entry: UserEntry,
   lineNumber: number,
-  toolResults?: Map<string, string>,
-  parentIndicator?: number | string
+  toolResults?: Map<string, ToolResultInfo>,
+  parentIndicator?: number | string,
 ): string {
-  const attrs: string[] = [`line="${lineNumber}"`];
-  if (entry.timestamp) {
-    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  }
-  if (parentIndicator !== undefined) {
-    attrs.push(`parent="${parentIndicator}"`);
-  }
+  const attrs: Array<string> = [`line="${lineNumber}"`];
+  if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
+  if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
 
   const content = formatMessageContent(entry.message.content, toolResults);
-  return formatXmlElement("user", attrs, content);
+  return formatXmlElement('user', attrs, content);
 }
 
 function formatAssistantEntry(
   entry: AssistantEntry,
   lineNumber: number,
-  toolResults?: Map<string, string>,
-  parentIndicator?: number | string
+  toolResults?: Map<string, ToolResultInfo>,
+  parentIndicator?: number | string,
 ): string {
-  const attrs: string[] = [`line="${lineNumber}"`];
-  if (entry.timestamp) {
-    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  }
-  if (entry.message.model) {
-    attrs.push(`model="${entry.message.model}"`);
-  }
-  if (entry.message.stop_reason && entry.message.stop_reason !== "end_turn") {
+  const attrs: Array<string> = [`line="${lineNumber}"`];
+  if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
+  if (entry.message.model) attrs.push(`model="${entry.message.model}"`);
+  if (entry.message.stop_reason && entry.message.stop_reason !== 'end_turn') {
     attrs.push(`stop="${entry.message.stop_reason}"`);
   }
-  if (parentIndicator !== undefined) {
-    attrs.push(`parent="${parentIndicator}"`);
-  }
+  if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
 
   const content = formatMessageContent(entry.message.content, toolResults);
-  return formatXmlElement("assistant", attrs, content);
+  return formatXmlElement('assistant', attrs, content);
 }
 
-/**
- * Format an XML element with optional attributes and content.
- * Multi-line content is indented.
- */
-function formatXmlElement(tag: string, attrs: string[], content: string): string {
-  const attrStr = attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
+function formatXmlElement(tag: string, attrs: Array<string>, content: string): string {
+  const attrStr = attrs.length > 0 ? ` ${attrs.join(' ')}` : '';
 
-  if (!content) {
-    return `<${tag}${attrStr}/>`;
-  }
+  if (!content) return `<${tag}${attrStr}/>`;
+  if (!content.includes('\n')) return `<${tag}${attrStr}>${content}</${tag}>`;
 
-  if (!content.includes("\n")) {
-    return `<${tag}${attrStr}>${content}</${tag}>`;
-  }
-
-  // Multi-line content: indent each line
   return `<${tag}${attrStr}>\n${indent(content, 2)}\n</${tag}>`;
 }
 
 function formatSystemEntry(entry: SystemEntry, lineNumber: number): string {
-  const attrs: string[] = [`line="${lineNumber}"`];
-  if (entry.timestamp) {
-    attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  }
-  if (entry.subtype) {
-    attrs.push(`subtype="${entry.subtype}"`);
-  }
-  if (entry.level && entry.level !== "info") {
-    attrs.push(`level="${entry.level}"`);
-  }
+  const attrs: Array<string> = [`line="${lineNumber}"`];
+  if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
+  if (entry.subtype) attrs.push(`subtype="${entry.subtype}"`);
+  if (entry.level && entry.level !== 'info') attrs.push(`level="${entry.level}"`);
 
-  return formatXmlElement("system", attrs, entry.content || "");
+  return formatXmlElement('system', attrs, entry.content || '');
 }
 
 function formatSummaryEntry(entry: SummaryEntry, lineNumber: number): string {
-  const attrs: string[] = [`line="${lineNumber}"`];
-  return formatXmlElement("summary", attrs, entry.summary);
+  return formatXmlElement('summary', [`line="${lineNumber}"`], entry.summary);
 }
 
-/**
- * Format timestamp to compact ISO format (no seconds, no Z).
- * 2026-01-04T05:43:04.199Z -> 2026-01-04T05:43
- */
 function formatTimestamp(iso: string): string {
-  // Keep YYYY-MM-DDTHH:MM, drop :SS.sssZ
   return iso.slice(0, 16);
 }
 
-/**
- * Format message content (string or array of blocks).
- */
 function formatMessageContent(
-  content: string | ContentBlock[] | undefined,
-  toolResults?: Map<string, string>
+  content: string | Array<ContentBlock> | undefined,
+  toolResults?: Map<string, ToolResultInfo>,
 ): string {
-  if (!content) return "";
+  if (!content) return '';
+  if (typeof content === 'string') return content;
 
-  if (typeof content === "string") {
-    return content;
-  }
-
-  const parts: string[] = [];
+  const parts: Array<string> = [];
   for (const block of content) {
     if (isNoiseBlock(block)) continue;
-    // Skip tool_result blocks when we have toolResults (they're merged into tool_use)
-    if (toolResults && block.type === "tool_result") continue;
+    if (toolResults && block.type === 'tool_result') continue;
     const formatted = formatContentBlock(block, toolResults);
-    if (formatted) {
-      parts.push(formatted);
-    }
+    if (formatted) parts.push(formatted);
   }
 
-  return parts.join("\n");
+  return parts.join('\n');
 }
 
-/**
- * Check if a content block is noise that should be filtered out.
- */
 function isNoiseBlock(block: ContentBlock): boolean {
-  // Filter out tool_result blocks that are just TodoWrite confirmation
-  if (block.type === "tool_result" && "content" in block) {
+  if (block.type === 'tool_result' && 'content' in block) {
     const content = block.content;
-    if (typeof content === "string") {
-      if (content.startsWith("Todos have been modified successfully")) {
-        return true;
-      }
+    if (typeof content === 'string' && content.startsWith('Todos have been modified successfully')) {
+      return true;
     }
   }
 
-  // Filter out text blocks that are just system-reminder
-  if (block.type === "text" && "text" in block) {
+  if (block.type === 'text' && 'text' in block) {
     const text = block.text.trim();
-    if (text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>")) {
+    if (text.startsWith('<system-reminder>') && text.endsWith('</system-reminder>')) {
       return true;
     }
   }
@@ -341,150 +249,108 @@ function isNoiseBlock(block: ContentBlock): boolean {
   return false;
 }
 
-/**
- * Format a single content block.
- */
-function formatContentBlock(
-  block: ContentBlock,
-  toolResults?: Map<string, string>
-): string | null {
-  // Handle known block types
-  if (isKnownBlock(block)) {
-    return formatKnownBlock(block, toolResults);
-  }
-
-  // Unknown block type - include type for debugging
-  return `<unknown type="${block.type}"/>`;
-}
-
-function isKnownBlock(block: ContentBlock): block is KnownContentBlock {
-  return ["text", "thinking", "tool_use", "tool_result", "image", "document"].includes(block.type);
-}
-
-function formatKnownBlock(
-  block: KnownContentBlock,
-  toolResults?: Map<string, string>
-): string | null {
+function formatContentBlock(block: ContentBlock, toolResults?: Map<string, ToolResultInfo>): string | null {
   switch (block.type) {
-    case "text":
-      return formatTextBlock(block.text);
-
-    case "thinking":
-      return formatXmlElement("thinking", [], block.thinking);
-
-    case "tool_use":
+    case 'text':
+      return block.text;
+    case 'thinking':
+      return formatXmlElement('thinking', [], block.thinking);
+    case 'tool_use':
       return formatToolUseBlock(block, toolResults);
-
-    case "tool_result":
+    case 'tool_result':
       return formatToolResultBlock(block);
-
-    case "image":
+    case 'image':
       return `<image media_type="${block.source.media_type}"/>`;
-
-    case "document":
+    case 'document':
       return `<document media_type="${block.source.media_type}"/>`;
-
-    default:
-      return null;
   }
 }
 
-/**
- * Format text block - plain text, no wrapper.
- */
-function formatTextBlock(text: string): string {
-  return text;
-}
-
-/**
- * Format tool_use block as XML, optionally including the result.
- */
 function formatToolUseBlock(
   block: { id: string; name: string; input: Record<string, unknown> },
-  toolResults?: Map<string, string>
+  toolResults?: Map<string, ToolResultInfo>,
 ): string {
-  const result = toolResults?.get(block.id);
+  const resultInfo = toolResults?.get(block.id);
+  const tagName = resultInfo ? 'tool' : 'tool_use';
 
-  // Use <tool> tag when we have both call and result, <tool_use> when call only
-  const tagName = result ? "tool" : "tool_use";
-  const lines: string[] = [`<${tagName} name="${block.name}">`];
+  const attrs = [`name="${block.name}"`];
+  if (block.name === 'Task' && resultInfo?.agentId) {
+    attrs.push(`agent_session="agent-${resultInfo.agentId}"`);
+  }
 
-  // Format input parameters
+  const lines: Array<string> = [`<${tagName} ${attrs.join(' ')}>`];
+
   for (const [key, value] of Object.entries(block.input)) {
-    const formatted = formatValue(value);
-    if (formatted.includes("\n")) {
+    const formatted = formatValue(value, key);
+    if (formatted.includes('\n')) {
       lines.push(`  <${key}>\n${indent(formatted, 4)}\n  </${key}>`);
     } else {
       lines.push(`  <${key}>${formatted}</${key}>`);
     }
   }
 
-  // Include result if available
-  if (result) {
-    if (result.includes("\n")) {
-      lines.push(`  <result>\n${indent(result, 4)}\n  </result>`);
+  if (resultInfo) {
+    if (resultInfo.content.includes('\n')) {
+      lines.push(`  <result>\n${indent(resultInfo.content, 4)}\n  </result>`);
     } else {
-      lines.push(`  <result>${result}</result>`);
+      lines.push(`  <result>${resultInfo.content}</result>`);
     }
   }
 
   lines.push(`</${tagName}>`);
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
-/**
- * Format tool_result block as XML.
- */
-function formatToolResultBlock(block: { tool_use_id: string; content?: string | ContentBlock[] }): string {
-  const lines: string[] = [`<tool_result>`];
+function formatToolResultBlock(block: {
+  tool_use_id: string;
+  content?: string | Array<ToolResultContentBlock>;
+}): string {
+  const lines: Array<string> = [`<tool_result>`];
 
   if (block.content) {
-    if (typeof block.content === "string") {
+    if (typeof block.content === 'string') {
       lines.push(indent(block.content, 2));
     } else {
-      // Array of content blocks (usually text blocks inside tool_result)
       for (const innerBlock of block.content) {
-        if (innerBlock.type === "text" && "text" in innerBlock) {
+        if (innerBlock.type === 'text') {
           lines.push(indent(innerBlock.text, 2));
-        } else if (innerBlock.type === "image" && "source" in innerBlock) {
+        } else if (innerBlock.type === 'image') {
           lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
-        } else if (innerBlock.type === "document" && "source" in innerBlock) {
+        } else {
           lines.push(`  <document media_type="${innerBlock.source.media_type}"/>`);
         }
       }
     }
   }
 
-  lines.push("</tool_result>");
-  return lines.join("\n");
+  lines.push('</tool_result>');
+  return lines.join('\n');
 }
 
-/**
- * Format a value for XML output.
- */
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  if (Array.isArray(value) || typeof value === "object") {
-    return JSON.stringify(value, null, 2);
-  }
+function formatValue(value: unknown, key?: string): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (key === 'todos' && Array.isArray(value)) return formatTodosAsXml(value);
+  if (Array.isArray(value) || typeof value === 'object') return JSON.stringify(value, null, 2);
   return String(value);
 }
 
-/**
- * Indent text by a number of spaces.
- */
+function formatTodosAsXml(todos: Array<unknown>): string {
+  const lines: Array<string> = [];
+  for (const todo of todos) {
+    if (typeof todo === 'object' && todo !== null) {
+      const t = todo as { content?: string; status?: string };
+      lines.push(`<todo status="${t.status || 'pending'}">${t.content || ''}</todo>`);
+    }
+  }
+  return lines.join('\n');
+}
+
 function indent(text: string, spaces: number): string {
-  const prefix = " ".repeat(spaces);
+  const prefix = ' '.repeat(spaces);
   return text
-    .split("\n")
-    .map(line => (line ? prefix + line : line))
-    .join("\n");
+    .split('\n')
+    .map((line) => (line ? prefix + line : line))
+    .join('\n');
 }

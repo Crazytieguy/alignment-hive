@@ -911,28 +911,10 @@
 <assistant line="47" time="2026-01-03T22:17" model="claude-opus-4-5-20251101">
   <tool name="TodoWrite">
     <todos>
-      [
-        {
-          "content": "Draft new README.md",
-          "status": "in_progress",
-          "activeForm": "Drafting new README.md"
-        },
-        {
-          "content": "Create docs/roadmap.md with planning content",
-          "status": "pending",
-          "activeForm": "Creating docs/roadmap.md"
-        },
-        {
-          "content": "Create plugins/hive-mind/README.md with dev info",
-          "status": "pending",
-          "activeForm": "Creating hive-mind README"
-        },
-        {
-          "content": "Simplify CLAUDE.md",
-          "status": "pending",
-          "activeForm": "Simplifying CLAUDE.md"
-        }
-      ]
+      <todo status="in_progress">Draft new README.md</todo>
+      <todo status="pending">Create docs/roadmap.md with planning content</todo>
+      <todo status="pending">Create plugins/hive-mind/README.md with dev info</todo>
+      <todo status="pending">Simplify CLAUDE.md</todo>
     </todos>
     <result>Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable</result>
   </tool>
@@ -1098,28 +1080,10 @@
 <assistant line="53" time="2026-01-03T22:18" model="claude-opus-4-5-20251101" stop="tool_use">
   <tool name="TodoWrite">
     <todos>
-      [
-        {
-          "content": "Draft new README.md",
-          "status": "completed",
-          "activeForm": "Drafting new README.md"
-        },
-        {
-          "content": "Create docs/roadmap.md with planning content",
-          "status": "in_progress",
-          "activeForm": "Creating docs/roadmap.md"
-        },
-        {
-          "content": "Create plugins/hive-mind/README.md with dev info",
-          "status": "pending",
-          "activeForm": "Creating hive-mind README"
-        },
-        {
-          "content": "Simplify CLAUDE.md",
-          "status": "pending",
-          "activeForm": "Simplifying CLAUDE.md"
-        }
-      ]
+      <todo status="completed">Draft new README.md</todo>
+      <todo status="in_progress">Create docs/roadmap.md with planning content</todo>
+      <todo status="pending">Create plugins/hive-mind/README.md with dev info</todo>
+      <todo status="pending">Simplify CLAUDE.md</todo>
     </todos>
     <result>Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable</result>
   </tool>
@@ -1163,28 +1127,10 @@
 <assistant line="59" time="2026-01-03T22:19" model="claude-opus-4-5-20251101">
   <tool name="TodoWrite">
     <todos>
-      [
-        {
-          "content": "Draft new README.md",
-          "status": "completed",
-          "activeForm": "Drafting new README.md"
-        },
-        {
-          "content": "Create docs/roadmap.md with planning content",
-          "status": "completed",
-          "activeForm": "Creating docs/roadmap.md"
-        },
-        {
-          "content": "Create plugins/hive-mind/README.md with dev info",
-          "status": "in_progress",
-          "activeForm": "Creating hive-mind README"
-        },
-        {
-          "content": "Simplify CLAUDE.md",
-          "status": "pending",
-          "activeForm": "Simplifying CLAUDE.md"
-        }
-      ]
+      <todo status="completed">Draft new README.md</todo>
+      <todo status="completed">Create docs/roadmap.md with planning content</todo>
+      <todo status="in_progress">Create plugins/hive-mind/README.md with dev info</todo>
+      <todo status="pending">Simplify CLAUDE.md</todo>
     </todos>
     <result>Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable</result>
   </tool>
@@ -1268,28 +1214,10 @@
 <assistant line="71" time="2026-01-03T22:23" model="claude-opus-4-5-20251101" stop="tool_use">
   <tool name="TodoWrite">
     <todos>
-      [
-        {
-          "content": "Draft new README.md",
-          "status": "completed",
-          "activeForm": "Drafting new README.md"
-        },
-        {
-          "content": "Create docs/roadmap.md with planning content",
-          "status": "completed",
-          "activeForm": "Creating docs/roadmap.md"
-        },
-        {
-          "content": "Create plugins/hive-mind/README.md with dev info",
-          "status": "completed",
-          "activeForm": "Creating hive-mind README"
-        },
-        {
-          "content": "Simplify CLAUDE.md",
-          "status": "in_progress",
-          "activeForm": "Simplifying CLAUDE.md"
-        }
-      ]
+      <todo status="completed">Draft new README.md</todo>
+      <todo status="completed">Create docs/roadmap.md with planning content</todo>
+      <todo status="completed">Create plugins/hive-mind/README.md with dev info</todo>
+      <todo status="in_progress">Simplify CLAUDE.md</todo>
     </todos>
     <result>Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable</result>
   </tool>
@@ -1425,28 +1353,10 @@
 <assistant line="80" time="2026-01-03T22:25" model="claude-opus-4-5-20251101" stop="tool_use">
   <tool name="TodoWrite">
     <todos>
-      [
-        {
-          "content": "Draft new README.md",
-          "status": "completed",
-          "activeForm": "Drafting new README.md"
-        },
-        {
-          "content": "Create docs/roadmap.md with planning content",
-          "status": "completed",
-          "activeForm": "Creating docs/roadmap.md"
-        },
-        {
-          "content": "Create plugins/hive-mind/README.md with dev info",
-          "status": "completed",
-          "activeForm": "Creating hive-mind README"
-        },
-        {
-          "content": "Simplify CLAUDE.md",
-          "status": "completed",
-          "activeForm": "Simplifying CLAUDE.md"
-        }
-      ]
+      <todo status="completed">Draft new README.md</todo>
+      <todo status="completed">Create docs/roadmap.md with planning content</todo>
+      <todo status="completed">Create plugins/hive-mind/README.md with dev info</todo>
+      <todo status="completed">Simplify CLAUDE.md</todo>
     </todos>
     <result>Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable</result>
   </tool>

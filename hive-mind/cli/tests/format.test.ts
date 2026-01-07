@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { describe, expect, test } from "bun:test";
 import { parseJsonl } from "../lib/extraction";
 import { formatSession } from "../lib/format";
 import { parseKnownEntry } from "../lib/schemas";
@@ -32,7 +32,7 @@ async function formatFullSession(sessionPrefix: string): Promise<string> {
   const rawEntries = lines.slice(1); // Skip metadata
 
   // Parse all entries
-  const entries: KnownEntry[] = [];
+  const entries: Array<KnownEntry> = [];
   for (const raw of rawEntries) {
     const result = parseKnownEntry(raw);
     if (result.data) {

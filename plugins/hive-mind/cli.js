@@ -14252,12 +14252,10 @@ var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
 });
-var UnknownContentBlockSchema = exports_external.looseObject({ type: exports_external.string() });
 var ToolResultContentBlockSchema = exports_external.union([
   TextBlockSchema,
   ImageBlockSchema,
-  DocumentBlockSchema,
-  UnknownContentBlockSchema
+  DocumentBlockSchema
 ]);
 var ToolResultBlockSchema = exports_external.looseObject({
   type: exports_external.literal("tool_result"),
@@ -14272,14 +14270,8 @@ var KnownContentBlockSchema = exports_external.discriminatedUnion("type", [
   ImageBlockSchema,
   DocumentBlockSchema
 ]);
-var ContentBlockSchema = exports_external.union([
-  KnownContentBlockSchema,
-  UnknownContentBlockSchema
-]);
-var MessageContentSchema = exports_external.union([
-  exports_external.string(),
-  exports_external.array(ContentBlockSchema)
-]);
+var ContentBlockSchema = KnownContentBlockSchema;
+var MessageContentSchema = exports_external.union([exports_external.string(), exports_external.array(ContentBlockSchema)]);
 var UserMessageObjectSchema = exports_external.looseObject({
   role: exports_external.string(),
   content: MessageContentSchema.optional(),
@@ -14317,7 +14309,10 @@ var UserEntrySchema = exports_external.looseObject({
   imagePasteIds: exports_external.unknown(),
   thinkingMetadata: exports_external.unknown().optional(),
   todos: exports_external.unknown().optional()
-}).transform(({ toolUseResult, requestId, slug, userType, ...rest }) => rest);
+}).transform(({ toolUseResult, requestId, slug, userType, ...rest }) => {
+  const agentId = toolUseResult && typeof toolUseResult === "object" && "agentId" in toolUseResult ? toolUseResult.agentId : undefined;
+  return { ...rest, ...agentId && { agentId } };
+});
 var AssistantEntrySchema = exports_external.looseObject({
   type: exports_external.literal("assistant"),
   uuid: exports_external.string(),
@@ -14368,7 +14363,7 @@ function parseKnownEntry(data) {
   if (parsed.success) {
     return { data: parsed.data };
   }
-  const entryType = data?.type;
+  const entryType = data.type;
   if (isKnownEntryType(entryType)) {
     const errorDetails = parsed.error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
     return { data: null, error: `${entryType}: ${errorDetails}` };
@@ -14384,6 +14379,7 @@ var HiveMindMetaSchema = exports_external.object({
   rawMtime: exports_external.string(),
   messageCount: exports_external.number(),
   summary: exports_external.string().optional(),
+  firstUserPrompt: exports_external.string().optional(),
   rawPath: exports_external.string(),
   agentId: exports_external.string().optional(),
   parentSessionId: exports_external.string().optional(),
@@ -14410,37 +14406,14 @@ function* parseJsonl(content) {
 }
 function transformEntry(rawEntry) {
   const result = parseKnownEntry(rawEntry);
-  if (result.error) {
+  if (result.error)
     return { entry: null, error: result.error };
-  }
-  if (!result.data) {
+  if (!result.data)
     return { entry: null };
-  }
   if (INCLUDED_ENTRY_TYPES.includes(result.data.type)) {
     return { entry: result.data };
   }
   return { entry: null };
-}
-function findValidSummary(entries) {
-  const uuids = new Set;
-  const summaries = [];
-  for (const entry of entries) {
-    if ("uuid" in entry && typeof entry.uuid === "string") {
-      uuids.add(entry.uuid);
-    }
-    if (entry.type === "summary") {
-      summaries.push({
-        summary: entry.summary,
-        leafUuid: entry.leafUuid
-      });
-    }
-  }
-  for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid)) {
-      return s.summary;
-    }
-  }
-  return summaries.at(-1)?.summary;
 }
 async function extractSession(options) {
   const { rawPath, outputPath, agentId } = options;
@@ -14455,32 +14428,25 @@ async function extractSession(options) {
   const schemaErrors = [];
   for (const rawEntry of parseJsonl(content)) {
     const { entry, error: error48 } = transformEntry(rawEntry);
-    if (error48) {
+    if (error48)
       schemaErrors.push(error48);
-    }
-    if (entry) {
+    if (entry)
       entries.push(entry);
-    }
   }
   if (process.env.DEBUG) {
     console.log(`[extract] Parsing: ${(performance.now() - t0Parse).toFixed(2)}ms for ${entries.length} entries`);
   }
-  const hasAssistantMessage = entries.some((e) => e.type === "assistant");
-  if (!hasAssistantMessage) {
+  if (!entries.some((e) => e.type === "assistant"))
     return null;
-  }
   const parentSessionId = agentId ? entries.find((e) => ("sessionId" in e) && typeof e.sessionId === "string")?.sessionId : undefined;
-  const summary = findValidSummary(entries);
-  const sessionId = basename(rawPath, ".jsonl");
   const meta3 = {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
-    sessionId,
+    sessionId: basename(rawPath, ".jsonl"),
     checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime: rawStat.mtime.toISOString(),
     messageCount: entries.length,
-    summary,
     rawPath,
     ...agentId && { agentId },
     ...parentSessionId && { parentSessionId },
@@ -14489,20 +14455,16 @@ async function extractSession(options) {
   resetDetectSecretsStats();
   const t0 = performance.now();
   const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
-  const sanitizeMs = performance.now() - t0;
   if (process.env.DEBUG) {
     const stats = getDetectSecretsStats();
-    console.log(`[extract] Sanitization: ${sanitizeMs.toFixed(2)}ms for ${entries.length} entries | detectSecrets: ${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs, ${stats.totalMs.toFixed(2)}ms`);
+    console.log(`[extract] Sanitization: ${(performance.now() - t0).toFixed(2)}ms | ` + `${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs`);
   }
   await mkdir2(dirname(outputPath), { recursive: true });
-  const lines = [
-    JSON.stringify(meta3),
-    ...sanitizedEntries.map((e) => JSON.stringify(e))
-  ];
+  const lines = [JSON.stringify(meta3), ...sanitizedEntries.map((e) => JSON.stringify(e))];
   await writeFile2(outputPath, `${lines.join(`
 `)}
 `);
-  return { messageCount: entries.length, summary, schemaErrors };
+  return { messageCount: entries.length, schemaErrors };
 }
 async function readFirstLine(filePath) {
   const stream = createReadStream(filePath, { encoding: "utf-8" });
@@ -14528,9 +14490,29 @@ async function readExtractedMeta(extractedPath) {
     return null;
   }
 }
+async function readExtractedSession(extractedPath) {
+  try {
+    const content = await readFile2(extractedPath, "utf-8");
+    const lines = content.split(`
+`).filter((l) => l.trim());
+    if (lines.length === 0)
+      return null;
+    const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
+    if (!metaParsed.success)
+      return null;
+    const entries = [];
+    for (let i = 1;i < lines.length; i++) {
+      const result = parseKnownEntry(JSON.parse(lines[i]));
+      if (result.data)
+        entries.push(result.data);
+    }
+    return { meta: metaParsed.data, entries };
+  } catch {
+    return null;
+  }
+}
 function getProjectsDir(cwd) {
-  const encoded = cwd.replace(/\//g, "-");
-  return join2(homedir2(), ".claude", "projects", encoded);
+  return join2(homedir2(), ".claude", "projects", cwd.replace(/\//g, "-"));
 }
 function getHiveMindSessionsDir(projectCwd) {
   return join2(projectCwd, ".claude", "hive-mind", "sessions");
@@ -14543,8 +14525,7 @@ async function findRawSessions(rawDir) {
       if (!f.endsWith(".jsonl"))
         continue;
       if (f.startsWith("agent-")) {
-        const agentId = f.replace("agent-", "").replace(".jsonl", "");
-        sessions.push({ path: join2(rawDir, f), agentId });
+        sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
       } else {
         sessions.push({ path: join2(rawDir, f) });
       }
@@ -14560,8 +14541,7 @@ async function needsExtraction(rawPath, extractedPath) {
     const meta3 = await readExtractedMeta(extractedPath);
     if (!meta3)
       return true;
-    const rawMtime = rawStat.mtime.toISOString();
-    return rawMtime !== meta3.rawMtime;
+    return rawStat.mtime.toISOString() !== meta3.rawMtime;
   } catch {
     return true;
   }
@@ -14581,15 +14561,11 @@ async function extractAllSessions(cwd, transcriptPath) {
         if (result) {
           extracted++;
           if (result.schemaErrors.length > 0) {
-            schemaErrors.push({
-              sessionId: basename(rawPath, ".jsonl"),
-              errors: result.schemaErrors
-            });
+            schemaErrors.push({ sessionId: basename(rawPath, ".jsonl"), errors: result.schemaErrors });
           }
         }
       } catch (error48) {
-        const id = basename(rawPath, ".jsonl");
-        console.error(`Failed to extract ${id}:`, error48);
+        console.error(`Failed to extract ${basename(rawPath, ".jsonl")}:`, error48);
       }
     }
   }
@@ -14638,58 +14614,146 @@ async function index() {
   const sessions = [];
   for (const file2 of jsonlFiles) {
     const path = join3(sessionsDir, file2);
-    const meta3 = await readExtractedMeta(path);
-    if (meta3) {
-      sessions.push({ meta: meta3, path });
+    const session = await readExtractedSession(path);
+    if (session && !session.meta.agentId) {
+      sessions.push(session);
     }
   }
-  const parentSessions = [];
-  const agentSessions = [];
+  sessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
+  console.log("ID\tDATETIME\tMSGS\tSUMMARY	COMMITS");
   for (const session of sessions) {
-    if (session.meta.agentId) {
-      agentSessions.push(session);
-    } else {
-      parentSessions.push(session);
+    console.log(formatSessionLine(session));
+  }
+}
+function formatSessionLine(session) {
+  const { meta: meta3, entries } = session;
+  const id = meta3.sessionId.slice(0, 16);
+  const datetime3 = meta3.rawMtime.slice(0, 16);
+  const count = String(meta3.messageCount);
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const commits = findGitCommits(entries).filter((c) => c.success);
+  const commitList = commits.map((c) => c.message.length > 100 ? `${c.message.slice(0, 97)}...` : c.message).join("; ");
+  return `${id}	${datetime3}	${count}	${summary}	${commitList}`;
+}
+function findSummary(entries) {
+  const uuids = new Set;
+  const summaries = [];
+  for (const entry of entries) {
+    if ("uuid" in entry && typeof entry.uuid === "string") {
+      uuids.add(entry.uuid);
+    }
+    if (entry.type === "summary") {
+      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
     }
   }
-  parentSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
-  const agentsByParent = new Map;
-  for (const agent of agentSessions) {
-    const parentId = agent.meta.parentSessionId;
-    if (parentId) {
-      const existing = agentsByParent.get(parentId) || [];
-      existing.push(agent);
-      agentsByParent.set(parentId, existing);
+  for (const s of summaries) {
+    if (s.leafUuid && uuids.has(s.leafUuid)) {
+      return s.summary;
     }
   }
-  for (const agents of agentsByParent.values()) {
-    agents.sort((a, b) => a.meta.rawMtime.localeCompare(b.meta.rawMtime));
-  }
-  for (const session of parentSessions) {
-    console.log(formatSessionLine(session.meta));
-    const agents = agentsByParent.get(session.meta.sessionId);
-    if (agents) {
-      for (const agent of agents) {
-        console.log("  " + formatSessionLine(agent.meta));
+  return summaries.at(-1)?.summary;
+}
+function findFirstUserPrompt(entries) {
+  for (const entry of entries) {
+    if (entry.type !== "user")
+      continue;
+    const content = entry.message.content;
+    if (!content)
+      continue;
+    let text;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === "text" && "text" in block && typeof block.text === "string") {
+          text = block.text;
+          break;
+        }
+      }
+    }
+    if (text) {
+      const firstLine = text.split(`
+`)[0].trim();
+      if (firstLine) {
+        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
       }
     }
   }
-  const orphanAgents = agentSessions.filter((a) => !a.meta.parentSessionId || !parentSessions.some((p) => p.meta.sessionId === a.meta.parentSessionId));
-  if (orphanAgents.length > 0) {
-    orphanAgents.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
-    console.log(`
-(orphan agents)`);
-    for (const agent of orphanAgents) {
-      console.log("  " + formatSessionLine(agent.meta));
+  return;
+}
+function findGitCommits(entries) {
+  const commits = [];
+  const pendingCommits = new Map;
+  for (const entry of entries) {
+    if (entry.type === "assistant") {
+      const content = entry.message.content;
+      if (!Array.isArray(content))
+        continue;
+      for (const block of content) {
+        if (block.type === "tool_use" && "name" in block && block.name === "Bash") {
+          const input = block.input;
+          const command = input.command;
+          if (typeof command === "string" && command.includes("git commit")) {
+            const message = extractCommitMessage(command);
+            if (message && "id" in block && typeof block.id === "string") {
+              pendingCommits.set(block.id, message);
+            }
+          }
+        }
+      }
+    } else if (entry.type === "user") {
+      const content = entry.message.content;
+      if (!Array.isArray(content))
+        continue;
+      for (const block of content) {
+        if (block.type === "tool_result" && "tool_use_id" in block) {
+          const toolUseId = block.tool_use_id;
+          const message = pendingCommits.get(toolUseId);
+          if (message) {
+            const resultContent = getToolResultText(block.content);
+            const success2 = resultContent.includes("[") && !resultContent.includes("error");
+            commits.push({ message, success: success2 });
+            pendingCommits.delete(toolUseId);
+          }
+        }
+      }
     }
   }
+  for (const message of pendingCommits.values()) {
+    commits.push({ message, success: true });
+  }
+  return commits;
 }
-function formatSessionLine(meta3) {
-  const id = meta3.agentId || meta3.sessionId.slice(0, 16);
-  const datetime3 = meta3.rawMtime.slice(0, 16);
-  const count = String(meta3.messageCount);
-  const summary = meta3.summary || "";
-  return `${id} ${datetime3} ${count} ${summary}`;
+function extractCommitMessage(command) {
+  const heredocMatch = command.match(/<<['"]?EOF['"]?\s*\n([\s\S]*?)\n\s*EOF/);
+  if (heredocMatch) {
+    const firstLine = heredocMatch[1].trim().split(`
+`)[0].trim();
+    if (firstLine)
+      return firstLine;
+  }
+  const mFlagMatch = command.match(/git commit[^"']*-m\s*["'](?!\$\()([^"']+)["']/);
+  if (mFlagMatch)
+    return mFlagMatch[1].trim();
+  const simpleMatch = command.match(/git commit[^-]*-m\s+(\S+)/);
+  if (simpleMatch && !simpleMatch[1].startsWith('"') && !simpleMatch[1].startsWith("'")) {
+    return simpleMatch[1];
+  }
+  return;
+}
+function getToolResultText(content) {
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const parts = [];
+  for (const block of content) {
+    if (block.type === "text" && "text" in block) {
+      parts.push(block.text);
+    }
+  }
+  return parts.join(`
+`);
 }
 
 // cli/commands/login.ts
@@ -15030,9 +15094,8 @@ function formatEntry(entry, options) {
   const { lineNumber, toolResults, parentIndicator } = options;
   switch (entry.type) {
     case "user":
-      if (toolResults && isToolResultOnlyEntry(entry)) {
+      if (toolResults && isToolResultOnlyEntry(entry))
         return null;
-      }
       return formatUserEntry(entry, lineNumber, toolResults, parentIndicator);
     case "assistant":
       return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator);
@@ -15049,61 +15112,50 @@ function formatEntry(entry, options) {
 }
 function formatUserEntry(entry, lineNumber, toolResults, parentIndicator) {
   const attrs = [`line="${lineNumber}"`];
-  if (entry.timestamp) {
+  if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  }
-  if (parentIndicator !== undefined) {
+  if (parentIndicator !== undefined)
     attrs.push(`parent="${parentIndicator}"`);
-  }
   const content = formatMessageContent(entry.message.content, toolResults);
   return formatXmlElement("user", attrs, content);
 }
 function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator) {
   const attrs = [`line="${lineNumber}"`];
-  if (entry.timestamp) {
+  if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  }
-  if (entry.message.model) {
+  if (entry.message.model)
     attrs.push(`model="${entry.message.model}"`);
-  }
   if (entry.message.stop_reason && entry.message.stop_reason !== "end_turn") {
     attrs.push(`stop="${entry.message.stop_reason}"`);
   }
-  if (parentIndicator !== undefined) {
+  if (parentIndicator !== undefined)
     attrs.push(`parent="${parentIndicator}"`);
-  }
   const content = formatMessageContent(entry.message.content, toolResults);
   return formatXmlElement("assistant", attrs, content);
 }
 function formatXmlElement(tag, attrs, content) {
   const attrStr = attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
-  if (!content) {
+  if (!content)
     return `<${tag}${attrStr}/>`;
-  }
   if (!content.includes(`
-`)) {
+`))
     return `<${tag}${attrStr}>${content}</${tag}>`;
-  }
   return `<${tag}${attrStr}>
 ${indent(content, 2)}
 </${tag}>`;
 }
 function formatSystemEntry(entry, lineNumber) {
   const attrs = [`line="${lineNumber}"`];
-  if (entry.timestamp) {
+  if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
-  }
-  if (entry.subtype) {
+  if (entry.subtype)
     attrs.push(`subtype="${entry.subtype}"`);
-  }
-  if (entry.level && entry.level !== "info") {
+  if (entry.level && entry.level !== "info")
     attrs.push(`level="${entry.level}"`);
-  }
   return formatXmlElement("system", attrs, entry.content || "");
 }
 function formatSummaryEntry(entry, lineNumber) {
-  const attrs = [`line="${lineNumber}"`];
-  return formatXmlElement("summary", attrs, entry.summary);
+  return formatXmlElement("summary", [`line="${lineNumber}"`], entry.summary);
 }
 function formatTimestamp(iso) {
   return iso.slice(0, 16);
@@ -15111,9 +15163,8 @@ function formatTimestamp(iso) {
 function formatMessageContent(content, toolResults) {
   if (!content)
     return "";
-  if (typeof content === "string") {
+  if (typeof content === "string")
     return content;
-  }
   const parts = [];
   for (const block of content) {
     if (isNoiseBlock(block))
@@ -15121,9 +15172,8 @@ function formatMessageContent(content, toolResults) {
     if (toolResults && block.type === "tool_result")
       continue;
     const formatted = formatContentBlock(block, toolResults);
-    if (formatted) {
+    if (formatted)
       parts.push(formatted);
-    }
   }
   return parts.join(`
 `);
@@ -15131,10 +15181,8 @@ function formatMessageContent(content, toolResults) {
 function isNoiseBlock(block) {
   if (block.type === "tool_result" && "content" in block) {
     const content = block.content;
-    if (typeof content === "string") {
-      if (content.startsWith("Todos have been modified successfully")) {
-        return true;
-      }
+    if (typeof content === "string" && content.startsWith("Todos have been modified successfully")) {
+      return true;
     }
   }
   if (block.type === "text" && "text" in block) {
@@ -15146,18 +15194,9 @@ function isNoiseBlock(block) {
   return false;
 }
 function formatContentBlock(block, toolResults) {
-  if (isKnownBlock(block)) {
-    return formatKnownBlock(block, toolResults);
-  }
-  return `<unknown type="${block.type}"/>`;
-}
-function isKnownBlock(block) {
-  return ["text", "thinking", "tool_use", "tool_result", "image", "document"].includes(block.type);
-}
-function formatKnownBlock(block, toolResults) {
   switch (block.type) {
     case "text":
-      return formatTextBlock(block.text);
+      return block.text;
     case "thinking":
       return formatXmlElement("thinking", [], block.thinking);
     case "tool_use":
@@ -15168,19 +15207,18 @@ function formatKnownBlock(block, toolResults) {
       return `<image media_type="${block.source.media_type}"/>`;
     case "document":
       return `<document media_type="${block.source.media_type}"/>`;
-    default:
-      return null;
   }
 }
-function formatTextBlock(text) {
-  return text;
-}
 function formatToolUseBlock(block, toolResults) {
-  const result = toolResults?.get(block.id);
-  const tagName = result ? "tool" : "tool_use";
-  const lines = [`<${tagName} name="${block.name}">`];
+  const resultInfo = toolResults?.get(block.id);
+  const tagName = resultInfo ? "tool" : "tool_use";
+  const attrs = [`name="${block.name}"`];
+  if (block.name === "Task" && resultInfo?.agentId) {
+    attrs.push(`agent_session="agent-${resultInfo.agentId}"`);
+  }
+  const lines = [`<${tagName} ${attrs.join(" ")}>`];
   for (const [key, value] of Object.entries(block.input)) {
-    const formatted = formatValue(value);
+    const formatted = formatValue(value, key);
     if (formatted.includes(`
 `)) {
       lines.push(`  <${key}>
@@ -15190,14 +15228,14 @@ ${indent(formatted, 4)}
       lines.push(`  <${key}>${formatted}</${key}>`);
     }
   }
-  if (result) {
-    if (result.includes(`
+  if (resultInfo) {
+    if (resultInfo.content.includes(`
 `)) {
       lines.push(`  <result>
-${indent(result, 4)}
+${indent(resultInfo.content, 4)}
   </result>`);
     } else {
-      lines.push(`  <result>${result}</result>`);
+      lines.push(`  <result>${resultInfo.content}</result>`);
     }
   }
   lines.push(`</${tagName}>`);
@@ -15211,11 +15249,11 @@ function formatToolResultBlock(block) {
       lines.push(indent(block.content, 2));
     } else {
       for (const innerBlock of block.content) {
-        if (innerBlock.type === "text" && "text" in innerBlock) {
+        if (innerBlock.type === "text") {
           lines.push(indent(innerBlock.text, 2));
-        } else if (innerBlock.type === "image" && "source" in innerBlock) {
+        } else if (innerBlock.type === "image") {
           lines.push(`  <image media_type="${innerBlock.source.media_type}"/>`);
-        } else if (innerBlock.type === "document" && "source" in innerBlock) {
+        } else {
           lines.push(`  <document media_type="${innerBlock.source.media_type}"/>`);
         }
       }
@@ -15225,20 +15263,29 @@ function formatToolResultBlock(block) {
   return lines.join(`
 `);
 }
-function formatValue(value) {
-  if (value === null || value === undefined) {
+function formatValue(value, key) {
+  if (value === null || value === undefined)
     return "";
-  }
-  if (typeof value === "string") {
+  if (typeof value === "string")
     return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
+  if (typeof value === "number" || typeof value === "boolean")
     return String(value);
-  }
-  if (Array.isArray(value) || typeof value === "object") {
+  if (key === "todos" && Array.isArray(value))
+    return formatTodosAsXml(value);
+  if (Array.isArray(value) || typeof value === "object")
     return JSON.stringify(value, null, 2);
-  }
   return String(value);
+}
+function formatTodosAsXml(todos) {
+  const lines = [];
+  for (const todo of todos) {
+    if (typeof todo === "object" && todo !== null) {
+      const t = todo;
+      lines.push(`<todo status="${t.status || "pending"}">${t.content || ""}</todo>`);
+    }
+  }
+  return lines.join(`
+`);
 }
 function indent(text, spaces) {
   const prefix = " ".repeat(spaces);

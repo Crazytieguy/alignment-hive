@@ -37,7 +37,7 @@ export async function read(): Promise<void> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
   // Find matching session file
-  let files: string[];
+  let files: Array<string>;
   try {
     files = await readdir(sessionsDir);
   } catch {

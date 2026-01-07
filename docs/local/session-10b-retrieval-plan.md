@@ -216,6 +216,8 @@ const COMMANDS = {
 
 # Session 10B-2: Simple Line Redaction
 
+> **Note:** This plan is a rough first approximation. Expect iteration and changes during implementation.
+
 ## Goal
 
 Add simple redaction to `read` command as MVP for compression/scanning. Start simple and iterate.
@@ -226,6 +228,7 @@ Add simple redaction to `read` command as MVP for compression/scanning. Start si
 
 - `read <id>` (all lines) → redacted (first line only of multi-line content)
 - `read <id> 5` (single line) → full content (no redaction)
+- `read <id> 1-10` (multiple lines) → full content (no redaction)
 - `read <id> --full` → force full content for all lines
 
 ## Redaction Strategy (MVP)
@@ -255,14 +258,45 @@ Applies uniformly to:
   - If single line, return as-is
   - If multi-line, return `${firstLine}\n[+${remainingLines} lines]`
 
-## Optional: XML Format Optimization
+## Optional Optimizations (If Simple Redaction Isn't Enough)
 
-If redaction produces good results but tokens are still high, consider optimizing the XML format:
+### XML Format Optimization
+If redaction produces good results but tokens are still high:
 - Remove redundant closing tags for empty elements
 - Shorter attribute names
 - Remove attributes that repeat (model same across all entries)
 
-**Only add this if needed** - test redaction first.
+### Smart Truncation (Original Plan - Deferred)
+If simple redaction proves too aggressive or too uniform, consider content-type-specific limits:
+
+**Linear scaling based on lines requested:**
+- 1 line: no truncation
+- 10 lines: moderate truncation
+- 100+ lines: heavy truncation
+
+**Base limits (at moderate truncation, ~10 lines) - calibrate on real data:**
+
+| Content Type | Base Limit (chars) |
+|--------------|-------------------|
+| user plain text | 200 |
+| user tool_result: Bash stdout | 150 |
+| user tool_result: Glob/Grep filenames | 100 |
+| user tool_result: Edit old/new strings | 80 |
+| user tool_result: Read file content | 100 |
+| user tool_result: WebFetch content | 100 |
+| user tool_result: Task output | 100 |
+| assistant text | 80 |
+| assistant thinking | 50 |
+| assistant tool_use params | 60 |
+| system content | 80 |
+
+**Scaling formula:** `limit = base * scale_factor(lines_requested)`
+- Example: `scale_factor = clamp(0.5, 5.0, 10 / lines_requested)`
+
+**Fields to conditionally drop/hide:**
+- `structuredPatch` from Edit results (large, redundant with old/new)
+- Repeating fields if same as previous entry: model, cwd, gitBranch
+- Full file contents beyond limit
 
 ## Summaries Investigation Notes
 
@@ -272,6 +306,14 @@ From 10B-1 investigation:
 - Summaries have `leafUuid` referencing the last message of summarized branch
 - No evidence of cross-session summaries (summaries are in their own session file)
 - **Index change:** Remove agent sessions from index output since they lack summaries
+- **Fallback display:** For sessions without summaries, show first line of first user prompt (truncated)
+
+## Future: Git Commit Correlation
+
+Consider correlating git commit timestamps with Claude Code sessions to find related commits even if they weren't made by Claude. This could help with:
+- Finding commits that were made manually after Claude's work
+- Identifying sessions related to specific code changes
+- Building a timeline of session + commit activity
 
 ## Experimentation Focus
 
