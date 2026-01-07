@@ -1,7 +1,11 @@
 /**
  * Format module for token-efficient LLM output.
- * Tool calls are combined with their results.
- * Supports redaction mode (first line + line count) for scanning.
+ *
+ * Two modes:
+ * - Full mode: XML format with complete content
+ * - Redacted mode: Compact pipe-delimited format for scanning
+ *
+ * Tool calls are combined with their results in both modes.
  */
 
 import type {
@@ -24,6 +28,12 @@ export interface FormatOptions {
   toolResults?: Map<string, ToolResultInfo>;
   parentIndicator?: number | string;
   redact?: boolean;
+  /** For compact format: previous timestamp's date portion */
+  prevDate?: string;
+  /** For compact format: is this the first entry? */
+  isFirst?: boolean;
+  /** Current working directory for relative path resolution */
+  cwd?: string;
 }
 
 export interface SessionFormatOptions {
@@ -41,17 +51,89 @@ export function redactMultiline(text: string): string {
   return `${lines[0]}\n[+${remaining} lines]`;
 }
 
+/**
+ * Count lines in text.
+ */
+function countLines(text: string): number {
+  if (!text) return 0;
+  return text.split('\n').length;
+}
+
+/**
+ * Format text as quoted first line + count, or just quote if single line.
+ * Returns `"first line" +Nlines` or `"single line content"`
+ */
+function formatQuotedSummary(text: string, maxFirstLineLen = 300): string {
+  if (!text) return '""';
+  const lines = text.split('\n');
+  let firstLine = lines[0];
+  if (firstLine.length > maxFirstLineLen) {
+    firstLine = firstLine.slice(0, maxFirstLineLen - 3) + '...';
+  }
+  const escaped = firstLine.replace(/"/g, '\\"');
+  if (lines.length === 1) {
+    return `"${escaped}"`;
+  }
+  return `"${escaped}" +${lines.length - 1}lines`;
+}
+
+/**
+ * Format as just line count: `Nlines`
+ */
+function formatLineCount(text: string): string {
+  const count = countLines(text);
+  return `${count}line${count === 1 ? '' : 's'}`;
+}
+
 export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
   const { redact = false } = options;
   const toolResults = collectToolResults(entries, redact);
-  const uuidToLine = buildUuidMap(entries);
+
+  // Find the last summary entry index (we only want to show the last one)
+  let lastSummaryIndex = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === 'summary') {
+      lastSummaryIndex = i;
+      break;
+    }
+  }
+
+  // Filter entries: skip all summaries except the last one
+  const filteredEntries = entries.filter((entry, i) => {
+    if (entry.type === 'summary') {
+      return i === lastSummaryIndex;
+    }
+    return true;
+  });
+
+  const uuidToLine = buildUuidMap(filteredEntries);
 
   const results: Array<string> = [];
   let prevUuid: string | undefined;
+  let prevDate: string | undefined;
+  let cwd: string | undefined;
+  let logicalLine = 0;
 
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const lineNumber = i + 1;
+  for (let i = 0; i < filteredEntries.length; i++) {
+    const entry = filteredEntries[i];
+
+    // Skip tool-result-only user entries (they're merged into tool calls)
+    if (entry.type === 'user' && toolResults && isToolResultOnlyEntry(entry)) {
+      continue;
+    }
+
+    // Skip noise entry types
+    if (entry.type === 'file-history-snapshot' || entry.type === 'queue-operation') {
+      continue;
+    }
+
+    // Track cwd from user entries
+    if (entry.type === 'user' && entry.cwd) {
+      cwd = entry.cwd;
+    }
+
+    logicalLine++;
+    const lineNumber = logicalLine;
 
     let parentIndicator: string | number | undefined;
     const parentUuid = getParentUuid(entry);
@@ -59,13 +141,30 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
       if (parentUuid && parentUuid !== prevUuid) {
         parentIndicator = uuidToLine.get(parentUuid);
       } else if (!parentUuid && getUuid(entry)) {
-        parentIndicator = '?';
+        parentIndicator = 'start';
       }
     }
 
-    const formatted = formatEntry(entry, { lineNumber, toolResults, parentIndicator, redact });
+    const timestamp = getTimestamp(entry);
+    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+    const isFirst = logicalLine === 1;
+
+    const formatted = formatEntry(entry, {
+      lineNumber,
+      toolResults,
+      parentIndicator,
+      redact,
+      prevDate,
+      isFirst,
+      cwd,
+    });
+
     if (formatted) {
       results.push(formatted);
+    }
+
+    if (currentDate) {
+      prevDate = currentDate;
     }
 
     const uuid = getUuid(entry);
@@ -74,15 +173,29 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
     }
   }
 
-  return results.join('\n\n');
+  return results.join('\n');
 }
 
 function buildUuidMap(entries: Array<KnownEntry>): Map<string, number> {
   const map = new Map<string, number>();
-  for (let i = 0; i < entries.length; i++) {
-    const uuid = getUuid(entries[i]);
+  let logicalLine = 0;
+  for (const entry of entries) {
+    if (entry.type === 'file-history-snapshot' || entry.type === 'queue-operation') {
+      continue;
+    }
+    if (entry.type === 'user') {
+      const content = entry.message.content;
+      if (Array.isArray(content)) {
+        const meaningful = content.filter((b) => !isNoiseBlock(b));
+        if (meaningful.length === 0 || meaningful.every((b) => b.type === 'tool_result')) {
+          continue;
+        }
+      }
+    }
+    logicalLine++;
+    const uuid = getUuid(entry);
     if (uuid) {
-      map.set(uuid, i + 1);
+      map.set(uuid, logicalLine);
     }
   }
   return map;
@@ -102,6 +215,13 @@ function getParentUuid(entry: KnownEntry): string | undefined {
   return undefined;
 }
 
+function getTimestamp(entry: KnownEntry): string | undefined {
+  if ('timestamp' in entry && typeof entry.timestamp === 'string') {
+    return entry.timestamp;
+  }
+  return undefined;
+}
+
 function collectToolResults(entries: Array<KnownEntry>, redact: boolean): Map<string, ToolResultInfo> {
   const results = new Map<string, ToolResultInfo>();
 
@@ -110,15 +230,13 @@ function collectToolResults(entries: Array<KnownEntry>, redact: boolean): Map<st
     const content = entry.message.content;
     if (!Array.isArray(content)) continue;
 
-    const agentId = 'agentId' in entry ? (entry.agentId) : undefined;
+    const agentId = 'agentId' in entry ? entry.agentId : undefined;
 
     for (const block of content) {
       if (block.type === 'tool_result' && 'tool_use_id' in block) {
         let formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
         if (formatted) {
-          if (redact) {
-            formatted = redactMultiline(formatted);
-          }
+          // Don't redact here - we'll format it appropriately per tool
           results.set(block.tool_use_id, { content: formatted, agentId });
         }
       }
@@ -137,9 +255,9 @@ function formatToolResultContent(content: string | Array<ContentBlock> | undefin
     if (block.type === 'text' && 'text' in block) {
       parts.push(block.text);
     } else if (block.type === 'image' && 'source' in block) {
-      parts.push(`<image media_type="${block.source.media_type}"/>`);
+      parts.push(`[image:${block.source.media_type}]`);
     } else if (block.type === 'document' && 'source' in block) {
-      parts.push(`<document media_type="${block.source.media_type}"/>`);
+      parts.push(`[document:${block.source.media_type}]`);
     }
   }
   return parts.join('\n');
@@ -156,27 +274,406 @@ function isToolResultOnlyEntry(entry: UserEntry): boolean {
 }
 
 export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
-  const { lineNumber, toolResults, parentIndicator, redact = false } = options;
+  const { redact = false } = options;
+
+  if (redact) {
+    return formatEntryCompact(entry, options);
+  }
+  return formatEntryXml(entry, options);
+}
+
+// ============================================================================
+// COMPACT FORMAT (redacted mode)
+// ============================================================================
+
+function formatEntryCompact(entry: KnownEntry, options: FormatOptions): string | null {
+  const { lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd } = options;
 
   switch (entry.type) {
     case 'user':
       if (toolResults && isToolResultOnlyEntry(entry)) return null;
-      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator, redact);
+      return formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst);
     case 'assistant':
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, redact);
+      return formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd);
     case 'system':
-      return formatSystemEntry(entry, lineNumber, redact);
+      return formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst);
     case 'summary':
-      return formatSummaryEntry(entry, lineNumber);
-    case 'file-history-snapshot':
-    case 'queue-operation':
-      return null;
+      return formatSummaryEntryCompact(entry, lineNumber);
     default:
       return null;
   }
 }
 
-function formatUserEntry(
+function formatTimestampCompact(timestamp: string | undefined, prevDate: string | undefined, isFirst?: boolean): string {
+  if (!timestamp) return '';
+  const date = timestamp.slice(0, 10);
+  const time = timestamp.slice(11, 16);
+  if (isFirst || !prevDate || date !== prevDate) {
+    return `${date}T${time}`;
+  }
+  return time;
+}
+
+function formatUserEntryCompact(
+  entry: UserEntry,
+  lineNumber: number,
+  toolResults?: Map<string, ToolResultInfo>,
+  parentIndicator?: number | string,
+  prevDate?: string,
+  isFirst?: boolean,
+): string {
+  const parts: Array<string> = [String(lineNumber)];
+
+  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+
+  parts.push('user');
+
+  if (parentIndicator !== undefined) {
+    parts.push(`parent=${parentIndicator}`);
+  }
+
+  const content = formatMessageContentCompact(entry.message.content, toolResults);
+  parts.push(content);
+
+  return parts.join('|');
+}
+
+function formatAssistantEntryCompact(
+  entry: AssistantEntry,
+  lineNumber: number,
+  toolResults?: Map<string, ToolResultInfo>,
+  parentIndicator?: number | string,
+  prevDate?: string,
+  isFirst?: boolean,
+  cwd?: string,
+): string {
+  // Assistant entries in compact mode get split into their content blocks
+  const blocks = entry.message.content;
+  if (!blocks || typeof blocks === 'string') {
+    // Simple text response
+    const parts: Array<string> = [String(lineNumber)];
+    const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
+    if (ts) parts.push(ts);
+    parts.push('assistant');
+    if (parentIndicator !== undefined) {
+      parts.push(`parent=${parentIndicator}`);
+    }
+    const text = typeof blocks === 'string' ? blocks : '';
+    parts.push(formatQuotedSummary(text));
+    return parts.join('|');
+  }
+
+  // Multiple content blocks - format each separately
+  const lines: Array<string> = [];
+  let blockIndex = 0;
+
+  for (const block of blocks) {
+    if (isNoiseBlock(block)) continue;
+    if (block.type === 'tool_result') continue;
+
+    const parts: Array<string> = [String(lineNumber)];
+    const ts = blockIndex === 0 ? formatTimestampCompact(entry.timestamp, prevDate, isFirst) : '';
+    if (ts) parts.push(ts);
+
+    if (block.type === 'thinking') {
+      parts.push('thinking');
+      parts.push(formatLineCount(block.thinking));
+    } else if (block.type === 'text') {
+      parts.push('assistant');
+      if (blockIndex === 0 && parentIndicator !== undefined) {
+        parts.push(`parent=${parentIndicator}`);
+      }
+      parts.push(formatQuotedSummary(block.text));
+    } else if (block.type === 'tool_use') {
+      parts.push('tool');
+      const toolLine = formatToolUseCompact(block, toolResults, cwd);
+      parts.push(toolLine);
+    }
+
+    lines.push(parts.join('|'));
+    blockIndex++;
+  }
+
+  return lines.join('\n');
+}
+
+function formatToolUseCompact(
+  block: { id: string; name: string; input: Record<string, unknown> },
+  toolResults?: Map<string, ToolResultInfo>,
+  cwd?: string,
+): string {
+  const result = toolResults?.get(block.id);
+  const name = block.name;
+  const input = block.input;
+
+  // Tool-specific formatting
+  switch (name) {
+    case 'Edit':
+      return formatEditToolCompact(input, result, cwd);
+    case 'Read':
+      return formatReadToolCompact(input, result, cwd);
+    case 'Write':
+      return formatWriteToolCompact(input, result, cwd);
+    case 'Bash':
+      return formatBashToolCompact(input, result);
+    case 'Grep':
+      return formatGrepToolCompact(input, result, cwd);
+    case 'Glob':
+      return formatGlobToolCompact(input, result);
+    case 'Task':
+      return formatTaskToolCompact(input, result);
+    case 'TodoWrite':
+      return formatTodoWriteToolCompact(input);
+    case 'AskUserQuestion':
+      return formatAskUserQuestionToolCompact(input, result);
+    case 'ExitPlanMode':
+      return formatExitPlanModeToolCompact(input, result);
+    case 'WebFetch':
+      return formatWebFetchToolCompact(input, result);
+    case 'WebSearch':
+      return formatWebSearchToolCompact(input, result);
+    default:
+      return formatGenericToolCompact(name, input, result);
+  }
+}
+
+function formatEditToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const oldStr = String(input.old_string || '');
+  const newStr = String(input.new_string || '');
+  const oldLines = countLines(oldStr);
+  const newLines = countLines(newStr);
+  return `Edit|${path}|-${oldLines}+${newLines}`;
+}
+
+function formatReadToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const lineCount = result ? countLines(result.content) : 0;
+  return `Read|${path}|returned=${lineCount}lines`;
+}
+
+function formatWriteToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const content = String(input.content || '');
+  const lineCount = countLines(content);
+  return `Write|${path}|written=${lineCount}lines`;
+}
+
+function formatBashToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const command = String(input.command || '').trim();
+  const desc = input.description ? String(input.description) : undefined;
+  const parts = ['Bash'];
+
+  // Show first line of command (heredocs will end at $(cat <<'EOF')
+  const firstLine = command.split('\n')[0];
+  const maxCmdLen = 300;
+  const shortCmd = firstLine.length > maxCmdLen ? firstLine.slice(0, maxCmdLen - 3) + '...' : firstLine;
+  parts.push(`command="${shortCmd.replace(/"/g, '\\"')}"`);
+
+  if (desc) {
+    parts.push(`description="${desc.replace(/"/g, '\\"')}"`);
+  }
+
+  if (result) {
+    parts.push(`returned=${formatQuotedSummary(result.content)}`);
+  }
+
+  return parts.join('|');
+}
+
+function formatGrepToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
+  const pattern = String(input.pattern || '');
+  const path = input.path ? shortenPath(String(input.path), cwd) : '';
+  const parts = ['Grep', `pattern="${pattern.replace(/"/g, '\\"')}"`];
+  if (path) parts.push(path);
+  if (result) {
+    const lineCount = countLines(result.content);
+    parts.push(`returned=${lineCount}lines`);
+  }
+  return parts.join('|');
+}
+
+function formatGlobToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const pattern = String(input.pattern || '');
+  const parts = ['Glob', `pattern="${pattern}"`];
+  if (result) {
+    // Count non-empty lines (file paths)
+    const files = result.content.split('\n').filter((l) => l.trim()).length;
+    parts.push(`returned=${files}files`);
+  }
+  return parts.join('|');
+}
+
+function formatTaskToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const desc = String(input.description || '');
+  const prompt = String(input.prompt || '');
+  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
+  const parts = ['Task'];
+
+  if (result?.agentId) {
+    parts.push(`agent_session="agent-${result.agentId}"`);
+  }
+
+  if (subagentType) {
+    parts.push(`subagent_type="${subagentType}"`);
+  }
+
+  parts.push(`description="${desc.replace(/"/g, '\\"')}"`);
+  parts.push(`prompt=${countLines(prompt)}lines`);
+
+  if (result) {
+    parts.push(`returned=${countLines(result.content)}lines`);
+  }
+
+  return parts.join('|');
+}
+
+function formatTodoWriteToolCompact(input: Record<string, unknown>): string {
+  const todos = Array.isArray(input.todos) ? input.todos : [];
+  return `TodoWrite|todos=${todos.length}`;
+}
+
+function formatAskUserQuestionToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const parts = ['AskUserQuestion', `questions=${questions.length}`];
+  if (result) {
+    // Show raw result content
+    parts.push(`returned=${formatQuotedSummary(result.content)}`);
+  }
+  return parts.join('|');
+}
+
+function formatExitPlanModeToolCompact(input: Record<string, unknown>, _result?: ToolResultInfo): string {
+  const plan = input.plan ? String(input.plan) : '';
+  if (plan) {
+    return `ExitPlanMode|plan=${countLines(plan)}lines`;
+  }
+  return 'ExitPlanMode';
+}
+
+function formatWebFetchToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const url = String(input.url || '');
+  const parts = ['WebFetch', `url="${url}"`];
+  if (result) {
+    parts.push(`returned=${countLines(result.content)}lines`);
+  }
+  return parts.join('|');
+}
+
+function formatWebSearchToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const query = String(input.query || '');
+  const parts = ['WebSearch', `query="${query.replace(/"/g, '\\"')}"`];
+  if (result) {
+    // Count results (rough heuristic: non-empty lines that look like results)
+    parts.push(`returned=${countLines(result.content)}lines`);
+  }
+  return parts.join('|');
+}
+
+function formatGenericToolCompact(name: string, input: Record<string, unknown>, result?: ToolResultInfo): string {
+  const parts = [name];
+
+  // Include key input params (first few, abbreviated)
+  const entries = Object.entries(input).slice(0, 3);
+  for (const [key, value] of entries) {
+    const str = typeof value === 'string' ? value : JSON.stringify(value);
+    const short = str.length > 300 ? str.slice(0, 297) + '...' : str;
+    parts.push(`${key}="${short.replace(/"/g, '\\"')}"`);
+  }
+
+  if (result) {
+    parts.push(`returned=${formatQuotedSummary(result.content)}`);
+  }
+
+  return parts.join('|');
+}
+
+function shortenPath(path: string, cwd?: string): string {
+  if (!cwd) return path;
+  // Make path relative if it's inside cwd
+  if (path.startsWith(cwd + '/')) {
+    return path.slice(cwd.length + 1);
+  }
+  if (path === cwd) {
+    return '.';
+  }
+  return path;
+}
+
+function formatSystemEntryCompact(
+  entry: SystemEntry,
+  lineNumber: number,
+  prevDate?: string,
+  isFirst?: boolean,
+): string {
+  const parts: Array<string> = [String(lineNumber)];
+
+  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
+  if (ts) parts.push(ts);
+
+  parts.push('system');
+
+  if (entry.subtype) parts.push(`subtype=${entry.subtype}`);
+  if (entry.level && entry.level !== 'info') parts.push(`level=${entry.level}`);
+
+  if (entry.content) {
+    parts.push(formatQuotedSummary(entry.content));
+  }
+
+  return parts.join('|');
+}
+
+function formatSummaryEntryCompact(entry: SummaryEntry, lineNumber: number): string {
+  return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
+}
+
+function formatMessageContentCompact(
+  content: string | Array<ContentBlock> | undefined,
+  toolResults?: Map<string, ToolResultInfo>,
+): string {
+  if (!content) return '""';
+  if (typeof content === 'string') {
+    return formatQuotedSummary(content);
+  }
+
+  // For user entries with mixed content, show the text parts
+  const textParts: Array<string> = [];
+  for (const block of content) {
+    if (isNoiseBlock(block)) continue;
+    if (block.type === 'tool_result') continue;
+    if (block.type === 'text') {
+      textParts.push(block.text);
+    }
+  }
+
+  if (textParts.length === 0) return '""';
+  return formatQuotedSummary(textParts.join('\n'));
+}
+
+// ============================================================================
+// XML FORMAT (full mode)
+// ============================================================================
+
+function formatEntryXml(entry: KnownEntry, options: FormatOptions): string | null {
+  const { lineNumber, toolResults, parentIndicator, redact = false } = options;
+
+  switch (entry.type) {
+    case 'user':
+      if (toolResults && isToolResultOnlyEntry(entry)) return null;
+      return formatUserEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
+    case 'assistant':
+      return formatAssistantEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
+    case 'system':
+      return formatSystemEntryXml(entry, lineNumber, redact);
+    case 'summary':
+      return formatSummaryEntryXml(entry, lineNumber);
+    default:
+      return null;
+  }
+}
+
+function formatUserEntryXml(
   entry: UserEntry,
   lineNumber: number,
   toolResults?: Map<string, ToolResultInfo>,
@@ -187,11 +684,11 @@ function formatUserEntry(
   if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
   if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
 
-  const content = formatMessageContent(entry.message.content, toolResults, redact);
+  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
   return formatXmlElement('user', attrs, content);
 }
 
-function formatAssistantEntry(
+function formatAssistantEntryXml(
   entry: AssistantEntry,
   lineNumber: number,
   toolResults?: Map<string, ToolResultInfo>,
@@ -206,7 +703,7 @@ function formatAssistantEntry(
   }
   if (parentIndicator !== undefined) attrs.push(`parent="${parentIndicator}"`);
 
-  const content = formatMessageContent(entry.message.content, toolResults, redact);
+  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
   return formatXmlElement('assistant', attrs, content);
 }
 
@@ -219,7 +716,7 @@ function formatXmlElement(tag: string, attrs: Array<string>, content: string): s
   return `<${tag}${attrStr}>\n${indent(content, 2)}\n</${tag}>`;
 }
 
-function formatSystemEntry(entry: SystemEntry, lineNumber: number, redact?: boolean): string {
+function formatSystemEntryXml(entry: SystemEntry, lineNumber: number, redact?: boolean): string {
   const attrs: Array<string> = [`line="${lineNumber}"`];
   if (entry.timestamp) attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
   if (entry.subtype) attrs.push(`subtype="${entry.subtype}"`);
@@ -232,7 +729,7 @@ function formatSystemEntry(entry: SystemEntry, lineNumber: number, redact?: bool
   return formatXmlElement('system', attrs, content);
 }
 
-function formatSummaryEntry(entry: SummaryEntry, lineNumber: number): string {
+function formatSummaryEntryXml(entry: SummaryEntry, lineNumber: number): string {
   return formatXmlElement('summary', [`line="${lineNumber}"`], entry.summary);
 }
 
@@ -240,7 +737,7 @@ function formatTimestamp(iso: string): string {
   return iso.slice(0, 16);
 }
 
-function formatMessageContent(
+function formatMessageContentXml(
   content: string | Array<ContentBlock> | undefined,
   toolResults?: Map<string, ToolResultInfo>,
   redact?: boolean,
@@ -254,7 +751,7 @@ function formatMessageContent(
   for (const block of content) {
     if (isNoiseBlock(block)) continue;
     if (toolResults && block.type === 'tool_result') continue;
-    const formatted = formatContentBlock(block, toolResults, redact);
+    const formatted = formatContentBlockXml(block, toolResults, redact);
     if (formatted) parts.push(formatted);
   }
 
@@ -279,16 +776,20 @@ function isNoiseBlock(block: ContentBlock): boolean {
   return false;
 }
 
-function formatContentBlock(block: ContentBlock, toolResults?: Map<string, ToolResultInfo>, redact?: boolean): string | null {
+function formatContentBlockXml(
+  block: ContentBlock,
+  toolResults?: Map<string, ToolResultInfo>,
+  redact?: boolean,
+): string | null {
   switch (block.type) {
     case 'text':
       return redact ? redactMultiline(block.text) : block.text;
     case 'thinking':
       return formatXmlElement('thinking', [], redact ? redactMultiline(block.thinking) : block.thinking);
     case 'tool_use':
-      return formatToolUseBlock(block, toolResults, redact);
+      return formatToolUseBlockXml(block, toolResults, redact);
     case 'tool_result':
-      return formatToolResultBlock(block, redact);
+      return formatToolResultBlockXml(block, redact);
     case 'image':
       return `<image media_type="${block.source.media_type}"/>`;
     case 'document':
@@ -296,7 +797,7 @@ function formatContentBlock(block: ContentBlock, toolResults?: Map<string, ToolR
   }
 }
 
-function formatToolUseBlock(
+function formatToolUseBlockXml(
   block: { id: string; name: string; input: Record<string, unknown> },
   toolResults?: Map<string, ToolResultInfo>,
   redact?: boolean,
@@ -324,11 +825,14 @@ function formatToolUseBlock(
   }
 
   if (resultInfo) {
-    // Result content already redacted in collectToolResults if needed
-    if (resultInfo.content.includes('\n')) {
-      lines.push(`  <result>\n${indent(resultInfo.content, 4)}\n  </result>`);
+    let resultContent = resultInfo.content;
+    if (redact) {
+      resultContent = redactMultiline(resultContent);
+    }
+    if (resultContent.includes('\n')) {
+      lines.push(`  <result>\n${indent(resultContent, 4)}\n  </result>`);
     } else {
-      lines.push(`  <result>${resultInfo.content}</result>`);
+      lines.push(`  <result>${resultContent}</result>`);
     }
   }
 
@@ -336,7 +840,7 @@ function formatToolUseBlock(
   return lines.join('\n');
 }
 
-function formatToolResultBlock(
+function formatToolResultBlockXml(
   block: {
     tool_use_id: string;
     content?: string | Array<ToolResultContentBlock>;

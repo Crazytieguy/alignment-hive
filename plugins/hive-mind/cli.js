@@ -15088,27 +15088,92 @@ function redactMultiline(text) {
   return `${lines[0]}
 [+${remaining} lines]`;
 }
+function countLines(text) {
+  if (!text)
+    return 0;
+  return text.split(`
+`).length;
+}
+function formatQuotedSummary(text, maxFirstLineLen = 300) {
+  if (!text)
+    return '""';
+  const lines = text.split(`
+`);
+  let firstLine = lines[0];
+  if (firstLine.length > maxFirstLineLen) {
+    firstLine = firstLine.slice(0, maxFirstLineLen - 3) + "...";
+  }
+  const escaped = firstLine.replace(/"/g, "\\\"");
+  if (lines.length === 1) {
+    return `"${escaped}"`;
+  }
+  return `"${escaped}" +${lines.length - 1}lines`;
+}
+function formatLineCount(text) {
+  const count = countLines(text);
+  return `${count}line${count === 1 ? "" : "s"}`;
+}
 function formatSession(entries, options = {}) {
   const { redact = false } = options;
   const toolResults = collectToolResults(entries, redact);
-  const uuidToLine = buildUuidMap(entries);
+  let lastSummaryIndex = -1;
+  for (let i = entries.length - 1;i >= 0; i--) {
+    if (entries[i].type === "summary") {
+      lastSummaryIndex = i;
+      break;
+    }
+  }
+  const filteredEntries = entries.filter((entry, i) => {
+    if (entry.type === "summary") {
+      return i === lastSummaryIndex;
+    }
+    return true;
+  });
+  const uuidToLine = buildUuidMap(filteredEntries);
   const results = [];
   let prevUuid;
-  for (let i = 0;i < entries.length; i++) {
-    const entry = entries[i];
-    const lineNumber = i + 1;
+  let prevDate;
+  let cwd;
+  let logicalLine = 0;
+  for (let i = 0;i < filteredEntries.length; i++) {
+    const entry = filteredEntries[i];
+    if (entry.type === "user" && toolResults && isToolResultOnlyEntry(entry)) {
+      continue;
+    }
+    if (entry.type === "file-history-snapshot" || entry.type === "queue-operation") {
+      continue;
+    }
+    if (entry.type === "user" && entry.cwd) {
+      cwd = entry.cwd;
+    }
+    logicalLine++;
+    const lineNumber = logicalLine;
     let parentIndicator;
     const parentUuid = getParentUuid(entry);
     if (prevUuid) {
       if (parentUuid && parentUuid !== prevUuid) {
         parentIndicator = uuidToLine.get(parentUuid);
       } else if (!parentUuid && getUuid(entry)) {
-        parentIndicator = "?";
+        parentIndicator = "start";
       }
     }
-    const formatted = formatEntry(entry, { lineNumber, toolResults, parentIndicator, redact });
+    const timestamp = getTimestamp(entry);
+    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+    const isFirst = logicalLine === 1;
+    const formatted = formatEntry(entry, {
+      lineNumber,
+      toolResults,
+      parentIndicator,
+      redact,
+      prevDate,
+      isFirst,
+      cwd
+    });
     if (formatted) {
       results.push(formatted);
+    }
+    if (currentDate) {
+      prevDate = currentDate;
     }
     const uuid3 = getUuid(entry);
     if (uuid3) {
@@ -15116,15 +15181,28 @@ function formatSession(entries, options = {}) {
     }
   }
   return results.join(`
-
 `);
 }
 function buildUuidMap(entries) {
   const map2 = new Map;
-  for (let i = 0;i < entries.length; i++) {
-    const uuid3 = getUuid(entries[i]);
+  let logicalLine = 0;
+  for (const entry of entries) {
+    if (entry.type === "file-history-snapshot" || entry.type === "queue-operation") {
+      continue;
+    }
+    if (entry.type === "user") {
+      const content = entry.message.content;
+      if (Array.isArray(content)) {
+        const meaningful = content.filter((b) => !isNoiseBlock(b));
+        if (meaningful.length === 0 || meaningful.every((b) => b.type === "tool_result")) {
+          continue;
+        }
+      }
+    }
+    logicalLine++;
+    const uuid3 = getUuid(entry);
     if (uuid3) {
-      map2.set(uuid3, i + 1);
+      map2.set(uuid3, logicalLine);
     }
   }
   return map2;
@@ -15141,6 +15219,12 @@ function getParentUuid(entry) {
   }
   return;
 }
+function getTimestamp(entry) {
+  if ("timestamp" in entry && typeof entry.timestamp === "string") {
+    return entry.timestamp;
+  }
+  return;
+}
 function collectToolResults(entries, redact) {
   const results = new Map;
   for (const entry of entries) {
@@ -15154,9 +15238,6 @@ function collectToolResults(entries, redact) {
       if (block.type === "tool_result" && "tool_use_id" in block) {
         let formatted = formatToolResultContent(block.content);
         if (formatted) {
-          if (redact) {
-            formatted = redactMultiline(formatted);
-          }
           results.set(block.tool_use_id, { content: formatted, agentId });
         }
       }
@@ -15174,9 +15255,9 @@ function formatToolResultContent(content) {
     if (block.type === "text" && "text" in block) {
       parts.push(block.text);
     } else if (block.type === "image" && "source" in block) {
-      parts.push(`<image media_type="${block.source.media_type}"/>`);
+      parts.push(`[image:${block.source.media_type}]`);
     } else if (block.type === "document" && "source" in block) {
-      parts.push(`<document media_type="${block.source.media_type}"/>`);
+      parts.push(`[document:${block.source.media_type}]`);
     }
   }
   return parts.join(`
@@ -15192,35 +15273,332 @@ function isToolResultOnlyEntry(entry) {
   return meaningfulBlocks.every((b) => b.type === "tool_result");
 }
 function formatEntry(entry, options) {
+  const { redact = false } = options;
+  if (redact) {
+    return formatEntryCompact(entry, options);
+  }
+  return formatEntryXml(entry, options);
+}
+function formatEntryCompact(entry, options) {
+  const { lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd } = options;
+  switch (entry.type) {
+    case "user":
+      if (toolResults && isToolResultOnlyEntry(entry))
+        return null;
+      return formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst);
+    case "assistant":
+      return formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd);
+    case "system":
+      return formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst);
+    case "summary":
+      return formatSummaryEntryCompact(entry, lineNumber);
+    default:
+      return null;
+  }
+}
+function formatTimestampCompact(timestamp, prevDate, isFirst) {
+  if (!timestamp)
+    return "";
+  const date5 = timestamp.slice(0, 10);
+  const time3 = timestamp.slice(11, 16);
+  if (isFirst || !prevDate || date5 !== prevDate) {
+    return `${date5}T${time3}`;
+  }
+  return time3;
+}
+function formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst) {
+  const parts = [String(lineNumber)];
+  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("user");
+  if (parentIndicator !== undefined) {
+    parts.push(`parent=${parentIndicator}`);
+  }
+  const content = formatMessageContentCompact(entry.message.content, toolResults);
+  parts.push(content);
+  return parts.join("|");
+}
+function formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd) {
+  const blocks = entry.message.content;
+  if (!blocks || typeof blocks === "string") {
+    const parts = [String(lineNumber)];
+    const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
+    if (ts)
+      parts.push(ts);
+    parts.push("assistant");
+    if (parentIndicator !== undefined) {
+      parts.push(`parent=${parentIndicator}`);
+    }
+    const text = typeof blocks === "string" ? blocks : "";
+    parts.push(formatQuotedSummary(text));
+    return parts.join("|");
+  }
+  const lines = [];
+  let blockIndex = 0;
+  for (const block of blocks) {
+    if (isNoiseBlock(block))
+      continue;
+    if (block.type === "tool_result")
+      continue;
+    const parts = [String(lineNumber)];
+    const ts = blockIndex === 0 ? formatTimestampCompact(entry.timestamp, prevDate, isFirst) : "";
+    if (ts)
+      parts.push(ts);
+    if (block.type === "thinking") {
+      parts.push("thinking");
+      parts.push(formatLineCount(block.thinking));
+    } else if (block.type === "text") {
+      parts.push("assistant");
+      if (blockIndex === 0 && parentIndicator !== undefined) {
+        parts.push(`parent=${parentIndicator}`);
+      }
+      parts.push(formatQuotedSummary(block.text));
+    } else if (block.type === "tool_use") {
+      parts.push("tool");
+      const toolLine = formatToolUseCompact(block, toolResults, cwd);
+      parts.push(toolLine);
+    }
+    lines.push(parts.join("|"));
+    blockIndex++;
+  }
+  return lines.join(`
+`);
+}
+function formatToolUseCompact(block, toolResults, cwd) {
+  const result = toolResults?.get(block.id);
+  const name = block.name;
+  const input = block.input;
+  switch (name) {
+    case "Edit":
+      return formatEditToolCompact(input, result, cwd);
+    case "Read":
+      return formatReadToolCompact(input, result, cwd);
+    case "Write":
+      return formatWriteToolCompact(input, result, cwd);
+    case "Bash":
+      return formatBashToolCompact(input, result);
+    case "Grep":
+      return formatGrepToolCompact(input, result, cwd);
+    case "Glob":
+      return formatGlobToolCompact(input, result);
+    case "Task":
+      return formatTaskToolCompact(input, result);
+    case "TodoWrite":
+      return formatTodoWriteToolCompact(input);
+    case "AskUserQuestion":
+      return formatAskUserQuestionToolCompact(input, result);
+    case "ExitPlanMode":
+      return formatExitPlanModeToolCompact(input, result);
+    case "WebFetch":
+      return formatWebFetchToolCompact(input, result);
+    case "WebSearch":
+      return formatWebSearchToolCompact(input, result);
+    default:
+      return formatGenericToolCompact(name, input, result);
+  }
+}
+function formatEditToolCompact(input, result, cwd) {
+  const path = shortenPath(String(input.file_path || ""), cwd);
+  const oldStr = String(input.old_string || "");
+  const newStr = String(input.new_string || "");
+  const oldLines = countLines(oldStr);
+  const newLines = countLines(newStr);
+  return `Edit|${path}|-${oldLines}+${newLines}`;
+}
+function formatReadToolCompact(input, result, cwd) {
+  const path = shortenPath(String(input.file_path || ""), cwd);
+  const lineCount = result ? countLines(result.content) : 0;
+  return `Read|${path}|returned=${lineCount}lines`;
+}
+function formatWriteToolCompact(input, result, cwd) {
+  const path = shortenPath(String(input.file_path || ""), cwd);
+  const content = String(input.content || "");
+  const lineCount = countLines(content);
+  return `Write|${path}|written=${lineCount}lines`;
+}
+function formatBashToolCompact(input, result) {
+  const command = String(input.command || "").trim();
+  const desc = input.description ? String(input.description) : undefined;
+  const parts = ["Bash"];
+  const firstLine = command.split(`
+`)[0];
+  const maxCmdLen = 300;
+  const shortCmd = firstLine.length > maxCmdLen ? firstLine.slice(0, maxCmdLen - 3) + "..." : firstLine;
+  parts.push(`command="${shortCmd.replace(/"/g, "\\\"")}"`);
+  if (desc) {
+    parts.push(`description="${desc.replace(/"/g, "\\\"")}"`);
+  }
+  if (result) {
+    parts.push(`returned=${formatQuotedSummary(result.content)}`);
+  }
+  return parts.join("|");
+}
+function formatGrepToolCompact(input, result, cwd) {
+  const pattern = String(input.pattern || "");
+  const path = input.path ? shortenPath(String(input.path), cwd) : "";
+  const parts = ["Grep", `pattern="${pattern.replace(/"/g, "\\\"")}"`];
+  if (path)
+    parts.push(path);
+  if (result) {
+    const lineCount = countLines(result.content);
+    parts.push(`returned=${lineCount}lines`);
+  }
+  return parts.join("|");
+}
+function formatGlobToolCompact(input, result) {
+  const pattern = String(input.pattern || "");
+  const parts = ["Glob", `pattern="${pattern}"`];
+  if (result) {
+    const files = result.content.split(`
+`).filter((l) => l.trim()).length;
+    parts.push(`returned=${files}files`);
+  }
+  return parts.join("|");
+}
+function formatTaskToolCompact(input, result) {
+  const desc = String(input.description || "");
+  const prompt = String(input.prompt || "");
+  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
+  const parts = ["Task"];
+  if (result?.agentId) {
+    parts.push(`agent_session="agent-${result.agentId}"`);
+  }
+  if (subagentType) {
+    parts.push(`subagent_type="${subagentType}"`);
+  }
+  parts.push(`description="${desc.replace(/"/g, "\\\"")}"`);
+  parts.push(`prompt=${countLines(prompt)}lines`);
+  if (result) {
+    parts.push(`returned=${countLines(result.content)}lines`);
+  }
+  return parts.join("|");
+}
+function formatTodoWriteToolCompact(input) {
+  const todos = Array.isArray(input.todos) ? input.todos : [];
+  return `TodoWrite|todos=${todos.length}`;
+}
+function formatAskUserQuestionToolCompact(input, result) {
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const parts = ["AskUserQuestion", `questions=${questions.length}`];
+  if (result) {
+    parts.push(`returned=${formatQuotedSummary(result.content)}`);
+  }
+  return parts.join("|");
+}
+function formatExitPlanModeToolCompact(input, _result) {
+  const plan = input.plan ? String(input.plan) : "";
+  if (plan) {
+    return `ExitPlanMode|plan=${countLines(plan)}lines`;
+  }
+  return "ExitPlanMode";
+}
+function formatWebFetchToolCompact(input, result) {
+  const url2 = String(input.url || "");
+  const parts = ["WebFetch", `url="${url2}"`];
+  if (result) {
+    parts.push(`returned=${countLines(result.content)}lines`);
+  }
+  return parts.join("|");
+}
+function formatWebSearchToolCompact(input, result) {
+  const query = String(input.query || "");
+  const parts = ["WebSearch", `query="${query.replace(/"/g, "\\\"")}"`];
+  if (result) {
+    parts.push(`returned=${countLines(result.content)}lines`);
+  }
+  return parts.join("|");
+}
+function formatGenericToolCompact(name, input, result) {
+  const parts = [name];
+  const entries = Object.entries(input).slice(0, 3);
+  for (const [key, value] of entries) {
+    const str = typeof value === "string" ? value : JSON.stringify(value);
+    const short = str.length > 300 ? str.slice(0, 297) + "..." : str;
+    parts.push(`${key}="${short.replace(/"/g, "\\\"")}"`);
+  }
+  if (result) {
+    parts.push(`returned=${formatQuotedSummary(result.content)}`);
+  }
+  return parts.join("|");
+}
+function shortenPath(path, cwd) {
+  if (!cwd)
+    return path;
+  if (path.startsWith(cwd + "/")) {
+    return path.slice(cwd.length + 1);
+  }
+  if (path === cwd) {
+    return ".";
+  }
+  return path;
+}
+function formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst) {
+  const parts = [String(lineNumber)];
+  const ts = formatTimestampCompact(entry.timestamp, prevDate, isFirst);
+  if (ts)
+    parts.push(ts);
+  parts.push("system");
+  if (entry.subtype)
+    parts.push(`subtype=${entry.subtype}`);
+  if (entry.level && entry.level !== "info")
+    parts.push(`level=${entry.level}`);
+  if (entry.content) {
+    parts.push(formatQuotedSummary(entry.content));
+  }
+  return parts.join("|");
+}
+function formatSummaryEntryCompact(entry, lineNumber) {
+  return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
+}
+function formatMessageContentCompact(content, toolResults) {
+  if (!content)
+    return '""';
+  if (typeof content === "string") {
+    return formatQuotedSummary(content);
+  }
+  const textParts = [];
+  for (const block of content) {
+    if (isNoiseBlock(block))
+      continue;
+    if (block.type === "tool_result")
+      continue;
+    if (block.type === "text") {
+      textParts.push(block.text);
+    }
+  }
+  if (textParts.length === 0)
+    return '""';
+  return formatQuotedSummary(textParts.join(`
+`));
+}
+function formatEntryXml(entry, options) {
   const { lineNumber, toolResults, parentIndicator, redact = false } = options;
   switch (entry.type) {
     case "user":
       if (toolResults && isToolResultOnlyEntry(entry))
         return null;
-      return formatUserEntry(entry, lineNumber, toolResults, parentIndicator, redact);
+      return formatUserEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
     case "assistant":
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, redact);
+      return formatAssistantEntryXml(entry, lineNumber, toolResults, parentIndicator, redact);
     case "system":
-      return formatSystemEntry(entry, lineNumber, redact);
+      return formatSystemEntryXml(entry, lineNumber, redact);
     case "summary":
-      return formatSummaryEntry(entry, lineNumber);
-    case "file-history-snapshot":
-    case "queue-operation":
-      return null;
+      return formatSummaryEntryXml(entry, lineNumber);
     default:
       return null;
   }
 }
-function formatUserEntry(entry, lineNumber, toolResults, parentIndicator, redact) {
+function formatUserEntryXml(entry, lineNumber, toolResults, parentIndicator, redact) {
   const attrs = [`line="${lineNumber}"`];
   if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
   if (parentIndicator !== undefined)
     attrs.push(`parent="${parentIndicator}"`);
-  const content = formatMessageContent(entry.message.content, toolResults, redact);
+  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
   return formatXmlElement("user", attrs, content);
 }
-function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, redact) {
+function formatAssistantEntryXml(entry, lineNumber, toolResults, parentIndicator, redact) {
   const attrs = [`line="${lineNumber}"`];
   if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
@@ -15231,7 +15609,7 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, r
   }
   if (parentIndicator !== undefined)
     attrs.push(`parent="${parentIndicator}"`);
-  const content = formatMessageContent(entry.message.content, toolResults, redact);
+  const content = formatMessageContentXml(entry.message.content, toolResults, redact);
   return formatXmlElement("assistant", attrs, content);
 }
 function formatXmlElement(tag, attrs, content) {
@@ -15245,7 +15623,7 @@ function formatXmlElement(tag, attrs, content) {
 ${indent(content, 2)}
 </${tag}>`;
 }
-function formatSystemEntry(entry, lineNumber, redact) {
+function formatSystemEntryXml(entry, lineNumber, redact) {
   const attrs = [`line="${lineNumber}"`];
   if (entry.timestamp)
     attrs.push(`time="${formatTimestamp(entry.timestamp)}"`);
@@ -15259,13 +15637,13 @@ function formatSystemEntry(entry, lineNumber, redact) {
   }
   return formatXmlElement("system", attrs, content);
 }
-function formatSummaryEntry(entry, lineNumber) {
+function formatSummaryEntryXml(entry, lineNumber) {
   return formatXmlElement("summary", [`line="${lineNumber}"`], entry.summary);
 }
 function formatTimestamp(iso) {
   return iso.slice(0, 16);
 }
-function formatMessageContent(content, toolResults, redact) {
+function formatMessageContentXml(content, toolResults, redact) {
   if (!content)
     return "";
   if (typeof content === "string") {
@@ -15277,7 +15655,7 @@ function formatMessageContent(content, toolResults, redact) {
       continue;
     if (toolResults && block.type === "tool_result")
       continue;
-    const formatted = formatContentBlock(block, toolResults, redact);
+    const formatted = formatContentBlockXml(block, toolResults, redact);
     if (formatted)
       parts.push(formatted);
   }
@@ -15299,23 +15677,23 @@ function isNoiseBlock(block) {
   }
   return false;
 }
-function formatContentBlock(block, toolResults, redact) {
+function formatContentBlockXml(block, toolResults, redact) {
   switch (block.type) {
     case "text":
       return redact ? redactMultiline(block.text) : block.text;
     case "thinking":
       return formatXmlElement("thinking", [], redact ? redactMultiline(block.thinking) : block.thinking);
     case "tool_use":
-      return formatToolUseBlock(block, toolResults, redact);
+      return formatToolUseBlockXml(block, toolResults, redact);
     case "tool_result":
-      return formatToolResultBlock(block, redact);
+      return formatToolResultBlockXml(block, redact);
     case "image":
       return `<image media_type="${block.source.media_type}"/>`;
     case "document":
       return `<document media_type="${block.source.media_type}"/>`;
   }
 }
-function formatToolUseBlock(block, toolResults, redact) {
+function formatToolUseBlockXml(block, toolResults, redact) {
   const resultInfo = toolResults?.get(block.id);
   const tagName = resultInfo ? "tool" : "tool_use";
   const attrs = [`name="${block.name}"`];
@@ -15338,20 +15716,24 @@ ${indent(formatted, 4)}
     }
   }
   if (resultInfo) {
-    if (resultInfo.content.includes(`
+    let resultContent = resultInfo.content;
+    if (redact) {
+      resultContent = redactMultiline(resultContent);
+    }
+    if (resultContent.includes(`
 `)) {
       lines.push(`  <result>
-${indent(resultInfo.content, 4)}
+${indent(resultContent, 4)}
   </result>`);
     } else {
-      lines.push(`  <result>${resultInfo.content}</result>`);
+      lines.push(`  <result>${resultContent}</result>`);
     }
   }
   lines.push(`</${tagName}>`);
   return lines.join(`
 `);
 }
-function formatToolResultBlock(block, redact) {
+function formatToolResultBlockXml(block, redact) {
   const lines = [`<tool_result>`];
   if (block.content) {
     if (typeof block.content === "string") {

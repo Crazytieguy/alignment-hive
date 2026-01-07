@@ -1,135 +1,18 @@
-<user line="1" time="2026-01-05T01:20">
-  Review actual extracted session files to check data quality. Do not run bash commands - only read files.
-  [+13 lines]
-</user>
-
-<assistant line="2" time="2026-01-05T01:20" model="claude-opus-4-5-20251101">
-  <tool name="Glob">
-    <pattern>**/*.jsonl</pattern>
-    <path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions</path>
-    <result>
-      /Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/agent-a36ff0b.jsonl
-      [+100 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="3" time="2026-01-05T01:20" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/docs/claude-code-jsonl-format.md</file_path>
-    <result>
-           1→# Claude Code JSONL Format Reference
-      [+808 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="6" time="2026-01-05T01:20" model="claude-opus-4-5-20251101">Now let me read a few extracted session files to analyze the data quality:</assistant>
-
-<assistant line="7" time="2026-01-05T01:20" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl</file_path>
-    <result>
-           1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"cb6aa757-c24a-4950-b034-131e5c6acfd5","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.062Z","rawMtime":"2026-01-02T01:53:47.996Z","messageCount":38,"summary":"Memory System: Hook Behavior & Plugin Architecture","rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl"}
-      [+44 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="8" time="2026-01-05T01:20" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/agent-a36ff0b.jsonl</file_path>
-    <result>
-           1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"a36ff0b","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.048Z","rawMtime":"2025-12-30T22:00:03.847Z","messageCount":1,"rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/agent-a36ff0b.jsonl","agentId":"a36ff0b","parentSessionId":"424cac5b-9c1c-4316-8c26-c23fe169af4c"}
-      [+7 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="9" time="2026-01-05T01:20" model="claude-opus-4-5-20251101" stop="tool_use">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/73a1d417-9818-4888-879b-cb816af7a7e9.jsonl</file_path>
-    <result>
-           1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"73a1d417-9818-4888-879b-cb816af7a7e9","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.091Z","rawMtime":"2026-01-02T02:04:13.846Z","messageCount":6,"summary":"SessionStart Hook Output Pollution Test","rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/73a1d417-9818-4888-879b-cb816af7a7e9.jsonl"}
-      [+12 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="13" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">Let me read one more extracted file that seems more substantial to get a better picture of the data quality:</assistant>
-
-<assistant line="14" time="2026-01-05T01:21" model="claude-opus-4-5-20251101" stop="tool_use">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl</file_path>
-    <result><tool_use_error>File content (287.4KB) exceeds maximum allowed size (256KB). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.</tool_use_error></result>
-  </tool>
-</assistant>
-
-<assistant line="16" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl</file_path>
-    <limit>100</limit>
-    <result>File content (61964 tokens) exceeds maximum allowed tokens (25000). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.</result>
-  </tool>
-</assistant>
-
-<assistant line="18" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl</file_path>
-    <offset>1</offset>
-    <limit>50</limit>
-    <result>File content (38102 tokens) exceeds maximum allowed tokens (25000). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.</result>
-  </tool>
-</assistant>
-
-<assistant line="20" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl</file_path>
-    <offset>1</offset>
-    <limit>20</limit>
-    <result>
-           1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"6e855450-f8c6-4880-a87c-30088ac7a3b2","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.106Z","rawMtime":"2026-01-03T05:07:24.409Z","messageCount":150,"summary":"Plugin auth setup and multi-environment distribution","rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl"}
-      [+24 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="22" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">Now let me also check the extraction code to understand what transformations are being applied:</assistant>
-
-<assistant line="23" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">
-  <tool name="Glob">
-    <pattern>**/extraction*.ts</pattern>
-    <path>/Users/yoav/projects/alignment-hive</path>
-    <result>
-      /Users/yoav/projects/alignment-hive/hive-mind-cli/src/lib/extraction.ts
-      [+1 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="25" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/hive-mind-cli/src/lib/extraction.ts</file_path>
-    <result>
-           1→import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-      [+321 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="27" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">Let me also check the schemas to understand what fields are being stripped:</assistant>
-
-<assistant line="28" time="2026-01-05T01:21" model="claude-opus-4-5-20251101">
-  <tool name="Read">
-    <file_path>/Users/yoav/projects/alignment-hive/hive-mind-cli/src/lib/schemas.ts</file_path>
-    <result>
-           1→import { z } from "zod";
-      [+230 lines]
-    </result>
-  </tool>
-</assistant>
-
-<assistant line="30" time="2026-01-05T01:22" model="claude-opus-4-5-20251101">
-  Now I have a comprehensive picture of the extraction system and the extracted data. Let me provide my analysis.
-  [+153 lines]
-</assistant>
+1|2026-01-05T01:20|user|"Review actual extracted session files to check data quality. Do not run bash commands - only read files." +13lines
+2|01:20|tool|Glob|pattern="**/*.jsonl"|returned=101files
+3|01:20|tool|Read|docs/claude-code-jsonl-format.md|returned=809lines
+4|01:20|assistant|"Now let me read a few extracted session files to analyze the data quality:"
+5|01:20|tool|Read|.claude/hive-mind/sessions/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl|returned=45lines
+6|01:20|tool|Read|.claude/hive-mind/sessions/agent-a36ff0b.jsonl|returned=8lines
+7|01:20|tool|Read|.claude/hive-mind/sessions/73a1d417-9818-4888-879b-cb816af7a7e9.jsonl|returned=13lines
+8|01:21|assistant|"Let me read one more extracted file that seems more substantial to get a better picture of the data quality:"
+9|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|returned=1lines
+10|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|returned=1lines
+11|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|returned=1lines
+12|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|returned=25lines
+13|01:21|assistant|"Now let me also check the extraction code to understand what transformations are being applied:"
+14|01:21|tool|Glob|pattern="**/extraction*.ts"|returned=2files
+15|01:21|tool|Read|hive-mind-cli/src/lib/extraction.ts|returned=322lines
+16|01:21|assistant|"Let me also check the schemas to understand what fields are being stripped:"
+17|01:21|tool|Read|hive-mind-cli/src/lib/schemas.ts|returned=231lines
+18|01:22|assistant|"Now I have a comprehensive picture of the extraction system and the extracted data. Let me provide my analysis." +153lines

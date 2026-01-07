@@ -227,51 +227,67 @@ Add smart redaction to `read` command for token-efficient scanning. Tool-specifi
 - `read <id> 1-10` (multiple lines) → full content
 - `read <id> --full` → force full content for all lines
 
-## MVP Implementation (Done)
+## Compact Format (Implemented)
 
-Basic `redactMultiline()` function: first line + `[+N lines]` applied uniformly.
+Pipe-delimited format for scanning mode. Tool results merged with tool calls.
 
-## Tool-Specific Redaction (To Implement)
+### Line Format
 
-Based on snapshot analysis, each tool type gets specific handling:
-
-| Tool | Include | Omit |
-|------|---------|------|
-| **Read** | path, line count | first line, full content |
-| **Edit** | path, old/new line counts | old/new content, result |
-| **Write** | path, line count | first line, full content |
-| **Bash** | command, first result line | remaining output |
-| **Glob** | pattern, file count | file list |
-| **Grep** | pattern, first match | remaining matches |
-| **WebFetch** | url, char/line count | content |
-| **WebSearch** | query, result count | results |
-| **Task** | description, agent_session, line count | prompt details, full result |
-| **thinking** | stub indicator only | all content |
-| **TodoWrite** | stub indicator only | todos, result message |
-| **AskUserQuestion** | question headers, answer summary | full options/structure |
-
-### Additional Optimizations
-
-- **Remove `model` field** when same as previous message
-- **Remove `stop="tool_use"`** (noise)
-- **Timestamps**: Only include for genuine user prompts
-- **`parent="?"`**: Change to `parent="start"` (indicates user restarted)
-- **Long lines**: Truncate very long first lines (e.g., 200 char max)
-
-## Format Change (Pending)
-
-Current XML format has too much overhead for redacted mode where content is single-line.
-
-**Direction**: More compact format similar to Claude Code UI:
 ```
-1 user: Help me implement OAuth
-2 Read(src/auth.ts) 357 lines
-3 Edit(src/auth.ts) -35 +42 lines
-4 Bash(bun test) 5 pass [+12]
-5 assistant: Let me check the tests.
+line_num|timestamp|type|content...
 ```
 
-Format details to be finalized in next session.
+**Timestamp handling:**
+- First entry: full ISO `2026-01-05T02:50`
+- Subsequent: just time `02:51`
+- New day: include date again
+
+**Entry types:**
+- `user|"first line" +Nlines`
+- `thinking|Nlines`
+- `assistant|"first line" +Nlines`
+- `tool|ToolName|...tool-specific...|returned=...`
+- `summary|"summary text"`
+- `parent=start` for restart points
+
+### Tool-Specific Optimizations
+
+| Tool | Format |
+|------|--------|
+| **Edit** | `Edit\|path\|-X+Y` (diff stats, no result) |
+| **Read** | `Read\|path\|returned=Xlines` |
+| **Write** | `Write\|path\|written=Xlines` |
+| **Bash** | `Bash\|command="..."\|description="..."\|returned="first line" +Xlines` |
+| **Grep** | `Grep\|pattern="..."\|path\|returned=Xlines` |
+| **Glob** | `Glob\|pattern="..."\|returned=Xfiles` |
+| **Task** | `Task\|agent_session="..."\|description="..."\|prompt=Xlines\|returned=Xlines` |
+| **TodoWrite** | `TodoWrite\|todos=N` |
+| **AskUserQuestion** | `AskUserQuestion\|questions=N\|returned="answer summary..."` |
+| **ExitPlanMode** | `ExitPlanMode\|returned="first line..."` |
+| **Generic** | `ToolName\|key="value"\|...\|returned=Xlines` |
+
+### Example Output
+
+```
+1|2026-01-05T02:50|user|"I'd like to iterate a bit on @hive-mind-cli/src/lib/schem..." +3lines
+2|02:51|thinking|45lines
+3|02:51|assistant|"Let me analyze these questions carefully." +36lines
+4|02:51|tool|TodoWrite|todos=4
+5|02:51|thinking|1line
+6|02:51|tool|Edit|/Users/yoav/projects/alignment-hive/hive-mind-cli/src/lib/schemas.ts|-36+57
+...
+18|02:52|user|parent=start|"I'd like to iterate a bit on @hive-mind-cli/src/lib/schem..." +3lines
+...
+21|02:53|tool|Task|agent_session="agent-aacc414"|description="Explore ToolResultBlock recursion"|prompt=10lines|returned=99lines
+...
+95|03:21|tool|Bash|command="bun test"|description="Run hive-mind-cli tests"|returned="bun test v1.2.14 (6a363a38)" +62lines
+```
+
+### Deferred Optimizations
+
+- **Path shortening**: Could shorten `/Users/username/projects/alignment-hive/` to relative paths
+- **Model dedup**: Remove `model` when same as previous message
+- **MCP tools**: Generic format works, but could add custom formatters for common MCP tools
 
 ## Summaries Investigation Notes
 
@@ -407,9 +423,13 @@ Update `plugins/hive-mind/plugin.json` to register the agents directory.
 - [x] Update `read` command: default redacted, `--full` for full content
 - [x] Single line requests get full content automatically
 - [x] Update snapshot tests with redacted versions (all 8 sessions)
-- [ ] Tool-specific redaction (see table in plan)
-- [ ] Additional optimizations (model dedup, stop removal, timestamps, parent="start", line truncation)
-- [ ] **Format change**: Switch from XML to compact format (pending next session)
+- [x] Tool-specific redaction (Edit, Read, Write, Bash, Grep, Glob, Task, TodoWrite, AskUserQuestion, etc.)
+- [x] Timestamp compression (full first, then HH:MM, new day gets date)
+- [x] `parent="start"` for restart points (was `parent="?"`)
+- [x] **Format change**: Compact pipe-delimited format for redacted mode
+- [ ] Path shortening (deferred)
+- [ ] Model dedup (deferred)
+- [ ] MCP tool-specific formatters (deferred)
 
 ## 10B-3: Retrieval Subagent
 - [ ] Load `/plugin-dev:agent-development` skill
