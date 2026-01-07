@@ -8,7 +8,9 @@ Claude Code infrastructure for AI safety researchers.
 
 ## hive-mind
 
-When working on hive-mind, read and update [plugins/hive-mind/README.md](plugins/hive-mind/README.md) as needed.
+The hive-mind source code (CLI and web app) lives in `hive-mind/` at the repo root. The `plugins/hive-mind/` directory is just the plugin distribution (bundled CLI, plugin.json, etc.).
+
+When working on hive-mind, read and update [hive-mind/CLAUDE.md](hive-mind/CLAUDE.md) and [plugins/hive-mind/README.md](plugins/hive-mind/README.md) as needed.
 
 ## The "Search" tool, and scanning the code in other ways
 

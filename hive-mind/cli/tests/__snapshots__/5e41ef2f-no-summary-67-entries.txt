@@ -524,7 +524,7 @@
 <assistant line="25" time="2026-01-05T02:53" model="claude-opus-4-5-20251101">I'll explore the codebase to understand the context better and read the referenced documentation.</assistant>
 
 <assistant line="26" time="2026-01-05T02:53" model="claude-opus-4-5-20251101">
-  <tool name="Task">
+  <tool name="Task" agent_session="agent-aacc414">
     <description>Explore ToolResultBlock recursion</description>
     <prompt>
       I need to understand if ToolResultBlock can actually contain another ToolResultBlock recursively in Claude Code's JSONL format.

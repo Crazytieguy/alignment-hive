@@ -15,3 +15,10 @@ To re-extract all sessions (e.g., after schema changes):
 rm -rf .claude/hive-mind/sessions/
 bun hive-mind/cli/cli.ts session-start
 ```
+
+## Regenerating Snapshot Tests
+
+The format tests use custom snapshot logic. To update snapshots:
+```bash
+UPDATE_SNAPSHOTS=1 bun test
+```
