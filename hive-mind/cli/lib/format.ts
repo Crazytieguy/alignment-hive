@@ -18,6 +18,18 @@ import type {
   UserEntry,
 } from './schemas';
 
+const MAX_CONTENT_SUMMARY_LEN = 300;
+
+function escapeQuotes(str: string): string {
+  return str.replace(/"/g, '\\"');
+}
+
+function truncateFirstLine(text: string, maxLen = MAX_CONTENT_SUMMARY_LEN): string {
+  const firstLine = text.split('\n')[0];
+  if (firstLine.length <= maxLen) return firstLine;
+  return firstLine.slice(0, maxLen - 3) + '...';
+}
+
 export interface ToolResultInfo {
   content: string;
   agentId?: string;
@@ -63,14 +75,11 @@ function countLines(text: string): number {
  * Format text as quoted first line + count, or just quote if single line.
  * Returns `"first line" +Nlines` or `"single line content"`
  */
-function formatQuotedSummary(text: string, maxFirstLineLen = 300): string {
+function formatQuotedSummary(text: string, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN): string {
   if (!text) return '""';
   const lines = text.split('\n');
-  let firstLine = lines[0];
-  if (firstLine.length > maxFirstLineLen) {
-    firstLine = firstLine.slice(0, maxFirstLineLen - 3) + '...';
-  }
-  const escaped = firstLine.replace(/"/g, '\\"');
+  const firstLine = truncateFirstLine(lines[0], maxFirstLineLen);
+  const escaped = escapeQuotes(firstLine);
   if (lines.length === 1) {
     return `"${escaped}"`;
   }
@@ -85,9 +94,20 @@ function formatLineCount(text: string): string {
   return `${count}line${count === 1 ? '' : 's'}`;
 }
 
+/**
+ * Format result content as `returned=Nlines`
+ */
+function formatResultLines(result: ToolResultInfo): string {
+  return `returned=${countLines(result.content)}lines`;
+}
+
+function isSkippedEntryType(entry: KnownEntry): boolean {
+  return entry.type === 'file-history-snapshot' || entry.type === 'queue-operation';
+}
+
 export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
   const { redact = false } = options;
-  const toolResults = collectToolResults(entries, redact);
+  const toolResults = collectToolResults(entries);
 
   // Find the last summary entry index (we only want to show the last one)
   let lastSummaryIndex = -1;
@@ -114,16 +134,13 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
   let cwd: string | undefined;
   let logicalLine = 0;
 
-  for (let i = 0; i < filteredEntries.length; i++) {
-    const entry = filteredEntries[i];
-
+  for (const entry of filteredEntries) {
     // Skip tool-result-only user entries (they're merged into tool calls)
-    if (entry.type === 'user' && toolResults && isToolResultOnlyEntry(entry)) {
+    if (entry.type === 'user' && isToolResultOnlyEntry(entry)) {
       continue;
     }
 
-    // Skip noise entry types
-    if (entry.type === 'file-history-snapshot' || entry.type === 'queue-operation') {
+    if (isSkippedEntryType(entry)) {
       continue;
     }
 
@@ -180,7 +197,7 @@ function buildUuidMap(entries: Array<KnownEntry>): Map<string, number> {
   const map = new Map<string, number>();
   let logicalLine = 0;
   for (const entry of entries) {
-    if (entry.type === 'file-history-snapshot' || entry.type === 'queue-operation') {
+    if (isSkippedEntryType(entry)) {
       continue;
     }
     if (entry.type === 'user') {
@@ -222,7 +239,7 @@ function getTimestamp(entry: KnownEntry): string | undefined {
   return undefined;
 }
 
-function collectToolResults(entries: Array<KnownEntry>, redact: boolean): Map<string, ToolResultInfo> {
+function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultInfo> {
   const results = new Map<string, ToolResultInfo>();
 
   for (const entry of entries) {
@@ -234,9 +251,8 @@ function collectToolResults(entries: Array<KnownEntry>, redact: boolean): Map<st
 
     for (const block of content) {
       if (block.type === 'tool_result' && 'tool_use_id' in block) {
-        let formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
+        const formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
         if (formatted) {
-          // Don't redact here - we'll format it appropriately per tool
           results.set(block.tool_use_id, { content: formatted, agentId });
         }
       }
@@ -333,8 +349,8 @@ function formatUserEntryCompact(
     parts.push(`parent=${parentIndicator}`);
   }
 
-  const content = formatMessageContentCompact(entry.message.content, toolResults);
-  parts.push(content);
+  const messageContent = formatMessageContentCompact(entry.message.content);
+  parts.push(messageContent);
 
   return parts.join('|');
 }
@@ -347,7 +363,7 @@ function formatAssistantEntryCompact(
   prevDate?: string,
   isFirst?: boolean,
   cwd?: string,
-): string {
+): string | null {
   // Assistant entries in compact mode get split into their content blocks
   const blocks = entry.message.content;
   if (!blocks || typeof blocks === 'string') {
@@ -395,7 +411,7 @@ function formatAssistantEntryCompact(
     blockIndex++;
   }
 
-  return lines.join('\n');
+  return lines.length > 0 ? lines.join('\n') : null;
 }
 
 function formatToolUseCompact(
@@ -407,7 +423,6 @@ function formatToolUseCompact(
   const name = block.name;
   const input = block.input;
 
-  // Tool-specific formatting
   switch (name) {
     case 'Edit':
       return formatEditToolCompact(input, result, cwd);
@@ -428,7 +443,7 @@ function formatToolUseCompact(
     case 'AskUserQuestion':
       return formatAskUserQuestionToolCompact(input, result);
     case 'ExitPlanMode':
-      return formatExitPlanModeToolCompact(input, result);
+      return formatExitPlanModeToolCompact(input);
     case 'WebFetch':
       return formatWebFetchToolCompact(input, result);
     case 'WebSearch':
@@ -449,8 +464,8 @@ function formatEditToolCompact(input: Record<string, unknown>, result?: ToolResu
 
 function formatReadToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
   const path = shortenPath(String(input.file_path || ''), cwd);
-  const lineCount = result ? countLines(result.content) : 0;
-  return `Read|${path}|returned=${lineCount}lines`;
+  const resultPart = result ? formatResultLines(result) : 'returned=0lines';
+  return `Read|${path}|${resultPart}`;
 }
 
 function formatWriteToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
@@ -465,14 +480,10 @@ function formatBashToolCompact(input: Record<string, unknown>, result?: ToolResu
   const desc = input.description ? String(input.description) : undefined;
   const parts = ['Bash'];
 
-  // Show first line of command (heredocs will end at $(cat <<'EOF')
-  const firstLine = command.split('\n')[0];
-  const maxCmdLen = 300;
-  const shortCmd = firstLine.length > maxCmdLen ? firstLine.slice(0, maxCmdLen - 3) + '...' : firstLine;
-  parts.push(`command="${shortCmd.replace(/"/g, '\\"')}"`);
+  parts.push(`command="${escapeQuotes(truncateFirstLine(command))}"`);
 
   if (desc) {
-    parts.push(`description="${desc.replace(/"/g, '\\"')}"`);
+    parts.push(`description="${escapeQuotes(desc)}"`);
   }
 
   if (result) {
@@ -485,11 +496,10 @@ function formatBashToolCompact(input: Record<string, unknown>, result?: ToolResu
 function formatGrepToolCompact(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): string {
   const pattern = String(input.pattern || '');
   const path = input.path ? shortenPath(String(input.path), cwd) : '';
-  const parts = ['Grep', `pattern="${pattern.replace(/"/g, '\\"')}"`];
+  const parts = ['Grep', `pattern="${escapeQuotes(pattern)}"`];
   if (path) parts.push(path);
   if (result) {
-    const lineCount = countLines(result.content);
-    parts.push(`returned=${lineCount}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join('|');
 }
@@ -519,11 +529,11 @@ function formatTaskToolCompact(input: Record<string, unknown>, result?: ToolResu
     parts.push(`subagent_type="${subagentType}"`);
   }
 
-  parts.push(`description="${desc.replace(/"/g, '\\"')}"`);
+  parts.push(`description="${escapeQuotes(desc)}"`);
   parts.push(`prompt=${countLines(prompt)}lines`);
 
   if (result) {
-    parts.push(`returned=${countLines(result.content)}lines`);
+    parts.push(formatResultLines(result));
   }
 
   return parts.join('|');
@@ -538,13 +548,12 @@ function formatAskUserQuestionToolCompact(input: Record<string, unknown>, result
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const parts = ['AskUserQuestion', `questions=${questions.length}`];
   if (result) {
-    // Show raw result content
     parts.push(`returned=${formatQuotedSummary(result.content)}`);
   }
   return parts.join('|');
 }
 
-function formatExitPlanModeToolCompact(input: Record<string, unknown>, _result?: ToolResultInfo): string {
+function formatExitPlanModeToolCompact(input: Record<string, unknown>): string {
   const plan = input.plan ? String(input.plan) : '';
   if (plan) {
     return `ExitPlanMode|plan=${countLines(plan)}lines`;
@@ -556,17 +565,16 @@ function formatWebFetchToolCompact(input: Record<string, unknown>, result?: Tool
   const url = String(input.url || '');
   const parts = ['WebFetch', `url="${url}"`];
   if (result) {
-    parts.push(`returned=${countLines(result.content)}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join('|');
 }
 
 function formatWebSearchToolCompact(input: Record<string, unknown>, result?: ToolResultInfo): string {
   const query = String(input.query || '');
-  const parts = ['WebSearch', `query="${query.replace(/"/g, '\\"')}"`];
+  const parts = ['WebSearch', `query="${escapeQuotes(query)}"`];
   if (result) {
-    // Count results (rough heuristic: non-empty lines that look like results)
-    parts.push(`returned=${countLines(result.content)}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join('|');
 }
@@ -574,12 +582,11 @@ function formatWebSearchToolCompact(input: Record<string, unknown>, result?: Too
 function formatGenericToolCompact(name: string, input: Record<string, unknown>, result?: ToolResultInfo): string {
   const parts = [name];
 
-  // Include key input params (first few, abbreviated)
   const entries = Object.entries(input).slice(0, 3);
   for (const [key, value] of entries) {
     const str = typeof value === 'string' ? value : JSON.stringify(value);
-    const short = str.length > 300 ? str.slice(0, 297) + '...' : str;
-    parts.push(`${key}="${short.replace(/"/g, '\\"')}"`);
+    const short = truncateFirstLine(str);
+    parts.push(`${key}="${escapeQuotes(short)}"`);
   }
 
   if (result) {
@@ -628,10 +635,7 @@ function formatSummaryEntryCompact(entry: SummaryEntry, lineNumber: number): str
   return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
 }
 
-function formatMessageContentCompact(
-  content: string | Array<ContentBlock> | undefined,
-  toolResults?: Map<string, ToolResultInfo>,
-): string {
+function formatMessageContentCompact(content: string | Array<ContentBlock> | undefined): string {
   if (!content) return '""';
   if (typeof content === 'string') {
     return formatQuotedSummary(content);

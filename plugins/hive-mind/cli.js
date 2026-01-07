@@ -15079,6 +15079,17 @@ import { readFile as readFile3, readdir as readdir3 } from "fs/promises";
 import { join as join4 } from "path";
 
 // cli/lib/format.ts
+var MAX_CONTENT_SUMMARY_LEN = 300;
+function escapeQuotes(str) {
+  return str.replace(/"/g, "\\\"");
+}
+function truncateFirstLine(text, maxLen = MAX_CONTENT_SUMMARY_LEN) {
+  const firstLine = text.split(`
+`)[0];
+  if (firstLine.length <= maxLen)
+    return firstLine;
+  return firstLine.slice(0, maxLen - 3) + "...";
+}
 function redactMultiline(text) {
   const lines = text.split(`
 `);
@@ -15094,16 +15105,13 @@ function countLines(text) {
   return text.split(`
 `).length;
 }
-function formatQuotedSummary(text, maxFirstLineLen = 300) {
+function formatQuotedSummary(text, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN) {
   if (!text)
     return '""';
   const lines = text.split(`
 `);
-  let firstLine = lines[0];
-  if (firstLine.length > maxFirstLineLen) {
-    firstLine = firstLine.slice(0, maxFirstLineLen - 3) + "...";
-  }
-  const escaped = firstLine.replace(/"/g, "\\\"");
+  const firstLine = truncateFirstLine(lines[0], maxFirstLineLen);
+  const escaped = escapeQuotes(firstLine);
   if (lines.length === 1) {
     return `"${escaped}"`;
   }
@@ -15113,9 +15121,15 @@ function formatLineCount(text) {
   const count = countLines(text);
   return `${count}line${count === 1 ? "" : "s"}`;
 }
+function formatResultLines(result) {
+  return `returned=${countLines(result.content)}lines`;
+}
+function isSkippedEntryType(entry) {
+  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
+}
 function formatSession(entries, options = {}) {
   const { redact = false } = options;
-  const toolResults = collectToolResults(entries, redact);
+  const toolResults = collectToolResults(entries);
   let lastSummaryIndex = -1;
   for (let i = entries.length - 1;i >= 0; i--) {
     if (entries[i].type === "summary") {
@@ -15135,12 +15149,11 @@ function formatSession(entries, options = {}) {
   let prevDate;
   let cwd;
   let logicalLine = 0;
-  for (let i = 0;i < filteredEntries.length; i++) {
-    const entry = filteredEntries[i];
-    if (entry.type === "user" && toolResults && isToolResultOnlyEntry(entry)) {
+  for (const entry of filteredEntries) {
+    if (entry.type === "user" && isToolResultOnlyEntry(entry)) {
       continue;
     }
-    if (entry.type === "file-history-snapshot" || entry.type === "queue-operation") {
+    if (isSkippedEntryType(entry)) {
       continue;
     }
     if (entry.type === "user" && entry.cwd) {
@@ -15187,7 +15200,7 @@ function buildUuidMap(entries) {
   const map2 = new Map;
   let logicalLine = 0;
   for (const entry of entries) {
-    if (entry.type === "file-history-snapshot" || entry.type === "queue-operation") {
+    if (isSkippedEntryType(entry)) {
       continue;
     }
     if (entry.type === "user") {
@@ -15225,7 +15238,7 @@ function getTimestamp(entry) {
   }
   return;
 }
-function collectToolResults(entries, redact) {
+function collectToolResults(entries) {
   const results = new Map;
   for (const entry of entries) {
     if (entry.type !== "user")
@@ -15236,7 +15249,7 @@ function collectToolResults(entries, redact) {
     const agentId = "agentId" in entry ? entry.agentId : undefined;
     for (const block of content) {
       if (block.type === "tool_result" && "tool_use_id" in block) {
-        let formatted = formatToolResultContent(block.content);
+        const formatted = formatToolResultContent(block.content);
         if (formatted) {
           results.set(block.tool_use_id, { content: formatted, agentId });
         }
@@ -15315,8 +15328,8 @@ function formatUserEntryCompact(entry, lineNumber, toolResults, parentIndicator,
   if (parentIndicator !== undefined) {
     parts.push(`parent=${parentIndicator}`);
   }
-  const content = formatMessageContentCompact(entry.message.content, toolResults);
-  parts.push(content);
+  const messageContent = formatMessageContentCompact(entry.message.content);
+  parts.push(messageContent);
   return parts.join("|");
 }
 function formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd) {
@@ -15362,8 +15375,8 @@ function formatAssistantEntryCompact(entry, lineNumber, toolResults, parentIndic
     lines.push(parts.join("|"));
     blockIndex++;
   }
-  return lines.join(`
-`);
+  return lines.length > 0 ? lines.join(`
+`) : null;
 }
 function formatToolUseCompact(block, toolResults, cwd) {
   const result = toolResults?.get(block.id);
@@ -15389,7 +15402,7 @@ function formatToolUseCompact(block, toolResults, cwd) {
     case "AskUserQuestion":
       return formatAskUserQuestionToolCompact(input, result);
     case "ExitPlanMode":
-      return formatExitPlanModeToolCompact(input, result);
+      return formatExitPlanModeToolCompact(input);
     case "WebFetch":
       return formatWebFetchToolCompact(input, result);
     case "WebSearch":
@@ -15408,8 +15421,8 @@ function formatEditToolCompact(input, result, cwd) {
 }
 function formatReadToolCompact(input, result, cwd) {
   const path = shortenPath(String(input.file_path || ""), cwd);
-  const lineCount = result ? countLines(result.content) : 0;
-  return `Read|${path}|returned=${lineCount}lines`;
+  const resultPart = result ? formatResultLines(result) : "returned=0lines";
+  return `Read|${path}|${resultPart}`;
 }
 function formatWriteToolCompact(input, result, cwd) {
   const path = shortenPath(String(input.file_path || ""), cwd);
@@ -15421,13 +15434,9 @@ function formatBashToolCompact(input, result) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const parts = ["Bash"];
-  const firstLine = command.split(`
-`)[0];
-  const maxCmdLen = 300;
-  const shortCmd = firstLine.length > maxCmdLen ? firstLine.slice(0, maxCmdLen - 3) + "..." : firstLine;
-  parts.push(`command="${shortCmd.replace(/"/g, "\\\"")}"`);
+  parts.push(`command="${escapeQuotes(truncateFirstLine(command))}"`);
   if (desc) {
-    parts.push(`description="${desc.replace(/"/g, "\\\"")}"`);
+    parts.push(`description="${escapeQuotes(desc)}"`);
   }
   if (result) {
     parts.push(`returned=${formatQuotedSummary(result.content)}`);
@@ -15437,12 +15446,11 @@ function formatBashToolCompact(input, result) {
 function formatGrepToolCompact(input, result, cwd) {
   const pattern = String(input.pattern || "");
   const path = input.path ? shortenPath(String(input.path), cwd) : "";
-  const parts = ["Grep", `pattern="${pattern.replace(/"/g, "\\\"")}"`];
+  const parts = ["Grep", `pattern="${escapeQuotes(pattern)}"`];
   if (path)
     parts.push(path);
   if (result) {
-    const lineCount = countLines(result.content);
-    parts.push(`returned=${lineCount}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join("|");
 }
@@ -15467,10 +15475,10 @@ function formatTaskToolCompact(input, result) {
   if (subagentType) {
     parts.push(`subagent_type="${subagentType}"`);
   }
-  parts.push(`description="${desc.replace(/"/g, "\\\"")}"`);
+  parts.push(`description="${escapeQuotes(desc)}"`);
   parts.push(`prompt=${countLines(prompt)}lines`);
   if (result) {
-    parts.push(`returned=${countLines(result.content)}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join("|");
 }
@@ -15486,7 +15494,7 @@ function formatAskUserQuestionToolCompact(input, result) {
   }
   return parts.join("|");
 }
-function formatExitPlanModeToolCompact(input, _result) {
+function formatExitPlanModeToolCompact(input) {
   const plan = input.plan ? String(input.plan) : "";
   if (plan) {
     return `ExitPlanMode|plan=${countLines(plan)}lines`;
@@ -15497,15 +15505,15 @@ function formatWebFetchToolCompact(input, result) {
   const url2 = String(input.url || "");
   const parts = ["WebFetch", `url="${url2}"`];
   if (result) {
-    parts.push(`returned=${countLines(result.content)}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join("|");
 }
 function formatWebSearchToolCompact(input, result) {
   const query = String(input.query || "");
-  const parts = ["WebSearch", `query="${query.replace(/"/g, "\\\"")}"`];
+  const parts = ["WebSearch", `query="${escapeQuotes(query)}"`];
   if (result) {
-    parts.push(`returned=${countLines(result.content)}lines`);
+    parts.push(formatResultLines(result));
   }
   return parts.join("|");
 }
@@ -15514,8 +15522,8 @@ function formatGenericToolCompact(name, input, result) {
   const entries = Object.entries(input).slice(0, 3);
   for (const [key, value] of entries) {
     const str = typeof value === "string" ? value : JSON.stringify(value);
-    const short = str.length > 300 ? str.slice(0, 297) + "..." : str;
-    parts.push(`${key}="${short.replace(/"/g, "\\\"")}"`);
+    const short = truncateFirstLine(str);
+    parts.push(`${key}="${escapeQuotes(short)}"`);
   }
   if (result) {
     parts.push(`returned=${formatQuotedSummary(result.content)}`);
@@ -15551,7 +15559,7 @@ function formatSystemEntryCompact(entry, lineNumber, prevDate, isFirst) {
 function formatSummaryEntryCompact(entry, lineNumber) {
   return `${lineNumber}|summary|${formatQuotedSummary(entry.summary)}`;
 }
-function formatMessageContentCompact(content, toolResults) {
+function formatMessageContentCompact(content) {
   if (!content)
     return '""';
   if (typeof content === "string") {

@@ -260,10 +260,10 @@ line_num|timestamp|type|content...
 | **Bash** | `Bash\|command="..."\|description="..."\|returned="first line" +Xlines` |
 | **Grep** | `Grep\|pattern="..."\|path\|returned=Xlines` |
 | **Glob** | `Glob\|pattern="..."\|returned=Xfiles` |
-| **Task** | `Task\|agent_session="..."\|description="..."\|prompt=Xlines\|returned=Xlines` |
+| **Task** | `Task\|agent_session="..."\|subagent_type="..."\|description="..."\|prompt=Xlines\|returned=Xlines` |
 | **TodoWrite** | `TodoWrite\|todos=N` |
 | **AskUserQuestion** | `AskUserQuestion\|questions=N\|returned="answer summary..."` |
-| **ExitPlanMode** | `ExitPlanMode\|returned="first line..."` |
+| **ExitPlanMode** | `ExitPlanMode\|plan=Nlines` or just `ExitPlanMode` |
 | **Generic** | `ToolName\|key="value"\|...\|returned=Xlines` |
 
 ### Example Output
@@ -278,7 +278,7 @@ line_num|timestamp|type|content...
 ...
 18|02:52|user|parent=start|"I'd like to iterate a bit on @hive-mind-cli/src/lib/schem..." +3lines
 ...
-21|02:53|tool|Task|agent_session="agent-aacc414"|description="Explore ToolResultBlock recursion"|prompt=10lines|returned=99lines
+21|02:53|tool|Task|agent_session="agent-aacc414"|subagent_type="Explore"|description="Explore ToolResultBlock recursion"|prompt=10lines|returned=99lines
 ...
 95|03:21|tool|Bash|command="bun test"|description="Run hive-mind-cli tests"|returned="bun test v1.2.14 (6a363a38)" +62lines
 ```
