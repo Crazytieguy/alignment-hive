@@ -17,7 +17,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
-import { formatEntry, formatSession } from "../lib/format";
+import { collectToolResults, formatEntry, formatSession, getLogicalEntries } from "../lib/format";
 import { printError } from "../lib/output";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
@@ -108,6 +108,11 @@ export async function read(): Promise<void> {
     }
   }
 
+  // Build logical entry mapping (matches line numbers shown in formatSession)
+  const logicalEntries = getLogicalEntries(allEntries);
+  // Collect tool results for merging with tool_use entries
+  const toolResults = collectToolResults(allEntries);
+
   if (entryNumber === null) {
     // All entries mode: use formatSession
     // Truncate unless --full flag is set
@@ -115,14 +120,19 @@ export async function read(): Promise<void> {
     const output = formatSession(allEntries, { redact });
     console.log(output);
   } else {
-    // Single entry mode: use formatEntry with full content
-    const index = entryNumber - 1;
-    if (index < 0 || index >= allEntries.length) {
-      printError(`Entry ${entryNumber} not found (session has ${allEntries.length} entries)`);
+    // Single entry mode: find entry by logical line number
+    const logicalEntry = logicalEntries.find((e) => e.lineNumber === entryNumber);
+    if (!logicalEntry) {
+      const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
+      printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
       return;
     }
 
-    const formatted = formatEntry(allEntries[index], { lineNumber: entryNumber });
+    const formatted = formatEntry(logicalEntry.entry, {
+      lineNumber: entryNumber,
+      redact: false,
+      toolResults,
+    });
     if (formatted) {
       console.log(formatted);
     }

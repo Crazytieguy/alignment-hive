@@ -118,6 +118,54 @@ export function redactMultiline(text: string): string {
   return `${lines[0]}\n[+${remaining} lines]`;
 }
 
+export interface LogicalEntry {
+  lineNumber: number;
+  entry: KnownEntry;
+}
+
+/**
+ * Build a mapping of logical line numbers to entries.
+ * Logical lines skip tool-result-only user entries and internal entry types,
+ * matching the line numbers shown in formatSession output.
+ */
+export function getLogicalEntries(entries: Array<KnownEntry>): Array<LogicalEntry> {
+  const result: Array<LogicalEntry> = [];
+  let logicalLine = 0;
+
+  // Find the last summary entry index (we only show the last one)
+  let lastSummaryIndex = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === 'summary') {
+      lastSummaryIndex = i;
+      break;
+    }
+  }
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+
+    // Skip summaries except the last one
+    if (entry.type === 'summary' && i !== lastSummaryIndex) {
+      continue;
+    }
+
+    // Skip tool-result-only user entries
+    if (entry.type === 'user' && isToolResultOnlyEntry(entry)) {
+      continue;
+    }
+
+    // Skip internal entry types
+    if (isSkippedEntryType(entry)) {
+      continue;
+    }
+
+    logicalLine++;
+    result.push({ lineNumber: logicalLine, entry });
+  }
+
+  return result;
+}
+
 export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
   const { redact = false } = options;
   const toolResults = collectToolResults(entries);
@@ -303,7 +351,7 @@ function getTimestamp(entry: KnownEntry): string | undefined {
   return undefined;
 }
 
-function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultInfo> {
+export function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultInfo> {
   const results = new Map<string, ToolResultInfo>();
 
   for (const entry of entries) {
