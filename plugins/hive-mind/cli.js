@@ -15139,6 +15139,32 @@ function formatTimestamp(timestamp, prevDate, isFirst) {
   }
   return time3;
 }
+function getLogicalEntries(entries) {
+  const result = [];
+  let logicalLine = 0;
+  let lastSummaryIndex = -1;
+  for (let i = entries.length - 1;i >= 0; i--) {
+    if (entries[i].type === "summary") {
+      lastSummaryIndex = i;
+      break;
+    }
+  }
+  for (let i = 0;i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.type === "summary" && i !== lastSummaryIndex) {
+      continue;
+    }
+    if (entry.type === "user" && isToolResultOnlyEntry(entry)) {
+      continue;
+    }
+    if (isSkippedEntryType(entry)) {
+      continue;
+    }
+    logicalLine++;
+    result.push({ lineNumber: logicalLine, entry });
+  }
+  return result;
+}
 function formatSession(entries, options = {}) {
   const { redact = false } = options;
   const toolResults = collectToolResults(entries);
@@ -15867,17 +15893,24 @@ Examples:`);
       allEntries.push(result.data);
     }
   }
+  const logicalEntries = getLogicalEntries(allEntries);
+  const toolResults = collectToolResults(allEntries);
   if (entryNumber === null) {
     const redact = !fullFlag;
     const output = formatSession(allEntries, { redact });
     console.log(output);
   } else {
-    const index2 = entryNumber - 1;
-    if (index2 < 0 || index2 >= allEntries.length) {
-      printError(`Entry ${entryNumber} not found (session has ${allEntries.length} entries)`);
+    const logicalEntry = logicalEntries.find((e) => e.lineNumber === entryNumber);
+    if (!logicalEntry) {
+      const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
+      printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
       return;
     }
-    const formatted = formatEntry(allEntries[index2], { lineNumber: entryNumber });
+    const formatted = formatEntry(logicalEntry.entry, {
+      lineNumber: entryNumber,
+      redact: false,
+      toolResults
+    });
     if (formatted) {
       console.log(formatted);
     }

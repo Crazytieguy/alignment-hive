@@ -6,6 +6,11 @@
       "name": "mats",
       "source": "./plugins/mats",
       "description": "Resources for MATS scholars"
+    },
+    {
+      "name": "hive-mind",
+      "source": "./plugins/hive-mind",
+      "description": "Share session learnings with the alignment research community"
     }
   ]
 }
