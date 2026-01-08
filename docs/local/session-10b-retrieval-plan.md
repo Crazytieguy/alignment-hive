@@ -435,8 +435,135 @@ Update `plugins/hive-mind/plugin.json` to register the agents directory.
 - [ ] MCP tool-specific formatters (deferred)
 
 ## 10B-3: Retrieval Subagent
-- [ ] Load `/plugin-dev:agent-development` skill
-- [ ] Create `plugins/hive-mind/agents/retrieval.md`
-- [ ] Update `plugins/hive-mind/plugin.json`
-- [ ] Test agent on sample queries
+- [x] Load `/plugin-dev:agent-development` skill
+- [x] Create `plugins/hive-mind/agents/retrieval.md`
+- [x] Update `plugins/hive-mind/plugin.json` (bumped version to 0.1.2)
+- [x] Test agent on sample queries (tested CLI commands directly)
+- [x] Fixed bug: single-entry read now uses logical line numbers matching session overview
+- [x] Fixed bug: single-entry read now includes tool results
+- [x] Created skill at `plugins/hive-mind/skills/retrieval/SKILL.md` with detailed instructions
+- [x] Agent loads skill via `skills: hive-mind:retrieval` frontmatter
+- [x] Model selection works: `model: haiku` correctly uses haiku
+- [ ] **Tool restrictions not working as expected** - see issues below
 - [ ] **Experiment and iterate**: Refine description to get good context from main agent, adjust prompt based on results
+
+### Current State (2026-01-08)
+
+**Working:**
+- Agent runs on haiku model
+- Agent loads skill instructions via `skills:` frontmatter
+- Agent produces good retrieval results when it follows instructions
+
+### Research Findings (2026-01-08)
+
+#### Critical Discovery: `allowed-tools` is a SKILL field, not an AGENT field
+
+**Agent frontmatter fields** (from [official docs](https://code.claude.com/docs/en/sub-agents)):
+- `name` (required)
+- `description` (required)
+- `tools` (optional) - comma-separated list of tool NAMES (e.g., `Read, Grep, Glob, Bash`)
+- `model` (optional)
+- `permissionMode` (optional) - `default`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `plan`, `ignore`
+- `skills` (optional) - comma-separated skill names to auto-load
+- `hooks` (optional)
+
+**Skill frontmatter fields** (from [official docs](https://code.claude.com/docs/en/skills)):
+- `name` (required)
+- `description` (required)
+- `allowed-tools` (optional) - tools Claude can use WITHOUT PERMISSION, supports patterns like `Bash(python:*)`
+- `model` (optional)
+- `context` (optional) - set to `fork` for subagent context
+- `agent` (optional) - which agent type when `context: fork`
+- `hooks` (optional)
+- `user-invocable` (optional)
+
+**Our retrieval agent was using `allowed-tools` in the agent file, which is the wrong field!**
+
+#### How `allowed-tools` vs `tools` Actually Work
+
+| Field | File Type | Purpose | Accepts Patterns? |
+|-------|-----------|---------|-------------------|
+| `tools` | Agent | Restricts which tools are AVAILABLE to the agent | No - tool names only |
+| `allowed-tools` | Skill | Auto-approves tools WITHOUT PERMISSION prompts | Yes - e.g., `Bash(python:*)` |
+
+The `tools` field in agents only accepts tool names like `Bash, Read, Grep`. It cannot restrict Bash to specific commands.
+
+The `allowed-tools` field in skills accepts permission patterns. When a skill is active, matching tools are auto-approved.
+
+#### Known Bugs (Not Fixed)
+
+1. **[Issue #4740](https://github.com/anthropics/claude-code/issues/4740)** - Sub-agents use tools even when `tools` field restricts them. Closed due to inactivity, **not fixed**.
+
+2. **[Issue #11934](https://github.com/anthropics/claude-code/issues/11934)** - Sub agents get "Permission auto-denied in dontAsk mode" even with `--dangerously-skip-permissions`. **Still open**.
+
+3. **[Issue #10906](https://github.com/anthropics/claude-code/issues/10906)** - Built-in Plan agent ignores parent settings.json permissions. **Open**.
+
+4. **[Issue #10093](https://github.com/anthropics/claude-code/issues/10093)** - Feature request to allow specifying tool permissions in agents/plugins. **Open** - proposed `permissions` field in agent settings.json.
+
+#### Workarounds
+
+1. **PermissionRequest hook** (most reliable) - Auto-approve specific patterns:
+   ```json
+   {
+     "hooks": {
+       "PermissionRequest": [{
+         "matcher": "Bash",
+         "hooks": [{ "type": "command", "command": "exit 0" }]
+       }]
+     }
+   }
+   ```
+
+2. **Use `permissionMode: dontAsk`** in agent frontmatter - Requires user to have pre-approved permissions.
+
+3. **Rely on skill's `allowed-tools`** - Should auto-approve when skill is loaded, but may not work reliably for subagents.
+
+4. **Accept manual approval** - For now, accept that CLI commands need approval.
+
+#### Environment Variables
+
+- `${CLAUDE_PLUGIN_ROOT}` - Only works in hooks/MCP contexts, not in agent bash commands
+- Workaround: Use wildcards like `Bash(bun *cli.js index*)` instead
+
+### Files
+
+- Agent: `plugins/hive-mind/agents/retrieval.md`
+- Skill: `plugins/hive-mind/skills/retrieval/SKILL.md`
+- CLI: `plugins/hive-mind/cli.js` (built from `hive-mind/cli/`)
+
+### Recommended Fix
+
+1. **Agent file** - Remove `allowed-tools`, use `tools` for basic restriction:
+   ```yaml
+   ---
+   name: retrieval
+   description: ...
+   model: haiku
+   tools: Bash, Read, Grep  # Basic restriction (known to be buggy)
+   skills: hive-mind:retrieval
+   permissionMode: dontAsk  # Or use a PermissionRequest hook
+   ---
+   ```
+
+2. **Skill file** - Add `allowed-tools` for auto-approval patterns:
+   ```yaml
+   ---
+   name: retrieval
+   description: ...
+   allowed-tools:
+     - Bash(bun *cli.js index*)
+     - Bash(bun *cli.js read*)
+     - Bash(* | grep *)
+     - Bash(* | head *)
+     - Bash(* | tail *)
+   ---
+   ```
+
+3. **Alternative**: Add PermissionRequest hook in plugin settings or agent hooks field.
+
+### Next Steps
+
+- [ ] Fix retrieval agent to use correct fields
+- [ ] Test with `permissionMode: dontAsk`
+- [ ] Consider adding PermissionRequest hook if still having issues
+- [ ] Monitor GitHub issues for fixes to subagent permission bugs

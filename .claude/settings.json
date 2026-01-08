@@ -5,6 +5,7 @@
       "Skill(plugin-dev:plugin-structure)",
       "Skill(plugin-dev:create-plugin)",
       "Skill(plugin-dev:hook-development)",
+      "Skill(plugin-dev:agent-development)",
       "WebSearch",
       "WebFetch(domain:workos.com)",
       "WebFetch(domain:docs.convex.dev)",
@@ -19,9 +20,6 @@
       "Bash(bun run dev)",
       "Bash(bun run cli:build)",
       "Bash(bun hive-mind/cli/cli.ts:*)"
-    ],
-    "deny": [
-      "Read(.claude/hive-mind/sessions)"
     ]
   },
   "hooks": {
