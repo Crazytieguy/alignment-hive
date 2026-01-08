@@ -161,11 +161,11 @@ POST session/upload
 ### Local Retrieval
 
 Retrieval agent uses CLI commands:
-- `hive-mind index` - Build index from session metadata first-lines
-- `hive-mind scan <id> [--tokens-per-msg=N]` - Scan session with smart truncation
-- `hive-mind read <id> <indices>` - Get full content for specific messages
+- `hive-mind index` - List sessions with metadata (datetime, message count, summary, commits)
+- `hive-mind read <id>` - Scan session entries (truncated for quick scanning)
+- `hive-mind read <id> N` - Get full content for specific entry N
 
-Workflow: index → identify candidates → scan with appropriate detail → read specific messages.
+Workflow: index → identify candidates → read (truncated) → read specific entries for full content.
 
 ## v0.1 Session Details
 
@@ -203,8 +203,8 @@ Foundation for all downstream work. Creates the extracted session files that ret
 CLI tools and agent for searching past sessions. Depends on 10A (reads extracted files).
 
 **Scope** (see `local/session-10b-retrieval-plan.md`):
-- CLI commands: `index`, `scan <id>`, `read <id> <indices>`
-- Retrieval agent with smart truncation
+- CLI commands: `index`, `read <id> [N]`
+- Retrieval agent
 - Tuning on real session data
 
 ### Session 11: Convex Submission

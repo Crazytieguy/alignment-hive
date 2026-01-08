@@ -89,13 +89,15 @@ Format: `<truncated-id> <datetime> <msg-count> <summary>`
 
 ## 2. Read Command
 
-**Usage:** `bun hive-mind/cli/cli.ts read <session-id> [indices]`
+**Usage:** `bun hive-mind/cli/cli.ts read <session-id> [N] [--full]`
 
-- No indices = all entries (excluding metadata line)
-- Indices: `5`, `5-10`, `1,5,10-15` (1-indexed, after metadata)
+- No entry number = all entries (truncated for scanning)
+- Entry number N = full content for that entry (1-indexed)
+- `--full` = all entries with full content (no truncation)
 - Prefix match on session ID (e.g., `02ed` matches `02ed589a-...`)
+- Pipe through `| head -n 50` to control output length
 
-**Output:** Full formatted entries. No truncation. Exclude only truly useless fields (like internal IDs that have no retrieval value).
+**Output:** Formatted entries. Truncated by default for scanning; use entry number or `--full` for complete content.
 
 ## 3. Format Module (`cli/lib/format.ts`)
 
@@ -207,10 +209,11 @@ const COMMANDS = {
 
 1. Run `bun hive-mind/cli/cli.ts extract` to ensure extracted sessions exist
 2. Test `index` on real data, verify format is scannable
-3. Test `read <id>` for full session, verify all content visible
-4. Test `read <id> 1,5,10` for specific lines
-5. Implement snapshot tests to capture format decisions
-6. Iterate on format based on what's useful vs noise
+3. Test `read <id>` for truncated scan view
+4. Test `read <id> N` for single entry full content
+5. Test `read <id> --full` for all entries full content
+6. Implement snapshot tests to capture format decisions
+7. Iterate on format based on what's useful vs noise
 
 ---
 

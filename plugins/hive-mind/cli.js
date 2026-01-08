@@ -15804,20 +15804,18 @@ ${indent(entry.summary, 2)}`;
 async function read() {
   const args = process.argv.slice(3);
   if (args.length === 0) {
-    printError("Usage: read <session-id> [indices] [--full]");
+    printError("Usage: read <session-id> [N] [--full]");
     console.log(`
 Examples:`);
-    console.log("  read 02ed           # all entries (redacted for scanning)");
-    console.log("  read 02ed --full    # all entries (full content)");
-    console.log("  read 02ed 5         # entry 5 (full content)");
-    console.log("  read 02ed 5-10      # entries 5 through 10 (full content)");
-    console.log("  read 02ed 1,5,10-15 # specific entries and ranges (full content)");
+    console.log("  read 02ed        # all entries (truncated for scanning)");
+    console.log("  read 02ed --full # all entries (full content)");
+    console.log("  read 02ed 5      # entry 5 (full content)");
     return;
   }
   const fullFlag = args.includes("--full");
   const filteredArgs = args.filter((a) => a !== "--full");
   const sessionIdPrefix = filteredArgs[0];
-  const indicesArg = filteredArgs[1];
+  const entryArg = filteredArgs[1];
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
@@ -15847,11 +15845,11 @@ Examples:`);
     return;
   }
   const sessionFile = join4(sessionsDir, matches[0]);
-  let indices = null;
-  if (indicesArg) {
-    indices = parseIndices(indicesArg);
-    if (indices.size === 0) {
-      printError(`Invalid indices: ${indicesArg}`);
+  let entryNumber = null;
+  if (entryArg) {
+    entryNumber = parseInt(entryArg, 10);
+    if (isNaN(entryNumber) || entryNumber < 1) {
+      printError(`Invalid entry number: ${entryArg}`);
       return;
     }
   }
@@ -15869,55 +15867,21 @@ Examples:`);
       allEntries.push(result.data);
     }
   }
-  if (indices === null) {
+  if (entryNumber === null) {
     const redact = !fullFlag;
     const output = formatSession(allEntries, { redact });
     console.log(output);
   } else {
-    const outputs = [];
-    for (let i = 0;i < allEntries.length; i++) {
-      const userIndex = i + 1;
-      if (indices.has(userIndex)) {
-        const formatted = formatEntry(allEntries[i], { lineNumber: userIndex });
-        if (formatted) {
-          outputs.push(formatted);
-        }
-      }
-    }
-    if (outputs.length === 0) {
-      printError(`No entries match indices: ${indicesArg}`);
+    const index2 = entryNumber - 1;
+    if (index2 < 0 || index2 >= allEntries.length) {
+      printError(`Entry ${entryNumber} not found (session has ${allEntries.length} entries)`);
       return;
     }
-    console.log(outputs.join(`
-
-`));
-  }
-}
-function parseIndices(input) {
-  const result = new Set;
-  const parts = input.split(",");
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed)
-      continue;
-    if (trimmed.includes("-")) {
-      const [startStr, endStr] = trimmed.split("-");
-      const start = parseInt(startStr, 10);
-      const end = parseInt(endStr, 10);
-      if (isNaN(start) || isNaN(end) || start < 1 || end < start) {
-        continue;
-      }
-      for (let i = start;i <= end; i++) {
-        result.add(i);
-      }
-    } else {
-      const num = parseInt(trimmed, 10);
-      if (!isNaN(num) && num >= 1) {
-        result.add(num);
-      }
+    const formatted = formatEntry(allEntries[index2], { lineNumber: entryNumber });
+    if (formatted) {
+      console.log(formatted);
     }
   }
-  return result;
 }
 
 // cli/commands/session-start.ts
