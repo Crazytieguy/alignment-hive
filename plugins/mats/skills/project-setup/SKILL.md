@@ -30,7 +30,7 @@ Propose relevant plugins from the official marketplace (auto-installed):
 - **Rust**: `rust-analyzer-lsp`
 - **Agent development**: `agent-sdk-dev`
 
-Install by adding to `.claude/settings.json`:
+Install by adding to `./.claude/settings.json` in the project root (not `~/.claude/settings.json` or `settings.local.json`):
 
 ```json
 {
