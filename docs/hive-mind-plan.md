@@ -162,14 +162,13 @@ POST session/upload
 
 Retrieval agent uses CLI commands:
 - `hive-mind index` - List sessions with metadata (datetime, message count, summary, commit hashes)
+- `hive-mind grep <pattern>` - Search across sessions (supports `-i`, `-c`, `-l`, `-m N`, `-C N` flags)
 - `hive-mind read <id>` - Scan session entries (truncated for quick scanning)
 - `hive-mind read <id> N` - Get full content for specific entry N
+- `hive-mind read <id> N -C/-B/-A` - Get entry N with surrounding context entries
 - Agent can also use `git log` and `git show <hash>` to correlate commits with sessions
 
-Workflow: index → identify candidates → read (truncated) → read specific entries for full content.
-
-**Future CLI improvements** (low priority):
-- `hive-mind search <term>` - Grep across all sessions for specific terms (GitHub issue numbers, keywords, etc.)
+Workflow: Use grep for specific terms, index for browsing, read for scanning sessions, read with entry number for details.
 
 ## v0.1 Session Details
 

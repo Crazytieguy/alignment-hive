@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { grep } from "./commands/grep";
 import { index } from "./commands/index";
 import { login } from "./commands/login";
 import { read } from "./commands/read";
@@ -7,6 +8,7 @@ import { sessionStart } from "./commands/session-start";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
+  grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
   login: { description: "Authenticate with hive-mind", handler: login },
   read: { description: "Read session entries", handler: read },

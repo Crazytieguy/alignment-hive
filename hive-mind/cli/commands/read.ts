@@ -2,9 +2,11 @@
  * Read command - read session entries.
  *
  * Usage:
- *   read <session-id>        - all entries (truncated for scanning)
- *   read <session-id> N      - entry N (full content)
- *   read <session-id> --full - all entries (full content)
+ *   read <session-id>           - all entries (truncated for scanning)
+ *   read <session-id> N         - entry N (full content)
+ *   read <session-id> --full    - all entries (full content)
+ *   read <session-id> N -C 2    - entry N with 2 entries before/after as context
+ *   read <session-id> N -B 1 -A 3 - entry N with 1 before, 3 after
  *
  * Session ID supports prefix matching (e.g., "02ed" matches "02ed589a-...")
  *
@@ -12,6 +14,9 @@
  * line + line count (e.g., "[+42 lines]"). This allows quick scanning of session
  * content. Request a specific entry number to see full content, or pipe through
  * `head -n 50` to control output length.
+ *
+ * Context flags (-C, -B, -A) show surrounding entries: target entry in full,
+ * context entries truncated. Requires an entry number N.
  */
 
 import { readFile, readdir } from "node:fs/promises";
@@ -26,17 +31,51 @@ export async function read(): Promise<void> {
   const args = process.argv.slice(3);
 
   if (args.length === 0) {
-    printError("Usage: read <session-id> [N] [--full]");
+    printError("Usage: read <session-id> [N] [--full] [-C N] [-B N] [-A N]");
     console.log("\nExamples:");
-    console.log("  read 02ed        # all entries (truncated for scanning)");
-    console.log("  read 02ed --full # all entries (full content)");
-    console.log("  read 02ed 5      # entry 5 (full content)");
+    console.log("  read 02ed          # all entries (truncated for scanning)");
+    console.log("  read 02ed --full   # all entries (full content)");
+    console.log("  read 02ed 5        # entry 5 (full content)");
+    console.log("  read 02ed 5 -C 2   # entry 5 with 2 entries context before/after");
+    console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
     return;
   }
 
-  // Parse args: session-id, optional entry number, optional --full flag
+  // Parse numeric flag like -C 2, -B 1, -A 3
+  function parseNumericFlag(argList: Array<string>, flag: string): number | null {
+    const idx = argList.indexOf(flag);
+    if (idx === -1) return null;
+    const value = argList[idx + 1];
+    if (!value) return null;
+    const num = parseInt(value, 10);
+    return isNaN(num) || num < 0 ? null : num;
+  }
+
+  // Parse args: session-id, optional entry number, optional flags
   const fullFlag = args.includes("--full");
-  const filteredArgs = args.filter((a) => a !== "--full");
+  const contextC = parseNumericFlag(args, "-C");
+  const contextB = parseNumericFlag(args, "-B");
+  const contextA = parseNumericFlag(args, "-A");
+  const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
+
+  // Filter out all flags and their values to get positional args
+  const flagsToRemove = new Set(["--full"]);
+  for (const flag of ["-C", "-B", "-A"]) {
+    const idx = args.indexOf(flag);
+    if (idx !== -1) {
+      flagsToRemove.add(flag);
+      if (args[idx + 1]) flagsToRemove.add(args[idx + 1]);
+    }
+  }
+  const filteredArgs = args.filter((a, i) => {
+    if (flagsToRemove.has(a)) return false;
+    // Also filter out values that follow flags
+    for (const flag of ["-C", "-B", "-A"]) {
+      const flagIdx = args.indexOf(flag);
+      if (flagIdx !== -1 && i === flagIdx + 1) return false;
+    }
+    return true;
+  });
   const sessionIdPrefix = filteredArgs[0];
   const entryArg = filteredArgs[1];
 
@@ -86,6 +125,12 @@ export async function read(): Promise<void> {
     }
   }
 
+  // Context flags require an entry number
+  if (hasContextFlags && entryNumber === null) {
+    printError("Context flags (-C, -B, -A) require an entry number");
+    return;
+  }
+
   // Read and parse session
   const content = await readFile(sessionFile, "utf-8");
   const lines = Array.from(parseJsonl(content));
@@ -121,20 +166,33 @@ export async function read(): Promise<void> {
     console.log(output);
   } else {
     // Single entry mode: find entry by logical line number
-    const logicalEntry = logicalEntries.find((e) => e.lineNumber === entryNumber);
-    if (!logicalEntry) {
+    const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
+    if (targetIdx === -1) {
       const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
       printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
       return;
     }
 
-    const formatted = formatEntry(logicalEntry.entry, {
-      lineNumber: entryNumber,
-      redact: false,
-      toolResults,
-    });
-    if (formatted) {
-      console.log(formatted);
+    // Calculate context range
+    const before = contextB ?? contextC ?? 0;
+    const after = contextA ?? contextC ?? 0;
+    const startIdx = Math.max(0, targetIdx - before);
+    const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
+
+    // Format and output entries in range
+    const output: Array<string> = [];
+    for (let i = startIdx; i <= endIdx; i++) {
+      const { lineNumber, entry } = logicalEntries[i];
+      const isTarget = i === targetIdx;
+      const formatted = formatEntry(entry, {
+        lineNumber,
+        redact: !isTarget, // Target entry full, context entries truncated
+        toolResults,
+      });
+      if (formatted) {
+        output.push(formatted);
+      }
     }
+    console.log(output.join("\n"));
   }
 }

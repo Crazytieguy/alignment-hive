@@ -11,7 +11,7 @@ var __export = (target, all) => {
     });
 };
 
-// cli/commands/index.ts
+// cli/commands/grep.ts
 import { readdir as readdir2 } from "fs/promises";
 import { join as join3 } from "path";
 
@@ -14570,519 +14570,6 @@ async function extractAllSessions(cwd, transcriptPath) {
   return { extracted, schemaErrors };
 }
 
-// cli/lib/output.ts
-var colors = {
-  red: (s) => `\x1B[31m${s}\x1B[0m`,
-  green: (s) => `\x1B[32m${s}\x1B[0m`,
-  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
-  blue: (s) => `\x1B[34m${s}\x1B[0m`
-};
-function hookOutput(message) {
-  console.log(JSON.stringify({ systemMessage: message }));
-}
-function printError(message) {
-  console.error(`${colors.red("Error:")} ${message}`);
-}
-function printSuccess(message) {
-  console.log(colors.green(message));
-}
-function printInfo(message) {
-  console.log(colors.blue(message));
-}
-function printWarning(message) {
-  console.log(colors.yellow(message));
-}
-
-// cli/commands/index.ts
-async function index() {
-  const cwd = process.cwd();
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-  let files;
-  try {
-    files = await readdir2(sessionsDir);
-  } catch {
-    printError(`No sessions found. Run 'extract' first.`);
-    return;
-  }
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
-    return;
-  }
-  const sessions = [];
-  for (const file2 of jsonlFiles) {
-    const path = join3(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (session && !session.meta.agentId) {
-      sessions.push(session);
-    }
-  }
-  sessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
-  console.log("ID\tDATETIME\tMSGS\tSUMMARY	COMMITS");
-  for (const session of sessions) {
-    console.log(formatSessionLine(session));
-  }
-}
-function formatSessionLine(session) {
-  const { meta: meta3, entries } = session;
-  const id = meta3.sessionId.slice(0, 16);
-  const datetime3 = meta3.rawMtime.slice(0, 16);
-  const count = String(meta3.messageCount);
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
-  const commits = findGitCommits(entries).filter((c) => c.success);
-  const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
-  return `${id}	${datetime3}	${count}	${summary}	${commitList}`;
-}
-function findSummary(entries) {
-  const uuids = new Set;
-  const summaries = [];
-  for (const entry of entries) {
-    if ("uuid" in entry && typeof entry.uuid === "string") {
-      uuids.add(entry.uuid);
-    }
-    if (entry.type === "summary") {
-      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
-    }
-  }
-  for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid)) {
-      return s.summary;
-    }
-  }
-  return summaries.at(-1)?.summary;
-}
-function findFirstUserPrompt(entries) {
-  for (const entry of entries) {
-    if (entry.type !== "user")
-      continue;
-    const content = entry.message.content;
-    if (!content)
-      continue;
-    let text;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === "text" && "text" in block && typeof block.text === "string") {
-          text = block.text;
-          break;
-        }
-      }
-    }
-    if (text) {
-      const firstLine = text.split(`
-`)[0].trim();
-      if (firstLine) {
-        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
-      }
-    }
-  }
-  return;
-}
-function findGitCommits(entries) {
-  const commits = [];
-  const pendingCommits = new Map;
-  for (const entry of entries) {
-    if (entry.type === "assistant") {
-      const content = entry.message.content;
-      if (!Array.isArray(content))
-        continue;
-      for (const block of content) {
-        if (block.type === "tool_use" && "name" in block && block.name === "Bash") {
-          const input = block.input;
-          const command = input.command;
-          if (typeof command === "string" && command.includes("git commit")) {
-            const message = extractCommitMessage(command);
-            if (message && "id" in block && typeof block.id === "string") {
-              pendingCommits.set(block.id, message);
-            }
-          }
-        }
-      }
-    } else if (entry.type === "user") {
-      const content = entry.message.content;
-      if (!Array.isArray(content))
-        continue;
-      for (const block of content) {
-        if (block.type === "tool_result" && "tool_use_id" in block) {
-          const toolUseId = block.tool_use_id;
-          const message = pendingCommits.get(toolUseId);
-          if (message) {
-            const resultContent = getToolResultText(block.content);
-            const success2 = resultContent.includes("[") && !resultContent.includes("error");
-            const hash2 = extractCommitHash(resultContent);
-            commits.push({ hash: hash2, message, success: success2 });
-            pendingCommits.delete(toolUseId);
-          }
-        }
-      }
-    }
-  }
-  for (const message of pendingCommits.values()) {
-    commits.push({ hash: undefined, message, success: true });
-  }
-  return commits;
-}
-function extractCommitHash(output) {
-  const match = output.match(/\[[\w/-]+\s+([a-f0-9]{7,})\]/);
-  return match?.[1];
-}
-function extractCommitMessage(command) {
-  const heredocMatch = command.match(/<<['"]?EOF['"]?\s*\n([\s\S]*?)\n\s*EOF/);
-  if (heredocMatch) {
-    const firstLine = heredocMatch[1].trim().split(`
-`)[0].trim();
-    if (firstLine)
-      return firstLine;
-  }
-  const mFlagMatch = command.match(/git commit[^"']*-m\s*["'](?!\$\()([^"']+)["']/);
-  if (mFlagMatch)
-    return mFlagMatch[1].trim();
-  const simpleMatch = command.match(/git commit[^-]*-m\s+(\S+)/);
-  if (simpleMatch && !simpleMatch[1].startsWith('"') && !simpleMatch[1].startsWith("'")) {
-    return simpleMatch[1];
-  }
-  return;
-}
-function getToolResultText(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const parts = [];
-  for (const block of content) {
-    if (block.type === "text" && "text" in block) {
-      parts.push(block.text);
-    }
-  }
-  return parts.join(`
-`);
-}
-
-// cli/commands/login.ts
-import { createInterface as createInterface2 } from "readline";
-
-// cli/lib/auth.ts
-import { mkdir as mkdir3 } from "fs/promises";
-var WORKOS_API_URL = "https://api.workos.com/user_management";
-var AuthUserSchema = exports_external.object({
-  id: exports_external.string(),
-  email: exports_external.string(),
-  first_name: exports_external.string().optional(),
-  last_name: exports_external.string().optional()
-});
-var AuthDataSchema = exports_external.object({
-  access_token: exports_external.string(),
-  refresh_token: exports_external.string(),
-  user: AuthUserSchema
-});
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
-function isTokenExpired(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number")
-    return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
-}
-async function loadAuthData() {
-  try {
-    const file2 = Bun.file(AUTH_FILE);
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function saveAuthData(data) {
-  await mkdir3(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
-}
-async function refreshToken(refreshTokenValue) {
-  try {
-    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const data = await response.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function checkAuthStatus(attemptRefresh = true) {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
-    return { authenticated: false, needsLogin: true };
-  }
-  if (isTokenExpired(authData.access_token)) {
-    if (!attemptRefresh || !authData.refresh_token) {
-      return { authenticated: false, needsLogin: true };
-    }
-    const newAuthData = await refreshToken(authData.refresh_token);
-    if (!newAuthData) {
-      return { authenticated: false, needsLogin: true };
-    }
-    await saveAuthData(newAuthData);
-    return { authenticated: true, user: newAuthData.user, needsLogin: false };
-  }
-  return { authenticated: true, user: authData.user, needsLogin: false };
-}
-function getUserDisplayName(user) {
-  return user.first_name || user.email;
-}
-
-// cli/lib/messages.ts
-function getCliPath() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return "~/.claude/plugins/hive-mind/cli.js";
-}
-function notLoggedInMessage() {
-  const cliPath = getCliPath();
-  const shell = getShellConfig();
-  return [
-    "hive-mind: Not logged in",
-    "  Login:",
-    `    bun ${cliPath} login`,
-    "",
-    "  Add CLI shortcut (optional):",
-    `    echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
-  ].join(`
-`);
-}
-function loggedInMessage(displayName) {
-  return `hive-mind: Logged in as ${displayName}`;
-}
-function extractedMessage(count) {
-  return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
-}
-var login = {
-  header: "hive-mind login",
-  alreadyLoggedIn: "You're already logged in.",
-  confirmRelogin: "Do you want to log in again?",
-  refreshing: "Attempting to refresh existing session...",
-  refreshSuccess: "Session refreshed successfully!",
-  starting: "Starting hive-mind authentication...",
-  visitUrl: "To authenticate, visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
-  browserOpened: "Browser opened. Confirm the code matches and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
-  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
-  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
-  success: "Authentication successful!",
-  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
-  welcomeEmail: (email3) => `Logged in as: ${email3}`,
-  contributing: "Your Claude Code sessions will now contribute to the hive-mind.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before they're submitted.",
-  timeout: "Authentication timed out. Please try again.",
-  startFailed: (error48) => `Failed to start authentication: ${error48}`,
-  authFailed: (error48) => `Authentication failed: ${error48}`
-};
-
-// cli/commands/login.ts
-var WORKOS_API_URL2 = "https://api.workos.com/user_management";
-var DeviceAuthResponseSchema = exports_external.object({
-  device_code: exports_external.string(),
-  user_code: exports_external.string(),
-  verification_uri: exports_external.string(),
-  verification_uri_complete: exports_external.string(),
-  interval: exports_external.number(),
-  expires_in: exports_external.number()
-});
-var ErrorResponseSchema = exports_external.object({
-  error: exports_external.string(),
-  error_description: exports_external.string().optional()
-});
-async function confirm(message) {
-  const rl = createInterface2({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
-      rl.close();
-      resolve(answer.toLowerCase() === "y");
-    });
-  });
-}
-async function openBrowser(url2) {
-  try {
-    if (process.platform === "darwin") {
-      await Bun.spawn(["open", url2]).exited;
-      return true;
-    } else if (process.platform === "linux") {
-      try {
-        await Bun.spawn(["xdg-open", url2]).exited;
-        return true;
-      } catch {
-        try {
-          await Bun.spawn(["wslview", url2]).exited;
-          return true;
-        } catch {
-          return false;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function checkExistingAuth() {
-  const status = await checkAuthStatus(false);
-  if (status.authenticated && status.user) {
-    printWarning(login.alreadyLoggedIn);
-    console.log("");
-    return await confirm(login.confirmRelogin);
-  }
-  return true;
-}
-async function tryRefresh() {
-  const authData = await loadAuthData();
-  if (!authData?.refresh_token)
-    return false;
-  printInfo(login.refreshing);
-  const newAuthData = await refreshToken(authData.refresh_token);
-  if (newAuthData) {
-    await saveAuthData(newAuthData);
-    printSuccess(login.refreshSuccess);
-    return true;
-  }
-  return false;
-}
-async function deviceAuthFlow() {
-  printInfo(login.starting);
-  console.log("");
-  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
-  });
-  const data = await response.json();
-  const errorResult = ErrorResponseSchema.safeParse(data);
-  if (errorResult.success && errorResult.data.error) {
-    printError(login.startFailed(errorResult.data.error));
-    if (errorResult.data.error_description) {
-      console.log(errorResult.data.error_description);
-    }
-    process.exit(1);
-  }
-  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
-  if (!deviceAuthResult.success) {
-    printError("Unexpected response from authentication server");
-    process.exit(1);
-  }
-  const deviceAuth = deviceAuthResult.data;
-  console.log("\u2501".repeat(65));
-  console.log("");
-  console.log(`  ${login.visitUrl}`);
-  console.log("");
-  console.log(`    ${deviceAuth.verification_uri}`);
-  console.log("");
-  console.log(`  ${login.confirmCode}`);
-  console.log("");
-  console.log(`    ${colors.green(deviceAuth.user_code)}`);
-  console.log("");
-  console.log("\u2501".repeat(65));
-  console.log("");
-  if (await openBrowser(deviceAuth.verification_uri_complete)) {
-    printInfo(login.browserOpened);
-  } else {
-    printInfo(login.openManually);
-  }
-  console.log("");
-  printInfo(login.waiting(deviceAuth.expires_in));
-  let interval = deviceAuth.interval * 1000;
-  const startTime = Date.now();
-  const expiresAt = startTime + deviceAuth.expires_in * 1000;
-  while (Date.now() < expiresAt) {
-    await sleep(interval);
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: deviceAuth.device_code,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const tokenData = await tokenResponse.json();
-    const authResult = AuthDataSchema.safeParse(tokenData);
-    if (authResult.success) {
-      await saveAuthData(authResult.data);
-      console.log("");
-      printSuccess(login.success);
-      console.log("");
-      const displayName = getUserDisplayName(authResult.data.user);
-      if (authResult.data.user.first_name) {
-        console.log(login.welcomeNamed(displayName, authResult.data.user.email));
-      } else {
-        console.log(login.welcomeEmail(authResult.data.user.email));
-      }
-      console.log("");
-      console.log(login.contributing);
-      console.log(login.reviewPeriod);
-      return;
-    }
-    const errorData = tokenData;
-    if (errorData.error === "authorization_pending") {
-      process.stdout.write(`\r  ${login.waitingProgress(elapsed)}`);
-      continue;
-    }
-    if (errorData.error === "slow_down") {
-      interval += 1000;
-      continue;
-    }
-    console.log("");
-    printError(login.authFailed(errorData.error || "unknown error"));
-    if (errorData.error_description)
-      console.log(errorData.error_description);
-    process.exit(1);
-  }
-  printError(login.timeout);
-  process.exit(1);
-}
-async function login2() {
-  console.log("");
-  console.log(`  ${login.header}`);
-  console.log(`  ${"\u2500".repeat(15)}`);
-  console.log("");
-  if (!await checkExistingAuth())
-    return;
-  if (await tryRefresh())
-    return;
-  await deviceAuthFlow();
-}
-
-// cli/commands/read.ts
-import { readFile as readFile3, readdir as readdir3 } from "fs/promises";
-import { join as join4 } from "path";
-
 // cli/lib/format.ts
 var MAX_CONTENT_SUMMARY_LEN = 300;
 function escapeQuotes(str) {
@@ -15831,27 +15318,794 @@ ${indent(entry.summary, 2)}`;
   }
 }
 
+// cli/lib/output.ts
+var colors = {
+  red: (s) => `\x1B[31m${s}\x1B[0m`,
+  green: (s) => `\x1B[32m${s}\x1B[0m`,
+  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
+  blue: (s) => `\x1B[34m${s}\x1B[0m`
+};
+function hookOutput(message) {
+  console.log(JSON.stringify({ systemMessage: message }));
+}
+function printError(message) {
+  console.error(`${colors.red("Error:")} ${message}`);
+}
+function printSuccess(message) {
+  console.log(colors.green(message));
+}
+function printInfo(message) {
+  console.log(colors.blue(message));
+}
+function printWarning(message) {
+  console.log(colors.yellow(message));
+}
+
+// cli/commands/grep.ts
+async function grep() {
+  const args = process.argv.slice(3);
+  if (args.length === 0) {
+    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N]");
+    console.log(`
+Options:`);
+    console.log("  -i       Case insensitive search");
+    console.log("  -c       Count matches per session only");
+    console.log("  -l       List matching session IDs only");
+    console.log("  -m N     Stop after N total matches");
+    console.log("  -C N     Show N lines of context around match");
+    console.log(`
+Examples:`);
+    console.log('  grep "TODO"           # find TODO in sessions');
+    console.log('  grep -i "error" -C 2  # case insensitive with context');
+    console.log('  grep -c "function"    # count matches per session');
+    console.log('  grep -l "#2597"       # list sessions mentioning issue');
+    return;
+  }
+  const options = parseGrepOptions(args);
+  if (!options)
+    return;
+  const cwd = process.cwd();
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir2(sessionsDir);
+  } catch {
+    printError(`No sessions found. Run 'extract' first.`);
+    return;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (jsonlFiles.length === 0) {
+    printError(`No sessions found in ${sessionsDir}`);
+    return;
+  }
+  let totalMatches = 0;
+  const sessionCounts = [];
+  const matchingSessions = [];
+  for (const file2 of jsonlFiles) {
+    if (options.maxMatches !== null && totalMatches >= options.maxMatches)
+      break;
+    const path = join3(sessionsDir, file2);
+    const session = await readExtractedSession(path);
+    if (!session || session.meta.agentId)
+      continue;
+    const sessionId = session.meta.sessionId.slice(0, 8);
+    const logicalEntries = getLogicalEntries(session.entries);
+    let sessionMatchCount = 0;
+    const sessionMatches = [];
+    for (const { lineNumber, entry } of logicalEntries) {
+      if (options.maxMatches !== null && totalMatches >= options.maxMatches)
+        break;
+      const content = extractEntryContent(entry);
+      const lines = content.split(`
+`);
+      for (let i = 0;i < lines.length; i++) {
+        if (options.maxMatches !== null && totalMatches >= options.maxMatches)
+          break;
+        const line = lines[i];
+        if (options.pattern.test(line)) {
+          totalMatches++;
+          sessionMatchCount++;
+          if (!options.countOnly && !options.listOnly) {
+            const contextBefore = lines.slice(Math.max(0, i - options.contextLines), i);
+            const contextAfter = lines.slice(i + 1, i + 1 + options.contextLines);
+            sessionMatches.push({
+              sessionId,
+              entryNumber: lineNumber,
+              entryType: entry.type,
+              line,
+              contextBefore,
+              contextAfter
+            });
+          }
+        }
+      }
+    }
+    if (sessionMatchCount > 0) {
+      matchingSessions.push(sessionId);
+      sessionCounts.push({ sessionId, count: sessionMatchCount });
+      if (!options.countOnly && !options.listOnly) {
+        for (const match of sessionMatches) {
+          outputMatch(match, options.contextLines > 0);
+        }
+      }
+    }
+  }
+  if (options.countOnly) {
+    for (const { sessionId, count } of sessionCounts) {
+      console.log(`${sessionId}:${count}`);
+    }
+  } else if (options.listOnly) {
+    for (const sessionId of matchingSessions) {
+      console.log(sessionId);
+    }
+  }
+}
+function parseGrepOptions(args) {
+  const caseInsensitive = args.includes("-i");
+  const countOnly = args.includes("-c");
+  const listOnly = args.includes("-l");
+  let maxMatches = null;
+  const mIdx = args.indexOf("-m");
+  if (mIdx !== -1 && args[mIdx + 1]) {
+    maxMatches = parseInt(args[mIdx + 1], 10);
+    if (isNaN(maxMatches) || maxMatches < 1) {
+      printError("Invalid -m value: must be a positive number");
+      return null;
+    }
+  }
+  let contextLines = 0;
+  const cIdx = args.indexOf("-C");
+  if (cIdx !== -1 && args[cIdx + 1]) {
+    contextLines = parseInt(args[cIdx + 1], 10);
+    if (isNaN(contextLines) || contextLines < 0) {
+      printError("Invalid -C value: must be a non-negative number");
+      return null;
+    }
+  }
+  const flagsWithValues = new Set(["-m", "-C"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C"]);
+  let patternStr = null;
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (flags.has(arg)) {
+      if (flagsWithValues.has(arg))
+        i++;
+      continue;
+    }
+    patternStr = arg;
+    break;
+  }
+  if (!patternStr) {
+    printError("No pattern specified");
+    return null;
+  }
+  let pattern;
+  try {
+    pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
+  } catch (e) {
+    printError(`Invalid regex pattern: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+  return {
+    pattern,
+    caseInsensitive,
+    countOnly,
+    listOnly,
+    maxMatches,
+    contextLines
+  };
+}
+function extractEntryContent(entry) {
+  const parts = [];
+  if (entry.type === "user" || entry.type === "assistant") {
+    const content = entry.message.content;
+    if (typeof content === "string") {
+      parts.push(content);
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        const text = extractBlockContent(block);
+        if (text)
+          parts.push(text);
+      }
+    }
+  } else if (entry.type === "system") {
+    if (typeof entry.content === "string") {
+      parts.push(entry.content);
+    }
+  } else if (entry.type === "summary") {
+    parts.push(entry.summary);
+  }
+  return parts.join(`
+`);
+}
+function extractBlockContent(block) {
+  if (block.type === "text" && "text" in block) {
+    return block.text;
+  }
+  if (block.type === "thinking" && "thinking" in block) {
+    return block.thinking;
+  }
+  if (block.type === "tool_use" && "input" in block) {
+    return JSON.stringify(block.input);
+  }
+  if (block.type === "tool_result" && "content" in block) {
+    const content = block.content;
+    if (typeof content === "string") {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      const texts = [];
+      for (const item of content) {
+        if (item.type === "text" && "text" in item) {
+          texts.push(item.text);
+        }
+      }
+      return texts.join(`
+`);
+    }
+  }
+  return null;
+}
+function outputMatch(match, showContext) {
+  const prefix = `${match.sessionId}:${match.entryNumber}|${match.entryType}|`;
+  if (showContext) {
+    for (const line of match.contextBefore) {
+      console.log(`${prefix} ${line}`);
+    }
+  }
+  console.log(`${prefix} ${match.line}`);
+  if (showContext) {
+    for (const line of match.contextAfter) {
+      console.log(`${prefix} ${line}`);
+    }
+  }
+}
+
+// cli/commands/index.ts
+import { readdir as readdir3 } from "fs/promises";
+import { join as join4 } from "path";
+async function index() {
+  const cwd = process.cwd();
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir3(sessionsDir);
+  } catch {
+    printError(`No sessions found. Run 'extract' first.`);
+    return;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (jsonlFiles.length === 0) {
+    printError(`No sessions found in ${sessionsDir}`);
+    return;
+  }
+  const sessions = [];
+  for (const file2 of jsonlFiles) {
+    const path = join4(sessionsDir, file2);
+    const session = await readExtractedSession(path);
+    if (session && !session.meta.agentId) {
+      sessions.push(session);
+    }
+  }
+  sessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
+  console.log("ID\tDATETIME\tMSGS\tSUMMARY	COMMITS");
+  for (const session of sessions) {
+    console.log(formatSessionLine(session));
+  }
+}
+function formatSessionLine(session) {
+  const { meta: meta3, entries } = session;
+  const id = meta3.sessionId.slice(0, 16);
+  const datetime3 = meta3.rawMtime.slice(0, 16);
+  const count = String(meta3.messageCount);
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const commits = findGitCommits(entries).filter((c) => c.success);
+  const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
+  return `${id}	${datetime3}	${count}	${summary}	${commitList}`;
+}
+function findSummary(entries) {
+  const uuids = new Set;
+  const summaries = [];
+  for (const entry of entries) {
+    if ("uuid" in entry && typeof entry.uuid === "string") {
+      uuids.add(entry.uuid);
+    }
+    if (entry.type === "summary") {
+      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
+    }
+  }
+  for (const s of summaries) {
+    if (s.leafUuid && uuids.has(s.leafUuid)) {
+      return s.summary;
+    }
+  }
+  return summaries.at(-1)?.summary;
+}
+function findFirstUserPrompt(entries) {
+  for (const entry of entries) {
+    if (entry.type !== "user")
+      continue;
+    const content = entry.message.content;
+    if (!content)
+      continue;
+    let text;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === "text" && "text" in block && typeof block.text === "string") {
+          text = block.text;
+          break;
+        }
+      }
+    }
+    if (text) {
+      const firstLine = text.split(`
+`)[0].trim();
+      if (firstLine) {
+        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
+      }
+    }
+  }
+  return;
+}
+function findGitCommits(entries) {
+  const commits = [];
+  const pendingCommits = new Map;
+  for (const entry of entries) {
+    if (entry.type === "assistant") {
+      const content = entry.message.content;
+      if (!Array.isArray(content))
+        continue;
+      for (const block of content) {
+        if (block.type === "tool_use" && "name" in block && block.name === "Bash") {
+          const input = block.input;
+          const command = input.command;
+          if (typeof command === "string" && command.includes("git commit")) {
+            const message = extractCommitMessage(command);
+            if (message && "id" in block && typeof block.id === "string") {
+              pendingCommits.set(block.id, message);
+            }
+          }
+        }
+      }
+    } else if (entry.type === "user") {
+      const content = entry.message.content;
+      if (!Array.isArray(content))
+        continue;
+      for (const block of content) {
+        if (block.type === "tool_result" && "tool_use_id" in block) {
+          const toolUseId = block.tool_use_id;
+          const message = pendingCommits.get(toolUseId);
+          if (message) {
+            const resultContent = getToolResultText(block.content);
+            const success2 = resultContent.includes("[") && !resultContent.includes("error");
+            const hash2 = extractCommitHash(resultContent);
+            commits.push({ hash: hash2, message, success: success2 });
+            pendingCommits.delete(toolUseId);
+          }
+        }
+      }
+    }
+  }
+  for (const message of pendingCommits.values()) {
+    commits.push({ hash: undefined, message, success: true });
+  }
+  return commits;
+}
+function extractCommitHash(output) {
+  const match = output.match(/\[[\w/-]+\s+([a-f0-9]{7,})\]/);
+  return match?.[1];
+}
+function extractCommitMessage(command) {
+  const heredocMatch = command.match(/<<['"]?EOF['"]?\s*\n([\s\S]*?)\n\s*EOF/);
+  if (heredocMatch) {
+    const firstLine = heredocMatch[1].trim().split(`
+`)[0].trim();
+    if (firstLine)
+      return firstLine;
+  }
+  const mFlagMatch = command.match(/git commit[^"']*-m\s*["'](?!\$\()([^"']+)["']/);
+  if (mFlagMatch)
+    return mFlagMatch[1].trim();
+  const simpleMatch = command.match(/git commit[^-]*-m\s+(\S+)/);
+  if (simpleMatch && !simpleMatch[1].startsWith('"') && !simpleMatch[1].startsWith("'")) {
+    return simpleMatch[1];
+  }
+  return;
+}
+function getToolResultText(content) {
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const parts = [];
+  for (const block of content) {
+    if (block.type === "text" && "text" in block) {
+      parts.push(block.text);
+    }
+  }
+  return parts.join(`
+`);
+}
+
+// cli/commands/login.ts
+import { createInterface as createInterface2 } from "readline";
+
+// cli/lib/auth.ts
+import { mkdir as mkdir3 } from "fs/promises";
+var WORKOS_API_URL = "https://api.workos.com/user_management";
+var AuthUserSchema = exports_external.object({
+  id: exports_external.string(),
+  email: exports_external.string(),
+  first_name: exports_external.string().optional(),
+  last_name: exports_external.string().optional()
+});
+var AuthDataSchema = exports_external.object({
+  access_token: exports_external.string(),
+  refresh_token: exports_external.string(),
+  user: AuthUserSchema
+});
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number")
+    return true;
+  return payload.exp <= Math.floor(Date.now() / 1000);
+}
+async function loadAuthData() {
+  try {
+    const file2 = Bun.file(AUTH_FILE);
+    if (!await file2.exists())
+      return null;
+    const data = await file2.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+async function saveAuthData(data) {
+  await mkdir3(AUTH_DIR, { recursive: true });
+  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
+}
+async function refreshToken(refreshTokenValue) {
+  try {
+    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshTokenValue,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const data = await response.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+async function checkAuthStatus(attemptRefresh = true) {
+  const authData = await loadAuthData();
+  if (!authData?.access_token) {
+    return { authenticated: false, needsLogin: true };
+  }
+  if (isTokenExpired(authData.access_token)) {
+    if (!attemptRefresh || !authData.refresh_token) {
+      return { authenticated: false, needsLogin: true };
+    }
+    const newAuthData = await refreshToken(authData.refresh_token);
+    if (!newAuthData) {
+      return { authenticated: false, needsLogin: true };
+    }
+    await saveAuthData(newAuthData);
+    return { authenticated: true, user: newAuthData.user, needsLogin: false };
+  }
+  return { authenticated: true, user: authData.user, needsLogin: false };
+}
+function getUserDisplayName(user) {
+  return user.first_name || user.email;
+}
+
+// cli/lib/messages.ts
+function getCliPath() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (pluginRoot) {
+    return `${pluginRoot}/cli.js`;
+  }
+  return "~/.claude/plugins/hive-mind/cli.js";
+}
+function notLoggedInMessage() {
+  const cliPath = getCliPath();
+  const shell = getShellConfig();
+  return [
+    "hive-mind: Not logged in",
+    "  Login:",
+    `    bun ${cliPath} login`,
+    "",
+    "  Add CLI shortcut (optional):",
+    `    echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
+  ].join(`
+`);
+}
+function loggedInMessage(displayName) {
+  return `hive-mind: Logged in as ${displayName}`;
+}
+function extractedMessage(count) {
+  return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
+}
+var login = {
+  header: "hive-mind login",
+  alreadyLoggedIn: "You're already logged in.",
+  confirmRelogin: "Do you want to log in again?",
+  refreshing: "Attempting to refresh existing session...",
+  refreshSuccess: "Session refreshed successfully!",
+  starting: "Starting hive-mind authentication...",
+  visitUrl: "To authenticate, visit this URL in your browser:",
+  confirmCode: "Confirm this code matches:",
+  browserOpened: "Browser opened. Confirm the code matches and approve.",
+  openManually: "Open the URL in your browser, then confirm the code.",
+  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
+  success: "Authentication successful!",
+  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
+  welcomeEmail: (email3) => `Logged in as: ${email3}`,
+  contributing: "Your Claude Code sessions will now contribute to the hive-mind.",
+  reviewPeriod: "You'll have 24 hours to review and exclude sessions before they're submitted.",
+  timeout: "Authentication timed out. Please try again.",
+  startFailed: (error48) => `Failed to start authentication: ${error48}`,
+  authFailed: (error48) => `Authentication failed: ${error48}`
+};
+
+// cli/commands/login.ts
+var WORKOS_API_URL2 = "https://api.workos.com/user_management";
+var DeviceAuthResponseSchema = exports_external.object({
+  device_code: exports_external.string(),
+  user_code: exports_external.string(),
+  verification_uri: exports_external.string(),
+  verification_uri_complete: exports_external.string(),
+  interval: exports_external.number(),
+  expires_in: exports_external.number()
+});
+var ErrorResponseSchema = exports_external.object({
+  error: exports_external.string(),
+  error_description: exports_external.string().optional()
+});
+async function confirm(message) {
+  const rl = createInterface2({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${message} [y/N] `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === "y");
+    });
+  });
+}
+async function openBrowser(url2) {
+  try {
+    if (process.platform === "darwin") {
+      await Bun.spawn(["open", url2]).exited;
+      return true;
+    } else if (process.platform === "linux") {
+      try {
+        await Bun.spawn(["xdg-open", url2]).exited;
+        return true;
+      } catch {
+        try {
+          await Bun.spawn(["wslview", url2]).exited;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function checkExistingAuth() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    printWarning(login.alreadyLoggedIn);
+    console.log("");
+    return await confirm(login.confirmRelogin);
+  }
+  return true;
+}
+async function tryRefresh() {
+  const authData = await loadAuthData();
+  if (!authData?.refresh_token)
+    return false;
+  printInfo(login.refreshing);
+  const newAuthData = await refreshToken(authData.refresh_token);
+  if (newAuthData) {
+    await saveAuthData(newAuthData);
+    printSuccess(login.refreshSuccess);
+    return true;
+  }
+  return false;
+}
+async function deviceAuthFlow() {
+  printInfo(login.starting);
+  console.log("");
+  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
+  });
+  const data = await response.json();
+  const errorResult = ErrorResponseSchema.safeParse(data);
+  if (errorResult.success && errorResult.data.error) {
+    printError(login.startFailed(errorResult.data.error));
+    if (errorResult.data.error_description) {
+      console.log(errorResult.data.error_description);
+    }
+    process.exit(1);
+  }
+  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
+  if (!deviceAuthResult.success) {
+    printError("Unexpected response from authentication server");
+    process.exit(1);
+  }
+  const deviceAuth = deviceAuthResult.data;
+  console.log("\u2501".repeat(65));
+  console.log("");
+  console.log(`  ${login.visitUrl}`);
+  console.log("");
+  console.log(`    ${deviceAuth.verification_uri}`);
+  console.log("");
+  console.log(`  ${login.confirmCode}`);
+  console.log("");
+  console.log(`    ${colors.green(deviceAuth.user_code)}`);
+  console.log("");
+  console.log("\u2501".repeat(65));
+  console.log("");
+  if (await openBrowser(deviceAuth.verification_uri_complete)) {
+    printInfo(login.browserOpened);
+  } else {
+    printInfo(login.openManually);
+  }
+  console.log("");
+  printInfo(login.waiting(deviceAuth.expires_in));
+  let interval = deviceAuth.interval * 1000;
+  const startTime = Date.now();
+  const expiresAt = startTime + deviceAuth.expires_in * 1000;
+  while (Date.now() < expiresAt) {
+    await sleep(interval);
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceAuth.device_code,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const tokenData = await tokenResponse.json();
+    const authResult = AuthDataSchema.safeParse(tokenData);
+    if (authResult.success) {
+      await saveAuthData(authResult.data);
+      console.log("");
+      printSuccess(login.success);
+      console.log("");
+      const displayName = getUserDisplayName(authResult.data.user);
+      if (authResult.data.user.first_name) {
+        console.log(login.welcomeNamed(displayName, authResult.data.user.email));
+      } else {
+        console.log(login.welcomeEmail(authResult.data.user.email));
+      }
+      console.log("");
+      console.log(login.contributing);
+      console.log(login.reviewPeriod);
+      return;
+    }
+    const errorData = tokenData;
+    if (errorData.error === "authorization_pending") {
+      process.stdout.write(`\r  ${login.waitingProgress(elapsed)}`);
+      continue;
+    }
+    if (errorData.error === "slow_down") {
+      interval += 1000;
+      continue;
+    }
+    console.log("");
+    printError(login.authFailed(errorData.error || "unknown error"));
+    if (errorData.error_description)
+      console.log(errorData.error_description);
+    process.exit(1);
+  }
+  printError(login.timeout);
+  process.exit(1);
+}
+async function login2() {
+  console.log("");
+  console.log(`  ${login.header}`);
+  console.log(`  ${"\u2500".repeat(15)}`);
+  console.log("");
+  if (!await checkExistingAuth())
+    return;
+  if (await tryRefresh())
+    return;
+  await deviceAuthFlow();
+}
+
 // cli/commands/read.ts
+import { readFile as readFile3, readdir as readdir4 } from "fs/promises";
+import { join as join5 } from "path";
 async function read() {
   const args = process.argv.slice(3);
   if (args.length === 0) {
-    printError("Usage: read <session-id> [N] [--full]");
+    printError("Usage: read <session-id> [N] [--full] [-C N] [-B N] [-A N]");
     console.log(`
 Examples:`);
-    console.log("  read 02ed        # all entries (truncated for scanning)");
-    console.log("  read 02ed --full # all entries (full content)");
-    console.log("  read 02ed 5      # entry 5 (full content)");
+    console.log("  read 02ed          # all entries (truncated for scanning)");
+    console.log("  read 02ed --full   # all entries (full content)");
+    console.log("  read 02ed 5        # entry 5 (full content)");
+    console.log("  read 02ed 5 -C 2   # entry 5 with 2 entries context before/after");
+    console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
     return;
   }
+  function parseNumericFlag(argList, flag) {
+    const idx = argList.indexOf(flag);
+    if (idx === -1)
+      return null;
+    const value = argList[idx + 1];
+    if (!value)
+      return null;
+    const num = parseInt(value, 10);
+    return isNaN(num) || num < 0 ? null : num;
+  }
   const fullFlag = args.includes("--full");
-  const filteredArgs = args.filter((a) => a !== "--full");
+  const contextC = parseNumericFlag(args, "-C");
+  const contextB = parseNumericFlag(args, "-B");
+  const contextA = parseNumericFlag(args, "-A");
+  const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
+  const flagsToRemove = new Set(["--full"]);
+  for (const flag of ["-C", "-B", "-A"]) {
+    const idx = args.indexOf(flag);
+    if (idx !== -1) {
+      flagsToRemove.add(flag);
+      if (args[idx + 1])
+        flagsToRemove.add(args[idx + 1]);
+    }
+  }
+  const filteredArgs = args.filter((a, i) => {
+    if (flagsToRemove.has(a))
+      return false;
+    for (const flag of ["-C", "-B", "-A"]) {
+      const flagIdx = args.indexOf(flag);
+      if (flagIdx !== -1 && i === flagIdx + 1)
+        return false;
+    }
+    return true;
+  });
   const sessionIdPrefix = filteredArgs[0];
   const entryArg = filteredArgs[1];
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir3(sessionsDir);
+    files = await readdir4(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
     return;
@@ -15875,7 +16129,7 @@ Examples:`);
     }
     return;
   }
-  const sessionFile = join4(sessionsDir, matches[0]);
+  const sessionFile = join5(sessionsDir, matches[0]);
   let entryNumber = null;
   if (entryArg) {
     entryNumber = parseInt(entryArg, 10);
@@ -15883,6 +16137,10 @@ Examples:`);
       printError(`Invalid entry number: ${entryArg}`);
       return;
     }
+  }
+  if (hasContextFlags && entryNumber === null) {
+    printError("Context flags (-C, -B, -A) require an entry number");
+    return;
   }
   const content = await readFile3(sessionFile, "utf-8");
   const lines = Array.from(parseJsonl(content));
@@ -15905,20 +16163,31 @@ Examples:`);
     const output = formatSession(allEntries, { redact });
     console.log(output);
   } else {
-    const logicalEntry = logicalEntries.find((e) => e.lineNumber === entryNumber);
-    if (!logicalEntry) {
+    const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
+    if (targetIdx === -1) {
       const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
       printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
       return;
     }
-    const formatted = formatEntry(logicalEntry.entry, {
-      lineNumber: entryNumber,
-      redact: false,
-      toolResults
-    });
-    if (formatted) {
-      console.log(formatted);
+    const before = contextB ?? contextC ?? 0;
+    const after = contextA ?? contextC ?? 0;
+    const startIdx = Math.max(0, targetIdx - before);
+    const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
+    const output = [];
+    for (let i = startIdx;i <= endIdx; i++) {
+      const { lineNumber, entry } = logicalEntries[i];
+      const isTarget = i === targetIdx;
+      const formatted = formatEntry(entry, {
+        lineNumber,
+        redact: !isTarget,
+        toolResults
+      });
+      if (formatted) {
+        output.push(formatted);
+      }
     }
+    console.log(output.join(`
+`));
   }
 }
 
@@ -15955,6 +16224,7 @@ async function sessionStart() {
 
 // cli/cli.ts
 var COMMANDS = {
+  grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
   login: { description: "Authenticate with hive-mind", handler: login2 },
   read: { description: "Read session entries", handler: read },
