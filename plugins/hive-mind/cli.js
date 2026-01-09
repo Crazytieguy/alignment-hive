@@ -14630,7 +14630,7 @@ function formatSessionLine(session) {
   const count = String(meta3.messageCount);
   const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
   const commits = findGitCommits(entries).filter((c) => c.success);
-  const commitList = commits.map((c) => c.message.length > 100 ? `${c.message.slice(0, 97)}...` : c.message).join("; ");
+  const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
   return `${id}	${datetime3}	${count}	${summary}	${commitList}`;
 }
 function findSummary(entries) {
@@ -14710,7 +14710,8 @@ function findGitCommits(entries) {
           if (message) {
             const resultContent = getToolResultText(block.content);
             const success2 = resultContent.includes("[") && !resultContent.includes("error");
-            commits.push({ message, success: success2 });
+            const hash2 = extractCommitHash(resultContent);
+            commits.push({ hash: hash2, message, success: success2 });
             pendingCommits.delete(toolUseId);
           }
         }
@@ -14718,9 +14719,13 @@ function findGitCommits(entries) {
     }
   }
   for (const message of pendingCommits.values()) {
-    commits.push({ message, success: true });
+    commits.push({ hash: undefined, message, success: true });
   }
   return commits;
+}
+function extractCommitHash(output) {
+  const match = output.match(/\[[\w/-]+\s+([a-f0-9]{7,})\]/);
+  return match?.[1];
 }
 function extractCommitMessage(command) {
   const heredocMatch = command.match(/<<['"]?EOF['"]?\s*\n([\s\S]*?)\n\s*EOF/);

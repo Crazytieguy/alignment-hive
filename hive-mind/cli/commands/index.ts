@@ -57,9 +57,10 @@ function formatSessionLine(session: SessionInfo): string {
   const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
 
   const commits = findGitCommits(entries).filter((c) => c.success);
+  // Show hashes (agent can use git show for details) with fallback to truncated message
   const commitList = commits.map((c) =>
-    c.message.length > 100 ? `${c.message.slice(0, 97)}...` : c.message
-  ).join("; ");
+    c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)
+  ).join(" ");
 
   return `${id}\t${datetime}\t${count}\t${summary}\t${commitList}`;
 }
@@ -115,6 +116,7 @@ function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
 }
 
 interface GitCommit {
+  hash: string | undefined;
   message: string;
   success: boolean;
 }
@@ -151,7 +153,8 @@ function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
           if (message) {
             const resultContent = getToolResultText(block.content as string | Array<ContentBlock> | undefined);
             const success = resultContent.includes("[") && !resultContent.includes("error");
-            commits.push({ message, success });
+            const hash = extractCommitHash(resultContent);
+            commits.push({ hash, message, success });
             pendingCommits.delete(toolUseId);
           }
         }
@@ -160,10 +163,16 @@ function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
   }
 
   for (const message of pendingCommits.values()) {
-    commits.push({ message, success: true });
+    commits.push({ hash: undefined, message, success: true });
   }
 
   return commits;
+}
+
+function extractCommitHash(output: string): string | undefined {
+  // Parse "[branch abc1234] message" format
+  const match = output.match(/\[[\w/-]+\s+([a-f0-9]{7,})\]/);
+  return match?.[1];
 }
 
 function extractCommitMessage(command: string): string | undefined {
