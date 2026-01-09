@@ -59,18 +59,13 @@ export async function read(): Promise<void> {
   const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
 
   // Filter out all flags and their values to get positional args
-  const flagsToRemove = new Set(["--full"]);
-  for (const flag of ["-C", "-B", "-A"]) {
-    const idx = args.indexOf(flag);
-    if (idx !== -1) {
-      flagsToRemove.add(flag);
-      if (args[idx + 1]) flagsToRemove.add(args[idx + 1]);
-    }
-  }
+  const flags = new Set(["--full", "-C", "-B", "-A"]);
+  const flagsWithValues = new Set(["-C", "-B", "-A"]);
   const filteredArgs = args.filter((a, i) => {
-    if (flagsToRemove.has(a)) return false;
-    // Also filter out values that follow flags
-    for (const flag of ["-C", "-B", "-A"]) {
+    // Filter out flags themselves
+    if (flags.has(a)) return false;
+    // Filter out values that follow flags (by position, not by value)
+    for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
       if (flagIdx !== -1 && i === flagIdx + 1) return false;
     }

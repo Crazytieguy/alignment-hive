@@ -15345,20 +15345,24 @@ function printWarning(message) {
 async function grep() {
   const args = process.argv.slice(3);
   if (args.length === 0) {
-    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N]");
+    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
     console.log(`
 Options:`);
-    console.log("  -i       Case insensitive search");
-    console.log("  -c       Count matches per session only");
-    console.log("  -l       List matching session IDs only");
-    console.log("  -m N     Stop after N total matches");
-    console.log("  -C N     Show N lines of context around match");
+    console.log("  -i                     Case insensitive search");
+    console.log("  -c                     Count matches per session only");
+    console.log("  -l                     List matching session IDs only");
+    console.log("  -m N                   Stop after N total matches");
+    console.log("  -C N                   Show N lines of context around match");
+    console.log("  -s <session>           Search only in specified session (prefix match)");
+    console.log("  --include-tool-results Also search tool output (can be noisy)");
     console.log(`
 Examples:`);
-    console.log('  grep "TODO"           # find TODO in sessions');
-    console.log('  grep -i "error" -C 2  # case insensitive with context');
-    console.log('  grep -c "function"    # count matches per session');
-    console.log('  grep -l "#2597"       # list sessions mentioning issue');
+    console.log('  grep "TODO"                  # find TODO in sessions');
+    console.log('  grep -i "error" -C 2         # case insensitive with context');
+    console.log('  grep -c "function"           # count matches per session');
+    console.log('  grep -l "#2597"              # list sessions mentioning issue');
+    console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
+    console.log('  grep --include-tool-results "error"  # include tool output');
     return;
   }
   const options = parseGrepOptions(args);
@@ -15373,10 +15377,21 @@ Examples:`);
     printError(`No sessions found. Run 'extract' first.`);
     return;
   }
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
     printError(`No sessions found in ${sessionsDir}`);
     return;
+  }
+  if (options.sessionFilter) {
+    const prefix = options.sessionFilter;
+    jsonlFiles = jsonlFiles.filter((f) => {
+      const name = f.replace(".jsonl", "");
+      return name.startsWith(prefix) || name === `agent-${prefix}`;
+    });
+    if (jsonlFiles.length === 0) {
+      printError(`No session found matching '${prefix}'`);
+      return;
+    }
   }
   let totalMatches = 0;
   const sessionCounts = [];
@@ -15389,10 +15404,10 @@ Examples:`);
     if (!session || session.meta.agentId)
       continue;
     const sessionId = session.meta.sessionId.slice(0, 8);
-    const logicalEntries = getLogicalEntries(session.entries);
+    const entriesToSearch = options.includeToolResults ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry })) : getLogicalEntries(session.entries);
     let sessionMatchCount = 0;
     const sessionMatches = [];
-    for (const { lineNumber, entry } of logicalEntries) {
+    for (const { lineNumber, entry } of entriesToSearch) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches)
         break;
       const content = extractEntryContent(entry);
@@ -15444,6 +15459,7 @@ function parseGrepOptions(args) {
   const caseInsensitive = args.includes("-i");
   const countOnly = args.includes("-c");
   const listOnly = args.includes("-l");
+  const includeToolResults = args.includes("--include-tool-results");
   let maxMatches = null;
   const mIdx = args.indexOf("-m");
   if (mIdx !== -1 && args[mIdx + 1]) {
@@ -15462,8 +15478,13 @@ function parseGrepOptions(args) {
       return null;
     }
   }
-  const flagsWithValues = new Set(["-m", "-C"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C"]);
+  let sessionFilter = null;
+  const sIdx = args.indexOf("-s");
+  if (sIdx !== -1 && args[sIdx + 1]) {
+    sessionFilter = args[sIdx + 1];
+  }
+  const flagsWithValues = new Set(["-m", "-C", "-s"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--include-tool-results"]);
   let patternStr = null;
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
@@ -15492,7 +15513,9 @@ function parseGrepOptions(args) {
     countOnly,
     listOnly,
     maxMatches,
-    contextLines
+    contextLines,
+    includeToolResults,
+    sessionFilter
   };
 }
 function extractEntryContent(entry) {
@@ -16080,19 +16103,12 @@ Examples:`);
   const contextB = parseNumericFlag(args, "-B");
   const contextA = parseNumericFlag(args, "-A");
   const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
-  const flagsToRemove = new Set(["--full"]);
-  for (const flag of ["-C", "-B", "-A"]) {
-    const idx = args.indexOf(flag);
-    if (idx !== -1) {
-      flagsToRemove.add(flag);
-      if (args[idx + 1])
-        flagsToRemove.add(args[idx + 1]);
-    }
-  }
+  const flags = new Set(["--full", "-C", "-B", "-A"]);
+  const flagsWithValues = new Set(["-C", "-B", "-A"]);
   const filteredArgs = args.filter((a, i) => {
-    if (flagsToRemove.has(a))
+    if (flags.has(a))
       return false;
-    for (const flag of ["-C", "-B", "-A"]) {
+    for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
       if (flagIdx !== -1 && i === flagIdx + 1)
         return false;

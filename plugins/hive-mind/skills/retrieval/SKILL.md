@@ -28,9 +28,12 @@ bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -c "<pattern>"     # Count matches per ses
 bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -l "<pattern>"     # List matching session IDs
 bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -m 10 "<pattern>"  # Limit to 10 matches
 bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -C 2 "<pattern>"   # Show 2 lines context
+bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -s <session> "<pattern>"  # Search specific session
+bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --include-tool-results "<pattern>"  # Include tool output
 
 # Read session overview (truncated for scanning)
 bun ${CLAUDE_PLUGIN_ROOT}/cli.js read <session-id>
+bun ${CLAUDE_PLUGIN_ROOT}/cli.js read <session-id> --full  # Full content, no truncation
 
 # Read specific entry in full
 bun ${CLAUDE_PLUGIN_ROOT}/cli.js read <session-id> <line-number>
@@ -52,7 +55,9 @@ Your goal is to be **thorough**. Use all available tools to find relevant contex
    ```bash
    bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep "#2597"        # Find discussions of an issue
    bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -l "auth"      # List sessions mentioning auth
+   bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep -s 02ed "bug"  # Search within a specific session
    ```
+   Note: By default, grep searches user prompts, assistant responses, thinking, and tool inputs. Use `--include-tool-results` to also search command output and file contents (can be noisy).
 
 3. **Scan session overviews**: Read truncated overviews (`read <id>`) of candidate sessions. Summaries don't capture everything - scan the actual content.
 

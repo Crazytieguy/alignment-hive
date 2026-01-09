@@ -2,15 +2,18 @@
  * Grep command - search across sessions.
  *
  * Usage:
- *   grep <pattern>         - search for pattern in all sessions
- *   grep -i <pattern>      - case insensitive search
- *   grep -c <pattern>      - count matches per session
- *   grep -l <pattern>      - list matching session IDs only
- *   grep -m N <pattern>    - stop after N total matches
- *   grep -C N <pattern>    - show N lines context around match
+ *   grep <pattern>                    - search for pattern in all sessions
+ *   grep -s <session> <pattern>       - search within a specific session
+ *   grep -i <pattern>                 - case insensitive search
+ *   grep -c <pattern>                 - count matches per session
+ *   grep -l <pattern>                 - list matching session IDs only
+ *   grep -m N <pattern>               - stop after N total matches
+ *   grep -C N <pattern>               - show N lines context around match
+ *   grep --include-tool-results <pattern> - also search tool output content
  *
  * Pattern is a JavaScript regex (like grep -E extended regex).
- * Searches full entry content (user prompts, assistant responses, tool results).
+ * By default, searches user prompts, assistant responses, thinking, and tool inputs.
+ * Use --include-tool-results to also search tool output (can be noisy).
  * Agent sessions excluded (same as index command).
  */
 
@@ -28,6 +31,8 @@ interface GrepOptions {
   listOnly: boolean;
   maxMatches: number | null;
   contextLines: number;
+  includeToolResults: boolean;
+  sessionFilter: string | null;
 }
 
 interface Match {
@@ -43,18 +48,22 @@ export async function grep(): Promise<void> {
   const args = process.argv.slice(3);
 
   if (args.length === 0) {
-    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N]");
+    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
     console.log("\nOptions:");
-    console.log("  -i       Case insensitive search");
-    console.log("  -c       Count matches per session only");
-    console.log("  -l       List matching session IDs only");
-    console.log("  -m N     Stop after N total matches");
-    console.log("  -C N     Show N lines of context around match");
+    console.log("  -i                     Case insensitive search");
+    console.log("  -c                     Count matches per session only");
+    console.log("  -l                     List matching session IDs only");
+    console.log("  -m N                   Stop after N total matches");
+    console.log("  -C N                   Show N lines of context around match");
+    console.log("  -s <session>           Search only in specified session (prefix match)");
+    console.log("  --include-tool-results Also search tool output (can be noisy)");
     console.log("\nExamples:");
-    console.log('  grep "TODO"           # find TODO in sessions');
-    console.log('  grep -i "error" -C 2  # case insensitive with context');
-    console.log('  grep -c "function"    # count matches per session');
-    console.log('  grep -l "#2597"       # list sessions mentioning issue');
+    console.log('  grep "TODO"                  # find TODO in sessions');
+    console.log('  grep -i "error" -C 2         # case insensitive with context');
+    console.log('  grep -c "function"           # count matches per session');
+    console.log('  grep -l "#2597"              # list sessions mentioning issue');
+    console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
+    console.log('  grep --include-tool-results "error"  # include tool output');
     return;
   }
 
@@ -73,10 +82,23 @@ export async function grep(): Promise<void> {
     return;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
     printError(`No sessions found in ${sessionsDir}`);
     return;
+  }
+
+  // Filter to specific session if -s flag provided
+  if (options.sessionFilter) {
+    const prefix = options.sessionFilter;
+    jsonlFiles = jsonlFiles.filter((f) => {
+      const name = f.replace(".jsonl", "");
+      return name.startsWith(prefix) || name === `agent-${prefix}`;
+    });
+    if (jsonlFiles.length === 0) {
+      printError(`No session found matching '${prefix}'`);
+      return;
+    }
   }
 
   let totalMatches = 0;
@@ -93,12 +115,17 @@ export async function grep(): Promise<void> {
     if (!session || session.meta.agentId) continue;
 
     const sessionId = session.meta.sessionId.slice(0, 8);
-    const logicalEntries = getLogicalEntries(session.entries);
+
+    // When --include-tool-results is set, search all entries (including tool-result-only)
+    // Otherwise, use logical entries (which skip tool-result-only entries)
+    const entriesToSearch: Array<{ lineNumber: number; entry: KnownEntry }> = options.includeToolResults
+      ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry }))
+      : getLogicalEntries(session.entries);
 
     let sessionMatchCount = 0;
     const sessionMatches: Array<Match> = [];
 
-    for (const { lineNumber, entry } of logicalEntries) {
+    for (const { lineNumber, entry } of entriesToSearch) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
       const content = extractEntryContent(entry);
@@ -158,6 +185,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   const caseInsensitive = args.includes("-i");
   const countOnly = args.includes("-c");
   const listOnly = args.includes("-l");
+  const includeToolResults = args.includes("--include-tool-results");
 
   // Parse -m N
   let maxMatches: number | null = null;
@@ -181,9 +209,16 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     }
   }
 
+  // Parse -s <session>
+  let sessionFilter: string | null = null;
+  const sIdx = args.indexOf("-s");
+  if (sIdx !== -1 && args[sIdx + 1]) {
+    sessionFilter = args[sIdx + 1];
+  }
+
   // Extract pattern (first non-flag argument)
-  const flagsWithValues = new Set(["-m", "-C"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C"]);
+  const flagsWithValues = new Set(["-m", "-C", "-s"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--include-tool-results"]);
   let patternStr: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
@@ -216,6 +251,8 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     listOnly,
     maxMatches,
     contextLines,
+    includeToolResults,
+    sessionFilter,
   };
 }
 
