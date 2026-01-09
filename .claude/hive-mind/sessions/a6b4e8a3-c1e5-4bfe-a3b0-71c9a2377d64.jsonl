@@ -1,4 +1,4 @@
-{"_type":"hive-mind-meta","version":"0.1","sessionId":"a6b4e8a3-c1e5-4bfe-a3b0-71c9a2377d64","checkoutId":"deb16c4b-0302-4e62-8640-ec42acb25027","extractedAt":"2026-01-07T01:45:44.910Z","rawMtime":"2026-01-05T16:59:08.920Z","messageCount":418,"rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/a6b4e8a3-c1e5-4bfe-a3b0-71c9a2377d64.jsonl"}
+{"_type":"hive-mind-meta","version":"0.1","sessionId":"a6b4e8a3-c1e5-4bfe-a3b0-71c9a2377d64","checkoutId":"deb16c4b-0302-4e62-8640-ec42acb25027","extractedAt":"2026-01-09T04:48:43.302Z","rawMtime":"2026-01-05T16:59:08.920Z","messageCount":418,"rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/a6b4e8a3-c1e5-4bfe-a3b0-71c9a2377d64.jsonl"}
 {"type":"summary","summary":"Zod Schema Refactor & Tool Result Processing Cleanup","leafUuid":"08e4b689-b740-4cd7-ab7c-e733623969e8"}
 {"type":"summary","summary":"Zod refactor: strip fields, eliminate type casts","leafUuid":"9beee7aa-02f0-4913-b397-2f63f9da22c0"}
 {"type":"summary","summary":"Zod Schema Refactor: Simplify Extraction & Strip Base64","leafUuid":"3ff8329f-0676-4433-a2ce-3891220cad53"}

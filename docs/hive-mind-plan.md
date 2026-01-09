@@ -270,6 +270,45 @@ For processing pipeline management:
 - Admin web app design
 - Queueing to limit concurrent processing jobs
 
+## Open Issues
+
+### Retrieval Agent Permissions Not Enforced
+
+**Status**: Investigating
+
+The `allowed-tools` restrictions in the retrieval skill (`plugins/hive-mind/skills/retrieval/SKILL.md`) are not being enforced. Agents can use any Bash command despite restrictions like:
+```yaml
+allowed-tools:
+  - Bash(bun *cli.js index*)
+  - Bash(bun *cli.js read*)
+  - Bash(bun *cli.js grep*)
+  - Bash(git log*)
+  - Bash(git show*)
+```
+
+Observed violations include `cat`, `find`, `grep -r`, and `ls` commands that executed successfully and returned real output. This is a Claude Code behavior issue, not a hive-mind bug.
+
+**Next steps**: Investigate how skill permissions are supposed to work, check if this is a known Claude Code issue.
+
+### Subagent Extraction (Claude Code 2.1.0+)
+
+Claude Code 2.1.0 changed subagent storage from standalone `agent-*.jsonl` files to `<session-id>/subagents/agent-*.jsonl` directories. Extraction updated to handle both formats. Currently extracting all agents flat to `.claude/hive-mind/sessions/agent-*.jsonl` - may want to preserve hierarchy later if needed for parent-child relationships.
+
+### CLI Feature Gaps (from usage analysis)
+
+Analysis of retrieval agent bash commands revealed patterns where the model used raw bash instead of CLI commands. See `docs/retrieval-agent-bash-commands.txt` for the raw data.
+
+**Observed patterns:**
+1. **Range reads**: Model tried `read <id> 150-200` but CLI only supports single entry reads
+2. **Reading project files**: Model used `cat docs/*.md`, `grep -r` on project files to cross-reference session findings with actual documentation/code
+3. **Finding files**: Model used `find` and `ls` to explore project structure
+
+**Questions to resolve:**
+- Should we add range read support (`read <id> N-M`)?
+- Should retrieval agents be allowed to read non-session files (project docs, code)?
+- If yes, should this be via raw file access or a new CLI command?
+- How does this interact with the (currently broken) permissions system?
+
 ## Future Features
 
 - User web dashboard for session management

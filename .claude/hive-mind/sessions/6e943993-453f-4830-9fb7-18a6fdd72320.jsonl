@@ -1,4 +1,4 @@
-{"_type":"hive-mind-meta","version":"0.1","sessionId":"6e943993-453f-4830-9fb7-18a6fdd72320","checkoutId":"deb16c4b-0302-4e62-8640-ec42acb25027","extractedAt":"2026-01-07T01:45:39.873Z","rawMtime":"2026-01-05T02:46:41.491Z","messageCount":225,"rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/6e943993-453f-4830-9fb7-18a6fdd72320.jsonl"}
+{"_type":"hive-mind-meta","version":"0.1","sessionId":"6e943993-453f-4830-9fb7-18a6fdd72320","checkoutId":"deb16c4b-0302-4e62-8640-ec42acb25027","extractedAt":"2026-01-09T04:48:33.467Z","rawMtime":"2026-01-05T02:46:41.491Z","messageCount":225,"rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/6e943993-453f-4830-9fb7-18a6fdd72320.jsonl"}
 {"type":"summary","summary":"Zod schema refactor with type safety","leafUuid":"08e4b689-b740-4cd7-ab7c-e733623969e8"}
 {"type":"summary","summary":"Zod schema refactor: strip fields, eliminate type casts","leafUuid":"9beee7aa-02f0-4913-b397-2f63f9da22c0"}
 {"type":"summary","summary":"Zod Schema Refactor & Code Simplification","leafUuid":"db0958d4-c917-4b48-98bb-8cd9c9f055fc"}

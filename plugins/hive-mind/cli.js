@@ -14520,13 +14520,26 @@ async function findRawSessions(rawDir) {
     const files = await readdir(rawDir);
     const sessions = [];
     for (const f of files) {
-      if (!f.endsWith(".jsonl"))
+      if (f.endsWith(".jsonl")) {
+        if (f.startsWith("agent-")) {
+          sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+        } else {
+          sessions.push({ path: join2(rawDir, f) });
+        }
         continue;
-      if (f.startsWith("agent-")) {
-        sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
-      } else {
-        sessions.push({ path: join2(rawDir, f) });
       }
+      const subagentsDir = join2(rawDir, f, "subagents");
+      try {
+        const subagentFiles = await readdir(subagentsDir);
+        for (const sf of subagentFiles) {
+          if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
+            sessions.push({
+              path: join2(subagentsDir, sf),
+              agentId: sf.replace("agent-", "").replace(".jsonl", "")
+            });
+          }
+        }
+      } catch {}
     }
     return sessions;
   } catch {
