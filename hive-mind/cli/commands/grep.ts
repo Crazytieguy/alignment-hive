@@ -44,27 +44,41 @@ interface Match {
   contextAfter: Array<string>;
 }
 
+function printUsage(): void {
+  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
+  console.log("\nSearch across sessions for a pattern (JavaScript regex).");
+  console.log("Use -- to separate options from pattern (e.g., grep -- \"--help\" to search for literal --help).");
+  console.log("\nOptions:");
+  console.log("  -i                     Case insensitive search");
+  console.log("  -c                     Count matches per session only");
+  console.log("  -l                     List matching session IDs only");
+  console.log("  -m N                   Stop after N total matches");
+  console.log("  -C N                   Show N lines of context around match");
+  console.log("  -s <session>           Search only in specified session (prefix match)");
+  console.log("  --include-tool-results Also search tool output (can be noisy)");
+  console.log("\nExamples:");
+  console.log('  grep "TODO"                  # find TODO in sessions');
+  console.log('  grep -i "error" -C 2         # case insensitive with context');
+  console.log('  grep -c "function"           # count matches per session');
+  console.log('  grep -l "#2597"              # list sessions mentioning issue');
+  console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
+  console.log('  grep --include-tool-results "error"  # include tool output');
+}
+
 export async function grep(): Promise<void> {
   const args = process.argv.slice(3);
 
-  if (args.length === 0) {
-    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
-    console.log("\nOptions:");
-    console.log("  -i                     Case insensitive search");
-    console.log("  -c                     Count matches per session only");
-    console.log("  -l                     List matching session IDs only");
-    console.log("  -m N                   Stop after N total matches");
-    console.log("  -C N                   Show N lines of context around match");
-    console.log("  -s <session>           Search only in specified session (prefix match)");
-    console.log("  --include-tool-results Also search tool output (can be noisy)");
-    console.log("\nExamples:");
-    console.log('  grep "TODO"                  # find TODO in sessions');
-    console.log('  grep -i "error" -C 2         # case insensitive with context');
-    console.log('  grep -c "function"           # count matches per session');
-    console.log('  grep -l "#2597"              # list sessions mentioning issue');
-    console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
-    console.log('  grep --include-tool-results "error"  # include tool output');
+  // Check for help flag before -- separator
+  const doubleDashIdx = args.indexOf("--");
+  const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
+  if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
+    printUsage();
     return;
+  }
+
+  if (args.length === 0) {
+    printUsage();
+    process.exit(1);
   }
 
   // Parse options

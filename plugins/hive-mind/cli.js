@@ -15355,28 +15355,40 @@ function printWarning(message) {
 }
 
 // cli/commands/grep.ts
+function printUsage() {
+  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
+  console.log(`
+Search across sessions for a pattern (JavaScript regex).`);
+  console.log('Use -- to separate options from pattern (e.g., grep -- "--help" to search for literal --help).');
+  console.log(`
+Options:`);
+  console.log("  -i                     Case insensitive search");
+  console.log("  -c                     Count matches per session only");
+  console.log("  -l                     List matching session IDs only");
+  console.log("  -m N                   Stop after N total matches");
+  console.log("  -C N                   Show N lines of context around match");
+  console.log("  -s <session>           Search only in specified session (prefix match)");
+  console.log("  --include-tool-results Also search tool output (can be noisy)");
+  console.log(`
+Examples:`);
+  console.log('  grep "TODO"                  # find TODO in sessions');
+  console.log('  grep -i "error" -C 2         # case insensitive with context');
+  console.log('  grep -c "function"           # count matches per session');
+  console.log('  grep -l "#2597"              # list sessions mentioning issue');
+  console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
+  console.log('  grep --include-tool-results "error"  # include tool output');
+}
 async function grep() {
   const args = process.argv.slice(3);
-  if (args.length === 0) {
-    console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
-    console.log(`
-Options:`);
-    console.log("  -i                     Case insensitive search");
-    console.log("  -c                     Count matches per session only");
-    console.log("  -l                     List matching session IDs only");
-    console.log("  -m N                   Stop after N total matches");
-    console.log("  -C N                   Show N lines of context around match");
-    console.log("  -s <session>           Search only in specified session (prefix match)");
-    console.log("  --include-tool-results Also search tool output (can be noisy)");
-    console.log(`
-Examples:`);
-    console.log('  grep "TODO"                  # find TODO in sessions');
-    console.log('  grep -i "error" -C 2         # case insensitive with context');
-    console.log('  grep -c "function"           # count matches per session');
-    console.log('  grep -l "#2597"              # list sessions mentioning issue');
-    console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
-    console.log('  grep --include-tool-results "error"  # include tool output');
+  const doubleDashIdx = args.indexOf("--");
+  const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
+  if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
+    printUsage();
     return;
+  }
+  if (args.length === 0) {
+    printUsage();
+    process.exit(1);
   }
   const options = parseGrepOptions(args);
   if (!options)
@@ -15600,7 +15612,25 @@ function outputMatch(match, showContext) {
 // cli/commands/index.ts
 import { readdir as readdir3 } from "fs/promises";
 import { join as join4 } from "path";
+function printUsage2() {
+  console.log("Usage: index");
+  console.log(`
+List all extracted sessions with ID, datetime, message count, summary, and commits.`);
+  console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
+  console.log(`
+Output columns:`);
+  console.log("  ID        Session ID prefix (first 16 chars)");
+  console.log("  DATETIME  Session modification time");
+  console.log("  MSGS      Message count");
+  console.log("  SUMMARY   Session summary or first user prompt");
+  console.log("  COMMITS   Git commit hashes from the session");
+}
 async function index() {
+  const args = process.argv.slice(3);
+  if (args.includes("--help") || args.includes("-h")) {
+    printUsage2();
+    return;
+  }
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
@@ -16088,18 +16118,34 @@ async function login2() {
 // cli/commands/read.ts
 import { readFile as readFile3, readdir as readdir4 } from "fs/promises";
 import { join as join5 } from "path";
+function printUsage3() {
+  console.log("Usage: read <session-id> [N] [--full] [-C N] [-B N] [-A N]");
+  console.log(`
+Read session entries. Session ID supports prefix matching.`);
+  console.log(`
+Options:`);
+  console.log("  N         Entry number to read (full content)");
+  console.log("  --full    Show all entries with full content (no truncation)");
+  console.log("  -C N      Show N entries of context before and after");
+  console.log("  -B N      Show N entries of context before");
+  console.log("  -A N      Show N entries of context after");
+  console.log(`
+Examples:`);
+  console.log("  read 02ed          # all entries (truncated for scanning)");
+  console.log("  read 02ed --full   # all entries (full content)");
+  console.log("  read 02ed 5        # entry 5 (full content)");
+  console.log("  read 02ed 5 -C 2   # entry 5 with 2 entries context before/after");
+  console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
+}
 async function read() {
   const args = process.argv.slice(3);
-  if (args.length === 0) {
-    printError("Usage: read <session-id> [N] [--full] [-C N] [-B N] [-A N]");
-    console.log(`
-Examples:`);
-    console.log("  read 02ed          # all entries (truncated for scanning)");
-    console.log("  read 02ed --full   # all entries (full content)");
-    console.log("  read 02ed 5        # entry 5 (full content)");
-    console.log("  read 02ed 5 -C 2   # entry 5 with 2 entries context before/after");
-    console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
+  if (args.includes("--help") || args.includes("-h")) {
+    printUsage3();
     return;
+  }
+  if (args.length === 0) {
+    printUsage3();
+    process.exit(1);
   }
   function parseNumericFlag(argList, flag) {
     const idx = argList.indexOf(flag);
@@ -16259,7 +16305,7 @@ var COMMANDS = {
   read: { description: "Read session entries", handler: read },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
 };
-function printUsage() {
+function printUsage4() {
   console.log(`Usage: hive-mind <command>
 `);
   console.log("Commands:");
@@ -16270,7 +16316,7 @@ function printUsage() {
 async function main() {
   const command = process.argv[2];
   if (!command || command === "help" || command === "--help" || command === "-h") {
-    printUsage();
+    printUsage4();
     if (!command)
       process.exit(1);
     return;
@@ -16278,7 +16324,7 @@ async function main() {
   if (!(command in COMMANDS)) {
     printError(`Unknown command: ${command}`);
     console.log("");
-    printUsage();
+    printUsage4();
     process.exit(1);
   }
   const cmd = COMMANDS[command];

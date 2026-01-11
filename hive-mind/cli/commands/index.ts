@@ -14,7 +14,26 @@ interface SessionInfo {
   entries: Array<KnownEntry>;
 }
 
+function printUsage(): void {
+  console.log("Usage: index");
+  console.log("\nList all extracted sessions with ID, datetime, message count, summary, and commits.");
+  console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
+  console.log("\nOutput columns:");
+  console.log("  ID        Session ID prefix (first 16 chars)");
+  console.log("  DATETIME  Session modification time");
+  console.log("  MSGS      Message count");
+  console.log("  SUMMARY   Session summary or first user prompt");
+  console.log("  COMMITS   Git commit hashes from the session");
+}
+
 export async function index(): Promise<void> {
+  const args = process.argv.slice(3);
+
+  if (args.includes("--help") || args.includes("-h")) {
+    printUsage();
+    return;
+  }
+
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
 

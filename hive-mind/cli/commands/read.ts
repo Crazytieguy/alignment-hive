@@ -27,18 +27,34 @@ import { printError } from "../lib/output";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
 
+function printUsage(): void {
+  console.log("Usage: read <session-id> [N] [--full] [-C N] [-B N] [-A N]");
+  console.log("\nRead session entries. Session ID supports prefix matching.");
+  console.log("\nOptions:");
+  console.log("  N         Entry number to read (full content)");
+  console.log("  --full    Show all entries with full content (no truncation)");
+  console.log("  -C N      Show N entries of context before and after");
+  console.log("  -B N      Show N entries of context before");
+  console.log("  -A N      Show N entries of context after");
+  console.log("\nExamples:");
+  console.log("  read 02ed          # all entries (truncated for scanning)");
+  console.log("  read 02ed --full   # all entries (full content)");
+  console.log("  read 02ed 5        # entry 5 (full content)");
+  console.log("  read 02ed 5 -C 2   # entry 5 with 2 entries context before/after");
+  console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
+}
+
 export async function read(): Promise<void> {
   const args = process.argv.slice(3);
 
-  if (args.length === 0) {
-    printError("Usage: read <session-id> [N] [--full] [-C N] [-B N] [-A N]");
-    console.log("\nExamples:");
-    console.log("  read 02ed          # all entries (truncated for scanning)");
-    console.log("  read 02ed --full   # all entries (full content)");
-    console.log("  read 02ed 5        # entry 5 (full content)");
-    console.log("  read 02ed 5 -C 2   # entry 5 with 2 entries context before/after");
-    console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
+  if (args.includes("--help") || args.includes("-h")) {
+    printUsage();
     return;
+  }
+
+  if (args.length === 0) {
+    printUsage();
+    process.exit(1);
   }
 
   // Parse numeric flag like -C 2, -B 1, -A 3
