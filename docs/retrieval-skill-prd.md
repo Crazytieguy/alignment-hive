@@ -52,39 +52,30 @@ This eliminates the first few commands every agent runs and ensures nothing is m
 
 ---
 
-### 3. Session Statistics During Extraction
+### 3. Session Statistics in Index
 
-**Status:** Not started
+**Status:** Done
 **Effort:** Medium-Large
 
-Compute mechanical statistics during session extraction to help agents understand session character without semantic analysis:
+Compute mechanical statistics on-the-fly during index to help agents understand session character without semantic analysis.
 
-**Statistics to compute:**
-- User message count
-- Assistant message count
-- Total lines modified (from Edit/Write tools)
-- Number of files touched
-- **Lines modified by folder** (see algorithm below)
-- Bash commands executed count
-- Web fetches count
-- Web searches count
+**Statistics computed:**
+- Message counts (total and user)
+- Lines added/removed (from Edit/Write tools)
+- Files touched
+- Significant locations (paths where >30% of work happened)
+- Tool usage counts (Bash, WebFetch, WebSearch)
 
-**Folder breakdown algorithm:**
-
-Find the most specific folder level that captures meaningful distribution. If 90% of work was in `src/frontend/components/` and 10% in `src/backend/`, showing just `src/` loses information.
-
-The exact algorithm and threshold parameters should be determined through experimentation. Initial approach to try:
-1. Build a tree of paths with line counts at leaves
-2. Traverse depth-first; at each node with >= threshold% of total, check children
-3. If any child has >= threshold%, recurse into that child
-4. Otherwise, output this node as a "significant" folder
-5. Aggregate remaining small items into "other" if needed
-
-This finds the "significant frontier" - the deepest level where folders still represent meaningful chunks of work. The threshold (e.g., 30%) and aggregation rules need tuning based on real session data.
+**Implementation notes:**
+- Statistics computed on-the-fly during index, not stored in metadata
+- Recursively includes stats from subagent sessions
+- Two-threshold algorithm for significant locations (>30% of total, >50% of parent)
+- Relative paths for project files, ~/ for home directory
+- Zero values display as blank
 
 **Acceptance criteria:**
-- Statistics computed during extraction and stored in session metadata
-- Folder breakdown uses adaptive algorithm to find right granularity
+- ~~Statistics computed during extraction and stored in session metadata~~ Computed on-the-fly
+- ~~Folder breakdown uses adaptive algorithm to find right granularity~~ Two-threshold algorithm implemented
 - Statistics displayed in index output
 - Be inclusive initially; we can remove noisy stats later
 
@@ -221,7 +212,7 @@ Suggested sequence based on dependencies and effort:
 1. ~~**#4 Add read-only tools** - Small, unblocks other testing~~ Done
 2. ~~**#1 Retrieval metaphor** - Small, improves baseline behavior~~ Done
 3. ~~**#2 Pre-populate context** - Medium, significant UX improvement~~ Done
-4. **#3 Session statistics** - Medium-large, requires extraction changes
+4. ~~**#3 Session statistics** - Medium-large, computed on-the-fly in index~~ Done
 5. **#5 Adaptive truncation** - Medium-large, algorithm work needed
 6. **#6 Range reads** - Small once #5 is done
 7. **#7 Opus model** - Trivial, do after validating improvements

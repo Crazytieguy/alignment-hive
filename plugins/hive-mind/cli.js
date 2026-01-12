@@ -15613,6 +15613,42 @@ function outputMatch(match, showContext) {
 import { readdir as readdir3 } from "fs/promises";
 import { homedir as homedir3 } from "os";
 import { join as join4 } from "path";
+var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function computeMinimalPrefixes(ids) {
+  const result = new Map;
+  const minLen = 4;
+  for (const id of ids) {
+    let len = minLen;
+    while (len < id.length) {
+      const prefix = id.slice(0, len);
+      const conflicts = ids.filter((other) => other !== id && other.startsWith(prefix));
+      if (conflicts.length === 0)
+        break;
+      len++;
+    }
+    result.set(id, id.slice(0, len));
+  }
+  return result;
+}
+function formatRelativeDateTime(rawMtime, prevDate, prevYear) {
+  const dateObj = new Date(rawMtime);
+  const year = String(dateObj.getFullYear());
+  const month = MONTH_NAMES[dateObj.getMonth()];
+  const day = String(dateObj.getDate()).padStart(2, "0");
+  const hours = String(dateObj.getHours()).padStart(2, "0");
+  const minutes = String(dateObj.getMinutes()).padStart(2, "0");
+  const date5 = `${month}${day}`;
+  const time3 = `T${hours}:${minutes}`;
+  let display;
+  if (year !== prevYear && prevYear !== "") {
+    display = `${year}${date5}${time3}`;
+  } else if (date5 !== prevDate) {
+    display = `${date5}${time3}`;
+  } else {
+    display = time3;
+  }
+  return { display, date: date5, year };
+}
 function printUsage2() {
   console.log("Usage: index");
   console.log(`
@@ -15668,23 +15704,30 @@ async function index() {
   }
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
-  console.log("ID\tDATETIME\tMSGS\tUSER_MESSAGES\tBASH_CALLS\tWEB_FETCHES\tWEB_SEARCHES\tLINES_ADDED\tLINES_REMOVED\tFILES_TOUCHED\tSIGNIFICANT_LOCATIONS\tSUMMARY	COMMITS");
+  const sessionIds = mainSessions.map((s) => s.meta.sessionId);
+  const idPrefixes = computeMinimalPrefixes(sessionIds);
+  console.log("ID DATETIME MSGS USER_MESSAGES BASH_CALLS WEB_FETCHES WEB_SEARCHES LINES_ADDED LINES_REMOVED FILES_TOUCHED SIGNIFICANT_LOCATIONS SUMMARY COMMITS");
+  let prevDate = "";
+  let prevYear = "";
   for (const session of mainSessions) {
-    console.log(formatSessionLine(session, allSessions, cwd));
+    const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
+    const { line, date: date5, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear);
+    console.log(line);
+    prevDate = date5;
+    prevYear = year;
   }
 }
-function formatSessionLine(session, allSessions, cwd) {
+function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYear) {
   const { meta: meta3, entries } = session;
-  const id = meta3.sessionId.slice(0, 16);
-  const datetime3 = meta3.rawMtime.slice(0, 16);
   const msgs = String(meta3.messageCount);
   const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
   const stats = computeSessionStats(entries, allSessions, new Set, cwd);
   const fmt = (n) => n === 0 ? "" : String(n);
-  return [
-    id,
+  const { display: datetime3, date: date5, year } = formatRelativeDateTime(meta3.rawMtime, prevDate, prevYear);
+  const line = [
+    idPrefix,
     datetime3,
     msgs,
     fmt(stats.userCount),
@@ -15697,7 +15740,8 @@ function formatSessionLine(session, allSessions, cwd) {
     stats.significantLocations.join(" "),
     summary,
     commitList
-  ].join("\t");
+  ].join(" ");
+  return { line, date: date5, year };
 }
 function computeSessionStats(entries, allSessions, visited, cwd) {
   const stats = {
@@ -15880,6 +15924,15 @@ function computeSignificantLocations(fileStats, cwd) {
   }
   return results.slice(0, 3);
 }
+var META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
+function isMetaXml(text) {
+  const trimmed = text.trim();
+  return META_XML_TAGS.some((tag) => trimmed.startsWith(tag));
+}
+function isGarbageSummary(summary) {
+  const trimmed = summary.trim();
+  return isMetaXml(trimmed) || trimmed.startsWith("Caveat:");
+}
 function findSummary(entries) {
   const uuids = new Set;
   const summaries = [];
@@ -15892,15 +15945,18 @@ function findSummary(entries) {
     }
   }
   for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid)) {
+    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary(s.summary)) {
       return s.summary;
     }
   }
-  return summaries.at(-1)?.summary;
+  const lastSummary = summaries.at(-1)?.summary;
+  return lastSummary && !isGarbageSummary(lastSummary) ? lastSummary : undefined;
 }
 function findFirstUserPrompt(entries) {
   for (const entry of entries) {
     if (entry.type !== "user")
+      continue;
+    if ("isMeta" in entry && entry.isMeta === true)
       continue;
     const content = entry.message.content;
     if (!content)
@@ -15917,7 +15973,10 @@ function findFirstUserPrompt(entries) {
       }
     }
     if (text) {
-      const firstLine = text.split(`
+      const trimmed = text.trim();
+      if (isMetaXml(trimmed))
+        continue;
+      const firstLine = trimmed.split(`
 `)[0].trim();
       if (firstLine) {
         return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;

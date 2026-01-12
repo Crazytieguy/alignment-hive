@@ -16,6 +16,66 @@ interface SessionInfo {
   entries: Array<KnownEntry>;
 }
 
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * Compute the minimal unique prefix for each ID in the list.
+ * Returns a map from full ID to its minimal prefix.
+ */
+function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
+  const result = new Map<string, string>();
+  const minLen = 4; // Minimum prefix length
+
+  for (const id of ids) {
+    let len = minLen;
+    while (len < id.length) {
+      const prefix = id.slice(0, len);
+      const conflicts = ids.filter((other) => other !== id && other.startsWith(prefix));
+      if (conflicts.length === 0) break;
+      len++;
+    }
+    result.set(id, id.slice(0, len));
+  }
+
+  return result;
+}
+
+/**
+ * Format datetime with relative display.
+ * Only show date (MonDD) when it changes, only show year when it changes.
+ * Format: Jan12T04:23 or just T04:23 if same day.
+ */
+function formatRelativeDateTime(
+  rawMtime: string,
+  prevDate: string,
+  prevYear: string
+): { display: string; date: string; year: string } {
+  // Parse ISO format: 2026-01-12T04:23:45...
+  const dateObj = new Date(rawMtime);
+  const year = String(dateObj.getFullYear());
+  const month = MONTH_NAMES[dateObj.getMonth()];
+  const day = String(dateObj.getDate()).padStart(2, "0");
+  const hours = String(dateObj.getHours()).padStart(2, "0");
+  const minutes = String(dateObj.getMinutes()).padStart(2, "0");
+
+  const date = `${month}${day}`;
+  const time = `T${hours}:${minutes}`;
+
+  let display: string;
+  if (year !== prevYear && prevYear !== "") {
+    // Year changed - show full with year
+    display = `${year}${date}${time}`;
+  } else if (date !== prevDate) {
+    // Date changed - show date + time
+    display = `${date}${time}`;
+  } else {
+    // Same date - show time only
+    display = time;
+  }
+
+  return { display, date, year };
+}
+
 interface SessionStats {
   userCount: number;
   linesAdded: number;
@@ -96,18 +156,33 @@ export async function index(): Promise<void> {
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
 
+  // Compute minimal unique prefixes for session IDs
+  const sessionIds = mainSessions.map((s) => s.meta.sessionId);
+  const idPrefixes = computeMinimalPrefixes(sessionIds);
+
   console.log(
-    "ID\tDATETIME\tMSGS\tUSER_MESSAGES\tBASH_CALLS\tWEB_FETCHES\tWEB_SEARCHES\tLINES_ADDED\tLINES_REMOVED\tFILES_TOUCHED\tSIGNIFICANT_LOCATIONS\tSUMMARY\tCOMMITS"
+    "ID DATETIME MSGS USER_MESSAGES BASH_CALLS WEB_FETCHES WEB_SEARCHES LINES_ADDED LINES_REMOVED FILES_TOUCHED SIGNIFICANT_LOCATIONS SUMMARY COMMITS"
   );
+  let prevDate = "";
+  let prevYear = "";
   for (const session of mainSessions) {
-    console.log(formatSessionLine(session, allSessions, cwd));
+    const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
+    const { line, date, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear);
+    console.log(line);
+    prevDate = date;
+    prevYear = year;
   }
 }
 
-function formatSessionLine(session: SessionInfo, allSessions: Map<string, SessionInfo>, cwd: string): string {
+function formatSessionLine(
+  session: SessionInfo,
+  allSessions: Map<string, SessionInfo>,
+  cwd: string,
+  idPrefix: string,
+  prevDate: string,
+  prevYear: string
+): { line: string; date: string; year: string } {
   const { meta, entries } = session;
-  const id = meta.sessionId.slice(0, 16);
-  const datetime = meta.rawMtime.slice(0, 16);
   const msgs = String(meta.messageCount);
   const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
 
@@ -122,8 +197,11 @@ function formatSessionLine(session: SessionInfo, allSessions: Map<string, Sessio
   // Format numbers, blank for 0
   const fmt = (n: number) => (n === 0 ? "" : String(n));
 
-  return [
-    id,
+  // Format datetime with relative display
+  const { display: datetime, date, year } = formatRelativeDateTime(meta.rawMtime, prevDate, prevYear);
+
+  const line = [
+    idPrefix,
     datetime,
     msgs,
     fmt(stats.userCount),
@@ -136,7 +214,9 @@ function formatSessionLine(session: SessionInfo, allSessions: Map<string, Sessio
     stats.significantLocations.join(" "),
     summary,
     commitList,
-  ].join("\t");
+  ].join(" ");
+
+  return { line, date, year };
 }
 
 function computeSessionStats(
@@ -379,6 +459,19 @@ function computeSignificantLocations(fileStats: Map<string, FileStats>, cwd: str
   return results.slice(0, 3);
 }
 
+// XML tags that indicate meta/system content rather than real user prompts
+const META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
+
+function isMetaXml(text: string): boolean {
+  const trimmed = text.trim();
+  return META_XML_TAGS.some((tag) => trimmed.startsWith(tag));
+}
+
+function isGarbageSummary(summary: string): boolean {
+  const trimmed = summary.trim();
+  return isMetaXml(trimmed) || trimmed.startsWith("Caveat:");
+}
+
 function findSummary(entries: Array<KnownEntry>): string | undefined {
   const uuids = new Set<string>();
   const summaries: Array<{ summary: string; leafUuid?: string }> = [];
@@ -393,17 +486,22 @@ function findSummary(entries: Array<KnownEntry>): string | undefined {
   }
 
   for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid)) {
+    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary(s.summary)) {
       return s.summary;
     }
   }
 
-  return summaries.at(-1)?.summary;
+  const lastSummary = summaries.at(-1)?.summary;
+  return lastSummary && !isGarbageSummary(lastSummary) ? lastSummary : undefined;
 }
 
 function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
   for (const entry of entries) {
     if (entry.type !== "user") continue;
+
+    // Skip meta entries (local command caveats, etc.)
+    if ("isMeta" in entry && entry.isMeta === true) continue;
+
     const content = entry.message.content;
     if (!content) continue;
 
@@ -420,7 +518,11 @@ function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
     }
 
     if (text) {
-      const firstLine = text.split("\n")[0].trim();
+      const trimmed = text.trim();
+      // Skip meta XML content (command messages, local command output, etc.)
+      if (isMetaXml(trimmed)) continue;
+
+      const firstLine = trimmed.split("\n")[0].trim();
       if (firstLine) {
         return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
       }
