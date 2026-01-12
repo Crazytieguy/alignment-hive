@@ -74,7 +74,6 @@ function formatTruncatedBlock(content: string, suffix: string): string {
   return indented + suffix;
 }
 
-/** Format content with appropriate mode: truncated, compact, or full. */
 function formatContentBody(
   header: string,
   content: string,
@@ -103,11 +102,9 @@ function formatWordCount(text: string): string {
   return `${count}word${count === 1 ? '' : 's'}`;
 }
 
-/** Format a field value: show actual value if 1 word, otherwise show word count */
 function formatFieldValue(text: string): string {
   const count = countWords(text);
   if (count <= 1) {
-    // Show actual value for single words (no quotes needed, already short)
     return text.trim() || '""';
   }
   return `${count}words`;
@@ -130,6 +127,22 @@ function indent(text: string, spaces: number): string {
     .split('\n')
     .map((line) => (line ? prefix + line : line))
     .join('\n');
+}
+
+interface MultilineParam {
+  name: string;
+  content: string;
+  suffix?: string;
+}
+
+function formatMultilineParams(params: Array<MultilineParam>): Array<string> {
+  const lines: Array<string> = [];
+  for (const { name, content, suffix } of params) {
+    lines.push(`[${name}]`);
+    const indented = indent(content, 2);
+    lines.push(suffix ? indented + suffix : indented);
+  }
+  return lines;
 }
 
 function formatTimestamp(timestamp: string | undefined, prevDate: string | undefined, isFirst?: boolean): string {
@@ -353,9 +366,6 @@ export function formatEntry(entry: KnownEntry, options: FormatOptions): string |
     fieldFilter,
   } = options;
 
-  // Check if entry type should be shown (fieldFilter only applies in redact mode)
-  // Skip this check for assistant entries - they have mixed content (text, thinking, tools)
-  // and need block-level filtering instead
   if (fieldFilter && redact && entry.type !== 'assistant') {
     if (!fieldFilter.shouldShow(entry.type)) {
       return null;
@@ -448,7 +458,7 @@ function getParentUuid(entry: KnownEntry): string | undefined {
   return undefined;
 }
 
-function getTimestamp(entry: KnownEntry): string | undefined {
+export function getTimestamp(entry: KnownEntry): string | undefined {
   if ('timestamp' in entry && typeof entry.timestamp === 'string') {
     return entry.timestamp;
   }
@@ -585,8 +595,6 @@ function formatAssistantEntry(
 
   const lines: Array<string> = [];
   let blockIndex = 0;
-
-  // Check if thinking should show full content
   const showFullThinking = fieldFilter?.showFullThinking() ?? false;
 
   for (const block of blocks) {
@@ -597,9 +605,7 @@ function formatAssistantEntry(
     const parent = blockIndex === 0 ? parentIndicator : undefined;
 
     if (block.type === 'thinking') {
-      // Check if thinking should be shown
       if (fieldFilter && redact && !fieldFilter.shouldShow('thinking')) {
-        // Show word count when thinking is hidden
         const parts: Array<string> = [String(lineNumber)];
         const formattedTs = formatTimestamp(ts, prevDate, isFirst);
         if (formattedTs) parts.push(formattedTs);
@@ -622,9 +628,7 @@ function formatAssistantEntry(
       );
       if (formatted) lines.push(formatted);
     } else if (block.type === 'text') {
-      // Check if assistant text should be shown
       if (fieldFilter && redact && !fieldFilter.shouldShow('assistant')) {
-        // Show word count when assistant text is hidden
         const parts: Array<string> = [String(lineNumber)];
         const formattedTs = formatTimestamp(ts, prevDate, isFirst);
         if (formattedTs) parts.push(formattedTs);
@@ -637,21 +641,6 @@ function formatAssistantEntry(
       const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
       if (formatted) lines.push(formatted);
     } else if (block.type === 'tool_use') {
-      // Create a modified filter that hides both input and result when tool is hidden
-      let effectiveFilter = fieldFilter;
-      if (fieldFilter && redact && !fieldFilter.shouldShow(`tool:${block.name}`)) {
-        // Tool is hidden: use filter that hides both input and result
-        effectiveFilter = {
-          shouldShow: (field: string) => {
-            // Hide input and result for this tool
-            if (field === `tool:${block.name}:input` || field === `tool:${block.name}:result`) {
-              return false;
-            }
-            return fieldFilter.shouldShow(field);
-          },
-          showFullThinking: () => fieldFilter.showFullThinking(),
-        } as ReadFieldFilter;
-      }
       const formatted = formatToolEntry(
         lineNumber,
         ts,
@@ -663,7 +652,7 @@ function formatAssistantEntry(
         redact,
         wordLimit,
         skipWords,
-        effectiveFilter,
+        fieldFilter,
       );
       if (formatted) lines.push(formatted);
     }
@@ -694,11 +683,9 @@ function formatThinkingEntry(
 
   if (redact) {
     if (showFullThinking && wordLimit !== undefined) {
-      // Show truncated content when --show thinking is used
       const result = formatContentBody(parts.join('|'), content, redact, wordLimit, skipWords);
       return result ?? parts.join('|');
     }
-    // Default: show word count only
     parts.push(formatWordCount(content));
     return parts.join('|');
   }
@@ -746,7 +733,6 @@ function formatToolEntry(
   parts.push('tool');
   parts.push(block.name);
 
-  // Check if input/result should be shown (for this specific tool)
   const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
   const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
   const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:input`) : false;
@@ -767,53 +753,34 @@ function formatToolEntry(
   if (redact) {
     if (resultInfo && !suppressResult) {
       if (hideResult) {
-        // --hide tool:result: show word count only
         parts.push(`result=${formatFieldValue(resultInfo.content)}`);
       } else if (showResult && wordLimit !== undefined) {
-        // --show tool:result: show truncated result content
         const { content: truncated, suffix, isEmpty } = truncateContent(
           resultInfo.content,
           wordLimit,
           skipWords ?? 0,
         );
         if (!isEmpty) {
-          const bodyLines: Array<string> = [];
-          for (const { name: paramName, content, suffix: paramSuffix } of multilineParams) {
-            bodyLines.push(`[${paramName}]`);
-            const indented = indent(content, 2);
-            bodyLines.push(paramSuffix ? indented + paramSuffix : indented);
-          }
+          const bodyLines = formatMultilineParams(multilineParams);
           bodyLines.push('[result]');
-          const resultIndented = indent(truncated, 2);
-          bodyLines.push(suffix ? resultIndented + suffix : resultIndented);
+          bodyLines.push(suffix ? indent(truncated, 2) + suffix : indent(truncated, 2));
           const header = parts.join('|');
           return bodyLines.length > 0 ? `${header}\n${bodyLines.join('\n')}` : header;
         }
       } else {
-        // Default: show result as word count
         parts.push(`result=${formatFieldValue(resultInfo.content)}`);
       }
     }
     const header = parts.join('|');
     if (multilineParams.length > 0) {
-      const bodyLines: Array<string> = [];
-      for (const { name: paramName, content, suffix } of multilineParams) {
-        bodyLines.push(`[${paramName}]`);
-        const indented = indent(content, 2);
-        bodyLines.push(suffix ? indented + suffix : indented);
-      }
+      const bodyLines = formatMultilineParams(multilineParams);
       return `${header}\n${bodyLines.join('\n')}`;
     }
     return header;
   }
 
   const header = parts.join('|');
-  const bodyLines: Array<string> = [];
-  for (const { name: paramName, content, suffix } of multilineParams) {
-    bodyLines.push(`[${paramName}]`);
-    const indented = indent(content, 2);
-    bodyLines.push(suffix ? indented + suffix : indented);
-  }
+  const bodyLines = formatMultilineParams(multilineParams);
   if (resultInfo) {
     bodyLines.push('[result]');
     bodyLines.push(indent(resultInfo.content, 2));
@@ -824,7 +791,7 @@ function formatToolEntry(
 
 interface ToolFormatResult {
   headerParams: Array<string>;
-  multilineParams: Array<{ name: string; content: string; suffix?: string }>;
+  multilineParams: Array<MultilineParam>;
   suppressResult?: boolean;
 }
 
@@ -930,7 +897,7 @@ function formatEditTool({ input, cwd, redact }: ToolFormatterOptions): ToolForma
     };
   }
 
-  const multilineParams: Array<{ name: string; content: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
   if (oldStr) {
     multilineParams.push({ name: 'old_string', content: oldStr });
   }
@@ -978,7 +945,7 @@ function formatWriteTool({ input, cwd, redact }: ToolFormatterOptions): ToolForm
 
 function addFormattedParam(
   headerParams: Array<string>,
-  multilineParams: Array<{ name: string; content: string; suffix?: string }>,
+  multilineParams: Array<MultilineParam>,
   name: string,
   text: string,
   wordLimit?: number,
@@ -999,15 +966,13 @@ function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput
   const desc = input.description ? String(input.description) : undefined;
 
   const headerParams: Array<string> = [];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
   if (hideInput) {
-    // Show field value (actual value if 1 word, otherwise word count)
     headerParams.push(`command=${formatFieldValue(command)}`);
   } else {
     addFormattedParam(headerParams, multilineParams, 'command', command, wordLimit, skipWords);
   }
-  // Description is always shown (useful and short)
   if (desc) {
     addFormattedParam(headerParams, multilineParams, 'description', desc, wordLimit, skipWords);
   }
@@ -1029,7 +994,7 @@ function formatGrepTool({ input, cwd, wordLimit, skipWords }: ToolFormatterOptio
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
 
   const headerParams: Array<string> = [];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
   addFormattedParam(headerParams, multilineParams, 'pattern', pattern, wordLimit, skipWords);
   if (path) {
@@ -1048,7 +1013,7 @@ function formatGrepTool({ input, cwd, wordLimit, skipWords }: ToolFormatterOptio
 function formatGlobTool({ input, result, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
   const pattern = String(input.pattern || '');
   const headerParams: Array<string> = [];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
   addFormattedParam(headerParams, multilineParams, 'pattern', pattern, wordLimit, skipWords);
 
@@ -1066,16 +1031,14 @@ function formatTaskTool({ input, result, redact, wordLimit, skipWords }: ToolFor
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
 
   const headerParams: Array<string> = [];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
-  // Subagent type goes first (positional, no key)
   if (subagentType) {
     headerParams.push(subagentType);
   }
   if (result?.agentId) {
     headerParams.push(`session=agent-${result.agentId}`);
   }
-  // Description is always shown (useful and short)
   addFormattedParam(headerParams, multilineParams, 'description', desc, wordLimit, skipWords);
 
   if (redact) {
@@ -1117,7 +1080,7 @@ function formatTodoWriteTool({ input, redact }: ToolFormatterOptions): ToolForma
 function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords, hideResult }: ToolFormatterOptions): ToolFormatResult {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams: Array<string> = [`questions=${questions.length}`];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
   if (redact) {
     if (result) {
@@ -1180,7 +1143,7 @@ function formatWebFetchTool({ input }: ToolFormatterOptions): ToolFormatResult {
 function formatWebSearchTool({ input, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
   const query = String(input.query || '');
   const headerParams: Array<string> = [];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
   addFormattedParam(headerParams, multilineParams, 'query', query, wordLimit, skipWords);
   return { headerParams, multilineParams };
@@ -1188,7 +1151,7 @@ function formatWebSearchTool({ input, wordLimit, skipWords }: ToolFormatterOptio
 
 function formatGenericTool({ input, redact, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
   const headerParams: Array<string> = [];
-  const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
+  const multilineParams: Array<MultilineParam> = [];
 
   for (const [key, value] of Object.entries(input)) {
     if (value === null || value === undefined) continue;

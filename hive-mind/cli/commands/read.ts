@@ -80,7 +80,6 @@ export async function read(): Promise<number> {
   const hideFields = parseStringFlag(args, "--hide");
   const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
 
-  // Create field filter if --show or --hide specified
   let fieldFilter: ReadFieldFilter | undefined;
   if (showFields || hideFields) {
     const show = showFields ? parseFieldList(showFields) : [];
@@ -136,7 +135,6 @@ export async function read(): Promise<number> {
 
   const sessionFile = join(sessionsDir, matches[0]);
 
-  // Parse entry argument: could be single number (N) or range (N-M)
   let entryNumber: number | null = null;
   let rangeStart: number | null = null;
   let rangeEnd: number | null = null;
@@ -185,7 +183,6 @@ export async function read(): Promise<number> {
   const toolResults = collectToolResults(allEntries);
 
   if (rangeStart !== null && rangeEnd !== null) {
-    // Range read: entries N through M with truncation
     const rangeEntries = logicalEntries.filter(
       (e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd
     );
@@ -196,7 +193,6 @@ export async function read(): Promise<number> {
       return 1;
     }
 
-    // Format range with preserved line numbers
     const output = formatRangeEntries(rangeEntries, {
       redact: !fullFlag,
       targetWords: targetWords ?? undefined,

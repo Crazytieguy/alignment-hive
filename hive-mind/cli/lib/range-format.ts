@@ -1,8 +1,4 @@
-/**
- * Format a range of session entries with preserved line numbers and adaptive truncation.
- */
-
-import { collectToolResults, formatEntry } from './format';
+import { collectToolResults, formatEntry, getTimestamp } from './format';
 import { computeUniformLimit, countWords } from './truncation';
 import type { ReadFieldFilter } from './field-filter';
 import type { LogicalEntry, ToolResultInfo } from './format';
@@ -18,10 +14,6 @@ export interface RangeFormatOptions {
   allEntries: Array<KnownEntry>;
 }
 
-/**
- * Format a range of logical entries with preserved line numbers.
- * Applies adaptive truncation based on the range content, not the full session.
- */
 export function formatRangeEntries(
   rangeEntries: Array<LogicalEntry>,
   options: RangeFormatOptions,
@@ -29,7 +21,6 @@ export function formatRangeEntries(
   const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter, allEntries } = options;
   const toolResults = collectToolResults(allEntries);
 
-  // Compute word limit based on range content only
   let wordLimit: number | undefined;
   if (redact) {
     const wordCounts = collectWordCounts(rangeEntries, skipWords);
@@ -72,13 +63,6 @@ export function formatRangeEntries(
 
   const separator = redact ? '\n' : '\n\n';
   return results.join(separator);
-}
-
-function getTimestamp(entry: KnownEntry): string | undefined {
-  if ('timestamp' in entry && typeof entry.timestamp === 'string') {
-    return entry.timestamp;
-  }
-  return undefined;
 }
 
 function collectWordCounts(entries: Array<LogicalEntry>, skipWords: number): Array<number> {

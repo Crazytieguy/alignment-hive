@@ -14627,10 +14627,13 @@ class ReadFieldFilter {
       this.rules.push({ field, action: "hide", specificity: specificity(field) });
     }
     this.rules.sort((a, b) => {
-      if (b.specificity !== a.specificity) {
+      if (b.specificity !== a.specificity)
         return b.specificity - a.specificity;
-      }
-      return a.action === "hide" ? -1 : b.action === "hide" ? 1 : 0;
+      if (a.action === "hide" && b.action !== "hide")
+        return -1;
+      if (b.action === "hide" && a.action !== "hide")
+        return 1;
+      return 0;
     });
   }
   shouldShow(field) {
@@ -14830,6 +14833,15 @@ function indent(text, spaces) {
   return text.split(`
 `).map((line) => line ? prefix + line : line).join(`
 `);
+}
+function formatMultilineParams(params) {
+  const lines = [];
+  for (const { name, content, suffix } of params) {
+    lines.push(`[${name}]`);
+    const indented = indent(content, 2);
+    lines.push(suffix ? indented + suffix : indented);
+  }
+  return lines;
 }
 function formatTimestamp(timestamp, prevDate, isFirst) {
   if (!timestamp)
@@ -15222,19 +15234,7 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
       if (formatted)
         lines.push(formatted);
     } else if (block.type === "tool_use") {
-      let effectiveFilter = fieldFilter;
-      if (fieldFilter && redact && !fieldFilter.shouldShow(`tool:${block.name}`)) {
-        effectiveFilter = {
-          shouldShow: (field) => {
-            if (field === `tool:${block.name}:input` || field === `tool:${block.name}:result`) {
-              return false;
-            }
-            return fieldFilter.shouldShow(field);
-          },
-          showFullThinking: () => fieldFilter.showFullThinking()
-        };
-      }
-      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, effectiveFilter);
+      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter);
       if (formatted)
         lines.push(formatted);
     }
@@ -15301,15 +15301,9 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
       } else if (showResult && wordLimit !== undefined) {
         const { content: truncated, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
         if (!isEmpty) {
-          const bodyLines2 = [];
-          for (const { name: paramName, content, suffix: paramSuffix } of multilineParams) {
-            bodyLines2.push(`[${paramName}]`);
-            const indented = indent(content, 2);
-            bodyLines2.push(paramSuffix ? indented + paramSuffix : indented);
-          }
+          const bodyLines2 = formatMultilineParams(multilineParams);
           bodyLines2.push("[result]");
-          const resultIndented = indent(truncated, 2);
-          bodyLines2.push(suffix ? resultIndented + suffix : resultIndented);
+          bodyLines2.push(suffix ? indent(truncated, 2) + suffix : indent(truncated, 2));
           const header3 = parts.join("|");
           return bodyLines2.length > 0 ? `${header3}
 ${bodyLines2.join(`
@@ -15321,12 +15315,7 @@ ${bodyLines2.join(`
     }
     const header2 = parts.join("|");
     if (multilineParams.length > 0) {
-      const bodyLines2 = [];
-      for (const { name: paramName, content, suffix } of multilineParams) {
-        bodyLines2.push(`[${paramName}]`);
-        const indented = indent(content, 2);
-        bodyLines2.push(suffix ? indented + suffix : indented);
-      }
+      const bodyLines2 = formatMultilineParams(multilineParams);
       return `${header2}
 ${bodyLines2.join(`
 `)}`;
@@ -15334,12 +15323,7 @@ ${bodyLines2.join(`
     return header2;
   }
   const header = parts.join("|");
-  const bodyLines = [];
-  for (const { name: paramName, content, suffix } of multilineParams) {
-    bodyLines.push(`[${paramName}]`);
-    const indented = indent(content, 2);
-    bodyLines.push(suffix ? indented + suffix : indented);
-  }
+  const bodyLines = formatMultilineParams(multilineParams);
   if (resultInfo) {
     bodyLines.push("[result]");
     bodyLines.push(indent(resultInfo.content, 2));
@@ -15817,37 +15801,34 @@ async function grep() {
   return 0;
 }
 function parseGrepOptions(args) {
+  function getFlagValue(flag) {
+    const idx = args.indexOf(flag);
+    return idx !== -1 ? args[idx + 1] : undefined;
+  }
   const caseInsensitive = args.includes("-i");
   const countOnly = args.includes("-c");
   const listOnly = args.includes("-l");
   let maxMatches = null;
-  const mIdx = args.indexOf("-m");
-  if (mIdx !== -1 && args[mIdx + 1]) {
-    maxMatches = parseInt(args[mIdx + 1], 10);
+  const mValue = getFlagValue("-m");
+  if (mValue !== undefined) {
+    maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
       printError("Invalid -m value: must be a positive number");
       return null;
     }
   }
   let contextLines = 0;
-  const cIdx = args.indexOf("-C");
-  if (cIdx !== -1 && args[cIdx + 1]) {
-    contextLines = parseInt(args[cIdx + 1], 10);
+  const cValue = getFlagValue("-C");
+  if (cValue !== undefined) {
+    contextLines = parseInt(cValue, 10);
     if (isNaN(contextLines) || contextLines < 0) {
       printError("Invalid -C value: must be a non-negative number");
       return null;
     }
   }
-  let sessionFilter = null;
-  const sIdx = args.indexOf("-s");
-  if (sIdx !== -1 && args[sIdx + 1]) {
-    sessionFilter = args[sIdx + 1];
-  }
-  let searchIn = null;
-  const inIdx = args.indexOf("--in");
-  if (inIdx !== -1 && args[inIdx + 1]) {
-    searchIn = parseFieldList(args[inIdx + 1]);
-  }
+  const sessionFilter = getFlagValue("-s") ?? null;
+  const searchInValue = getFlagValue("--in");
+  const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
   const fieldFilter = new GrepFieldFilter(searchIn);
   const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
   const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
@@ -16767,7 +16748,7 @@ function formatRangeEntries(rangeEntries, options) {
   let prevDate;
   for (let i = 0;i < rangeEntries.length; i++) {
     const { lineNumber, entry } = rangeEntries[i];
-    const timestamp = getTimestamp2(entry);
+    const timestamp = getTimestamp(entry);
     const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
     const isFirst = i === 0;
     const formatted = formatEntry(entry, {
@@ -16795,12 +16776,6 @@ function formatRangeEntries(rangeEntries, options) {
 
 `;
   return results.join(separator);
-}
-function getTimestamp2(entry) {
-  if ("timestamp" in entry && typeof entry.timestamp === "string") {
-    return entry.timestamp;
-  }
-  return;
 }
 function collectWordCounts2(entries, skipWords) {
   const counts = [];

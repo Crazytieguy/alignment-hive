@@ -203,45 +203,40 @@ export async function grep(): Promise<number> {
 }
 
 function parseGrepOptions(args: Array<string>): GrepOptions | null {
+  function getFlagValue(flag: string): string | undefined {
+    const idx = args.indexOf(flag);
+    return idx !== -1 ? args[idx + 1] : undefined;
+  }
+
   const caseInsensitive = args.includes("-i");
   const countOnly = args.includes("-c");
   const listOnly = args.includes("-l");
 
-  // Parse -m N
+  // Parse -m N (max matches)
   let maxMatches: number | null = null;
-  const mIdx = args.indexOf("-m");
-  if (mIdx !== -1 && args[mIdx + 1]) {
-    maxMatches = parseInt(args[mIdx + 1], 10);
+  const mValue = getFlagValue("-m");
+  if (mValue !== undefined) {
+    maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
       printError("Invalid -m value: must be a positive number");
       return null;
     }
   }
 
-  // Parse -C N
+  // Parse -C N (context lines)
   let contextLines = 0;
-  const cIdx = args.indexOf("-C");
-  if (cIdx !== -1 && args[cIdx + 1]) {
-    contextLines = parseInt(args[cIdx + 1], 10);
+  const cValue = getFlagValue("-C");
+  if (cValue !== undefined) {
+    contextLines = parseInt(cValue, 10);
     if (isNaN(contextLines) || contextLines < 0) {
       printError("Invalid -C value: must be a non-negative number");
       return null;
     }
   }
 
-  // Parse -s <session>
-  let sessionFilter: string | null = null;
-  const sIdx = args.indexOf("-s");
-  if (sIdx !== -1 && args[sIdx + 1]) {
-    sessionFilter = args[sIdx + 1];
-  }
-
-  // Parse --in <fields>
-  let searchIn: Array<string> | null = null;
-  const inIdx = args.indexOf("--in");
-  if (inIdx !== -1 && args[inIdx + 1]) {
-    searchIn = parseFieldList(args[inIdx + 1]);
-  }
+  const sessionFilter = getFlagValue("-s") ?? null;
+  const searchInValue = getFlagValue("--in");
+  const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
   const fieldFilter = new GrepFieldFilter(searchIn);
 
   // Extract pattern (first non-flag argument)
@@ -252,7 +247,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (flags.has(arg)) {
-      if (flagsWithValues.has(arg)) i++; // Skip the value
+      if (flagsWithValues.has(arg)) i++;
       continue;
     }
     patternStr = arg;
@@ -283,9 +278,6 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   };
 }
 
-/**
- * Extract all searchable text content from an entry based on field filter.
- */
 function extractEntryContent(entry: KnownEntry, filter: GrepFieldFilter): string {
   const parts: Array<string> = [];
 
@@ -302,7 +294,6 @@ function extractEntryContent(entry: KnownEntry, filter: GrepFieldFilter): string
             parts.push(block.text);
           }
         } else if (block.type === "tool_result" && "content" in block) {
-          // Tool results in user entries - check if tool:result is searchable
           if (filter.isSearchable("tool:result")) {
             const resultContent = block.content;
             if (typeof resultContent === "string") {
@@ -343,9 +334,6 @@ function extractEntryContent(entry: KnownEntry, filter: GrepFieldFilter): string
   return parts.join("\n");
 }
 
-/**
- * Extract text from an assistant content block based on field filter.
- */
 function extractBlockContent(block: ContentBlock, filter: GrepFieldFilter): string | null {
   if (block.type === "text" && "text" in block) {
     if (filter.isSearchable("assistant")) {
@@ -359,19 +347,13 @@ function extractBlockContent(block: ContentBlock, filter: GrepFieldFilter): stri
   }
   if (block.type === "tool_use" && "input" in block) {
     const toolName = "name" in block ? (block as { name: string }).name : "unknown";
-    // Check both generic tool:input and specific tool:Name:input
     if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
       return JSON.stringify(block.input);
     }
   }
-  // Note: tool_result blocks in assistant entries are not common,
-  // but the main tool_result handling is in extractEntryContent for user entries
   return null;
 }
 
-/**
- * Output a single match with optional context.
- */
 function outputMatch(match: Match, showContext: boolean): void {
   const prefix = `${match.sessionId}:${match.entryNumber}|${match.entryType}|`;
 
