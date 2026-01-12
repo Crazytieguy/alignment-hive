@@ -22,7 +22,7 @@ const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
  * Compute the minimal unique prefix for each ID in the list.
  * Returns a map from full ID to its minimal prefix.
  */
-function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
+export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
   const result = new Map<string, string>();
   const minLen = 4; // Minimum prefix length
 
@@ -364,7 +364,7 @@ interface PathNode {
   removed: number;
 }
 
-function computeSignificantLocations(fileStats: Map<string, FileStats>, cwd: string): Array<string> {
+export function computeSignificantLocations(fileStats: Map<string, FileStats>, cwd: string): Array<string> {
   if (fileStats.size === 0) return [];
 
   // Build tree from file paths

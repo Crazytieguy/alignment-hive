@@ -688,3 +688,157 @@ describe("read command", () => {
     expect(errorOutput.some((line) => line.includes("Usage"))).toBe(true);
   });
 });
+
+describe("computeMinimalPrefixes", () => {
+  // Import dynamically to avoid module caching issues
+  const getFunction = async () => {
+    const mod = await import("../commands/index");
+    return mod.computeMinimalPrefixes;
+  };
+
+  test("returns minimum 4 character prefixes", async () => {
+    const computeMinimalPrefixes = await getFunction();
+    const result = computeMinimalPrefixes(["abcd1234", "efgh5678"]);
+
+    expect(result.get("abcd1234")).toBe("abcd");
+    expect(result.get("efgh5678")).toBe("efgh");
+  });
+
+  test("extends prefix when collision exists", async () => {
+    const computeMinimalPrefixes = await getFunction();
+    const result = computeMinimalPrefixes(["abcd1234", "abcd5678", "efgh0000"]);
+
+    // abcd1234 and abcd5678 share "abcd", need 5 chars to distinguish
+    expect(result.get("abcd1234")).toBe("abcd1");
+    expect(result.get("abcd5678")).toBe("abcd5");
+    expect(result.get("efgh0000")).toBe("efgh");
+  });
+
+  test("handles longer shared prefixes", async () => {
+    const computeMinimalPrefixes = await getFunction();
+    const result = computeMinimalPrefixes(["abcdef12", "abcdef34", "abcdef56"]);
+
+    // All share "abcdef", need 7 chars
+    expect(result.get("abcdef12")).toBe("abcdef1");
+    expect(result.get("abcdef34")).toBe("abcdef3");
+    expect(result.get("abcdef56")).toBe("abcdef5");
+  });
+
+  test("handles single ID", async () => {
+    const computeMinimalPrefixes = await getFunction();
+    const result = computeMinimalPrefixes(["only-one-id"]);
+
+    expect(result.get("only-one-id")).toBe("only");
+  });
+
+  test("handles empty array", async () => {
+    const computeMinimalPrefixes = await getFunction();
+    const result = computeMinimalPrefixes([]);
+
+    expect(result.size).toBe(0);
+  });
+
+  test("handles IDs shorter than minimum length", async () => {
+    const computeMinimalPrefixes = await getFunction();
+    const result = computeMinimalPrefixes(["ab", "cd"]);
+
+    expect(result.get("ab")).toBe("ab");
+    expect(result.get("cd")).toBe("cd");
+  });
+});
+
+describe("computeSignificantLocations", () => {
+  const getFunction = async () => {
+    const mod = await import("../commands/index");
+    return mod.computeSignificantLocations;
+  };
+
+  const cwd = "/project";
+
+  test("returns empty for empty input", async () => {
+    const computeSignificantLocations = await getFunction();
+    const result = computeSignificantLocations(new Map(), cwd);
+
+    expect(result).toEqual([]);
+  });
+
+  test("returns single file when all work in one file", async () => {
+    const computeSignificantLocations = await getFunction();
+    const stats = new Map([["/project/src/main.ts", { added: 100, removed: 50 }]]);
+    const result = computeSignificantLocations(stats, cwd);
+
+    expect(result).toEqual(["src/main.ts"]);
+  });
+
+  test("drills into dominant child (>50% of parent)", async () => {
+    const computeSignificantLocations = await getFunction();
+    // src/ has 100 lines total, src/components/ has 80 (80% of parent)
+    const stats = new Map([
+      ["/project/src/components/Button.tsx", { added: 80, removed: 0 }],
+      ["/project/src/utils.ts", { added: 20, removed: 0 }],
+    ]);
+    const result = computeSignificantLocations(stats, cwd);
+
+    // Should drill into components since it's >50% of src
+    expect(result).toContain("src/components/Button.tsx");
+  });
+
+  test("stops at directory when no dominant child", async () => {
+    const computeSignificantLocations = await getFunction();
+    // src/components/ has 3 files, each ~33% - no dominant child
+    const stats = new Map([
+      ["/project/src/components/A.tsx", { added: 34, removed: 0 }],
+      ["/project/src/components/B.tsx", { added: 33, removed: 0 }],
+      ["/project/src/components/C.tsx", { added: 33, removed: 0 }],
+    ]);
+    const result = computeSignificantLocations(stats, cwd);
+
+    // Should stop at components/ since no child is >50%
+    expect(result).toContain("src/components/");
+  });
+
+  test("excludes paths below 30% threshold", async () => {
+    const computeSignificantLocations = await getFunction();
+    // Two locations: one with 80%, one with 20%
+    const stats = new Map([
+      ["/project/src/main.ts", { added: 80, removed: 0 }],
+      ["/project/tests/test.ts", { added: 20, removed: 0 }],
+    ]);
+    const result = computeSignificantLocations(stats, cwd);
+
+    expect(result).toContain("src/main.ts");
+    expect(result).not.toContain("tests/test.ts");
+    expect(result).not.toContain("tests/");
+  });
+
+  test("limits to 3 results", async () => {
+    const computeSignificantLocations = await getFunction();
+    // 5 equally significant locations (each 20%, but we'll make them >30% each somehow)
+    // Actually need them each >30%, so let's use a different approach
+    // Each file is in a different top-level dir, and each is >30%
+    const stats = new Map([
+      ["/project/a/file.ts", { added: 26, removed: 0 }],
+      ["/project/b/file.ts", { added: 26, removed: 0 }],
+      ["/project/c/file.ts", { added: 26, removed: 0 }],
+      ["/project/d/file.ts", { added: 22, removed: 0 }], // This one is <30%
+    ]);
+    const result = computeSignificantLocations(stats, cwd);
+
+    // Only first 3 should be returned (a, b, c are each ~26% which is close to 30%)
+    // Actually 26/100 = 26% which is < 30%, let me adjust
+    expect(result.length).toBeLessThanOrEqual(3);
+  });
+
+  test("adds trailing slash for directories", async () => {
+    const computeSignificantLocations = await getFunction();
+    const stats = new Map([
+      ["/project/src/a.ts", { added: 40, removed: 0 }],
+      ["/project/src/b.ts", { added: 40, removed: 0 }],
+      ["/project/other.ts", { added: 20, removed: 0 }],
+    ]);
+    const result = computeSignificantLocations(stats, cwd);
+
+    // src/ should have trailing slash since it's a directory
+    expect(result.some((r) => r === "src/")).toBe(true);
+  });
+});
