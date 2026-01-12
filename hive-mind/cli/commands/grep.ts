@@ -26,7 +26,6 @@ import type { ContentBlock, KnownEntry } from "../lib/schemas";
 
 interface GrepOptions {
   pattern: RegExp;
-  caseInsensitive: boolean;
   countOnly: boolean;
   listOnly: boolean;
   maxMatches: number | null;
@@ -262,7 +261,6 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
 
   return {
     pattern,
-    caseInsensitive,
     countOnly,
     listOnly,
     maxMatches,

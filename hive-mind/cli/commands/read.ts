@@ -179,7 +179,7 @@ export async function read(): Promise<number> {
     // Single entry mode: find entry by logical line number
     const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
     if (targetIdx === -1) {
-      const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
+      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
       printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
       return 1;
     }

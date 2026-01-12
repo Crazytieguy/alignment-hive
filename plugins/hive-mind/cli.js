@@ -15062,7 +15062,7 @@ function getToolFormatter(name) {
       return formatGenericTool;
   }
 }
-function formatEditTool(input, result, cwd, redact) {
+function formatEditTool(input, _result, cwd, redact) {
   const path = shortenPath(String(input.file_path || ""), cwd);
   const oldStr = String(input.old_string || "");
   const newStr = String(input.new_string || "");
@@ -15087,7 +15087,7 @@ function formatEditTool(input, result, cwd, redact) {
     multilineParams
   };
 }
-function formatReadTool(input, result, cwd, redact) {
+function formatReadTool(input, _result, cwd, redact) {
   const path = shortenPath(String(input.file_path || ""), cwd);
   if (redact) {
     const headerParams2 = [path];
@@ -15108,7 +15108,7 @@ function formatReadTool(input, result, cwd, redact) {
   }
   return { headerParams, multilineParams: [] };
 }
-function formatWriteTool(input, result, cwd, redact) {
+function formatWriteTool(input, _result, cwd, redact) {
   const path = shortenPath(String(input.file_path || ""), cwd);
   const content = String(input.content || "");
   const lineCount = countLines(content);
@@ -15124,7 +15124,7 @@ function formatWriteTool(input, result, cwd, redact) {
     multilineParams: []
   };
 }
-function formatBashTool(input, result, cwd, redact) {
+function formatBashTool(input, result, _cwd, redact) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const headerParams = [];
@@ -15143,7 +15143,7 @@ function formatBashTool(input, result, cwd, redact) {
   }
   return { headerParams, multilineParams };
 }
-function formatGrepTool(input, result, cwd, redact) {
+function formatGrepTool(input, _result, cwd, _redact) {
   const pattern = String(input.pattern || "");
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
   const headerParams = [`pattern="${escapeQuotes(pattern)}"`];
@@ -15158,7 +15158,7 @@ function formatGrepTool(input, result, cwd, redact) {
   }
   return { headerParams, multilineParams: [] };
 }
-function formatGlobTool(input, result, cwd, redact) {
+function formatGlobTool(input, result, _cwd, _redact) {
   const pattern = String(input.pattern || "");
   const headerParams = [`pattern="${pattern}"`];
   if (result) {
@@ -15172,7 +15172,7 @@ function formatGlobTool(input, result, cwd, redact) {
     suppressResult: true
   };
 }
-function formatTaskTool(input, result, cwd, redact) {
+function formatTaskTool(input, result, _cwd, redact) {
   const desc = String(input.description || "");
   const prompt = String(input.prompt || "");
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
@@ -15201,7 +15201,7 @@ function formatTaskTool(input, result, cwd, redact) {
     multilineParams: [{ name: "prompt", content: prompt }]
   };
 }
-function formatTodoWriteTool(input, result, cwd, redact) {
+function formatTodoWriteTool(input, _result, _cwd, redact) {
   const todos = Array.isArray(input.todos) ? input.todos : [];
   if (redact) {
     return {
@@ -15225,7 +15225,7 @@ function formatTodoWriteTool(input, result, cwd, redact) {
 `) }] : []
   };
 }
-function formatAskUserQuestionTool(input, result, cwd, redact) {
+function formatAskUserQuestionTool(input, result, _cwd, redact) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams = [`questions=${questions.length}`];
   if (redact) {
@@ -15254,7 +15254,7 @@ function formatAskUserQuestionTool(input, result, cwd, redact) {
 `) }] : []
   };
 }
-function formatExitPlanModeTool(input, result, cwd, redact) {
+function formatExitPlanModeTool(input, _result, _cwd, _redact) {
   const plan = input.plan ? String(input.plan) : "";
   if (plan) {
     return {
@@ -15265,21 +15265,21 @@ function formatExitPlanModeTool(input, result, cwd, redact) {
   }
   return { headerParams: [], multilineParams: [], suppressResult: true };
 }
-function formatWebFetchTool(input) {
+function formatWebFetchTool(input, _result, _cwd, _redact) {
   const url2 = String(input.url || "");
   return {
     headerParams: [`url="${url2}"`],
     multilineParams: []
   };
 }
-function formatWebSearchTool(input) {
+function formatWebSearchTool(input, _result, _cwd, _redact) {
   const query = String(input.query || "");
   return {
     headerParams: [`query="${escapeQuotes(query)}"`],
     multilineParams: []
   };
 }
-function formatGenericTool(input, result, cwd, redact) {
+function formatGenericTool(input, _result, _cwd, redact) {
   const headerParams = [];
   const multilineParams = [];
   for (const [key, value] of Object.entries(input)) {
@@ -15535,7 +15535,6 @@ function parseGrepOptions(args) {
   }
   return {
     pattern,
-    caseInsensitive,
     countOnly,
     listOnly,
     maxMatches,
@@ -16512,7 +16511,7 @@ async function read() {
   } else {
     const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
     if (targetIdx === -1) {
-      const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
+      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
       printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
       return 1;
     }

@@ -14,7 +14,6 @@ import type {
   KnownEntry,
   SummaryEntry,
   SystemEntry,
-  ToolResultContentBlock,
   UserEntry,
 } from './schemas';
 
@@ -683,7 +682,7 @@ function getToolFormatter(name: string): ToolFormatter {
 
 function formatEditTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
+  _result?: ToolResultInfo,
   cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
@@ -719,7 +718,7 @@ function formatEditTool(
 
 function formatReadTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
+  _result?: ToolResultInfo,
   cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
@@ -751,7 +750,7 @@ function formatReadTool(
 
 function formatWriteTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
+  _result?: ToolResultInfo,
   cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
@@ -777,7 +776,7 @@ function formatWriteTool(
 function formatBashTool(
   input: Record<string, unknown>,
   result?: ToolResultInfo,
-  cwd?: string,
+  _cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
   const command = String(input.command || '').trim();
@@ -807,9 +806,9 @@ function formatBashTool(
 
 function formatGrepTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
+  _result?: ToolResultInfo,
   cwd?: string,
-  redact?: boolean,
+  _redact?: boolean,
 ): ToolFormatResult {
   const pattern = String(input.pattern || '');
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
@@ -832,8 +831,8 @@ function formatGrepTool(
 function formatGlobTool(
   input: Record<string, unknown>,
   result?: ToolResultInfo,
-  cwd?: string,
-  redact?: boolean,
+  _cwd?: string,
+  _redact?: boolean,
 ): ToolFormatResult {
   const pattern = String(input.pattern || '');
   const headerParams: Array<string> = [`pattern="${pattern}"`];
@@ -854,7 +853,7 @@ function formatGlobTool(
 function formatTaskTool(
   input: Record<string, unknown>,
   result?: ToolResultInfo,
-  cwd?: string,
+  _cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
   const desc = String(input.description || '');
@@ -893,8 +892,8 @@ function formatTaskTool(
 
 function formatTodoWriteTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
-  cwd?: string,
+  _result?: ToolResultInfo,
+  _cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
   const todos = Array.isArray(input.todos) ? input.todos : [];
@@ -928,7 +927,7 @@ function formatTodoWriteTool(
 function formatAskUserQuestionTool(
   input: Record<string, unknown>,
   result?: ToolResultInfo,
-  cwd?: string,
+  _cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
   const questions = Array.isArray(input.questions) ? input.questions : [];
@@ -966,9 +965,9 @@ function formatAskUserQuestionTool(
 
 function formatExitPlanModeTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
-  cwd?: string,
-  redact?: boolean,
+  _result?: ToolResultInfo,
+  _cwd?: string,
+  _redact?: boolean,
 ): ToolFormatResult {
   const plan = input.plan ? String(input.plan) : '';
 
@@ -983,7 +982,12 @@ function formatExitPlanModeTool(
   return { headerParams: [], multilineParams: [], suppressResult: true };
 }
 
-function formatWebFetchTool(input: Record<string, unknown>): ToolFormatResult {
+function formatWebFetchTool(
+  input: Record<string, unknown>,
+  _result?: ToolResultInfo,
+  _cwd?: string,
+  _redact?: boolean,
+): ToolFormatResult {
   const url = String(input.url || '');
   return {
     headerParams: [`url="${url}"`],
@@ -991,7 +995,12 @@ function formatWebFetchTool(input: Record<string, unknown>): ToolFormatResult {
   };
 }
 
-function formatWebSearchTool(input: Record<string, unknown>): ToolFormatResult {
+function formatWebSearchTool(
+  input: Record<string, unknown>,
+  _result?: ToolResultInfo,
+  _cwd?: string,
+  _redact?: boolean,
+): ToolFormatResult {
   const query = String(input.query || '');
   return {
     headerParams: [`query="${escapeQuotes(query)}"`],
@@ -1001,8 +1010,8 @@ function formatWebSearchTool(input: Record<string, unknown>): ToolFormatResult {
 
 function formatGenericTool(
   input: Record<string, unknown>,
-  result?: ToolResultInfo,
-  cwd?: string,
+  _result?: ToolResultInfo,
+  _cwd?: string,
   redact?: boolean,
 ): ToolFormatResult {
   const headerParams: Array<string> = [];
