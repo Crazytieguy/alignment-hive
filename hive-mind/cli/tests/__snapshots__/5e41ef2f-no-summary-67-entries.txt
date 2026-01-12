@@ -2036,7 +2036,143 @@
   2. **Keep more fields** - Stop stripping `usage`, `thinkingMetadata`, and `todos` per your preference.
   3. **Self-compatibility** - Make stripped fields optional so transformed data can be re-parsed. Add test to enforce this constraint.
 
-42|03:00|tool|ExitPlanMode|plan=135lines
+42|03:00|tool|ExitPlanMode
+[plan]
+  # Schema Improvements Plan
+
+  ## Summary
+
+  Three changes to `hive-mind-cli/src/lib/schemas.ts`:
+  1. Remove unnecessary recursion from ToolResultBlock
+  2. Keep `usage`, `thinkingMetadata`, and `todos` (stop stripping them)
+  3. Make schemas self-compatible (transformed data re-parses correctly)
+
+  ---
+
+  ## 1. Simplify ToolResultBlock
+
+  **Problem**: The schema uses a lazy getter to handle circular reference, but tool_result blocks never actually contain other tool_result blocks.
+
+  **Change**: Replace recursive type with explicit allowed types:
+
+  ```typescript
+  // Content blocks that can appear inside tool_result.content (no tool_result recursion)
+  const ToolResultContentBlockSchema = z.union([
+    TextBlockSchema,
+    ImageBlockSchema,
+    DocumentBlockSchema,
+    UnknownContentBlockSchema,
+  ]);
+
+  export const ToolResultBlockSchema = z.looseObject({
+    type: z.literal("tool_result"),
+    tool_use_id: z.string(),
+    content: z.union([z.string(), z.array(ToolResultContentBlockSchema)]).optional(),
+  });
+  ```
+
+  Note: `ToolResultBlockSchema` stays in `KnownContentBlockSchema` - it appears in user `message.content` arrays. The change is just that its own `content` field doesn't recursively include `ToolResultBlockSchema`.
+
+  ---
+
+  ## 2. Keep More Fields
+
+  **Decision**: Keep `usage`, `thinkingMetadata`, and `todos` for analytics value.
+
+  **Changes to UserMessageObjectSchema** (line 73):
+  - Remove `usage` from transform destructure
+
+  **Changes to AssistantMessageObjectSchema** (line 82):
+  - Remove `usage` from transform destructure
+
+  **Changes to UserEntrySchema** (line 100):
+  - Remove `thinkingMetadata` from transform destructure
+  - Remove `todos` from transform destructure
+
+  **Final stripped fields**:
+  | Field | Reason for stripping |
+  |-------|---------------------|
+  | `data` (Base64Source) | Large, can contain sensitive data |
+  | `id` (Message objects) | Low retrieval value |
+  | `toolUseResult` | Redundant with message.content |
+  | `requestId` | Low value |
+  | `slug` | Low value |
+  | `userType` | Always "external" |
+  | `imagePasteIds` | Low value without images |
+
+  ---
+
+  ## 3. Self-Compatibility
+
+  **Goal**: `Schema.parse(Schema.parse(data))` should work (transformed data is valid input).
+
+  **Constraint documentation** - Add comment at top of file:
+
+  ```typescript
+  /**
+   * SELF-COMPATIBILITY CONSTRAINT:
+   * All schemas with transforms must accept both original AND transformed data.
+   * This allows the same schemas to be used for initial extraction and later retrieval.
+   * To maintain this: make all stripped fields optional (not required).
+   */
+  ```
+
+  **Schema changes** - Make stripped fields optional:
+
+  ```typescript
+  // Base64SourceSchema
+  data: z.string().optional(),  // Was required
+
+  // UserMessageObjectSchema
+  id: z.string().optional(),    // Already optional, good
+
+  // AssistantMessageObjectSchema
+  id: z.string().optional(),    // Already optional, good
+
+  // UserEntrySchema
+  toolUseResult: z.unknown().optional(),  // Already optional, good
+  requestId: z.string().optional(),       // Already optional, good
+  // etc.
+  ```
+
+  **Add test** in `extraction.test.ts`:
+
+  ```typescript
+  describe("schema self-compatibility", () => {
+    test("transformed data re-parses correctly", () => {
+      const original = {
+        type: "user",
+        uuid: "1",
+        parentUuid: null,
+        timestamp: "2025-01-01",
+        message: { role: "user", content: "hello", id: "msg-1", usage: { input: 100 } },
+        toolUseResult: { foo: "bar" },
+        requestId: "req-1",
+      };
+
+      const parsed = UserEntrySchema.parse(original);
+      const reparsed = UserEntrySchema.parse(parsed);
+      expect(reparsed).toEqual(parsed);
+    });
+  });
+  ```
+
+  ---
+
+  ## Files to Modify
+
+  1. **`hive-mind-cli/src/lib/schemas.ts`**
+     - Add self-compatibility comment at top
+     - Simplify ToolResultBlockSchema (remove getter, use explicit types)
+     - Update KnownContentBlockSchema (remove ToolResultBlockSchema if appropriate)
+     - Stop stripping: `usage`, `thinkingMetadata`, `todos`
+     - Make `data` in Base64SourceSchema optional
+
+  2. **`hive-mind-cli/src/lib/extraction.test.ts`**
+     - Update "strips requestId, slug, userType" test (usage now preserved)
+     - Add self-compatibility test
+     - Update any assertions about stripped fields
+
 [result]
   The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.
 
@@ -3017,7 +3153,124 @@
   - **extraction.ts** verified as self-compatible (sanitizeDeep only modifies string content)
   - **slug** explained (auto-generated session name)
 
-57|03:09|tool|ExitPlanMode|plan=116lines
+57|03:09|tool|ExitPlanMode
+[plan]
+  # Schema Improvements Plan
+
+  ## Summary
+
+  Three changes to `hive-mind-cli/src/lib/schemas.ts`:
+  1. Remove unnecessary recursion from ToolResultBlock
+  2. Keep more fields: `usage`, `thinkingMetadata`, `todos`, `imagePasteIds`
+  3. Make schemas self-compatible with **compile-time TypeScript enforcement**
+
+  ---
+
+  ## 1. Simplify ToolResultBlock
+
+  **Problem**: The schema uses a lazy getter to handle circular reference, but tool_result blocks never actually contain other tool_result blocks.
+
+  **Change**: Replace recursive type with explicit allowed types:
+
+  ```typescript
+  // Content blocks that can appear inside tool_result.content (no tool_result recursion)
+  const ToolResultContentBlockSchema = z.union([
+    TextBlockSchema,
+    ImageBlockSchema,
+    DocumentBlockSchema,
+    UnknownContentBlockSchema,
+  ]);
+
+  export const ToolResultBlockSchema = z.looseObject({
+    type: z.literal("tool_result"),
+    tool_use_id: z.string(),
+    content: z.union([z.string(), z.array(ToolResultContentBlockSchema)]).optional(),
+  });
+  ```
+
+  Note: `ToolResultBlockSchema` stays in `KnownContentBlockSchema` - it appears in user `message.content` arrays. The change is just that its own `content` field doesn't recursively include `ToolResultBlockSchema`.
+
+  ---
+
+  ## 2. Keep More Fields
+
+  **Decision**: Keep `usage`, `thinkingMetadata`, `todos`, and `imagePasteIds`.
+
+  **Changes to UserMessageObjectSchema** (line 73):
+  - Remove `usage` from transform destructure
+
+  **Changes to AssistantMessageObjectSchema** (line 82):
+  - Remove `usage` from transform destructure
+
+  **Changes to UserEntrySchema** (line 100):
+  - Remove `thinkingMetadata`, `todos`, `imagePasteIds` from transform destructure
+
+  **Final stripped fields**:
+  | Field | Reason for stripping |
+  |-------|---------------------|
+  | `data` (Base64Source) | Large, can contain sensitive data |
+  | `id` (Message objects) | Low retrieval value |
+  | `toolUseResult` | Redundant with message.content |
+  | `requestId` | Low value |
+  | `slug` | Low value (auto-generated session name like "fix-auth-bug") |
+  | `userType` | Always "external" |
+
+  ---
+
+  ## 3. Self-Compatibility with TypeScript Enforcement
+
+  **Goal**: `Schema.parse(Schema.parse(data))` should work (transformed data is valid input).
+
+  **TypeScript compile-time enforcement** (no runtime tests needed!):
+
+  ```typescript
+  /**
+   * SELF-COMPATIBILITY CONSTRAINT:
+   * All schemas with transforms must accept both original AND transformed data.
+   * This allows the same schemas to be used for initial extraction and later retrieval.
+   * To maintain this: make all stripped fields optional (not required).
+   *
+   * The type assertions below enforce this at compile time.
+   */
+
+  // Compile-time assertion: output type must be assignable to input type
+  type AssertSelfCompatible<T extends z.ZodType> =
+    z.output<T> extends z.input<T> ? true : never;
+
+  // These will cause compile errors if schemas are not self-compatible
+  const _assertBase64Source: AssertSelfCompatible<typeof Base64SourceSchema> = true;
+  const _assertUserMessage: AssertSelfCompatible<typeof UserMessageObjectSchema> = true;
+  const _assertAssistantMessage: AssertSelfCompatible<typeof AssistantMessageObjectSchema> = true;
+  const _assertUserEntry: AssertSelfCompatible<typeof UserEntrySchema> = true;
+  const _assertAssistantEntry: AssertSelfCompatible<typeof AssistantEntrySchema> = true;
+  ```
+
+  **Schema changes** - Make stripped fields optional:
+
+  ```typescript
+  // Base64SourceSchema - make data optional
+  data: z.string().optional(),  // Was required, now optional for self-compatibility
+
+  // All other stripped fields are already optional - verify this is true
+  ```
+
+  **extraction.ts compatibility**: `sanitizeDeep()` only modifies string content (replacing secrets with `[REDACTED:rule-id]`), it doesn't change structure. Self-compatible.
+
+  ---
+
+  ## Files to Modify
+
+  1. **`hive-mind-cli/src/lib/schemas.ts`**
+     - Add self-compatibility comment and type assertions at bottom
+     - Simplify ToolResultBlockSchema (remove getter, use explicit types)
+     - Stop stripping: `usage`, `thinkingMetadata`, `todos`, `imagePasteIds`
+     - Make `data` in Base64SourceSchema optional
+
+  2. **`hive-mind-cli/src/lib/extraction.test.ts`**
+     - Update "strips requestId, slug, userType" test (usage now preserved)
+     - Update any assertions about stripped fields
+     - (No self-compatibility runtime test needed - TypeScript enforces it)
+
 [result]
   User has approved your plan. You can now start coding. Start with updating your todo list if applicable
 
@@ -4554,7 +4807,7 @@
 106|03:27|thinking
   Good, I can see the changes and the recent commit style. Let me create the commit.
 
-107|03:27|tool|Bash|command="git add hive-mind-cli/src/lib/schemas.ts hive-mind-cli/src/lib/extraction.test.ts && git commit -m \"$(cat <<'EOF'"|description="Commit schema improvements"
+107|03:27|tool|Bash|description="Commit schema improvements"
 [command]
   git add hive-mind-cli/src/lib/schemas.ts hive-mind-cli/src/lib/extraction.test.ts && git commit -m "$(cat <<'EOF'
   Improve schemas: simplify recursion, keep more fields, add self-compatibility
@@ -4578,7 +4831,7 @@
 108|03:27|thinking
   Oh, I'm already in the hive-mind-cli directory. Let me fix the paths.
 
-109|03:27|tool|Bash|command="git add src/lib/schemas.ts src/lib/extraction.test.ts && git commit -m \"$(cat <<'EOF'"|description="Commit schema improvements"
+109|03:27|tool|Bash|description="Commit schema improvements"
 [command]
   git add src/lib/schemas.ts src/lib/extraction.test.ts && git commit -m "$(cat <<'EOF'
   Improve schemas: simplify recursion, keep more fields, add self-compatibility

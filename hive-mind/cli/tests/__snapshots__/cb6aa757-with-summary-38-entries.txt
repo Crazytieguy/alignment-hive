@@ -1232,7 +1232,7 @@
 53|01:51|thinking
   Good. Now let me commit the changes. I'll add all the files and create a commit.
 
-54|01:51|tool|Bash|command="git add README.md docs/hive-mind-plan.md docs/memory-system-plan.md && git commit -m \"$(cat <<'EOF'"|description="Commit hive-mind rename"
+54|01:51|tool|Bash|description="Commit hive-mind rename"
 [command]
   git add README.md docs/hive-mind-plan.md docs/memory-system-plan.md && git commit -m "$(cat <<'EOF'
   Rename memory system to hive-mind

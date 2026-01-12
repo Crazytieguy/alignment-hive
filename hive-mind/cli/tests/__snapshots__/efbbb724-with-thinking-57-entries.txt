@@ -1341,7 +1341,7 @@
 75|22:28|thinking
   Good, I can see the changes. Now let me add and commit. The commit style from recent commits is concise and descriptive. I'll write a similar commit message.
 
-76|22:28|tool|Bash|command="git add README.md CLAUDE.md docs/roadmap.md plugins/hive-mind/README.md && git commit -m \"$(cat <<'EOF'"|description="Add and commit documentation refactor"
+76|22:28|tool|Bash|description="Add and commit documentation refactor"
 [command]
   git add README.md CLAUDE.md docs/roadmap.md plugins/hive-mind/README.md && git commit -m "$(cat <<'EOF'
   Refactor documentation for public sharing

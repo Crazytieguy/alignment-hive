@@ -1816,7 +1816,7 @@
 50|00:18|assistant
   The `.mcp.json` is for the llms-fetch MCP server - seems like local tooling config rather than project infrastructure. I'll leave it out and just commit the memory system plan:
 
-51|00:18|tool|Bash|command="git add docs/memory-system-plan.md README.md && git commit -m \"$(cat <<'EOF'"|description="Commit memory system plan"
+51|00:18|tool|Bash|description="Commit memory system plan"
 [command]
   git add docs/memory-system-plan.md README.md && git commit -m "$(cat <<'EOF'
   Add memory system plan and update README
