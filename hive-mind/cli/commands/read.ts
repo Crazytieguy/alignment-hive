@@ -44,17 +44,17 @@ function printUsage(): void {
   console.log("  read 02ed 5 -B 1 -A 3  # entry 5 with 1 before, 3 after");
 }
 
-export async function read(): Promise<void> {
+export async function read(): Promise<number> {
   const args = process.argv.slice(3);
 
   if (args.includes("--help") || args.includes("-h")) {
     printUsage();
-    return;
+    return 0;
   }
 
   if (args.length === 0) {
     printUsage();
-    process.exit(1);
+    return 1;
   }
 
   // Parse numeric flag like -C 2, -B 1, -A 3
@@ -99,7 +99,7 @@ export async function read(): Promise<void> {
     files = await readdir(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
-    return;
+    return 1;
   }
 
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
@@ -110,7 +110,7 @@ export async function read(): Promise<void> {
 
   if (matches.length === 0) {
     printError(`No session found matching '${sessionIdPrefix}'`);
-    return;
+    return 1;
   }
 
   if (matches.length > 1) {
@@ -121,7 +121,7 @@ export async function read(): Promise<void> {
     if (matches.length > 5) {
       console.log(`  ... and ${matches.length - 5} more`);
     }
-    return;
+    return 1;
   }
 
   const sessionFile = join(sessionsDir, matches[0]);
@@ -132,14 +132,14 @@ export async function read(): Promise<void> {
     entryNumber = parseInt(entryArg, 10);
     if (isNaN(entryNumber) || entryNumber < 1) {
       printError(`Invalid entry number: ${entryArg}`);
-      return;
+      return 1;
     }
   }
 
   // Context flags require an entry number
   if (hasContextFlags && entryNumber === null) {
     printError("Context flags (-C, -B, -A) require an entry number");
-    return;
+    return 1;
   }
 
   // Read and parse session
@@ -152,7 +152,7 @@ export async function read(): Promise<void> {
 
   if (rawEntries.length === 0) {
     printError("Session has no entries.");
-    return;
+    return 1;
   }
 
   // Parse all entries
@@ -181,7 +181,7 @@ export async function read(): Promise<void> {
     if (targetIdx === -1) {
       const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
       printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
-      return;
+      return 1;
     }
 
     // Calculate context range
@@ -206,4 +206,6 @@ export async function read(): Promise<void> {
     }
     console.log(output.join("\n"));
   }
+
+  return 0;
 }

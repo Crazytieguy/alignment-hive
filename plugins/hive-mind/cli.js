@@ -15384,15 +15384,15 @@ async function grep() {
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
   if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
     printUsage();
-    return;
+    return 0;
   }
   if (args.length === 0) {
     printUsage();
-    process.exit(1);
+    return 1;
   }
   const options = parseGrepOptions(args);
   if (!options)
-    return;
+    return 1;
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
@@ -15400,12 +15400,12 @@ async function grep() {
     files = await readdir2(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
-    return;
+    return 1;
   }
   let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
     printError(`No sessions found in ${sessionsDir}`);
-    return;
+    return 1;
   }
   if (options.sessionFilter) {
     const prefix = options.sessionFilter;
@@ -15415,7 +15415,7 @@ async function grep() {
     });
     if (jsonlFiles.length === 0) {
       printError(`No session found matching '${prefix}'`);
-      return;
+      return 1;
     }
   }
   let totalMatches = 0;
@@ -15479,6 +15479,7 @@ async function grep() {
       console.log(sessionId);
     }
   }
+  return 0;
 }
 function parseGrepOptions(args) {
   const caseInsensitive = args.includes("-i");
@@ -15675,7 +15676,7 @@ async function index() {
   const args = process.argv.slice(3);
   if (args.includes("--help") || args.includes("-h")) {
     printUsage2();
-    return;
+    return 0;
   }
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
@@ -15684,12 +15685,12 @@ async function index() {
     files = await readdir3(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
-    return;
+    return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
     printError(`No sessions found in ${sessionsDir}`);
-    return;
+    return 1;
   }
   const allSessions = new Map;
   for (const file2 of jsonlFiles) {
@@ -15716,6 +15717,7 @@ async function index() {
     prevDate = date5;
     prevYear = year;
   }
+  return 0;
 }
 function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYear) {
   const { meta: meta3, entries } = session;
@@ -16295,12 +16297,12 @@ async function deviceAuthFlow() {
     if (errorResult.data.error_description) {
       console.log(errorResult.data.error_description);
     }
-    process.exit(1);
+    return 1;
   }
   const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
   if (!deviceAuthResult.success) {
     printError("Unexpected response from authentication server");
-    process.exit(1);
+    return 1;
   }
   const deviceAuth = deviceAuthResult.data;
   console.log("\u2501".repeat(65));
@@ -16353,7 +16355,7 @@ async function deviceAuthFlow() {
       console.log("");
       console.log(login.contributing);
       console.log(login.reviewPeriod);
-      return;
+      return 0;
     }
     const errorData = tokenData;
     if (errorData.error === "authorization_pending") {
@@ -16368,10 +16370,10 @@ async function deviceAuthFlow() {
     printError(login.authFailed(errorData.error || "unknown error"));
     if (errorData.error_description)
       console.log(errorData.error_description);
-    process.exit(1);
+    return 1;
   }
   printError(login.timeout);
-  process.exit(1);
+  return 1;
 }
 async function login2() {
   console.log("");
@@ -16379,10 +16381,10 @@ async function login2() {
   console.log(`  ${"\u2500".repeat(15)}`);
   console.log("");
   if (!await checkExistingAuth())
-    return;
+    return 0;
   if (await tryRefresh())
-    return;
-  await deviceAuthFlow();
+    return 0;
+  return await deviceAuthFlow();
 }
 
 // cli/commands/read.ts
@@ -16411,11 +16413,11 @@ async function read() {
   const args = process.argv.slice(3);
   if (args.includes("--help") || args.includes("-h")) {
     printUsage3();
-    return;
+    return 0;
   }
   if (args.length === 0) {
     printUsage3();
-    process.exit(1);
+    return 1;
   }
   function parseNumericFlag(argList, flag) {
     const idx = argList.indexOf(flag);
@@ -16453,7 +16455,7 @@ async function read() {
     files = await readdir4(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
-    return;
+    return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   const matches = jsonlFiles.filter((f) => {
@@ -16462,7 +16464,7 @@ async function read() {
   });
   if (matches.length === 0) {
     printError(`No session found matching '${sessionIdPrefix}'`);
-    return;
+    return 1;
   }
   if (matches.length > 1) {
     printError(`Multiple sessions match '${sessionIdPrefix}':`);
@@ -16472,7 +16474,7 @@ async function read() {
     if (matches.length > 5) {
       console.log(`  ... and ${matches.length - 5} more`);
     }
-    return;
+    return 1;
   }
   const sessionFile = join5(sessionsDir, matches[0]);
   let entryNumber = null;
@@ -16480,19 +16482,19 @@ async function read() {
     entryNumber = parseInt(entryArg, 10);
     if (isNaN(entryNumber) || entryNumber < 1) {
       printError(`Invalid entry number: ${entryArg}`);
-      return;
+      return 1;
     }
   }
   if (hasContextFlags && entryNumber === null) {
     printError("Context flags (-C, -B, -A) require an entry number");
-    return;
+    return 1;
   }
   const content = await readFile3(sessionFile, "utf-8");
   const lines = Array.from(parseJsonl(content));
   const rawEntries = lines.slice(1);
   if (rawEntries.length === 0) {
     printError("Session has no entries.");
-    return;
+    return 1;
   }
   const allEntries = [];
   for (const raw of rawEntries) {
@@ -16512,7 +16514,7 @@ async function read() {
     if (targetIdx === -1) {
       const maxLine = logicalEntries.length > 0 ? logicalEntries[logicalEntries.length - 1].lineNumber : 0;
       printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
-      return;
+      return 1;
     }
     const before = contextB ?? contextC ?? 0;
     const after = contextA ?? contextC ?? 0;
@@ -16534,6 +16536,7 @@ async function read() {
     console.log(output.join(`
 `));
   }
+  return 0;
 }
 
 // cli/commands/session-start.ts
@@ -16565,6 +16568,7 @@ async function sessionStart() {
     hookOutput(messages.join(`
 `));
   }
+  return 0;
 }
 
 // cli/cli.ts
@@ -16599,7 +16603,9 @@ async function main() {
   }
   const cmd = COMMANDS[command];
   try {
-    await cmd.handler();
+    const exitCode = await cmd.handler();
+    if (exitCode !== 0)
+      process.exit(exitCode);
   } catch (error48) {
     printError(error48 instanceof Error ? error48.message : String(error48));
     process.exit(1);

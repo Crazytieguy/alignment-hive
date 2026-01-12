@@ -101,7 +101,7 @@ async function tryRefresh(): Promise<boolean> {
   return false;
 }
 
-async function deviceAuthFlow(): Promise<void> {
+async function deviceAuthFlow(): Promise<number> {
   printInfo(msg.starting);
   console.log("");
 
@@ -120,14 +120,14 @@ async function deviceAuthFlow(): Promise<void> {
     if (errorResult.data.error_description) {
       console.log(errorResult.data.error_description);
     }
-    process.exit(1);
+    return 1;
   }
 
   // Validate device auth response
   const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
   if (!deviceAuthResult.success) {
     printError("Unexpected response from authentication server");
-    process.exit(1);
+    return 1;
   }
 
   const deviceAuth = deviceAuthResult.data;
@@ -193,7 +193,7 @@ async function deviceAuthFlow(): Promise<void> {
       console.log(msg.contributing);
       console.log(msg.reviewPeriod);
 
-      return;
+      return 0;
     }
 
     // Check for known error states
@@ -215,21 +215,21 @@ async function deviceAuthFlow(): Promise<void> {
     console.log("");
     printError(msg.authFailed(errorData.error || "unknown error"));
     if (errorData.error_description) console.log(errorData.error_description);
-    process.exit(1);
+    return 1;
   }
 
   printError(msg.timeout);
-  process.exit(1);
+  return 1;
 }
 
-export async function login(): Promise<void> {
+export async function login(): Promise<number> {
   console.log("");
   console.log(`  ${msg.header}`);
   console.log(`  ${"\u2500".repeat(15)}`);
   console.log("");
 
-  if (!(await checkExistingAuth())) return;
-  if (await tryRefresh()) return;
+  if (!(await checkExistingAuth())) return 0;
+  if (await tryRefresh()) return 0;
 
-  await deviceAuthFlow();
+  return await deviceAuthFlow();
 }

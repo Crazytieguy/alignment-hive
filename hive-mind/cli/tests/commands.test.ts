@@ -674,18 +674,11 @@ describe("read command", () => {
   });
 
   test("shows usage when no session provided", async () => {
-    const errorOutput: Array<string> = [];
-    const errorSpy = spyOn(console, "error").mockImplementation((...args: Array<unknown>) => {
-      errorOutput.push(args.map(String).join(" "));
-    });
-
     process.argv = ["node", "cli", "read"];
     const { read } = await import("../commands/read");
     await read();
 
-    errorSpy.mockRestore();
-
-    expect(errorOutput.some((line) => line.includes("Usage"))).toBe(true);
+    expect(consoleOutput.some((line) => line.includes("Usage"))).toBe(true);
   });
 });
 

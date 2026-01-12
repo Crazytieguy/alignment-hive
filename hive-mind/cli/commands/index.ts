@@ -113,12 +113,12 @@ function printUsage(): void {
   console.log("  COMMITS              Git commit hashes from the session");
 }
 
-export async function index(): Promise<void> {
+export async function index(): Promise<number> {
   const args = process.argv.slice(3);
 
   if (args.includes("--help") || args.includes("-h")) {
     printUsage();
-    return;
+    return 0;
   }
 
   const cwd = process.cwd();
@@ -129,13 +129,13 @@ export async function index(): Promise<void> {
     files = await readdir(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
-    return;
+    return 1;
   }
 
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
     printError(`No sessions found in ${sessionsDir}`);
-    return;
+    return 1;
   }
 
   // Load all sessions for subagent lookups
@@ -172,6 +172,8 @@ export async function index(): Promise<void> {
     prevDate = date;
     prevYear = year;
   }
+
+  return 0;
 }
 
 function formatSessionLine(

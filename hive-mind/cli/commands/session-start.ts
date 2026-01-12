@@ -7,7 +7,7 @@ import {
 } from "../lib/messages";
 import { hookOutput } from "../lib/output";
 
-export async function sessionStart(): Promise<void> {
+export async function sessionStart(): Promise<number> {
   const messages: Array<string> = [];
 
   // 1. Check auth status
@@ -44,4 +44,6 @@ export async function sessionStart(): Promise<void> {
   if (messages.length > 0) {
     hookOutput(messages.join("\n"));
   }
+
+  return 0;
 }

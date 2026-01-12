@@ -65,7 +65,7 @@ function printUsage(): void {
   console.log('  grep --include-tool-results "error"  # include tool output');
 }
 
-export async function grep(): Promise<void> {
+export async function grep(): Promise<number> {
   const args = process.argv.slice(3);
 
   // Check for help flag before -- separator
@@ -73,17 +73,17 @@ export async function grep(): Promise<void> {
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
   if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
     printUsage();
-    return;
+    return 0;
   }
 
   if (args.length === 0) {
     printUsage();
-    process.exit(1);
+    return 1;
   }
 
   // Parse options
   const options = parseGrepOptions(args);
-  if (!options) return;
+  if (!options) return 1;
 
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
@@ -93,13 +93,13 @@ export async function grep(): Promise<void> {
     files = await readdir(sessionsDir);
   } catch {
     printError(`No sessions found. Run 'extract' first.`);
-    return;
+    return 1;
   }
 
   let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
     printError(`No sessions found in ${sessionsDir}`);
-    return;
+    return 1;
   }
 
   // Filter to specific session if -s flag provided
@@ -111,7 +111,7 @@ export async function grep(): Promise<void> {
     });
     if (jsonlFiles.length === 0) {
       printError(`No session found matching '${prefix}'`);
-      return;
+      return 1;
     }
   }
 
@@ -193,6 +193,8 @@ export async function grep(): Promise<void> {
       console.log(sessionId);
     }
   }
+
+  return 0;
 }
 
 function parseGrepOptions(args: Array<string>): GrepOptions | null {
