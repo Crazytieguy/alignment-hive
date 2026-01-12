@@ -15642,6 +15642,204 @@ function formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords) {
   return formatContentBody(`${lineNumber}|summary`, entry.summary, redact, wordLimit, skipWords);
 }
 
+// cli/lib/messages.ts
+function getCliPath() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (pluginRoot) {
+    return `${pluginRoot}/cli.js`;
+  }
+  return "~/.claude/plugins/hive-mind/cli.js";
+}
+var CONT = "\u2192";
+var hook = {
+  notLoggedIn: () => {
+    const cliPath = getCliPath();
+    const shell = getShellConfig();
+    return [
+      "hive-mind: Join the shared knowledge base",
+      `${CONT} Login: bun ${cliPath} login`,
+      `${CONT} Optional shortcut:`,
+      `  echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
+    ].join(`
+`);
+  },
+  loggedIn: (displayName) => {
+    return `hive-mind: Connected as ${displayName}`;
+  },
+  extracted: (count) => {
+    return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
+  },
+  schemaErrors: (errorCount, sessionCount, errors3) => {
+    const unique = [...new Set(errors3)];
+    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
+  },
+  extractionFailed: (error48) => {
+    return `Extraction failed: ${error48}`;
+  },
+  bunNotInstalled: () => {
+    return "hive-mind requires Bun. Install: curl -fsSL https://bun.sh/install | bash";
+  }
+};
+var errors3 = {
+  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
+  noSessionsIn: (dir) => `No sessions in ${dir}`,
+  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
+  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
+  andMore: (count) => `  ... and ${count} more`,
+  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
+  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
+  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
+  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
+  invalidEntry: (value) => `Invalid entry number: "${value}"`,
+  invalidRange: (value) => `Invalid range: "${value}"`,
+  contextRequiresEntry: "Context flags (-C, -B, -A) require an entry number",
+  emptySession: "Session has no entries",
+  noPattern: "No pattern specified",
+  invalidRegex: (error48) => `Invalid regex: ${error48}`,
+  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
+  unexpectedResponse: "Unexpected response from server",
+  bunNotInstalled: () => {
+    return [
+      "hive-mind requires Bun to run.",
+      "",
+      "Install Bun:",
+      "  curl -fsSL https://bun.sh/install | bash"
+    ].join(`
+`);
+  }
+};
+var usage = {
+  main: (commands) => {
+    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
+    for (const { name, description } of commands) {
+      lines.push(`  ${name.padEnd(15)} ${description}`);
+    }
+    return lines.join(`
+`);
+  },
+  read: () => {
+    return [
+      "Usage: read <session-id> [N | N-M] [options]",
+      "",
+      "Read session entries. Session ID supports prefix matching.",
+      "",
+      "Options:",
+      "  N             Entry number to read (full content)",
+      "  N-M           Entry range to read (with truncation)",
+      "  --full        Show all entries with full content (no truncation)",
+      "  --target N    Target total words (default 2000)",
+      "  --skip N      Skip first N words per field (for pagination)",
+      "  -C N          Show N entries of context before and after",
+      "  -B N          Show N entries of context before",
+      "  -A N          Show N entries of context after",
+      "  --show FIELDS Show full content for fields (comma-separated)",
+      "  --hide FIELDS Redact fields to word counts (comma-separated)",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
+      "",
+      "Truncation:",
+      "  Text is adaptively truncated to fit within the target word count.",
+      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
+      "  Use --skip with the shown N value to continue reading.",
+      "",
+      "Examples:",
+      "  read 02ed                          # all entries (~2000 words)",
+      "  read 02ed --target 500             # tighter truncation",
+      "  read 02ed --full                   # all entries (full content)",
+      "  read 02ed --skip 50                # skip first 50 words per field",
+      "  read 02ed 5                        # entry 5 (full content)",
+      "  read 02ed 10-20                    # entries 10 through 20",
+      "  read 02ed 10-20 --full             # range without truncation",
+      "  read 02ed --show thinking          # show full thinking content",
+      "  read 02ed --show tool:Bash:result  # show Bash command results",
+      "  read 02ed --hide user              # redact user messages to word counts"
+    ].join(`
+`);
+  },
+  grep: () => {
+    return [
+      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "",
+      "Search sessions for a pattern (JavaScript regex).",
+      "Use -- to separate options from pattern if needed.",
+      "",
+      "Options:",
+      "  -i              Case insensitive search",
+      "  -c              Count matches per session only",
+      "  -l              List matching session IDs only",
+      "  -m N            Stop after N total matches",
+      "  -C N            Show N lines of context around match",
+      "  -s <session>    Search only in specified session (prefix match)",
+      "  --in <fields>   Search only specified fields (comma-separated)",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
+      "",
+      "Default fields: user, assistant, thinking, tool:input, system, summary",
+      "",
+      "Examples:",
+      '  grep "TODO"                    # find TODO in sessions',
+      '  grep -i "error" -C 2           # case insensitive with context',
+      '  grep -c "function"             # count matches per session',
+      '  grep -l "#2597"                # list sessions mentioning issue',
+      '  grep -s 02ed "bug"             # search only in session 02ed...',
+      '  grep --in tool:result "error"  # search only in tool results',
+      '  grep --in user,assistant "fix" # search only user and assistant'
+    ].join(`
+`);
+  },
+  index: () => {
+    return [
+      "Usage: index",
+      "",
+      "List extracted sessions with statistics and summaries.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Output columns:",
+      "  ID                    Session ID prefix",
+      "  DATETIME              Session modification time",
+      "  MSGS                  Total message count",
+      "  USER_MESSAGES         User message count",
+      "  BASH_CALLS            Bash commands executed",
+      "  WEB_FETCHES           Web fetches",
+      "  WEB_SEARCHES          Web searches",
+      "  LINES_ADDED           Lines added",
+      "  LINES_REMOVED         Lines removed",
+      "  FILES_TOUCHED         Files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY               Session summary or first prompt",
+      "  COMMITS               Git commits from the session"
+    ].join(`
+`);
+  }
+};
+var login = {
+  header: "Join the hive-mind shared knowledge base",
+  alreadyLoggedIn: "You're already connected.",
+  confirmRelogin: "Do you want to reconnect?",
+  refreshing: "Refreshing your session...",
+  refreshSuccess: "Session refreshed!",
+  starting: "Starting authentication...",
+  visitUrl: "Visit this URL in your browser:",
+  confirmCode: "Confirm this code matches:",
+  browserOpened: "Browser opened. Confirm the code and approve.",
+  openManually: "Open the URL in your browser, then confirm the code.",
+  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
+  success: "You're connected!",
+  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
+  welcomeEmail: (email3) => `Logged in as: ${email3}`,
+  contributing: "Your sessions will now contribute to the shared knowledge base.",
+  reviewPeriod: "You'll have 24 hours to review and exclude sessions before submission.",
+  timeout: "Authentication timed out. Please try again.",
+  startFailed: (error48) => `Couldn't start authentication: ${error48}`,
+  authFailed: (error48) => `Authentication failed: ${error48}`
+};
+
 // cli/lib/output.ts
 var colors = {
   red: (s) => `\x1B[31m${s}\x1B[0m`,
@@ -15667,34 +15865,7 @@ function printWarning(message) {
 
 // cli/commands/grep.ts
 function printUsage() {
-  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]");
-  console.log(`
-Search across sessions for a pattern (JavaScript regex).`);
-  console.log('Use -- to separate options from pattern (e.g., grep -- "--help" to search for literal --help).');
-  console.log(`
-Options:`);
-  console.log("  -i              Case insensitive search");
-  console.log("  -c              Count matches per session only");
-  console.log("  -l              List matching session IDs only");
-  console.log("  -m N            Stop after N total matches");
-  console.log("  -C N            Show N lines of context around match");
-  console.log("  -s <session>    Search only in specified session (prefix match)");
-  console.log("  --in <fields>   Search only specified fields (comma-separated)");
-  console.log(`
-Field specifiers:`);
-  console.log("  user, assistant, thinking, system, summary");
-  console.log("  tool:input, tool:result, tool:<name>:input, tool:<name>:result");
-  console.log(`
-Default fields: user, assistant, thinking, tool:input, system, summary`);
-  console.log(`
-Examples:`);
-  console.log('  grep "TODO"                    # find TODO in sessions');
-  console.log('  grep -i "error" -C 2           # case insensitive with context');
-  console.log('  grep -c "function"             # count matches per session');
-  console.log('  grep -l "#2597"                # list sessions mentioning issue');
-  console.log('  grep -s 02ed "bug"             # search only in session 02ed...');
-  console.log('  grep --in tool:result "error"  # search only in tool results');
-  console.log('  grep --in user,assistant "fix" # search only user and assistant');
+  console.log(usage.grep());
 }
 async function grep() {
   const args = process.argv.slice(3);
@@ -15717,12 +15888,12 @@ async function grep() {
   try {
     files = await readdir2(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(errors3.noSessions);
     return 1;
   }
   let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
+    printError(errors3.noSessionsIn(sessionsDir));
     return 1;
   }
   if (options.sessionFilter) {
@@ -15732,7 +15903,7 @@ async function grep() {
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
     if (jsonlFiles.length === 0) {
-      printError(`No session found matching '${prefix}'`);
+      printError(errors3.sessionNotFound(prefix));
       return 1;
     }
   }
@@ -15813,7 +15984,7 @@ function parseGrepOptions(args) {
   if (mValue !== undefined) {
     maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
-      printError("Invalid -m value: must be a positive number");
+      printError(errors3.invalidNumber("-m", mValue));
       return null;
     }
   }
@@ -15822,7 +15993,7 @@ function parseGrepOptions(args) {
   if (cValue !== undefined) {
     contextLines = parseInt(cValue, 10);
     if (isNaN(contextLines) || contextLines < 0) {
-      printError("Invalid -C value: must be a non-negative number");
+      printError(errors3.invalidNonNegative("-C"));
       return null;
     }
   }
@@ -15844,14 +16015,14 @@ function parseGrepOptions(args) {
     break;
   }
   if (!patternStr) {
-    printError("No pattern specified");
+    printError(errors3.noPattern);
     return null;
   }
   let pattern;
   try {
     pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
   } catch (e) {
-    printError(`Invalid regex pattern: ${e instanceof Error ? e.message : String(e)}`);
+    printError(errors3.invalidRegex(e instanceof Error ? e.message : String(e)));
     return null;
   }
   return {
@@ -16504,56 +16675,6 @@ function getUserDisplayName(user) {
   return user.first_name || user.email;
 }
 
-// cli/lib/messages.ts
-function getCliPath() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return "~/.claude/plugins/hive-mind/cli.js";
-}
-function notLoggedInMessage() {
-  const cliPath = getCliPath();
-  const shell = getShellConfig();
-  return [
-    "hive-mind: Not logged in",
-    "  Login:",
-    `    bun ${cliPath} login`,
-    "",
-    "  Add CLI shortcut (optional):",
-    `    echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
-  ].join(`
-`);
-}
-function loggedInMessage(displayName) {
-  return `hive-mind: Logged in as ${displayName}`;
-}
-function extractedMessage(count) {
-  return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
-}
-var login = {
-  header: "hive-mind login",
-  alreadyLoggedIn: "You're already logged in.",
-  confirmRelogin: "Do you want to log in again?",
-  refreshing: "Attempting to refresh existing session...",
-  refreshSuccess: "Session refreshed successfully!",
-  starting: "Starting hive-mind authentication...",
-  visitUrl: "To authenticate, visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
-  browserOpened: "Browser opened. Confirm the code matches and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
-  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
-  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
-  success: "Authentication successful!",
-  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
-  welcomeEmail: (email3) => `Logged in as: ${email3}`,
-  contributing: "Your Claude Code sessions will now contribute to the hive-mind.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before they're submitted.",
-  timeout: "Authentication timed out. Please try again.",
-  startFailed: (error48) => `Failed to start authentication: ${error48}`,
-  authFailed: (error48) => `Authentication failed: ${error48}`
-};
-
 // cli/commands/login.ts
 var WORKOS_API_URL2 = "https://api.workos.com/user_management";
 var DeviceAuthResponseSchema = exports_external.object({
@@ -16830,42 +16951,7 @@ function getUserMessageContent2(content) {
 
 // cli/commands/read.ts
 function printUsage3() {
-  console.log("Usage: read <session-id> [N | N-M] [options]");
-  console.log(`
-Read session entries. Session ID supports prefix matching.`);
-  console.log(`
-Options:`);
-  console.log("  N             Entry number to read (full content)");
-  console.log("  N-M           Entry range to read (with truncation)");
-  console.log("  --full        Show all entries with full content (no truncation)");
-  console.log("  --target N    Target total words (default 2000)");
-  console.log("  --skip N      Skip first N words per field (for pagination)");
-  console.log("  -C N          Show N entries of context before and after");
-  console.log("  -B N          Show N entries of context before");
-  console.log("  -A N          Show N entries of context after");
-  console.log("  --show FIELDS Show full content for fields (comma-separated)");
-  console.log("  --hide FIELDS Redact fields to word counts (comma-separated)");
-  console.log(`
-Field specifiers:`);
-  console.log("  user, assistant, thinking, system, summary");
-  console.log("  tool, tool:<name>, tool:<name>:input, tool:<name>:result");
-  console.log(`
-Truncation:`);
-  console.log("  Text is adaptively truncated to fit within the target word count.");
-  console.log("  Output shows: '[Limited to N words per field. Use --skip N for more.]'");
-  console.log("  Use --skip with the shown N value to continue reading.");
-  console.log(`
-Examples:`);
-  console.log("  read 02ed                          # all entries (~2000 words)");
-  console.log("  read 02ed --target 500             # tighter truncation");
-  console.log("  read 02ed --full                   # all entries (full content)");
-  console.log("  read 02ed --skip 50                # skip first 50 words per field");
-  console.log("  read 02ed 5                        # entry 5 (full content)");
-  console.log("  read 02ed 10-20                    # entries 10 through 20");
-  console.log("  read 02ed 10-20 --full             # range without truncation");
-  console.log("  read 02ed --show thinking          # show full thinking content");
-  console.log("  read 02ed --show tool:Bash:result  # show Bash command results");
-  console.log("  read 02ed --hide user              # redact user messages to word counts");
+  console.log(usage.read());
 }
 async function read() {
   const args = process.argv.slice(3);
@@ -16928,7 +17014,7 @@ async function read() {
   try {
     files = await readdir4(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(errors3.noSessions);
     return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
@@ -16937,16 +17023,16 @@ async function read() {
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
   if (matches2.length === 0) {
-    printError(`No session found matching '${sessionIdPrefix}'`);
+    printError(errors3.sessionNotFound(sessionIdPrefix));
     return 1;
   }
   if (matches2.length > 1) {
-    printError(`Multiple sessions match '${sessionIdPrefix}':`);
+    printError(errors3.multipleSessions(sessionIdPrefix));
     for (const m of matches2.slice(0, 5)) {
       console.log(`  ${m.replace(".jsonl", "")}`);
     }
     if (matches2.length > 5) {
-      console.log(`  ... and ${matches2.length - 5} more`);
+      console.log(errors3.andMore(matches2.length - 5));
     }
     return 1;
   }
@@ -16960,26 +17046,26 @@ async function read() {
       rangeStart = parseInt(rangeMatch[1], 10);
       rangeEnd = parseInt(rangeMatch[2], 10);
       if (rangeStart < 1 || rangeEnd < 1 || rangeStart > rangeEnd) {
-        printError(`Invalid range: ${entryArg}`);
+        printError(errors3.invalidRange(entryArg));
         return 1;
       }
     } else {
       entryNumber = parseInt(entryArg, 10);
       if (isNaN(entryNumber) || entryNumber < 1) {
-        printError(`Invalid entry number: ${entryArg}`);
+        printError(errors3.invalidEntry(entryArg));
         return 1;
       }
     }
   }
   if (hasContextFlags && entryNumber === null) {
-    printError("Context flags (-C, -B, -A) require an entry number");
+    printError(errors3.contextRequiresEntry);
     return 1;
   }
   const content = await readFile3(sessionFile, "utf-8");
   const lines = Array.from(parseJsonl(content));
   const rawEntries = lines.slice(1);
   if (rawEntries.length === 0) {
-    printError("Session has no entries.");
+    printError(errors3.emptySession);
     return 1;
   }
   const allEntries = [];
@@ -16995,7 +17081,7 @@ async function read() {
     const rangeEntries = logicalEntries.filter((e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd);
     if (rangeEntries.length === 0) {
       const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(`No entries found in range ${rangeStart}-${rangeEnd} (session has ${maxLine} entries)`);
+      printError(errors3.rangeNotFound(rangeStart, rangeEnd, maxLine));
       return 1;
     }
     const output = formatRangeEntries(rangeEntries, {
@@ -17018,7 +17104,7 @@ async function read() {
     const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
     if (targetIdx === -1) {
       const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
+      printError(errors3.entryNotFound(entryNumber, maxLine));
       return 1;
     }
     const before = contextB ?? contextC ?? 0;
@@ -17048,25 +17134,25 @@ async function sessionStart() {
   const messages = [];
   const status = await checkAuthStatus(true);
   if (status.needsLogin) {
-    messages.push(notLoggedInMessage());
+    messages.push(hook.notLoggedIn());
   } else if (status.user) {
-    messages.push(loggedInMessage(getUserDisplayName(status.user)));
+    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
   }
   const cwd = process.env.CWD || process.cwd();
   const transcriptPath = process.env.TRANSCRIPT_PATH;
   try {
     const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
     if (extracted > 0) {
-      messages.push(extractedMessage(extracted));
+      messages.push(hook.extracted(extracted));
     }
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
-      const uniqueErrors = [...new Set(schemaErrors.flatMap((s) => s.errors))];
-      messages.push(`Schema errors (${errorCount} entries in ${schemaErrors.length} sessions): ${uniqueErrors.join("; ")}`);
+      const allErrors = schemaErrors.flatMap((s) => s.errors);
+      messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
     }
   } catch (error48) {
     const errorMsg = error48 instanceof Error ? error48.message : String(error48);
-    messages.push(`Extraction failed: ${errorMsg}`);
+    messages.push(hook.extractionFailed(errorMsg));
   }
   if (messages.length > 0) {
     hookOutput(messages.join(`
@@ -17084,12 +17170,11 @@ var COMMANDS = {
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
 };
 function printUsage4() {
-  console.log(`Usage: hive-mind <command>
-`);
-  console.log("Commands:");
-  for (const [name, { description }] of Object.entries(COMMANDS)) {
-    console.log(`  ${name.padEnd(15)} ${description}`);
-  }
+  const commands = Object.entries(COMMANDS).map(([name, { description }]) => ({
+    name,
+    description
+  }));
+  console.log(usage.main(commands));
 }
 async function main() {
   const command = process.argv[2];
@@ -17100,7 +17185,7 @@ async function main() {
     return;
   }
   if (!(command in COMMANDS)) {
-    printError(`Unknown command: ${command}`);
+    printError(errors3.unknownCommand(command));
     console.log("");
     printUsage4();
     process.exit(1);

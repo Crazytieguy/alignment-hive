@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
 import { GrepFieldFilter, parseFieldList } from "../lib/field-filter";
 import { getLogicalEntries } from "../lib/format";
+import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import type { ContentBlock, KnownEntry } from "../lib/schemas";
 
@@ -45,29 +46,7 @@ interface Match {
 }
 
 function printUsage(): void {
-  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]");
-  console.log("\nSearch across sessions for a pattern (JavaScript regex).");
-  console.log("Use -- to separate options from pattern (e.g., grep -- \"--help\" to search for literal --help).");
-  console.log("\nOptions:");
-  console.log("  -i              Case insensitive search");
-  console.log("  -c              Count matches per session only");
-  console.log("  -l              List matching session IDs only");
-  console.log("  -m N            Stop after N total matches");
-  console.log("  -C N            Show N lines of context around match");
-  console.log("  -s <session>    Search only in specified session (prefix match)");
-  console.log("  --in <fields>   Search only specified fields (comma-separated)");
-  console.log("\nField specifiers:");
-  console.log("  user, assistant, thinking, system, summary");
-  console.log("  tool:input, tool:result, tool:<name>:input, tool:<name>:result");
-  console.log("\nDefault fields: user, assistant, thinking, tool:input, system, summary");
-  console.log("\nExamples:");
-  console.log('  grep "TODO"                    # find TODO in sessions');
-  console.log('  grep -i "error" -C 2           # case insensitive with context');
-  console.log('  grep -c "function"             # count matches per session');
-  console.log('  grep -l "#2597"                # list sessions mentioning issue');
-  console.log('  grep -s 02ed "bug"             # search only in session 02ed...');
-  console.log('  grep --in tool:result "error"  # search only in tool results');
-  console.log('  grep --in user,assistant "fix" # search only user and assistant');
+  console.log(usage.grep());
 }
 
 export async function grep(): Promise<number> {
@@ -97,13 +76,13 @@ export async function grep(): Promise<number> {
   try {
     files = await readdir(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(errors.noSessions);
     return 1;
   }
 
   let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
+    printError(errors.noSessionsIn(sessionsDir));
     return 1;
   }
 
@@ -115,7 +94,7 @@ export async function grep(): Promise<number> {
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
     if (jsonlFiles.length === 0) {
-      printError(`No session found matching '${prefix}'`);
+      printError(errors.sessionNotFound(prefix));
       return 1;
     }
   }
@@ -218,7 +197,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   if (mValue !== undefined) {
     maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
-      printError("Invalid -m value: must be a positive number");
+      printError(errors.invalidNumber("-m", mValue));
       return null;
     }
   }
@@ -229,7 +208,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   if (cValue !== undefined) {
     contextLines = parseInt(cValue, 10);
     if (isNaN(contextLines) || contextLines < 0) {
-      printError("Invalid -C value: must be a non-negative number");
+      printError(errors.invalidNonNegative("-C"));
       return null;
     }
   }
@@ -255,7 +234,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   }
 
   if (!patternStr) {
-    printError("No pattern specified");
+    printError(errors.noPattern);
     return null;
   }
 
@@ -263,7 +242,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   try {
     pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
   } catch (e) {
-    printError(`Invalid regex pattern: ${e instanceof Error ? e.message : String(e)}`);
+    printError(errors.invalidRegex(e instanceof Error ? e.message : String(e)));
     return null;
   }
 

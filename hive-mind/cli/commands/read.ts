@@ -3,43 +3,14 @@ import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
 import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
 import { collectToolResults, formatEntry, formatSession, getLogicalEntries } from "../lib/format";
+import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import { formatRangeEntries } from "../lib/range-format";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
 
 function printUsage(): void {
-  console.log("Usage: read <session-id> [N | N-M] [options]");
-  console.log("\nRead session entries. Session ID supports prefix matching.");
-  console.log("\nOptions:");
-  console.log("  N             Entry number to read (full content)");
-  console.log("  N-M           Entry range to read (with truncation)");
-  console.log("  --full        Show all entries with full content (no truncation)");
-  console.log("  --target N    Target total words (default 2000)");
-  console.log("  --skip N      Skip first N words per field (for pagination)");
-  console.log("  -C N          Show N entries of context before and after");
-  console.log("  -B N          Show N entries of context before");
-  console.log("  -A N          Show N entries of context after");
-  console.log("  --show FIELDS Show full content for fields (comma-separated)");
-  console.log("  --hide FIELDS Redact fields to word counts (comma-separated)");
-  console.log("\nField specifiers:");
-  console.log("  user, assistant, thinking, system, summary");
-  console.log("  tool, tool:<name>, tool:<name>:input, tool:<name>:result");
-  console.log("\nTruncation:");
-  console.log("  Text is adaptively truncated to fit within the target word count.");
-  console.log("  Output shows: '[Limited to N words per field. Use --skip N for more.]'");
-  console.log("  Use --skip with the shown N value to continue reading.");
-  console.log("\nExamples:");
-  console.log("  read 02ed                          # all entries (~2000 words)");
-  console.log("  read 02ed --target 500             # tighter truncation");
-  console.log("  read 02ed --full                   # all entries (full content)");
-  console.log("  read 02ed --skip 50                # skip first 50 words per field");
-  console.log("  read 02ed 5                        # entry 5 (full content)");
-  console.log("  read 02ed 10-20                    # entries 10 through 20");
-  console.log("  read 02ed 10-20 --full             # range without truncation");
-  console.log("  read 02ed --show thinking          # show full thinking content");
-  console.log("  read 02ed --show tool:Bash:result  # show Bash command results");
-  console.log("  read 02ed --hide user              # redact user messages to word counts");
+  console.log(usage.read());
 }
 
 export async function read(): Promise<number> {
@@ -107,7 +78,7 @@ export async function read(): Promise<number> {
   try {
     files = await readdir(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(errors.noSessions);
     return 1;
   }
 
@@ -118,17 +89,17 @@ export async function read(): Promise<number> {
   });
 
   if (matches.length === 0) {
-    printError(`No session found matching '${sessionIdPrefix}'`);
+    printError(errors.sessionNotFound(sessionIdPrefix));
     return 1;
   }
 
   if (matches.length > 1) {
-    printError(`Multiple sessions match '${sessionIdPrefix}':`);
+    printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches.slice(0, 5)) {
       console.log(`  ${m.replace(".jsonl", "")}`);
     }
     if (matches.length > 5) {
-      console.log(`  ... and ${matches.length - 5} more`);
+      console.log(errors.andMore(matches.length - 5));
     }
     return 1;
   }
@@ -145,20 +116,20 @@ export async function read(): Promise<number> {
       rangeStart = parseInt(rangeMatch[1], 10);
       rangeEnd = parseInt(rangeMatch[2], 10);
       if (rangeStart < 1 || rangeEnd < 1 || rangeStart > rangeEnd) {
-        printError(`Invalid range: ${entryArg}`);
+        printError(errors.invalidRange(entryArg));
         return 1;
       }
     } else {
       entryNumber = parseInt(entryArg, 10);
       if (isNaN(entryNumber) || entryNumber < 1) {
-        printError(`Invalid entry number: ${entryArg}`);
+        printError(errors.invalidEntry(entryArg));
         return 1;
       }
     }
   }
 
   if (hasContextFlags && entryNumber === null) {
-    printError("Context flags (-C, -B, -A) require an entry number");
+    printError(errors.contextRequiresEntry);
     return 1;
   }
 
@@ -167,7 +138,7 @@ export async function read(): Promise<number> {
   const rawEntries = lines.slice(1);
 
   if (rawEntries.length === 0) {
-    printError("Session has no entries.");
+    printError(errors.emptySession);
     return 1;
   }
 
@@ -189,7 +160,7 @@ export async function read(): Promise<number> {
 
     if (rangeEntries.length === 0) {
       const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(`No entries found in range ${rangeStart}-${rangeEnd} (session has ${maxLine} entries)`);
+      printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
       return 1;
     }
 
@@ -213,7 +184,7 @@ export async function read(): Promise<number> {
     const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
     if (targetIdx === -1) {
       const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(`Entry ${entryNumber} not found (session has ${maxLine} entries)`);
+      printError(errors.entryNotFound(entryNumber, maxLine));
       return 1;
     }
 

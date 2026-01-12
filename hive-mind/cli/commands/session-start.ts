@@ -1,10 +1,6 @@
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
 import { extractAllSessions } from "../lib/extraction";
-import {
-  extractedMessage,
-  loggedInMessage,
-  notLoggedInMessage,
-} from "../lib/messages";
+import { hook } from "../lib/messages";
 import { hookOutput } from "../lib/output";
 
 export async function sessionStart(): Promise<number> {
@@ -13,9 +9,9 @@ export async function sessionStart(): Promise<number> {
   const status = await checkAuthStatus(true);
 
   if (status.needsLogin) {
-    messages.push(notLoggedInMessage());
+    messages.push(hook.notLoggedIn());
   } else if (status.user) {
-    messages.push(loggedInMessage(getUserDisplayName(status.user)));
+    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
   }
 
   const cwd = process.env.CWD || process.cwd();
@@ -24,18 +20,16 @@ export async function sessionStart(): Promise<number> {
   try {
     const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
     if (extracted > 0) {
-      messages.push(extractedMessage(extracted));
+      messages.push(hook.extracted(extracted));
     }
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
-      const uniqueErrors = [...new Set(schemaErrors.flatMap((s) => s.errors))];
-      messages.push(
-        `Schema errors (${errorCount} entries in ${schemaErrors.length} sessions): ${uniqueErrors.join("; ")}`,
-      );
+      const allErrors = schemaErrors.flatMap((s) => s.errors);
+      messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    messages.push(`Extraction failed: ${errorMsg}`);
+    messages.push(hook.extractionFailed(errorMsg));
   }
 
   if (messages.length > 0) {

@@ -9,7 +9,16 @@ Large orgs benefit from shared tooling and accumulated knowledge across their ag
 
 ## Installation
 
-Add the marketplace to Claude Code:
+### Prerequisites
+
+Install [Claude Code](https://code.claude.com/docs/en/overview) if you haven't already:
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+### Add the marketplace
+
+Run the following commands from within Claude Code (the `/` prefix indicates a Claude Code command):
 ```
 /plugin marketplace add Crazytieguy/alignment-hive
 ```

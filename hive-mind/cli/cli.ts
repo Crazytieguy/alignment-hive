@@ -5,6 +5,7 @@ import { index } from "./commands/index";
 import { login } from "./commands/login";
 import { read } from "./commands/read";
 import { sessionStart } from "./commands/session-start";
+import { errors, usage } from "./lib/messages";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
@@ -18,11 +19,11 @@ const COMMANDS = {
 type CommandName = keyof typeof COMMANDS;
 
 function printUsage(): void {
-  console.log("Usage: hive-mind <command>\n");
-  console.log("Commands:");
-  for (const [name, { description }] of Object.entries(COMMANDS)) {
-    console.log(`  ${name.padEnd(15)} ${description}`);
-  }
+  const commands = Object.entries(COMMANDS).map(([name, { description }]) => ({
+    name,
+    description,
+  }));
+  console.log(usage.main(commands));
 }
 
 async function main(): Promise<void> {
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
   }
 
   if (!(command in COMMANDS)) {
-    printError(`Unknown command: ${command}`);
+    printError(errors.unknownCommand(command));
     console.log("");
     printUsage();
     process.exit(1);
