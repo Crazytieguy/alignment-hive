@@ -1,27 +1,3 @@
-/**
- * Read command - read session entries.
- *
- * Usage:
- *   read <session-id>           - all entries (word-truncated for scanning)
- *   read <session-id> N         - entry N (full content)
- *   read <session-id> --full    - all entries (full content)
- *   read <session-id> --skip N  - skip first N words per field (for pagination)
- *   read <session-id> N -C 2    - entry N with 2 entries before/after as context
- *   read <session-id> N -B 1 -A 3 - entry N with 1 before, 3 after
- *
- * Session ID supports prefix matching (e.g., "02ed" matches "02ed589a-...")
- *
- * Truncation: When reading all entries, text content is adaptively truncated to
- * fit within ~2000 words total. A uniform word limit is computed and applied to
- * all messages - shorter messages shown in full, longer ones truncated.
- *
- * The output shows the computed limit: "[Limited to N words per field...]"
- * Use --skip N to continue reading where truncation left off.
- *
- * Context flags (-C, -B, -A) show surrounding entries: target entry in full,
- * context entries truncated. Requires an entry number N.
- */
-
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
@@ -66,7 +42,6 @@ export async function read(): Promise<number> {
     return 1;
   }
 
-  // Parse numeric flag like -C 2, -B 1, -A 3
   function parseNumericFlag(argList: Array<string>, flag: string): number | null {
     const idx = argList.indexOf(flag);
     if (idx === -1) return null;
@@ -76,7 +51,6 @@ export async function read(): Promise<number> {
     return isNaN(num) || num < 0 ? null : num;
   }
 
-  // Parse args: session-id, optional entry number, optional flags
   const fullFlag = args.includes("--full");
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
@@ -85,13 +59,10 @@ export async function read(): Promise<number> {
   const contextA = parseNumericFlag(args, "-A");
   const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
 
-  // Filter out all flags and their values to get positional args
   const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target"]);
   const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target"]);
   const filteredArgs = args.filter((a, i) => {
-    // Filter out flags themselves
     if (flags.has(a)) return false;
-    // Filter out values that follow flags (by position, not by value)
     for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
       if (flagIdx !== -1 && i === flagIdx + 1) return false;
@@ -104,7 +75,6 @@ export async function read(): Promise<number> {
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
-  // Find matching session file
   let files: Array<string>;
   try {
     files = await readdir(sessionsDir);
@@ -137,7 +107,6 @@ export async function read(): Promise<number> {
 
   const sessionFile = join(sessionsDir, matches[0]);
 
-  // Parse entry number (if provided)
   let entryNumber: number | null = null;
   if (entryArg) {
     entryNumber = parseInt(entryArg, 10);
@@ -147,18 +116,13 @@ export async function read(): Promise<number> {
     }
   }
 
-  // Context flags require an entry number
   if (hasContextFlags && entryNumber === null) {
     printError("Context flags (-C, -B, -A) require an entry number");
     return 1;
   }
 
-  // Read and parse session
   const content = await readFile(sessionFile, "utf-8");
   const lines = Array.from(parseJsonl(content));
-
-  // Skip metadata (line 0), entries start at line 1
-  // User-facing indices are 1-indexed (entry 1 = lines[1])
   const rawEntries = lines.slice(1);
 
   if (rawEntries.length === 0) {
@@ -166,7 +130,6 @@ export async function read(): Promise<number> {
     return 1;
   }
 
-  // Parse all entries
   const allEntries: Array<KnownEntry> = [];
   for (const raw of rawEntries) {
     const result = parseKnownEntry(raw);
@@ -175,23 +138,17 @@ export async function read(): Promise<number> {
     }
   }
 
-  // Build logical entry mapping (matches line numbers shown in formatSession)
   const logicalEntries = getLogicalEntries(allEntries);
-  // Collect tool results for merging with tool_use entries
   const toolResults = collectToolResults(allEntries);
 
   if (entryNumber === null) {
-    // All entries mode: use formatSession
-    // Truncate unless --full flag is set
-    const redact = !fullFlag;
     const output = formatSession(allEntries, {
-      redact,
+      redact: !fullFlag,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
     });
     console.log(output);
   } else {
-    // Single entry mode: find entry by logical line number
     const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
     if (targetIdx === -1) {
       const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
@@ -199,25 +156,20 @@ export async function read(): Promise<number> {
       return 1;
     }
 
-    // Calculate context range
     const before = contextB ?? contextC ?? 0;
     const after = contextA ?? contextC ?? 0;
     const startIdx = Math.max(0, targetIdx - before);
     const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
 
-    // Format and output entries in range
     const output: Array<string> = [];
     for (let i = startIdx; i <= endIdx; i++) {
       const { lineNumber, entry } = logicalEntries[i];
-      const isTarget = i === targetIdx;
       const formatted = formatEntry(entry, {
         lineNumber,
-        redact: !isTarget, // Target entry full, context entries truncated
+        redact: i !== targetIdx,
         toolResults,
       });
-      if (formatted) {
-        output.push(formatted);
-      }
+      if (formatted) output.push(formatted);
     }
     console.log(output.join("\n"));
   }

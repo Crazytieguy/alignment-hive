@@ -14687,6 +14687,28 @@ function formatTruncatedBlock(content, suffix) {
     return indented;
   return indented + suffix;
 }
+function formatContentBody(header, content, redact, wordLimit, skipWords) {
+  if (redact && wordLimit !== undefined) {
+    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
+    if (isEmpty)
+      return null;
+    if (!truncated.includes(`
+`)) {
+      const escaped = escapeQuotes(truncated);
+      return `${header}|"${escaped}"${suffix}`;
+    }
+    return `${header}
+${formatTruncatedBlock(truncated, suffix)}`;
+  } else if (redact) {
+    if (!content)
+      return header;
+    return `${header}|${formatQuotedSummary(content)}`;
+  }
+  if (!content)
+    return header;
+  return `${header}
+${indent(content, 2)}`;
+}
 function formatWordCount(text) {
   const count = countWords(text);
   return `${count}word${count === 1 ? "" : "s"}`;
@@ -14730,15 +14752,12 @@ function getLogicalEntries(entries) {
   }
   for (let i = 0;i < entries.length; i++) {
     const entry = entries[i];
-    if (entry.type === "summary" && i !== lastSummaryIndex) {
+    if (entry.type === "summary" && i !== lastSummaryIndex)
       continue;
-    }
-    if (entry.type === "user" && isToolResultOnlyEntry(entry)) {
+    if (entry.type === "user" && isToolResultOnlyEntry(entry))
       continue;
-    }
-    if (isSkippedEntryType(entry)) {
+    if (isSkippedEntryType(entry))
       continue;
-    }
     logicalLine++;
     result.push({ lineNumber: logicalLine, entry });
   }
@@ -14755,9 +14774,8 @@ function formatSession(entries, options = {}) {
     }
   }
   const filteredEntries = entries.filter((entry, i) => {
-    if (entry.type === "summary") {
+    if (entry.type === "summary")
       return i === lastSummaryIndex;
-    }
     return true;
   });
   let wordLimit;
@@ -14769,9 +14787,8 @@ function formatSession(entries, options = {}) {
   const results = [];
   if (redact) {
     const header = buildSessionHeader(entries);
-    if (header) {
+    if (header)
       results.push(header);
-    }
   }
   let prevUuid;
   let prevDate;
@@ -15017,34 +15034,10 @@ function formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, 
   if (ts)
     parts.push(ts);
   parts.push("user");
-  if (parentIndicator !== undefined) {
+  if (parentIndicator !== undefined)
     parts.push(`parent=${parentIndicator}`);
-  }
   const content = getUserMessageContent(entry.message.content);
-  const header = parts.join("|");
-  if (redact && wordLimit !== undefined) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
-    if (isEmpty)
-      return null;
-    if (!truncated.includes(`
-`)) {
-      const escaped = escapeQuotes(truncated);
-      const quoted = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
-      return `${header}|${quoted}`;
-    }
-    return `${header}
-${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    if (!content)
-      return header;
-    parts.push(formatQuotedSummary(content));
-    return parts.join("|");
-  } else {
-    if (!content)
-      return header;
-    return `${header}
-${indent(content, 2)}`;
-  }
+  return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
 }
 function getUserMessageContent(content) {
   if (!content)
@@ -15106,11 +15099,10 @@ function formatThinkingEntry(lineNumber, timestamp, content, prevDate, isFirst, 
   if (redact) {
     parts.push(formatWordCount(content));
     return parts.join("|");
-  } else {
-    const header = parts.join("|");
-    return `${header}
-${indent(content, 2)}`;
   }
+  const header = parts.join("|");
+  return `${header}
+${indent(content, 2)}`;
 }
 function formatTextEntry(lineNumber, timestamp, content, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords) {
   const parts = [String(lineNumber)];
@@ -15118,82 +15110,62 @@ function formatTextEntry(lineNumber, timestamp, content, parentIndicator, prevDa
   if (ts)
     parts.push(ts);
   parts.push("assistant");
-  if (parentIndicator !== undefined) {
+  if (parentIndicator !== undefined)
     parts.push(`parent=${parentIndicator}`);
-  }
-  const header = parts.join("|");
-  if (redact && wordLimit !== undefined) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
-    if (isEmpty)
-      return null;
-    if (!truncated.includes(`
-`)) {
-      const escaped = escapeQuotes(truncated);
-      const quoted = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
-      return `${header}|${quoted}`;
-    }
-    return `${header}
-${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    if (!content)
-      return header;
-    parts.push(formatQuotedSummary(content));
-    return parts.join("|");
-  } else {
-    if (!content)
-      return header;
-    return `${header}
-${indent(content, 2)}`;
-  }
+  return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
 }
 function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords) {
   const resultInfo = toolResults?.get(block.id);
-  const name = block.name;
-  const input = block.input;
   const parts = [String(lineNumber)];
   const ts = formatTimestamp(timestamp, prevDate, isFirst);
   if (ts)
     parts.push(ts);
   parts.push("tool");
-  parts.push(name);
-  const toolFormatter = getToolFormatter(name);
-  const { headerParams, multilineParams, suppressResult } = toolFormatter(input, resultInfo, cwd, redact, wordLimit, skipWords);
+  parts.push(block.name);
+  const toolFormatter = getToolFormatter(block.name);
+  const { headerParams, multilineParams, suppressResult } = toolFormatter({
+    input: block.input,
+    result: resultInfo,
+    cwd,
+    redact,
+    wordLimit,
+    skipWords
+  });
   parts.push(...headerParams);
   if (redact) {
     if (resultInfo && !suppressResult) {
       parts.push(`result=${formatWordCount(resultInfo.content)}`);
     }
-    const header = parts.join("|");
+    const header2 = parts.join("|");
     if (multilineParams.length > 0) {
-      const bodyLines = [];
+      const bodyLines2 = [];
       for (const { name: paramName, content, suffix } of multilineParams) {
-        bodyLines.push(`[${paramName}]`);
+        bodyLines2.push(`[${paramName}]`);
         const indented = indent(content, 2);
-        bodyLines.push(suffix ? indented + suffix : indented);
+        bodyLines2.push(suffix ? indented + suffix : indented);
       }
-      return `${header}
-${bodyLines.join(`
+      return `${header2}
+${bodyLines2.join(`
 `)}`;
     }
-    return header;
-  } else {
-    const header = parts.join("|");
-    const bodyLines = [];
-    for (const { name: paramName, content, suffix } of multilineParams) {
-      bodyLines.push(`[${paramName}]`);
-      const indented = indent(content, 2);
-      bodyLines.push(suffix ? indented + suffix : indented);
-    }
-    if (resultInfo) {
-      bodyLines.push("[result]");
-      bodyLines.push(indent(resultInfo.content, 2));
-    }
-    if (bodyLines.length === 0)
-      return header;
-    return `${header}
-${bodyLines.join(`
-`)}`;
+    return header2;
   }
+  const header = parts.join("|");
+  const bodyLines = [];
+  for (const { name: paramName, content, suffix } of multilineParams) {
+    bodyLines.push(`[${paramName}]`);
+    const indented = indent(content, 2);
+    bodyLines.push(suffix ? indented + suffix : indented);
+  }
+  if (resultInfo) {
+    bodyLines.push("[result]");
+    bodyLines.push(indent(resultInfo.content, 2));
+  }
+  if (bodyLines.length === 0)
+    return header;
+  return `${header}
+${bodyLines.join(`
+`)}`;
 }
 function formatToolText(text, wordLimit, skipWords) {
   if (wordLimit !== undefined) {
@@ -15254,7 +15226,7 @@ function getToolFormatter(name) {
       return formatGenericTool;
   }
 }
-function formatEditTool(input, _result, cwd, redact, _wordLimit, _skipWords) {
+function formatEditTool({ input, cwd, redact }) {
   const path = shortenPath(String(input.file_path || ""), cwd);
   const oldStr = String(input.old_string || "");
   const newStr = String(input.new_string || "");
@@ -15279,19 +15251,9 @@ function formatEditTool(input, _result, cwd, redact, _wordLimit, _skipWords) {
     multilineParams
   };
 }
-function formatReadTool(input, _result, cwd, redact, _wordLimit, _skipWords) {
+function formatReadTool({ input, cwd, redact }) {
   const path = shortenPath(String(input.file_path || ""), cwd);
-  if (redact) {
-    const headerParams2 = [path];
-    if (input.offset !== undefined) {
-      headerParams2.push(`offset=${input.offset}`);
-    }
-    if (input.limit !== undefined) {
-      headerParams2.push(`limit=${input.limit}`);
-    }
-    return { headerParams: headerParams2, multilineParams: [] };
-  }
-  const headerParams = [`file_path=${path}`];
+  const headerParams = redact ? [path] : [`file_path=${path}`];
   if (input.offset !== undefined) {
     headerParams.push(`offset=${input.offset}`);
   }
@@ -15300,7 +15262,7 @@ function formatReadTool(input, _result, cwd, redact, _wordLimit, _skipWords) {
   }
   return { headerParams, multilineParams: [] };
 }
-function formatWriteTool(input, _result, cwd, redact, _wordLimit, _skipWords) {
+function formatWriteTool({ input, cwd, redact }) {
   const path = shortenPath(String(input.file_path || ""), cwd);
   const content = String(input.content || "");
   const lineCount = countLines(content);
@@ -15326,7 +15288,7 @@ function addFormattedParam(headerParams, multilineParams, name, text, wordLimit,
     headerParams.push(`${name}=${formatted.inline}`);
   }
 }
-function formatBashTool(input, result, _cwd, redact, wordLimit, skipWords) {
+function formatBashTool({ input, result, redact, wordLimit, skipWords }) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const headerParams = [];
@@ -15339,13 +15301,9 @@ function formatBashTool(input, result, _cwd, redact, wordLimit, skipWords) {
     addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
     return { headerParams, multilineParams, suppressResult: true };
   }
-  if (!redact && command.includes(`
-`) && !multilineParams.some((p) => p.name === "command")) {
-    multilineParams.push({ name: "command", content: command });
-  }
   return { headerParams, multilineParams };
 }
-function formatGrepTool(input, _result, cwd, _redact, wordLimit, skipWords) {
+function formatGrepTool({ input, cwd, wordLimit, skipWords }) {
   const pattern = String(input.pattern || "");
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
   const headerParams = [];
@@ -15362,7 +15320,7 @@ function formatGrepTool(input, _result, cwd, _redact, wordLimit, skipWords) {
   }
   return { headerParams, multilineParams };
 }
-function formatGlobTool(input, result, _cwd, _redact, wordLimit, skipWords) {
+function formatGlobTool({ input, result, wordLimit, skipWords }) {
   const pattern = String(input.pattern || "");
   const headerParams = [];
   const multilineParams = [];
@@ -15372,13 +15330,9 @@ function formatGlobTool(input, result, _cwd, _redact, wordLimit, skipWords) {
 `).filter((l) => l.trim()).length;
     headerParams.push(`result=${files}files`);
   }
-  return {
-    headerParams,
-    multilineParams,
-    suppressResult: true
-  };
+  return { headerParams, multilineParams, suppressResult: true };
 }
-function formatTaskTool(input, result, _cwd, redact, wordLimit, skipWords) {
+function formatTaskTool({ input, result, redact, wordLimit, skipWords }) {
   const desc = String(input.description || "");
   const prompt = String(input.prompt || "");
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
@@ -15398,7 +15352,7 @@ function formatTaskTool(input, result, _cwd, redact, wordLimit, skipWords) {
   multilineParams.push({ name: "prompt", content: prompt });
   return { headerParams, multilineParams };
 }
-function formatTodoWriteTool(input, _result, _cwd, redact, _wordLimit, _skipWords) {
+function formatTodoWriteTool({ input, redact }) {
   const todos = Array.isArray(input.todos) ? input.todos : [];
   if (redact) {
     return {
@@ -15422,7 +15376,7 @@ function formatTodoWriteTool(input, _result, _cwd, redact, _wordLimit, _skipWord
 `) }] : []
   };
 }
-function formatAskUserQuestionTool(input, result, _cwd, redact, wordLimit, skipWords) {
+function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords }) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams = [`questions=${questions.length}`];
   const multilineParams = [];
@@ -15430,11 +15384,7 @@ function formatAskUserQuestionTool(input, result, _cwd, redact, wordLimit, skipW
     if (result) {
       addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
     }
-    return {
-      headerParams,
-      multilineParams,
-      suppressResult: true
-    };
+    return { headerParams, multilineParams, suppressResult: true };
   }
   const questionLines = [];
   for (let i = 0;i < questions.length; i++) {
@@ -15452,7 +15402,7 @@ function formatAskUserQuestionTool(input, result, _cwd, redact, wordLimit, skipW
   }
   return { headerParams: [], multilineParams };
 }
-function formatExitPlanModeTool(input, _result, _cwd, redact, _wordLimit, _skipWords) {
+function formatExitPlanModeTool({ input, redact }) {
   const plan = input.plan ? String(input.plan) : "";
   if (redact) {
     if (plan) {
@@ -15470,21 +15420,21 @@ function formatExitPlanModeTool(input, _result, _cwd, redact, _wordLimit, _skipW
     suppressResult: true
   };
 }
-function formatWebFetchTool(input, _result, _cwd, _redact, _wordLimit, _skipWords) {
+function formatWebFetchTool({ input }) {
   const url2 = String(input.url || "");
   return {
     headerParams: [`url="${url2}"`],
     multilineParams: []
   };
 }
-function formatWebSearchTool(input, _result, _cwd, _redact, wordLimit, skipWords) {
+function formatWebSearchTool({ input, wordLimit, skipWords }) {
   const query = String(input.query || "");
   const headerParams = [];
   const multilineParams = [];
   addFormattedParam(headerParams, multilineParams, "query", query, wordLimit, skipWords);
   return { headerParams, multilineParams };
 }
-function formatGenericTool(input, _result, _cwd, redact, wordLimit, skipWords) {
+function formatGenericTool({ input, redact, wordLimit, skipWords }) {
   const headerParams = [];
   const multilineParams = [];
   for (const [key, value] of Object.entries(input)) {
@@ -15507,53 +15457,10 @@ function formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLim
     parts.push(`subtype=${entry.subtype}`);
   if (entry.level && entry.level !== "info")
     parts.push(`level=${entry.level}`);
-  const content = entry.content || "";
-  const header = parts.join("|");
-  if (redact && wordLimit !== undefined && content) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
-    if (isEmpty)
-      return null;
-    if (!truncated.includes(`
-`)) {
-      const escaped = escapeQuotes(truncated);
-      const quoted = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
-      return `${header}|${quoted}`;
-    }
-    return `${header}
-${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    if (content) {
-      parts.push(formatQuotedSummary(content));
-      return parts.join("|");
-    }
-    return header;
-  } else {
-    if (!content)
-      return header;
-    return `${header}
-${indent(content, 2)}`;
-  }
+  return formatContentBody(parts.join("|"), entry.content || "", redact, wordLimit, skipWords);
 }
 function formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords) {
-  const header = `${lineNumber}|summary`;
-  if (redact && wordLimit !== undefined) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(entry.summary, wordLimit, skipWords ?? 0);
-    if (isEmpty)
-      return null;
-    if (!truncated.includes(`
-`)) {
-      const escaped = escapeQuotes(truncated);
-      const quoted = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
-      return `${header}|${quoted}`;
-    }
-    return `${header}
-${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    return `${header}|${formatQuotedSummary(entry.summary)}`;
-  } else {
-    return `${header}
-${indent(entry.summary, 2)}`;
-  }
+  return formatContentBody(`${lineNumber}|summary`, entry.summary, redact, wordLimit, skipWords);
 }
 
 // cli/lib/output.ts
@@ -16739,9 +16646,8 @@ async function read() {
   const logicalEntries = getLogicalEntries(allEntries);
   const toolResults = collectToolResults(allEntries);
   if (entryNumber === null) {
-    const redact = !fullFlag;
     const output = formatSession(allEntries, {
-      redact,
+      redact: !fullFlag,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined
     });
@@ -16760,15 +16666,13 @@ async function read() {
     const output = [];
     for (let i = startIdx;i <= endIdx; i++) {
       const { lineNumber, entry } = logicalEntries[i];
-      const isTarget = i === targetIdx;
       const formatted = formatEntry(entry, {
         lineNumber,
-        redact: !isTarget,
+        redact: i !== targetIdx,
         toolResults
       });
-      if (formatted) {
+      if (formatted)
         output.push(formatted);
-      }
     }
     console.log(output.join(`
 `));
