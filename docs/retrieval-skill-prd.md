@@ -117,43 +117,71 @@ Replace current line-based truncation with word-level truncation that adapts to 
 
 **Algorithm:** Find the single uniform truncation length T that achieves the target total. This requires solving for T given the message lengths and target - the exact algorithm needs to be determined.
 
-**Behavior by content type:**
-- User/assistant message text: truncate with algorithm above
-- Thinking blocks: hidden by default
-- Tool results (Read, Edit, etc.): hidden by default
-
-**Show/hide flags:**
-
-Add `--show` and `--hide` flags that accept comma-separated message types with hierarchical field specifiers:
-
-```bash
-# Examples
-bun cli.js read <id> --show thinking
-bun cli.js read <id> --show tool:Bash:input,tool:Bash:output
-bun cli.js read <id> --hide user
-bun cli.js read <id> --show tool:Read:output --hide tool:Edit:output
-```
-
-**Type hierarchy:**
-- High level: `user`, `assistant`, `thinking`, `tool`
-- Tool level: `tool:Bash`, `tool:Read`, `tool:Edit`, `tool:Write`, etc.
-- Field level: `tool:Bash:input`, `tool:Bash:output`, `tool:Read:output`, etc.
-
-More specific selectors override less specific. For example, `--hide tool --show tool:Bash:input` hides all tool content except Bash inputs.
-
-The exact type/field taxonomy should be designed based on the session schema and documented clearly in the CLI help message.
-
 **Acceptance criteria:**
 - Word-level truncation replaces line-level
 - Single uniform truncation length applied to all messages
 - Longer messages naturally get truncated more
-- `--show` and `--hide` flags with hierarchical type selectors
-- Type hierarchy and available selectors documented in `read --help`
-- Works with range reads (see #6)
+- Default behavior: show user/assistant text, hide thinking and tool results
+- Works with field filtering (#6) and range reads (#7)
 
 ---
 
-### 6. Range Reads
+### 6. Field Filtering and Output Control
+
+**Status:** Not started
+**Effort:** Medium
+
+Add consistent field filtering to both `read` and `grep` commands. The API should feel familiar to users of tools like grep, jq, and xsv.
+
+**API design considerations:**
+
+Before implementation, research and document how similar tools handle field selection:
+- `grep` - basic pattern matching, `-o` for match-only, context flags
+- `jq` - path expressions (`.foo.bar`), filtering, projection
+- `xsv` - `select` subcommand with column names/indices
+- `rg` (ripgrep) - `--type`, `--glob` for file filtering
+- `miller` - field selection with `-f`
+
+The goal is an API that's intuitive for users familiar with these tools, not something novel.
+
+**Capabilities needed:**
+
+For `read`:
+- Select which message types to show/hide (user, assistant, thinking, tool results)
+- Drill into tool-specific fields (e.g., show Bash inputs but not outputs)
+- Hierarchical: more specific selectors override less specific
+
+For `grep`:
+- Select which fields to search over (currently searches all text?)
+- Same show/hide controls for output formatting as `read`
+- Field selection should use same syntax as `read` for consistency
+
+**Possible syntax directions:**
+
+```bash
+# jq-style paths
+bun cli.js read <id> --show .assistant --hide .tool.Read.output
+
+# grep-style types
+bun cli.js grep <pattern> --type user,assistant --field input
+
+# Colon-separated hierarchy (current PRD direction)
+bun cli.js read <id> --show tool:Bash:input --hide tool:Edit
+```
+
+The exact syntax should be determined during implementation based on what works best for session data structure.
+
+**Acceptance criteria:**
+- `read` supports show/hide for message types and tool fields
+- `grep` supports field selection for search scope
+- `grep` supports same output filtering as `read`
+- Syntax is consistent between commands
+- API documented in help text with examples
+- Design rationale documented (which CLI tools influenced the design)
+
+---
+
+### 7. Range Reads
 
 **Status:** Not started
 **Effort:** Small (after #5)
@@ -169,11 +197,11 @@ Reads entries 50 through 100, applying the adaptive truncation from #5.
 **Acceptance criteria:**
 - `read <id> N-M` syntax works
 - Truncation adapts to total range size
-- Can combine with other flags (`--full`, `--show-thinking`, etc.)
+- Can combine with other flags (`--full`, field filtering from #6, etc.)
 
 ---
 
-### 7. Switch to Opus Model
+### 8. Switch to Opus Model
 
 **Status:** Planned for later
 **Effort:** Trivial
@@ -214,5 +242,6 @@ Suggested sequence based on dependencies and effort:
 3. ~~**#2 Pre-populate context** - Medium, significant UX improvement~~ Done
 4. ~~**#3 Session statistics** - Medium-large, computed on-the-fly in index~~ Done
 5. **#5 Adaptive truncation** - Medium-large, algorithm work needed
-6. **#6 Range reads** - Small once #5 is done
-7. **#7 Opus model** - Trivial, do after validating improvements
+6. **#6 Field filtering** - Medium, API design then implementation
+7. **#7 Range reads** - Small once #5 is done
+8. **#8 Opus model** - Trivial, do after validating improvements
