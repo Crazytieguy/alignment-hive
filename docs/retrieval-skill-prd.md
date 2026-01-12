@@ -102,7 +102,7 @@ The prompt will continue to only mention bash commands. The additional tools are
 
 ### 5. Adaptive Word-Level Truncation
 
-**Status:** Not started
+**Status:** Done
 **Effort:** Medium-Large
 
 Replace current line-based truncation with word-level truncation that adapts to total output size.
@@ -115,13 +115,20 @@ Replace current line-based truncation with word-level truncation that adapts to 
 - Algorithm finds truncation length T such that: `min(20,T) + min(50,T) + min(100,T) = 100`
 - Result: T = 40, so output is 20 + 40 + 40 = 100 words
 
-**Algorithm:** Find the single uniform truncation length T that achieves the target total. This requires solving for T given the message lengths and target - the exact algorithm needs to be determined.
+**Algorithm:** Sort messages by length ascending, then iterate to find where the uniform limit fits. For messages shorter than the limit, include them in full; for longer messages, truncate to exactly L words. The limit is clamped to a minimum of 6 words to ensure useful content.
+
+**Implementation:**
+- `truncation.ts` - Core utilities: `countWords`, `truncateWords`, `computeUniformLimit`
+- `format.ts` - Applies truncation via `formatContentBody` helper
+- Default target: 2000 words total
+- `--skip N` flag for pagination (skip first N words per field)
+- Shows `[Limited to N words per field. Use --skip N for more.]` when truncation applied
 
 **Acceptance criteria:**
-- Word-level truncation replaces line-level
-- Single uniform truncation length applied to all messages
-- Longer messages naturally get truncated more
-- Default behavior: show user/assistant text, hide thinking and tool results
+- ~~Word-level truncation replaces line-level~~ Done
+- ~~Single uniform truncation length applied to all messages~~ Done
+- ~~Longer messages naturally get truncated more~~ Done
+- ~~Default behavior: show user/assistant text, hide thinking and tool results~~ Done (thinking shows word count only)
 - Works with field filtering (#6) and range reads (#7)
 
 ---
@@ -241,7 +248,7 @@ Suggested sequence based on dependencies and effort:
 2. ~~**#1 Retrieval metaphor** - Small, improves baseline behavior~~ Done
 3. ~~**#2 Pre-populate context** - Medium, significant UX improvement~~ Done
 4. ~~**#3 Session statistics** - Medium-large, computed on-the-fly in index~~ Done
-5. **#5 Adaptive truncation** - Medium-large, algorithm work needed
+5. ~~**#5 Adaptive truncation** - Medium-large, algorithm work needed~~ Done
 6. **#6 Field filtering** - Medium, API design then implementation
 7. **#7 Range reads** - Small once #5 is done
 8. **#8 Opus model** - Trivial, do after validating improvements
