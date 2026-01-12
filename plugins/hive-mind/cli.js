@@ -15611,19 +15611,29 @@ function outputMatch(match, showContext) {
 
 // cli/commands/index.ts
 import { readdir as readdir3 } from "fs/promises";
+import { homedir as homedir3 } from "os";
 import { join as join4 } from "path";
 function printUsage2() {
   console.log("Usage: index");
   console.log(`
-List all extracted sessions with ID, datetime, message count, summary, and commits.`);
+List all extracted sessions with statistics, summary, and commits.`);
   console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
+  console.log("Statistics include work from subagent sessions.");
   console.log(`
 Output columns:`);
-  console.log("  ID        Session ID prefix (first 16 chars)");
-  console.log("  DATETIME  Session modification time");
-  console.log("  MSGS      Message count");
-  console.log("  SUMMARY   Session summary or first user prompt");
-  console.log("  COMMITS   Git commit hashes from the session");
+  console.log("  ID                   Session ID prefix (first 16 chars)");
+  console.log("  DATETIME             Session modification time");
+  console.log("  MSGS                 Total message count");
+  console.log("  USER_MESSAGES        User message count");
+  console.log("  BASH_CALLS           Bash commands executed");
+  console.log("  WEB_FETCHES          Web fetches");
+  console.log("  WEB_SEARCHES         Web searches");
+  console.log("  LINES_ADDED          Lines added");
+  console.log("  LINES_REMOVED        Lines removed");
+  console.log("  FILES_TOUCHED        Number of unique files modified");
+  console.log("  SIGNIFICANT_LOCATIONS Paths where >30% of work happened");
+  console.log("  SUMMARY              Session summary or first user prompt");
+  console.log("  COMMITS              Git commit hashes from the session");
 }
 async function index() {
   const args = process.argv.slice(3);
@@ -15645,29 +15655,230 @@ async function index() {
     printError(`No sessions found in ${sessionsDir}`);
     return;
   }
-  const sessions = [];
+  const allSessions = new Map;
   for (const file2 of jsonlFiles) {
     const path = join4(sessionsDir, file2);
     const session = await readExtractedSession(path);
-    if (session && !session.meta.agentId) {
-      sessions.push(session);
+    if (session) {
+      allSessions.set(session.meta.sessionId, session);
+      if (session.meta.agentId) {
+        allSessions.set(session.meta.agentId, session);
+      }
     }
   }
-  sessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
-  console.log("ID\tDATETIME\tMSGS\tSUMMARY	COMMITS");
-  for (const session of sessions) {
-    console.log(formatSessionLine(session));
+  const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
+  mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
+  console.log("ID\tDATETIME\tMSGS\tUSER_MESSAGES\tBASH_CALLS\tWEB_FETCHES\tWEB_SEARCHES\tLINES_ADDED\tLINES_REMOVED\tFILES_TOUCHED\tSIGNIFICANT_LOCATIONS\tSUMMARY	COMMITS");
+  for (const session of mainSessions) {
+    console.log(formatSessionLine(session, allSessions, cwd));
   }
 }
-function formatSessionLine(session) {
+function formatSessionLine(session, allSessions, cwd) {
   const { meta: meta3, entries } = session;
   const id = meta3.sessionId.slice(0, 16);
   const datetime3 = meta3.rawMtime.slice(0, 16);
-  const count = String(meta3.messageCount);
+  const msgs = String(meta3.messageCount);
   const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
-  return `${id}	${datetime3}	${count}	${summary}	${commitList}`;
+  const stats = computeSessionStats(entries, allSessions, new Set, cwd);
+  const fmt = (n) => n === 0 ? "" : String(n);
+  return [
+    id,
+    datetime3,
+    msgs,
+    fmt(stats.userCount),
+    fmt(stats.bashCount),
+    fmt(stats.fetchCount),
+    fmt(stats.searchCount),
+    stats.linesAdded === 0 ? "" : `+${stats.linesAdded}`,
+    stats.linesRemoved === 0 ? "" : `-${stats.linesRemoved}`,
+    fmt(stats.filesTouched),
+    stats.significantLocations.join(" "),
+    summary,
+    commitList
+  ].join("\t");
+}
+function computeSessionStats(entries, allSessions, visited, cwd) {
+  const stats = {
+    userCount: 0,
+    linesAdded: 0,
+    linesRemoved: 0,
+    filesTouched: 0,
+    significantLocations: [],
+    bashCount: 0,
+    fetchCount: 0,
+    searchCount: 0
+  };
+  const fileStats = new Map;
+  const subagentIds = [];
+  for (const entry of entries) {
+    if (entry.type === "user") {
+      const content = entry.message.content;
+      if (typeof content === "string" || !Array.isArray(content)) {
+        stats.userCount++;
+      } else {
+        const hasUserText = content.some((b) => b.type === "text");
+        if (hasUserText)
+          stats.userCount++;
+      }
+      if ("agentId" in entry && typeof entry.agentId === "string") {
+        subagentIds.push(entry.agentId);
+      }
+    }
+    if (entry.type === "assistant") {
+      const content = entry.message.content;
+      if (!Array.isArray(content))
+        continue;
+      for (const block of content) {
+        if (block.type !== "tool_use" || !("name" in block))
+          continue;
+        const toolName = block.name;
+        const input = block.input;
+        switch (toolName) {
+          case "Edit": {
+            const filePath = input.file_path;
+            const oldString = input.old_string;
+            const newString = input.new_string;
+            if (typeof filePath === "string") {
+              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+              if (typeof oldString === "string") {
+                current.removed += countLines2(oldString);
+              }
+              if (typeof newString === "string") {
+                current.added += countLines2(newString);
+              }
+              fileStats.set(filePath, current);
+            }
+            break;
+          }
+          case "Write": {
+            const filePath = input.file_path;
+            const fileContent = input.content;
+            if (typeof filePath === "string" && typeof fileContent === "string") {
+              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+              current.added += countLines2(fileContent);
+              fileStats.set(filePath, current);
+            }
+            break;
+          }
+          case "Bash":
+            stats.bashCount++;
+            break;
+          case "WebFetch":
+            stats.fetchCount++;
+            break;
+          case "WebSearch":
+            stats.searchCount++;
+            break;
+          case "Task":
+            break;
+        }
+      }
+    }
+  }
+  for (const agentId of subagentIds) {
+    if (visited.has(agentId))
+      continue;
+    visited.add(agentId);
+    const subSession = allSessions.get(agentId);
+    if (!subSession)
+      continue;
+    const subStats = computeSessionStats(subSession.entries, allSessions, visited, cwd);
+    stats.linesAdded += subStats.linesAdded;
+    stats.linesRemoved += subStats.linesRemoved;
+    stats.bashCount += subStats.bashCount;
+    stats.fetchCount += subStats.fetchCount;
+    stats.searchCount += subStats.searchCount;
+  }
+  for (const fs of fileStats.values()) {
+    stats.linesAdded += fs.added;
+    stats.linesRemoved += fs.removed;
+  }
+  stats.filesTouched = fileStats.size;
+  stats.significantLocations = computeSignificantLocations(fileStats, cwd);
+  return stats;
+}
+function countLines2(s) {
+  if (!s)
+    return 0;
+  let count = 1;
+  for (const c of s) {
+    if (c === `
+`)
+      count++;
+  }
+  return count;
+}
+function computeSignificantLocations(fileStats, cwd) {
+  if (fileStats.size === 0)
+    return [];
+  const root = { children: new Map, added: 0, removed: 0 };
+  const cwdPrefix = cwd.replace(/^\//, "").replace(/\/$/, "") + "/";
+  const homePrefix = homedir3().replace(/^\//, "") + "/";
+  for (const [filePath, stats] of fileStats) {
+    let normalizedPath = filePath.replace(/^\//, "");
+    if (normalizedPath.startsWith(cwdPrefix)) {
+      normalizedPath = normalizedPath.slice(cwdPrefix.length);
+    } else if (normalizedPath.startsWith(homePrefix)) {
+      normalizedPath = "~/" + normalizedPath.slice(homePrefix.length);
+    }
+    const parts = normalizedPath.split("/");
+    let node = root;
+    for (const part of parts) {
+      if (!node.children.has(part)) {
+        node.children.set(part, { children: new Map, added: 0, removed: 0 });
+      }
+      node = node.children.get(part);
+    }
+    node.added = stats.added;
+    node.removed = stats.removed;
+  }
+  function calculateTotals(node) {
+    let added = node.added;
+    let removed = node.removed;
+    for (const child of node.children.values()) {
+      const childTotals = calculateTotals(child);
+      added += childTotals.added;
+      removed += childTotals.removed;
+    }
+    node.added = added;
+    node.removed = removed;
+    return { added, removed };
+  }
+  calculateTotals(root);
+  const totalLines = root.added + root.removed;
+  if (totalLines === 0)
+    return [];
+  const SIGNIFICANT_THRESHOLD = 0.3;
+  const DOMINANT_THRESHOLD = 0.5;
+  const results = [];
+  function findSignificant(node, path) {
+    const nodeLines = node.added + node.removed;
+    const nodePercent = nodeLines / totalLines;
+    if (nodePercent <= SIGNIFICANT_THRESHOLD)
+      return;
+    let dominantChild = null;
+    for (const [name, child] of node.children) {
+      const childLines = child.added + child.removed;
+      const childPercentOfParent = childLines / nodeLines;
+      if (childPercentOfParent > DOMINANT_THRESHOLD) {
+        dominantChild = { name, node: child };
+        break;
+      }
+    }
+    if (dominantChild) {
+      const childPath = path ? `${path}/${dominantChild.name}` : dominantChild.name;
+      findSignificant(dominantChild.node, childPath);
+    } else if (path) {
+      const isDirectory = node.children.size > 0;
+      results.push(isDirectory ? `${path}/` : path);
+    }
+  }
+  for (const [name, child] of root.children) {
+    findSignificant(child, name);
+  }
+  return results.slice(0, 3);
 }
 function findSummary(entries) {
   const uuids = new Set;

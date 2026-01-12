@@ -8,6 +8,10 @@ When committing changes, always run:
 
 Both must pass before committing.
 
+## Session Metadata
+
+Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.
+
 ## Re-extracting Sessions
 
 To re-extract all sessions (e.g., after schema changes):
