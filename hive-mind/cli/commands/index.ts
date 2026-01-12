@@ -18,13 +18,9 @@ interface SessionInfo {
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/**
- * Compute the minimal unique prefix for each ID in the list.
- * Returns a map from full ID to its minimal prefix.
- */
 export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
   const result = new Map<string, string>();
-  const minLen = 4; // Minimum prefix length
+  const minLen = 4;
 
   for (const id of ids) {
     let len = minLen;
@@ -40,17 +36,11 @@ export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> 
   return result;
 }
 
-/**
- * Format datetime with relative display.
- * Only show date (MonDD) when it changes, only show year when it changes.
- * Format: Jan12T04:23 or just T04:23 if same day.
- */
 function formatRelativeDateTime(
   rawMtime: string,
   prevDate: string,
   prevYear: string
 ): { display: string; date: string; year: string } {
-  // Parse ISO format: 2026-01-12T04:23:45...
   const dateObj = new Date(rawMtime);
   const year = String(dateObj.getFullYear());
   const month = MONTH_NAMES[dateObj.getMonth()];
@@ -63,13 +53,10 @@ function formatRelativeDateTime(
 
   let display: string;
   if (year !== prevYear && prevYear !== "") {
-    // Year changed - show full with year
     display = `${year}${date}${time}`;
   } else if (date !== prevDate) {
-    // Date changed - show date + time
     display = `${date}${time}`;
   } else {
-    // Same date - show time only
     display = time;
   }
 
@@ -243,17 +230,14 @@ function computeSessionStats(
 
   for (const entry of entries) {
     if (entry.type === "user") {
-      // Count user messages (excluding tool results only)
       const content = entry.message.content;
       if (typeof content === "string" || !Array.isArray(content)) {
         stats.userCount++;
       } else {
-        // Check if there's actual user text, not just tool results
         const hasUserText = content.some((b) => b.type === "text");
         if (hasUserText) stats.userCount++;
       }
 
-      // Extract agentId from user entries (set during extraction from toolUseResult)
       if ("agentId" in entry && typeof entry.agentId === "string") {
         subagentIds.push(entry.agentId);
       }
@@ -306,14 +290,12 @@ function computeSessionStats(
             stats.searchCount++;
             break;
           case "Task":
-            // Task tool - we'll handle subagent recursion via agentId in user entries
             break;
         }
       }
     }
   }
 
-  // Recursively process subagent sessions
   for (const agentId of subagentIds) {
     if (visited.has(agentId)) continue;
     visited.add(agentId);
@@ -322,29 +304,18 @@ function computeSessionStats(
     if (!subSession) continue;
 
     const subStats = computeSessionStats(subSession.entries, allSessions, visited, cwd);
-
-    // Merge stats (except userCount - that's for main session only)
     stats.linesAdded += subStats.linesAdded;
     stats.linesRemoved += subStats.linesRemoved;
     stats.bashCount += subStats.bashCount;
     stats.fetchCount += subStats.fetchCount;
     stats.searchCount += subStats.searchCount;
-
-    // Merge file stats from subagent
-    // Note: subStats.significantLocations already computed from subagent's fileStats
-    // but we need the raw fileStats to properly compute combined locations
-    // For simplicity, we'll just add subStats line counts and let locations be from main session
-    // TODO: Could improve by passing fileStats through recursion
   }
 
-  // Aggregate file stats
   for (const fs of fileStats.values()) {
     stats.linesAdded += fs.added;
     stats.linesRemoved += fs.removed;
   }
   stats.filesTouched = fileStats.size;
-
-  // Compute significant locations
   stats.significantLocations = computeSignificantLocations(fileStats, cwd);
 
   return stats;
@@ -352,7 +323,6 @@ function computeSessionStats(
 
 function countLines(s: string): number {
   if (!s) return 0;
-  // Count newlines + 1 for non-empty strings
   let count = 1;
   for (const c of s) {
     if (c === "\n") count++;
@@ -369,15 +339,11 @@ interface PathNode {
 export function computeSignificantLocations(fileStats: Map<string, FileStats>, cwd: string): Array<string> {
   if (fileStats.size === 0) return [];
 
-  // Build tree from file paths
   const root: PathNode = { children: new Map(), added: 0, removed: 0 };
-
-  // Normalize cwd for prefix stripping
   const cwdPrefix = cwd.replace(/^\//, "").replace(/\/$/, "") + "/";
   const homePrefix = homedir().replace(/^\//, "") + "/";
 
   for (const [filePath, stats] of fileStats) {
-    // Normalize path - remove leading / and strip cwd prefix, or use ~ for home
     let normalizedPath = filePath.replace(/^\//, "");
     if (normalizedPath.startsWith(cwdPrefix)) {
       normalizedPath = normalizedPath.slice(cwdPrefix.length);
@@ -394,12 +360,10 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
       node = node.children.get(part)!;
     }
 
-    // Set stats at leaf
     node.added = stats.added;
     node.removed = stats.removed;
   }
 
-  // Calculate totals for each node (sum of all descendants)
   function calculateTotals(node: PathNode): { added: number; removed: number } {
     let added = node.added;
     let removed = node.removed;
@@ -417,8 +381,8 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
   const totalLines = root.added + root.removed;
   if (totalLines === 0) return [];
 
-  const SIGNIFICANT_THRESHOLD = 0.3; // 30% of total
-  const DOMINANT_THRESHOLD = 0.5; // 50% of parent
+  const SIGNIFICANT_THRESHOLD = 0.3;
+  const DOMINANT_THRESHOLD = 0.5;
 
   const results: Array<string> = [];
 
@@ -426,10 +390,8 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
     const nodeLines = node.added + node.removed;
     const nodePercent = nodeLines / totalLines;
 
-    // Not significant at all
     if (nodePercent <= SIGNIFICANT_THRESHOLD) return;
 
-    // Check for dominant child
     let dominantChild: { name: string; node: PathNode } | null = null;
     for (const [name, child] of node.children) {
       const childLines = child.added + child.removed;
@@ -441,27 +403,21 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
     }
 
     if (dominantChild) {
-      // Recurse into dominant child
       const childPath = path ? `${path}/${dominantChild.name}` : dominantChild.name;
       findSignificant(dominantChild.node, childPath);
     } else if (path) {
-      // No dominant child and this node is significant - output it
-      // Add trailing / for directories
       const isDirectory = node.children.size > 0;
       results.push(isDirectory ? `${path}/` : path);
     }
   }
 
-  // Start from root's children (skip root itself)
   for (const [name, child] of root.children) {
     findSignificant(child, name);
   }
 
-  // Limit to 3 results max
   return results.slice(0, 3);
 }
 
-// XML tags that indicate meta/system content rather than real user prompts
 const META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
 
 function isMetaXml(text: string): boolean {
@@ -500,8 +456,6 @@ function findSummary(entries: Array<KnownEntry>): string | undefined {
 function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
   for (const entry of entries) {
     if (entry.type !== "user") continue;
-
-    // Skip meta entries (local command caveats, etc.)
     if ("isMeta" in entry && entry.isMeta === true) continue;
 
     const content = entry.message.content;
@@ -521,7 +475,6 @@ function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
 
     if (text) {
       const trimmed = text.trim();
-      // Skip meta XML content (command messages, local command output, etc.)
       if (isMetaXml(trimmed)) continue;
 
       const firstLine = trimmed.split("\n")[0].trim();

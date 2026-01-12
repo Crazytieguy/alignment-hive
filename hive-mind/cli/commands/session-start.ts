@@ -10,7 +10,6 @@ import { hookOutput } from "../lib/output";
 export async function sessionStart(): Promise<number> {
   const messages: Array<string> = [];
 
-  // 1. Check auth status
   const status = await checkAuthStatus(true);
 
   if (status.needsLogin) {
@@ -19,7 +18,6 @@ export async function sessionStart(): Promise<number> {
     messages.push(loggedInMessage(getUserDisplayName(status.user)));
   }
 
-  // 2. Extract all sessions that need extraction
   const cwd = process.env.CWD || process.cwd();
   const transcriptPath = process.env.TRANSCRIPT_PATH;
 
@@ -40,7 +38,6 @@ export async function sessionStart(): Promise<number> {
     messages.push(`Extraction failed: ${errorMsg}`);
   }
 
-  // Output all messages together
   if (messages.length > 0) {
     hookOutput(messages.join("\n"));
   }

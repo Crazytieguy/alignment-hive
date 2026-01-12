@@ -666,18 +666,14 @@ function sanitizeString(content) {
   return result;
 }
 function sanitizeDeep(value, depth = 0) {
-  if (depth > MAX_SANITIZE_DEPTH) {
+  if (depth > MAX_SANITIZE_DEPTH)
     return value;
-  }
-  if (value === null || value === undefined) {
+  if (value === null || value === undefined)
     return value;
-  }
-  if (typeof value === "string") {
+  if (typeof value === "string")
     return sanitizeString(value);
-  }
-  if (Array.isArray(value)) {
+  if (Array.isArray(value))
     return value.map((item) => sanitizeDeep(item, depth + 1));
-  }
   if (typeof value === "object") {
     const result = {};
     for (const [key, val] of Object.entries(value)) {
