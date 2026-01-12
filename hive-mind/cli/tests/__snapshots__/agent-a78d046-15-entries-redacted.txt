@@ -1,5 +1,5 @@
 # model=claude-opus-4-5-20251101 branch=main
-1|2026-01-05T01:20|user|"Review actual extracted session files to check data quality. Do not run bash commands - only read files." +13lines
+1|2026-01-05T01:20|user|"Review actual extracted session files to check data quality. Do not run bash commands - only read files." +97words
 2|01:20|tool|Glob|pattern="**/*.jsonl"|result=101files
 3|01:20|tool|Read|docs/claude-code-jsonl-format.md|result=3491words
 4|01:20|assistant|"Now let me read a few extracted session files to analyze the data quality:"
@@ -16,4 +16,4 @@
 15|01:21|tool|Read|hive-mind-cli/src/lib/extraction.ts|result=1321words
 16|01:21|assistant|"Let me also check the schemas to understand what fields are being stripped:"
 17|01:21|tool|Read|hive-mind-cli/src/lib/schemas.ts|result=775words
-18|01:22|assistant|"Now I have a comprehensive picture of the extraction system and the extracted data. Let me provide my analysis." +153lines
+18|01:22|assistant|"Now I have a comprehensive picture of the extraction system and the extracted data. Let me provide my analysis." +939words

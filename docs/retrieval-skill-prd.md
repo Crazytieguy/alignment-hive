@@ -135,7 +135,7 @@ Replace current line-based truncation with word-level truncation that adapts to 
 
 ### 6. Field Filtering and Output Control
 
-**Status:** Done (with known issues, see below)
+**Status:** Done
 **Effort:** Medium
 
 Add consistent field filtering to both `read` and `grep` commands. The API should feel familiar to users of tools like grep, jq, and xsv.
@@ -186,34 +186,29 @@ The exact syntax should be determined during implementation based on what works 
 - ~~API documented in help text with examples~~ Done
 - ~~Design rationale documented~~ Similar to rsync --include/--exclude pattern
 
-**Known Issues (to fix in future session):**
+**Known Issues:** All fixed.
 
-1. **Architectural: operates at message level, not field level**
-   - Current: `--hide tool` skips entire tool messages in output
-   - Expected: `--hide tool` should still show messages but redact content to word counts
-   - This is the root cause of several issues below
+~~1. **Architectural: operates at message level, not field level**~~ Fixed
+   - `--hide tool` now shows tool entries with per-field word counts
 
-2. **`--hide assistant` hides entire entry including tool calls**
-   - Current: hides the whole assistant message (text + thinking + tool_use blocks)
-   - Expected: should only hide assistant text blocks, not tool calls
-   - Root cause: code operates on raw JSON entries with mixed content, not logical entries
+~~2. **`--hide assistant` hides entire entry including tool calls**~~ Fixed
+   - `--hide assistant` now only hides text blocks (shows word count), keeps thinking and tool blocks
 
-3. **`--hide tool:Bash:input` doesn't hide command/description fields**
-   - The tool input fields are still shown in full
-   - Need to apply field filter at the tool formatter level
+~~3. **`--hide tool:Bash:input` doesn't hide command/description fields**~~ Fixed
+   - `--hide tool:Bash:input` now shows `command=Nwords` (description always shown)
 
-4. **`--hide tool:Bash:result` doesn't hide the result field**
-   - Result word count is shown but content should be hidden entirely
-   - Need to apply field filter at the tool formatter level
+~~4. **`--hide tool:Bash:result` doesn't hide the result field**~~ Fixed
+   - `--hide tool:Bash:result` now shows `result=Nwords`
 
-5. **`--in tool` should search both inputs and results**
-   - Currently not supported as a shorthand
-   - Should expand to `tool:input,tool:result`
+~~5. **`--in tool` should search both inputs and results**~~ Already worked
+   - Parent-child matching in `matches()` already handles this case
+   - Added test to document behavior
 
-**Recommended fix approach:**
-- Refactor to operate at field level: always emit all messages, but control content visibility per field
-- Transform raw entries into logical entries (user, assistant-text, thinking, tool:Name) before formatting
-- Apply field filters during content formatting, not at entry selection
+**Additional improvements:**
+- 1-word fields show actual value instead of `1word` (e.g., `subagent_type=Explore`)
+- `description` field is always shown (useful context, typically short)
+- Task tool format optimized: `Task|<type>|session=...` (type positional, shorter key)
+- `--hide tool` now uses tool-specific formatters (DRY refactor)
 
 ---
 

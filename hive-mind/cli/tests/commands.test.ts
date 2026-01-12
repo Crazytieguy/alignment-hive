@@ -431,8 +431,8 @@ describe("read command", () => {
     await read();
 
     const output = consoleOutput.join("\n");
-    // Should show truncation indicator (format is "+Nlines")
-    expect(output).toMatch(/\+\d+lines/);
+    // Should show truncation indicator (format is "+Nwords")
+    expect(output).toMatch(/\+\d+words/);
   });
 
   test("reads all entries full with --full flag", async () => {

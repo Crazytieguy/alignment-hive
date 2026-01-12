@@ -20,8 +20,8 @@ function printUsage(): void {
   console.log("  -C N          Show N entries of context before and after");
   console.log("  -B N          Show N entries of context before");
   console.log("  -A N          Show N entries of context after");
-  console.log("  --show FIELDS Show additional fields (comma-separated)");
-  console.log("  --hide FIELDS Hide fields from output (comma-separated)");
+  console.log("  --show FIELDS Show full content for fields (comma-separated)");
+  console.log("  --hide FIELDS Redact fields to word counts (comma-separated)");
   console.log("\nField specifiers:");
   console.log("  user, assistant, thinking, system, summary");
   console.log("  tool, tool:<name>, tool:<name>:input, tool:<name>:result");
@@ -39,7 +39,7 @@ function printUsage(): void {
   console.log("  read 02ed 10-20 --full             # range without truncation");
   console.log("  read 02ed --show thinking          # show full thinking content");
   console.log("  read 02ed --show tool:Bash:result  # show Bash command results");
-  console.log("  read 02ed --hide user              # hide user messages");
+  console.log("  read 02ed --hide user              # redact user messages to word counts");
 }
 
 export async function read(): Promise<number> {

@@ -32,7 +32,7 @@
   - I'd like to make sure we're not removing fields that could plausibly be useful, don't contain a large amount of data, and can't contain sensitive data. Could you check if we should skip +61words
 19|02:53|thinking|105words
 20|02:53|assistant|"I'll explore the codebase to understand the context better and read the referenced documentation."
-21|02:53|tool|Task|agent_session=agent-aacc414|subagent_type=Explore|description="Explore ToolResultBlock recursion"|prompt=77words|result=453words
+21|02:53|tool|Task|Explore|session=agent-aacc414|description="Explore ToolResultBlock recursion"|prompt=77words|result=453words
 22|02:53|tool|Read|docs/claude-code-jsonl-format.md|result=3491words
 23|02:54|thinking|420words
 24|02:54|assistant|"Excellent research! Now I have a clear picture. Let me also check if there are any tests that verify the current field-stripping behavior:"

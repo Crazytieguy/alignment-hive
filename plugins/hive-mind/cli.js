@@ -14757,7 +14757,8 @@ function formatQuotedSummary(text, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN) {
   if (lines.length === 1) {
     return `"${escaped}"`;
   }
-  return `"${escaped}" +${lines.length - 1}lines`;
+  const totalWords = countWords(text);
+  return `"${escaped}" +${totalWords}words`;
 }
 var MIN_TRUNCATION_THRESHOLD = 3;
 function truncateContent(text, wordLimit, skipWords) {
@@ -14805,6 +14806,13 @@ ${indent(content, 2)}`;
 function formatWordCount(text) {
   const count = countWords(text);
   return `${count}word${count === 1 ? "" : "s"}`;
+}
+function formatFieldValue(text) {
+  const count = countWords(text);
+  if (count <= 1) {
+    return text.trim() || '""';
+  }
+  return `${count}words`;
 }
 function shortenPath(path, cwd) {
   if (!cwd)
@@ -14990,7 +14998,7 @@ function formatEntry(entry, options) {
     skipWords = 0,
     fieldFilter
   } = options;
-  if (fieldFilter && redact) {
+  if (fieldFilter && redact && entry.type !== "assistant") {
     if (!fieldFilter.shouldShow(entry.type)) {
       return null;
     }
@@ -15185,6 +15193,13 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
     const parent = blockIndex === 0 ? parentIndicator : undefined;
     if (block.type === "thinking") {
       if (fieldFilter && redact && !fieldFilter.shouldShow("thinking")) {
+        const parts = [String(lineNumber)];
+        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
+        if (formattedTs)
+          parts.push(formattedTs);
+        parts.push("thinking");
+        parts.push(formatWordCount(block.thinking));
+        lines.push(parts.join("|"));
         blockIndex++;
         continue;
       }
@@ -15192,15 +15207,34 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
       if (formatted)
         lines.push(formatted);
     } else if (block.type === "text") {
+      if (fieldFilter && redact && !fieldFilter.shouldShow("assistant")) {
+        const parts = [String(lineNumber)];
+        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
+        if (formattedTs)
+          parts.push(formattedTs);
+        parts.push("assistant");
+        parts.push(formatWordCount(block.text));
+        lines.push(parts.join("|"));
+        blockIndex++;
+        continue;
+      }
       const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
       if (formatted)
         lines.push(formatted);
     } else if (block.type === "tool_use") {
+      let effectiveFilter = fieldFilter;
       if (fieldFilter && redact && !fieldFilter.shouldShow(`tool:${block.name}`)) {
-        blockIndex++;
-        continue;
+        effectiveFilter = {
+          shouldShow: (field) => {
+            if (field === `tool:${block.name}:input` || field === `tool:${block.name}:result`) {
+              return false;
+            }
+            return fieldFilter.shouldShow(field);
+          },
+          showFullThinking: () => fieldFilter.showFullThinking()
+        };
       }
-      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter);
+      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, effectiveFilter);
       if (formatted)
         lines.push(formatted);
     }
@@ -15247,6 +15281,7 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
   parts.push(block.name);
   const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
   const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
+  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:input`) : false;
   const toolFormatter = getToolFormatter(block.name);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
     input: block.input,
@@ -15254,12 +15289,16 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
     cwd,
     redact,
     wordLimit,
-    skipWords
+    skipWords,
+    hideInput,
+    hideResult
   });
   parts.push(...headerParams);
   if (redact) {
-    if (resultInfo && !suppressResult && !hideResult) {
-      if (showResult && wordLimit !== undefined) {
+    if (resultInfo && !suppressResult) {
+      if (hideResult) {
+        parts.push(`result=${formatFieldValue(resultInfo.content)}`);
+      } else if (showResult && wordLimit !== undefined) {
         const { content: truncated, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
         if (!isEmpty) {
           const bodyLines2 = [];
@@ -15276,8 +15315,9 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
 ${bodyLines2.join(`
 `)}` : header3;
         }
+      } else {
+        parts.push(`result=${formatFieldValue(resultInfo.content)}`);
       }
-      parts.push(`result=${formatWordCount(resultInfo.content)}`);
     }
     const header2 = parts.join("|");
     if (multilineParams.length > 0) {
@@ -15431,17 +15471,25 @@ function addFormattedParam(headerParams, multilineParams, name, text, wordLimit,
     headerParams.push(`${name}=${formatted.inline}`);
   }
 }
-function formatBashTool({ input, result, redact, wordLimit, skipWords }) {
+function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput, hideResult }) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "command", command, wordLimit, skipWords);
+  if (hideInput) {
+    headerParams.push(`command=${formatFieldValue(command)}`);
+  } else {
+    addFormattedParam(headerParams, multilineParams, "command", command, wordLimit, skipWords);
+  }
   if (desc) {
     addFormattedParam(headerParams, multilineParams, "description", desc, wordLimit, skipWords);
   }
   if (redact && result) {
-    addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+    if (hideResult) {
+      headerParams.push(`result=${formatFieldValue(result.content)}`);
+    } else {
+      addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+    }
     return { headerParams, multilineParams, suppressResult: true };
   }
   return { headerParams, multilineParams };
@@ -15481,15 +15529,15 @@ function formatTaskTool({ input, result, redact, wordLimit, skipWords }) {
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
   const headerParams = [];
   const multilineParams = [];
-  if (result?.agentId) {
-    headerParams.push(`agent_session=agent-${result.agentId}`);
-  }
   if (subagentType) {
-    headerParams.push(`subagent_type=${subagentType}`);
+    headerParams.push(subagentType);
+  }
+  if (result?.agentId) {
+    headerParams.push(`session=agent-${result.agentId}`);
   }
   addFormattedParam(headerParams, multilineParams, "description", desc, wordLimit, skipWords);
   if (redact) {
-    headerParams.push(`prompt=${formatWordCount(prompt)}`);
+    headerParams.push(`prompt=${formatFieldValue(prompt)}`);
     return { headerParams, multilineParams };
   }
   multilineParams.push({ name: "prompt", content: prompt });
@@ -15519,13 +15567,17 @@ function formatTodoWriteTool({ input, redact }) {
 `) }] : []
   };
 }
-function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords }) {
+function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords, hideResult }) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams = [`questions=${questions.length}`];
   const multilineParams = [];
   if (redact) {
     if (result) {
-      addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+      if (hideResult) {
+        headerParams.push(`result=${formatWordCount(result.content)}`);
+      } else {
+        addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+      }
     }
     return { headerParams, multilineParams, suppressResult: true };
   }
@@ -16816,8 +16868,8 @@ Options:`);
   console.log("  -C N          Show N entries of context before and after");
   console.log("  -B N          Show N entries of context before");
   console.log("  -A N          Show N entries of context after");
-  console.log("  --show FIELDS Show additional fields (comma-separated)");
-  console.log("  --hide FIELDS Hide fields from output (comma-separated)");
+  console.log("  --show FIELDS Show full content for fields (comma-separated)");
+  console.log("  --hide FIELDS Redact fields to word counts (comma-separated)");
   console.log(`
 Field specifiers:`);
   console.log("  user, assistant, thinking, system, summary");
@@ -16838,7 +16890,7 @@ Examples:`);
   console.log("  read 02ed 10-20 --full             # range without truncation");
   console.log("  read 02ed --show thinking          # show full thinking content");
   console.log("  read 02ed --show tool:Bash:result  # show Bash command results");
-  console.log("  read 02ed --hide user              # hide user messages");
+  console.log("  read 02ed --hide user              # redact user messages to word counts");
 }
 async function read() {
   const args = process.argv.slice(3);

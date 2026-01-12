@@ -493,7 +493,7 @@
 20|02:53|assistant
   I'll explore the codebase to understand the context better and read the referenced documentation.
 
-21|02:53|tool|Task|agent_session=agent-aacc414|subagent_type=Explore|description="Explore ToolResultBlock recursion"
+21|02:53|tool|Task|Explore|session=agent-aacc414|description="Explore ToolResultBlock recursion"
 [prompt]
   I need to understand if ToolResultBlock can actually contain another ToolResultBlock recursively in Claude Code's JSONL format.
 

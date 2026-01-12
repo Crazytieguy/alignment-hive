@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parseJsonl } from "../lib/extraction";
 import { ReadFieldFilter } from "../lib/field-filter";
-import { formatSession, redactMultiline } from "../lib/format";
+import { formatSession } from "../lib/format";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
 
@@ -59,29 +59,6 @@ async function writeSnapshot(name: string, content: string): Promise<void> {
   await mkdir(snapshotsDir, { recursive: true });
   await writeFile(join(snapshotsDir, `${name}.txt`), content);
 }
-
-describe("redactMultiline", () => {
-  test("single line passes through unchanged", () => {
-    expect(redactMultiline("hello world")).toBe("hello world");
-  });
-
-  test("empty string passes through", () => {
-    expect(redactMultiline("")).toBe("");
-  });
-
-  test("two lines shows first line + count", () => {
-    expect(redactMultiline("line1\nline2")).toBe("line1\n[+1 lines]");
-  });
-
-  test("many lines shows first line + count", () => {
-    const input = "first line\nsecond\nthird\nfourth\nfifth";
-    expect(redactMultiline(input)).toBe("first line\n[+4 lines]");
-  });
-
-  test("handles trailing newline", () => {
-    expect(redactMultiline("line1\nline2\n")).toBe("line1\n[+2 lines]");
-  });
-});
 
 describe("format full sessions", () => {
   for (const { prefix, name } of TEST_SESSIONS) {

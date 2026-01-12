@@ -177,5 +177,16 @@ describe("GrepFieldFilter", () => {
       const filter = new GrepFieldFilter(["tool:Bash:input"]);
       expect(filter.isSearchable("tool:input")).toBe(true);
     });
+
+    test("bare tool matches both inputs and results", () => {
+      const filter = new GrepFieldFilter(["tool"]);
+      expect(filter.isSearchable("tool:input")).toBe(true);
+      expect(filter.isSearchable("tool:result")).toBe(true);
+      expect(filter.isSearchable("tool:Bash:input")).toBe(true);
+      expect(filter.isSearchable("tool:Bash:result")).toBe(true);
+      // Should not match non-tool fields
+      expect(filter.isSearchable("user")).toBe(false);
+      expect(filter.isSearchable("assistant")).toBe(false);
+    });
   });
 });

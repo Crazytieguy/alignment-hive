@@ -31,7 +31,7 @@
 [result]
   {"files":[{"characters":37567,"content_type":"html-converted","lines":612,"path":"/Users/yoav/projects/alignment-hive/.llms-fetch-mcp/huggingface.co/blog/sionic-ai/claude-code-skills-training/index","source_url":"https://huggingface.co/blog/sionic-ai/claude-code-skills-training","table_of_contents":"  23→### Giving Claude a Team Memory (￣ー￣)ノ✧ ###\n  41→### Quick Look ###\n  71→### Before ending your Claude Session ###\n 158→### When Starting a New Experiment ###\n 179→### Okay... What Makes a Good Skill? ###\n 377→### Demo: Training a Small Transformer to Learn Addition ###\n 447→### The System Behind It ###\n 457→### Build your own Skill Registry today ###\n 596→### The cultural part is harder than the technical part ###","words":4643}]}
 
-6|18:44|tool|Task|agent_session=agent-a79810d|subagent_type=Explore|description="Explore codebase structure"
+6|18:44|tool|Task|Explore|session=agent-a79810d|description="Explore codebase structure"
 [prompt]
   Explore the alignment-hive codebase to understand:
   1. The current structure and what plugins already exist
@@ -886,7 +886,7 @@
 12|18:48|assistant
   Now I have a good understanding. Let me also check the claude-code-guide for hooks/subagents features to understand what's available:
 
-13|18:48|tool|Task|agent_session=agent-a93e318|subagent_type=claude-code-guide|description="Research Claude Code features"
+13|18:48|tool|Task|claude-code-guide|session=agent-a93e318|description="Research Claude Code features"
 [prompt]
   Research Claude Code features that would be relevant for a memory system:
   1. Hooks - especially SessionEnd, PreToolUse, PostToolUse - how they work and what data they have access to
@@ -1864,7 +1864,7 @@
 57|00:19|thinking
   The user wants to know if there's a way to have a local (non-committed) MCP configuration file in Claude Code. Let me check the claude-code-guide agent for this information.
 
-58|00:19|tool|Task|agent_session=agent-a6891e1|subagent_type=claude-code-guide|description="Check MCP local config options"
+58|00:19|tool|Task|claude-code-guide|session=agent-a6891e1|description="Check MCP local config options"
 [prompt]
   How can I configure MCP servers locally without committing the config to git? Is there a .mcp.local.json or similar pattern? I currently have a .mcp.json file that I want to keep local to my machine.
 [result]

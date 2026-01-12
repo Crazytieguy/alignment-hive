@@ -40,7 +40,8 @@ function formatQuotedSummary(text: string, maxFirstLineLen = MAX_CONTENT_SUMMARY
   if (lines.length === 1) {
     return `"${escaped}"`;
   }
-  return `"${escaped}" +${lines.length - 1}lines`;
+  const totalWords = countWords(text);
+  return `"${escaped}" +${totalWords}words`;
 }
 
 const MIN_TRUNCATION_THRESHOLD = 3;
@@ -102,6 +103,16 @@ function formatWordCount(text: string): string {
   return `${count}word${count === 1 ? '' : 's'}`;
 }
 
+/** Format a field value: show actual value if 1 word, otherwise show word count */
+function formatFieldValue(text: string): string {
+  const count = countWords(text);
+  if (count <= 1) {
+    // Show actual value for single words (no quotes needed, already short)
+    return text.trim() || '""';
+  }
+  return `${count}words`;
+}
+
 function shortenPath(path: string, cwd?: string): string {
   if (!cwd) return path;
   if (path.startsWith(cwd + '/')) {
@@ -154,13 +165,6 @@ export interface SessionFormatOptions {
   targetWords?: number;
   skipWords?: number;
   fieldFilter?: ReadFieldFilter;
-}
-
-export function redactMultiline(text: string): string {
-  const lines = text.split('\n');
-  if (lines.length <= 1) return text;
-  const remaining = lines.length - 1;
-  return `${lines[0]}\n[+${remaining} lines]`;
 }
 
 export interface LogicalEntry {
@@ -350,7 +354,9 @@ export function formatEntry(entry: KnownEntry, options: FormatOptions): string |
   } = options;
 
   // Check if entry type should be shown (fieldFilter only applies in redact mode)
-  if (fieldFilter && redact) {
+  // Skip this check for assistant entries - they have mixed content (text, thinking, tools)
+  // and need block-level filtering instead
+  if (fieldFilter && redact && entry.type !== 'assistant') {
     if (!fieldFilter.shouldShow(entry.type)) {
       return null;
     }
@@ -593,6 +599,13 @@ function formatAssistantEntry(
     if (block.type === 'thinking') {
       // Check if thinking should be shown
       if (fieldFilter && redact && !fieldFilter.shouldShow('thinking')) {
+        // Show word count when thinking is hidden
+        const parts: Array<string> = [String(lineNumber)];
+        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
+        if (formattedTs) parts.push(formattedTs);
+        parts.push('thinking');
+        parts.push(formatWordCount(block.thinking));
+        lines.push(parts.join('|'));
         blockIndex++;
         continue;
       }
@@ -609,13 +622,35 @@ function formatAssistantEntry(
       );
       if (formatted) lines.push(formatted);
     } else if (block.type === 'text') {
+      // Check if assistant text should be shown
+      if (fieldFilter && redact && !fieldFilter.shouldShow('assistant')) {
+        // Show word count when assistant text is hidden
+        const parts: Array<string> = [String(lineNumber)];
+        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
+        if (formattedTs) parts.push(formattedTs);
+        parts.push('assistant');
+        parts.push(formatWordCount(block.text));
+        lines.push(parts.join('|'));
+        blockIndex++;
+        continue;
+      }
       const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
       if (formatted) lines.push(formatted);
     } else if (block.type === 'tool_use') {
-      // Check if tool should be shown
+      // Create a modified filter that hides both input and result when tool is hidden
+      let effectiveFilter = fieldFilter;
       if (fieldFilter && redact && !fieldFilter.shouldShow(`tool:${block.name}`)) {
-        blockIndex++;
-        continue;
+        // Tool is hidden: use filter that hides both input and result
+        effectiveFilter = {
+          shouldShow: (field: string) => {
+            // Hide input and result for this tool
+            if (field === `tool:${block.name}:input` || field === `tool:${block.name}:result`) {
+              return false;
+            }
+            return fieldFilter.shouldShow(field);
+          },
+          showFullThinking: () => fieldFilter.showFullThinking(),
+        } as ReadFieldFilter;
       }
       const formatted = formatToolEntry(
         lineNumber,
@@ -628,7 +663,7 @@ function formatAssistantEntry(
         redact,
         wordLimit,
         skipWords,
-        fieldFilter,
+        effectiveFilter,
       );
       if (formatted) lines.push(formatted);
     }
@@ -711,9 +746,10 @@ function formatToolEntry(
   parts.push('tool');
   parts.push(block.name);
 
-  // Check if result should be shown (for this specific tool)
+  // Check if input/result should be shown (for this specific tool)
   const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
   const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
+  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:input`) : false;
 
   const toolFormatter = getToolFormatter(block.name);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
@@ -723,13 +759,18 @@ function formatToolEntry(
     redact,
     wordLimit,
     skipWords,
+    hideInput,
+    hideResult,
   });
   parts.push(...headerParams);
 
   if (redact) {
-    if (resultInfo && !suppressResult && !hideResult) {
-      if (showResult && wordLimit !== undefined) {
-        // Show truncated result content when --show tool:result
+    if (resultInfo && !suppressResult) {
+      if (hideResult) {
+        // --hide tool:result: show word count only
+        parts.push(`result=${formatFieldValue(resultInfo.content)}`);
+      } else if (showResult && wordLimit !== undefined) {
+        // --show tool:result: show truncated result content
         const { content: truncated, suffix, isEmpty } = truncateContent(
           resultInfo.content,
           wordLimit,
@@ -748,9 +789,10 @@ function formatToolEntry(
           const header = parts.join('|');
           return bodyLines.length > 0 ? `${header}\n${bodyLines.join('\n')}` : header;
         }
+      } else {
+        // Default: show result as word count
+        parts.push(`result=${formatFieldValue(resultInfo.content)}`);
       }
-      // Default: show result as word count
-      parts.push(`result=${formatWordCount(resultInfo.content)}`);
     }
     const header = parts.join('|');
     if (multilineParams.length > 0) {
@@ -793,6 +835,8 @@ interface ToolFormatterOptions {
   redact?: boolean;
   wordLimit?: number;
   skipWords?: number;
+  hideInput?: boolean;
+  hideResult?: boolean;
 }
 
 type ToolFormatter = (options: ToolFormatterOptions) => ToolFormatResult;
@@ -950,20 +994,30 @@ function addFormattedParam(
   }
 }
 
-function formatBashTool({ input, result, redact, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput, hideResult }: ToolFormatterOptions): ToolFormatResult {
   const command = String(input.command || '').trim();
   const desc = input.description ? String(input.description) : undefined;
 
   const headerParams: Array<string> = [];
   const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
 
-  addFormattedParam(headerParams, multilineParams, 'command', command, wordLimit, skipWords);
+  if (hideInput) {
+    // Show field value (actual value if 1 word, otherwise word count)
+    headerParams.push(`command=${formatFieldValue(command)}`);
+  } else {
+    addFormattedParam(headerParams, multilineParams, 'command', command, wordLimit, skipWords);
+  }
+  // Description is always shown (useful and short)
   if (desc) {
     addFormattedParam(headerParams, multilineParams, 'description', desc, wordLimit, skipWords);
   }
 
   if (redact && result) {
-    addFormattedParam(headerParams, multilineParams, 'result', result.content, wordLimit, skipWords);
+    if (hideResult) {
+      headerParams.push(`result=${formatFieldValue(result.content)}`);
+    } else {
+      addFormattedParam(headerParams, multilineParams, 'result', result.content, wordLimit, skipWords);
+    }
     return { headerParams, multilineParams, suppressResult: true };
   }
 
@@ -1014,16 +1068,18 @@ function formatTaskTool({ input, result, redact, wordLimit, skipWords }: ToolFor
   const headerParams: Array<string> = [];
   const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
 
-  if (result?.agentId) {
-    headerParams.push(`agent_session=agent-${result.agentId}`);
-  }
+  // Subagent type goes first (positional, no key)
   if (subagentType) {
-    headerParams.push(`subagent_type=${subagentType}`);
+    headerParams.push(subagentType);
   }
+  if (result?.agentId) {
+    headerParams.push(`session=agent-${result.agentId}`);
+  }
+  // Description is always shown (useful and short)
   addFormattedParam(headerParams, multilineParams, 'description', desc, wordLimit, skipWords);
 
   if (redact) {
-    headerParams.push(`prompt=${formatWordCount(prompt)}`);
+    headerParams.push(`prompt=${formatFieldValue(prompt)}`);
     return { headerParams, multilineParams };
   }
 
@@ -1058,14 +1114,18 @@ function formatTodoWriteTool({ input, redact }: ToolFormatterOptions): ToolForma
   };
 }
 
-function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords, hideResult }: ToolFormatterOptions): ToolFormatResult {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams: Array<string> = [`questions=${questions.length}`];
   const multilineParams: Array<{ name: string; content: string; suffix?: string }> = [];
 
   if (redact) {
     if (result) {
-      addFormattedParam(headerParams, multilineParams, 'result', result.content, wordLimit, skipWords);
+      if (hideResult) {
+        headerParams.push(`result=${formatWordCount(result.content)}`);
+      } else {
+        addFormattedParam(headerParams, multilineParams, 'result', result.content, wordLimit, skipWords);
+      }
     }
     return { headerParams, multilineParams, suppressResult: true };
   }

@@ -4,14 +4,14 @@
 3|18:44|thinking|162words
 4|18:44|assistant|"I'll start by reading the blog post and exploring the current codebase structure to understand what we're working with."
 5|18:44|tool|mcp__llms-fetch__fetch|url="https://huggingface.co/blog/sionic-ai/claude-code-skills-training"|result=70words
-6|18:44|tool|Task|agent_session=agent-a79810d|subagent_type=Explore|description="Explore codebase structure"|prompt=69words|result=623words
+6|18:44|tool|Task|Explore|session=agent-a79810d|description="Explore codebase structure"|prompt=69words|result=623words
 7|18:48|thinking|58words
 8|18:48|assistant|"Let me read the blog post content to understand the memory system approach:"
 9|18:48|tool|Read|.llms-fetch-mcp/huggingface.co/blog/sionic-ai/claude-code-skills-training/index|result=4990words
 10|18:48|tool|Read|plugins/project-setup/skills/project-setup/SKILL.md|result=236words
 11|18:48|thinking|240words
 12|18:48|assistant|"Now I have a good understanding. Let me also check the claude-code-guide for hooks/subagents features to understand what's available:"
-13|18:48|tool|Task|agent_session=agent-a93e318|subagent_type=claude-code-guide|description="Research Claude Code features"|prompt=62words|result=1186words
+13|18:48|tool|Task|claude-code-guide|session=agent-a93e318|description="Research Claude Code features"|prompt=62words|result=1186words
 14|18:49|thinking|342words
 15|18:49|assistant
   Excellent! Now I have a comprehensive understanding. Let me synthesize what I've learned and clarify a few things before writing the plan.
@@ -193,7 +193,7 @@
   Left `.mcp.json` untracked - you may want to add it to `.gitignore` if it's machine-specific config.
 56|00:19|user|"There's probably a way to have a local mcp.json file, can you check the claude code guide?"
 57|00:19|thinking|29words
-58|00:19|tool|Task|agent_session=agent-a6891e1|subagent_type=claude-code-guide|description="Check MCP local config options"|prompt=35words|result=388words
+58|00:19|tool|Task|claude-code-guide|session=agent-a6891e1|description="Check MCP local config options"|prompt=35words|result=388words
 59|00:20|thinking|85words
 60|00:20|assistant
   Yes! There are MCP scopes:
@@ -218,7 +218,7 @@
 63|00:21|user|"<local-command-stdout>Goodbye!</local-command-stdout>"
 64|00:21|user|parent=61|"I've re-added it with scope local! Is it still available to you?"
 65|00:21|thinking|39words
-66|00:21|tool|mcp__llms-fetch__fetch|url="https://docs.anthropic.com/en/docs/claude-code"|result=1word
+66|00:21|tool|mcp__llms-fetch__fetch|url="https://docs.anthropic.com/en/docs/claude-code"|result={"files":[{"characters":10,"content_type":"html-converted","lines":1,"path":"/Users/yoav/projects/alignment-hive/.llms-fetch-mcp/docs.anthropic.com/en/docs/claude-code/index","source_url":"https://docs.anthropic.com/en/docs/claude-code","words":1}]}
 67|00:21|thinking|16words
 68|00:21|assistant|"Yes, still works! The local scope config is picked up correctly."
 [Limited to 69 words per field. Use --skip 69 for more.]
