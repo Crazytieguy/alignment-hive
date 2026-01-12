@@ -288,7 +288,7 @@ describe("grep command", () => {
     expect(consoleOutput.some((line) => line.includes("UNIQUE_OUTPUT_12345"))).toBe(false);
   });
 
-  test("searches tool results with --include-tool-results flag", async () => {
+  test("searches tool results with --in tool:result flag", async () => {
     await writeFile(
       join(sessionsDir, "test-session-10.jsonl"),
       createTestSession("test-session-10", [
@@ -299,11 +299,11 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "--include-tool-results", "SEARCHABLE_OUTPUT_67890"];
+    process.argv = ["node", "cli", "grep", "--in", "tool:result", "SEARCHABLE_OUTPUT_67890"];
     const { grep } = await import("../commands/grep");
     await grep();
 
-    // With --include-tool-results, tool result content IS searched
+    // With --in tool:result, tool result content IS searched
     expect(consoleOutput.some((line) => line.includes("SEARCHABLE_OUTPUT_67890"))).toBe(true);
   });
 
@@ -679,6 +679,149 @@ describe("read command", () => {
     await read();
 
     expect(consoleOutput.some((line) => line.includes("Usage"))).toBe(true);
+  });
+
+  test("reads range of entries with N-M syntax", async () => {
+    await writeFile(
+      join(sessionsDir, "read-range-1.jsonl"),
+      createTestSession("read-range-1", [
+        userEntry("1", "entry one"),
+        assistantEntry("2", "1", "entry two"),
+        userEntry("3", "entry three"),
+        assistantEntry("4", "3", "entry four"),
+        userEntry("5", "entry five"),
+        assistantEntry("6", "5", "entry six"),
+      ])
+    );
+
+    process.argv = ["node", "cli", "read", "read-range-1", "2-4"];
+    const { read } = await import("../commands/read");
+    await read();
+
+    const output = consoleOutput.join("\n");
+    // Should show entries 2, 3, 4
+    expect(output).toContain("entry two");
+    expect(output).toContain("entry three");
+    expect(output).toContain("entry four");
+    // Should NOT show entries 1, 5, 6
+    expect(output).not.toContain("entry one");
+    expect(output).not.toContain("entry five");
+    expect(output).not.toContain("entry six");
+  });
+
+  test("range read preserves original line numbers", async () => {
+    await writeFile(
+      join(sessionsDir, "read-range-2.jsonl"),
+      createTestSession("read-range-2", [
+        userEntry("1", "entry one"),
+        assistantEntry("2", "1", "entry two"),
+        userEntry("3", "entry three"),
+        assistantEntry("4", "3", "entry four"),
+      ])
+    );
+
+    process.argv = ["node", "cli", "read", "read-range-2", "3-4"];
+    const { read } = await import("../commands/read");
+    await read();
+
+    const output = consoleOutput.join("\n");
+    // Line numbers should be 3 and 4, not 1 and 2
+    expect(output).toMatch(/^3\|/m);
+    expect(output).toMatch(/^4\|/m);
+    expect(output).not.toMatch(/^1\|/m);
+    expect(output).not.toMatch(/^2\|/m);
+  });
+
+  test("range read with --full flag shows full content", async () => {
+    await writeFile(
+      join(sessionsDir, "read-range-3.jsonl"),
+      createTestSession("read-range-3", [
+        userEntry("1", "short"),
+        assistantEntry("2", "1", "line1\nline2\nline3\nline4\nline5\nline6"),
+        userEntry("3", "short"),
+      ])
+    );
+
+    process.argv = ["node", "cli", "read", "read-range-3", "1-2", "--full"];
+    const { read } = await import("../commands/read");
+    await read();
+
+    const output = consoleOutput.join("\n");
+    // Should show all lines without truncation markers
+    expect(output).toContain("line1");
+    expect(output).toContain("line6");
+    expect(output).not.toContain("[+");
+    expect(output).not.toContain("Limited to");
+  });
+
+  test("range read shows truncation notice when truncating", async () => {
+    // Create entries with enough content to trigger truncation (500 words each, 1500 total)
+    // Use --target 100 to force truncation
+    const longContent = Array.from({ length: 500 }, (_, i) => `word${i}`).join(" ");
+    await writeFile(
+      join(sessionsDir, "read-range-4.jsonl"),
+      createTestSession("read-range-4", [
+        userEntry("1", longContent),
+        assistantEntry("2", "1", longContent),
+        userEntry("3", longContent),
+      ])
+    );
+
+    process.argv = ["node", "cli", "read", "read-range-4", "1-3", "--target", "100"];
+    const { read } = await import("../commands/read");
+    await read();
+
+    const output = consoleOutput.join("\n");
+    // Should show truncation notice
+    expect(output).toMatch(/Limited to \d+ words per field/);
+  });
+
+  test("range read reports error for invalid range", async () => {
+    await writeFile(
+      join(sessionsDir, "read-range-5.jsonl"),
+      createTestSession("read-range-5", [
+        userEntry("1", "entry"),
+        assistantEntry("2", "1", "response"),
+      ])
+    );
+
+    const errorOutput: Array<string> = [];
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: Array<unknown>) => {
+      errorOutput.push(args.map(String).join(" "));
+    });
+
+    process.argv = ["node", "cli", "read", "read-range-5", "5-3"];
+    const { read } = await import("../commands/read");
+    await read();
+
+    errorSpy.mockRestore();
+
+    // Should show error about invalid range (end < start)
+    expect(errorOutput.some((line) => line.includes("Invalid range"))).toBe(true);
+  });
+
+  test("range read reports error for range beyond session", async () => {
+    await writeFile(
+      join(sessionsDir, "read-range-6.jsonl"),
+      createTestSession("read-range-6", [
+        userEntry("1", "entry"),
+        assistantEntry("2", "1", "response"),
+      ])
+    );
+
+    const errorOutput: Array<string> = [];
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: Array<unknown>) => {
+      errorOutput.push(args.map(String).join(" "));
+    });
+
+    process.argv = ["node", "cli", "read", "read-range-6", "10-20"];
+    const { read } = await import("../commands/read");
+    await read();
+
+    errorSpy.mockRestore();
+
+    // Should show error about no entries found
+    expect(errorOutput.some((line) => line.includes("No entries found"))).toBe(true);
   });
 });
 

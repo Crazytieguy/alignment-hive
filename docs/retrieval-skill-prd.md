@@ -135,7 +135,7 @@ Replace current line-based truncation with word-level truncation that adapts to 
 
 ### 6. Field Filtering and Output Control
 
-**Status:** Not started
+**Status:** Done (with known issues, see below)
 **Effort:** Medium
 
 Add consistent field filtering to both `read` and `grep` commands. The API should feel familiar to users of tools like grep, jq, and xsv.
@@ -179,18 +179,47 @@ bun cli.js read <id> --show tool:Bash:input --hide tool:Edit
 The exact syntax should be determined during implementation based on what works best for session data structure.
 
 **Acceptance criteria:**
-- `read` supports show/hide for message types and tool fields
-- `grep` supports field selection for search scope
-- `grep` supports same output filtering as `read`
-- Syntax is consistent between commands
-- API documented in help text with examples
-- Design rationale documented (which CLI tools influenced the design)
+- ~~`read` supports show/hide for message types and tool fields~~ Done: `--show`/`--hide` flags
+- ~~`grep` supports field selection for search scope~~ Done: `--in` flag (replaces `--include-tool-results`)
+- ~~`grep` supports same output filtering as `read`~~ Simplified: no show/hide for grep, use `read` for details
+- ~~Syntax is consistent between commands~~ Done: colon-separated field paths
+- ~~API documented in help text with examples~~ Done
+- ~~Design rationale documented~~ Similar to rsync --include/--exclude pattern
+
+**Known Issues (to fix in future session):**
+
+1. **Architectural: operates at message level, not field level**
+   - Current: `--hide tool` skips entire tool messages in output
+   - Expected: `--hide tool` should still show messages but redact content to word counts
+   - This is the root cause of several issues below
+
+2. **`--hide assistant` hides entire entry including tool calls**
+   - Current: hides the whole assistant message (text + thinking + tool_use blocks)
+   - Expected: should only hide assistant text blocks, not tool calls
+   - Root cause: code operates on raw JSON entries with mixed content, not logical entries
+
+3. **`--hide tool:Bash:input` doesn't hide command/description fields**
+   - The tool input fields are still shown in full
+   - Need to apply field filter at the tool formatter level
+
+4. **`--hide tool:Bash:result` doesn't hide the result field**
+   - Result word count is shown but content should be hidden entirely
+   - Need to apply field filter at the tool formatter level
+
+5. **`--in tool` should search both inputs and results**
+   - Currently not supported as a shorthand
+   - Should expand to `tool:input,tool:result`
+
+**Recommended fix approach:**
+- Refactor to operate at field level: always emit all messages, but control content visibility per field
+- Transform raw entries into logical entries (user, assistant-text, thinking, tool:Name) before formatting
+- Apply field filters during content formatting, not at entry selection
 
 ---
 
 ### 7. Range Reads
 
-**Status:** Not started
+**Status:** Done
 **Effort:** Small (after #5)
 
 Add support for reading a range of entries:
@@ -201,10 +230,17 @@ bun cli.js read <session-id> 50-100
 
 Reads entries 50 through 100, applying the adaptive truncation from #5.
 
+**Implementation:**
+- Range syntax `N-M` parsed in read command
+- `formatRangeEntries` in `range-format.ts` handles range formatting
+- Preserves original line numbers (entries 50-100 show as 50, 51, 52...)
+- Word limit computed based on range content only, not full session
+- Works with `--full`, `--target`, `--skip`, and field filtering
+
 **Acceptance criteria:**
-- `read <id> N-M` syntax works
-- Truncation adapts to total range size
-- Can combine with other flags (`--full`, field filtering from #6, etc.)
+- ~~`read <id> N-M` syntax works~~ Done
+- ~~Truncation adapts to total range size~~ Done
+- ~~Can combine with other flags (`--full`, field filtering from #6, etc.)~~ Done
 
 ---
 
@@ -249,6 +285,6 @@ Suggested sequence based on dependencies and effort:
 3. ~~**#2 Pre-populate context** - Medium, significant UX improvement~~ Done
 4. ~~**#3 Session statistics** - Medium-large, computed on-the-fly in index~~ Done
 5. ~~**#5 Adaptive truncation** - Medium-large, algorithm work needed~~ Done
-6. **#6 Field filtering** - Medium, API design then implementation
-7. **#7 Range reads** - Small once #5 is done
+6. ~~**#6 Field filtering** - Medium, API design then implementation~~ Done
+7. ~~**#7 Range reads** - Small once #5 is done~~ Done
 8. **#8 Opus model** - Trivial, do after validating improvements

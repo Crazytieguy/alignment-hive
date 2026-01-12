@@ -4,6 +4,7 @@
  */
 
 import { computeUniformLimit, countWords, truncateWords } from './truncation';
+import type { ReadFieldFilter } from './field-filter';
 import type {
   AssistantEntry,
   ContentBlock,
@@ -145,12 +146,14 @@ export interface FormatOptions {
   cwd?: string;
   wordLimit?: number;
   skipWords?: number;
+  fieldFilter?: ReadFieldFilter;
 }
 
 export interface SessionFormatOptions {
   redact?: boolean;
   targetWords?: number;
   skipWords?: number;
+  fieldFilter?: ReadFieldFilter;
 }
 
 export function redactMultiline(text: string): string {
@@ -193,7 +196,7 @@ export function getLogicalEntries(entries: Array<KnownEntry>): Array<LogicalEntr
 }
 
 export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0 } = options;
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
   const toolResults = collectToolResults(entries);
 
   let lastSummaryIndex = -1;
@@ -269,6 +272,7 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
       cwd,
       wordLimit,
       skipWords,
+      fieldFilter,
     });
 
     if (formatted) {
@@ -332,8 +336,25 @@ function collectWordCounts(entries: Array<KnownEntry>, skipWords: number): Array
 }
 
 export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
-  const { lineNumber, toolResults, parentIndicator, redact = false, prevDate, isFirst, cwd, wordLimit, skipWords = 0 } =
-    options;
+  const {
+    lineNumber,
+    toolResults,
+    parentIndicator,
+    redact = false,
+    prevDate,
+    isFirst,
+    cwd,
+    wordLimit,
+    skipWords = 0,
+    fieldFilter,
+  } = options;
+
+  // Check if entry type should be shown (fieldFilter only applies in redact mode)
+  if (fieldFilter && redact) {
+    if (!fieldFilter.shouldShow(entry.type)) {
+      return null;
+    }
+  }
 
   switch (entry.type) {
     case 'user':
@@ -351,6 +372,7 @@ export function formatEntry(entry: KnownEntry, options: FormatOptions): string |
         redact,
         wordLimit,
         skipWords,
+        fieldFilter,
       );
     case 'system':
       return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords);
@@ -546,6 +568,7 @@ function formatAssistantEntry(
   redact?: boolean,
   wordLimit?: number,
   skipWords?: number,
+  fieldFilter?: ReadFieldFilter,
 ): string | null {
   const blocks = entry.message.content;
 
@@ -557,6 +580,9 @@ function formatAssistantEntry(
   const lines: Array<string> = [];
   let blockIndex = 0;
 
+  // Check if thinking should show full content
+  const showFullThinking = fieldFilter?.showFullThinking() ?? false;
+
   for (const block of blocks) {
     if (isNoiseBlock(block)) continue;
     if (block.type === 'tool_result') continue;
@@ -565,13 +591,45 @@ function formatAssistantEntry(
     const parent = blockIndex === 0 ? parentIndicator : undefined;
 
     if (block.type === 'thinking') {
-      const formatted = formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact, wordLimit, skipWords);
+      // Check if thinking should be shown
+      if (fieldFilter && redact && !fieldFilter.shouldShow('thinking')) {
+        blockIndex++;
+        continue;
+      }
+      const formatted = formatThinkingEntry(
+        lineNumber,
+        ts,
+        block.thinking,
+        prevDate,
+        isFirst,
+        redact,
+        wordLimit,
+        skipWords,
+        showFullThinking,
+      );
       if (formatted) lines.push(formatted);
     } else if (block.type === 'text') {
       const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
       if (formatted) lines.push(formatted);
     } else if (block.type === 'tool_use') {
-      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords);
+      // Check if tool should be shown
+      if (fieldFilter && redact && !fieldFilter.shouldShow(`tool:${block.name}`)) {
+        blockIndex++;
+        continue;
+      }
+      const formatted = formatToolEntry(
+        lineNumber,
+        ts,
+        block,
+        toolResults,
+        cwd,
+        prevDate,
+        isFirst,
+        redact,
+        wordLimit,
+        skipWords,
+        fieldFilter,
+      );
       if (formatted) lines.push(formatted);
     }
 
@@ -588,8 +646,9 @@ function formatThinkingEntry(
   prevDate?: string,
   isFirst?: boolean,
   redact?: boolean,
-  _wordLimit?: number,
-  _skipWords?: number,
+  wordLimit?: number,
+  skipWords?: number,
+  showFullThinking?: boolean,
 ): string {
   const parts: Array<string> = [String(lineNumber)];
 
@@ -599,6 +658,12 @@ function formatThinkingEntry(
   parts.push('thinking');
 
   if (redact) {
+    if (showFullThinking && wordLimit !== undefined) {
+      // Show truncated content when --show thinking is used
+      const result = formatContentBody(parts.join('|'), content, redact, wordLimit, skipWords);
+      return result ?? parts.join('|');
+    }
+    // Default: show word count only
     parts.push(formatWordCount(content));
     return parts.join('|');
   }
@@ -637,6 +702,7 @@ function formatToolEntry(
   redact?: boolean,
   wordLimit?: number,
   skipWords?: number,
+  fieldFilter?: ReadFieldFilter,
 ): string | null {
   const resultInfo = toolResults?.get(block.id);
   const parts: Array<string> = [String(lineNumber)];
@@ -644,6 +710,10 @@ function formatToolEntry(
   if (ts) parts.push(ts);
   parts.push('tool');
   parts.push(block.name);
+
+  // Check if result should be shown (for this specific tool)
+  const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
+  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
 
   const toolFormatter = getToolFormatter(block.name);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
@@ -657,7 +727,29 @@ function formatToolEntry(
   parts.push(...headerParams);
 
   if (redact) {
-    if (resultInfo && !suppressResult) {
+    if (resultInfo && !suppressResult && !hideResult) {
+      if (showResult && wordLimit !== undefined) {
+        // Show truncated result content when --show tool:result
+        const { content: truncated, suffix, isEmpty } = truncateContent(
+          resultInfo.content,
+          wordLimit,
+          skipWords ?? 0,
+        );
+        if (!isEmpty) {
+          const bodyLines: Array<string> = [];
+          for (const { name: paramName, content, suffix: paramSuffix } of multilineParams) {
+            bodyLines.push(`[${paramName}]`);
+            const indented = indent(content, 2);
+            bodyLines.push(paramSuffix ? indented + paramSuffix : indented);
+          }
+          bodyLines.push('[result]');
+          const resultIndented = indent(truncated, 2);
+          bodyLines.push(suffix ? resultIndented + suffix : resultIndented);
+          const header = parts.join('|');
+          return bodyLines.length > 0 ? `${header}\n${bodyLines.join('\n')}` : header;
+        }
+      }
+      // Default: show result as word count
       parts.push(`result=${formatWordCount(resultInfo.content)}`);
     }
     const header = parts.join('|');

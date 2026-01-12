@@ -9,17 +9,18 @@
  *   grep -l <pattern>                 - list matching session IDs only
  *   grep -m N <pattern>               - stop after N total matches
  *   grep -C N <pattern>               - show N lines context around match
- *   grep --include-tool-results <pattern> - also search tool output content
+ *   grep --in <fields> <pattern>      - search only specified fields
  *
  * Pattern is a JavaScript regex (like grep -E extended regex).
- * By default, searches user prompts, assistant responses, thinking, and tool inputs.
- * Use --include-tool-results to also search tool output (can be noisy).
+ * By default, searches user, assistant, thinking, tool:input, system, summary.
+ * Use --in to specify which fields to search (e.g., --in tool:result).
  * Agent sessions excluded (same as index command).
  */
 
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
+import { GrepFieldFilter, parseFieldList } from "../lib/field-filter";
 import { getLogicalEntries } from "../lib/format";
 import { printError } from "../lib/output";
 import type { ContentBlock, KnownEntry } from "../lib/schemas";
@@ -30,7 +31,7 @@ interface GrepOptions {
   listOnly: boolean;
   maxMatches: number | null;
   contextLines: number;
-  includeToolResults: boolean;
+  fieldFilter: GrepFieldFilter;
   sessionFilter: string | null;
 }
 
@@ -44,24 +45,29 @@ interface Match {
 }
 
 function printUsage(): void {
-  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
+  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]");
   console.log("\nSearch across sessions for a pattern (JavaScript regex).");
   console.log("Use -- to separate options from pattern (e.g., grep -- \"--help\" to search for literal --help).");
   console.log("\nOptions:");
-  console.log("  -i                     Case insensitive search");
-  console.log("  -c                     Count matches per session only");
-  console.log("  -l                     List matching session IDs only");
-  console.log("  -m N                   Stop after N total matches");
-  console.log("  -C N                   Show N lines of context around match");
-  console.log("  -s <session>           Search only in specified session (prefix match)");
-  console.log("  --include-tool-results Also search tool output (can be noisy)");
+  console.log("  -i              Case insensitive search");
+  console.log("  -c              Count matches per session only");
+  console.log("  -l              List matching session IDs only");
+  console.log("  -m N            Stop after N total matches");
+  console.log("  -C N            Show N lines of context around match");
+  console.log("  -s <session>    Search only in specified session (prefix match)");
+  console.log("  --in <fields>   Search only specified fields (comma-separated)");
+  console.log("\nField specifiers:");
+  console.log("  user, assistant, thinking, system, summary");
+  console.log("  tool:input, tool:result, tool:<name>:input, tool:<name>:result");
+  console.log("\nDefault fields: user, assistant, thinking, tool:input, system, summary");
   console.log("\nExamples:");
-  console.log('  grep "TODO"                  # find TODO in sessions');
-  console.log('  grep -i "error" -C 2         # case insensitive with context');
-  console.log('  grep -c "function"           # count matches per session');
-  console.log('  grep -l "#2597"              # list sessions mentioning issue');
-  console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
-  console.log('  grep --include-tool-results "error"  # include tool output');
+  console.log('  grep "TODO"                    # find TODO in sessions');
+  console.log('  grep -i "error" -C 2           # case insensitive with context');
+  console.log('  grep -c "function"             # count matches per session');
+  console.log('  grep -l "#2597"                # list sessions mentioning issue');
+  console.log('  grep -s 02ed "bug"             # search only in session 02ed...');
+  console.log('  grep --in tool:result "error"  # search only in tool results');
+  console.log('  grep --in user,assistant "fix" # search only user and assistant');
 }
 
 export async function grep(): Promise<number> {
@@ -129,9 +135,9 @@ export async function grep(): Promise<number> {
 
     const sessionId = session.meta.sessionId.slice(0, 8);
 
-    // When --include-tool-results is set, search all entries (including tool-result-only)
-    // Otherwise, use logical entries (which skip tool-result-only entries)
-    const entriesToSearch: Array<{ lineNumber: number; entry: KnownEntry }> = options.includeToolResults
+    // When searching tool:result, include all entries; otherwise use logical entries
+    const searchesToolResult = options.fieldFilter.isSearchable("tool:result");
+    const entriesToSearch: Array<{ lineNumber: number; entry: KnownEntry }> = searchesToolResult
       ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry }))
       : getLogicalEntries(session.entries);
 
@@ -141,7 +147,7 @@ export async function grep(): Promise<number> {
     for (const { lineNumber, entry } of entriesToSearch) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
-      const content = extractEntryContent(entry);
+      const content = extractEntryContent(entry, options.fieldFilter);
       const lines = content.split("\n");
 
       for (let i = 0; i < lines.length; i++) {
@@ -200,7 +206,6 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   const caseInsensitive = args.includes("-i");
   const countOnly = args.includes("-c");
   const listOnly = args.includes("-l");
-  const includeToolResults = args.includes("--include-tool-results");
 
   // Parse -m N
   let maxMatches: number | null = null;
@@ -231,9 +236,17 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     sessionFilter = args[sIdx + 1];
   }
 
+  // Parse --in <fields>
+  let searchIn: Array<string> | null = null;
+  const inIdx = args.indexOf("--in");
+  if (inIdx !== -1 && args[inIdx + 1]) {
+    searchIn = parseFieldList(args[inIdx + 1]);
+  }
+  const fieldFilter = new GrepFieldFilter(searchIn);
+
   // Extract pattern (first non-flag argument)
-  const flagsWithValues = new Set(["-m", "-C", "-s"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--include-tool-results"]);
+  const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
   let patternStr: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
@@ -265,67 +278,94 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     listOnly,
     maxMatches,
     contextLines,
-    includeToolResults,
+    fieldFilter,
     sessionFilter,
   };
 }
 
 /**
- * Extract all searchable text content from an entry.
+ * Extract all searchable text content from an entry based on field filter.
  */
-function extractEntryContent(entry: KnownEntry): string {
+function extractEntryContent(entry: KnownEntry, filter: GrepFieldFilter): string {
   const parts: Array<string> = [];
 
-  if (entry.type === "user" || entry.type === "assistant") {
+  if (entry.type === "user") {
     const content = entry.message.content;
     if (typeof content === "string") {
-      parts.push(content);
+      if (filter.isSearchable("user")) {
+        parts.push(content);
+      }
     } else if (Array.isArray(content)) {
       for (const block of content) {
-        const text = extractBlockContent(block);
+        if (block.type === "text" && "text" in block) {
+          if (filter.isSearchable("user")) {
+            parts.push(block.text);
+          }
+        } else if (block.type === "tool_result" && "content" in block) {
+          // Tool results in user entries - check if tool:result is searchable
+          if (filter.isSearchable("tool:result")) {
+            const resultContent = block.content;
+            if (typeof resultContent === "string") {
+              parts.push(resultContent);
+            } else if (Array.isArray(resultContent)) {
+              for (const item of resultContent) {
+                if (item.type === "text" && "text" in item) {
+                  parts.push(item.text);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } else if (entry.type === "assistant") {
+    const content = entry.message.content;
+    if (typeof content === "string") {
+      if (filter.isSearchable("assistant")) {
+        parts.push(content);
+      }
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        const text = extractBlockContent(block, filter);
         if (text) parts.push(text);
       }
     }
   } else if (entry.type === "system") {
-    if (typeof entry.content === "string") {
+    if (filter.isSearchable("system") && typeof entry.content === "string") {
       parts.push(entry.content);
     }
   } else if (entry.type === "summary") {
-    parts.push(entry.summary);
+    if (filter.isSearchable("summary")) {
+      parts.push(entry.summary);
+    }
   }
 
   return parts.join("\n");
 }
 
 /**
- * Extract text from a content block.
+ * Extract text from an assistant content block based on field filter.
  */
-function extractBlockContent(block: ContentBlock): string | null {
+function extractBlockContent(block: ContentBlock, filter: GrepFieldFilter): string | null {
   if (block.type === "text" && "text" in block) {
-    return block.text;
+    if (filter.isSearchable("assistant")) {
+      return block.text;
+    }
   }
   if (block.type === "thinking" && "thinking" in block) {
-    return block.thinking;
+    if (filter.isSearchable("thinking")) {
+      return block.thinking;
+    }
   }
   if (block.type === "tool_use" && "input" in block) {
-    // Include tool inputs (e.g., Bash commands, Read paths)
-    return JSON.stringify(block.input);
-  }
-  if (block.type === "tool_result" && "content" in block) {
-    const content = block.content;
-    if (typeof content === "string") {
-      return content;
-    }
-    if (Array.isArray(content)) {
-      const texts: Array<string> = [];
-      for (const item of content) {
-        if (item.type === "text" && "text" in item) {
-          texts.push(item.text);
-        }
-      }
-      return texts.join("\n");
+    const toolName = "name" in block ? (block as { name: string }).name : "unknown";
+    // Check both generic tool:input and specific tool:Name:input
+    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+      return JSON.stringify(block.input);
     }
   }
+  // Note: tool_result blocks in assistant entries are not common,
+  // but the main tool_result handling is in extractEntryContent for user entries
   return null;
 }
 

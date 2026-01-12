@@ -14579,6 +14579,99 @@ async function extractAllSessions(cwd, transcriptPath) {
   return { extracted, schemaErrors };
 }
 
+// cli/lib/field-filter.ts
+function parseFieldList(input) {
+  return input.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+function matches(pattern, target) {
+  if (pattern === target)
+    return true;
+  if (target.startsWith(pattern + ":"))
+    return true;
+  if (pattern === "tool:result") {
+    return target.endsWith(":result") && target.startsWith("tool:");
+  }
+  if (pattern === "tool:input") {
+    return target.endsWith(":input") && target.startsWith("tool:");
+  }
+  return false;
+}
+function specificity(field) {
+  return field.split(":").length;
+}
+var READ_DEFAULT_SHOWN = new Set([
+  "user",
+  "assistant",
+  "thinking",
+  "tool",
+  "system",
+  "summary"
+]);
+var GREP_DEFAULT_SEARCH = new Set([
+  "user",
+  "assistant",
+  "thinking",
+  "tool:input",
+  "system",
+  "summary"
+]);
+
+class ReadFieldFilter {
+  rules;
+  constructor(show, hide) {
+    this.rules = [];
+    for (const field of show) {
+      this.rules.push({ field, action: "show", specificity: specificity(field) });
+    }
+    for (const field of hide) {
+      this.rules.push({ field, action: "hide", specificity: specificity(field) });
+    }
+    this.rules.sort((a, b) => {
+      if (b.specificity !== a.specificity) {
+        return b.specificity - a.specificity;
+      }
+      return a.action === "hide" ? -1 : b.action === "hide" ? 1 : 0;
+    });
+  }
+  shouldShow(field) {
+    for (const rule of this.rules) {
+      if (matches(rule.field, field)) {
+        return rule.action === "show";
+      }
+    }
+    return this.isDefaultShown(field);
+  }
+  showFullThinking() {
+    return this.rules.some((r) => r.field === "thinking" && r.action === "show");
+  }
+  isDefaultShown(field) {
+    for (const def of READ_DEFAULT_SHOWN) {
+      if (matches(def, field))
+        return true;
+    }
+    return false;
+  }
+}
+
+class GrepFieldFilter {
+  searchFields;
+  constructor(searchIn) {
+    if (searchIn === null || searchIn.length === 0) {
+      this.searchFields = new Set(GREP_DEFAULT_SEARCH);
+    } else {
+      this.searchFields = new Set(searchIn);
+    }
+  }
+  isSearchable(field) {
+    for (const searchField of this.searchFields) {
+      if (matches(searchField, field) || matches(field, searchField)) {
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
 // cli/lib/truncation.ts
 var MIN_WORD_LIMIT = 6;
 function countWords(text) {
@@ -14588,12 +14681,12 @@ function countWords(text) {
 }
 function truncateWords(text, skip, limit) {
   const wordPattern = /\S+/g;
-  const matches = [];
+  const matches2 = [];
   let match;
   while ((match = wordPattern.exec(text)) !== null) {
-    matches.push({ word: match[0], start: match.index, end: match.index + match[0].length });
+    matches2.push({ word: match[0], start: match.index, end: match.index + match[0].length });
   }
-  const totalWords = matches.length;
+  const totalWords = matches2.length;
   if (skip >= totalWords) {
     return { text: "", wordCount: 0, remaining: 0, truncated: false };
   }
@@ -14604,8 +14697,8 @@ function truncateWords(text, skip, limit) {
   if (wordsToInclude === 0) {
     return { text: "", wordCount: 0, remaining: 0, truncated: false };
   }
-  const startPos = matches[startIdx].start;
-  const endPos = matches[endIdx - 1].end;
+  const startPos = matches2[startIdx].start;
+  const endPos = matches2[endIdx - 1].end;
   const extracted = text.slice(startPos, endPos);
   const remaining = afterSkipCount - wordsToInclude;
   return {
@@ -14764,7 +14857,7 @@ function getLogicalEntries(entries) {
   return result;
 }
 function formatSession(entries, options = {}) {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0 } = options;
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
   const toolResults = collectToolResults(entries);
   let lastSummaryIndex = -1;
   for (let i = entries.length - 1;i >= 0; i--) {
@@ -14827,7 +14920,8 @@ function formatSession(entries, options = {}) {
       isFirst,
       cwd,
       wordLimit,
-      skipWords
+      skipWords,
+      fieldFilter
     });
     if (formatted) {
       results.push(formatted);
@@ -14884,14 +14978,30 @@ function collectWordCounts(entries, skipWords) {
   return counts;
 }
 function formatEntry(entry, options) {
-  const { lineNumber, toolResults, parentIndicator, redact = false, prevDate, isFirst, cwd, wordLimit, skipWords = 0 } = options;
+  const {
+    lineNumber,
+    toolResults,
+    parentIndicator,
+    redact = false,
+    prevDate,
+    isFirst,
+    cwd,
+    wordLimit,
+    skipWords = 0,
+    fieldFilter
+  } = options;
+  if (fieldFilter && redact) {
+    if (!fieldFilter.shouldShow(entry.type)) {
+      return null;
+    }
+  }
   switch (entry.type) {
     case "user":
       if (toolResults && isToolResultOnlyEntry(entry))
         return null;
       return formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
     case "assistant":
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords);
+      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords, fieldFilter);
     case "system":
       return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords);
     case "summary":
@@ -15057,7 +15167,7 @@ function getUserMessageContent(content) {
   return textParts.join(`
 `);
 }
-function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords) {
+function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords, fieldFilter) {
   const blocks = entry.message.content;
   if (!blocks || typeof blocks === "string") {
     const text = typeof blocks === "string" ? blocks : "";
@@ -15065,6 +15175,7 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
   }
   const lines = [];
   let blockIndex = 0;
+  const showFullThinking = fieldFilter?.showFullThinking() ?? false;
   for (const block of blocks) {
     if (isNoiseBlock(block))
       continue;
@@ -15073,7 +15184,11 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
     const ts = blockIndex === 0 ? entry.timestamp : undefined;
     const parent = blockIndex === 0 ? parentIndicator : undefined;
     if (block.type === "thinking") {
-      const formatted = formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact, wordLimit, skipWords);
+      if (fieldFilter && redact && !fieldFilter.shouldShow("thinking")) {
+        blockIndex++;
+        continue;
+      }
+      const formatted = formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact, wordLimit, skipWords, showFullThinking);
       if (formatted)
         lines.push(formatted);
     } else if (block.type === "text") {
@@ -15081,7 +15196,11 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
       if (formatted)
         lines.push(formatted);
     } else if (block.type === "tool_use") {
-      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords);
+      if (fieldFilter && redact && !fieldFilter.shouldShow(`tool:${block.name}`)) {
+        blockIndex++;
+        continue;
+      }
+      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter);
       if (formatted)
         lines.push(formatted);
     }
@@ -15090,13 +15209,17 @@ function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, p
   return lines.length > 0 ? lines.join(`
 `) : null;
 }
-function formatThinkingEntry(lineNumber, timestamp, content, prevDate, isFirst, redact, _wordLimit, _skipWords) {
+function formatThinkingEntry(lineNumber, timestamp, content, prevDate, isFirst, redact, wordLimit, skipWords, showFullThinking) {
   const parts = [String(lineNumber)];
   const ts = formatTimestamp(timestamp, prevDate, isFirst);
   if (ts)
     parts.push(ts);
   parts.push("thinking");
   if (redact) {
+    if (showFullThinking && wordLimit !== undefined) {
+      const result = formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
+      return result ?? parts.join("|");
+    }
     parts.push(formatWordCount(content));
     return parts.join("|");
   }
@@ -15114,7 +15237,7 @@ function formatTextEntry(lineNumber, timestamp, content, parentIndicator, prevDa
     parts.push(`parent=${parentIndicator}`);
   return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
 }
-function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords) {
+function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter) {
   const resultInfo = toolResults?.get(block.id);
   const parts = [String(lineNumber)];
   const ts = formatTimestamp(timestamp, prevDate, isFirst);
@@ -15122,6 +15245,8 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
     parts.push(ts);
   parts.push("tool");
   parts.push(block.name);
+  const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
+  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
   const toolFormatter = getToolFormatter(block.name);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
     input: block.input,
@@ -15133,7 +15258,25 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
   });
   parts.push(...headerParams);
   if (redact) {
-    if (resultInfo && !suppressResult) {
+    if (resultInfo && !suppressResult && !hideResult) {
+      if (showResult && wordLimit !== undefined) {
+        const { content: truncated, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
+        if (!isEmpty) {
+          const bodyLines2 = [];
+          for (const { name: paramName, content, suffix: paramSuffix } of multilineParams) {
+            bodyLines2.push(`[${paramName}]`);
+            const indented = indent(content, 2);
+            bodyLines2.push(paramSuffix ? indented + paramSuffix : indented);
+          }
+          bodyLines2.push("[result]");
+          const resultIndented = indent(truncated, 2);
+          bodyLines2.push(suffix ? resultIndented + suffix : resultIndented);
+          const header3 = parts.join("|");
+          return bodyLines2.length > 0 ? `${header3}
+${bodyLines2.join(`
+`)}` : header3;
+        }
+      }
       parts.push(`result=${formatWordCount(resultInfo.content)}`);
     }
     const header2 = parts.join("|");
@@ -15488,27 +15631,34 @@ function printWarning(message) {
 
 // cli/commands/grep.ts
 function printUsage() {
-  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--include-tool-results]");
+  console.log("Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]");
   console.log(`
 Search across sessions for a pattern (JavaScript regex).`);
   console.log('Use -- to separate options from pattern (e.g., grep -- "--help" to search for literal --help).');
   console.log(`
 Options:`);
-  console.log("  -i                     Case insensitive search");
-  console.log("  -c                     Count matches per session only");
-  console.log("  -l                     List matching session IDs only");
-  console.log("  -m N                   Stop after N total matches");
-  console.log("  -C N                   Show N lines of context around match");
-  console.log("  -s <session>           Search only in specified session (prefix match)");
-  console.log("  --include-tool-results Also search tool output (can be noisy)");
+  console.log("  -i              Case insensitive search");
+  console.log("  -c              Count matches per session only");
+  console.log("  -l              List matching session IDs only");
+  console.log("  -m N            Stop after N total matches");
+  console.log("  -C N            Show N lines of context around match");
+  console.log("  -s <session>    Search only in specified session (prefix match)");
+  console.log("  --in <fields>   Search only specified fields (comma-separated)");
+  console.log(`
+Field specifiers:`);
+  console.log("  user, assistant, thinking, system, summary");
+  console.log("  tool:input, tool:result, tool:<name>:input, tool:<name>:result");
+  console.log(`
+Default fields: user, assistant, thinking, tool:input, system, summary`);
   console.log(`
 Examples:`);
-  console.log('  grep "TODO"                  # find TODO in sessions');
-  console.log('  grep -i "error" -C 2         # case insensitive with context');
-  console.log('  grep -c "function"           # count matches per session');
-  console.log('  grep -l "#2597"              # list sessions mentioning issue');
-  console.log('  grep -s 02ed "bug"           # search only in session 02ed...');
-  console.log('  grep --include-tool-results "error"  # include tool output');
+  console.log('  grep "TODO"                    # find TODO in sessions');
+  console.log('  grep -i "error" -C 2           # case insensitive with context');
+  console.log('  grep -c "function"             # count matches per session');
+  console.log('  grep -l "#2597"                # list sessions mentioning issue');
+  console.log('  grep -s 02ed "bug"             # search only in session 02ed...');
+  console.log('  grep --in tool:result "error"  # search only in tool results');
+  console.log('  grep --in user,assistant "fix" # search only user and assistant');
 }
 async function grep() {
   const args = process.argv.slice(3);
@@ -15561,13 +15711,14 @@ async function grep() {
     if (!session || session.meta.agentId)
       continue;
     const sessionId = session.meta.sessionId.slice(0, 8);
-    const entriesToSearch = options.includeToolResults ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry })) : getLogicalEntries(session.entries);
+    const searchesToolResult = options.fieldFilter.isSearchable("tool:result");
+    const entriesToSearch = searchesToolResult ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry })) : getLogicalEntries(session.entries);
     let sessionMatchCount = 0;
     const sessionMatches = [];
     for (const { lineNumber, entry } of entriesToSearch) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches)
         break;
-      const content = extractEntryContent(entry);
+      const content = extractEntryContent(entry, options.fieldFilter);
       const lines = content.split(`
 `);
       for (let i = 0;i < lines.length; i++) {
@@ -15617,7 +15768,6 @@ function parseGrepOptions(args) {
   const caseInsensitive = args.includes("-i");
   const countOnly = args.includes("-c");
   const listOnly = args.includes("-l");
-  const includeToolResults = args.includes("--include-tool-results");
   let maxMatches = null;
   const mIdx = args.indexOf("-m");
   if (mIdx !== -1 && args[mIdx + 1]) {
@@ -15641,8 +15791,14 @@ function parseGrepOptions(args) {
   if (sIdx !== -1 && args[sIdx + 1]) {
     sessionFilter = args[sIdx + 1];
   }
-  const flagsWithValues = new Set(["-m", "-C", "-s"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--include-tool-results"]);
+  let searchIn = null;
+  const inIdx = args.indexOf("--in");
+  if (inIdx !== -1 && args[inIdx + 1]) {
+    searchIn = parseFieldList(args[inIdx + 1]);
+  }
+  const fieldFilter = new GrepFieldFilter(searchIn);
+  const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
   let patternStr = null;
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
@@ -15671,57 +15827,80 @@ function parseGrepOptions(args) {
     listOnly,
     maxMatches,
     contextLines,
-    includeToolResults,
+    fieldFilter,
     sessionFilter
   };
 }
-function extractEntryContent(entry) {
+function extractEntryContent(entry, filter) {
   const parts = [];
-  if (entry.type === "user" || entry.type === "assistant") {
+  if (entry.type === "user") {
     const content = entry.message.content;
     if (typeof content === "string") {
-      parts.push(content);
+      if (filter.isSearchable("user")) {
+        parts.push(content);
+      }
     } else if (Array.isArray(content)) {
       for (const block of content) {
-        const text = extractBlockContent(block);
+        if (block.type === "text" && "text" in block) {
+          if (filter.isSearchable("user")) {
+            parts.push(block.text);
+          }
+        } else if (block.type === "tool_result" && "content" in block) {
+          if (filter.isSearchable("tool:result")) {
+            const resultContent = block.content;
+            if (typeof resultContent === "string") {
+              parts.push(resultContent);
+            } else if (Array.isArray(resultContent)) {
+              for (const item of resultContent) {
+                if (item.type === "text" && "text" in item) {
+                  parts.push(item.text);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } else if (entry.type === "assistant") {
+    const content = entry.message.content;
+    if (typeof content === "string") {
+      if (filter.isSearchable("assistant")) {
+        parts.push(content);
+      }
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        const text = extractBlockContent(block, filter);
         if (text)
           parts.push(text);
       }
     }
   } else if (entry.type === "system") {
-    if (typeof entry.content === "string") {
+    if (filter.isSearchable("system") && typeof entry.content === "string") {
       parts.push(entry.content);
     }
   } else if (entry.type === "summary") {
-    parts.push(entry.summary);
+    if (filter.isSearchable("summary")) {
+      parts.push(entry.summary);
+    }
   }
   return parts.join(`
 `);
 }
-function extractBlockContent(block) {
+function extractBlockContent(block, filter) {
   if (block.type === "text" && "text" in block) {
-    return block.text;
+    if (filter.isSearchable("assistant")) {
+      return block.text;
+    }
   }
   if (block.type === "thinking" && "thinking" in block) {
-    return block.thinking;
+    if (filter.isSearchable("thinking")) {
+      return block.thinking;
+    }
   }
   if (block.type === "tool_use" && "input" in block) {
-    return JSON.stringify(block.input);
-  }
-  if (block.type === "tool_result" && "content" in block) {
-    const content = block.content;
-    if (typeof content === "string") {
-      return content;
-    }
-    if (Array.isArray(content)) {
-      const texts = [];
-      for (const item of content) {
-        if (item.type === "text" && "text" in item) {
-          texts.push(item.text);
-        }
-      }
-      return texts.join(`
-`);
+    const toolName = "name" in block ? block.name : "unknown";
+    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+      return JSON.stringify(block.input);
     }
   }
   return null;
@@ -16521,19 +16700,128 @@ async function login2() {
 // cli/commands/read.ts
 import { readFile as readFile3, readdir as readdir4 } from "fs/promises";
 import { join as join5 } from "path";
+
+// cli/lib/range-format.ts
+var DEFAULT_TARGET_WORDS2 = 2000;
+function formatRangeEntries(rangeEntries, options) {
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS2, skipWords = 0, fieldFilter, allEntries } = options;
+  const toolResults = collectToolResults(allEntries);
+  let wordLimit;
+  if (redact) {
+    const wordCounts = collectWordCounts2(rangeEntries, skipWords);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+  }
+  const results = [];
+  let prevDate;
+  for (let i = 0;i < rangeEntries.length; i++) {
+    const { lineNumber, entry } = rangeEntries[i];
+    const timestamp = getTimestamp2(entry);
+    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+    const isFirst = i === 0;
+    const formatted = formatEntry(entry, {
+      lineNumber,
+      toolResults,
+      redact,
+      prevDate,
+      isFirst,
+      wordLimit,
+      skipWords,
+      fieldFilter
+    });
+    if (formatted) {
+      results.push(formatted);
+    }
+    if (currentDate) {
+      prevDate = currentDate;
+    }
+  }
+  if (redact && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+  const separator = redact ? `
+` : `
+
+`;
+  return results.join(separator);
+}
+function getTimestamp2(entry) {
+  if ("timestamp" in entry && typeof entry.timestamp === "string") {
+    return entry.timestamp;
+  }
+  return;
+}
+function collectWordCounts2(entries, skipWords) {
+  const counts = [];
+  function addCount(text) {
+    const words = countWords(text);
+    const afterSkip = Math.max(0, words - skipWords);
+    if (afterSkip > 0) {
+      counts.push(afterSkip);
+    }
+  }
+  for (const { entry } of entries) {
+    if (entry.type === "user") {
+      const content = getUserMessageContent2(entry.message.content);
+      addCount(content);
+    } else if (entry.type === "assistant") {
+      const blocks = entry.message.content;
+      if (typeof blocks === "string") {
+        addCount(blocks);
+      } else if (Array.isArray(blocks)) {
+        for (const block of blocks) {
+          if (block.type === "text" && "text" in block) {
+            addCount(block.text);
+          } else if (block.type === "thinking" && "thinking" in block) {
+            addCount(block.thinking);
+          }
+        }
+      }
+    } else if (entry.type === "summary") {
+      addCount(entry.summary);
+    } else if (entry.type === "system") {
+      addCount(entry.content || "");
+    }
+  }
+  return counts;
+}
+function getUserMessageContent2(content) {
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const textParts = [];
+  for (const block of content) {
+    if (block.type === "tool_result")
+      continue;
+    if (block.type === "text" && "text" in block && block.text) {
+      textParts.push(block.text);
+    }
+  }
+  return textParts.join(`
+`);
+}
+
+// cli/commands/read.ts
 function printUsage3() {
-  console.log("Usage: read <session-id> [N] [--full] [--target N] [--skip N] [-C N] [-B N] [-A N]");
+  console.log("Usage: read <session-id> [N | N-M] [options]");
   console.log(`
 Read session entries. Session ID supports prefix matching.`);
   console.log(`
 Options:`);
-  console.log("  N          Entry number to read (full content)");
-  console.log("  --full     Show all entries with full content (no truncation)");
-  console.log("  --target N Target total words (default 2000)");
-  console.log("  --skip N   Skip first N words per field (for pagination)");
-  console.log("  -C N       Show N entries of context before and after");
-  console.log("  -B N       Show N entries of context before");
-  console.log("  -A N       Show N entries of context after");
+  console.log("  N             Entry number to read (full content)");
+  console.log("  N-M           Entry range to read (with truncation)");
+  console.log("  --full        Show all entries with full content (no truncation)");
+  console.log("  --target N    Target total words (default 2000)");
+  console.log("  --skip N      Skip first N words per field (for pagination)");
+  console.log("  -C N          Show N entries of context before and after");
+  console.log("  -B N          Show N entries of context before");
+  console.log("  -A N          Show N entries of context after");
+  console.log("  --show FIELDS Show additional fields (comma-separated)");
+  console.log("  --hide FIELDS Hide fields from output (comma-separated)");
+  console.log(`
+Field specifiers:`);
+  console.log("  user, assistant, thinking, system, summary");
+  console.log("  tool, tool:<name>, tool:<name>:input, tool:<name>:result");
   console.log(`
 Truncation:`);
   console.log("  Text is adaptively truncated to fit within the target word count.");
@@ -16541,11 +16829,16 @@ Truncation:`);
   console.log("  Use --skip with the shown N value to continue reading.");
   console.log(`
 Examples:`);
-  console.log("  read 02ed              # all entries (~2000 words)");
-  console.log("  read 02ed --target 500 # tighter truncation");
-  console.log("  read 02ed --full       # all entries (full content)");
-  console.log("  read 02ed --skip 50    # skip first 50 words per field");
-  console.log("  read 02ed 5            # entry 5 (full content)");
+  console.log("  read 02ed                          # all entries (~2000 words)");
+  console.log("  read 02ed --target 500             # tighter truncation");
+  console.log("  read 02ed --full                   # all entries (full content)");
+  console.log("  read 02ed --skip 50                # skip first 50 words per field");
+  console.log("  read 02ed 5                        # entry 5 (full content)");
+  console.log("  read 02ed 10-20                    # entries 10 through 20");
+  console.log("  read 02ed 10-20 --full             # range without truncation");
+  console.log("  read 02ed --show thinking          # show full thinking content");
+  console.log("  read 02ed --show tool:Bash:result  # show Bash command results");
+  console.log("  read 02ed --hide user              # hide user messages");
 }
 async function read() {
   const args = process.argv.slice(3);
@@ -16567,15 +16860,29 @@ async function read() {
     const num = parseInt(value, 10);
     return isNaN(num) || num < 0 ? null : num;
   }
+  function parseStringFlag(argList, flag) {
+    const idx = argList.indexOf(flag);
+    if (idx === -1)
+      return null;
+    return argList[idx + 1] ?? null;
+  }
   const fullFlag = args.includes("--full");
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
   const contextC = parseNumericFlag(args, "-C");
   const contextB = parseNumericFlag(args, "-B");
   const contextA = parseNumericFlag(args, "-A");
+  const showFields = parseStringFlag(args, "--show");
+  const hideFields = parseStringFlag(args, "--hide");
   const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
-  const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target"]);
-  const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target"]);
+  let fieldFilter;
+  if (showFields || hideFields) {
+    const show = showFields ? parseFieldList(showFields) : [];
+    const hide = hideFields ? parseFieldList(hideFields) : [];
+    fieldFilter = new ReadFieldFilter(show, hide);
+  }
+  const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
   const filteredArgs = args.filter((a, i) => {
     if (flags.has(a))
       return false;
@@ -16598,31 +16905,43 @@ async function read() {
     return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  const matches = jsonlFiles.filter((f) => {
+  const matches2 = jsonlFiles.filter((f) => {
     const name = f.replace(".jsonl", "");
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
-  if (matches.length === 0) {
+  if (matches2.length === 0) {
     printError(`No session found matching '${sessionIdPrefix}'`);
     return 1;
   }
-  if (matches.length > 1) {
+  if (matches2.length > 1) {
     printError(`Multiple sessions match '${sessionIdPrefix}':`);
-    for (const m of matches.slice(0, 5)) {
+    for (const m of matches2.slice(0, 5)) {
       console.log(`  ${m.replace(".jsonl", "")}`);
     }
-    if (matches.length > 5) {
-      console.log(`  ... and ${matches.length - 5} more`);
+    if (matches2.length > 5) {
+      console.log(`  ... and ${matches2.length - 5} more`);
     }
     return 1;
   }
-  const sessionFile = join5(sessionsDir, matches[0]);
+  const sessionFile = join5(sessionsDir, matches2[0]);
   let entryNumber = null;
+  let rangeStart = null;
+  let rangeEnd = null;
   if (entryArg) {
-    entryNumber = parseInt(entryArg, 10);
-    if (isNaN(entryNumber) || entryNumber < 1) {
-      printError(`Invalid entry number: ${entryArg}`);
-      return 1;
+    const rangeMatch = entryArg.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      rangeStart = parseInt(rangeMatch[1], 10);
+      rangeEnd = parseInt(rangeMatch[2], 10);
+      if (rangeStart < 1 || rangeEnd < 1 || rangeStart > rangeEnd) {
+        printError(`Invalid range: ${entryArg}`);
+        return 1;
+      }
+    } else {
+      entryNumber = parseInt(entryArg, 10);
+      if (isNaN(entryNumber) || entryNumber < 1) {
+        printError(`Invalid entry number: ${entryArg}`);
+        return 1;
+      }
     }
   }
   if (hasContextFlags && entryNumber === null) {
@@ -16645,11 +16964,27 @@ async function read() {
   }
   const logicalEntries = getLogicalEntries(allEntries);
   const toolResults = collectToolResults(allEntries);
-  if (entryNumber === null) {
+  if (rangeStart !== null && rangeEnd !== null) {
+    const rangeEntries = logicalEntries.filter((e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd);
+    if (rangeEntries.length === 0) {
+      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
+      printError(`No entries found in range ${rangeStart}-${rangeEnd} (session has ${maxLine} entries)`);
+      return 1;
+    }
+    const output = formatRangeEntries(rangeEntries, {
+      redact: !fullFlag,
+      targetWords: targetWords ?? undefined,
+      skipWords: skipWords ?? undefined,
+      fieldFilter,
+      allEntries
+    });
+    console.log(output);
+  } else if (entryNumber === null) {
     const output = formatSession(allEntries, {
       redact: !fullFlag,
       targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined
+      skipWords: skipWords ?? undefined,
+      fieldFilter
     });
     console.log(output);
   } else {
@@ -16669,7 +17004,8 @@ async function read() {
       const formatted = formatEntry(entry, {
         lineNumber,
         redact: i !== targetIdx,
-        toolResults
+        toolResults,
+        fieldFilter
       });
       if (formatted)
         output.push(formatted);

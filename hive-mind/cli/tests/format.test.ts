@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parseJsonl } from "../lib/extraction";
+import { ReadFieldFilter } from "../lib/field-filter";
 import { formatSession, redactMultiline } from "../lib/format";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
@@ -128,4 +129,64 @@ describe("format redacted sessions", () => {
       }
     });
   }
+});
+
+describe("format with field filtering", () => {
+  // Use a session with thinking blocks for testing field filters
+  const SESSION_WITH_THINKING = { prefix: "efbbb724", name: "efbbb724" };
+
+  async function formatWithFilter(
+    sessionPrefix: string,
+    show: Array<string>,
+    hide: Array<string>
+  ): Promise<string> {
+    const entries = await loadSessionEntries(sessionPrefix);
+    const fieldFilter = new ReadFieldFilter(show, hide);
+    return formatSession(entries, { redact: true, fieldFilter });
+  }
+
+  test("show thinking expands thinking content", async () => {
+    const output = await formatWithFilter(SESSION_WITH_THINKING.prefix, ["thinking"], []);
+    const name = `${SESSION_WITH_THINKING.name}-show-thinking`;
+    const existing = await readSnapshot(name);
+
+    if (existing === null || process.env.UPDATE_SNAPSHOTS) {
+      await writeSnapshot(name, output);
+      if (existing === null) {
+        console.log(`Created snapshot: ${name}.txt`);
+      }
+    } else {
+      expect(output).toBe(existing);
+    }
+  });
+
+  test("hide user removes user entries", async () => {
+    const output = await formatWithFilter(SESSION_WITH_THINKING.prefix, [], ["user"]);
+    const name = `${SESSION_WITH_THINKING.name}-hide-user`;
+    const existing = await readSnapshot(name);
+
+    if (existing === null || process.env.UPDATE_SNAPSHOTS) {
+      await writeSnapshot(name, output);
+      if (existing === null) {
+        console.log(`Created snapshot: ${name}.txt`);
+      }
+    } else {
+      expect(output).toBe(existing);
+    }
+  });
+
+  test("hide thinking removes thinking entries", async () => {
+    const output = await formatWithFilter(SESSION_WITH_THINKING.prefix, [], ["thinking"]);
+    const name = `${SESSION_WITH_THINKING.name}-hide-thinking`;
+    const existing = await readSnapshot(name);
+
+    if (existing === null || process.env.UPDATE_SNAPSHOTS) {
+      await writeSnapshot(name, output);
+      if (existing === null) {
+        console.log(`Created snapshot: ${name}.txt`);
+      }
+    } else {
+      expect(output).toBe(existing);
+    }
+  });
 });
