@@ -15119,7 +15119,7 @@ ${formatTruncatedBlock(truncated, prefix, suffix)}`;
         return null;
       if (!output.includes(`
 `))
-        return `${header}| ${output}`;
+        return `${header}|${output}`;
       return `${header}
 ${indent(output, 2)}`;
     }
@@ -15168,10 +15168,9 @@ function formatMatchesWithContext(text, matchPositions, contextWords) {
     if (range.start > lastEnd + 1) {
       const skippedCount = range.start - lastEnd - 1;
       if (skippedCount > 0) {
-        outputParts.push(`${skippedCount}words...`);
+        const isInitialGap = lastEnd === -1;
+        outputParts.push(isInitialGap ? `${skippedCount}words...` : `...${skippedCount}words...`);
       }
-    } else if (lastEnd === -1 && range.start > 0) {
-      outputParts.push(`${range.start}words...`);
     }
     const rangeWords = words.slice(range.start, range.end + 1).map((w) => w.word);
     outputParts.push(rangeWords.join(" "));

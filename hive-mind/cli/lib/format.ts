@@ -246,7 +246,7 @@ function formatBlockContent(
       const matchPositions = findMatchPositions(content, truncation.pattern);
       const output = formatMatchesWithContext(content, matchPositions, truncation.contextWords);
       if (!output) return null;
-      if (!output.includes('\n')) return `${header}| ${output}`;
+      if (!output.includes('\n')) return `${header}|${output}`;
       return `${header}\n${indent(output, 2)}`;
     }
 
@@ -305,10 +305,9 @@ function formatMatchesWithContext(
     if (range.start > lastEnd + 1) {
       const skippedCount = range.start - lastEnd - 1;
       if (skippedCount > 0) {
-        outputParts.push(`${skippedCount}words...`);
+        const isInitialGap = lastEnd === -1;
+        outputParts.push(isInitialGap ? `${skippedCount}words...` : `...${skippedCount}words...`);
       }
-    } else if (lastEnd === -1 && range.start > 0) {
-      outputParts.push(`${range.start}words...`);
     }
 
     const rangeWords = words.slice(range.start, range.end + 1).map((w) => w.word);
