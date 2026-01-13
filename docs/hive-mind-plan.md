@@ -337,33 +337,13 @@ Analysis of retrieval agent bash commands revealed patterns where the model used
 - Created Vercel deployment configuration
 - Documented all development workflows
 
-**Production Deployment Checklist:**
+**Production Deployment:** ✅ Complete
 
-After merging to main, deploy to alignment-hive.com:
+The web app is live at [alignment-hive.com](https://alignment-hive.com). Deployment is automatic on push to `main` via Vercel.
 
-```bash
-# 1. Run from repo root (NOT web/ directory)
-vercel link
-# Should create "alignment-hive" project
-
-# 2. Add Vercel environment variables (via Dashboard)
-# WorkOS (production):
-#   WORKOS_CLIENT_ID=client_01KE10CZ6FFQB9TR2NVBQJ4AKV
-#   WORKOS_API_KEY=<from WorkOS dashboard>
-#   WORKOS_COOKIE_PASSWORD=<secure random 32+ chars>
-#   WORKOS_REDIRECT_URI=https://alignment-hive.com/callback
-# Convex (production):
-#   CONVEX_DEPLOY_KEY=<from Convex dashboard>
-#   CONVEX_DEPLOYMENT=<prod deployment name>
-#   VITE_CONVEX_URL=https://<deployment>.convex.cloud
-
-# 3. Deploy
-git push origin main
-# Vercel auto-deploys on push
-
-# 4. Verify
-# Visit https://alignment-hive.com and test sign-up flow
-```
+Environment variables configured in Vercel dashboard:
+- WorkOS: `WORKOS_CLIENT_ID`, `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `WORKOS_REDIRECT_URI`
+- Convex: `CONVEX_DEPLOY_KEY`, `CONVEX_DEPLOYMENT`, `VITE_CONVEX_URL`
 
 **Key architectural decisions:**
 - CLI defaults to production credentials; local dev overrides with `HIVE_MIND_CLIENT_ID` env var

@@ -68,6 +68,8 @@ The dev server runs on `http://localhost:3000` and includes both the frontend an
 
 Deployment is automatic on push to `main` via Vercel. Environment variables are configured in Vercel dashboard.
 
+The `nitro` vite plugin in `vite.config.ts` is required for TanStack Start to deploy correctly on Vercel (it auto-detects the Vercel environment and builds for serverless).
+
 The build command is: `bunx convex deploy --cmd 'bun run build'`
 
 This ensures both Convex backend and Vite frontend are built for production.
