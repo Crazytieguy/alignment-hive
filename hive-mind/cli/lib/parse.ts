@@ -101,6 +101,7 @@ function findLastSummaryIndex(entries: Array<KnownEntry>): number {
 
 export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
   const blocks = [];
+  const uuidToLine = new Map<string, number>();
   let lineNumber = 0;
   const lastSummaryIndex = findLastSummaryIndex(entries);
 
@@ -114,9 +115,11 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
       if (isToolResultOnly(entry)) continue;
 
       lineNumber++;
+      if (entry.uuid) uuidToLine.set(entry.uuid, lineNumber);
       blocks.push({
         type: "user" as const,
         lineNumber,
+        parentLineNumber: undefined as number | null | undefined,
         content: extractUserText(entry),
         timestamp: entry.timestamp,
         uuid: entry.uuid,
@@ -131,9 +134,11 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
       if (typeof content === "string") {
         if (content) {
           lineNumber++;
+          if (entry.uuid) uuidToLine.set(entry.uuid, lineNumber);
           blocks.push({
             type: "assistant" as const,
             lineNumber,
+            parentLineNumber: undefined as number | null | undefined,
             content,
             timestamp: entry.timestamp,
             uuid: entry.uuid,
@@ -151,6 +156,7 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
         if (meaningfulBlocks.length === 0) continue;
 
         lineNumber++;
+        if (entry.uuid) uuidToLine.set(entry.uuid, lineNumber);
         const entryLineNumber = lineNumber;
 
         for (const contentBlock of content) {
@@ -160,6 +166,7 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
             blocks.push({
               type: "assistant" as const,
               lineNumber: entryLineNumber,
+              parentLineNumber: undefined as number | null | undefined,
               content: contentBlock.text,
               timestamp: entry.timestamp,
               uuid: entry.uuid,
@@ -170,6 +177,7 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
             blocks.push({
               type: "thinking" as const,
               lineNumber: entryLineNumber,
+              parentLineNumber: undefined as number | null | undefined,
               content: contentBlock.thinking,
               timestamp: entry.timestamp,
             });
@@ -178,6 +186,7 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
             blocks.push({
               type: "tool" as const,
               lineNumber: entryLineNumber,
+              parentLineNumber: undefined as number | null | undefined,
               toolName: contentBlock.name,
               toolInput: contentBlock.input,
               toolResult: resultInfo?.content,
@@ -193,6 +202,7 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
       blocks.push({
         type: "system" as const,
         lineNumber,
+        parentLineNumber: undefined as number | null | undefined,
         content: entry.content ?? "",
         timestamp: entry.timestamp,
         subtype: entry.subtype,
@@ -203,8 +213,19 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
       blocks.push({
         type: "summary" as const,
         lineNumber,
+        parentLineNumber: undefined as number | null | undefined,
         content: entry.summary,
       });
+    }
+  }
+
+  for (const block of blocks) {
+    const parentUuid = block.parentUuid;
+    const uuid = block.uuid;
+    if (parentUuid) {
+      block.parentLineNumber = uuidToLine.get(parentUuid);
+    } else if (uuid) {
+      block.parentLineNumber = null;
     }
   }
 

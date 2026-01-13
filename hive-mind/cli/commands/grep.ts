@@ -167,6 +167,10 @@ export async function grep(): Promise<number> {
       sessionMatchCount++;
 
       if (!options.countOnly && !options.listOnly) {
+        const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
+        const parentIndicator =
+          parentLineNumber === null ? "start" : parentLineNumber;
+
         const formatted = formatBlock(block, {
           sessionPrefix,
           cwd,
@@ -175,6 +179,7 @@ export async function grep(): Promise<number> {
             pattern: options.pattern,
             contextWords: options.contextWords,
           },
+          parentIndicator,
         });
 
         if (formatted) {

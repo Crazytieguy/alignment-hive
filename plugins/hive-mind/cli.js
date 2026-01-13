@@ -14825,6 +14825,7 @@ function findLastSummaryIndex(entries) {
 }
 function parseSession(meta3, entries) {
   const blocks = [];
+  const uuidToLine = new Map;
   let lineNumber = 0;
   const lastSummaryIndex = findLastSummaryIndex(entries);
   for (let i = 0;i < entries.length; i++) {
@@ -14837,9 +14838,12 @@ function parseSession(meta3, entries) {
       if (isToolResultOnly(entry))
         continue;
       lineNumber++;
+      if (entry.uuid)
+        uuidToLine.set(entry.uuid, lineNumber);
       blocks.push({
         type: "user",
         lineNumber,
+        parentLineNumber: undefined,
         content: extractUserText(entry),
         timestamp: entry.timestamp,
         uuid: entry.uuid,
@@ -14852,9 +14856,12 @@ function parseSession(meta3, entries) {
       if (typeof content === "string") {
         if (content) {
           lineNumber++;
+          if (entry.uuid)
+            uuidToLine.set(entry.uuid, lineNumber);
           blocks.push({
             type: "assistant",
             lineNumber,
+            parentLineNumber: undefined,
             content,
             timestamp: entry.timestamp,
             uuid: entry.uuid,
@@ -14869,6 +14876,8 @@ function parseSession(meta3, entries) {
         if (meaningfulBlocks.length === 0)
           continue;
         lineNumber++;
+        if (entry.uuid)
+          uuidToLine.set(entry.uuid, lineNumber);
         const entryLineNumber = lineNumber;
         for (const contentBlock of content) {
           if (isNoiseBlock(contentBlock))
@@ -14877,6 +14886,7 @@ function parseSession(meta3, entries) {
             blocks.push({
               type: "assistant",
               lineNumber: entryLineNumber,
+              parentLineNumber: undefined,
               content: contentBlock.text,
               timestamp: entry.timestamp,
               uuid: entry.uuid,
@@ -14887,6 +14897,7 @@ function parseSession(meta3, entries) {
             blocks.push({
               type: "thinking",
               lineNumber: entryLineNumber,
+              parentLineNumber: undefined,
               content: contentBlock.thinking,
               timestamp: entry.timestamp
             });
@@ -14895,6 +14906,7 @@ function parseSession(meta3, entries) {
             blocks.push({
               type: "tool",
               lineNumber: entryLineNumber,
+              parentLineNumber: undefined,
               toolName: contentBlock.name,
               toolInput: contentBlock.input,
               toolResult: resultInfo?.content,
@@ -14910,6 +14922,7 @@ function parseSession(meta3, entries) {
       blocks.push({
         type: "system",
         lineNumber,
+        parentLineNumber: undefined,
         content: entry.content ?? "",
         timestamp: entry.timestamp,
         subtype: entry.subtype,
@@ -14920,8 +14933,18 @@ function parseSession(meta3, entries) {
       blocks.push({
         type: "summary",
         lineNumber,
+        parentLineNumber: undefined,
         content: entry.summary
       });
+    }
+  }
+  for (const block of blocks) {
+    const parentUuid = block.parentUuid;
+    const uuid3 = block.uuid;
+    if (parentUuid) {
+      block.parentLineNumber = uuidToLine.get(parentUuid);
+    } else if (uuid3) {
+      block.parentLineNumber = null;
     }
   }
   return {
@@ -15297,7 +15320,6 @@ function formatSession(entries, options = {}) {
     const wordCounts = collectWordCountsFromBlocks(parsed.blocks, skipWords);
     wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
   }
-  const uuidToLine = buildUuidMapFromBlocks(parsed.blocks);
   let model;
   let gitBranch;
   for (const block of parsed.blocks) {
@@ -15330,15 +15352,13 @@ function formatSession(entries, options = {}) {
       cwd = block.cwd;
     }
     let parentIndicator;
-    if (block.lineNumber !== prevLineNumber) {
+    if (block.lineNumber !== prevLineNumber && prevUuid) {
       const parentUuid = "parentUuid" in block ? block.parentUuid : undefined;
-      const blockUuid = "uuid" in block ? block.uuid : undefined;
-      if (prevUuid) {
-        if (parentUuid && parentUuid !== prevUuid) {
-          parentIndicator = uuidToLine.get(parentUuid);
-        } else if (!parentUuid && blockUuid) {
-          parentIndicator = "start";
-        }
+      const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
+      if (parentLineNumber === null) {
+        parentIndicator = "start";
+      } else if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+        parentIndicator = parentLineNumber;
       }
     }
     const truncation = redact ? wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "summary" } : { type: "full" };
@@ -15393,15 +15413,6 @@ function collectWordCountsFromBlocks(blocks, skipWords) {
     }
   }
   return counts;
-}
-function buildUuidMapFromBlocks(blocks) {
-  const map2 = new Map;
-  for (const block of blocks) {
-    if ("uuid" in block && block.uuid) {
-      map2.set(block.uuid, block.lineNumber);
-    }
-  }
-  return map2;
 }
 function formatToolText(text, truncation) {
   if (truncation?.type === "wordLimit") {
@@ -16073,6 +16084,8 @@ async function grep() {
       totalMatches++;
       sessionMatchCount++;
       if (!options.countOnly && !options.listOnly) {
+        const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
+        const parentIndicator = parentLineNumber === null ? "start" : parentLineNumber;
         const formatted = formatBlock(block, {
           sessionPrefix,
           cwd,
@@ -16080,7 +16093,8 @@ async function grep() {
             type: "matchContext",
             pattern: options.pattern,
             contextWords: options.contextWords
-          }
+          },
+          parentIndicator
         });
         if (formatted) {
           console.log(formatted);

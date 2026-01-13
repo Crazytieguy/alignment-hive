@@ -449,8 +449,6 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
     wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
   }
 
-  const uuidToLine = buildUuidMapFromBlocks(parsed.blocks);
-
   let model: string | undefined;
   let gitBranch: string | undefined;
   for (const block of parsed.blocks) {
@@ -485,15 +483,13 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
     }
 
     let parentIndicator: string | number | undefined;
-    if (block.lineNumber !== prevLineNumber) {
+    if (block.lineNumber !== prevLineNumber && prevUuid) {
       const parentUuid = 'parentUuid' in block ? block.parentUuid : undefined;
-      const blockUuid = 'uuid' in block ? block.uuid : undefined;
-      if (prevUuid) {
-        if (parentUuid && parentUuid !== prevUuid) {
-          parentIndicator = uuidToLine.get(parentUuid);
-        } else if (!parentUuid && blockUuid) {
-          parentIndicator = 'start';
-        }
+      const parentLineNumber = 'parentLineNumber' in block ? block.parentLineNumber : undefined;
+      if (parentLineNumber === null) {
+        parentIndicator = 'start';
+      } else if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+        parentIndicator = parentLineNumber;
       }
     }
 
@@ -560,16 +556,6 @@ function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: num
   }
 
   return counts;
-}
-
-function buildUuidMapFromBlocks(blocks: Array<LogicalBlock>): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const block of blocks) {
-    if ('uuid' in block && block.uuid) {
-      map.set(block.uuid, block.lineNumber);
-    }
-  }
-  return map;
 }
 
 interface ToolFormatResult {
