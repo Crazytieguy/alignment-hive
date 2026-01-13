@@ -291,10 +291,22 @@ function formatMatchesWithContext(
     const start = Math.max(0, idx - contextWords);
     const end = Math.min(words.length - 1, idx + contextWords);
 
-    if (ranges.length > 0 && ranges[ranges.length - 1].end >= start - 1) {
+    if (ranges.length > 0 && ranges[ranges.length - 1].end >= start - 4) {
       ranges[ranges.length - 1].end = end;
     } else {
       ranges.push({ start, end });
+    }
+  }
+
+  const MIN_TRUNCATION_WORDS = 4;
+  if (ranges.length > 0 && ranges[0].start > 0 && ranges[0].start < MIN_TRUNCATION_WORDS) {
+    ranges[0].start = 0;
+  }
+  if (ranges.length > 0) {
+    const lastRange = ranges[ranges.length - 1];
+    const finalGap = words.length - 1 - lastRange.end;
+    if (finalGap > 0 && finalGap < MIN_TRUNCATION_WORDS) {
+      lastRange.end = words.length - 1;
     }
   }
 
