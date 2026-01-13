@@ -34,3 +34,12 @@ UPDATE_SNAPSHOTS=1 bun test
 ## Skill and CLI Sync
 
 The retrieval skill dynamically includes `--help` output. When CLI behavior changes, update the `--help` text in the command file and bump the plugin version.
+
+## Local Development with Staging Auth
+
+To test the CLI against the staging WorkOS environment instead of production, copy the project root `.env.example` to `.env.local`:
+```bash
+cp .env.example .env.local
+```
+
+This sets `HIVE_MIND_CLIENT_ID` to use the staging WorkOS client instead of production.

@@ -17,7 +17,6 @@ A TanStack Start + React web application for alignment researchers to share sess
 cp .env.local.example .env.local
 
 # Update with staging credentials (check .env.local.example for defaults)
-# Note: HIVE_MIND_CLIENT_ID in .env.local allows the CLI to use staging
 
 # Install dependencies (from repo root)
 bun install
@@ -32,8 +31,7 @@ The dev server runs on `http://localhost:3000` and includes both the frontend an
 ### Environment Variables
 
 **For local development** (staging credentials in `.env.local`):
-- `HIVE_MIND_CLIENT_ID`: Staging WorkOS client ID (for CLI)
-- `WORKOS_CLIENT_ID`: Staging WorkOS client ID (web app)
+- `WORKOS_CLIENT_ID`: Staging WorkOS client ID
 - `WORKOS_API_KEY`: Staging WorkOS API key
 - `WORKOS_COOKIE_PASSWORD`: Secure 32+ char string for session cookies
 - `WORKOS_REDIRECT_URI`: Should be `http://localhost:3000/callback`

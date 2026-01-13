@@ -56,6 +56,10 @@ function WelcomePage() {
             </pre>
           </li>
           <li>
+            Run Claude Code (the remaining steps happen inside it):
+            <pre className="p-2 bg-muted rounded text-xs">claude</pre>
+          </li>
+          <li>
             Add the alignment-hive marketplace:
             <pre className="p-2 bg-muted rounded text-xs">
               /plugin marketplace add Crazytieguy/alignment-hive
