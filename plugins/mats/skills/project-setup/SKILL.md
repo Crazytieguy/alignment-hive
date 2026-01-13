@@ -27,6 +27,8 @@ For existing projects, offer to help with architecture or codebase organization 
 
 Consider modern tooling where appropriate. Examples: `uv` for Python, `vite` and `bun` for JavaScript/TypeScript.
 
+If a tool would be useful and isn't installed, ask if the user would like to install it.
+
 ## Living Documentation
 
 A useful pattern: treat README.md as a working document that evolves with the project, and add a CLAUDE.md with instructions to keep it updated.
@@ -52,7 +54,7 @@ Install by adding to `./.claude/settings.json` in the project root (not `~/.clau
 
 ## MATS / Alignment Researchers
 
-Ask if the user wants to install hive-mind - local memory retrieval system, plus shared knowledge from other researchers' Claude sessions, and your sessions contribute back. Sharing requires an invite (MATS scholars: check your email).
+Ask if the user wants to install hive-mind - local memory retrieval system, plus shared knowledge from other researchers' Claude sessions, and your sessions contribute back. Sharing requires an invite (MATS fellows: check your email).
 
 ```json
 {

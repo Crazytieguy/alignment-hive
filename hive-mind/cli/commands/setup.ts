@@ -249,7 +249,23 @@ async function deviceAuthFlow(): Promise<number> {
   return 1;
 }
 
+async function showStatus(): Promise<number> {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    const displayName = getUserDisplayName(status.user);
+    console.log(`logged in: yes (${displayName})`);
+  } else {
+    console.log("logged in: no");
+  }
+  return 0;
+}
+
 export async function setup(): Promise<number> {
+  // Handle --status flag
+  if (process.argv.includes("--status")) {
+    return showStatus();
+  }
+
   console.log("");
   console.log(`  ${msg.header}`);
   console.log(`  ${"\u2500".repeat(15)}`);

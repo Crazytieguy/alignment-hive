@@ -1,6 +1,6 @@
 # alignment-hive
 
-Shared infrastructure for alignment researchers. [MATS](https://www.matsprogram.org/) scholars are the first intended users, but this is built for the broader AI safety community.
+Shared infrastructure for alignment researchers. [MATS](https://www.matsprogram.org/) fellows are the first intended users, but this is built for the broader AI safety community.
 
 Large orgs benefit from shared tooling and accumulated knowledge across their agents. This project aims to bring some of those advantages to independent researchers:
 
@@ -30,7 +30,7 @@ Enable auto-update to get new plugins and updates automatically:
 4. Select **Enable auto-update**
 5. Press **Esc** twice to exit the menu
 
-Install the mats plugin (recommended for MATS scholars):
+Install the mats plugin (recommended for MATS fellows):
 ```
 /plugin install mats@alignment-hive
 ```

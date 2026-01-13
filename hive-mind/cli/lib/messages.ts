@@ -17,8 +17,7 @@ export function getCliCommand(hasAlias: boolean): string {
 
 export const hook = {
   notLoggedIn: (): string => {
-    const cliPath = getCliPath();
-    return `To connect to hive-mind: bun ${cliPath} setup`;
+    return 'To connect: run /hive-mind:setup';
   },
   loggedIn: (displayName: string): string => {
     return `Connected as ${displayName}`;
@@ -34,7 +33,7 @@ export const hook = {
     return `Extraction failed: ${error}`;
   },
   bunNotInstalled: (): string => {
-    return 'To use hive-mind: curl -fsSL https://bun.sh/install | bash';
+    return 'To set up hive-mind: run /hive-mind:setup';
   },
   pendingSessions: (count: number, earliestUploadAt: number | null, userHasAlias: boolean): string => {
     const cli = getCliCommand(userHasAlias);

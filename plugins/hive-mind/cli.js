@@ -14612,8 +14612,7 @@ function getCliCommand(hasAlias) {
 }
 var hook = {
   notLoggedIn: () => {
-    const cliPath = getCliPath();
-    return `To connect to hive-mind: bun ${cliPath} setup`;
+    return "To connect: run /hive-mind:setup";
   },
   loggedIn: (displayName) => {
     return `Connected as ${displayName}`;
@@ -14629,7 +14628,7 @@ var hook = {
     return `Extraction failed: ${error48}`;
   },
   bunNotInstalled: () => {
-    return "To use hive-mind: curl -fsSL https://bun.sh/install | bash";
+    return "To set up hive-mind: run /hive-mind:setup";
   },
   pendingSessions: (count, earliestUploadAt, userHasAlias) => {
     const cli = getCliCommand(userHasAlias);
@@ -18905,7 +18904,20 @@ async function deviceAuthFlow() {
   printError(setup.timeout);
   return 1;
 }
+async function showStatus() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    const displayName = getUserDisplayName(status.user);
+    console.log(`logged in: yes (${displayName})`);
+  } else {
+    console.log("logged in: no");
+  }
+  return 0;
+}
 async function setup2() {
+  if (process.argv.includes("--status")) {
+    return showStatus();
+  }
   console.log("");
   console.log(`  ${setup.header}`);
   console.log(`  ${"\u2500".repeat(15)}`);
