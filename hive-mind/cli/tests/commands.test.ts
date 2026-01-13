@@ -208,9 +208,9 @@ describe("grep command", () => {
     const { grep } = await import("../commands/grep");
     await grep();
 
-    // Should stop after 2 matches
-    const matchCount = consoleOutput.filter((line) => line.includes("match")).length;
-    expect(matchCount).toBe(2);
+    // Should stop after 2 matching blocks (block headers start with session prefix and line number)
+    const blockCount = consoleOutput.filter((line) => /^test.*\|\d+\|/.test(line)).length;
+    expect(blockCount).toBe(2);
   });
 
   test("context lines with -C flag", async () => {

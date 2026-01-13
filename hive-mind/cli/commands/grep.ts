@@ -2,7 +2,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
 import { GrepFieldFilter, parseFieldList } from "../lib/field-filter";
-import { formatBlock } from "../lib/format";
+import { formatBlocks } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
@@ -152,56 +152,47 @@ export async function grep(): Promise<number> {
 
     const parsed = parseSession(session.meta, session.entries);
 
-    let sessionMatchCount = 0;
-    let prevUuid: string | undefined;
-
-    for (const block of parsed.blocks) {
-      if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
-
+    // Find matching block indices
+    const matchingIndices = new Set<number>();
+    for (let i = 0; i < parsed.blocks.length; i++) {
+      const block = parsed.blocks[i];
       const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
       if (fieldValues.length === 0) continue;
 
       const hasMatch = fieldValues.some((value) => options.pattern.test(value));
-      if (!hasMatch) continue;
-
-      totalMatches++;
-      sessionMatchCount++;
-
-      if (!options.countOnly && !options.listOnly) {
-        let parentIndicator: string | number | undefined;
-        if (prevUuid) {
-          const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
-          const parentUuid = "parentUuid" in block ? block.parentUuid : undefined;
-          if (parentLineNumber === null) {
-            parentIndicator = "start";
-          } else if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
-            parentIndicator = parentLineNumber;
-          }
-        }
-
-        const formatted = formatBlock(block, {
-          sessionPrefix,
-          cwd,
-          truncation: {
-            type: "matchContext",
-            pattern: options.pattern,
-            contextWords: options.contextWords,
-          },
-          parentIndicator,
-        });
-
-        if (formatted) {
-          console.log(formatted);
+      if (hasMatch) {
+        matchingIndices.add(i);
+        // Stop scanning if we've hit maxMatches
+        if (options.maxMatches !== null && totalMatches + matchingIndices.size >= options.maxMatches) {
+          break;
         }
       }
-
-      const blockUuid = "uuid" in block ? block.uuid : undefined;
-      if (blockUuid) prevUuid = blockUuid;
     }
 
-    if (sessionMatchCount > 0) {
-      matchingSessions.push(sessionPrefix);
-      sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
+    if (matchingIndices.size === 0) continue;
+
+    const sessionMatchCount = matchingIndices.size;
+    totalMatches += sessionMatchCount;
+    matchingSessions.push(sessionPrefix);
+    sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
+
+    if (!options.countOnly && !options.listOnly) {
+      const output = formatBlocks(parsed.blocks, {
+        sessionPrefix,
+        cwd,
+        getTruncation: () => ({
+          type: "matchContext" as const,
+          pattern: options.pattern,
+          contextWords: options.contextWords,
+        }),
+        shouldOutput: (_block, i) => matchingIndices.has(i),
+        separator: "\n",
+      });
+
+      // Output each result line separately for consistent behavior
+      for (const line of output.split("\n")) {
+        if (line) console.log(line);
+      }
     }
   }
 

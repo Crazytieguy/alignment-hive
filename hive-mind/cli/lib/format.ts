@@ -159,14 +159,6 @@ export interface FormatBlockOptions {
 export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {}): string | null {
   const { sessionPrefix, showTimestamp, prevDate, isFirst, cwd, truncation, fieldFilter, parentIndicator } = options;
 
-  if (fieldFilter) {
-    if (block.type === 'user' && !fieldFilter.shouldShow('user')) return null;
-    if (block.type === 'assistant' && !fieldFilter.shouldShow('assistant')) return null;
-    if (block.type === 'system' && !fieldFilter.shouldShow('system')) return null;
-    if (block.type === 'summary' && !fieldFilter.shouldShow('summary')) return null;
-    if (block.type === 'tool' && !fieldFilter.shouldShow(`tool:${block.toolName}:input`)) return null;
-  }
-
   const parts: Array<string> = [];
   if (sessionPrefix) parts.push(sessionPrefix);
   parts.push(String(block.lineNumber));
@@ -177,15 +169,27 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
   }
 
   switch (block.type) {
-    case 'user':
+    case 'user': {
       parts.push('user');
       if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow('user');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
+      }
       return formatBlockContent(parts.join('|'), block.content, truncation);
+    }
 
-    case 'assistant':
+    case 'assistant': {
       parts.push('assistant');
       if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow('assistant');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
+      }
       return formatBlockContent(parts.join('|'), block.content, truncation);
+    }
 
     case 'thinking': {
       parts.push('thinking');
@@ -201,15 +205,27 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
     case 'tool':
       return formatToolBlock(block, parts, { cwd, truncation, fieldFilter });
 
-    case 'system':
+    case 'system': {
       parts.push('system');
       if (block.subtype) parts.push(`subtype=${block.subtype}`);
       if (block.level && block.level !== 'info') parts.push(`level=${block.level}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow('system');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
+      }
       return formatBlockContent(parts.join('|'), block.content, truncation);
+    }
 
-    case 'summary':
+    case 'summary': {
       parts.push('summary');
+      const hidden = fieldFilter && !fieldFilter.shouldShow('summary');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
+      }
       return formatBlockContent(parts.join('|'), block.content, truncation);
+    }
 
     default:
       return null;
@@ -428,11 +444,44 @@ function formatToolBlock(
 }
 
 export interface BlocksFormatOptions {
+  // Truncation mode (existing behavior)
   redact?: boolean;
   targetWords?: number;
   skipWords?: number;
+
+  // Per-block truncation override (when set, overrides redact-based logic)
+  getTruncation?: (block: LogicalBlock, index: number) => TruncationStrategy;
+
+  // Filter which blocks to output (still tracks all for parent indicators)
+  shouldOutput?: (block: LogicalBlock, index: number) => boolean;
+
+  // Session prefix for grep-style output (replaces line number)
+  sessionPrefix?: string;
+
+  // Output customization
+  separator?: string;
+
   fieldFilter?: ReadFieldFilter;
   cwd?: string;
+}
+
+function computeParentIndicator(
+  block: LogicalBlock,
+  prevUuid: string | undefined,
+  prevLineNumber: number
+): string | number | undefined {
+  if (block.lineNumber === prevLineNumber || !prevUuid) {
+    return undefined;
+  }
+  const parentUuid = 'parentUuid' in block ? block.parentUuid : undefined;
+  const parentLineNumber = 'parentLineNumber' in block ? block.parentLineNumber : undefined;
+  if (parentLineNumber === null) {
+    return 'start';
+  }
+  if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+    return parentLineNumber;
+  }
+  return undefined;
 }
 
 export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatOptions = {}): string {
@@ -440,11 +489,15 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
     redact = false,
     targetWords = DEFAULT_TARGET_WORDS,
     skipWords = 0,
+    getTruncation,
+    shouldOutput,
+    sessionPrefix,
     fieldFilter,
   } = options;
 
+  // Compute word limit for redact mode (only if not using custom getTruncation)
   let wordLimit: number | undefined;
-  if (redact) {
+  if (redact && !getTruncation) {
     const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
     wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
   }
@@ -454,6 +507,7 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
   let prevDate: string | undefined;
   let prevLineNumber = 0;
   let cwd = options.cwd;
+  let firstOutput = true;
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -462,55 +516,57 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
       cwd = block.cwd;
     }
 
-    let parentIndicator: string | number | undefined;
-    if (block.lineNumber !== prevLineNumber && prevUuid) {
-      const parentUuid = 'parentUuid' in block ? block.parentUuid : undefined;
-      const parentLineNumber = 'parentLineNumber' in block ? block.parentLineNumber : undefined;
-      if (parentLineNumber === null) {
-        parentIndicator = 'start';
-      } else if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
-        parentIndicator = parentLineNumber;
+    const parentIndicator = computeParentIndicator(block, prevUuid, prevLineNumber);
+
+    // Determine truncation strategy
+    const truncation: TruncationStrategy = getTruncation
+      ? getTruncation(block, i)
+      : redact
+        ? wordLimit !== undefined
+          ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
+          : { type: 'summary' }
+        : { type: 'full' };
+
+    // Check if we should output this block
+    const includeInOutput = shouldOutput ? shouldOutput(block, i) : true;
+
+    if (includeInOutput) {
+      const timestamp = 'timestamp' in block ? block.timestamp : undefined;
+      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+
+      const formatted = formatBlock(block, {
+        sessionPrefix,
+        showTimestamp: true,
+        prevDate,
+        isFirst: firstOutput,
+        cwd,
+        truncation,
+        fieldFilter,
+        parentIndicator,
+      });
+
+      if (formatted) {
+        results.push(formatted);
+        firstOutput = false;
+      }
+
+      if (currentDate) {
+        prevDate = currentDate;
       }
     }
 
-    const truncation: TruncationStrategy | undefined = redact
-      ? wordLimit !== undefined
-        ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
-        : { type: 'summary' }
-      : { type: 'full' };
-
-    const timestamp = 'timestamp' in block ? block.timestamp : undefined;
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = i === 0;
-
-    const formatted = formatBlock(block, {
-      showTimestamp: true,
-      prevDate,
-      isFirst,
-      cwd,
-      truncation,
-      fieldFilter,
-      parentIndicator,
-    });
-
-    if (formatted) {
-      results.push(formatted);
-    }
-
-    if (currentDate) {
-      prevDate = currentDate;
-    }
+    // Always track for parent indicator computation
     if ('uuid' in block && block.uuid) {
       prevUuid = block.uuid;
     }
     prevLineNumber = block.lineNumber;
   }
 
-  if (redact && wordLimit !== undefined) {
+  if (redact && !getTruncation && wordLimit !== undefined) {
     results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
   }
 
-  const separator = redact ? '\n' : '\n\n';
+  const separator = options.separator ?? (redact ? '\n' : '\n\n');
   return results.join(separator);
 }
 

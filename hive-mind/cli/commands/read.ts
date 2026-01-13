@@ -2,12 +2,11 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
 import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
-import { formatBlock, formatBlocks, formatSession } from "../lib/format";
+import { formatBlocks, formatSession } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
 import { parseKnownEntry } from "../lib/schemas";
-import type { TruncationStrategy } from "../lib/format";
 import type { HiveMindMeta, KnownEntry } from "../lib/schemas";
 
 function printUsage(): void {
@@ -186,8 +185,8 @@ export async function read(): Promise<number> {
     });
     console.log(output);
   } else if (entryNumber !== null) {
-    const targetBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
-    if (targetBlocks.length === 0) {
+    const hasTarget = blocks.some((b) => b.lineNumber === entryNumber);
+    if (!hasTarget) {
       printError(errors.entryNotFound(entryNumber, maxLine));
       return 1;
     }
@@ -197,41 +196,16 @@ export async function read(): Promise<number> {
     const minLine = Math.max(1, entryNumber - before);
     const maxContextLine = Math.min(maxLine, entryNumber + after);
 
-    const contextBlocks = blocks.filter(
-      (b) => b.lineNumber >= minLine && b.lineNumber <= maxContextLine
-    );
-
-    const output: Array<string> = [];
-    let prevDate: string | undefined;
-
-    for (const block of contextBlocks) {
-      const isTarget = block.lineNumber === entryNumber;
-      const timestamp = "timestamp" in block ? block.timestamp : undefined;
-      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-      const isFirst = block === contextBlocks[0];
-
-      const truncation: TruncationStrategy = isTarget
-        ? { type: "full" }
-        : { type: "summary" };
-
-      const formatted = formatBlock(block, {
-        showTimestamp: true,
-        prevDate,
-        isFirst,
-        cwd,
-        truncation,
-        fieldFilter,
-      });
-
-      if (formatted) {
-        output.push(formatted);
-      }
-
-      if (currentDate) {
-        prevDate = currentDate;
-      }
-    }
-    console.log(output.join("\n"));
+    const output = formatBlocks(blocks, {
+      getTruncation: (block) =>
+        block.lineNumber === entryNumber ? { type: "full" } : { type: "summary" },
+      shouldOutput: (block) =>
+        block.lineNumber >= minLine && block.lineNumber <= maxContextLine,
+      separator: "\n",
+      fieldFilter,
+      cwd,
+    });
+    console.log(output);
   }
 
   return 0;
