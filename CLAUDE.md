@@ -20,6 +20,8 @@ When updating plugin content (skills, commands, hooks, etc.), you must bump the 
 
 Use [uv](https://docs.astral.sh/uv/) with inline dependencies (PEP 723). Run scripts with `uv run script.py`.
 
-## The "Search" tool, and scanning the code in other ways
+## hive-mind Session Files
 
-Make sure to ignore `.claude/hive-mind/sessions`, it contains the equivalent of long logs which will spam the context for you and any subagent you spawn.
+The `.claude/hive-mind/sessions/` directory contains extracted session data. These files **should be committed** - they're test fixtures and development data for hive-mind.
+
+However, **do not read or search these files** during normal development. They contain long conversation logs that will spam your context. Only access them when specifically working on session extraction or formatting.
