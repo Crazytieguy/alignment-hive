@@ -1,17 +1,27 @@
 ---
 name: project-setup
-description: This skill should be used when the user asks to "start a new project", "set up a project", "initialize a repo", "create a new codebase", "help me get started", or mentions "first session" or "project kickoff".
+description: This skill should be used when the user asks to "start a new project", "set up a project", "initialize a repo", "create a new codebase", "help me get started", mentions "first session" or "project kickoff", or asks to "set up an existing project" or "configure this project".
 ---
 
 # Project Setup
 
-Consider spending the first session on architecture, research, and tooling rather than feature development.
+This skill applies to both new and existing projects.
 
-## First Session Ideas
+## New Projects
+
+For new projects, consider spending the first session on architecture, research, and tooling rather than jumping into feature development:
 
 - Make high-level architecture decisions
 - Research existing solutions before building from scratch
 - Set up the development environment
+
+## Existing Projects
+
+For existing projects, offer to help with architecture or codebase organization if the user wants, but don't push it. Focus on:
+
+- Understanding the current structure
+- Suggesting relevant plugins (see below)
+- Helping with whatever task brought them here
 
 ## Tooling
 

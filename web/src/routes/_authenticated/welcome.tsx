@@ -80,6 +80,15 @@ function WelcomePage() {
               /plugin install mats@alignment-hive
             </pre>
           </li>
+          <li>
+            Navigate to your project directory and ask Claude to help you set it up:
+            <pre className="p-2 bg-muted rounded text-xs">
+              cd ~/my-project && claude
+            </pre>
+            <p className="mt-1 text-muted-foreground">
+              Works for both new and existing projects.
+            </p>
+          </li>
         </ol>
 
         <div className="text-sm text-muted-foreground">
