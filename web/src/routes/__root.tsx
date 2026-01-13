@@ -9,11 +9,10 @@ import type { ConvexQueryClient } from '@convex-dev/react-query';
 
 const fetchWorkosAuth = createServerFn({ method: 'GET' }).handler(async () => {
   const auth = await getAuth();
-  const { user } = auth;
 
   return {
-    userId: user?.id ?? null,
-    token: user ? auth.accessToken : null,
+    userId: auth.user?.id ?? null,
+    token: auth.user ? auth.accessToken : null,
   };
 });
 
@@ -32,12 +31,12 @@ export const Route = createRootRouteWithContext<{
         content: 'width=device-width, initial-scale=1',
       },
       {
-        title: 'Convex + TanStack Start + WorkOS AuthKit',
+        title: 'Alignment Hive',
       },
     ],
     links: [
       { rel: 'stylesheet', href: appCssUrl },
-      { rel: 'icon', href: '/convex.svg' },
+      { rel: 'icon', href: '/favicon.svg' },
     ],
   }),
   component: RootComponent,
@@ -45,8 +44,6 @@ export const Route = createRootRouteWithContext<{
   beforeLoad: async (ctx) => {
     const { userId, token } = await fetchWorkosAuth();
 
-    // During SSR only (the only time serverHttpClient exists),
-    // set the Clerk auth token to make HTTP queries with.
     if (token) {
       ctx.context.convexQueryClient.serverHttpClient?.setAuth(token);
     }

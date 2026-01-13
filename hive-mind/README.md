@@ -1,85 +1,36 @@
-# Welcome to your Convex + TanStack Start + WorkOS AuthKit app
+# hive-mind
 
-This is a [Convex](https://convex.dev/) project using WorkOS AuthKit for authentication.
+A system for alignment researchers to extract and share session learnings across the community.
 
-After the initial setup (<2 minutes) you'll have a working full-stack app using:
+## Development
 
-- Convex as your backend (database, server logic)
-- [React](https://react.dev/) as your frontend (web page interactivity)
-- [TanStack Start](https://tanstack.com/start) for modern full-stack React with file-based routing
-- [Tailwind](https://tailwindcss.com/) for building great looking accessible UI
-- [WorkOS AuthKit](https://authkit.com/) for authentication
+When committing changes, always run:
+- `bun test`
+- `bun run lint`
 
-## Get started
+Both must pass before committing.
 
-1. Clone this repository and install dependencies:
+**Note:** Do not pipe test output with `2>&1 | head` - this can stall the process. Run tests without piping.
 
-   ```bash
-   npm install
-   ```
+## Session Metadata
 
-2. Set up your environment variables:
+Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.
 
-   ```bash
-   cp .env.local.example .env.local
-   ```
+## Re-extracting Sessions
 
-3. Configure WorkOS AuthKit:
-   - Create a [WorkOS account](https://workos.com/)
-   - Get your Client ID and API Key from the WorkOS dashboard
-   - In the WorkOS dashboard, add `http://localhost:3000/callback` as a redirect URI
-   - Generate a secure password for cookie encryption (minimum 32 characters)
-   - Update your `.env.local` file with these values
+To re-extract all sessions (e.g., after schema changes):
+```bash
+rm -rf .claude/hive-mind/sessions/
+bun hive-mind/cli/cli.ts session-start
+```
 
-4. Configure Convex:
+## Regenerating Snapshot Tests
 
-   ```bash
-   npx convex dev
-   ```
+The format tests use custom snapshot logic. To update snapshots:
+```bash
+UPDATE_SNAPSHOTS=1 bun test
+```
 
-   This will:
-   - Set up your Convex deployment
-   - Add your Convex URL to `.env.local`
-   - Open the Convex dashboard
+## Skill and CLI Sync
 
-   Then set your WorkOS Client ID in Convex:
-
-   ```bash
-   npx convex env set WORKOS_CLIENT_ID <your_client_id>
-   ```
-
-   This allows Convex to validate JWT tokens from WorkOS
-
-5. Run the development server:
-
-   ```bash
-   npm run dev
-   ```
-
-   This starts both the Vite dev server (TanStack Start frontend) and Convex backend in parallel
-
-6. Open [http://localhost:3000](http://localhost:3000) to see your app
-
-## WorkOS AuthKit Setup
-
-This app uses WorkOS AuthKit for authentication. Key features:
-
-- **Redirect-based authentication**: Users are redirected to WorkOS for sign-in/sign-up
-- **Session management**: Automatic token refresh and session handling
-- **Route loader protection**: Protected routes use loaders to check authentication
-- **Client and server functions**: `useAuth()` for client components, `getAuth()` for server loaders
-
-## Learn more
-
-To learn more about developing your project with Convex, check out:
-
-- The [Tour of Convex](https://docs.convex.dev/get-started) for a thorough introduction to Convex principles.
-- The rest of [Convex docs](https://docs.convex.dev/) to learn about all Convex features.
-- [Stack](https://stack.convex.dev/) for in-depth articles on advanced topics.
-
-## Join the community
-
-Join thousands of developers building full-stack apps with Convex:
-
-- Join the [Convex Discord community](https://convex.dev/community) to get help in real-time.
-- Follow [Convex on GitHub](https://github.com/get-convex/), star and contribute to the open-source implementation of Convex.
+The retrieval skill dynamically includes `--help` output. When CLI behavior changes, update the `--help` text in the command file and bump the plugin version.

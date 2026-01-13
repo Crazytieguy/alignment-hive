@@ -4,13 +4,18 @@ Claude Code infrastructure for AI safety researchers.
 
 ## About This Repo
 
-@README.md explains what this is and how to use it. Keep it up to date as the project evolves.
+@README.md explains what this is. Keep it up to date as the project evolves.
 
-## hive-mind
+This is a **bun monorepo**:
+- `web/` - TanStack Start web app (alignment-hive.com)
+- `hive-mind/` - CLI for session extraction
+- `plugins/` - Plugin distributions
 
-The hive-mind source code (CLI and web app) lives in `hive-mind/` at the repo root. The `plugins/hive-mind/` directory is just the plugin distribution (bundled CLI, plugin.json, etc.).
+## Working on the Code
 
-**Before working on hive-mind or using its CLI, read [hive-mind/CLAUDE.md](hive-mind/CLAUDE.md).** It contains essential development instructions including how to run the CLI, tests, and linting. Also update [plugins/hive-mind/README.md](plugins/hive-mind/README.md) as needed.
+**For web app**: Read [web/README.md](web/README.md) for local development setup
+
+**For CLI**: Read [hive-mind/CLAUDE.md](hive-mind/CLAUDE.md) for development guidelines
 
 ## Plugin Versioning
 

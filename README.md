@@ -44,6 +44,10 @@ The [plugin-dev](https://github.com/anthropics/claude-code-plugins) plugin auto-
 
 Feedback and suggestions welcome—open an issue, send a Slack DM, or reach out however works for you. All changes go through PR review.
 
+## Web App
+
+A web interface for hive-mind is in development at [alignment-hive.com](https://alignment-hive.com).
+
 ## Roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for what's planned.

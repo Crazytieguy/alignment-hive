@@ -31,8 +31,8 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] Session 9: Local Extraction & Retrieval (design only)
 - [x] Session 10A: Extraction Implementation
 - [x] Session 10B: Local Retrieval (CLI commands, retrieval agent, field filtering, range reads)
-- [ ] **Session 11: WorkOS Production & Signup Flow** ← NEXT
-- [ ] Session 12: Convex Submission (heartbeats, background upload, R2 storage)
+- [x] Session 11: WorkOS Production & Signup Flow
+- [ ] **Session 12: Convex Submission** ← NEXT (heartbeats, background upload, R2 storage)
 - [ ] Session 13: Local Audit Server (view/audit sessions, manage submission status)
 - [ ] Session 14: Testing Strategy
 - [x] Session 15: User Communication Style (hook messages, error UX)
@@ -325,6 +325,51 @@ Analysis of retrieval agent bash commands revealed patterns where the model used
 - Should retrieval agents be allowed to read non-session files (project docs, code)?
 - If yes, should this be via raw file access or a new CLI command?
 - How does this interact with the (currently broken) permissions system?
+
+## Session 11: WorkOS Production & Signup Flow - Completed
+
+**What was accomplished:**
+- Restructured repository as bun monorepo: `web/` (TanStack Start) and `hive-mind/` (CLI) at root
+- Built minimal web app: homepage, OAuth callback, welcome page with 4-step onboarding
+- Integrated shadcn/ui components with Slate color scheme
+- Implemented automatic dark mode via `prefers-color-scheme` media query
+- Updated CLI config to use production WorkOS credentials by default
+- Created Vercel deployment configuration
+- Documented all development workflows
+
+**Production Deployment Checklist:**
+
+After merging to main, deploy to alignment-hive.com:
+
+```bash
+# 1. Run from repo root (NOT web/ directory)
+vercel link
+# Should create "alignment-hive" project
+
+# 2. Add Vercel environment variables (via Dashboard)
+# WorkOS (production):
+#   WORKOS_CLIENT_ID=client_01KE10CZ6FFQB9TR2NVBQJ4AKV
+#   WORKOS_API_KEY=<from WorkOS dashboard>
+#   WORKOS_COOKIE_PASSWORD=<secure random 32+ chars>
+#   WORKOS_REDIRECT_URI=https://alignment-hive.com/callback
+# Convex (production):
+#   CONVEX_DEPLOY_KEY=<from Convex dashboard>
+#   CONVEX_DEPLOYMENT=<prod deployment name>
+#   VITE_CONVEX_URL=https://<deployment>.convex.cloud
+
+# 3. Deploy
+git push origin main
+# Vercel auto-deploys on push
+
+# 4. Verify
+# Visit https://alignment-hive.com and test sign-up flow
+```
+
+**Key architectural decisions:**
+- CLI defaults to production credentials; local dev overrides with `HIVE_MIND_CLIENT_ID` env var
+- Web app is production-only via Vercel; CLI runs locally on user machines
+- All styling via CSS variables in `src/app.css` for easy theming
+- OAuth callback intercepts response to redirect to `/welcome` instead of homepage
 
 ## Future Features
 

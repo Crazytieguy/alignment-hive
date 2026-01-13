@@ -1,0 +1,6 @@
+.vercel
+dist/
+.DS_Store
+*.local
+.env
+*.tsbuildinfo
