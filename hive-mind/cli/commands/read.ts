@@ -1,13 +1,11 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
+import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
 import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
 import { formatBlocks, formatSession } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
-import { parseKnownEntry } from "../lib/schemas";
-import type { HiveMindMeta, KnownEntry } from "../lib/schemas";
 
 function printUsage(): void {
   console.log(usage.read());
@@ -132,25 +130,16 @@ export async function read(): Promise<number> {
     return 1;
   }
 
-  const content = await readFile(sessionFile, "utf-8");
-  const lines = Array.from(parseJsonl(content));
-  const rawEntries = lines.slice(1);
-
-  if (rawEntries.length === 0) {
+  const session = await readExtractedSession(sessionFile);
+  if (!session || session.entries.length === 0) {
     printError(errors.emptySession);
     return 1;
   }
 
-  const allEntries: Array<KnownEntry> = [];
-  for (const raw of rawEntries) {
-    const result = parseKnownEntry(raw);
-    if (result.data) {
-      allEntries.push(result.data);
-    }
-  }
+  const { meta, entries } = session;
 
   if (entryNumber === null && rangeStart === null) {
-    const output = formatSession(allEntries, {
+    const output = formatSession(entries, {
       redact: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
@@ -160,8 +149,7 @@ export async function read(): Promise<number> {
     return 0;
   }
 
-  const meta = createMinimalMeta(allEntries.length);
-  const parsed = parseSession(meta, allEntries);
+  const parsed = parseSession(meta, entries);
   const { blocks } = parsed;
   const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
   const maxLine = lineNumbers.at(-1) ?? 0;
@@ -209,18 +197,5 @@ export async function read(): Promise<number> {
   }
 
   return 0;
-}
-
-function createMinimalMeta(entryCount: number): HiveMindMeta {
-  return {
-    _type: "hive-mind-meta" as const,
-    version: "0.1" as const,
-    sessionId: "unknown",
-    checkoutId: "unknown",
-    extractedAt: new Date().toISOString(),
-    rawMtime: new Date().toISOString(),
-    rawPath: "unknown",
-    messageCount: entryCount,
-  };
 }
 

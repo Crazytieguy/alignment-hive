@@ -16954,7 +16954,7 @@ async function login2() {
 }
 
 // cli/commands/read.ts
-import { readFile as readFile3, readdir as readdir4 } from "fs/promises";
+import { readdir as readdir4 } from "fs/promises";
 import { join as join5 } from "path";
 function printUsage3() {
   console.log(usage.read());
@@ -17066,22 +17066,14 @@ async function read() {
     printError(errors3.contextRequiresEntry);
     return 1;
   }
-  const content = await readFile3(sessionFile, "utf-8");
-  const lines = Array.from(parseJsonl(content));
-  const rawEntries = lines.slice(1);
-  if (rawEntries.length === 0) {
+  const session = await readExtractedSession(sessionFile);
+  if (!session || session.entries.length === 0) {
     printError(errors3.emptySession);
     return 1;
   }
-  const allEntries = [];
-  for (const raw of rawEntries) {
-    const result = parseKnownEntry(raw);
-    if (result.data) {
-      allEntries.push(result.data);
-    }
-  }
+  const { meta: meta3, entries } = session;
   if (entryNumber === null && rangeStart === null) {
-    const output = formatSession(allEntries, {
+    const output = formatSession(entries, {
       redact: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
@@ -17090,8 +17082,7 @@ async function read() {
     console.log(output);
     return 0;
   }
-  const meta3 = createMinimalMeta(allEntries.length);
-  const parsed = parseSession(meta3, allEntries);
+  const parsed = parseSession(meta3, entries);
   const { blocks } = parsed;
   const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
   const maxLine = lineNumbers.at(-1) ?? 0;
@@ -17130,18 +17121,6 @@ async function read() {
     console.log(output);
   }
   return 0;
-}
-function createMinimalMeta(entryCount) {
-  return {
-    _type: "hive-mind-meta",
-    version: "0.1",
-    sessionId: "unknown",
-    checkoutId: "unknown",
-    extractedAt: new Date().toISOString(),
-    rawMtime: new Date().toISOString(),
-    rawPath: "unknown",
-    messageCount: entryCount
-  };
 }
 
 // cli/commands/session-start.ts
