@@ -80,10 +80,12 @@ interface FileStats {
 }
 
 function printUsage(): void {
-  console.log("Usage: index");
+  console.log("Usage: index [--escape-file-refs]");
   console.log("\nList all extracted sessions with statistics, summary, and commits.");
   console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
   console.log("Statistics include work from subagent sessions.");
+  console.log("\nOptions:");
+  console.log("  --escape-file-refs  Escape @ symbols to prevent file reference interpretation");
   console.log("\nOutput columns:");
   console.log("  ID                   Session ID prefix (first 16 chars)");
   console.log("  DATETIME             Session modification time");
@@ -107,6 +109,8 @@ export async function index(): Promise<number> {
     printUsage();
     return 0;
   }
+
+  const escapeFileRefs = args.includes("--escape-file-refs");
 
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
@@ -154,7 +158,7 @@ export async function index(): Promise<number> {
   let prevYear = "";
   for (const session of mainSessions) {
     const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
-    const { line, date, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear);
+    const { line, date, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear, escapeFileRefs);
     console.log(line);
     prevDate = date;
     prevYear = year;
@@ -169,11 +173,13 @@ function formatSessionLine(
   cwd: string,
   idPrefix: string,
   prevDate: string,
-  prevYear: string
+  prevYear: string,
+  escapeFileRefs: boolean
 ): { line: string; date: string; year: string } {
   const { meta, entries } = session;
   const msgs = String(meta.messageCount);
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const summary = escapeFileRefs ? rawSummary.replace(/@/g, "\\@") : rawSummary;
 
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits

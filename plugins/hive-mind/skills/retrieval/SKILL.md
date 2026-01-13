@@ -1,6 +1,7 @@
 ---
 name: retrieval
 description: Retrieval instructions for searching session history. Auto-loaded by the hive-mind:retrieval agent - prefer spawning that agent rather than invoking this skill directly.
+allowed-tools: Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git:*)
 ---
 
 Memory archaeology: excavate layers of project history to uncover artifacts that explain the current state.
@@ -54,7 +55,7 @@ Output for `git log --oneline`:
 
 Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js index`:
 ```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js index | sed 's/@/\\@/g'`
+!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs`
 ```
 
 ## Thoroughness
