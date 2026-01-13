@@ -30,13 +30,12 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] [Session 8](sessions/session-8-jsonl-format.md): JSONL Format Deep Dive
 - [x] Session 9: Local Extraction & Retrieval (design only)
 - [x] Session 10A: Extraction Implementation
-- [ ] **Session 10B: Local Retrieval** ← NEXT (see `local/session-10b-retrieval-plan.md`)
-- [ ] Session 11: Convex Submission (heartbeats, background upload, R2 storage)
-- [ ] Session 12: Local Audit Server (view/audit sessions, manage submission status)
-
-**Concurrency note**: Sessions 10B, 11, and 12 can now run in parallel. They share no modified files except `cli.ts` (each adds commands as separate import blocks).
-- [ ] Session 13: Testing Strategy
-- [ ] Session 14: User Communication Style (hook messages, error UX, when to be verbose vs quiet)
+- [x] Session 10B: Local Retrieval (CLI commands, retrieval agent, field filtering, range reads)
+- [ ] **Session 11: WorkOS Production & Signup Flow** ← NEXT
+- [ ] Session 12: Convex Submission (heartbeats, background upload, R2 storage)
+- [ ] Session 13: Local Audit Server (view/audit sessions, manage submission status)
+- [ ] Session 14: Testing Strategy
+- [x] Session 15: User Communication Style (hook messages, error UX)
 
 ### v0.2 Design
 - [ ] Processing Pipeline (Fly.io)
@@ -210,7 +209,25 @@ CLI tools and agent for searching past sessions. Depends on 10A (reads extracted
 - Retrieval agent
 - Tuning on real session data
 
-### Session 11: Convex Submission
+### Session 11: WorkOS Production & Signup Flow
+
+Switch from staging to production WorkOS app and create the signup callback page.
+
+**Scope:**
+- Switch WorkOS app to production environment
+- Build callback page for invitation flow signups:
+  - Short welcome message explaining what signing up enables
+  - Redirect to GitHub repo for installation instructions
+- Deploy the callback page
+- Test end-to-end signup flow
+
+**Acceptance criteria:**
+- Production WorkOS app configured and working
+- Callback page deployed and accessible
+- New users see welcome message and can navigate to installation docs
+- Existing CLI auth flow still works with production credentials
+
+### Session 12: Convex Submission
 
 Implement remote submission using existing Convex State and Convex API design (see v0.1 Architecture above):
 - Heartbeat endpoint (upsert session metadata)
@@ -221,12 +238,12 @@ Implement remote submission using existing Convex State and Convex API design (s
 
 **Privacy note:** Before authentication, only `checkoutId` is sent to Convex (for anonymous install tracking). No session data or other metadata is sent until the user authenticates. This allows counting plugin installations while respecting privacy.
 
-### Session 12: Local Audit Server
+### Session 13: Local Audit Server
 - Local web server in CLI for viewing/auditing extracted sessions
 - Manage submission status (exclude sessions before upload)
 - Browse session content in browser
 
-### Session 13: Testing
+### Session 14: Testing
 - Local testing approach
 - Staging environment
 - Dry-run mode
