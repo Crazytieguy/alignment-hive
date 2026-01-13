@@ -1,0 +1,6 @@
+{
+  "llms-fetch": {
+    "command": "npx",
+    "args": ["-y", "llms-fetch-mcp"]
+  }
+}

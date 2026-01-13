@@ -38,6 +38,13 @@ The mats plugin includes:
 - **project-setup** - Guidance for starting new projects with good architecture decisions
 - **fellow-handbook** - Quick lookup of MATS policies, compute access, housing, and program logistics
 
+Also available:
+```
+/plugin install llms-fetch-mcp@alignment-hive
+```
+
+Adds an MCP server for fetching documentation with [llms.txt](https://llmstxt.org/) support.
+
 ## Contributing
 
 The [plugin-dev](https://github.com/anthropics/claude-code-plugins) plugin auto-installs when you clone this repo, so Claude can help with plugin development.
