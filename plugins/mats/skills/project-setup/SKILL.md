@@ -25,7 +25,7 @@ For existing projects, offer to help with architecture or codebase organization 
 
 ## Tooling
 
-Consider modern tooling where appropriate. Examples: `uv` for Python, `vite` and `bun` for JavaScript/TypeScript.
+Consider modern tooling where appropriate. Examples: `uv` for Python, `vite` and `bun` for JavaScript/TypeScript. Be proactive about including and proposing linters, typechecking, etc.
 
 If a tool would be useful and isn't installed, ask if the user would like to install it.
 
@@ -51,6 +51,8 @@ Install by adding to `./.claude/settings.json` in the project root (not `~/.clau
   }
 }
 ```
+
+After installing plugins, tell the user to exit ("/exit") and continue the session with "claude -c".
 
 ## MATS / Alignment Researchers
 
