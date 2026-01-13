@@ -40,7 +40,7 @@ Before running setup, explain what hive-mind does:
 - Logging in: your sessions contribute to shared knowledge, and you can retrieve insights from other researchers' sessions
 - Not logging in: local session retrieval still works, no data shared externally, can set up later anytime
 
-If the user has questions or concerns about their data, explain:
+**Only** if the user has questions or concerns about their data, explain:
 
 - **What gets extracted**: User messages, assistant responses, tool inputs/outputs, and thinking blocks from Claude Code sessions. Images, PDFs, and other non-text content are excluded.
 - **Sanitization**: Before upload, sessions are scanned using gitleaks rules to detect and remove secrets like API keys, tokens, and credentials.
