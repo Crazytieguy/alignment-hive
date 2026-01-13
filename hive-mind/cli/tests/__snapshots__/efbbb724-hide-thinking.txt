@@ -40,7 +40,7 @@
 15|22:14|assistant|"Let me read your tweet writing skill to get a sense of your style, and review the current files."
 16|22:14|tool|Read|/Users/yoav/.claude/skills/draft-tweets.md
 [result]
-  <tool_use_error>File does not exist. Did you mean draft-tweets?</tool_use_error>
+  "<tool_use_error>File does not exist. Did you mean draft-tweets?</tool_use_error>"
 17|22:14|tool|Read|README.md
 [result]
   1→# alignment-hive
@@ -129,7 +129,7 @@
 27|22:15|assistant|"I can see it's listed in my available skills, but I can't read the file directly to see your style examples. Let me invoke it to see what it contains:"
 28|22:15|tool|Skill|skill="draft-tweets"
 [result]
-  Launching skill: draft-tweets
+  "Launching skill: draft-tweets"
 29|22:15|user
   Base directory for this skill: /Users/yoav/.claude/skills/draft-tweets
 

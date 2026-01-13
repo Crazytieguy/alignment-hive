@@ -24,7 +24,7 @@
 15|22:14|assistant|"Let me read your tweet writing skill to get a sense of your style, and review the current files."
 16|22:14|tool|Read|/Users/yoav/.claude/skills/draft-tweets.md
 [result]
-  <tool_use_error>File does not exist. Did you mean draft-tweets?</tool_use_error>
+  "<tool_use_error>File does not exist. Did you mean draft-tweets?</tool_use_error>"
 17|22:14|tool|Read|README.md
 [result]
   1→# alignment-hive
@@ -111,7 +111,7 @@
 27|22:15|assistant|"I can see it's listed in my available skills, but I can't read the file directly to see your style examples. Let me invoke it to see what it contains:"
 28|22:15|tool|Skill|skill="draft-tweets"
 [result]
-  Launching skill: draft-tweets
+  "Launching skill: draft-tweets"
 30|22:15|thinking|409words
 31|22:15|assistant|"Now I have a good sense of your style. Before I draft, one clarification:"
 32|22:15|tool|AskUserQuestion|questions=1|result="User has answered your questions: \"The hive-mind CLI dev info (bun commands, pre-commit hook, etc.) - where should it live?\"=\"plugins/hive-mind/README.md\". You can now continue with the user's answers in mind."

@@ -1,10 +1,3 @@
-/**
- * Word-level truncation utilities for adaptive output sizing.
- *
- * Core idea: find a uniform truncation length L such that sum(min(wi, L)) ≈ target.
- * Longer messages get truncated more, short messages shown in full.
- */
-
 const MIN_WORD_LIMIT = 6;
 
 export function countWords(text: string): number {
@@ -12,10 +5,6 @@ export function countWords(text: string): number {
   return text.split(/\s+/).filter((w) => w.length > 0).length;
 }
 
-/**
- * Truncate text to a word limit, optionally skipping initial words.
- * Preserves original whitespace.
- */
 export function truncateWords(
   text: string,
   skip: number,
@@ -61,10 +50,6 @@ export function truncateWords(
   };
 }
 
-/**
- * Compute a uniform word limit L such that sum(min(wi, L)) ≈ target.
- * Returns null if no truncation needed. Result clamped to MIN_WORD_LIMIT.
- */
 export function computeUniformLimit(wordCounts: Array<number>, targetTotal: number): number | null {
   if (wordCounts.length === 0) return null;
 

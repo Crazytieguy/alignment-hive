@@ -1,21 +1,4 @@
-/**
- * Centralized user-facing messages for hive-mind.
- *
- * Style guidelines:
- * - Friendly but concise - respect the user's time
- * - First line of hook messages should be informative (it's prepended in UI)
- * - Use "→" for continuation lines in multi-line hook messages
- * - No empty lines in hook messages (keeps output visually grouped in UI)
- * - Sentence case for messages, no trailing periods for short messages
- * - Use "couldn't" over "could not", "don't" over "do not" for friendliness
- * - Provide actionable next steps when possible
- */
-
 import { getShellConfig } from "./config";
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 export function getCliPath(): string {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
@@ -25,12 +8,7 @@ export function getCliPath(): string {
   return "~/.claude/plugins/hive-mind/cli.js";
 }
 
-/** Continuation prefix for multi-line hook messages */
 const CONT = "→";
-
-// ============================================================================
-// Hook messages (displayed via hookOutput, first line is prepended in UI)
-// ============================================================================
 
 export const hook = {
   notLoggedIn: (): string => {
@@ -66,10 +44,6 @@ export const hook = {
   },
 };
 
-// ============================================================================
-// CLI error messages
-// ============================================================================
-
 export const errors = {
   noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
   noSessionsIn: (dir: string): string => `No sessions in ${dir}`,
@@ -98,10 +72,6 @@ export const errors = {
     ].join("\n");
   },
 };
-
-// ============================================================================
-// CLI usage/help text
-// ============================================================================
 
 export const usage = {
   main: (commands: Array<{ name: string; description: string }>): string => {
@@ -210,10 +180,6 @@ export const usage = {
     ].join("\n");
   },
 };
-
-// ============================================================================
-// Login flow messages
-// ============================================================================
 
 export const login = {
   header: "Join the hive-mind shared knowledge base",

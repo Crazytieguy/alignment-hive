@@ -1,17 +1,8 @@
-/**
- * Secret detection and sanitization using patterns ported from gitleaks.
- * Detected secrets are replaced with [REDACTED:<rule-id>].
- *
- * Based on: https://github.com/gitleaks/gitleaks
- * See: https://lookingatcomputer.substack.com/p/regex-is-almost-all-you-need
- */
-
 import { ALL_KEYWORDS, SECRET_RULES } from "./secret-rules";
 
 const MAX_SANITIZE_DEPTH = 100;
 const MIN_SECRET_LENGTH = 8;
 
-// Keys whose values are structurally safe and never contain secrets
 const SAFE_KEYS = new Set([
   "uuid",
   "parentUuid",
@@ -51,11 +42,6 @@ export interface SecretMatch {
   entropy?: number;
 }
 
-/**
- * Calculate Shannon entropy of a string.
- * Higher entropy = more random = more likely to be a real secret.
- * Typical thresholds: 3.0-4.0 bits per character.
- */
 function shannonEntropy(data: string): number {
   if (!data) return 0;
 
@@ -125,7 +111,7 @@ export function detectSecrets(content: string): Array<SecretMatch> {
       });
 
       if (match[0].length === 0) {
-        rule.regex.lastIndex++; // Prevent infinite loops on zero-width matches
+        rule.regex.lastIndex++;
       }
     }
   }
@@ -147,9 +133,6 @@ export function detectSecrets(content: string): Array<SecretMatch> {
   return deduped;
 }
 
-/**
- * Sanitize a string by replacing detected secrets with [REDACTED:<rule-id>].
- */
 export function sanitizeString(content: string): string {
   if (content.length < MIN_SECRET_LENGTH) {
     return content;
@@ -170,7 +153,6 @@ export function sanitizeString(content: string): string {
   return result;
 }
 
-/** Recursively sanitize all strings in an object or array. */
 export function sanitizeDeep<T>(value: T, depth = 0): T {
   if (depth > MAX_SANITIZE_DEPTH) return value;
   if (value === null || value === undefined) return value;

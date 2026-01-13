@@ -20,7 +20,6 @@ import {
 
 const WORKOS_API_URL = "https://api.workos.com/user_management";
 
-// Zod schemas for WorkOS device auth responses
 const DeviceAuthResponseSchema = z.object({
   device_code: z.string(),
   user_code: z.string(),
@@ -112,8 +111,6 @@ async function deviceAuthFlow(): Promise<number> {
   });
 
   const data = await response.json();
-
-  // Check for error response
   const errorResult = ErrorResponseSchema.safeParse(data);
   if (errorResult.success && errorResult.data.error) {
     printError(msg.startFailed(errorResult.data.error));
@@ -123,7 +120,6 @@ async function deviceAuthFlow(): Promise<number> {
     return 1;
   }
 
-  // Validate device auth response
   const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
   if (!deviceAuthResult.success) {
     printError("Unexpected response from authentication server");
@@ -173,8 +169,6 @@ async function deviceAuthFlow(): Promise<number> {
     });
 
     const tokenData = await tokenResponse.json();
-
-    // Try to parse as successful auth response
     const authResult = AuthDataSchema.safeParse(tokenData);
     if (authResult.success) {
       await saveAuthData(authResult.data);
@@ -196,7 +190,6 @@ async function deviceAuthFlow(): Promise<number> {
       return 0;
     }
 
-    // Check for known error states
     const errorData = tokenData as {
       error?: string;
       error_description?: string;

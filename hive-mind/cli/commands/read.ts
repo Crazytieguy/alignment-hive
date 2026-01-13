@@ -152,7 +152,6 @@ export async function read(): Promise<number> {
     }
   }
 
-  // Full session read - use formatSession which handles everything internally
   if (entryNumber === null && rangeStart === null) {
     const output = formatSession(allEntries, {
       redact: true,
@@ -164,17 +163,13 @@ export async function read(): Promise<number> {
     return 0;
   }
 
-  // Parse into blocks for range/single entry reading
   const meta = createMinimalMeta(allEntries.length);
   const parsed = parseSession(meta, allEntries);
   const { blocks } = parsed;
-
-  // Get unique line numbers to find the max
   const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
   const maxLine = lineNumbers.at(-1) ?? 0;
 
   if (rangeStart !== null && rangeEnd !== null) {
-    // Range read
     const rangeBlocks = blocks.filter(
       (b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd
     );
@@ -193,7 +188,6 @@ export async function read(): Promise<number> {
     });
     console.log(output);
   } else if (entryNumber !== null) {
-    // Single entry with optional context
     const targetBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
     if (targetBlocks.length === 0) {
       printError(errors.entryNotFound(entryNumber, maxLine));
@@ -202,8 +196,6 @@ export async function read(): Promise<number> {
 
     const before = contextB ?? contextC ?? 0;
     const after = contextA ?? contextC ?? 0;
-
-    // Find line numbers in context range
     const minLine = Math.max(1, entryNumber - before);
     const maxContextLine = Math.min(maxLine, entryNumber + after);
 
@@ -211,7 +203,6 @@ export async function read(): Promise<number> {
       (b) => b.lineNumber >= minLine && b.lineNumber <= maxContextLine
     );
 
-    // Format with full content for target entry, redacted for context
     const output: Array<string> = [];
     let prevDate: string | undefined;
 
@@ -248,9 +239,6 @@ export async function read(): Promise<number> {
   return 0;
 }
 
-/**
- * Create a minimal meta object for parseSession.
- */
 function createMinimalMeta(entryCount: number): HiveMindMeta {
   return {
     _type: "hive-mind-meta" as const,
@@ -266,9 +254,6 @@ function createMinimalMeta(entryCount: number): HiveMindMeta {
 
 const DEFAULT_TARGET_WORDS = 2000;
 
-/**
- * Format a list of blocks with uniform word limit truncation.
- */
 function formatBlocks(
   blocks: Array<LogicalBlock>,
   options: {
@@ -334,9 +319,6 @@ function formatBlocks(
   return results.join(separator);
 }
 
-/**
- * Collect word counts from blocks for computing uniform truncation limit.
- */
 function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {
   const counts: Array<number> = [];
 

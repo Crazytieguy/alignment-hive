@@ -1,22 +1,3 @@
-/**
- * Grep command - search across sessions.
- *
- * Usage:
- *   grep <pattern>                    - search for pattern in all sessions
- *   grep -s <session> <pattern>       - search within a specific session
- *   grep -i <pattern>                 - case insensitive search
- *   grep -c <pattern>                 - count matches per session
- *   grep -l <pattern>                 - list matching session IDs only
- *   grep -m N <pattern>               - stop after N total matches
- *   grep -C N <pattern>               - show N words context around match
- *   grep --in <fields> <pattern>      - search only specified fields
- *
- * Pattern is a JavaScript regex (same as grep -E extended regex).
- * By default, searches user, assistant, thinking, tool:input, system, summary.
- * Use --in to specify which fields to search (e.g., --in tool:result).
- * Agent sessions excluded (same as index command).
- */
-
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
@@ -39,14 +20,10 @@ interface GrepOptions {
   sessionFilter: string | null;
 }
 
-
 function printUsage(): void {
   console.log(usage.grep());
 }
 
-/**
- * Compute minimal unique prefixes for session IDs.
- */
 function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> {
   const prefixes = new Map<string, string>();
   const minLen = 4;
@@ -70,10 +47,6 @@ function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> 
   return prefixes;
 }
 
-/**
- * Get searchable field values from a block.
- * Returns only the actual values (not keys/labels).
- */
 function getSearchableFieldValues(block: LogicalBlock, filter: GrepFieldFilter): Array<string> {
   const values: Array<string> = [];
 
@@ -84,10 +57,8 @@ function getSearchableFieldValues(block: LogicalBlock, filter: GrepFieldFilter):
   } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
     if (block.content) values.push(block.content);
   } else if (block.type === "tool") {
-    // Search only in VALUES, not keys
     const toolName = block.toolName;
     if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
-      // Extract just the values from toolInput
       for (const value of Object.values(block.toolInput)) {
         if (value !== null && value !== undefined) {
           values.push(String(value));
@@ -109,7 +80,6 @@ function getSearchableFieldValues(block: LogicalBlock, filter: GrepFieldFilter):
 export async function grep(): Promise<number> {
   const args = process.argv.slice(3);
 
-  // Check for help flag before -- separator
   const doubleDashIdx = args.indexOf("--");
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
   if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
@@ -122,7 +92,6 @@ export async function grep(): Promise<number> {
     return 1;
   }
 
-  // Parse options
   const options = parseGrepOptions(args);
   if (!options) return 1;
 
@@ -156,7 +125,6 @@ export async function grep(): Promise<number> {
     }
   }
 
-  // Collect all session IDs for minimal prefix computation
   const allSessionIds: Array<string> = [];
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
@@ -177,13 +145,11 @@ export async function grep(): Promise<number> {
     const path = join(sessionsDir, file);
     const session = await readExtractedSession(path);
 
-    // Skip agent sessions (same as index command)
     if (!session || session.meta.agentId) continue;
 
     const sessionId = session.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
 
-    // Parse session into logical blocks
     const parsed = parseSession(session.meta, session.entries);
 
     let sessionMatchCount = 0;
@@ -191,11 +157,9 @@ export async function grep(): Promise<number> {
     for (const block of parsed.blocks) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
-      // Get searchable field values for this block
       const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
       if (fieldValues.length === 0) continue;
 
-      // Check if any field value matches the pattern
       const hasMatch = fieldValues.some((value) => options.pattern.test(value));
       if (!hasMatch) continue;
 
@@ -203,7 +167,6 @@ export async function grep(): Promise<number> {
       sessionMatchCount++;
 
       if (!options.countOnly && !options.listOnly) {
-        // Format with match context - formatBlock finds matches using the pattern
         const formatted = formatBlock(block, {
           sessionPrefix,
           cwd,
@@ -226,7 +189,6 @@ export async function grep(): Promise<number> {
     }
   }
 
-  // Output summary for count/list modes
   if (options.countOnly) {
     for (const { sessionId, count } of sessionCounts) {
       console.log(`${sessionId}:${count}`);
@@ -277,7 +239,6 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
   const fieldFilter = new GrepFieldFilter(searchIn);
 
-  // Extract pattern (first non-flag argument)
   const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
   const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
   let patternStr: string | null = null;

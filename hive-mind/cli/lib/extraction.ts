@@ -170,7 +170,6 @@ async function findRawSessions(rawDir: string) {
     const sessions: Array<{ path: string; agentId?: string }> = [];
 
     for (const f of files) {
-      // Main session files and legacy standalone agent files
       if (f.endsWith(".jsonl")) {
         if (f.startsWith("agent-")) {
           sessions.push({ path: join(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
@@ -180,8 +179,6 @@ async function findRawSessions(rawDir: string) {
         continue;
       }
 
-      // Check for subagents directory (Claude Code 2.1.0+ format)
-      // Structure: <session-id>/subagents/agent-<id>.jsonl
       const subagentsDir = join(rawDir, f, "subagents");
       try {
         const subagentFiles = await readdir(subagentsDir);
@@ -193,9 +190,7 @@ async function findRawSessions(rawDir: string) {
             });
           }
         }
-      } catch {
-        // No subagents directory for this session, that's fine
-      }
+      } catch {}
     }
     return sessions;
   } catch {

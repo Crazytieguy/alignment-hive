@@ -8,11 +8,7 @@ export const WORKOS_CLIENT_ID =
 
 export const AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 export const AUTH_FILE = join(AUTH_DIR, "auth.json");
-/**
- * Get or create a persistent checkout ID for this project checkout.
- * Project-scoped and gitignored - each worktree gets its own ID.
- * @param hiveMindDir - The .claude/hive-mind directory for the project
- */
+
 export async function getCheckoutId(hiveMindDir: string) {
   const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
@@ -22,7 +18,6 @@ export async function getCheckoutId(hiveMindDir: string) {
     const id = randomUUID();
     await mkdir(hiveMindDir, { recursive: true });
     await writeFile(checkoutIdFile, id);
-    // Ensure checkout-id is gitignored (worktree-specific)
     const gitignorePath = join(hiveMindDir, ".gitignore");
     try {
       const existing = await readFile(gitignorePath, "utf-8");

@@ -1,16 +1,3 @@
-/**
- * Field filtering for read and grep commands.
- *
- * Field hierarchy:
- *   user, assistant, thinking, system, summary (entry types)
- *   tool (all tools)
- *   tool:<name> (specific tool, e.g., tool:Bash)
- *   tool:<name>:input (tool input parameters)
- *   tool:<name>:result (tool output/result)
- *
- * More specific selectors override less specific ones.
- */
-
 export function parseFieldList(input: string): Array<string> {
   return input
     .split(',')

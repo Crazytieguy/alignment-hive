@@ -14981,9 +14981,7 @@ function truncateContent(text, wordLimit, skipWords) {
 function formatTruncatedBlock(content, prefix, suffix) {
   const indented = indent(content, 2);
   const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
-  if (!suffix)
-    return prefixed;
-  return prefixed + suffix;
+  return suffix ? prefixed + suffix : prefixed;
 }
 function formatWordCount(text) {
   const count = countWords(text);
@@ -15074,7 +15072,8 @@ function formatBlock(block, options = {}) {
         parts.push(formatWordCount(block.content));
         return parts.join("|");
       }
-      return formatBlockContent(parts.join("|"), block.content, truncation);
+      const thinkingTruncation = showFull ? { type: "full" } : truncation ?? { type: "full" };
+      return formatBlockContent(parts.join("|"), block.content, thinkingTruncation);
     }
     case "tool":
       return formatToolBlock(block, parts, { cwd, truncation, fieldFilter });
@@ -15119,9 +15118,8 @@ ${formatTruncatedBlock(truncated, prefix, suffix)}`;
       if (!output)
         return null;
       if (!output.includes(`
-`)) {
+`))
         return `${header}| ${output}`;
-      }
       return `${header}
 ${indent(output, 2)}`;
     }
@@ -15209,8 +15207,6 @@ function formatToolBlock(block, headerParts, options) {
   const { cwd, truncation, fieldFilter } = options;
   const parts = [...headerParts, "tool", block.toolName];
   const redact = truncation?.type !== "full";
-  const wordLimit = truncation?.type === "wordLimit" ? truncation.limit : undefined;
-  const skipWords = truncation?.type === "wordLimit" ? truncation.skip : undefined;
   const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:result`) : false;
   const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:input`) : false;
   const showFullResult = fieldFilter?.shouldShow(`tool:${block.toolName}:result`) ?? false;
@@ -15221,35 +15217,27 @@ function formatToolBlock(block, headerParts, options) {
     result: resultInfo,
     cwd,
     redact,
-    wordLimit,
-    skipWords,
+    truncation,
     hideInput,
     hideResult
   });
   parts.push(...headerParams);
-  if (truncation?.type === "matchContext") {
-    const fullContent = formatToolFullContent(block, multilineParams, resultInfo, suppressResult);
-    const matchPositions = findMatchPositions(fullContent, truncation.pattern);
-    const contextOutput = formatMatchesWithContext(fullContent, matchPositions, truncation.contextWords);
-    if (!contextOutput.includes(`
-`)) {
-      return `${parts.join("|")}| ${contextOutput}`;
-    }
-    return `${parts.join("|")}
-${indent(contextOutput, 2)}`;
-  }
   if (redact) {
     if (resultInfo && !suppressResult) {
       if (hideResult) {
         parts.push(`result=${formatFieldValue(resultInfo.content)}`);
-      } else if (showFullResult && wordLimit !== undefined) {
-        const { content: truncated, prefix, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
-        if (!isEmpty) {
+      } else if (showFullResult && truncation) {
+        const formatted = formatToolText(resultInfo.content, truncation);
+        if (!formatted.isEmpty) {
           const bodyLines2 = formatMultilineParams(multilineParams);
           bodyLines2.push("[result]");
-          const indentedResult = indent(truncated, 2);
-          const prefixed = prefix ? `  ${prefix}${indentedResult.slice(2)}` : indentedResult;
-          bodyLines2.push(suffix ? prefixed + suffix : prefixed);
+          if (formatted.isMultiline) {
+            const indentedResult = indent(formatted.blockContent, 2);
+            const prefixed = formatted.blockPrefix ? `  ${formatted.blockPrefix}${indentedResult.slice(2)}` : indentedResult;
+            bodyLines2.push(formatted.blockSuffix ? prefixed + formatted.blockSuffix : prefixed);
+          } else {
+            bodyLines2.push(`  ${formatted.inline}`);
+          }
           const header3 = parts.join("|");
           return bodyLines2.length > 0 ? `${header3}
 ${bodyLines2.join(`
@@ -15279,21 +15267,6 @@ ${bodyLines2.join(`
   return `${header}
 ${bodyLines.join(`
 `)}`;
-}
-function formatToolFullContent(block, multilineParams, resultInfo, suppressResult) {
-  const parts = [];
-  for (const param of multilineParams) {
-    parts.push(`${param.name}="${param.content}"`);
-  }
-  for (const [key, value] of Object.entries(block.toolInput)) {
-    if (value !== null && value !== undefined) {
-      parts.push(`${key}="${String(value)}"`);
-    }
-  }
-  if (resultInfo && !suppressResult) {
-    parts.push(`\u2192 ${resultInfo.content}`);
-  }
-  return parts.join(" ");
 }
 function formatSession(entries, options = {}) {
   const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
@@ -15419,9 +15392,9 @@ function buildUuidMapFromBlocks(blocks) {
   }
   return map2;
 }
-function formatToolText(text, wordLimit, skipWords) {
-  if (wordLimit !== undefined) {
-    const { content, prefix, suffix, isEmpty } = truncateContent(text, wordLimit, skipWords ?? 0);
+function formatToolText(text, truncation) {
+  if (truncation?.type === "wordLimit") {
+    const { content, prefix, suffix, isEmpty } = truncateContent(text, truncation.limit, truncation.skip ?? 0);
     if (isEmpty) {
       return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockPrefix: "", blockSuffix: "" };
     }
@@ -15436,6 +15409,23 @@ function formatToolText(text, wordLimit, skipWords) {
       blockContent: content,
       blockPrefix: prefix,
       blockSuffix: suffix
+    };
+  }
+  if (truncation?.type === "matchContext") {
+    const matchPositions = findMatchPositions(text, truncation.pattern);
+    const contextOutput = formatMatchesWithContext(text, matchPositions, truncation.contextWords);
+    if (!contextOutput) {
+      return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockPrefix: "", blockSuffix: "" };
+    }
+    const isMultiline2 = contextOutput.includes(`
+`);
+    return {
+      isEmpty: false,
+      isMultiline: isMultiline2,
+      inline: contextOutput,
+      blockContent: contextOutput,
+      blockPrefix: "",
+      blockSuffix: ""
     };
   }
   const firstLine = truncateFirstLine(text);
@@ -15532,8 +15522,8 @@ function formatWriteTool({ input, cwd, redact }) {
     multilineParams: []
   };
 }
-function addFormattedParam(headerParams, multilineParams, name, text, wordLimit, skipWords) {
-  const formatted = formatToolText(text, wordLimit, skipWords);
+function addFormattedParam(headerParams, multilineParams, name, text, truncation) {
+  const formatted = formatToolText(text, truncation);
   if (formatted.isEmpty)
     return;
   if (formatted.isMultiline) {
@@ -15547,7 +15537,7 @@ function addFormattedParam(headerParams, multilineParams, name, text, wordLimit,
     headerParams.push(`${name}=${formatted.inline}`);
   }
 }
-function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput, hideResult }) {
+function formatBashTool({ input, result, redact, truncation, hideInput, hideResult }) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const headerParams = [];
@@ -15555,27 +15545,27 @@ function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput
   if (hideInput) {
     headerParams.push(`command=${formatFieldValue(command)}`);
   } else {
-    addFormattedParam(headerParams, multilineParams, "command", command, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, "command", command, truncation);
   }
   if (desc) {
-    addFormattedParam(headerParams, multilineParams, "description", desc, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, "description", desc, truncation);
   }
   if (redact && result) {
     if (hideResult) {
       headerParams.push(`result=${formatFieldValue(result.content)}`);
     } else {
-      addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+      addFormattedParam(headerParams, multilineParams, "result", result.content, truncation);
     }
     return { headerParams, multilineParams, suppressResult: true };
   }
   return { headerParams, multilineParams };
 }
-function formatGrepTool({ input, cwd, wordLimit, skipWords }) {
+function formatGrepTool({ input, cwd, truncation }) {
   const pattern = String(input.pattern || "");
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "pattern", pattern, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "pattern", pattern, truncation);
   if (path) {
     headerParams.push(path);
   }
@@ -15583,15 +15573,15 @@ function formatGrepTool({ input, cwd, wordLimit, skipWords }) {
     headerParams.push(`output_mode=${input.output_mode}`);
   }
   if (input.glob) {
-    addFormattedParam(headerParams, multilineParams, "glob", String(input.glob), wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, "glob", String(input.glob), truncation);
   }
   return { headerParams, multilineParams };
 }
-function formatGlobTool({ input, result, wordLimit, skipWords }) {
+function formatGlobTool({ input, result, truncation }) {
   const pattern = String(input.pattern || "");
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "pattern", pattern, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "pattern", pattern, truncation);
   if (result) {
     const files = result.content.split(`
 `).filter((l) => l.trim()).length;
@@ -15599,7 +15589,7 @@ function formatGlobTool({ input, result, wordLimit, skipWords }) {
   }
   return { headerParams, multilineParams, suppressResult: true };
 }
-function formatTaskTool({ input, result, redact, wordLimit, skipWords }) {
+function formatTaskTool({ input, result, redact, truncation }) {
   const desc = String(input.description || "");
   const prompt = String(input.prompt || "");
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
@@ -15611,7 +15601,7 @@ function formatTaskTool({ input, result, redact, wordLimit, skipWords }) {
   if (result?.agentId) {
     headerParams.push(`session=agent-${result.agentId}`);
   }
-  addFormattedParam(headerParams, multilineParams, "description", desc, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "description", desc, truncation);
   if (redact) {
     headerParams.push(`prompt=${formatFieldValue(prompt)}`);
     return { headerParams, multilineParams };
@@ -15643,7 +15633,7 @@ function formatTodoWriteTool({ input, redact }) {
 `) }] : []
   };
 }
-function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords, hideResult }) {
+function formatAskUserQuestionTool({ input, result, redact, truncation, hideResult }) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams = [`questions=${questions.length}`];
   const multilineParams = [];
@@ -15652,7 +15642,7 @@ function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords
       if (hideResult) {
         headerParams.push(`result=${formatWordCount(result.content)}`);
       } else {
-        addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+        addFormattedParam(headerParams, multilineParams, "result", result.content, truncation);
       }
     }
     return { headerParams, multilineParams, suppressResult: true };
@@ -15698,21 +15688,21 @@ function formatWebFetchTool({ input }) {
     multilineParams: []
   };
 }
-function formatWebSearchTool({ input, wordLimit, skipWords }) {
+function formatWebSearchTool({ input, truncation }) {
   const query = String(input.query || "");
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "query", query, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "query", query, truncation);
   return { headerParams, multilineParams };
 }
-function formatGenericTool({ input, redact, wordLimit, skipWords }) {
+function formatGenericTool({ input, redact, truncation }) {
   const headerParams = [];
   const multilineParams = [];
   for (const [key, value] of Object.entries(input)) {
     if (value === null || value === undefined)
       continue;
     const str = typeof value === "string" ? value : JSON.stringify(value);
-    addFormattedParam(headerParams, multilineParams, key, str, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, key, str, truncation);
     if (redact && headerParams.length >= 3)
       break;
   }

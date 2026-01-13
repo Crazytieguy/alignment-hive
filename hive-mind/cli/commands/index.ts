@@ -1,9 +1,3 @@
-/**
- * Index command - list extracted sessions with statistics.
- * Agent sessions excluded - explore via Task tool calls in parent sessions.
- * Statistics are computed on-the-fly (not stored in metadata).
- */
-
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
