@@ -427,57 +427,37 @@ function formatToolBlock(
   return `${header}\n${bodyLines.join('\n')}`;
 }
 
-export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
+export interface BlocksFormatOptions {
+  redact?: boolean;
+  targetWords?: number;
+  skipWords?: number;
+  fieldFilter?: ReadFieldFilter;
+  cwd?: string;
+}
 
-  const meta = {
-    _type: 'hive-mind-meta' as const,
-    version: '0.1' as const,
-    sessionId: 'unknown',
-    checkoutId: 'unknown',
-    extractedAt: new Date().toISOString(),
-    rawMtime: new Date().toISOString(),
-    rawPath: 'unknown',
-    messageCount: entries.length,
-  };
-
-  const parsed = parseSession(meta, entries);
+export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatOptions = {}): string {
+  const {
+    redact = false,
+    targetWords = DEFAULT_TARGET_WORDS,
+    skipWords = 0,
+    fieldFilter,
+  } = options;
 
   let wordLimit: number | undefined;
   if (redact) {
-    const wordCounts = collectWordCountsFromBlocks(parsed.blocks, skipWords);
+    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
     wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
   }
 
-  let model: string | undefined;
-  let gitBranch: string | undefined;
-  for (const block of parsed.blocks) {
-    if (!model && block.type === 'assistant' && 'model' in block && block.model) {
-      model = block.model;
-    }
-    if (!gitBranch && block.type === 'user' && 'gitBranch' in block && block.gitBranch) {
-      gitBranch = block.gitBranch;
-    }
-    if (model && gitBranch) break;
-  }
-
   const results: Array<string> = [];
-
-  if (redact) {
-    const headerParts: Array<string> = ['#'];
-    if (model) headerParts.push(`model=${model}`);
-    if (gitBranch) headerParts.push(`branch=${gitBranch}`);
-    if (headerParts.length > 1) {
-      results.push(headerParts.join(' '));
-    }
-  }
-
   let prevUuid: string | undefined;
   let prevDate: string | undefined;
   let prevLineNumber = 0;
-  let cwd: string | undefined;
+  let cwd = options.cwd;
 
-  for (const block of parsed.blocks) {
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+
     if (block.type === 'user' && 'cwd' in block && block.cwd) {
       cwd = block.cwd;
     }
@@ -501,7 +481,7 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
 
     const timestamp = 'timestamp' in block ? block.timestamp : undefined;
     const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = block.lineNumber === 1 && prevLineNumber === 0;
+    const isFirst = i === 0;
 
     const formatted = formatBlock(block, {
       showTimestamp: true,
@@ -532,6 +512,55 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
 
   const separator = redact ? '\n' : '\n\n';
   return results.join(separator);
+}
+
+export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
+
+  const meta = {
+    _type: 'hive-mind-meta' as const,
+    version: '0.1' as const,
+    sessionId: 'unknown',
+    checkoutId: 'unknown',
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: 'unknown',
+    messageCount: entries.length,
+  };
+
+  const parsed = parseSession(meta, entries);
+
+  // Extract header info
+  let model: string | undefined;
+  let gitBranch: string | undefined;
+  for (const block of parsed.blocks) {
+    if (!model && block.type === 'assistant' && 'model' in block && block.model) {
+      model = block.model;
+    }
+    if (!gitBranch && block.type === 'user' && 'gitBranch' in block && block.gitBranch) {
+      gitBranch = block.gitBranch;
+    }
+    if (model && gitBranch) break;
+  }
+
+  const headerParts: Array<string> = [];
+  if (redact) {
+    const parts = ['#'];
+    if (model) parts.push(`model=${model}`);
+    if (gitBranch) parts.push(`branch=${gitBranch}`);
+    if (parts.length > 1) {
+      headerParts.push(parts.join(' '));
+    }
+  }
+
+  const blocksOutput = formatBlocks(parsed.blocks, { redact, targetWords, skipWords, fieldFilter });
+
+  if (headerParts.length > 0) {
+    const separator = redact ? '\n' : '\n\n';
+    return headerParts.join(separator) + separator + blocksOutput;
+  }
+
+  return blocksOutput;
 }
 
 function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {

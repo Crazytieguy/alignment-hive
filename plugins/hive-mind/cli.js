@@ -14899,7 +14899,9 @@ function parseSession(meta3, entries) {
               lineNumber: entryLineNumber,
               parentLineNumber: undefined,
               content: contentBlock.thinking,
-              timestamp: entry.timestamp
+              timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid
             });
           } else if (contentBlock.type === "tool_use" && "input" in contentBlock) {
             const resultInfo = findToolResult(entries, contentBlock.id);
@@ -14912,7 +14914,9 @@ function parseSession(meta3, entries) {
               toolResult: resultInfo?.content,
               toolUseId: contentBlock.id,
               agentId: resultInfo?.agentId,
-              timestamp: entry.timestamp
+              timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid
             });
           }
         }
@@ -15302,52 +15306,25 @@ ${bodyLines2.join(`
 ${bodyLines.join(`
 `)}`;
 }
-function formatSession(entries, options = {}) {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
-  const meta3 = {
-    _type: "hive-mind-meta",
-    version: "0.1",
-    sessionId: "unknown",
-    checkoutId: "unknown",
-    extractedAt: new Date().toISOString(),
-    rawMtime: new Date().toISOString(),
-    rawPath: "unknown",
-    messageCount: entries.length
-  };
-  const parsed = parseSession(meta3, entries);
+function formatBlocks(blocks, options = {}) {
+  const {
+    redact = false,
+    targetWords = DEFAULT_TARGET_WORDS,
+    skipWords = 0,
+    fieldFilter
+  } = options;
   let wordLimit;
   if (redact) {
-    const wordCounts = collectWordCountsFromBlocks(parsed.blocks, skipWords);
+    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
     wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
   }
-  let model;
-  let gitBranch;
-  for (const block of parsed.blocks) {
-    if (!model && block.type === "assistant" && "model" in block && block.model) {
-      model = block.model;
-    }
-    if (!gitBranch && block.type === "user" && "gitBranch" in block && block.gitBranch) {
-      gitBranch = block.gitBranch;
-    }
-    if (model && gitBranch)
-      break;
-  }
   const results = [];
-  if (redact) {
-    const headerParts = ["#"];
-    if (model)
-      headerParts.push(`model=${model}`);
-    if (gitBranch)
-      headerParts.push(`branch=${gitBranch}`);
-    if (headerParts.length > 1) {
-      results.push(headerParts.join(" "));
-    }
-  }
   let prevUuid;
   let prevDate;
   let prevLineNumber = 0;
-  let cwd;
-  for (const block of parsed.blocks) {
+  let cwd = options.cwd;
+  for (let i = 0;i < blocks.length; i++) {
+    const block = blocks[i];
     if (block.type === "user" && "cwd" in block && block.cwd) {
       cwd = block.cwd;
     }
@@ -15364,7 +15341,7 @@ function formatSession(entries, options = {}) {
     const truncation = redact ? wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "summary" } : { type: "full" };
     const timestamp = "timestamp" in block ? block.timestamp : undefined;
     const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = block.lineNumber === 1 && prevLineNumber === 0;
+    const isFirst = i === 0;
     const formatted = formatBlock(block, {
       showTimestamp: true,
       prevDate,
@@ -15393,6 +15370,52 @@ function formatSession(entries, options = {}) {
 
 `;
   return results.join(separator);
+}
+function formatSession(entries, options = {}) {
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
+  const meta3 = {
+    _type: "hive-mind-meta",
+    version: "0.1",
+    sessionId: "unknown",
+    checkoutId: "unknown",
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: "unknown",
+    messageCount: entries.length
+  };
+  const parsed = parseSession(meta3, entries);
+  let model;
+  let gitBranch;
+  for (const block of parsed.blocks) {
+    if (!model && block.type === "assistant" && "model" in block && block.model) {
+      model = block.model;
+    }
+    if (!gitBranch && block.type === "user" && "gitBranch" in block && block.gitBranch) {
+      gitBranch = block.gitBranch;
+    }
+    if (model && gitBranch)
+      break;
+  }
+  const headerParts = [];
+  if (redact) {
+    const parts = ["#"];
+    if (model)
+      parts.push(`model=${model}`);
+    if (gitBranch)
+      parts.push(`branch=${gitBranch}`);
+    if (parts.length > 1) {
+      headerParts.push(parts.join(" "));
+    }
+  }
+  const blocksOutput = formatBlocks(parsed.blocks, { redact, targetWords, skipWords, fieldFilter });
+  if (headerParts.length > 0) {
+    const separator = redact ? `
+` : `
+
+`;
+    return headerParts.join(separator) + separator + blocksOutput;
+  }
+  return blocksOutput;
 }
 function collectWordCountsFromBlocks(blocks, skipWords) {
   const counts = [];
@@ -16072,6 +16095,7 @@ async function grep() {
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
     const parsed = parseSession(session.meta, session.entries);
     let sessionMatchCount = 0;
+    let prevUuid;
     for (const block of parsed.blocks) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches)
         break;
@@ -16084,8 +16108,16 @@ async function grep() {
       totalMatches++;
       sessionMatchCount++;
       if (!options.countOnly && !options.listOnly) {
-        const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
-        const parentIndicator = parentLineNumber === null ? "start" : parentLineNumber;
+        let parentIndicator;
+        if (prevUuid) {
+          const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
+          const parentUuid = "parentUuid" in block ? block.parentUuid : undefined;
+          if (parentLineNumber === null) {
+            parentIndicator = "start";
+          } else if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+            parentIndicator = parentLineNumber;
+          }
+        }
         const formatted = formatBlock(block, {
           sessionPrefix,
           cwd,
@@ -16100,6 +16132,9 @@ async function grep() {
           console.log(formatted);
         }
       }
+      const blockUuid = "uuid" in block ? block.uuid : undefined;
+      if (blockUuid)
+        prevUuid = blockUuid;
     }
     if (sessionMatchCount > 0) {
       matchingSessions.push(sessionPrefix);
@@ -17104,72 +17139,6 @@ function createMinimalMeta(entryCount) {
     rawPath: "unknown",
     messageCount: entryCount
   };
-}
-var DEFAULT_TARGET_WORDS2 = 2000;
-function formatBlocks(blocks, options) {
-  const {
-    redact = false,
-    targetWords = DEFAULT_TARGET_WORDS2,
-    skipWords = 0,
-    fieldFilter,
-    cwd
-  } = options;
-  let wordLimit;
-  if (redact) {
-    const wordCounts = collectWordCountsFromBlocks2(blocks, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-  const results = [];
-  let prevDate;
-  for (let i = 0;i < blocks.length; i++) {
-    const block = blocks[i];
-    const timestamp = "timestamp" in block ? block.timestamp : undefined;
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = i === 0;
-    const truncation = redact ? wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "summary" } : { type: "full" };
-    const formatted = formatBlock(block, {
-      showTimestamp: true,
-      prevDate,
-      isFirst,
-      cwd,
-      truncation,
-      fieldFilter
-    });
-    if (formatted) {
-      results.push(formatted);
-    }
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-  }
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-  const separator = redact ? `
-` : `
-
-`;
-  return results.join(separator);
-}
-function collectWordCountsFromBlocks2(blocks, skipWords) {
-  const counts = [];
-  function addCount(text) {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-  for (const block of blocks) {
-    if (block.type === "user" || block.type === "assistant" || block.type === "system") {
-      addCount(block.content);
-    } else if (block.type === "thinking") {
-      addCount(block.content);
-    } else if (block.type === "summary") {
-      addCount(block.content);
-    }
-  }
-  return counts;
 }
 
 // cli/commands/session-start.ts

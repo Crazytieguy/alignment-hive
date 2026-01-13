@@ -2,14 +2,12 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
 import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
-import { formatBlock, formatSession } from "../lib/format";
+import { formatBlock, formatBlocks, formatSession } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
 import { parseKnownEntry } from "../lib/schemas";
-import { computeUniformLimit, countWords } from "../lib/truncation";
 import type { TruncationStrategy } from "../lib/format";
-import type { LogicalBlock } from "../lib/parse";
 import type { HiveMindMeta, KnownEntry } from "../lib/schemas";
 
 function printUsage(): void {
@@ -252,93 +250,3 @@ function createMinimalMeta(entryCount: number): HiveMindMeta {
   };
 }
 
-const DEFAULT_TARGET_WORDS = 2000;
-
-function formatBlocks(
-  blocks: Array<LogicalBlock>,
-  options: {
-    redact?: boolean;
-    targetWords?: number;
-    skipWords?: number;
-    fieldFilter?: ReadFieldFilter;
-    cwd?: string;
-  }
-): string {
-  const {
-    redact = false,
-    targetWords = DEFAULT_TARGET_WORDS,
-    skipWords = 0,
-    fieldFilter,
-    cwd,
-  } = options;
-
-  let wordLimit: number | undefined;
-  if (redact) {
-    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-
-  const results: Array<string> = [];
-  let prevDate: string | undefined;
-
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    const timestamp = "timestamp" in block ? block.timestamp : undefined;
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = i === 0;
-
-    const truncation: TruncationStrategy | undefined = redact
-      ? wordLimit !== undefined
-        ? { type: "wordLimit", limit: wordLimit, skip: skipWords }
-        : { type: "summary" }
-      : { type: "full" };
-
-    const formatted = formatBlock(block, {
-      showTimestamp: true,
-      prevDate,
-      isFirst,
-      cwd,
-      truncation,
-      fieldFilter,
-    });
-
-    if (formatted) {
-      results.push(formatted);
-    }
-
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-  }
-
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-
-  const separator = redact ? "\n" : "\n\n";
-  return results.join(separator);
-}
-
-function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {
-  const counts: Array<number> = [];
-
-  function addCount(text: string): void {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-
-  for (const block of blocks) {
-    if (block.type === "user" || block.type === "assistant" || block.type === "system") {
-      addCount(block.content);
-    } else if (block.type === "thinking") {
-      addCount(block.content);
-    } else if (block.type === "summary") {
-      addCount(block.content);
-    }
-  }
-
-  return counts;
-}

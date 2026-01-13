@@ -153,6 +153,7 @@ export async function grep(): Promise<number> {
     const parsed = parseSession(session.meta, session.entries);
 
     let sessionMatchCount = 0;
+    let prevUuid: string | undefined;
 
     for (const block of parsed.blocks) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
@@ -167,9 +168,16 @@ export async function grep(): Promise<number> {
       sessionMatchCount++;
 
       if (!options.countOnly && !options.listOnly) {
-        const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
-        const parentIndicator =
-          parentLineNumber === null ? "start" : parentLineNumber;
+        let parentIndicator: string | number | undefined;
+        if (prevUuid) {
+          const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
+          const parentUuid = "parentUuid" in block ? block.parentUuid : undefined;
+          if (parentLineNumber === null) {
+            parentIndicator = "start";
+          } else if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+            parentIndicator = parentLineNumber;
+          }
+        }
 
         const formatted = formatBlock(block, {
           sessionPrefix,
@@ -186,6 +194,9 @@ export async function grep(): Promise<number> {
           console.log(formatted);
         }
       }
+
+      const blockUuid = "uuid" in block ? block.uuid : undefined;
+      if (blockUuid) prevUuid = blockUuid;
     }
 
     if (sessionMatchCount > 0) {

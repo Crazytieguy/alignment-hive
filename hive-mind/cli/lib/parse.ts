@@ -180,6 +180,8 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
               parentLineNumber: undefined as number | null | undefined,
               content: contentBlock.thinking,
               timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid,
             });
           } else if (contentBlock.type === "tool_use" && "input" in contentBlock) {
             const resultInfo = findToolResult(entries, contentBlock.id);
@@ -193,6 +195,8 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
               toolUseId: contentBlock.id,
               agentId: resultInfo?.agentId,
               timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid,
             });
           }
         }
