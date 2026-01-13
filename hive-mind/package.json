@@ -15,8 +15,7 @@
     "lint": "tsc && tsc --noEmit -p cli/tsconfig.json && eslint . --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "test": "bun test",
-    "cli:build": "bun build cli/cli.ts --outfile=../plugins/hive-mind/cli.js --target=bun",
-    "cli:dev": "bun cli/cli.ts"
+    "cli:build": "bun build cli/cli.ts --outfile=../plugins/hive-mind/cli.js --target=bun"
   },
   "dependencies": {
     "@convex-dev/react-query": "^0.0.0-alpha.11",

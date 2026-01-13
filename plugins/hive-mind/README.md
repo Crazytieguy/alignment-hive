@@ -18,7 +18,11 @@ bun run dev          # Run web app + Convex dev server
 bun run lint         # Typecheck + ESLint
 bun run test         # Run tests
 bun run cli:build    # Bundle CLI to plugins/hive-mind/cli.js
-bun run cli:dev <cmd> # Run CLI directly without bundling
+```
+
+To run CLI commands during development (from project root):
+```bash
+bun hive-mind/cli/cli.ts <command>
 ```
 
 ### Git hooks
@@ -33,9 +37,9 @@ User-facing CLI strings are centralized in `cli/lib/messages.ts` for easy review
 
 ### Regenerating extracted sessions
 
-After schema or extraction changes, delete cached sessions and re-run extraction:
+After schema or extraction changes, delete cached sessions and re-run extraction (from project root):
 
 ```bash
 rm -rf .claude/hive-mind/sessions/*.jsonl
-CWD=$(pwd) bun cli/cli.ts session-start
+bun hive-mind/cli/cli.ts session-start
 ```
