@@ -11,22 +11,23 @@ var __export = (target, all) => {
     });
 };
 
-// cli/commands/grep.ts
-import { readdir as readdir2 } from "fs/promises";
-import { join as join3 } from "path";
+// cli/commands/exclude.ts
+import { readFile as readFile3, readdir as readdir3, writeFile as writeFile3 } from "fs/promises";
+import { join as join4 } from "path";
 
 // cli/lib/extraction.ts
 import { createReadStream } from "fs";
 import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
 import { homedir as homedir2 } from "os";
-import { basename, dirname, join as join2 } from "path";
+import { basename as basename2, dirname, join as join2 } from "path";
 
 // cli/lib/config.ts
+import { execSync } from "child_process";
 import { randomUUID } from "crypto";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
 var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 var AUTH_FILE = join(AUTH_DIR, "auth.json");
@@ -69,6 +70,19 @@ function getShellConfig() {
     };
   }
   return { file: "~/.profile", sourceCmd: "source ~/.profile" };
+}
+function getCanonicalProjectName(cwd) {
+  try {
+    const remoteUrl = execSync("git remote get-url origin", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    }).trim();
+    const canonical = remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
+    return canonical;
+  } catch {
+    return basename(cwd);
+  }
 }
 
 // cli/lib/secret-rules.ts
@@ -14377,7 +14391,8 @@ var HiveMindMetaSchema = exports_external.object({
   rawPath: exports_external.string(),
   agentId: exports_external.string().optional(),
   parentSessionId: exports_external.string().optional(),
-  schemaErrors: exports_external.array(exports_external.string()).optional()
+  schemaErrors: exports_external.array(exports_external.string()).optional(),
+  excluded: exports_external.boolean().optional()
 });
 
 // cli/lib/extraction.ts
@@ -14436,7 +14451,7 @@ async function extractSession(options) {
   const meta3 = {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
-    sessionId: basename(rawPath, ".jsonl"),
+    sessionId: basename2(rawPath, ".jsonl"),
     checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime: rawStat.mtime.toISOString(),
@@ -14561,23 +14576,501 @@ async function extractAllSessions(cwd, transcriptPath) {
   const schemaErrors = [];
   for (const session of rawSessions) {
     const { path: rawPath, agentId } = session;
-    const extractedPath = join2(extractedDir, basename(rawPath));
+    const extractedPath = join2(extractedDir, basename2(rawPath));
     if (await needsExtraction(rawPath, extractedPath)) {
       try {
         const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
         if (result) {
-          extracted++;
+          if (!agentId) {
+            extracted++;
+          }
           if (result.schemaErrors.length > 0) {
-            schemaErrors.push({ sessionId: basename(rawPath, ".jsonl"), errors: result.schemaErrors });
+            schemaErrors.push({ sessionId: basename2(rawPath, ".jsonl"), errors: result.schemaErrors });
           }
         }
       } catch (error48) {
-        console.error(`Failed to extract ${basename(rawPath, ".jsonl")}:`, error48);
+        console.error(`Failed to extract ${basename2(rawPath, ".jsonl")}:`, error48);
       }
     }
   }
   return { extracted, schemaErrors };
 }
+
+// cli/lib/messages.ts
+function getCliPath() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (pluginRoot) {
+    return `${pluginRoot}/cli.js`;
+  }
+  return "~/.claude/plugins/hive-mind/cli.js";
+}
+function getCliCommand(hasAlias) {
+  if (hasAlias) {
+    return "hive-mind";
+  }
+  return `bun ${getCliPath()}`;
+}
+var hook = {
+  notLoggedIn: () => {
+    const cliPath = getCliPath();
+    return `To connect to hive-mind: bun ${cliPath} setup`;
+  },
+  loggedIn: (displayName) => {
+    return `Connected as ${displayName}`;
+  },
+  extracted: (count) => {
+    return `Extracted ${count} session${count === 1 ? "" : "s"}`;
+  },
+  schemaErrors: (errorCount, sessionCount, errors3) => {
+    const unique = [...new Set(errors3)];
+    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
+  },
+  extractionFailed: (error48) => {
+    return `Extraction failed: ${error48}`;
+  },
+  bunNotInstalled: () => {
+    return "To use hive-mind: curl -fsSL https://bun.sh/install | bash";
+  },
+  pendingSessions: (count, earliestUploadAt, userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    if (earliestUploadAt) {
+      const now = Date.now();
+      const hoursRemaining = Math.ceil((earliestUploadAt - now) / (1000 * 60 * 60));
+      return `${count} session${count === 1 ? "" : "s"} uploading in ~${hoursRemaining}h. To review: ${cli} index --pending`;
+    }
+    return `${count} session${count === 1 ? "" : "s"} ready to upload. To review: ${cli} index --pending`;
+  },
+  uploadingSessions: (count, userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    return `Uploading ${count} session${count === 1 ? "" : "s"} in 10 min. To review: ${cli} index --pending`;
+  },
+  aliasUpdated: () => {
+    const shell = getShellConfig();
+    return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
+  }
+};
+var errors3 = {
+  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
+  noSessionsIn: (dir) => `No sessions in ${dir}`,
+  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
+  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
+  andMore: (count) => `  ... and ${count} more`,
+  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
+  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
+  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
+  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
+  invalidEntry: (value) => `Invalid entry number: "${value}"`,
+  invalidRange: (value) => `Invalid range: "${value}"`,
+  contextRequiresEntry: "Context flags (-C, -B, -A) require an entry number",
+  emptySession: "Session has no entries",
+  noPattern: "No pattern specified",
+  invalidRegex: (error48) => `Invalid regex: ${error48}`,
+  invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
+  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
+  unexpectedResponse: "Unexpected response from server",
+  bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash"
+};
+var usage = {
+  main: (commands) => {
+    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
+    for (const { name, description } of commands) {
+      lines.push(`  ${name.padEnd(15)} ${description}`);
+    }
+    return lines.join(`
+`);
+  },
+  read: () => {
+    return [
+      "Usage: read <session-id> [N | N-M] [options]",
+      "",
+      "Read session entries. Session ID supports prefix matching.",
+      "",
+      "Options:",
+      "  N             Entry number to read (full content)",
+      "  N-M           Entry range to read (with truncation)",
+      "  --target N    Target total words (default 2000)",
+      "  --skip N      Skip first N words per field (for pagination)",
+      "  -C N          Show N entries of context before and after",
+      "  -B N          Show N entries of context before",
+      "  -A N          Show N entries of context after",
+      "  --show FIELDS Show full content for fields (comma-separated)",
+      "  --hide FIELDS Redact fields to word counts (comma-separated)",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
+      "",
+      "Truncation:",
+      "  Text is adaptively truncated to fit within the target word count.",
+      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
+      "  Use --skip with the shown N value to continue reading.",
+      "",
+      "Examples:",
+      "  read 02ed                          # all entries (~2000 words)",
+      "  read 02ed --target 500             # tighter truncation",
+      "  read 02ed --skip 50                # skip first 50 words per field",
+      "  read 02ed 5                        # entry 5 (full content)",
+      "  read 02ed 10-20                    # entries 10 through 20",
+      "  read 02ed --show thinking          # show full thinking content",
+      "  read 02ed --show tool:Bash:result  # show Bash command results",
+      "  read 02ed --hide user              # redact user messages to word counts"
+    ].join(`
+`);
+  },
+  grep: () => {
+    return [
+      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "                      [--after <time>] [--before <time>]",
+      "",
+      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
+      "Use -- to separate options from pattern if needed.",
+      "",
+      "Options:",
+      "  -i              Case insensitive search",
+      "  -c              Count matches per session only",
+      "  -l              List matching session IDs only",
+      "  -m N            Stop after N total matches",
+      "  -C N            Show N words of context around match (default: 10)",
+      "  -s <session>    Search only in specified session (prefix match)",
+      "  --in <fields>   Search only specified fields (comma-separated)",
+      "  --after <time>  Include only results after this time",
+      "  --before <time> Include only results before this time",
+      "",
+      "Time formats:",
+      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
+      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
+      "",
+      "Default fields: user, assistant, thinking, tool:input, system, summary",
+      "",
+      "Examples:",
+      '  grep "TODO"                    # find TODO in sessions',
+      '  grep -i "error" -C 20          # case insensitive, 20 words context',
+      '  grep -c "function"             # count matches per session',
+      '  grep -l "#2597"                # list sessions mentioning issue',
+      '  grep -s 02ed "bug"             # search only in session 02ed...',
+      '  grep "error|warning|bug"       # find any of these terms (OR)',
+      '  grep "TODO|FIXME|XXX"          # find code comments',
+      '  grep --in tool:result "error"  # search only in tool results',
+      '  grep --in user,assistant "fix" # search only user and assistant',
+      '  grep --after 2d "error"        # errors in last 2 days',
+      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1'
+    ].join(`
+`);
+  },
+  index: () => {
+    return [
+      "Usage: index",
+      "",
+      "List extracted sessions with statistics and summaries.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Output columns:",
+      "  ID                    Session ID prefix",
+      "  DATETIME              Session modification time",
+      "  MSGS                  Total message count",
+      "  USER_MESSAGES         User message count",
+      "  BASH_CALLS            Bash commands executed",
+      "  WEB_FETCHES           Web fetches",
+      "  WEB_SEARCHES          Web searches",
+      "  LINES_ADDED           Lines added",
+      "  LINES_REMOVED         Lines removed",
+      "  FILES_TOUCHED         Files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY               Session summary or first prompt",
+      "  COMMITS               Git commits from the session"
+    ].join(`
+`);
+  }
+};
+var setup = {
+  header: "Join the hive-mind shared knowledge base",
+  alreadyLoggedIn: "You're already connected.",
+  confirmRelogin: "Do you want to reconnect?",
+  refreshing: "Refreshing your session...",
+  refreshSuccess: "Session refreshed!",
+  starting: "Starting authentication...",
+  visitUrl: "Visit this URL in your browser:",
+  confirmCode: "Confirm this code matches:",
+  browserOpened: "Browser opened. Confirm the code and approve.",
+  openManually: "Open the URL in your browser, then confirm the code.",
+  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
+  success: "You're connected!",
+  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
+  welcomeEmail: (email3) => `Logged in as: ${email3}`,
+  consentInfo: (userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    return `Your sessions will contribute to the shared knowledge base.
+You'll have 24 hours to review sessions before auto-submission.
+Run \`${cli} exclude\` anytime to opt out.`;
+  },
+  consentConfirm: "Continue?",
+  consentDeclined: "Setup cancelled. Run setup again if you change your mind.",
+  timeout: "Authentication timed out. Please try again.",
+  startFailed: (error48) => `Couldn't start authentication: ${error48}`,
+  authFailed: (error48) => `Authentication failed: ${error48}`,
+  unexpectedAuthResponse: "Unexpected response from authentication server",
+  aliasPrompt: "Set up a command to run hive-mind more easily?",
+  aliasExplain: "This adds `alias hive-mind=...` to your shell config.",
+  aliasConfirm: "Set up hive-mind command?",
+  aliasSuccess: "Command added!",
+  aliasActivate: (sourceCmd) => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
+  aliasFailed: "Couldn't add command automatically."
+};
+var indexCmd = {
+  noSessionsDir: "No sessions found. Run 'extract' first.",
+  noSessionsIn: (dir) => `No sessions found in ${dir}`,
+  uploadStatus: "Upload eligibility status:",
+  noExtractedSessions: "No extracted sessions found.",
+  total: (count, summary) => `Total: ${count} sessions (${summary})`,
+  runUpload: "Run 'hive-mind upload' to upload ready sessions.",
+  excludeSession: "To exclude a session: hive-mind exclude <session-id>",
+  excludeAll: "To exclude all sessions: hive-mind exclude --all"
+};
+var excludeCmd = {
+  noSessionsDir: "No sessions directory found",
+  noSessions: "No sessions found.",
+  allAlreadyExcluded: "All sessions are already excluded.",
+  foundNonExcluded: (count) => `Found ${count} session(s) not yet excluded.`,
+  confirmExcludeAll: "Exclude all sessions from upload?",
+  cancelled: "Cancelled.",
+  excludedCount: (count) => `Excluded ${count} session(s)`,
+  failedCount: (count) => `Failed to exclude ${count} session(s)`,
+  sessionNotFound: (id) => `Session '${id}' not found`,
+  ambiguousSession: (id, count) => `Ambiguous session ID '${id}' matches ${count} sessions`,
+  matches: "Matches:",
+  couldNotRead: (id) => `Could not read session '${id}'`,
+  alreadyExcluded: (id) => `Session ${id} is already excluded`,
+  excluded: (id) => `Excluded session ${id}`,
+  failedToExclude: (id) => `Failed to exclude session ${id}`,
+  cannotExcludeAgent: "Agent sessions cannot be excluded directly. Exclude the parent session instead.",
+  usage: "Usage: hive-mind exclude <session-id> or hive-mind exclude --all"
+};
+var uploadCmd = {
+  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
+  waitingDelay: (seconds) => `Waiting ${seconds} seconds before upload...`,
+  sessionNotFound: (id) => `Session '${id}' not found`,
+  ambiguousSession: (id, count) => `Multiple sessions match '${id}' (${count} matches):`,
+  sessionExcluded: (id) => `Session ${id} was excluded, skipping`,
+  uploading: (id) => `Uploading ${id}...`,
+  uploaded: (id) => `Uploaded ${id}`,
+  uploadedWithAgents: (id, agentCount) => `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? "" : "s"})`,
+  failedToUpload: (id, error48) => `Failed to upload ${id}: ${error48}`,
+  checking: "Checking for sessions ready to upload...",
+  noExtractedSessions: "No extracted sessions found.",
+  sessionsHeader: "Sessions:",
+  noSessionsReady: "No sessions ready for upload.",
+  pendingCount: (count) => `${count} session(s) still in review period.`,
+  readyCount: (count) => `${count} session(s) ready for upload.`,
+  confirmUpload: "Upload these sessions?",
+  cancelled: "Cancelled.",
+  uploadedCount: (count) => `Uploaded ${count} session(s)`,
+  failedCount: (count) => `Failed to upload ${count} session(s)`,
+  done: "done",
+  failed: (error48) => `failed: ${error48}`
+};
+
+// cli/lib/output.ts
+var colors = {
+  red: (s) => `\x1B[31m${s}\x1B[0m`,
+  green: (s) => `\x1B[32m${s}\x1B[0m`,
+  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
+  blue: (s) => `\x1B[34m${s}\x1B[0m`
+};
+function hookOutput(message) {
+  console.log(JSON.stringify({ systemMessage: message }));
+}
+function printError(message) {
+  console.error(`${colors.red("Error:")} ${message}`);
+}
+function printSuccess(message) {
+  console.log(colors.green(message));
+}
+function printInfo(message) {
+  console.log(colors.blue(message));
+}
+function printWarning(message) {
+  console.log(colors.yellow(message));
+}
+
+// cli/lib/utils.ts
+import { createInterface as createInterface2 } from "readline";
+import { readdir as readdir2 } from "fs/promises";
+import { join as join3 } from "path";
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function confirm(message) {
+  const rl = createInterface2({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${message} [y/N] `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === "y");
+    });
+  });
+}
+function formatSessionId(id) {
+  return id.length > 12 ? `${id.slice(0, 8)}...${id.slice(-4)}` : id;
+}
+async function lookupSession(cwd, sessionIdPrefix) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const exactPath = join3(sessionsDir, `${sessionIdPrefix}.jsonl`);
+  const exactMeta = await readExtractedMeta(exactPath);
+  if (exactMeta) {
+    return { type: "found", sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMeta };
+  }
+  let files;
+  try {
+    files = await readdir2(sessionsDir);
+  } catch {
+    return { type: "not_found" };
+  }
+  const matches = files.filter((f) => f.endsWith(".jsonl") && f.startsWith(sessionIdPrefix));
+  if (matches.length === 0) {
+    return { type: "not_found" };
+  }
+  if (matches.length > 1) {
+    return { type: "ambiguous", matches: matches.map((m) => m.replace(".jsonl", "")) };
+  }
+  const sessionId = matches[0].replace(".jsonl", "");
+  const sessionPath = join3(sessionsDir, matches[0]);
+  const meta3 = await readExtractedMeta(sessionPath);
+  if (!meta3) {
+    return { type: "not_found" };
+  }
+  return { type: "found", sessionId, sessionPath, meta: meta3 };
+}
+
+// cli/commands/exclude.ts
+async function excludeSession(sessionPath) {
+  try {
+    const content = await readFile3(sessionPath, "utf-8");
+    const lines = content.split(`
+`);
+    if (lines.length === 0)
+      return false;
+    const meta3 = JSON.parse(lines[0]);
+    if (meta3.excluded) {
+      return true;
+    }
+    meta3.excluded = true;
+    lines[0] = JSON.stringify(meta3);
+    await writeFile3(sessionPath, lines.join(`
+`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function excludeAll(cwd) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir3(sessionsDir);
+  } catch {
+    printError(excludeCmd.noSessionsDir);
+    return 1;
+  }
+  const sessionFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (sessionFiles.length === 0) {
+    console.log(excludeCmd.noSessions);
+    return 0;
+  }
+  let nonExcludedCount = 0;
+  for (const file2 of sessionFiles) {
+    const meta3 = await readExtractedMeta(join4(sessionsDir, file2));
+    if (meta3 && !meta3.excluded && !meta3.agentId) {
+      nonExcludedCount++;
+    }
+  }
+  if (nonExcludedCount === 0) {
+    console.log(excludeCmd.allAlreadyExcluded);
+    return 0;
+  }
+  console.log(excludeCmd.foundNonExcluded(nonExcludedCount));
+  console.log("");
+  if (!await confirm(excludeCmd.confirmExcludeAll)) {
+    console.log(excludeCmd.cancelled);
+    return 0;
+  }
+  let succeeded = 0;
+  let failed = 0;
+  for (const file2 of sessionFiles) {
+    const sessionPath = join4(sessionsDir, file2);
+    const meta3 = await readExtractedMeta(sessionPath);
+    if (!meta3 || meta3.excluded || meta3.agentId)
+      continue;
+    const sessionId = file2.replace(".jsonl", "");
+    if (await excludeSession(sessionPath)) {
+      console.log(`  ${colors.yellow("\u2717")} ${formatSessionId(sessionId)} excluded`);
+      succeeded++;
+    } else {
+      console.log(`  ${colors.red("!")} ${formatSessionId(sessionId)} failed`);
+      failed++;
+    }
+  }
+  console.log("");
+  if (succeeded > 0) {
+    printSuccess(excludeCmd.excludedCount(succeeded));
+  }
+  if (failed > 0) {
+    printError(excludeCmd.failedCount(failed));
+  }
+  return failed > 0 ? 1 : 0;
+}
+async function excludeOne(cwd, sessionIdPrefix) {
+  const lookup = await lookupSession(cwd, sessionIdPrefix);
+  if (lookup.type === "not_found") {
+    printError(excludeCmd.sessionNotFound(sessionIdPrefix));
+    return 1;
+  }
+  if (lookup.type === "ambiguous") {
+    printError(excludeCmd.ambiguousSession(sessionIdPrefix, lookup.matches.length));
+    console.log(excludeCmd.matches);
+    for (const m of lookup.matches) {
+      console.log(`  ${m}`);
+    }
+    return 1;
+  }
+  const { sessionPath, meta: meta3 } = lookup;
+  if (meta3.agentId) {
+    printError(excludeCmd.cannotExcludeAgent);
+    return 1;
+  }
+  if (meta3.excluded) {
+    printInfo(excludeCmd.alreadyExcluded(formatSessionId(meta3.sessionId)));
+    return 0;
+  }
+  if (await excludeSession(sessionPath)) {
+    printSuccess(excludeCmd.excluded(formatSessionId(meta3.sessionId)));
+    return 0;
+  } else {
+    printError(excludeCmd.failedToExclude(formatSessionId(meta3.sessionId)));
+    return 1;
+  }
+}
+async function exclude() {
+  const cwd = process.env.CWD || process.cwd();
+  const args = process.argv.slice(3);
+  if (args.includes("--all")) {
+    return await excludeAll(cwd);
+  }
+  const sessionId = args.find((a) => !a.startsWith("-"));
+  if (!sessionId) {
+    printError(excludeCmd.usage);
+    return 1;
+  }
+  return await excludeOne(cwd, sessionId);
+}
+
+// cli/commands/grep.ts
+import { readdir as readdir4 } from "fs/promises";
+import { join as join5 } from "path";
 
 // cli/lib/field-filter.ts
 function parseFieldList(input) {
@@ -15780,236 +16273,6 @@ function formatGenericTool({ input, redact, truncation }) {
   return { headerParams, multilineParams };
 }
 
-// cli/lib/messages.ts
-function getCliPath() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return "~/.claude/plugins/hive-mind/cli.js";
-}
-var CONT = "\u2192";
-var hook = {
-  notLoggedIn: () => {
-    const cliPath = getCliPath();
-    const shell = getShellConfig();
-    return [
-      "hive-mind: Join the shared knowledge base",
-      `${CONT} Login: bun ${cliPath} login`,
-      `${CONT} Optional shortcut:`,
-      `  echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
-    ].join(`
-`);
-  },
-  loggedIn: (displayName) => {
-    return `hive-mind: Connected as ${displayName}`;
-  },
-  extracted: (count) => {
-    return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
-  },
-  schemaErrors: (errorCount, sessionCount, errors3) => {
-    const unique = [...new Set(errors3)];
-    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
-  },
-  extractionFailed: (error48) => {
-    return `Extraction failed: ${error48}`;
-  },
-  bunNotInstalled: () => {
-    return "hive-mind requires Bun. Install: curl -fsSL https://bun.sh/install | bash";
-  }
-};
-var errors3 = {
-  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
-  noSessionsIn: (dir) => `No sessions in ${dir}`,
-  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
-  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
-  andMore: (count) => `  ... and ${count} more`,
-  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
-  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
-  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
-  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
-  invalidEntry: (value) => `Invalid entry number: "${value}"`,
-  invalidRange: (value) => `Invalid range: "${value}"`,
-  contextRequiresEntry: "Context flags (-C, -B, -A) require an entry number",
-  emptySession: "Session has no entries",
-  noPattern: "No pattern specified",
-  invalidRegex: (error48) => `Invalid regex: ${error48}`,
-  invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
-  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
-  unexpectedResponse: "Unexpected response from server",
-  bunNotInstalled: () => {
-    return [
-      "hive-mind requires Bun to run.",
-      "",
-      "Install Bun:",
-      "  curl -fsSL https://bun.sh/install | bash"
-    ].join(`
-`);
-  }
-};
-var usage = {
-  main: (commands) => {
-    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
-    for (const { name, description } of commands) {
-      lines.push(`  ${name.padEnd(15)} ${description}`);
-    }
-    return lines.join(`
-`);
-  },
-  read: () => {
-    return [
-      "Usage: read <session-id> [N | N-M] [options]",
-      "",
-      "Read session entries. Session ID supports prefix matching.",
-      "",
-      "Options:",
-      "  N             Entry number to read (full content)",
-      "  N-M           Entry range to read (with truncation)",
-      "  --target N    Target total words (default 2000)",
-      "  --skip N      Skip first N words per field (for pagination)",
-      "  -C N          Show N entries of context before and after",
-      "  -B N          Show N entries of context before",
-      "  -A N          Show N entries of context after",
-      "  --show FIELDS Show full content for fields (comma-separated)",
-      "  --hide FIELDS Redact fields to word counts (comma-separated)",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
-      "",
-      "Truncation:",
-      "  Text is adaptively truncated to fit within the target word count.",
-      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
-      "  Use --skip with the shown N value to continue reading.",
-      "",
-      "Examples:",
-      "  read 02ed                          # all entries (~2000 words)",
-      "  read 02ed --target 500             # tighter truncation",
-      "  read 02ed --skip 50                # skip first 50 words per field",
-      "  read 02ed 5                        # entry 5 (full content)",
-      "  read 02ed 10-20                    # entries 10 through 20",
-      "  read 02ed --show thinking          # show full thinking content",
-      "  read 02ed --show tool:Bash:result  # show Bash command results",
-      "  read 02ed --hide user              # redact user messages to word counts"
-    ].join(`
-`);
-  },
-  grep: () => {
-    return [
-      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
-      "                      [--after <time>] [--before <time>]",
-      "",
-      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
-      "Use -- to separate options from pattern if needed.",
-      "",
-      "Options:",
-      "  -i              Case insensitive search",
-      "  -c              Count matches per session only",
-      "  -l              List matching session IDs only",
-      "  -m N            Stop after N total matches",
-      "  -C N            Show N words of context around match (default: 10)",
-      "  -s <session>    Search only in specified session (prefix match)",
-      "  --in <fields>   Search only specified fields (comma-separated)",
-      "  --after <time>  Include only results after this time",
-      "  --before <time> Include only results before this time",
-      "",
-      "Time formats:",
-      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
-      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
-      "",
-      "Default fields: user, assistant, thinking, tool:input, system, summary",
-      "",
-      "Examples:",
-      '  grep "TODO"                    # find TODO in sessions',
-      '  grep -i "error" -C 20          # case insensitive, 20 words context',
-      '  grep -c "function"             # count matches per session',
-      '  grep -l "#2597"                # list sessions mentioning issue',
-      '  grep -s 02ed "bug"             # search only in session 02ed...',
-      '  grep "error|warning|bug"       # find any of these terms (OR)',
-      '  grep "TODO|FIXME|XXX"          # find code comments',
-      '  grep --in tool:result "error"  # search only in tool results',
-      '  grep --in user,assistant "fix" # search only user and assistant',
-      '  grep --after 2d "error"        # errors in last 2 days',
-      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1'
-    ].join(`
-`);
-  },
-  index: () => {
-    return [
-      "Usage: index",
-      "",
-      "List extracted sessions with statistics and summaries.",
-      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
-      "Statistics include work from subagent sessions.",
-      "",
-      "Output columns:",
-      "  ID                    Session ID prefix",
-      "  DATETIME              Session modification time",
-      "  MSGS                  Total message count",
-      "  USER_MESSAGES         User message count",
-      "  BASH_CALLS            Bash commands executed",
-      "  WEB_FETCHES           Web fetches",
-      "  WEB_SEARCHES          Web searches",
-      "  LINES_ADDED           Lines added",
-      "  LINES_REMOVED         Lines removed",
-      "  FILES_TOUCHED         Files modified",
-      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
-      "  SUMMARY               Session summary or first prompt",
-      "  COMMITS               Git commits from the session"
-    ].join(`
-`);
-  }
-};
-var login = {
-  header: "Join the hive-mind shared knowledge base",
-  alreadyLoggedIn: "You're already connected.",
-  confirmRelogin: "Do you want to reconnect?",
-  refreshing: "Refreshing your session...",
-  refreshSuccess: "Session refreshed!",
-  starting: "Starting authentication...",
-  visitUrl: "Visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
-  browserOpened: "Browser opened. Confirm the code and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
-  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
-  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
-  success: "You're connected!",
-  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
-  welcomeEmail: (email3) => `Logged in as: ${email3}`,
-  contributing: "Your sessions will now contribute to the shared knowledge base.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before submission.",
-  timeout: "Authentication timed out. Please try again.",
-  startFailed: (error48) => `Couldn't start authentication: ${error48}`,
-  authFailed: (error48) => `Authentication failed: ${error48}`
-};
-
-// cli/lib/output.ts
-var colors = {
-  red: (s) => `\x1B[31m${s}\x1B[0m`,
-  green: (s) => `\x1B[32m${s}\x1B[0m`,
-  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
-  blue: (s) => `\x1B[34m${s}\x1B[0m`
-};
-function hookOutput(message) {
-  console.log(JSON.stringify({ systemMessage: message }));
-}
-function printError(message) {
-  console.error(`${colors.red("Error:")} ${message}`);
-}
-function printSuccess(message) {
-  console.log(colors.green(message));
-}
-function printInfo(message) {
-  console.log(colors.blue(message));
-}
-function printWarning(message) {
-  console.log(colors.yellow(message));
-}
-
 // cli/lib/time-filter.ts
 function parseRelativeTime(value) {
   const match = value.match(/^(\d+)([mhdw])$/);
@@ -16134,7 +16397,7 @@ async function grep() {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir2(sessionsDir);
+    files = await readdir4(sessionsDir);
   } catch {
     printError(errors3.noSessions);
     return 1;
@@ -16157,7 +16420,7 @@ async function grep() {
   }
   const allSessionIds = [];
   for (const file2 of jsonlFiles) {
-    const path = join3(sessionsDir, file2);
+    const path = join5(sessionsDir, file2);
     const session = await readExtractedSession(path);
     if (session && !session.meta.agentId) {
       allSessionIds.push(session.meta.sessionId);
@@ -16170,7 +16433,7 @@ async function grep() {
   for (const file2 of jsonlFiles) {
     if (options.maxMatches !== null && totalMatches >= options.maxMatches)
       break;
-    const path = join3(sessionsDir, file2);
+    const path = join5(sessionsDir, file2);
     const session = await readExtractedSession(path);
     if (!session || session.meta.agentId)
       continue;
@@ -16320,9 +16583,199 @@ function parseGrepOptions(args) {
 }
 
 // cli/commands/index.ts
-import { readdir as readdir3 } from "fs/promises";
+import { readdir as readdir6 } from "fs/promises";
 import { homedir as homedir3 } from "os";
-import { join as join4 } from "path";
+import { join as join7 } from "path";
+
+// cli/lib/upload-eligibility.ts
+import { readdir as readdir5 } from "fs/promises";
+import { join as join6 } from "path";
+
+// cli/lib/auth.ts
+import { mkdir as mkdir3 } from "fs/promises";
+var WORKOS_API_URL = "https://api.workos.com/user_management";
+var AuthUserSchema = exports_external.object({
+  id: exports_external.string(),
+  email: exports_external.string(),
+  first_name: exports_external.string().optional(),
+  last_name: exports_external.string().optional()
+});
+var AuthDataSchema = exports_external.object({
+  access_token: exports_external.string(),
+  refresh_token: exports_external.string(),
+  user: AuthUserSchema
+});
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number")
+    return true;
+  return payload.exp <= Math.floor(Date.now() / 1000);
+}
+async function loadAuthData() {
+  try {
+    const file2 = Bun.file(AUTH_FILE);
+    if (!await file2.exists())
+      return null;
+    const data = await file2.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+async function saveAuthData(data) {
+  await mkdir3(AUTH_DIR, { recursive: true });
+  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
+}
+async function refreshToken(refreshTokenValue) {
+  try {
+    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshTokenValue,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const data = await response.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+async function checkAuthStatus(attemptRefresh = true) {
+  const authData = await loadAuthData();
+  if (!authData?.access_token) {
+    return { authenticated: false, needsLogin: true };
+  }
+  if (isTokenExpired(authData.access_token)) {
+    if (!attemptRefresh || !authData.refresh_token) {
+      return { authenticated: false, needsLogin: true };
+    }
+    const newAuthData = await refreshToken(authData.refresh_token);
+    if (!newAuthData) {
+      return { authenticated: false, needsLogin: true };
+    }
+    await saveAuthData(newAuthData);
+    return { authenticated: true, user: newAuthData.user, needsLogin: false };
+  }
+  return { authenticated: true, user: authData.user, needsLogin: false };
+}
+function getUserDisplayName(user) {
+  return user.first_name || user.email;
+}
+
+// cli/lib/upload-eligibility.ts
+var REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+function decodeJwtPayload2(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+async function getAuthIssuedAt() {
+  const authData = await loadAuthData();
+  if (!authData?.access_token)
+    return null;
+  const payload = decodeJwtPayload2(authData.access_token);
+  if (!payload || typeof payload.iat !== "number")
+    return null;
+  return payload.iat * 1000;
+}
+function checkSessionEligibility(meta3, authIssuedAt) {
+  const sessionId = meta3.sessionId;
+  if (meta3.excluded) {
+    return {
+      sessionId,
+      meta: meta3,
+      eligible: false,
+      excluded: true,
+      eligibleAt: null,
+      reason: "Excluded by user"
+    };
+  }
+  const now = Date.now();
+  const rawMtimeMs = new Date(meta3.rawMtime).getTime();
+  const eligibilityBase = authIssuedAt ? Math.max(rawMtimeMs, authIssuedAt) : rawMtimeMs;
+  const eligibleAt = eligibilityBase + REVIEW_PERIOD_MS;
+  if (now < eligibleAt) {
+    const remainingMs = eligibleAt - now;
+    const remainingHours = Math.ceil(remainingMs / (60 * 60 * 1000));
+    return {
+      sessionId,
+      meta: meta3,
+      eligible: false,
+      excluded: false,
+      eligibleAt,
+      reason: `Eligible in ${remainingHours}h`
+    };
+  }
+  return {
+    sessionId,
+    meta: meta3,
+    eligible: true,
+    excluded: false,
+    eligibleAt,
+    reason: "Ready for upload"
+  };
+}
+async function getAllSessionsEligibility(cwd) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const authIssuedAt = await getAuthIssuedAt();
+  let files;
+  try {
+    files = await readdir5(sessionsDir);
+  } catch {
+    return [];
+  }
+  const results = [];
+  for (const file2 of files) {
+    if (!file2.endsWith(".jsonl"))
+      continue;
+    const meta3 = await readExtractedMeta(join6(sessionsDir, file2));
+    if (!meta3 || meta3.agentId)
+      continue;
+    const eligibility = checkSessionEligibility(meta3, authIssuedAt);
+    results.push(eligibility);
+  }
+  return results;
+}
+async function getEligibleSessions(cwd) {
+  const all = await getAllSessionsEligibility(cwd);
+  return all.filter((s) => s.eligible);
+}
+async function getPendingSessions(cwd) {
+  const all = await getAllSessionsEligibility(cwd);
+  return all.filter((s) => !s.eligible && !s.excluded);
+}
+
+// cli/commands/index.ts
 var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function computeMinimalPrefixes2(ids) {
   const result = new Map;
@@ -16360,7 +16813,7 @@ function formatRelativeDateTime(rawMtime, prevDate, prevYear) {
   return { display, date: date5, year };
 }
 function printUsage2() {
-  console.log("Usage: index [--escape-file-refs]");
+  console.log("Usage: index [--escape-file-refs] [--pending]");
   console.log(`
 List all extracted sessions with statistics, summary, and commits.`);
   console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
@@ -16368,6 +16821,7 @@ List all extracted sessions with statistics, summary, and commits.`);
   console.log(`
 Options:`);
   console.log("  --escape-file-refs  Escape @ symbols to prevent file reference interpretation");
+  console.log("  --pending           Show upload eligibility status for each session");
   console.log(`
 Output columns:`);
   console.log("  ID                   Session ID prefix (first 16 chars)");
@@ -16384,30 +16838,152 @@ Output columns:`);
   console.log("  SUMMARY              Session summary or first user prompt");
   console.log("  COMMITS              Git commit hashes from the session");
 }
+function formatPendingSession(info, idPrefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth) {
+  const { eligibility, entries, agentCount } = info;
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
+  const dateCol = dateDisplay.padEnd(maxDateWidth);
+  const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
+  const agentText = agentCount > 0 ? `+${agentCount} agents` : "";
+  const agentCol = agentText.padEnd(maxAgentWidth);
+  let statusIcon;
+  let statusText;
+  if (eligibility.excluded) {
+    statusIcon = colors.yellow("\u2717");
+    statusText = colors.yellow("excluded".padEnd(14));
+  } else if (eligibility.eligible) {
+    statusIcon = colors.green("\u2713");
+    statusText = colors.green("ready".padEnd(14));
+  } else {
+    statusIcon = colors.blue("\u25CB");
+    statusText = colors.blue(eligibility.reason.padEnd(14));
+  }
+  return `  ${statusIcon} ${idPrefix}  ${dateCol}  ${msgCount} msgs  ${agentCol}  ${statusText}  ${truncatedSummary}`;
+}
+function countAgentsInBlocks(blocks) {
+  const agentIds = new Set;
+  for (const block of blocks) {
+    if (block.type === "tool" && block.agentId) {
+      agentIds.add(block.agentId);
+    }
+  }
+  return agentIds.size;
+}
+async function showPendingStatus(cwd) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir6(sessionsDir);
+  } catch {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (jsonlFiles.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+  const mainSessions = [];
+  for (const file2 of jsonlFiles) {
+    const path = join7(sessionsDir, file2);
+    const session = await readExtractedSession(path);
+    if (!session || session.meta.agentId)
+      continue;
+    const parsed = parseSession(session.meta, session.entries);
+    mainSessions.push({ ...session, parsed });
+  }
+  if (mainSessions.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+  const authIssuedAt = await getAuthIssuedAt();
+  const pendingInfos = [];
+  for (const session of mainSessions) {
+    const eligibility = checkSessionEligibility(session.meta, authIssuedAt);
+    const agentCount = countAgentsInBlocks(session.parsed.blocks);
+    pendingInfos.push({
+      eligibility,
+      entries: session.entries,
+      agentCount
+    });
+  }
+  pendingInfos.sort((a, b) => {
+    return b.eligibility.meta.rawMtime.localeCompare(a.eligibility.meta.rawMtime);
+  });
+  const sessionIds = pendingInfos.map((p) => p.eligibility.sessionId);
+  const idPrefixes = computeMinimalPrefixes2(sessionIds);
+  const formatDate = (rawMtime) => {
+    const d = new Date(rawMtime);
+    const month = MONTH_NAMES[d.getMonth()];
+    const day = d.getDate();
+    const year = d.getFullYear();
+    return `${month} ${day}, ${year}`;
+  };
+  const dateDisplays = new Map;
+  for (const info of pendingInfos) {
+    const display = formatDate(info.eligibility.meta.rawMtime);
+    dateDisplays.set(info.eligibility.sessionId, display);
+  }
+  const maxAgentWidth = Math.max(0, ...pendingInfos.map((p) => p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0));
+  const maxMsgWidth = Math.max(...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length));
+  const maxDateWidth = Math.max(...Array.from(dateDisplays.values()).map((d) => d.length));
+  console.log(indexCmd.uploadStatus);
+  console.log("");
+  for (const info of pendingInfos) {
+    const prefix = idPrefixes.get(info.eligibility.sessionId) || info.eligibility.sessionId.slice(0, 8);
+    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || "";
+    console.log(formatPendingSession(info, prefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth));
+  }
+  console.log("");
+  const ready = pendingInfos.filter((s) => s.eligibility.eligible).length;
+  const pending = pendingInfos.filter((s) => !s.eligibility.eligible && !s.eligibility.excluded).length;
+  const excluded = pendingInfos.filter((s) => s.eligibility.excluded).length;
+  const statusSummary = [];
+  if (ready > 0)
+    statusSummary.push(`${ready} ready`);
+  if (pending > 0)
+    statusSummary.push(`${pending} pending`);
+  if (excluded > 0)
+    statusSummary.push(`${excluded} excluded`);
+  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(", ")));
+  if (ready > 0) {
+    console.log("");
+    console.log(indexCmd.runUpload);
+  }
+  if (ready > 0 || pending > 0) {
+    console.log("");
+    console.log(indexCmd.excludeSession);
+    console.log(indexCmd.excludeAll);
+  }
+  return 0;
+}
 async function index() {
   const args = process.argv.slice(3);
   if (args.includes("--help") || args.includes("-h")) {
     printUsage2();
     return 0;
   }
-  const escapeFileRefs = args.includes("--escape-file-refs");
   const cwd = process.cwd();
+  if (args.includes("--pending")) {
+    return await showPendingStatus(cwd);
+  }
+  const escapeFileRefs = args.includes("--escape-file-refs");
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir3(sessionsDir);
+    files = await readdir6(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(indexCmd.noSessionsDir);
     return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
+    printError(indexCmd.noSessionsIn(sessionsDir));
     return 1;
   }
   const allSessions = new Map;
   for (const file2 of jsonlFiles) {
-    const path = join4(sessionsDir, file2);
+    const path = join7(sessionsDir, file2);
     const session = await readExtractedSession(path);
     if (session) {
       const parsed = parseSession(session.meta, session.entries);
@@ -16765,279 +17341,9 @@ function getToolResultText(content) {
 `);
 }
 
-// cli/commands/login.ts
-import { createInterface as createInterface2 } from "readline";
-
-// cli/lib/auth.ts
-import { mkdir as mkdir3 } from "fs/promises";
-var WORKOS_API_URL = "https://api.workos.com/user_management";
-var AuthUserSchema = exports_external.object({
-  id: exports_external.string(),
-  email: exports_external.string(),
-  first_name: exports_external.string().optional(),
-  last_name: exports_external.string().optional()
-});
-var AuthDataSchema = exports_external.object({
-  access_token: exports_external.string(),
-  refresh_token: exports_external.string(),
-  user: AuthUserSchema
-});
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
-function isTokenExpired(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number")
-    return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
-}
-async function loadAuthData() {
-  try {
-    const file2 = Bun.file(AUTH_FILE);
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function saveAuthData(data) {
-  await mkdir3(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
-}
-async function refreshToken(refreshTokenValue) {
-  try {
-    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const data = await response.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function checkAuthStatus(attemptRefresh = true) {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
-    return { authenticated: false, needsLogin: true };
-  }
-  if (isTokenExpired(authData.access_token)) {
-    if (!attemptRefresh || !authData.refresh_token) {
-      return { authenticated: false, needsLogin: true };
-    }
-    const newAuthData = await refreshToken(authData.refresh_token);
-    if (!newAuthData) {
-      return { authenticated: false, needsLogin: true };
-    }
-    await saveAuthData(newAuthData);
-    return { authenticated: true, user: newAuthData.user, needsLogin: false };
-  }
-  return { authenticated: true, user: authData.user, needsLogin: false };
-}
-function getUserDisplayName(user) {
-  return user.first_name || user.email;
-}
-
-// cli/commands/login.ts
-var WORKOS_API_URL2 = "https://api.workos.com/user_management";
-var DeviceAuthResponseSchema = exports_external.object({
-  device_code: exports_external.string(),
-  user_code: exports_external.string(),
-  verification_uri: exports_external.string(),
-  verification_uri_complete: exports_external.string(),
-  interval: exports_external.number(),
-  expires_in: exports_external.number()
-});
-var ErrorResponseSchema = exports_external.object({
-  error: exports_external.string(),
-  error_description: exports_external.string().optional()
-});
-async function confirm(message) {
-  const rl = createInterface2({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
-      rl.close();
-      resolve(answer.toLowerCase() === "y");
-    });
-  });
-}
-async function openBrowser(url2) {
-  try {
-    if (process.platform === "darwin") {
-      await Bun.spawn(["open", url2]).exited;
-      return true;
-    } else if (process.platform === "linux") {
-      try {
-        await Bun.spawn(["xdg-open", url2]).exited;
-        return true;
-      } catch {
-        try {
-          await Bun.spawn(["wslview", url2]).exited;
-          return true;
-        } catch {
-          return false;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function checkExistingAuth() {
-  const status = await checkAuthStatus(false);
-  if (status.authenticated && status.user) {
-    printWarning(login.alreadyLoggedIn);
-    console.log("");
-    return await confirm(login.confirmRelogin);
-  }
-  return true;
-}
-async function tryRefresh() {
-  const authData = await loadAuthData();
-  if (!authData?.refresh_token)
-    return false;
-  printInfo(login.refreshing);
-  const newAuthData = await refreshToken(authData.refresh_token);
-  if (newAuthData) {
-    await saveAuthData(newAuthData);
-    printSuccess(login.refreshSuccess);
-    return true;
-  }
-  return false;
-}
-async function deviceAuthFlow() {
-  printInfo(login.starting);
-  console.log("");
-  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
-  });
-  const data = await response.json();
-  const errorResult = ErrorResponseSchema.safeParse(data);
-  if (errorResult.success && errorResult.data.error) {
-    printError(login.startFailed(errorResult.data.error));
-    if (errorResult.data.error_description) {
-      console.log(errorResult.data.error_description);
-    }
-    return 1;
-  }
-  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
-  if (!deviceAuthResult.success) {
-    printError("Unexpected response from authentication server");
-    return 1;
-  }
-  const deviceAuth = deviceAuthResult.data;
-  console.log("\u2501".repeat(65));
-  console.log("");
-  console.log(`  ${login.visitUrl}`);
-  console.log("");
-  console.log(`    ${deviceAuth.verification_uri}`);
-  console.log("");
-  console.log(`  ${login.confirmCode}`);
-  console.log("");
-  console.log(`    ${colors.green(deviceAuth.user_code)}`);
-  console.log("");
-  console.log("\u2501".repeat(65));
-  console.log("");
-  if (await openBrowser(deviceAuth.verification_uri_complete)) {
-    printInfo(login.browserOpened);
-  } else {
-    printInfo(login.openManually);
-  }
-  console.log("");
-  printInfo(login.waiting(deviceAuth.expires_in));
-  let interval = deviceAuth.interval * 1000;
-  const startTime = Date.now();
-  const expiresAt = startTime + deviceAuth.expires_in * 1000;
-  while (Date.now() < expiresAt) {
-    await sleep(interval);
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: deviceAuth.device_code,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const tokenData = await tokenResponse.json();
-    const authResult = AuthDataSchema.safeParse(tokenData);
-    if (authResult.success) {
-      await saveAuthData(authResult.data);
-      console.log("");
-      printSuccess(login.success);
-      console.log("");
-      const displayName = getUserDisplayName(authResult.data.user);
-      if (authResult.data.user.first_name) {
-        console.log(login.welcomeNamed(displayName, authResult.data.user.email));
-      } else {
-        console.log(login.welcomeEmail(authResult.data.user.email));
-      }
-      console.log("");
-      console.log(login.contributing);
-      console.log(login.reviewPeriod);
-      return 0;
-    }
-    const errorData = tokenData;
-    if (errorData.error === "authorization_pending") {
-      process.stdout.write(`\r  ${login.waitingProgress(elapsed)}`);
-      continue;
-    }
-    if (errorData.error === "slow_down") {
-      interval += 1000;
-      continue;
-    }
-    console.log("");
-    printError(login.authFailed(errorData.error || "unknown error"));
-    if (errorData.error_description)
-      console.log(errorData.error_description);
-    return 1;
-  }
-  printError(login.timeout);
-  return 1;
-}
-async function login2() {
-  console.log("");
-  console.log(`  ${login.header}`);
-  console.log(`  ${"\u2500".repeat(15)}`);
-  console.log("");
-  if (!await checkExistingAuth())
-    return 0;
-  if (await tryRefresh())
-    return 0;
-  return await deviceAuthFlow();
-}
-
 // cli/commands/read.ts
-import { readdir as readdir4 } from "fs/promises";
-import { join as join5 } from "path";
+import { readdir as readdir7 } from "fs/promises";
+import { join as join8 } from "path";
 function printUsage3() {
   console.log(usage.read());
 }
@@ -17099,7 +17405,7 @@ async function read() {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir4(sessionsDir);
+    files = await readdir7(sessionsDir);
   } catch {
     printError(errors3.noSessions);
     return 1;
@@ -17123,7 +17429,7 @@ async function read() {
     }
     return 1;
   }
-  const sessionFile = join5(sessionsDir, matches2[0]);
+  const sessionFile = join8(sessionsDir, matches2[0]);
   let entryNumber = null;
   let rangeStart = null;
   let rangeEnd = null;
@@ -17206,16 +17512,1104 @@ async function read() {
 }
 
 // cli/commands/session-start.ts
+import { readdir as readdir8 } from "fs/promises";
+import { join as join9 } from "path";
+import { spawn } from "child_process";
+
+// cli/lib/alias.ts
+import { homedir as homedir4 } from "os";
+import { readFile as readFile4, writeFile as writeFile4 } from "fs/promises";
+var ALIAS_NAME = "hive-mind";
+function getExpectedAliasCommand() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  const cliPath = pluginRoot ? `${pluginRoot}/cli.js` : "~/.claude/plugins/hive-mind/cli.js";
+  return `bun ${cliPath}`;
+}
+function expandPath(path) {
+  if (path.startsWith("~")) {
+    return path.replace("~", homedir4());
+  }
+  return path;
+}
+async function readShellConfig() {
+  const { file: file2 } = getShellConfig();
+  try {
+    return await readFile4(expandPath(file2), "utf-8");
+  } catch {
+    return null;
+  }
+}
+async function writeShellConfig(content) {
+  const { file: file2 } = getShellConfig();
+  try {
+    await writeFile4(expandPath(file2), content, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+var ALIAS_REGEX = /^alias\s+hive-mind\s*=\s*(['"])(.+?)\1\s*$/m;
+async function getExistingAliasCommand() {
+  const config2 = await readShellConfig();
+  if (!config2)
+    return null;
+  const match = config2.match(ALIAS_REGEX);
+  if (!match)
+    return null;
+  return match[2];
+}
+async function hasAlias() {
+  const existing = await getExistingAliasCommand();
+  return existing !== null;
+}
+async function setupAlias() {
+  const config2 = await readShellConfig();
+  const expected = getExpectedAliasCommand();
+  const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
+  if (!config2) {
+    const success3 = await writeShellConfig(`${aliasLine}
+`);
+    return { success: success3, alreadyExists: false };
+  }
+  const match = config2.match(ALIAS_REGEX);
+  if (match) {
+    if (match[2] === expected) {
+      return { success: true, alreadyExists: true };
+    }
+    const updated2 = config2.replace(ALIAS_REGEX, aliasLine);
+    const success3 = await writeShellConfig(updated2);
+    return { success: success3, alreadyExists: false };
+  }
+  const separator = config2.endsWith(`
+`) ? "" : `
+`;
+  const updated = `${config2}${separator}${aliasLine}
+`;
+  const success2 = await writeShellConfig(updated);
+  return { success: success2, alreadyExists: false };
+}
+async function updateAliasIfOutdated() {
+  const existing = await getExistingAliasCommand();
+  if (!existing)
+    return false;
+  const expected = getExpectedAliasCommand();
+  if (existing === expected)
+    return false;
+  const { success: success2 } = await setupAlias();
+  return success2;
+}
+
+// node_modules/convex/dist/esm/index.js
+var version2 = "1.31.2";
+
+// node_modules/convex/dist/esm/values/base64.js
+var lookup = [];
+var revLookup = [];
+var Arr = Uint8Array;
+var code = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+for (i = 0, len = code.length;i < len; ++i) {
+  lookup[i] = code[i];
+  revLookup[code.charCodeAt(i)] = i;
+}
+var i;
+var len;
+revLookup[45] = 62;
+revLookup[95] = 63;
+function getLens(b64) {
+  var len2 = b64.length;
+  if (len2 % 4 > 0) {
+    throw new Error("Invalid string. Length must be a multiple of 4");
+  }
+  var validLen = b64.indexOf("=");
+  if (validLen === -1)
+    validLen = len2;
+  var placeHoldersLen = validLen === len2 ? 0 : 4 - validLen % 4;
+  return [validLen, placeHoldersLen];
+}
+function _byteLength(_b64, validLen, placeHoldersLen) {
+  return (validLen + placeHoldersLen) * 3 / 4 - placeHoldersLen;
+}
+function toByteArray(b64) {
+  var tmp;
+  var lens = getLens(b64);
+  var validLen = lens[0];
+  var placeHoldersLen = lens[1];
+  var arr = new Arr(_byteLength(b64, validLen, placeHoldersLen));
+  var curByte = 0;
+  var len2 = placeHoldersLen > 0 ? validLen - 4 : validLen;
+  var i2;
+  for (i2 = 0;i2 < len2; i2 += 4) {
+    tmp = revLookup[b64.charCodeAt(i2)] << 18 | revLookup[b64.charCodeAt(i2 + 1)] << 12 | revLookup[b64.charCodeAt(i2 + 2)] << 6 | revLookup[b64.charCodeAt(i2 + 3)];
+    arr[curByte++] = tmp >> 16 & 255;
+    arr[curByte++] = tmp >> 8 & 255;
+    arr[curByte++] = tmp & 255;
+  }
+  if (placeHoldersLen === 2) {
+    tmp = revLookup[b64.charCodeAt(i2)] << 2 | revLookup[b64.charCodeAt(i2 + 1)] >> 4;
+    arr[curByte++] = tmp & 255;
+  }
+  if (placeHoldersLen === 1) {
+    tmp = revLookup[b64.charCodeAt(i2)] << 10 | revLookup[b64.charCodeAt(i2 + 1)] << 4 | revLookup[b64.charCodeAt(i2 + 2)] >> 2;
+    arr[curByte++] = tmp >> 8 & 255;
+    arr[curByte++] = tmp & 255;
+  }
+  return arr;
+}
+function tripletToBase64(num) {
+  return lookup[num >> 18 & 63] + lookup[num >> 12 & 63] + lookup[num >> 6 & 63] + lookup[num & 63];
+}
+function encodeChunk(uint8, start, end) {
+  var tmp;
+  var output = [];
+  for (var i2 = start;i2 < end; i2 += 3) {
+    tmp = (uint8[i2] << 16 & 16711680) + (uint8[i2 + 1] << 8 & 65280) + (uint8[i2 + 2] & 255);
+    output.push(tripletToBase64(tmp));
+  }
+  return output.join("");
+}
+function fromByteArray(uint8) {
+  var tmp;
+  var len2 = uint8.length;
+  var extraBytes = len2 % 3;
+  var parts = [];
+  var maxChunkLength = 16383;
+  for (var i2 = 0, len22 = len2 - extraBytes;i2 < len22; i2 += maxChunkLength) {
+    parts.push(encodeChunk(uint8, i2, i2 + maxChunkLength > len22 ? len22 : i2 + maxChunkLength));
+  }
+  if (extraBytes === 1) {
+    tmp = uint8[len2 - 1];
+    parts.push(lookup[tmp >> 2] + lookup[tmp << 4 & 63] + "==");
+  } else if (extraBytes === 2) {
+    tmp = (uint8[len2 - 2] << 8) + uint8[len2 - 1];
+    parts.push(lookup[tmp >> 10] + lookup[tmp >> 4 & 63] + lookup[tmp << 2 & 63] + "=");
+  }
+  return parts.join("");
+}
+
+// node_modules/convex/dist/esm/common/index.js
+function parseArgs(args) {
+  if (args === undefined) {
+    return {};
+  }
+  if (!isSimpleObject(args)) {
+    throw new Error(`The arguments to a Convex function must be an object. Received: ${args}`);
+  }
+  return args;
+}
+function validateDeploymentUrl(deploymentUrl) {
+  if (typeof deploymentUrl === "undefined") {
+    throw new Error(`Client created with undefined deployment address. If you used an environment variable, check that it's set.`);
+  }
+  if (typeof deploymentUrl !== "string") {
+    throw new Error(`Invalid deployment address: found ${deploymentUrl}".`);
+  }
+  if (!(deploymentUrl.startsWith("http:") || deploymentUrl.startsWith("https:"))) {
+    throw new Error(`Invalid deployment address: Must start with "https://" or "http://". Found "${deploymentUrl}".`);
+  }
+  try {
+    new URL(deploymentUrl);
+  } catch {
+    throw new Error(`Invalid deployment address: "${deploymentUrl}" is not a valid URL. If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
+  }
+  if (deploymentUrl.endsWith(".convex.site")) {
+    throw new Error(`Invalid deployment address: "${deploymentUrl}" ends with .convex.site, which is used for HTTP Actions. Convex deployment URLs typically end with .convex.cloud? If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
+  }
+}
+function isSimpleObject(value) {
+  const isObject2 = typeof value === "object";
+  const prototype = Object.getPrototypeOf(value);
+  const isSimple = prototype === null || prototype === Object.prototype || prototype?.constructor?.name === "Object";
+  return isObject2 && isSimple;
+}
+
+// node_modules/convex/dist/esm/values/value.js
+var LITTLE_ENDIAN = true;
+var MIN_INT64 = BigInt("-9223372036854775808");
+var MAX_INT64 = BigInt("9223372036854775807");
+var ZERO = BigInt("0");
+var EIGHT = BigInt("8");
+var TWOFIFTYSIX = BigInt("256");
+function isSpecial(n) {
+  return Number.isNaN(n) || !Number.isFinite(n) || Object.is(n, -0);
+}
+function slowBigIntToBase64(value) {
+  if (value < ZERO) {
+    value -= MIN_INT64 + MIN_INT64;
+  }
+  let hex3 = value.toString(16);
+  if (hex3.length % 2 === 1)
+    hex3 = "0" + hex3;
+  const bytes = new Uint8Array(new ArrayBuffer(8));
+  let i2 = 0;
+  for (const hexByte of hex3.match(/.{2}/g).reverse()) {
+    bytes.set([parseInt(hexByte, 16)], i2++);
+    value >>= EIGHT;
+  }
+  return fromByteArray(bytes);
+}
+function slowBase64ToBigInt(encoded) {
+  const integerBytes = toByteArray(encoded);
+  if (integerBytes.byteLength !== 8) {
+    throw new Error(`Received ${integerBytes.byteLength} bytes, expected 8 for $integer`);
+  }
+  let value = ZERO;
+  let power = ZERO;
+  for (const byte of integerBytes) {
+    value += BigInt(byte) * TWOFIFTYSIX ** power;
+    power++;
+  }
+  if (value > MAX_INT64) {
+    value += MIN_INT64 + MIN_INT64;
+  }
+  return value;
+}
+function modernBigIntToBase64(value) {
+  if (value < MIN_INT64 || MAX_INT64 < value) {
+    throw new Error(`BigInt ${value} does not fit into a 64-bit signed integer.`);
+  }
+  const buffer = new ArrayBuffer(8);
+  new DataView(buffer).setBigInt64(0, value, true);
+  return fromByteArray(new Uint8Array(buffer));
+}
+function modernBase64ToBigInt(encoded) {
+  const integerBytes = toByteArray(encoded);
+  if (integerBytes.byteLength !== 8) {
+    throw new Error(`Received ${integerBytes.byteLength} bytes, expected 8 for $integer`);
+  }
+  const intBytesView = new DataView(integerBytes.buffer);
+  return intBytesView.getBigInt64(0, true);
+}
+var bigIntToBase64 = DataView.prototype.setBigInt64 ? modernBigIntToBase64 : slowBigIntToBase64;
+var base64ToBigInt = DataView.prototype.getBigInt64 ? modernBase64ToBigInt : slowBase64ToBigInt;
+var MAX_IDENTIFIER_LEN = 1024;
+function validateObjectField(k) {
+  if (k.length > MAX_IDENTIFIER_LEN) {
+    throw new Error(`Field name ${k} exceeds maximum field name length ${MAX_IDENTIFIER_LEN}.`);
+  }
+  if (k.startsWith("$")) {
+    throw new Error(`Field name ${k} starts with a '$', which is reserved.`);
+  }
+  for (let i2 = 0;i2 < k.length; i2 += 1) {
+    const charCode = k.charCodeAt(i2);
+    if (charCode < 32 || charCode >= 127) {
+      throw new Error(`Field name ${k} has invalid character '${k[i2]}': Field names can only contain non-control ASCII characters`);
+    }
+  }
+}
+function jsonToConvex(value) {
+  if (value === null) {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((value2) => jsonToConvex(value2));
+  }
+  if (typeof value !== "object") {
+    throw new Error(`Unexpected type of ${value}`);
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 1) {
+    const key = entries[0][0];
+    if (key === "$bytes") {
+      if (typeof value.$bytes !== "string") {
+        throw new Error(`Malformed $bytes field on ${value}`);
+      }
+      return toByteArray(value.$bytes).buffer;
+    }
+    if (key === "$integer") {
+      if (typeof value.$integer !== "string") {
+        throw new Error(`Malformed $integer field on ${value}`);
+      }
+      return base64ToBigInt(value.$integer);
+    }
+    if (key === "$float") {
+      if (typeof value.$float !== "string") {
+        throw new Error(`Malformed $float field on ${value}`);
+      }
+      const floatBytes = toByteArray(value.$float);
+      if (floatBytes.byteLength !== 8) {
+        throw new Error(`Received ${floatBytes.byteLength} bytes, expected 8 for $float`);
+      }
+      const floatBytesView = new DataView(floatBytes.buffer);
+      const float = floatBytesView.getFloat64(0, LITTLE_ENDIAN);
+      if (!isSpecial(float)) {
+        throw new Error(`Float ${float} should be encoded as a number`);
+      }
+      return float;
+    }
+    if (key === "$set") {
+      throw new Error(`Received a Set which is no longer supported as a Convex type.`);
+    }
+    if (key === "$map") {
+      throw new Error(`Received a Map which is no longer supported as a Convex type.`);
+    }
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    validateObjectField(k);
+    out[k] = jsonToConvex(v);
+  }
+  return out;
+}
+var MAX_VALUE_FOR_ERROR_LEN = 16384;
+function stringifyValueForError(value) {
+  const str = JSON.stringify(value, (_key, value2) => {
+    if (value2 === undefined) {
+      return "undefined";
+    }
+    if (typeof value2 === "bigint") {
+      return `${value2.toString()}n`;
+    }
+    return value2;
+  });
+  if (str.length > MAX_VALUE_FOR_ERROR_LEN) {
+    const rest = "[...truncated]";
+    let truncateAt = MAX_VALUE_FOR_ERROR_LEN - rest.length;
+    const codePoint = str.codePointAt(truncateAt - 1);
+    if (codePoint !== undefined && codePoint > 65535) {
+      truncateAt -= 1;
+    }
+    return str.substring(0, truncateAt) + rest;
+  }
+  return str;
+}
+function convexToJsonInternal(value, originalValue, context, includeTopLevelUndefined) {
+  if (value === undefined) {
+    const contextText = context && ` (present at path ${context} in original object ${stringifyValueForError(originalValue)})`;
+    throw new Error(`undefined is not a valid Convex value${contextText}. To learn about Convex's supported types, see https://docs.convex.dev/using/types.`);
+  }
+  if (value === null) {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    if (value < MIN_INT64 || MAX_INT64 < value) {
+      throw new Error(`BigInt ${value} does not fit into a 64-bit signed integer.`);
+    }
+    return { $integer: bigIntToBase64(value) };
+  }
+  if (typeof value === "number") {
+    if (isSpecial(value)) {
+      const buffer = new ArrayBuffer(8);
+      new DataView(buffer).setFloat64(0, value, LITTLE_ENDIAN);
+      return { $float: fromByteArray(new Uint8Array(buffer)) };
+    } else {
+      return value;
+    }
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return { $bytes: fromByteArray(new Uint8Array(value)) };
+  }
+  if (Array.isArray(value)) {
+    return value.map((value2, i2) => convexToJsonInternal(value2, originalValue, context + `[${i2}]`, false));
+  }
+  if (value instanceof Set) {
+    throw new Error(errorMessageForUnsupportedType(context, "Set", [...value], originalValue));
+  }
+  if (value instanceof Map) {
+    throw new Error(errorMessageForUnsupportedType(context, "Map", [...value], originalValue));
+  }
+  if (!isSimpleObject(value)) {
+    const theType = value?.constructor?.name;
+    const typeName = theType ? `${theType} ` : "";
+    throw new Error(errorMessageForUnsupportedType(context, typeName, value, originalValue));
+  }
+  const out = {};
+  const entries = Object.entries(value);
+  entries.sort(([k1, _v1], [k2, _v2]) => k1 === k2 ? 0 : k1 < k2 ? -1 : 1);
+  for (const [k, v] of entries) {
+    if (v !== undefined) {
+      validateObjectField(k);
+      out[k] = convexToJsonInternal(v, originalValue, context + `.${k}`, false);
+    } else if (includeTopLevelUndefined) {
+      validateObjectField(k);
+      out[k] = convexOrUndefinedToJsonInternal(v, originalValue, context + `.${k}`);
+    }
+  }
+  return out;
+}
+function errorMessageForUnsupportedType(context, typeName, value, originalValue) {
+  if (context) {
+    return `${typeName}${stringifyValueForError(value)} is not a supported Convex type (present at path ${context} in original object ${stringifyValueForError(originalValue)}). To learn about Convex's supported types, see https://docs.convex.dev/using/types.`;
+  } else {
+    return `${typeName}${stringifyValueForError(value)} is not a supported Convex type.`;
+  }
+}
+function convexOrUndefinedToJsonInternal(value, originalValue, context) {
+  if (value === undefined) {
+    return { $undefined: null };
+  } else {
+    if (originalValue === undefined) {
+      throw new Error(`Programming error. Current value is ${stringifyValueForError(value)} but original value is undefined`);
+    }
+    return convexToJsonInternal(value, originalValue, context, false);
+  }
+}
+function convexToJson(value) {
+  return convexToJsonInternal(value, value, "", false);
+}
+// node_modules/convex/dist/esm/values/errors.js
+var __defProp2 = Object.defineProperty;
+var __defNormalProp = (obj, key, value) => (key in obj) ? __defProp2(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+var _a2;
+var _b;
+var IDENTIFYING_FIELD = Symbol.for("ConvexError");
+
+class ConvexError extends (_b = Error, _a2 = IDENTIFYING_FIELD, _b) {
+  constructor(data) {
+    super(typeof data === "string" ? data : stringifyValueForError(data));
+    __publicField(this, "name", "ConvexError");
+    __publicField(this, "data");
+    __publicField(this, _a2, true);
+    this.data = data;
+  }
+}
+// node_modules/convex/dist/esm/browser/logging.js
+var __defProp3 = Object.defineProperty;
+var __defNormalProp2 = (obj, key, value) => (key in obj) ? __defProp3(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField2 = (obj, key, value) => __defNormalProp2(obj, typeof key !== "symbol" ? key + "" : key, value);
+var INFO_COLOR = "color:rgb(0, 145, 255)";
+function prefix_for_source(source) {
+  switch (source) {
+    case "query":
+      return "Q";
+    case "mutation":
+      return "M";
+    case "action":
+      return "A";
+    case "any":
+      return "?";
+  }
+}
+
+class DefaultLogger {
+  constructor(options) {
+    __publicField2(this, "_onLogLineFuncs");
+    __publicField2(this, "_verbose");
+    this._onLogLineFuncs = {};
+    this._verbose = options.verbose;
+  }
+  addLogLineListener(func) {
+    let id = Math.random().toString(36).substring(2, 15);
+    for (let i2 = 0;i2 < 10; i2++) {
+      if (this._onLogLineFuncs[id] === undefined) {
+        break;
+      }
+      id = Math.random().toString(36).substring(2, 15);
+    }
+    this._onLogLineFuncs[id] = func;
+    return () => {
+      delete this._onLogLineFuncs[id];
+    };
+  }
+  logVerbose(...args) {
+    if (this._verbose) {
+      for (const func of Object.values(this._onLogLineFuncs)) {
+        func("debug", `${(/* @__PURE__ */ new Date()).toISOString()}`, ...args);
+      }
+    }
+  }
+  log(...args) {
+    for (const func of Object.values(this._onLogLineFuncs)) {
+      func("info", ...args);
+    }
+  }
+  warn(...args) {
+    for (const func of Object.values(this._onLogLineFuncs)) {
+      func("warn", ...args);
+    }
+  }
+  error(...args) {
+    for (const func of Object.values(this._onLogLineFuncs)) {
+      func("error", ...args);
+    }
+  }
+}
+function instantiateDefaultLogger(options) {
+  const logger = new DefaultLogger(options);
+  logger.addLogLineListener((level, ...args) => {
+    switch (level) {
+      case "debug":
+        console.debug(...args);
+        break;
+      case "info":
+        console.log(...args);
+        break;
+      case "warn":
+        console.warn(...args);
+        break;
+      case "error":
+        console.error(...args);
+        break;
+      default: {
+        console.log(...args);
+      }
+    }
+  });
+  return logger;
+}
+function instantiateNoopLogger(options) {
+  return new DefaultLogger(options);
+}
+function logForFunction(logger, type, source, udfPath, message) {
+  const prefix = prefix_for_source(source);
+  if (typeof message === "object") {
+    message = `ConvexError ${JSON.stringify(message.errorData, null, 2)}`;
+  }
+  if (type === "info") {
+    const match = message.match(/^\[.*?\] /);
+    if (match === null) {
+      logger.error(`[CONVEX ${prefix}(${udfPath})] Could not parse console.log`);
+      return;
+    }
+    const level = message.slice(1, match[0].length - 2);
+    const args = message.slice(match[0].length);
+    logger.log(`%c[CONVEX ${prefix}(${udfPath})] [${level}]`, INFO_COLOR, args);
+  } else {
+    logger.error(`[CONVEX ${prefix}(${udfPath})] ${message}`);
+  }
+}
+
+// node_modules/convex/dist/esm/server/functionName.js
+var functionName = Symbol.for("functionName");
+
+// node_modules/convex/dist/esm/server/components/paths.js
+var toReferencePath = Symbol.for("toReferencePath");
+function extractReferencePath(reference) {
+  return reference[toReferencePath] ?? null;
+}
+function isFunctionHandle(s) {
+  return s.startsWith("function://");
+}
+function getFunctionAddress(functionReference) {
+  let functionAddress;
+  if (typeof functionReference === "string") {
+    if (isFunctionHandle(functionReference)) {
+      functionAddress = { functionHandle: functionReference };
+    } else {
+      functionAddress = { name: functionReference };
+    }
+  } else if (functionReference[functionName]) {
+    functionAddress = { name: functionReference[functionName] };
+  } else {
+    const referencePath = extractReferencePath(functionReference);
+    if (!referencePath) {
+      throw new Error(`${functionReference} is not a functionReference`);
+    }
+    functionAddress = { reference: referencePath };
+  }
+  return functionAddress;
+}
+
+// node_modules/convex/dist/esm/server/api.js
+function getFunctionName(functionReference) {
+  const address = getFunctionAddress(functionReference);
+  if (address.name === undefined) {
+    if (address.functionHandle !== undefined) {
+      throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received function handle ${address.functionHandle}`);
+    } else if (address.reference !== undefined) {
+      throw new Error(`Expected function reference in the current component like "api.file.func" or "internal.file.func", but received reference ${address.reference}`);
+    }
+    throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received ${JSON.stringify(address)}`);
+  }
+  if (typeof functionReference === "string")
+    return functionReference;
+  const name = functionReference[functionName];
+  if (!name) {
+    throw new Error(`${functionReference} is not a functionReference`);
+  }
+  return name;
+}
+function createApi(pathParts = []) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createApi(newParts);
+      } else if (prop === functionName) {
+        if (pathParts.length < 2) {
+          const found = ["api", ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`api.moduleName.functionName\`. Found: \`${found}\``);
+        }
+        const path = pathParts.slice(0, -1).join("/");
+        const exportName = pathParts[pathParts.length - 1];
+        if (exportName === "default") {
+          return path;
+        } else {
+          return path + ":" + exportName;
+        }
+      } else if (prop === Symbol.toStringTag) {
+        return "FunctionReference";
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var anyApi = createApi();
+
+// node_modules/convex/dist/esm/browser/http_client.js
+var __defProp4 = Object.defineProperty;
+var __defNormalProp3 = (obj, key, value) => (key in obj) ? __defProp4(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField3 = (obj, key, value) => __defNormalProp3(obj, typeof key !== "symbol" ? key + "" : key, value);
+var STATUS_CODE_UDF_FAILED = 560;
+var specifiedFetch = undefined;
+class ConvexHttpClient {
+  constructor(address, options) {
+    __publicField3(this, "address");
+    __publicField3(this, "auth");
+    __publicField3(this, "adminAuth");
+    __publicField3(this, "encodedTsPromise");
+    __publicField3(this, "debug");
+    __publicField3(this, "fetchOptions");
+    __publicField3(this, "fetch");
+    __publicField3(this, "logger");
+    __publicField3(this, "mutationQueue", []);
+    __publicField3(this, "isProcessingQueue", false);
+    if (typeof options === "boolean") {
+      throw new Error("skipConvexDeploymentUrlCheck as the second argument is no longer supported. Please pass an options object, `{ skipConvexDeploymentUrlCheck: true }`.");
+    }
+    const opts = options ?? {};
+    if (opts.skipConvexDeploymentUrlCheck !== true) {
+      validateDeploymentUrl(address);
+    }
+    this.logger = options?.logger === false ? instantiateNoopLogger({ verbose: false }) : options?.logger !== true && options?.logger ? options.logger : instantiateDefaultLogger({ verbose: false });
+    this.address = address;
+    this.debug = true;
+    this.auth = undefined;
+    this.adminAuth = undefined;
+    this.fetch = options?.fetch;
+    if (options?.auth) {
+      this.setAuth(options.auth);
+    }
+  }
+  backendUrl() {
+    return `${this.address}/api`;
+  }
+  get url() {
+    return this.address;
+  }
+  setAuth(value) {
+    this.clearAuth();
+    this.auth = value;
+  }
+  setAdminAuth(token, actingAsIdentity) {
+    this.clearAuth();
+    if (actingAsIdentity !== undefined) {
+      const bytes = new TextEncoder().encode(JSON.stringify(actingAsIdentity));
+      const actingAsIdentityEncoded = btoa(String.fromCodePoint(...bytes));
+      this.adminAuth = `${token}:${actingAsIdentityEncoded}`;
+    } else {
+      this.adminAuth = token;
+    }
+  }
+  clearAuth() {
+    this.auth = undefined;
+    this.adminAuth = undefined;
+  }
+  setDebug(debug) {
+    this.debug = debug;
+  }
+  setFetchOptions(fetchOptions) {
+    this.fetchOptions = fetchOptions;
+  }
+  async consistentQuery(query, ...args) {
+    const queryArgs = parseArgs(args[0]);
+    const timestampPromise = this.getTimestamp();
+    return await this.queryInner(query, queryArgs, { timestampPromise });
+  }
+  async getTimestamp() {
+    if (this.encodedTsPromise) {
+      return this.encodedTsPromise;
+    }
+    return this.encodedTsPromise = this.getTimestampInner();
+  }
+  async getTimestampInner() {
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    const response = await localFetch(`${this.address}/api/query_ts`, {
+      ...this.fetchOptions,
+      method: "POST",
+      headers
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const { ts } = await response.json();
+    return ts;
+  }
+  async query(query, ...args) {
+    const queryArgs = parseArgs(args[0]);
+    return await this.queryInner(query, queryArgs, {});
+  }
+  async queryInner(query, queryArgs, options) {
+    const name = getFunctionName(query);
+    const args = [convexToJson(queryArgs)];
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const timestamp = options.timestampPromise ? await options.timestampPromise : undefined;
+    const body = JSON.stringify({
+      path: name,
+      format: "convex_encoded_json",
+      args,
+      ...timestamp ? { ts: timestamp } : {}
+    });
+    const endpoint = timestamp ? `${this.address}/api/query_at_ts` : `${this.address}/api/query`;
+    const response = await localFetch(endpoint, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "query", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+  async mutationInner(mutation, mutationArgs) {
+    const name = getFunctionName(mutation);
+    const body = JSON.stringify({
+      path: name,
+      format: "convex_encoded_json",
+      args: [convexToJson(mutationArgs)]
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const response = await localFetch(`${this.address}/api/mutation`, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "mutation", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+  async processMutationQueue() {
+    if (this.isProcessingQueue) {
+      return;
+    }
+    this.isProcessingQueue = true;
+    while (this.mutationQueue.length > 0) {
+      const { mutation, args, resolve, reject } = this.mutationQueue.shift();
+      try {
+        const result = await this.mutationInner(mutation, args);
+        resolve(result);
+      } catch (error48) {
+        reject(error48);
+      }
+    }
+    this.isProcessingQueue = false;
+  }
+  enqueueMutation(mutation, args) {
+    return new Promise((resolve, reject) => {
+      this.mutationQueue.push({ mutation, args, resolve, reject });
+      this.processMutationQueue();
+    });
+  }
+  async mutation(mutation, ...args) {
+    const [fnArgs, options] = args;
+    const mutationArgs = parseArgs(fnArgs);
+    const queued = !options?.skipQueue;
+    if (queued) {
+      return await this.enqueueMutation(mutation, mutationArgs);
+    } else {
+      return await this.mutationInner(mutation, mutationArgs);
+    }
+  }
+  async action(action, ...args) {
+    const actionArgs = parseArgs(args[0]);
+    const name = getFunctionName(action);
+    const body = JSON.stringify({
+      path: name,
+      format: "convex_encoded_json",
+      args: [convexToJson(actionArgs)]
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const response = await localFetch(`${this.address}/api/action`, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "action", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+  async function(anyFunction, componentPath, ...args) {
+    const functionArgs = parseArgs(args[0]);
+    const name = typeof anyFunction === "string" ? anyFunction : getFunctionName(anyFunction);
+    const body = JSON.stringify({
+      componentPath,
+      path: name,
+      format: "convex_encoded_json",
+      args: convexToJson(functionArgs)
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const response = await localFetch(`${this.address}/api/function`, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "any", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+}
+function forwardErrorData(errorData, error48) {
+  error48.data = jsonToConvex(errorData);
+  return error48;
+}
+// ../node_modules/convex/dist/esm/server/functionName.js
+var functionName2 = Symbol.for("functionName");
+
+// ../node_modules/convex/dist/esm/server/components/paths.js
+var toReferencePath2 = Symbol.for("toReferencePath");
+// ../node_modules/convex/dist/esm/server/api.js
+function createApi2(pathParts = []) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createApi2(newParts);
+      } else if (prop === functionName2) {
+        if (pathParts.length < 2) {
+          const found = ["api", ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`api.moduleName.functionName\`. Found: \`${found}\``);
+        }
+        const path = pathParts.slice(0, -1).join("/");
+        const exportName = pathParts[pathParts.length - 1];
+        if (exportName === "default") {
+          return path;
+        } else {
+          return path + ":" + exportName;
+        }
+      } else if (prop === Symbol.toStringTag) {
+        return "FunctionReference";
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var anyApi2 = createApi2();
+// ../node_modules/convex/dist/esm/server/components/index.js
+function createChildComponents(root, pathParts) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createChildComponents(root, newParts);
+      } else if (prop === toReferencePath2) {
+        if (pathParts.length < 1) {
+          const found = [root, ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`${root}.childComponent.functionName\`. Found: \`${found}\``);
+        }
+        return `_reference/childComponent/` + pathParts.join("/");
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var componentsGeneric = () => createChildComponents("components", []);
+// ../web/convex/_generated/api.js
+var api2 = anyApi2;
+var components = componentsGeneric();
+
+// cli/lib/convex.ts
+var CONVEX_URL = process.env.CONVEX_URL ?? "https://grateful-warbler-176.convex.cloud";
+var clientInstance = null;
+function getConvexClient() {
+  if (!clientInstance) {
+    clientInstance = new ConvexHttpClient(CONVEX_URL);
+  }
+  return clientInstance;
+}
+async function getAuthenticatedClient() {
+  const authData = await loadAuthData();
+  if (!authData?.access_token) {
+    return null;
+  }
+  const client = getConvexClient();
+  client.setAuth(authData.access_token);
+  return client;
+}
+async function pingCheckout(checkoutId) {
+  try {
+    const client = getConvexClient();
+    await client.mutation(api2.sessions.upsertCheckout, { checkoutId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function heartbeatSession(session) {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client)
+      return false;
+    await client.mutation(api2.sessions.heartbeatSession, session);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function generateUploadUrl(sessionId) {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client)
+      return null;
+    return await client.mutation(api2.sessions.generateUploadUrl, { sessionId });
+  } catch {
+    return null;
+  }
+}
+async function saveUpload(sessionId, storageId) {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client)
+      return false;
+    await client.mutation(api2.sessions.saveUpload, {
+      sessionId,
+      storageId
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// cli/commands/session-start.ts
+var AUTO_UPLOAD_DELAY_MINUTES = 10;
 async function sessionStart() {
   const messages = [];
-  const status = await checkAuthStatus(true);
-  if (status.needsLogin) {
-    messages.push(hook.notLoggedIn());
-  } else if (status.user) {
-    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
-  }
   const cwd = process.env.CWD || process.cwd();
   const transcriptPath = process.env.TRANSCRIPT_PATH;
+  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
+  getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
   try {
     const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
     if (extracted > 0) {
@@ -17230,19 +18624,531 @@ async function sessionStart() {
     const errorMsg = error48 instanceof Error ? error48.message : String(error48);
     messages.push(hook.extractionFailed(errorMsg));
   }
+  const status = await checkAuthStatus(true);
+  let userHasAlias = false;
+  if (status.authenticated) {
+    try {
+      const aliasUpdated = await updateAliasIfOutdated();
+      if (aliasUpdated) {
+        messages.push(hook.aliasUpdated());
+      }
+      userHasAlias = await hasAlias();
+    } catch {}
+  }
+  if (status.needsLogin) {
+    messages.push(hook.notLoggedIn());
+  } else if (status.user) {
+    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
+  }
+  if (status.authenticated) {
+    try {
+      const pending = await getPendingSessions(cwd);
+      if (pending.length > 1) {
+        const earliestUploadAt = pending.map((s) => s.eligibleAt).filter((t) => t !== null).sort((a, b) => a - b)[0] ?? null;
+        messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
+      }
+      const eligible = await getEligibleSessions(cwd);
+      if (eligible.length > 0) {
+        let uploadCount = 0;
+        for (const session of eligible) {
+          if (scheduleAutoUpload(session.sessionId)) {
+            uploadCount++;
+          }
+        }
+        if (uploadCount > 0) {
+          messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
+        }
+      }
+    } catch {}
+  }
   if (messages.length > 0) {
-    hookOutput(messages.join(`
+    const formatted = messages.map((msg, i2) => i2 === 0 ? `hive-mind: ${msg}` : `\u2192 ${msg}`);
+    hookOutput(formatted.join(`
 `));
   }
-  return 0;
+  sendHeartbeats(cwd, status.authenticated).finally(() => process.exit(0));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  process.exit(0);
+}
+async function sendHeartbeats(cwd, authenticated) {
+  if (!authenticated)
+    return;
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir8(sessionsDir);
+  } catch {
+    return;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  for (const file2 of jsonlFiles) {
+    const meta3 = await readExtractedMeta(join9(sessionsDir, file2));
+    if (!meta3)
+      continue;
+    await heartbeatSession({
+      sessionId: meta3.sessionId,
+      checkoutId: meta3.checkoutId,
+      project: getCanonicalProjectName(cwd),
+      lineCount: meta3.messageCount,
+      parentSessionId: meta3.parentSessionId
+    });
+  }
+}
+function scheduleAutoUpload(sessionId) {
+  const cliPath = getCliPath();
+  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+  try {
+    const child = spawn("bun", [cliPath, "upload", sessionId, "--delay", String(delaySeconds)], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, CWD: process.env.CWD || process.cwd() }
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// cli/commands/setup.ts
+import { createInterface as createInterface3 } from "readline";
+var WORKOS_API_URL2 = "https://api.workos.com/user_management";
+var DeviceAuthResponseSchema = exports_external.object({
+  device_code: exports_external.string(),
+  user_code: exports_external.string(),
+  verification_uri: exports_external.string(),
+  verification_uri_complete: exports_external.string(),
+  interval: exports_external.number(),
+  expires_in: exports_external.number()
+});
+var ErrorResponseSchema = exports_external.object({
+  error: exports_external.string(),
+  error_description: exports_external.string().optional()
+});
+async function confirm2(message, defaultYes = false) {
+  const rl = createInterface3({ input: process.stdin, output: process.stdout });
+  const hint = defaultYes ? "[Y/n]" : "[y/N]";
+  return new Promise((resolve) => {
+    rl.question(`${message} ${hint} `, (answer) => {
+      rl.close();
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === "") {
+        resolve(defaultYes);
+      } else {
+        resolve(trimmed === "y" || trimmed === "yes");
+      }
+    });
+  });
+}
+async function openBrowser(url2) {
+  try {
+    if (process.platform === "darwin") {
+      await Bun.spawn(["open", url2]).exited;
+      return true;
+    } else if (process.platform === "linux") {
+      try {
+        await Bun.spawn(["xdg-open", url2]).exited;
+        return true;
+      } catch {
+        try {
+          await Bun.spawn(["wslview", url2]).exited;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+function sleep2(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function promptAliasSetup() {
+  const alreadyHasAlias = await hasAlias();
+  if (alreadyHasAlias)
+    return true;
+  console.log("");
+  console.log(`  ${setup.aliasPrompt}`);
+  console.log(`  ${setup.aliasExplain}`);
+  console.log("");
+  if (await confirm2(`  ${setup.aliasConfirm}`, true)) {
+    const { success: success2 } = await setupAlias();
+    if (success2) {
+      const shell = getShellConfig();
+      printSuccess(setup.aliasSuccess);
+      console.log(`  ${setup.aliasActivate(shell.sourceCmd)}`);
+      return true;
+    } else {
+      printWarning(setup.aliasFailed);
+    }
+  }
+  return false;
+}
+async function checkExistingAuth() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    printWarning(setup.alreadyLoggedIn);
+    console.log("");
+    return await confirm2(setup.confirmRelogin);
+  }
+  return true;
+}
+async function tryRefresh() {
+  const authData = await loadAuthData();
+  if (!authData?.refresh_token)
+    return { success: false };
+  printInfo(setup.refreshing);
+  const newAuthData = await refreshToken(authData.refresh_token);
+  if (newAuthData) {
+    await saveAuthData(newAuthData);
+    printSuccess(setup.refreshSuccess);
+    return { success: true, user: newAuthData.user };
+  }
+  return { success: false };
+}
+async function promptConsent(userHasAlias) {
+  console.log("");
+  console.log(setup.consentInfo(userHasAlias));
+  console.log("");
+  return await confirm2(setup.consentConfirm, true);
+}
+async function deviceAuthFlow() {
+  printInfo(setup.starting);
+  console.log("");
+  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
+  });
+  const data = await response.json();
+  const errorResult = ErrorResponseSchema.safeParse(data);
+  if (errorResult.success && errorResult.data.error) {
+    printError(setup.startFailed(errorResult.data.error));
+    if (errorResult.data.error_description) {
+      console.log(errorResult.data.error_description);
+    }
+    return 1;
+  }
+  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
+  if (!deviceAuthResult.success) {
+    printError(setup.unexpectedAuthResponse);
+    return 1;
+  }
+  const deviceAuth = deviceAuthResult.data;
+  console.log("\u2501".repeat(65));
+  console.log("");
+  console.log(`  ${setup.visitUrl}`);
+  console.log("");
+  console.log(`    ${deviceAuth.verification_uri}`);
+  console.log("");
+  console.log(`  ${setup.confirmCode}`);
+  console.log("");
+  console.log(`    ${colors.green(deviceAuth.user_code)}`);
+  console.log("");
+  console.log("\u2501".repeat(65));
+  console.log("");
+  if (await openBrowser(deviceAuth.verification_uri_complete)) {
+    printInfo(setup.browserOpened);
+  } else {
+    printInfo(setup.openManually);
+  }
+  console.log("");
+  printInfo(setup.waiting(deviceAuth.expires_in));
+  let interval = deviceAuth.interval * 1000;
+  const startTime = Date.now();
+  const expiresAt = startTime + deviceAuth.expires_in * 1000;
+  while (Date.now() < expiresAt) {
+    await sleep2(interval);
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceAuth.device_code,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const tokenData = await tokenResponse.json();
+    const authResult = AuthDataSchema.safeParse(tokenData);
+    if (authResult.success) {
+      await saveAuthData(authResult.data);
+      console.log("");
+      printSuccess(setup.success);
+      console.log("");
+      const displayName = getUserDisplayName(authResult.data.user);
+      if (authResult.data.user.first_name) {
+        console.log(setup.welcomeNamed(displayName, authResult.data.user.email));
+      } else {
+        console.log(setup.welcomeEmail(authResult.data.user.email));
+      }
+      return 0;
+    }
+    const errorData = tokenData;
+    if (errorData.error === "authorization_pending") {
+      process.stdout.write(`\r  ${setup.waitingProgress(elapsed)}`);
+      continue;
+    }
+    if (errorData.error === "slow_down") {
+      interval += 1000;
+      continue;
+    }
+    console.log("");
+    printError(setup.authFailed(errorData.error || "unknown error"));
+    if (errorData.error_description)
+      console.log(errorData.error_description);
+    return 1;
+  }
+  printError(setup.timeout);
+  return 1;
+}
+async function setup2() {
+  console.log("");
+  console.log(`  ${setup.header}`);
+  console.log(`  ${"\u2500".repeat(15)}`);
+  const userHasAlias = await promptAliasSetup();
+  if (!await promptConsent(userHasAlias)) {
+    console.log(setup.consentDeclined);
+    return 0;
+  }
+  console.log("");
+  if (!await checkExistingAuth()) {
+    return 0;
+  }
+  const refreshResult = await tryRefresh();
+  if (refreshResult.success) {
+    return 0;
+  }
+  return await deviceAuthFlow();
+}
+
+// cli/commands/upload.ts
+import { readFile as readFile5 } from "fs/promises";
+import { join as join10 } from "path";
+async function uploadSession(cwd, sessionId) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
+  let content;
+  try {
+    content = await readFile5(sessionPath, "utf-8");
+  } catch {
+    return { success: false, error: "Session file not found" };
+  }
+  const meta3 = await readExtractedMeta(sessionPath);
+  if (!meta3) {
+    return { success: false, error: "Could not read session metadata" };
+  }
+  const heartbeatOk = await heartbeatSession({
+    sessionId: meta3.sessionId,
+    checkoutId: meta3.checkoutId,
+    project: getCanonicalProjectName(cwd),
+    lineCount: meta3.messageCount,
+    parentSessionId: meta3.parentSessionId
+  });
+  if (!heartbeatOk) {
+    return { success: false, error: "Failed to heartbeat session" };
+  }
+  const uploadUrl = await generateUploadUrl(sessionId);
+  if (!uploadUrl) {
+    return { success: false, error: "Failed to get upload URL" };
+  }
+  try {
+    const response = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-ndjson" },
+      body: content
+    });
+    if (!response.ok) {
+      return { success: false, error: `Upload failed: ${response.status}` };
+    }
+    const result = await response.json();
+    if (!result.storageId) {
+      return { success: false, error: "No storage ID returned" };
+    }
+    const saved = await saveUpload(sessionId, result.storageId);
+    if (!saved) {
+      return { success: false, error: "Failed to save upload metadata" };
+    }
+    return { success: true };
+  } catch (error48) {
+    return {
+      success: false,
+      error: error48 instanceof Error ? error48.message : "Unknown upload error"
+    };
+  }
+}
+async function getAgentIds(cwd, sessionId) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
+  const session = await readExtractedSession(sessionPath);
+  if (!session)
+    return [];
+  const parsed = parseSession(session.meta, session.entries);
+  const agentIds = new Set;
+  for (const block of parsed.blocks) {
+    if (block.type === "tool" && block.agentId) {
+      agentIds.add(block.agentId);
+    }
+  }
+  return Array.from(agentIds);
+}
+async function uploadSessionWithAgents(cwd, sessionId) {
+  const mainResult = await uploadSession(cwd, sessionId);
+  if (!mainResult.success) {
+    return { ...mainResult, agentCount: 0 };
+  }
+  const agentIds = await getAgentIds(cwd, sessionId);
+  let agentCount = 0;
+  for (const agentId of agentIds) {
+    const agentResult = await uploadSession(cwd, `agent-${agentId}`);
+    if (agentResult.success) {
+      agentCount++;
+    }
+  }
+  return { success: true, agentCount };
+}
+function formatEligibility(e) {
+  const id = formatSessionId(e.sessionId);
+  const lines = `${e.meta.messageCount} lines`;
+  if (e.excluded) {
+    return `  ${colors.yellow("\u2717")} ${id}  ${lines}  ${colors.yellow("excluded")}`;
+  }
+  if (e.eligible) {
+    return `  ${colors.green("\u2713")} ${id}  ${lines}  ${colors.green("ready")}`;
+  }
+  return `  ${colors.blue("\u25CB")} ${id}  ${lines}  ${colors.blue(e.reason)}`;
+}
+async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
+  if (delaySeconds > 0) {
+    printInfo(uploadCmd.waitingDelay(delaySeconds));
+    await sleep(delaySeconds * 1000);
+  }
+  const lookup2 = await lookupSession(cwd, sessionIdPrefix);
+  if (lookup2.type === "not_found") {
+    printError(uploadCmd.sessionNotFound(sessionIdPrefix));
+    return 1;
+  }
+  if (lookup2.type === "ambiguous") {
+    printError(uploadCmd.ambiguousSession(sessionIdPrefix, lookup2.matches.length));
+    for (const m of lookup2.matches.slice(0, 5)) {
+      console.log(`  ${m}`);
+    }
+    if (lookup2.matches.length > 5) {
+      console.log(`  ... and ${lookup2.matches.length - 5} more`);
+    }
+    return 1;
+  }
+  const { sessionId, meta: meta3 } = lookup2;
+  if (meta3.excluded) {
+    printInfo(uploadCmd.sessionExcluded(sessionId));
+    return 0;
+  }
+  printInfo(uploadCmd.uploading(sessionId));
+  const result = await uploadSessionWithAgents(cwd, sessionId);
+  if (result.success) {
+    if (result.agentCount > 0) {
+      printSuccess(uploadCmd.uploadedWithAgents(sessionId, result.agentCount));
+    } else {
+      printSuccess(uploadCmd.uploaded(sessionId));
+    }
+    return 0;
+  } else {
+    printError(uploadCmd.failedToUpload(sessionId, result.error || "Unknown error"));
+    return 1;
+  }
+}
+async function interactiveUpload(cwd) {
+  console.log("");
+  printInfo(uploadCmd.checking);
+  console.log("");
+  const allSessions = await getAllSessionsEligibility(cwd);
+  if (allSessions.length === 0) {
+    console.log(uploadCmd.noExtractedSessions);
+    return 0;
+  }
+  console.log(uploadCmd.sessionsHeader);
+  for (const session of allSessions) {
+    console.log(formatEligibility(session));
+  }
+  console.log("");
+  const eligible = allSessions.filter((s) => s.eligible);
+  if (eligible.length === 0) {
+    console.log(uploadCmd.noSessionsReady);
+    const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
+    if (pending.length > 0) {
+      console.log(uploadCmd.pendingCount(pending.length));
+    }
+    return 0;
+  }
+  console.log(uploadCmd.readyCount(eligible.length));
+  console.log("");
+  if (!await confirm(uploadCmd.confirmUpload)) {
+    console.log(uploadCmd.cancelled);
+    return 0;
+  }
+  console.log("");
+  let succeeded = 0;
+  let failed = 0;
+  for (const session of eligible) {
+    process.stdout.write(`${uploadCmd.uploading(formatSessionId(session.sessionId))} `);
+    const result = await uploadSessionWithAgents(cwd, session.sessionId);
+    if (result.success) {
+      if (result.agentCount > 0) {
+        console.log(colors.green(`${uploadCmd.done} (+${result.agentCount} agents)`));
+      } else {
+        console.log(colors.green(uploadCmd.done));
+      }
+      succeeded++;
+    } else {
+      console.log(colors.red(uploadCmd.failed(result.error || "Unknown error")));
+      failed++;
+    }
+  }
+  console.log("");
+  if (succeeded > 0) {
+    printSuccess(uploadCmd.uploadedCount(succeeded));
+  }
+  if (failed > 0) {
+    printError(uploadCmd.failedCount(failed));
+  }
+  return failed > 0 ? 1 : 0;
+}
+async function upload() {
+  const cwd = process.env.CWD || process.cwd();
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) {
+    printError(uploadCmd.notAuthenticated);
+    return 1;
+  }
+  const args = process.argv.slice(3);
+  let sessionId = null;
+  let delaySeconds = 0;
+  for (let i2 = 0;i2 < args.length; i2++) {
+    const arg = args[i2];
+    if (arg === "--delay" && args[i2 + 1]) {
+      delaySeconds = parseInt(args[i2 + 1], 10);
+      i2++;
+    } else if (!arg.startsWith("-")) {
+      sessionId = arg;
+    }
+  }
+  if (sessionId) {
+    return await uploadSingleSession(cwd, sessionId, delaySeconds);
+  }
+  return await interactiveUpload(cwd);
 }
 
 // cli/cli.ts
 var COMMANDS = {
+  exclude: { description: "Exclude session from upload", handler: exclude },
   grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
-  login: { description: "Authenticate with hive-mind", handler: login2 },
   read: { description: "Read session entries", handler: read },
+  setup: { description: "Set up hive-mind (login + alias)", handler: setup2 },
+  upload: { description: "Upload eligible sessions", handler: upload },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
 };
 function printUsage4() {

@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import { z } from "zod";
+import { hasAlias, setupAlias } from "../lib/alias";
 import {
   AuthDataSchema,
   checkAuthStatus,
@@ -8,8 +9,8 @@ import {
   refreshToken,
   saveAuthData,
 } from "../lib/auth";
-import { WORKOS_CLIENT_ID } from "../lib/config";
-import { login as msg } from "../lib/messages";
+import { WORKOS_CLIENT_ID, getShellConfig } from "../lib/config";
+import { setup as msg } from "../lib/messages";
 import {
   colors,
   printError,
@@ -34,12 +35,18 @@ const ErrorResponseSchema = z.object({
   error_description: z.string().optional(),
 });
 
-async function confirm(message: string): Promise<boolean> {
+async function confirm(message: string, defaultYes = false): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const hint = defaultYes ? "[Y/n]" : "[y/N]";
   return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
+    rl.question(`${message} ${hint} `, (answer) => {
       rl.close();
-      resolve(answer.toLowerCase() === "y");
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === "") {
+        resolve(defaultYes);
+      } else {
+        resolve(trimmed === "y" || trimmed === "yes");
+      }
     });
   });
 }
@@ -72,6 +79,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function promptAliasSetup(): Promise<boolean> {
+  const alreadyHasAlias = await hasAlias();
+  if (alreadyHasAlias) return true;
+
+  console.log("");
+  console.log(`  ${msg.aliasPrompt}`);
+  console.log(`  ${msg.aliasExplain}`);
+  console.log("");
+
+  if (await confirm(`  ${msg.aliasConfirm}`, true)) {
+    const { success } = await setupAlias();
+    if (success) {
+      const shell = getShellConfig();
+      printSuccess(msg.aliasSuccess);
+      console.log(`  ${msg.aliasActivate(shell.sourceCmd)}`);
+      return true;
+    } else {
+      printWarning(msg.aliasFailed);
+    }
+  }
+  return false;
+}
+
 async function checkExistingAuth(): Promise<boolean> {
   const status = await checkAuthStatus(false);
 
@@ -84,9 +114,9 @@ async function checkExistingAuth(): Promise<boolean> {
   return true;
 }
 
-async function tryRefresh(): Promise<boolean> {
+async function tryRefresh(): Promise<{ success: boolean; user?: { first_name?: string; email: string } }> {
   const authData = await loadAuthData();
-  if (!authData?.refresh_token) return false;
+  if (!authData?.refresh_token) return { success: false };
 
   printInfo(msg.refreshing);
 
@@ -94,10 +124,17 @@ async function tryRefresh(): Promise<boolean> {
   if (newAuthData) {
     await saveAuthData(newAuthData);
     printSuccess(msg.refreshSuccess);
-    return true;
+    return { success: true, user: newAuthData.user };
   }
 
-  return false;
+  return { success: false };
+}
+
+async function promptConsent(userHasAlias: boolean): Promise<boolean> {
+  console.log("");
+  console.log(msg.consentInfo(userHasAlias));
+  console.log("");
+  return await confirm(msg.consentConfirm, true);
 }
 
 async function deviceAuthFlow(): Promise<number> {
@@ -122,7 +159,7 @@ async function deviceAuthFlow(): Promise<number> {
 
   const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
   if (!deviceAuthResult.success) {
-    printError("Unexpected response from authentication server");
+    printError(msg.unexpectedAuthResponse);
     return 1;
   }
 
@@ -183,9 +220,6 @@ async function deviceAuthFlow(): Promise<number> {
       } else {
         console.log(msg.welcomeEmail(authResult.data.user.email));
       }
-      console.log("");
-      console.log(msg.contributing);
-      console.log(msg.reviewPeriod);
 
       return 0;
     }
@@ -215,14 +249,33 @@ async function deviceAuthFlow(): Promise<number> {
   return 1;
 }
 
-export async function login(): Promise<number> {
+export async function setup(): Promise<number> {
   console.log("");
   console.log(`  ${msg.header}`);
   console.log(`  ${"\u2500".repeat(15)}`);
+
+  // Alias setup first
+  const userHasAlias = await promptAliasSetup();
+
+  // Consent before any auth
+  if (!(await promptConsent(userHasAlias))) {
+    console.log(msg.consentDeclined);
+    return 0;
+  }
+
   console.log("");
 
-  if (!(await checkExistingAuth())) return 0;
-  if (await tryRefresh()) return 0;
+  // Check if already authenticated
+  if (!(await checkExistingAuth())) {
+    return 0;
+  }
 
+  // Try to refresh existing token
+  const refreshResult = await tryRefresh();
+  if (refreshResult.success) {
+    return 0;
+  }
+
+  // Full device auth flow
   return await deviceAuthFlow();
 }

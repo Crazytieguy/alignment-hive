@@ -32,7 +32,7 @@ A system for alignment researchers to contribute session learnings to a shared k
 - [x] Session 10A: Extraction Implementation
 - [x] Session 10B: Local Retrieval (CLI commands, retrieval agent, field filtering, range reads)
 - [x] Session 11: WorkOS Production & Signup Flow
-- [ ] **Session 12: Convex Submission** ← NEXT (heartbeats, background upload, R2 storage)
+- [x] Session 12: Convex Submission (heartbeats, upload to Convex storage, 24h review period)
 - [ ] Session 13: Local Audit Server (view/audit sessions, manage submission status)
 - [ ] Session 14: Testing Strategy
 - [x] Session 15: User Communication Style (hook messages, error UX)
@@ -55,7 +55,7 @@ A system for alignment researchers to contribute session learnings to a shared k
 | Web App | TanStack Start + React |
 | Auth | WorkOS AuthKit (web) + device flow (CLI) |
 | Backend | Convex |
-| File Storage | Cloudflare R2 |
+| File Storage | Convex built-in storage |
 | Local Extraction | Deterministic code (no AI) |
 | Retrieval | Local JSONL + scripts |
 
@@ -148,13 +148,21 @@ Schema details subject to change during implementation.
 ### Convex API
 
 ```
-POST session/heartbeat
-  - Upsert session (create if new, update timestamp + line_count + status)
-  - Called by SessionStart hook for all sessions (including excluded)
+sessions.heartbeatSession
+  - Upsert session metadata (sessionId, checkoutId, project, lineCount, parentSessionId)
+  - Called by SessionStart hook for authenticated users
 
-POST session/upload
-  - Upload extracted transcript to R2
-  - Called by background submission script
+sessions.generateUploadUrl
+  - Get pre-signed URL for Convex storage upload
+  - Validates session exists and belongs to user
+
+sessions.saveUpload
+  - Record storage ID after successful upload
+  - Marks session as uploaded
+
+sessions.upsertCheckout
+  - Track checkout IDs for anonymous install telemetry
+  - Called on every session start (no auth required)
 ```
 
 ### Local Retrieval
@@ -227,14 +235,17 @@ Switch from staging to production WorkOS app and create the signup callback page
 - New users see welcome message and can navigate to installation docs
 - Existing CLI auth flow still works with production credentials
 
-### Session 12: Convex Submission
+### Session 12: Convex Submission ✓
 
-Implement remote submission using existing Convex State and Convex API design (see v0.1 Architecture above):
-- Heartbeat endpoint (upsert session metadata)
-- Upload endpoint (R2 storage)
-- Background submission script (delay after 24h review period)
-- Status tracking (pending, submitted, excluded)
-- Graceful degradation when Convex unavailable
+Implemented:
+- Heartbeat endpoint (upsert session metadata with project, lineCount, parentSessionId)
+- Upload to Convex built-in storage (simpler than R2)
+- 24h review period based on session mtime + auth token creation time
+- Auto-upload with 10-minute delay for eligible sessions
+- CLI commands: `upload [session-id]`, `exclude <session-id>`, `index --pending`
+- Canonical project name from git remote (shared across machines/users)
+- Agent sessions linked to parent via parentSessionId
+- Checkout telemetry for anonymous install tracking
 
 **Privacy note:** Before authentication, only `checkoutId` is sent to Convex (for anonymous install tracking). No session data or other metadata is sent until the user authenticates. This allows counting plugin installations while respecting privacy.
 
@@ -369,3 +380,8 @@ Environment variables configured in Vercel dashboard:
 - [Convex R2 Component](https://www.convex.dev/components/cloudflare-r2)
 - [Convex HTTP Actions](https://docs.convex.dev/functions/http-actions)
 - [Fly.io Machines API](https://fly.io/docs/machines/api/)
+
+## Known Issues / TODOs
+
+### Extraction count bug
+Running `session-start` repeatedly shows "Extracted N sessions" even when no new Claude Code sessions occurred. Need to investigate why `needsExtraction` is returning true for sessions that haven't changed.

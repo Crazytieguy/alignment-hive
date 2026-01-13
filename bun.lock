@@ -7,6 +7,9 @@
     "hive-mind": {
       "name": "@alignment-hive/hive-mind",
       "version": "0.1.0",
+      "dependencies": {
+        "convex": "^1.31.0",
+      },
       "devDependencies": {
         "@types/bun": "latest",
         "@types/node": "^24.10.4",

@@ -4,13 +4,10 @@ PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 
 if ! command -v bun &> /dev/null; then
     if [ "$1" = "session-start" ]; then
-        echo '{"systemMessage": "hive-mind requires Bun.\nInstall: curl -fsSL https://bun.sh/install | bash"}'
+        echo '{"systemMessage": "To run hive-mind: curl -fsSL https://bun.sh/install | bash"}'
         exit 0
     else
-        echo "Error: hive-mind requires Bun to be installed."
-        echo ""
-        echo "Install Bun:"
-        echo "  curl -fsSL https://bun.sh/install | bash"
+        echo "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash"
         exit 1
     fi
 fi

@@ -1,21 +1,24 @@
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { hasAlias, updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
-import { extractAllSessions } from "../lib/extraction";
-import { hook } from "../lib/messages";
+import { getCanonicalProjectName, getCheckoutId } from "../lib/config";
+import { heartbeatSession, pingCheckout } from "../lib/convex";
+import { extractAllSessions, getHiveMindSessionsDir, readExtractedMeta } from "../lib/extraction";
+import { getCliPath, hook } from "../lib/messages";
 import { hookOutput } from "../lib/output";
+import { getEligibleSessions, getPendingSessions } from "../lib/upload-eligibility";
+
+const AUTO_UPLOAD_DELAY_MINUTES = 10;
 
 export async function sessionStart(): Promise<number> {
   const messages: Array<string> = [];
-
-  const status = await checkAuthStatus(true);
-
-  if (status.needsLogin) {
-    messages.push(hook.notLoggedIn());
-  } else if (status.user) {
-    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
-  }
-
   const cwd = process.env.CWD || process.cwd();
   const transcriptPath = process.env.TRANSCRIPT_PATH;
+  const hiveMindDir = join(cwd, ".claude", "hive-mind");
+
+  getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
 
   try {
     const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
@@ -32,9 +35,111 @@ export async function sessionStart(): Promise<number> {
     messages.push(hook.extractionFailed(errorMsg));
   }
 
-  if (messages.length > 0) {
-    hookOutput(messages.join("\n"));
+  const status = await checkAuthStatus(true);
+
+  let userHasAlias = false;
+  if (status.authenticated) {
+    try {
+      const aliasUpdated = await updateAliasIfOutdated();
+      if (aliasUpdated) {
+        messages.push(hook.aliasUpdated());
+      }
+      userHasAlias = await hasAlias();
+    } catch {
+      // Ignore alias errors
+    }
   }
 
-  return 0;
+  if (status.needsLogin) {
+    messages.push(hook.notLoggedIn());
+  } else if (status.user) {
+    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
+  }
+
+  if (status.authenticated) {
+    try {
+      const pending = await getPendingSessions(cwd);
+      if (pending.length > 1) {
+        const earliestUploadAt = pending
+          .map((s) => s.eligibleAt)
+          .filter((t): t is number => t !== null)
+          .sort((a, b) => a - b)[0] ?? null;
+        messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
+      }
+
+      const eligible = await getEligibleSessions(cwd);
+      if (eligible.length > 0) {
+        let uploadCount = 0;
+        for (const session of eligible) {
+          if (scheduleAutoUpload(session.sessionId)) {
+            uploadCount++;
+          }
+        }
+        if (uploadCount > 0) {
+          messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
+        }
+      }
+    } catch {
+      // Ignore eligibility check errors
+    }
+  }
+
+  if (messages.length > 0) {
+    const formatted = messages.map((msg, i) => (i === 0 ? `hive-mind: ${msg}` : `→ ${msg}`));
+    hookOutput(formatted.join("\n"));
+  }
+
+  // Convex client keeps connections alive, so we force exit after heartbeats
+  sendHeartbeats(cwd, status.authenticated).finally(() => process.exit(0));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  process.exit(0);
+}
+
+async function sendHeartbeats(cwd: string, authenticated: boolean): Promise<void> {
+  if (!authenticated) return;
+
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+
+  let files: Array<string>;
+  try {
+    files = await readdir(sessionsDir);
+  } catch {
+    return;
+  }
+
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+
+  for (const file of jsonlFiles) {
+    const meta = await readExtractedMeta(join(sessionsDir, file));
+    if (!meta) continue;
+
+    await heartbeatSession({
+      sessionId: meta.sessionId,
+      checkoutId: meta.checkoutId,
+      project: getCanonicalProjectName(cwd),
+      lineCount: meta.messageCount,
+      parentSessionId: meta.parentSessionId,
+    });
+  }
+}
+
+function scheduleAutoUpload(sessionId: string): boolean {
+  const cliPath = getCliPath();
+  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+
+  try {
+    const child = spawn(
+      "bun",
+      [cliPath, "upload", sessionId, "--delay", String(delaySeconds)],
+      {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, CWD: process.env.CWD || process.cwd() },
+      }
+    );
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -10,6 +10,9 @@
     "lint:fix": "eslint cli --fix",
     "cli:build": "bun build cli/cli.ts --outfile=../plugins/hive-mind/cli.js --target=bun"
   },
+  "dependencies": {
+    "convex": "^1.31.0"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^24.10.4",

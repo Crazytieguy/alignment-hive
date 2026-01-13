@@ -1,18 +1,22 @@
 #!/usr/bin/env bun
 
+import { exclude } from "./commands/exclude";
 import { grep } from "./commands/grep";
 import { index } from "./commands/index";
-import { login } from "./commands/login";
 import { read } from "./commands/read";
 import { sessionStart } from "./commands/session-start";
+import { setup } from "./commands/setup";
+import { upload } from "./commands/upload";
 import { errors, usage } from "./lib/messages";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
+  exclude: { description: "Exclude session from upload", handler: exclude },
   grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
-  login: { description: "Authenticate with hive-mind", handler: login },
   read: { description: "Read session entries", handler: read },
+  setup: { description: "Set up hive-mind (login + alias)", handler: setup },
+  upload: { description: "Upload eligible sessions", handler: upload },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
 } as const;
 

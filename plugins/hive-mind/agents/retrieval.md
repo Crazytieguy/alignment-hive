@@ -42,7 +42,7 @@ description: |
   Includes specific details about the current issue so retrieval can find relevant past debugging sessions.
   </commentary>
   </example>
-model: haiku
+model: opus
 color: cyan
 skills: hive-mind:retrieval
 tools: Bash

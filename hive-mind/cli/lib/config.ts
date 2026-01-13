@@ -1,7 +1,8 @@
+import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 export const WORKOS_CLIENT_ID =
   process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
@@ -46,4 +47,28 @@ export function getShellConfig(): { file: string; sourceCmd: string } {
     };
   }
   return { file: "~/.profile", sourceCmd: "source ~/.profile" };
+}
+
+/**
+ * Get a canonical project identifier from git remote.
+ * Returns a normalized identifier like "github.com/user/repo" or falls back to directory basename.
+ */
+export function getCanonicalProjectName(cwd: string): string {
+  try {
+    const remoteUrl = execSync("git remote get-url origin", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+
+    const canonical = remoteUrl
+      .replace(/^git@/, "")
+      .replace(/^https?:\/\//, "")
+      .replace(":", "/")
+      .replace(/\.git$/, "");
+
+    return canonical;
+  } catch {
+    return basename(cwd);
+  }
 }

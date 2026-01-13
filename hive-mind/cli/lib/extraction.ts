@@ -230,7 +230,10 @@ export async function extractAllSessions(cwd: string, transcriptPath?: string): 
       try {
         const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
         if (result) {
-          extracted++;
+          // Only count main sessions, not agents
+          if (!agentId) {
+            extracted++;
+          }
           if (result.schemaErrors.length > 0) {
             schemaErrors.push({ sessionId: basename(rawPath, ".jsonl"), errors: result.schemaErrors });
           }

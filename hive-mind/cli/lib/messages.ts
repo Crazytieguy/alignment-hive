@@ -1,157 +1,163 @@
-import { getShellConfig } from "./config";
+import { getShellConfig } from './config';
 
 export function getCliPath(): string {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   if (pluginRoot) {
     return `${pluginRoot}/cli.js`;
   }
-  return "~/.claude/plugins/hive-mind/cli.js";
+  return '~/.claude/plugins/hive-mind/cli.js';
 }
 
-const CONT = "→";
+export function getCliCommand(hasAlias: boolean): string {
+  if (hasAlias) {
+    return 'hive-mind';
+  }
+  return `bun ${getCliPath()}`;
+}
 
 export const hook = {
   notLoggedIn: (): string => {
     const cliPath = getCliPath();
-    const shell = getShellConfig();
-    return [
-      "hive-mind: Join the shared knowledge base",
-      `${CONT} Login: bun ${cliPath} login`,
-      `${CONT} Optional shortcut:`,
-      `  echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`,
-    ].join("\n");
+    return `To connect to hive-mind: bun ${cliPath} setup`;
   },
-
   loggedIn: (displayName: string): string => {
-    return `hive-mind: Connected as ${displayName}`;
+    return `Connected as ${displayName}`;
   },
-
   extracted: (count: number): string => {
-    return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
+    return `Extracted ${count} session${count === 1 ? '' : 's'}`;
   },
-
   schemaErrors: (errorCount: number, sessionCount: number, errors: Array<string>): string => {
     const unique = [...new Set(errors)];
-    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
+    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? '' : 's'} (${errorCount} entries): ${unique.join('; ')}`;
   },
-
   extractionFailed: (error: string): string => {
     return `Extraction failed: ${error}`;
   },
-
   bunNotInstalled: (): string => {
-    return "hive-mind requires Bun. Install: curl -fsSL https://bun.sh/install | bash";
+    return 'To use hive-mind: curl -fsSL https://bun.sh/install | bash';
+  },
+  pendingSessions: (count: number, earliestUploadAt: number | null, userHasAlias: boolean): string => {
+    const cli = getCliCommand(userHasAlias);
+    if (earliestUploadAt) {
+      const now = Date.now();
+      const hoursRemaining = Math.ceil((earliestUploadAt - now) / (1000 * 60 * 60));
+      return `${count} session${count === 1 ? '' : 's'} uploading in ~${hoursRemaining}h. To review: ${cli} index --pending`;
+    }
+    return `${count} session${count === 1 ? '' : 's'} ready to upload. To review: ${cli} index --pending`;
+  },
+  uploadingSessions: (count: number, userHasAlias: boolean): string => {
+    const cli = getCliCommand(userHasAlias);
+    return `Uploading ${count} session${count === 1 ? '' : 's'} in 10 min. To review: ${cli} index --pending`;
+  },
+  aliasUpdated: (): string => {
+    const shell = getShellConfig();
+    return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
   },
 };
 
 export const errors = {
-  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
+  noSessions: 'No sessions found yet. Sessions are extracted automatically when you start Claude Code.',
   noSessionsIn: (dir: string): string => `No sessions in ${dir}`,
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
   multipleSessions: (prefix: string): string => `Multiple sessions match "${prefix}":`,
   andMore: (count: number): string => `  ... and ${count} more`,
-  invalidNumber: (flag: string, value: string): string => `Invalid ${flag} value: "${value}" (expected a positive number)`,
+  invalidNumber: (flag: string, value: string): string =>
+    `Invalid ${flag} value: "${value}" (expected a positive number)`,
   invalidNonNegative: (flag: string): string => `Invalid ${flag} value (expected a non-negative number)`,
-  entryNotFound: (requested: number, max: number): string => `Entry ${requested} not found (session has ${max} entries)`,
+  entryNotFound: (requested: number, max: number): string =>
+    `Entry ${requested} not found (session has ${max} entries)`,
   rangeNotFound: (start: number, end: number, max: number): string =>
     `No entries found in range ${start}-${end} (session has ${max} entries)`,
   invalidEntry: (value: string): string => `Invalid entry number: "${value}"`,
   invalidRange: (value: string): string => `Invalid range: "${value}"`,
-  contextRequiresEntry: "Context flags (-C, -B, -A) require an entry number",
-  emptySession: "Session has no entries",
-  noPattern: "No pattern specified",
+  contextRequiresEntry: 'Context flags (-C, -B, -A) require an entry number',
+  emptySession: 'Session has no entries',
+  noPattern: 'No pattern specified',
   invalidRegex: (error: string): string => `Invalid regex: ${error}`,
   invalidTimeSpec: (flag: string, value: string): string =>
     `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd: string): string => `Unknown command: ${cmd}`,
-  unexpectedResponse: "Unexpected response from server",
-  bunNotInstalled: (): string => {
-    return [
-      "hive-mind requires Bun to run.",
-      "",
-      "Install Bun:",
-      "  curl -fsSL https://bun.sh/install | bash",
-    ].join("\n");
-  },
+  unexpectedResponse: 'Unexpected response from server',
+  bunNotInstalled: 'To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash',
 };
 
 export const usage = {
   main: (commands: Array<{ name: string; description: string }>): string => {
-    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
+    const lines = ['Usage: hive-mind <command>', '', 'Commands:'];
     for (const { name, description } of commands) {
       lines.push(`  ${name.padEnd(15)} ${description}`);
     }
-    return lines.join("\n");
+    return lines.join('\n');
   },
 
   read: (): string => {
     return [
-      "Usage: read <session-id> [N | N-M] [options]",
-      "",
-      "Read session entries. Session ID supports prefix matching.",
-      "",
-      "Options:",
-      "  N             Entry number to read (full content)",
-      "  N-M           Entry range to read (with truncation)",
-      "  --target N    Target total words (default 2000)",
-      "  --skip N      Skip first N words per field (for pagination)",
-      "  -C N          Show N entries of context before and after",
-      "  -B N          Show N entries of context before",
-      "  -A N          Show N entries of context after",
-      "  --show FIELDS Show full content for fields (comma-separated)",
-      "  --hide FIELDS Redact fields to word counts (comma-separated)",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
-      "",
-      "Truncation:",
-      "  Text is adaptively truncated to fit within the target word count.",
+      'Usage: read <session-id> [N | N-M] [options]',
+      '',
+      'Read session entries. Session ID supports prefix matching.',
+      '',
+      'Options:',
+      '  N             Entry number to read (full content)',
+      '  N-M           Entry range to read (with truncation)',
+      '  --target N    Target total words (default 2000)',
+      '  --skip N      Skip first N words per field (for pagination)',
+      '  -C N          Show N entries of context before and after',
+      '  -B N          Show N entries of context before',
+      '  -A N          Show N entries of context after',
+      '  --show FIELDS Show full content for fields (comma-separated)',
+      '  --hide FIELDS Redact fields to word counts (comma-separated)',
+      '',
+      'Field specifiers:',
+      '  user, assistant, thinking, system, summary',
+      '  tool, tool:<name>, tool:<name>:input, tool:<name>:result',
+      '',
+      'Truncation:',
+      '  Text is adaptively truncated to fit within the target word count.',
       "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
-      "  Use --skip with the shown N value to continue reading.",
-      "",
-      "Examples:",
-      "  read 02ed                          # all entries (~2000 words)",
-      "  read 02ed --target 500             # tighter truncation",
-      "  read 02ed --skip 50                # skip first 50 words per field",
-      "  read 02ed 5                        # entry 5 (full content)",
-      "  read 02ed 10-20                    # entries 10 through 20",
-      "  read 02ed --show thinking          # show full thinking content",
-      "  read 02ed --show tool:Bash:result  # show Bash command results",
-      "  read 02ed --hide user              # redact user messages to word counts",
-    ].join("\n");
+      '  Use --skip with the shown N value to continue reading.',
+      '',
+      'Examples:',
+      '  read 02ed                          # all entries (~2000 words)',
+      '  read 02ed --target 500             # tighter truncation',
+      '  read 02ed --skip 50                # skip first 50 words per field',
+      '  read 02ed 5                        # entry 5 (full content)',
+      '  read 02ed 10-20                    # entries 10 through 20',
+      '  read 02ed --show thinking          # show full thinking content',
+      '  read 02ed --show tool:Bash:result  # show Bash command results',
+      '  read 02ed --hide user              # redact user messages to word counts',
+    ].join('\n');
   },
 
   grep: (): string => {
     return [
-      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
-      "                      [--after <time>] [--before <time>]",
-      "",
-      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
-      "Use -- to separate options from pattern if needed.",
-      "",
-      "Options:",
-      "  -i              Case insensitive search",
-      "  -c              Count matches per session only",
-      "  -l              List matching session IDs only",
-      "  -m N            Stop after N total matches",
-      "  -C N            Show N words of context around match (default: 10)",
-      "  -s <session>    Search only in specified session (prefix match)",
-      "  --in <fields>   Search only specified fields (comma-separated)",
-      "  --after <time>  Include only results after this time",
-      "  --before <time> Include only results before this time",
-      "",
-      "Time formats:",
-      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
-      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
-      "",
-      "Default fields: user, assistant, thinking, tool:input, system, summary",
-      "",
-      "Examples:",
+      'Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]',
+      '                      [--after <time>] [--before <time>]',
+      '',
+      'Search sessions for a pattern (JavaScript regex, same as grep -E).',
+      'Use -- to separate options from pattern if needed.',
+      '',
+      'Options:',
+      '  -i              Case insensitive search',
+      '  -c              Count matches per session only',
+      '  -l              List matching session IDs only',
+      '  -m N            Stop after N total matches',
+      '  -C N            Show N words of context around match (default: 10)',
+      '  -s <session>    Search only in specified session (prefix match)',
+      '  --in <fields>   Search only specified fields (comma-separated)',
+      '  --after <time>  Include only results after this time',
+      '  --before <time> Include only results before this time',
+      '',
+      'Time formats:',
+      '  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)',
+      '  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z',
+      '',
+      'Field specifiers:',
+      '  user, assistant, thinking, system, summary',
+      '  tool:input, tool:result, tool:<name>:input, tool:<name>:result',
+      '',
+      'Default fields: user, assistant, thinking, tool:input, system, summary',
+      '',
+      'Examples:',
       '  grep "TODO"                    # find TODO in sessions',
       '  grep -i "error" -C 20          # case insensitive, 20 words context',
       '  grep -c "function"             # count matches per session',
@@ -163,54 +169,130 @@ export const usage = {
       '  grep --in user,assistant "fix" # search only user and assistant',
       '  grep --after 2d "error"        # errors in last 2 days',
       '  grep --after 2025-01-01 "fix"  # fixes since Jan 1',
-    ].join("\n");
+    ].join('\n');
   },
 
   index: (): string => {
     return [
-      "Usage: index",
-      "",
-      "List extracted sessions with statistics and summaries.",
-      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
-      "Statistics include work from subagent sessions.",
-      "",
-      "Output columns:",
-      "  ID                    Session ID prefix",
-      "  DATETIME              Session modification time",
-      "  MSGS                  Total message count",
-      "  USER_MESSAGES         User message count",
-      "  BASH_CALLS            Bash commands executed",
-      "  WEB_FETCHES           Web fetches",
-      "  WEB_SEARCHES          Web searches",
-      "  LINES_ADDED           Lines added",
-      "  LINES_REMOVED         Lines removed",
-      "  FILES_TOUCHED         Files modified",
-      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
-      "  SUMMARY               Session summary or first prompt",
-      "  COMMITS               Git commits from the session",
-    ].join("\n");
+      'Usage: index',
+      '',
+      'List extracted sessions with statistics and summaries.',
+      'Agent sessions are excluded (explore via Task tool calls in parent sessions).',
+      'Statistics include work from subagent sessions.',
+      '',
+      'Output columns:',
+      '  ID                    Session ID prefix',
+      '  DATETIME              Session modification time',
+      '  MSGS                  Total message count',
+      '  USER_MESSAGES         User message count',
+      '  BASH_CALLS            Bash commands executed',
+      '  WEB_FETCHES           Web fetches',
+      '  WEB_SEARCHES          Web searches',
+      '  LINES_ADDED           Lines added',
+      '  LINES_REMOVED         Lines removed',
+      '  FILES_TOUCHED         Files modified',
+      '  SIGNIFICANT_LOCATIONS Paths where >30% of work happened',
+      '  SUMMARY               Session summary or first prompt',
+      '  COMMITS               Git commits from the session',
+    ].join('\n');
   },
 };
 
-export const login = {
-  header: "Join the hive-mind shared knowledge base",
+export const setup = {
+  header: 'Join the hive-mind shared knowledge base',
   alreadyLoggedIn: "You're already connected.",
-  confirmRelogin: "Do you want to reconnect?",
-  refreshing: "Refreshing your session...",
-  refreshSuccess: "Session refreshed!",
-  starting: "Starting authentication...",
-  visitUrl: "Visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
-  browserOpened: "Browser opened. Confirm the code and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
+  confirmRelogin: 'Do you want to reconnect?',
+  refreshing: 'Refreshing your session...',
+  refreshSuccess: 'Session refreshed!',
+  starting: 'Starting authentication...',
+  visitUrl: 'Visit this URL in your browser:',
+  confirmCode: 'Confirm this code matches:',
+  browserOpened: 'Browser opened. Confirm the code and approve.',
+  openManually: 'Open the URL in your browser, then confirm the code.',
   waiting: (seconds: number): string => `Waiting for authentication... (expires in ${seconds}s)`,
   waitingProgress: (elapsed: number): string => `Waiting... (${elapsed}s elapsed)`,
   success: "You're connected!",
   welcomeNamed: (name: string, email: string): string => `Welcome, ${name} (${email})!`,
   welcomeEmail: (email: string): string => `Logged in as: ${email}`,
-  contributing: "Your sessions will now contribute to the shared knowledge base.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before submission.",
-  timeout: "Authentication timed out. Please try again.",
+  // Consent (shown before auth)
+  consentInfo: (userHasAlias: boolean): string => {
+    const cli = getCliCommand(userHasAlias);
+    return `Your sessions will contribute to the shared knowledge base.\nYou'll have 24 hours to review sessions before auto-submission.\nRun \`${cli} exclude\` anytime to opt out.`;
+  },
+  consentConfirm: 'Continue?',
+  consentDeclined: 'Setup cancelled. Run setup again if you change your mind.',
+  timeout: 'Authentication timed out. Please try again.',
   startFailed: (error: string): string => `Couldn't start authentication: ${error}`,
   authFailed: (error: string): string => `Authentication failed: ${error}`,
+  unexpectedAuthResponse: 'Unexpected response from authentication server',
+  // Alias setup
+  aliasPrompt: 'Set up a command to run hive-mind more easily?',
+  aliasExplain: 'This adds `alias hive-mind=...` to your shell config.',
+  aliasConfirm: 'Set up hive-mind command?',
+  aliasSuccess: 'Command added!',
+  aliasActivate: (sourceCmd: string): string => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
+  aliasFailed: "Couldn't add command automatically.",
+};
+
+export const indexCmd = {
+  noSessionsDir: "No sessions found. Run 'extract' first.",
+  noSessionsIn: (dir: string): string => `No sessions found in ${dir}`,
+  uploadStatus: 'Upload eligibility status:',
+  noExtractedSessions: 'No extracted sessions found.',
+  total: (count: number, summary: string): string =>
+    `Total: ${count} sessions (${summary})`,
+  runUpload: "Run 'hive-mind upload' to upload ready sessions.",
+  excludeSession: 'To exclude a session: hive-mind exclude <session-id>',
+  excludeAll: 'To exclude all sessions: hive-mind exclude --all',
+};
+
+export const excludeCmd = {
+  noSessionsDir: 'No sessions directory found',
+  noSessions: 'No sessions found.',
+  allAlreadyExcluded: 'All sessions are already excluded.',
+  foundNonExcluded: (count: number): string =>
+    `Found ${count} session(s) not yet excluded.`,
+  confirmExcludeAll: 'Exclude all sessions from upload?',
+  cancelled: 'Cancelled.',
+  excludedCount: (count: number): string => `Excluded ${count} session(s)`,
+  failedCount: (count: number): string => `Failed to exclude ${count} session(s)`,
+  sessionNotFound: (id: string): string => `Session '${id}' not found`,
+  ambiguousSession: (id: string, count: number): string =>
+    `Ambiguous session ID '${id}' matches ${count} sessions`,
+  matches: 'Matches:',
+  couldNotRead: (id: string): string => `Could not read session '${id}'`,
+  alreadyExcluded: (id: string): string => `Session ${id} is already excluded`,
+  excluded: (id: string): string => `Excluded session ${id}`,
+  failedToExclude: (id: string): string => `Failed to exclude session ${id}`,
+  cannotExcludeAgent: 'Agent sessions cannot be excluded directly. Exclude the parent session instead.',
+  usage: 'Usage: hive-mind exclude <session-id> or hive-mind exclude --all',
+};
+
+export const uploadCmd = {
+  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
+  waitingDelay: (seconds: number): string =>
+    `Waiting ${seconds} seconds before upload...`,
+  sessionNotFound: (id: string): string => `Session '${id}' not found`,
+  ambiguousSession: (id: string, count: number): string =>
+    `Multiple sessions match '${id}' (${count} matches):`,
+  sessionExcluded: (id: string): string => `Session ${id} was excluded, skipping`,
+  uploading: (id: string): string => `Uploading ${id}...`,
+  uploaded: (id: string): string => `Uploaded ${id}`,
+  uploadedWithAgents: (id: string, agentCount: number): string =>
+    `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? '' : 's'})`,
+  failedToUpload: (id: string, error: string): string =>
+    `Failed to upload ${id}: ${error}`,
+  checking: 'Checking for sessions ready to upload...',
+  noExtractedSessions: 'No extracted sessions found.',
+  sessionsHeader: 'Sessions:',
+  noSessionsReady: 'No sessions ready for upload.',
+  pendingCount: (count: number): string =>
+    `${count} session(s) still in review period.`,
+  readyCount: (count: number): string => `${count} session(s) ready for upload.`,
+  confirmUpload: 'Upload these sessions?',
+  cancelled: 'Cancelled.',
+  uploadedCount: (count: number): string => `Uploaded ${count} session(s)`,
+  failedCount: (count: number): string => `Failed to upload ${count} session(s)`,
+  done: 'done',
+  failed: (error: string): string => `failed: ${error}`,
 };

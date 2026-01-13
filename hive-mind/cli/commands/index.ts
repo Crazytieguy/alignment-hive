@@ -2,8 +2,11 @@ import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { printError } from "../lib/output";
+import { indexCmd } from "../lib/messages";
+import { colors, printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
+import { checkSessionEligibility, getAuthIssuedAt } from "../lib/upload-eligibility";
+import type { SessionEligibility } from "../lib/upload-eligibility";
 import type { LogicalBlock, ParsedSession } from "../lib/parse";
 import type { ContentBlock, HiveMindMeta, KnownEntry } from "../lib/schemas";
 
@@ -77,12 +80,13 @@ interface FileStats {
 }
 
 function printUsage(): void {
-  console.log("Usage: index [--escape-file-refs]");
+  console.log("Usage: index [--escape-file-refs] [--pending]");
   console.log("\nList all extracted sessions with statistics, summary, and commits.");
   console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
   console.log("Statistics include work from subagent sessions.");
   console.log("\nOptions:");
   console.log("  --escape-file-refs  Escape @ symbols to prevent file reference interpretation");
+  console.log("  --pending           Show upload eligibility status for each session");
   console.log("\nOutput columns:");
   console.log("  ID                   Session ID prefix (first 16 chars)");
   console.log("  DATETIME             Session modification time");
@@ -99,6 +103,168 @@ function printUsage(): void {
   console.log("  COMMITS              Git commit hashes from the session");
 }
 
+interface PendingSessionInfo {
+  eligibility: SessionEligibility;
+  entries: Array<KnownEntry>;
+  agentCount: number;
+}
+
+function formatPendingSession(
+  info: PendingSessionInfo,
+  idPrefix: string,
+  dateDisplay: string,
+  maxAgentWidth: number,
+  maxMsgWidth: number,
+  maxDateWidth: number
+): string {
+  const { eligibility, entries, agentCount } = info;
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
+
+  const dateCol = dateDisplay.padEnd(maxDateWidth);
+  const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
+  const agentText = agentCount > 0 ? `+${agentCount} agents` : "";
+  const agentCol = agentText.padEnd(maxAgentWidth);
+
+  let statusIcon: string;
+  let statusText: string;
+  if (eligibility.excluded) {
+    statusIcon = colors.yellow("✗");
+    statusText = colors.yellow("excluded".padEnd(14));
+  } else if (eligibility.eligible) {
+    statusIcon = colors.green("✓");
+    statusText = colors.green("ready".padEnd(14));
+  } else {
+    statusIcon = colors.blue("○");
+    statusText = colors.blue(eligibility.reason.padEnd(14));
+  }
+
+  return `  ${statusIcon} ${idPrefix}  ${dateCol}  ${msgCount} msgs  ${agentCol}  ${statusText}  ${truncatedSummary}`;
+}
+
+function countAgentsInBlocks(blocks: Array<LogicalBlock>): number {
+  const agentIds = new Set<string>();
+  for (const block of blocks) {
+    if (block.type === "tool" && block.agentId) {
+      agentIds.add(block.agentId);
+    }
+  }
+  return agentIds.size;
+}
+
+async function showPendingStatus(cwd: string): Promise<number> {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+
+  let files: Array<string>;
+  try {
+    files = await readdir(sessionsDir);
+  } catch {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (jsonlFiles.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+
+  const mainSessions: Array<{ meta: HiveMindMeta; entries: Array<KnownEntry>; parsed: ParsedSession }> = [];
+
+  for (const file of jsonlFiles) {
+    const path = join(sessionsDir, file);
+    const session = await readExtractedSession(path);
+    if (!session || session.meta.agentId) continue;
+
+    const parsed = parseSession(session.meta, session.entries);
+    mainSessions.push({ ...session, parsed });
+  }
+
+  if (mainSessions.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+
+  const authIssuedAt = await getAuthIssuedAt();
+  const pendingInfos: Array<PendingSessionInfo> = [];
+
+  for (const session of mainSessions) {
+    const eligibility = checkSessionEligibility(session.meta, authIssuedAt);
+    const agentCount = countAgentsInBlocks(session.parsed.blocks);
+    pendingInfos.push({
+      eligibility,
+      entries: session.entries,
+      agentCount,
+    });
+  }
+
+  pendingInfos.sort((a, b) => {
+    return b.eligibility.meta.rawMtime.localeCompare(a.eligibility.meta.rawMtime);
+  });
+
+  const sessionIds = pendingInfos.map((p) => p.eligibility.sessionId);
+  const idPrefixes = computeMinimalPrefixes(sessionIds);
+
+  const formatDate = (rawMtime: string): string => {
+    const d = new Date(rawMtime);
+    const month = MONTH_NAMES[d.getMonth()];
+    const day = d.getDate();
+    const year = d.getFullYear();
+    return `${month} ${day}, ${year}`;
+  };
+
+  const dateDisplays = new Map<string, string>();
+  for (const info of pendingInfos) {
+    const display = formatDate(info.eligibility.meta.rawMtime);
+    dateDisplays.set(info.eligibility.sessionId, display);
+  }
+
+  const maxAgentWidth = Math.max(
+    0,
+    ...pendingInfos.map((p) => (p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0))
+  );
+  const maxMsgWidth = Math.max(
+    ...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length)
+  );
+  const maxDateWidth = Math.max(
+    ...Array.from(dateDisplays.values()).map((d) => d.length)
+  );
+
+  console.log(indexCmd.uploadStatus);
+  console.log("");
+
+  for (const info of pendingInfos) {
+    const prefix = idPrefixes.get(info.eligibility.sessionId) || info.eligibility.sessionId.slice(0, 8);
+    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || "";
+    console.log(formatPendingSession(info, prefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth));
+  }
+
+  console.log("");
+
+  const ready = pendingInfos.filter((s) => s.eligibility.eligible).length;
+  const pending = pendingInfos.filter((s) => !s.eligibility.eligible && !s.eligibility.excluded).length;
+  const excluded = pendingInfos.filter((s) => s.eligibility.excluded).length;
+
+  const statusSummary: Array<string> = [];
+  if (ready > 0) statusSummary.push(`${ready} ready`);
+  if (pending > 0) statusSummary.push(`${pending} pending`);
+  if (excluded > 0) statusSummary.push(`${excluded} excluded`);
+  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(", ")));
+
+  if (ready > 0) {
+    console.log("");
+    console.log(indexCmd.runUpload);
+  }
+
+  if (ready > 0 || pending > 0) {
+    console.log("");
+    console.log(indexCmd.excludeSession);
+    console.log(indexCmd.excludeAll);
+  }
+
+  return 0;
+}
+
 export async function index(): Promise<number> {
   const args = process.argv.slice(3);
 
@@ -107,26 +273,29 @@ export async function index(): Promise<number> {
     return 0;
   }
 
-  const escapeFileRefs = args.includes("--escape-file-refs");
-
   const cwd = process.cwd();
+
+  if (args.includes("--pending")) {
+    return await showPendingStatus(cwd);
+  }
+
+  const escapeFileRefs = args.includes("--escape-file-refs");
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
   let files: Array<string>;
   try {
     files = await readdir(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(indexCmd.noSessionsDir);
     return 1;
   }
 
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
+    printError(indexCmd.noSessionsIn(sessionsDir));
     return 1;
   }
 
-  // Load all sessions for subagent lookups
   const allSessions = new Map<string, SessionInfo>();
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
@@ -135,18 +304,15 @@ export async function index(): Promise<number> {
       const parsed = parseSession(session.meta, session.entries);
       const sessionInfo: SessionInfo = { ...session, parsed };
       allSessions.set(session.meta.sessionId, sessionInfo);
-      // Also index by agentId for agent sessions
       if (session.meta.agentId) {
         allSessions.set(session.meta.agentId, sessionInfo);
       }
     }
   }
 
-  // Filter to main sessions only
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
 
-  // Compute minimal unique prefixes for session IDs
   const sessionIds = mainSessions.map((s) => s.meta.sessionId);
   const idPrefixes = computeMinimalPrefixes(sessionIds);
 
@@ -185,13 +351,8 @@ function formatSessionLine(
     .map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message))
     .join(" ");
 
-  // Compute stats including subagents (using parsed blocks)
   const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set(), cwd);
-
-  // Format numbers, blank for 0
   const fmt = (n: number) => (n === 0 ? "" : String(n));
-
-  // Format datetime with relative display
   const { display: datetime, date, year } = formatRelativeDateTime(meta.rawMtime, prevDate, prevYear);
 
   const line = [
@@ -239,7 +400,6 @@ function computeSessionStats(
     } else if (block.type === "tool") {
       const { toolName, toolInput, agentId } = block;
 
-      // Track subagent IDs from Task tool results
       if (agentId) {
         subagentIds.push(agentId);
       }
