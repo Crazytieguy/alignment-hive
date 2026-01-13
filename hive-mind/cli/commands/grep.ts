@@ -180,6 +180,7 @@ export async function grep(): Promise<number> {
       const output = formatBlocks(parsed.blocks, {
         sessionPrefix,
         cwd,
+        showTimestamp: false,
         getTruncation: () => ({
           type: "matchContext" as const,
           pattern: options.pattern,

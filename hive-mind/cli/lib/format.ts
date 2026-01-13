@@ -460,6 +460,7 @@ export interface BlocksFormatOptions {
 
   // Output customization
   separator?: string;
+  showTimestamp?: boolean;
 
   fieldFilter?: ReadFieldFilter;
   cwd?: string;
@@ -492,6 +493,7 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
     getTruncation,
     shouldOutput,
     sessionPrefix,
+    showTimestamp = true,
     fieldFilter,
   } = options;
 
@@ -536,7 +538,7 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
 
       const formatted = formatBlock(block, {
         sessionPrefix,
-        showTimestamp: true,
+        showTimestamp,
         prevDate,
         isFirst: firstOutput,
         cwd,

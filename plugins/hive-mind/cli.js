@@ -15340,6 +15340,7 @@ function formatBlocks(blocks, options = {}) {
     getTruncation,
     shouldOutput,
     sessionPrefix,
+    showTimestamp = true,
     fieldFilter
   } = options;
   let wordLimit;
@@ -15366,7 +15367,7 @@ function formatBlocks(blocks, options = {}) {
       const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
       const formatted = formatBlock(block, {
         sessionPrefix,
-        showTimestamp: true,
+        showTimestamp,
         prevDate,
         isFirst: firstOutput,
         cwd,
@@ -16143,6 +16144,7 @@ async function grep() {
       const output = formatBlocks(parsed.blocks, {
         sessionPrefix,
         cwd,
+        showTimestamp: false,
         getTruncation: () => ({
           type: "matchContext",
           pattern: options.pattern,
