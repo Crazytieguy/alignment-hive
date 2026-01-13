@@ -1,85 +1,103 @@
-# Welcome to your Convex + TanStack Start + WorkOS AuthKit app
+# hive-mind CLI
 
-This is a [Convex](https://convex.dev/) project using WorkOS AuthKit for authentication.
+The hive-mind CLI enables Claude Code users to extract and submit session learnings to the alignment-hive knowledge base.
 
-After the initial setup (<2 minutes) you'll have a working full-stack app using:
+## What it does
 
-- Convex as your backend (database, server logic)
-- [React](https://react.dev/) as your frontend (web page interactivity)
-- [TanStack Start](https://tanstack.com/start) for modern full-stack React with file-based routing
-- [Tailwind](https://tailwindcss.com/) for building great looking accessible UI
-- [WorkOS AuthKit](https://authkit.com/) for authentication
+- **Session Extraction**: Automatically extracts Claude Code session information
+- **Local Review**: Users review extractions before submission (24-hour window)
+- **Knowledge Submission**: Contributes sessions to shared knowledge base for other researchers
+- **Privacy Controls**: Users control what gets shared and can retract submissions
 
-## Get started
+## Development
 
-1. Clone this repository and install dependencies:
+### Setup
 
-   ```bash
-   npm install
-   ```
+From the repository root:
 
-2. Set up your environment variables:
+```bash
+# Install dependencies for entire workspace
+bun install
 
-   ```bash
-   cp .env.local.example .env.local
-   ```
+# Navigate to CLI directory
+cd hive-mind
+```
 
-3. Configure WorkOS AuthKit:
-   - Create a [WorkOS account](https://workos.com/)
-   - Get your Client ID and API Key from the WorkOS dashboard
-   - In the WorkOS dashboard, add `http://localhost:3000/callback` as a redirect URI
-   - Generate a secure password for cookie encryption (minimum 32 characters)
-   - Update your `.env.local` file with these values
+### Available Commands
 
-4. Configure Convex:
+```bash
+bun run test         # Run CLI tests
+bun run lint         # Type check and ESLint
+bun run cli:build    # Bundle CLI to ../plugins/hive-mind/cli.js
+```
 
-   ```bash
-   npx convex dev
-   ```
+### Running CLI During Development
 
-   This will:
-   - Set up your Convex deployment
-   - Add your Convex URL to `.env.local`
-   - Open the Convex dashboard
+From the project root:
 
-   Then set your WorkOS Client ID in Convex:
+```bash
+bun hive-mind/cli/cli.ts <command> [args]
+```
 
-   ```bash
-   npx convex env set WORKOS_CLIENT_ID <your_client_id>
-   ```
+Examples:
 
-   This allows Convex to validate JWT tokens from WorkOS
+```bash
+bun hive-mind/cli/cli.ts login
+bun hive-mind/cli/cli.ts extract
+bun hive-mind/cli/cli.ts retrieve --query "authentication"
+```
 
-5. Run the development server:
+### Environment Variables
 
-   ```bash
-   npm run dev
-   ```
+Set `HIVE_MIND_CLIENT_ID` to override the WorkOS client ID (useful for local testing with staging):
 
-   This starts both the Vite dev server (TanStack Start frontend) and Convex backend in parallel
+```bash
+# Use staging credentials locally
+export HIVE_MIND_CLIENT_ID=client_01KE10CYZ10VVZPJVRQBJESK1A
+bun hive-mind/cli/cli.ts login
+```
 
-6. Open [http://localhost:3000](http://localhost:3000) to see your app
+The default is production client ID (configured in `cli/lib/config.ts`).
 
-## WorkOS AuthKit Setup
+### User-Facing Messages
 
-This app uses WorkOS AuthKit for authentication. Key features:
+All user-facing strings are centralized in `cli/lib/messages.ts`. When updating:
 
-- **Redirect-based authentication**: Users are redirected to WorkOS for sign-in/sign-up
-- **Session management**: Automatic token refresh and session handling
-- **Route loader protection**: Protected routes use loaders to check authentication
-- **Client and server functions**: `useAuth()` for client components, `getAuth()` for server loaders
+1. Edit messages in `cli/lib/messages.ts`
+2. Run `bun run cli:build` to rebundle
+3. Bump version in `plugins/hive-mind/plugin.json` for auto-update to users
 
-## Learn more
+### Git Hooks
 
-To learn more about developing your project with Convex, check out:
+To automatically rebuild the CLI on commit:
 
-- The [Tour of Convex](https://docs.convex.dev/get-started) for a thorough introduction to Convex principles.
-- The rest of [Convex docs](https://docs.convex.dev/) to learn about all Convex features.
-- [Stack](https://stack.convex.dev/) for in-depth articles on advanced topics.
+```bash
+git config core.hooksPath .githooks
+```
 
-## Join the community
+### Regenerating Sessions
 
-Join thousands of developers building full-stack apps with Convex:
+After schema or extraction logic changes, re-extract all sessions:
 
-- Join the [Convex Discord community](https://convex.dev/community) to get help in real-time.
-- Follow [Convex on GitHub](https://github.com/get-convex/), star and contribute to the open-source implementation of Convex.
+```bash
+# From project root
+rm -rf .claude/hive-mind/sessions/
+bun hive-mind/cli/cli.ts session-start
+```
+
+## Architecture
+
+- **CLI**: TypeScript with Bun runtime, bundles to `plugins/hive-mind/cli.js`
+- **Auth**: WorkOS device authorization flow
+- **Storage**: Local `~/.claude/hive-mind/` directory
+- **Backend**: Convex serverless functions
+- **Web Integration**: Connects with web app at alignment-hive.com
+
+## File Structure
+
+- `cli/` - CLI source code
+  - `cli.ts` - CLI entry point
+  - `commands/` - Command implementations
+  - `lib/` - Shared utilities
+  - `tests/` - Test suite
+- `CLAUDE.md` - Development guidelines (auto-loads this README)

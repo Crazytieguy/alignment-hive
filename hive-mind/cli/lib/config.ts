@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const WORKOS_CLIENT_ID =
-  process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CYZ10VVZPJVRQBJESK1A";
+  process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
 
 export const AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 export const AUTH_FILE = join(AUTH_DIR, "auth.json");

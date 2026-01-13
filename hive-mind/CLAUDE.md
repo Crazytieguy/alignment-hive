@@ -1,4 +1,10 @@
-# hive-mind
+@hive-mind/README.md
+
+## Monorepo Structure
+
+This repository uses bun workspaces:
+- `web/` - TanStack Start web application (alignment-hive.com)
+- `hive-mind/` - CLI and extraction tools
 
 ## Development
 

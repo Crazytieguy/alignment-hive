@@ -27,7 +27,7 @@ import { randomUUID } from "crypto";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CYZ10VVZPJVRQBJESK1A";
+var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
 var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 var AUTH_FILE = join(AUTH_DIR, "auth.json");
 async function getCheckoutId(hiveMindDir) {
