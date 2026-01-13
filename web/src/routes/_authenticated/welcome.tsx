@@ -72,6 +72,7 @@ function WelcomePage() {
               <li>Go to the <strong>Marketplaces</strong> tab</li>
               <li>Select <strong>alignment-hive</strong></li>
               <li>Select <strong>Enable auto-update</strong></li>
+              <li>Press <strong>Esc</strong> twice to exit the menu</li>
             </ol>
           </li>
           <li>
@@ -79,6 +80,10 @@ function WelcomePage() {
             <pre className="p-2 bg-muted rounded text-xs">
               /plugin install mats@alignment-hive
             </pre>
+          </li>
+          <li>
+            Exit Claude Code:
+            <pre className="p-2 bg-muted rounded text-xs">/exit</pre>
           </li>
           <li>
             Navigate to your project directory and ask Claude to help you set it up:

@@ -6,6 +6,8 @@ Claude Code infrastructure for AI safety researchers.
 
 @README.md explains what this is. Keep it up to date as the project evolves.
 
+**Important:** The installation instructions in `README.md` and `web/src/routes/_authenticated/welcome.tsx` must stay in sync. When updating one, update the other.
+
 This is a **bun monorepo**:
 - `web/` - TanStack Start web app (alignment-hive.com)
 - `hive-mind/` - CLI for session extraction

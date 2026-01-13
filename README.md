@@ -28,6 +28,7 @@ Enable auto-update to get new plugins and updates automatically:
 2. Go to the **Marketplaces** tab
 3. Select **alignment-hive**
 4. Select **Enable auto-update**
+5. Press **Esc** twice to exit the menu
 
 Install the mats plugin (recommended for MATS scholars):
 ```
@@ -44,6 +45,18 @@ Also available:
 ```
 
 Adds an MCP server for fetching documentation with [llms.txt](https://llmstxt.org/) support.
+
+### Start your project
+
+Exit Claude Code and navigate to your project directory:
+```
+/exit
+```
+```bash
+cd ~/my-project && claude
+```
+
+Works for both new and existing projects.
 
 ## Contributing
 
