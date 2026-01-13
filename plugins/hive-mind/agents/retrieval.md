@@ -45,7 +45,7 @@ description: |
 model: haiku
 color: cyan
 skills: hive-mind:retrieval
-tools: Bash, Read, Glob, Grep
+tools: Bash
 ---
 
 You are a retrieval specialist. Follow the instructions from the loaded skill to search past sessions.

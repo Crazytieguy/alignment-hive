@@ -14731,6 +14731,205 @@ function computeUniformLimit(wordCounts, targetTotal) {
   return Math.max(MIN_WORD_LIMIT, Math.floor(targetTotal / n));
 }
 
+// cli/lib/parse.ts
+function isNoiseBlock(block) {
+  if (block.type === "tool_result" && "content" in block) {
+    const content = block.content;
+    if (typeof content === "string" && content.startsWith("Todos have been modified successfully")) {
+      return true;
+    }
+  }
+  if (block.type === "text" && "text" in block) {
+    const text = block.text.trim();
+    if (text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>")) {
+      return true;
+    }
+  }
+  return false;
+}
+function isSkippedEntryType(entry) {
+  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
+}
+function isToolResultOnly(entry) {
+  const content = entry.message.content;
+  if (!Array.isArray(content))
+    return false;
+  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
+  if (meaningfulBlocks.length === 0)
+    return true;
+  return meaningfulBlocks.every((b) => b.type === "tool_result");
+}
+function extractUserText(entry) {
+  const content = entry.message.content;
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const textParts = [];
+  for (const block of content) {
+    if (isNoiseBlock(block))
+      continue;
+    if (block.type === "tool_result")
+      continue;
+    if (block.type === "text" && "text" in block) {
+      textParts.push(block.text);
+    }
+  }
+  return textParts.join(`
+`);
+}
+function findToolResult(entries, toolUseId) {
+  for (const entry of entries) {
+    if (entry.type !== "user")
+      continue;
+    const content = entry.message.content;
+    if (!Array.isArray(content))
+      continue;
+    for (const block of content) {
+      if (block.type === "tool_result" && "tool_use_id" in block && block.tool_use_id === toolUseId) {
+        const agentId = "agentId" in entry && typeof entry.agentId === "string" ? entry.agentId : undefined;
+        return {
+          content: formatToolResultContent(block.content),
+          agentId
+        };
+      }
+    }
+  }
+  return;
+}
+function formatToolResultContent(content) {
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const parts = [];
+  for (const block of content) {
+    if (block.type === "text" && "text" in block) {
+      parts.push(block.text);
+    } else if (block.type === "image" && "source" in block) {
+      parts.push(`[image:${block.source.media_type}]`);
+    } else if (block.type === "document" && "source" in block) {
+      parts.push(`[document:${block.source.media_type}]`);
+    }
+  }
+  return parts.join(`
+`);
+}
+function findLastSummaryIndex(entries) {
+  for (let i = entries.length - 1;i >= 0; i--) {
+    if (entries[i].type === "summary") {
+      return i;
+    }
+  }
+  return -1;
+}
+function parseSession(meta3, entries) {
+  const blocks = [];
+  let lineNumber = 0;
+  const lastSummaryIndex = findLastSummaryIndex(entries);
+  for (let i = 0;i < entries.length; i++) {
+    const entry = entries[i];
+    if (isSkippedEntryType(entry))
+      continue;
+    if (entry.type === "summary" && i !== lastSummaryIndex)
+      continue;
+    if (entry.type === "user") {
+      if (isToolResultOnly(entry))
+        continue;
+      lineNumber++;
+      blocks.push({
+        type: "user",
+        lineNumber,
+        content: extractUserText(entry),
+        timestamp: entry.timestamp,
+        uuid: entry.uuid,
+        parentUuid: entry.parentUuid,
+        cwd: entry.cwd,
+        gitBranch: entry.gitBranch
+      });
+    } else if (entry.type === "assistant") {
+      const content = entry.message.content;
+      if (typeof content === "string") {
+        if (content) {
+          lineNumber++;
+          blocks.push({
+            type: "assistant",
+            lineNumber,
+            content,
+            timestamp: entry.timestamp,
+            uuid: entry.uuid,
+            parentUuid: entry.parentUuid,
+            model: entry.message.model
+          });
+        }
+        continue;
+      }
+      if (Array.isArray(content)) {
+        const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b) && b.type !== "tool_result");
+        if (meaningfulBlocks.length === 0)
+          continue;
+        lineNumber++;
+        const entryLineNumber = lineNumber;
+        for (const contentBlock of content) {
+          if (isNoiseBlock(contentBlock))
+            continue;
+          if (contentBlock.type === "text" && "text" in contentBlock) {
+            blocks.push({
+              type: "assistant",
+              lineNumber: entryLineNumber,
+              content: contentBlock.text,
+              timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid,
+              model: entry.message.model
+            });
+          } else if (contentBlock.type === "thinking" && "thinking" in contentBlock) {
+            blocks.push({
+              type: "thinking",
+              lineNumber: entryLineNumber,
+              content: contentBlock.thinking,
+              timestamp: entry.timestamp
+            });
+          } else if (contentBlock.type === "tool_use" && "input" in contentBlock) {
+            const resultInfo = findToolResult(entries, contentBlock.id);
+            blocks.push({
+              type: "tool",
+              lineNumber: entryLineNumber,
+              toolName: contentBlock.name,
+              toolInput: contentBlock.input,
+              toolResult: resultInfo?.content,
+              toolUseId: contentBlock.id,
+              agentId: resultInfo?.agentId,
+              timestamp: entry.timestamp
+            });
+          }
+        }
+      }
+    } else if (entry.type === "system") {
+      lineNumber++;
+      blocks.push({
+        type: "system",
+        lineNumber,
+        content: entry.content ?? "",
+        timestamp: entry.timestamp,
+        subtype: entry.subtype,
+        level: entry.level
+      });
+    } else if (entry.type === "summary") {
+      lineNumber++;
+      blocks.push({
+        type: "summary",
+        lineNumber,
+        content: entry.summary
+      });
+    }
+  }
+  return {
+    meta: meta3,
+    blocks
+  };
+}
+
 // cli/lib/format.ts
 var MAX_CONTENT_SUMMARY_LEN = 300;
 var DEFAULT_TARGET_WORDS = 2000;
@@ -14761,50 +14960,30 @@ function formatQuotedSummary(text, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN) {
     return `"${escaped}"`;
   }
   const totalWords = countWords(text);
-  return `"${escaped}" +${totalWords}words`;
+  return `"${escaped}"...${totalWords}words`;
 }
 var MIN_TRUNCATION_THRESHOLD = 3;
 function truncateContent(text, wordLimit, skipWords) {
   if (!text)
-    return { content: "", suffix: "", isEmpty: true };
+    return { content: "", prefix: "", suffix: "", isEmpty: true };
   const result = truncateWords(text, skipWords, wordLimit);
   if (result.wordCount === 0) {
-    return { content: "", suffix: "", isEmpty: true };
+    return { content: "", prefix: "", suffix: "", isEmpty: true };
   }
+  const prefix = skipWords > 0 ? "..." : "";
   if (result.truncated && result.remaining <= MIN_TRUNCATION_THRESHOLD) {
     const fullResult = truncateWords(text, skipWords, wordLimit + result.remaining);
-    return { content: fullResult.text, suffix: "", isEmpty: false };
+    return { content: fullResult.text, prefix, suffix: "", isEmpty: false };
   }
-  const suffix = result.truncated ? ` +${result.remaining}words` : "";
-  return { content: result.text, suffix, isEmpty: false };
+  const suffix = result.truncated ? `...${result.remaining}words` : "";
+  return { content: result.text, prefix, suffix, isEmpty: false };
 }
-function formatTruncatedBlock(content, suffix) {
+function formatTruncatedBlock(content, prefix, suffix) {
   const indented = indent(content, 2);
+  const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
   if (!suffix)
-    return indented;
-  return indented + suffix;
-}
-function formatContentBody(header, content, redact, wordLimit, skipWords) {
-  if (redact && wordLimit !== undefined) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
-    if (isEmpty)
-      return null;
-    if (!truncated.includes(`
-`)) {
-      const escaped = escapeQuotes(truncated);
-      return `${header}|"${escaped}"${suffix}`;
-    }
-    return `${header}
-${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    if (!content)
-      return header;
-    return `${header}|${formatQuotedSummary(content)}`;
-  }
-  if (!content)
-    return header;
-  return `${header}
-${indent(content, 2)}`;
+    return prefixed;
+  return prefixed + suffix;
 }
 function formatWordCount(text) {
   const count = countWords(text);
@@ -14836,10 +15015,11 @@ function indent(text, spaces) {
 }
 function formatMultilineParams(params) {
   const lines = [];
-  for (const { name, content, suffix } of params) {
+  for (const { name, content, prefix, suffix } of params) {
     lines.push(`[${name}]`);
     const indented = indent(content, 2);
-    lines.push(suffix ? indented + suffix : indented);
+    const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
+    lines.push(suffix ? prefixed + suffix : prefixed);
   }
   return lines;
 }
@@ -14853,438 +15033,191 @@ function formatTimestamp(timestamp, prevDate, isFirst) {
   }
   return time3;
 }
-function getLogicalEntries(entries) {
-  const result = [];
-  let logicalLine = 0;
-  let lastSummaryIndex = -1;
-  for (let i = entries.length - 1;i >= 0; i--) {
-    if (entries[i].type === "summary") {
-      lastSummaryIndex = i;
-      break;
-    }
-  }
-  for (let i = 0;i < entries.length; i++) {
-    const entry = entries[i];
-    if (entry.type === "summary" && i !== lastSummaryIndex)
-      continue;
-    if (entry.type === "user" && isToolResultOnlyEntry(entry))
-      continue;
-    if (isSkippedEntryType(entry))
-      continue;
-    logicalLine++;
-    result.push({ lineNumber: logicalLine, entry });
-  }
-  return result;
-}
-function formatSession(entries, options = {}) {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
-  const toolResults = collectToolResults(entries);
-  let lastSummaryIndex = -1;
-  for (let i = entries.length - 1;i >= 0; i--) {
-    if (entries[i].type === "summary") {
-      lastSummaryIndex = i;
-      break;
-    }
-  }
-  const filteredEntries = entries.filter((entry, i) => {
-    if (entry.type === "summary")
-      return i === lastSummaryIndex;
-    return true;
-  });
-  let wordLimit;
-  if (redact) {
-    const wordCounts = collectWordCounts(filteredEntries, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-  const uuidToLine = buildUuidMap(filteredEntries);
-  const results = [];
-  if (redact) {
-    const header = buildSessionHeader(entries);
-    if (header)
-      results.push(header);
-  }
-  let prevUuid;
-  let prevDate;
-  let cwd;
-  let logicalLine = 0;
-  for (const entry of filteredEntries) {
-    if (entry.type === "user" && isToolResultOnlyEntry(entry)) {
-      continue;
-    }
-    if (isSkippedEntryType(entry)) {
-      continue;
-    }
-    if (entry.type === "user" && entry.cwd) {
-      cwd = entry.cwd;
-    }
-    logicalLine++;
-    const lineNumber = logicalLine;
-    let parentIndicator;
-    const parentUuid = getParentUuid(entry);
-    if (prevUuid) {
-      if (parentUuid && parentUuid !== prevUuid) {
-        parentIndicator = uuidToLine.get(parentUuid);
-      } else if (!parentUuid && getUuid(entry)) {
-        parentIndicator = "start";
-      }
-    }
-    const timestamp = getTimestamp(entry);
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = logicalLine === 1;
-    const formatted = formatEntry(entry, {
-      lineNumber,
-      toolResults,
-      parentIndicator,
-      redact,
-      prevDate,
-      isFirst,
-      cwd,
-      wordLimit,
-      skipWords,
-      fieldFilter
-    });
-    if (formatted) {
-      results.push(formatted);
-    }
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-    const uuid3 = getUuid(entry);
-    if (uuid3) {
-      prevUuid = uuid3;
-    }
-  }
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-  const separator = redact ? `
-` : `
-
-`;
-  return results.join(separator);
-}
-function collectWordCounts(entries, skipWords) {
-  const counts = [];
-  function addCount(text) {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-  for (const entry of entries) {
-    if (entry.type === "user" && !isToolResultOnlyEntry(entry)) {
-      const content = getUserMessageContent(entry.message.content);
-      addCount(content);
-    } else if (entry.type === "assistant") {
-      const blocks = entry.message.content;
-      if (typeof blocks === "string") {
-        addCount(blocks);
-      } else if (Array.isArray(blocks)) {
-        for (const block of blocks) {
-          if (block.type === "text" && "text" in block) {
-            addCount(block.text);
-          } else if (block.type === "thinking" && "thinking" in block) {
-            addCount(block.thinking);
-          }
-        }
-      }
-    } else if (entry.type === "summary") {
-      addCount(entry.summary);
-    } else if (entry.type === "system") {
-      addCount(entry.content || "");
-    }
-  }
-  return counts;
-}
-function formatEntry(entry, options) {
-  const {
-    lineNumber,
-    toolResults,
-    parentIndicator,
-    redact = false,
-    prevDate,
-    isFirst,
-    cwd,
-    wordLimit,
-    skipWords = 0,
-    fieldFilter
-  } = options;
-  if (fieldFilter && redact && entry.type !== "assistant") {
-    if (!fieldFilter.shouldShow(entry.type)) {
+function formatBlock(block, options = {}) {
+  const { sessionPrefix, showTimestamp, prevDate, isFirst, cwd, truncation, fieldFilter, parentIndicator } = options;
+  if (fieldFilter) {
+    if (block.type === "user" && !fieldFilter.shouldShow("user"))
       return null;
-    }
+    if (block.type === "assistant" && !fieldFilter.shouldShow("assistant"))
+      return null;
+    if (block.type === "system" && !fieldFilter.shouldShow("system"))
+      return null;
+    if (block.type === "summary" && !fieldFilter.shouldShow("summary"))
+      return null;
+    if (block.type === "tool" && !fieldFilter.shouldShow(`tool:${block.toolName}:input`))
+      return null;
   }
-  switch (entry.type) {
+  const parts = [];
+  if (sessionPrefix)
+    parts.push(sessionPrefix);
+  parts.push(String(block.lineNumber));
+  if (showTimestamp && "timestamp" in block && block.timestamp) {
+    const ts = formatTimestamp(block.timestamp, prevDate, isFirst);
+    if (ts)
+      parts.push(ts);
+  }
+  switch (block.type) {
     case "user":
-      if (toolResults && isToolResultOnlyEntry(entry))
-        return null;
-      return formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
+      parts.push("user");
+      if (parentIndicator !== undefined)
+        parts.push(`parent=${parentIndicator}`);
+      return formatBlockContent(parts.join("|"), block.content, truncation);
     case "assistant":
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords, fieldFilter);
+      parts.push("assistant");
+      if (parentIndicator !== undefined)
+        parts.push(`parent=${parentIndicator}`);
+      return formatBlockContent(parts.join("|"), block.content, truncation);
+    case "thinking": {
+      parts.push("thinking");
+      const showFull = fieldFilter?.showFullThinking() ?? false;
+      if (!showFull && truncation?.type !== "full" && truncation?.type !== "matchContext") {
+        parts.push(formatWordCount(block.content));
+        return parts.join("|");
+      }
+      return formatBlockContent(parts.join("|"), block.content, truncation);
+    }
+    case "tool":
+      return formatToolBlock(block, parts, { cwd, truncation, fieldFilter });
     case "system":
-      return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords);
+      parts.push("system");
+      if (block.subtype)
+        parts.push(`subtype=${block.subtype}`);
+      if (block.level && block.level !== "info")
+        parts.push(`level=${block.level}`);
+      return formatBlockContent(parts.join("|"), block.content, truncation);
     case "summary":
-      return formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords);
+      parts.push("summary");
+      return formatBlockContent(parts.join("|"), block.content, truncation);
     default:
       return null;
   }
 }
-function buildSessionHeader(entries) {
-  let model;
-  let gitBranch;
-  for (const entry of entries) {
-    if (!model && entry.type === "assistant" && entry.message.model) {
-      model = entry.message.model;
+function formatBlockContent(header, content, truncation) {
+  if (!content && !truncation)
+    return header;
+  switch (truncation?.type) {
+    case "full":
+      if (!content)
+        return header;
+      return `${header}
+${indent(content, 2)}`;
+    case "wordLimit": {
+      const { content: truncated, prefix, suffix, isEmpty } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
+      if (isEmpty)
+        return null;
+      if (!truncated.includes(`
+`)) {
+        const escaped = escapeQuotes(truncated);
+        return `${header}|${prefix}"${escaped}"${suffix}`;
+      }
+      return `${header}
+${formatTruncatedBlock(truncated, prefix, suffix)}`;
     }
-    if (!gitBranch && entry.type === "user" && entry.gitBranch) {
-      gitBranch = entry.gitBranch;
+    case "matchContext": {
+      const matchPositions = findMatchPositions(content, truncation.pattern);
+      const output = formatMatchesWithContext(content, matchPositions, truncation.contextWords);
+      if (!output)
+        return null;
+      if (!output.includes(`
+`)) {
+        return `${header}| ${output}`;
+      }
+      return `${header}
+${indent(output, 2)}`;
     }
-    if (model && gitBranch)
+    case "summary":
+    default:
+      if (!content)
+        return header;
+      return `${header}|${formatQuotedSummary(content)}`;
+  }
+}
+function formatMatchesWithContext(text, matchPositions, contextWords) {
+  if (matchPositions.length === 0)
+    return text;
+  const words = splitIntoWords(text);
+  if (words.length === 0)
+    return text;
+  const matchingWordIndices = new Set;
+  for (const pos of matchPositions) {
+    for (let i = 0;i < words.length; i++) {
+      const word = words[i];
+      if (word.start < pos.end && word.end > pos.start) {
+        matchingWordIndices.add(i);
+      }
+    }
+  }
+  if (matchingWordIndices.size === 0) {
+    if (words.length > contextWords * 2) {
+      return `${words.length}words`;
+    }
+    return text;
+  }
+  const sortedMatchIndices = Array.from(matchingWordIndices).sort((a, b) => a - b);
+  const ranges = [];
+  for (const idx of sortedMatchIndices) {
+    const start = Math.max(0, idx - contextWords);
+    const end = Math.min(words.length - 1, idx + contextWords);
+    if (ranges.length > 0 && ranges[ranges.length - 1].end >= start - 1) {
+      ranges[ranges.length - 1].end = end;
+    } else {
+      ranges.push({ start, end });
+    }
+  }
+  const outputParts = [];
+  let lastEnd = -1;
+  for (const range of ranges) {
+    if (range.start > lastEnd + 1) {
+      const skippedCount = range.start - lastEnd - 1;
+      if (skippedCount > 0) {
+        outputParts.push(`${skippedCount}words...`);
+      }
+    } else if (lastEnd === -1 && range.start > 0) {
+      outputParts.push(`${range.start}words...`);
+    }
+    const rangeWords = words.slice(range.start, range.end + 1).map((w) => w.word);
+    outputParts.push(rangeWords.join(" "));
+    lastEnd = range.end;
+  }
+  if (lastEnd < words.length - 1) {
+    const skippedCount = words.length - 1 - lastEnd;
+    outputParts.push(`...${skippedCount}words`);
+  }
+  return outputParts.join("");
+}
+function splitIntoWords(text) {
+  const words = [];
+  const regex = /\S+/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    words.push({ word: match[0], start: match.index, end: match.index + match[0].length });
+  }
+  return words;
+}
+function findMatchPositions(text, pattern) {
+  const positions = [];
+  const globalPattern = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
+  let match;
+  while ((match = globalPattern.exec(text)) !== null) {
+    positions.push({ start: match.index, end: match.index + match[0].length });
+    if (match[0].length === 0)
       break;
   }
-  const parts = ["#"];
-  if (model)
-    parts.push(`model=${model}`);
-  if (gitBranch)
-    parts.push(`branch=${gitBranch}`);
-  if (parts.length === 1)
-    return null;
-  return parts.join(" ");
+  return positions;
 }
-function buildUuidMap(entries) {
-  const map2 = new Map;
-  let logicalLine = 0;
-  for (const entry of entries) {
-    if (isSkippedEntryType(entry))
-      continue;
-    if (entry.type === "user") {
-      const content = entry.message.content;
-      if (Array.isArray(content)) {
-        const meaningful = content.filter((b) => !isNoiseBlock(b));
-        if (meaningful.length === 0 || meaningful.every((b) => b.type === "tool_result")) {
-          continue;
-        }
-      }
-    }
-    logicalLine++;
-    const uuid3 = getUuid(entry);
-    if (uuid3) {
-      map2.set(uuid3, logicalLine);
-    }
-  }
-  return map2;
-}
-function getUuid(entry) {
-  if ("uuid" in entry && typeof entry.uuid === "string") {
-    return entry.uuid;
-  }
-  return;
-}
-function getParentUuid(entry) {
-  if ("parentUuid" in entry && typeof entry.parentUuid === "string") {
-    return entry.parentUuid;
-  }
-  return;
-}
-function getTimestamp(entry) {
-  if ("timestamp" in entry && typeof entry.timestamp === "string") {
-    return entry.timestamp;
-  }
-  return;
-}
-function collectToolResults(entries) {
-  const results = new Map;
-  for (const entry of entries) {
-    if (entry.type !== "user")
-      continue;
-    const content = entry.message.content;
-    if (!Array.isArray(content))
-      continue;
-    const agentId = "agentId" in entry ? entry.agentId : undefined;
-    for (const block of content) {
-      if (block.type === "tool_result" && "tool_use_id" in block) {
-        const formatted = formatToolResultContent(block.content);
-        if (formatted) {
-          results.set(block.tool_use_id, { content: formatted, agentId });
-        }
-      }
-    }
-  }
-  return results;
-}
-function formatToolResultContent(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const parts = [];
-  for (const block of content) {
-    if (block.type === "text" && "text" in block) {
-      parts.push(block.text);
-    } else if (block.type === "image" && "source" in block) {
-      parts.push(`[image:${block.source.media_type}]`);
-    } else if (block.type === "document" && "source" in block) {
-      parts.push(`[document:${block.source.media_type}]`);
-    }
-  }
-  return parts.join(`
-`);
-}
-function isToolResultOnlyEntry(entry) {
-  const content = entry.message.content;
-  if (!Array.isArray(content))
-    return false;
-  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
-  if (meaningfulBlocks.length === 0)
-    return true;
-  return meaningfulBlocks.every((b) => b.type === "tool_result");
-}
-function isSkippedEntryType(entry) {
-  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
-}
-function isNoiseBlock(block) {
-  if (block.type === "tool_result" && "content" in block) {
-    const content = block.content;
-    if (typeof content === "string" && content.startsWith("Todos have been modified successfully")) {
-      return true;
-    }
-  }
-  if (block.type === "text" && "text" in block) {
-    const text = block.text.trim();
-    if (text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>")) {
-      return true;
-    }
-  }
-  return false;
-}
-function formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("user");
-  if (parentIndicator !== undefined)
-    parts.push(`parent=${parentIndicator}`);
-  const content = getUserMessageContent(entry.message.content);
-  return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
-}
-function getUserMessageContent(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const textParts = [];
-  for (const block of content) {
-    if (isNoiseBlock(block))
-      continue;
-    if (block.type === "tool_result")
-      continue;
-    if (block.type === "text") {
-      textParts.push(block.text);
-    }
-  }
-  return textParts.join(`
-`);
-}
-function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords, fieldFilter) {
-  const blocks = entry.message.content;
-  if (!blocks || typeof blocks === "string") {
-    const text = typeof blocks === "string" ? blocks : "";
-    return formatTextEntry(lineNumber, entry.timestamp, text, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
-  }
-  const lines = [];
-  let blockIndex = 0;
-  const showFullThinking = fieldFilter?.showFullThinking() ?? false;
-  for (const block of blocks) {
-    if (isNoiseBlock(block))
-      continue;
-    if (block.type === "tool_result")
-      continue;
-    const ts = blockIndex === 0 ? entry.timestamp : undefined;
-    const parent = blockIndex === 0 ? parentIndicator : undefined;
-    if (block.type === "thinking") {
-      if (fieldFilter && redact && !fieldFilter.shouldShow("thinking")) {
-        const parts = [String(lineNumber)];
-        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
-        if (formattedTs)
-          parts.push(formattedTs);
-        parts.push("thinking");
-        parts.push(formatWordCount(block.thinking));
-        lines.push(parts.join("|"));
-        blockIndex++;
-        continue;
-      }
-      const formatted = formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact, wordLimit, skipWords, showFullThinking);
-      if (formatted)
-        lines.push(formatted);
-    } else if (block.type === "text") {
-      if (fieldFilter && redact && !fieldFilter.shouldShow("assistant")) {
-        const parts = [String(lineNumber)];
-        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
-        if (formattedTs)
-          parts.push(formattedTs);
-        parts.push("assistant");
-        parts.push(formatWordCount(block.text));
-        lines.push(parts.join("|"));
-        blockIndex++;
-        continue;
-      }
-      const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
-      if (formatted)
-        lines.push(formatted);
-    } else if (block.type === "tool_use") {
-      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter);
-      if (formatted)
-        lines.push(formatted);
-    }
-    blockIndex++;
-  }
-  return lines.length > 0 ? lines.join(`
-`) : null;
-}
-function formatThinkingEntry(lineNumber, timestamp, content, prevDate, isFirst, redact, wordLimit, skipWords, showFullThinking) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("thinking");
-  if (redact) {
-    if (showFullThinking && wordLimit !== undefined) {
-      const result = formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
-      return result ?? parts.join("|");
-    }
-    parts.push(formatWordCount(content));
-    return parts.join("|");
-  }
-  const header = parts.join("|");
-  return `${header}
-${indent(content, 2)}`;
-}
-function formatTextEntry(lineNumber, timestamp, content, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("assistant");
-  if (parentIndicator !== undefined)
-    parts.push(`parent=${parentIndicator}`);
-  return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
-}
-function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter) {
-  const resultInfo = toolResults?.get(block.id);
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("tool");
-  parts.push(block.name);
-  const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
-  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
-  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:input`) : false;
-  const toolFormatter = getToolFormatter(block.name);
+function formatToolBlock(block, headerParts, options) {
+  const { cwd, truncation, fieldFilter } = options;
+  const parts = [...headerParts, "tool", block.toolName];
+  const redact = truncation?.type !== "full";
+  const wordLimit = truncation?.type === "wordLimit" ? truncation.limit : undefined;
+  const skipWords = truncation?.type === "wordLimit" ? truncation.skip : undefined;
+  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:result`) : false;
+  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:input`) : false;
+  const showFullResult = fieldFilter?.shouldShow(`tool:${block.toolName}:result`) ?? false;
+  const resultInfo = block.toolResult ? { content: block.toolResult, agentId: block.agentId } : undefined;
+  const toolFormatter = getToolFormatter(block.toolName);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
-    input: block.input,
+    input: block.toolInput,
     result: resultInfo,
     cwd,
     redact,
@@ -15294,16 +15227,29 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
     hideResult
   });
   parts.push(...headerParams);
+  if (truncation?.type === "matchContext") {
+    const fullContent = formatToolFullContent(block, multilineParams, resultInfo, suppressResult);
+    const matchPositions = findMatchPositions(fullContent, truncation.pattern);
+    const contextOutput = formatMatchesWithContext(fullContent, matchPositions, truncation.contextWords);
+    if (!contextOutput.includes(`
+`)) {
+      return `${parts.join("|")}| ${contextOutput}`;
+    }
+    return `${parts.join("|")}
+${indent(contextOutput, 2)}`;
+  }
   if (redact) {
     if (resultInfo && !suppressResult) {
       if (hideResult) {
         parts.push(`result=${formatFieldValue(resultInfo.content)}`);
-      } else if (showResult && wordLimit !== undefined) {
-        const { content: truncated, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
+      } else if (showFullResult && wordLimit !== undefined) {
+        const { content: truncated, prefix, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
         if (!isEmpty) {
           const bodyLines2 = formatMultilineParams(multilineParams);
           bodyLines2.push("[result]");
-          bodyLines2.push(suffix ? indent(truncated, 2) + suffix : indent(truncated, 2));
+          const indentedResult = indent(truncated, 2);
+          const prefixed = prefix ? `  ${prefix}${indentedResult.slice(2)}` : indentedResult;
+          bodyLines2.push(suffix ? prefixed + suffix : prefixed);
           const header3 = parts.join("|");
           return bodyLines2.length > 0 ? `${header3}
 ${bodyLines2.join(`
@@ -15334,21 +15280,161 @@ ${bodyLines2.join(`
 ${bodyLines.join(`
 `)}`;
 }
+function formatToolFullContent(block, multilineParams, resultInfo, suppressResult) {
+  const parts = [];
+  for (const param of multilineParams) {
+    parts.push(`${param.name}="${param.content}"`);
+  }
+  for (const [key, value] of Object.entries(block.toolInput)) {
+    if (value !== null && value !== undefined) {
+      parts.push(`${key}="${String(value)}"`);
+    }
+  }
+  if (resultInfo && !suppressResult) {
+    parts.push(`\u2192 ${resultInfo.content}`);
+  }
+  return parts.join(" ");
+}
+function formatSession(entries, options = {}) {
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
+  const meta3 = {
+    _type: "hive-mind-meta",
+    version: "0.1",
+    sessionId: "unknown",
+    checkoutId: "unknown",
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: "unknown",
+    messageCount: entries.length
+  };
+  const parsed = parseSession(meta3, entries);
+  let wordLimit;
+  if (redact) {
+    const wordCounts = collectWordCountsFromBlocks(parsed.blocks, skipWords);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+  }
+  const uuidToLine = buildUuidMapFromBlocks(parsed.blocks);
+  let model;
+  let gitBranch;
+  for (const block of parsed.blocks) {
+    if (!model && block.type === "assistant" && "model" in block && block.model) {
+      model = block.model;
+    }
+    if (!gitBranch && block.type === "user" && "gitBranch" in block && block.gitBranch) {
+      gitBranch = block.gitBranch;
+    }
+    if (model && gitBranch)
+      break;
+  }
+  const results = [];
+  if (redact) {
+    const headerParts = ["#"];
+    if (model)
+      headerParts.push(`model=${model}`);
+    if (gitBranch)
+      headerParts.push(`branch=${gitBranch}`);
+    if (headerParts.length > 1) {
+      results.push(headerParts.join(" "));
+    }
+  }
+  let prevUuid;
+  let prevDate;
+  let prevLineNumber = 0;
+  let cwd;
+  for (const block of parsed.blocks) {
+    if (block.type === "user" && "cwd" in block && block.cwd) {
+      cwd = block.cwd;
+    }
+    let parentIndicator;
+    if (block.lineNumber !== prevLineNumber) {
+      const parentUuid = "parentUuid" in block ? block.parentUuid : undefined;
+      const blockUuid = "uuid" in block ? block.uuid : undefined;
+      if (prevUuid) {
+        if (parentUuid && parentUuid !== prevUuid) {
+          parentIndicator = uuidToLine.get(parentUuid);
+        } else if (!parentUuid && blockUuid) {
+          parentIndicator = "start";
+        }
+      }
+    }
+    const truncation = redact ? wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "summary" } : { type: "full" };
+    const timestamp = "timestamp" in block ? block.timestamp : undefined;
+    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+    const isFirst = block.lineNumber === 1 && prevLineNumber === 0;
+    const formatted = formatBlock(block, {
+      showTimestamp: true,
+      prevDate,
+      isFirst,
+      cwd,
+      truncation,
+      fieldFilter,
+      parentIndicator
+    });
+    if (formatted) {
+      results.push(formatted);
+    }
+    if (currentDate) {
+      prevDate = currentDate;
+    }
+    if ("uuid" in block && block.uuid) {
+      prevUuid = block.uuid;
+    }
+    prevLineNumber = block.lineNumber;
+  }
+  if (redact && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+  const separator = redact ? `
+` : `
+
+`;
+  return results.join(separator);
+}
+function collectWordCountsFromBlocks(blocks, skipWords) {
+  const counts = [];
+  function addCount(text) {
+    const words = countWords(text);
+    const afterSkip = Math.max(0, words - skipWords);
+    if (afterSkip > 0) {
+      counts.push(afterSkip);
+    }
+  }
+  for (const block of blocks) {
+    if (block.type === "user" || block.type === "assistant" || block.type === "system") {
+      addCount(block.content);
+    } else if (block.type === "thinking") {
+      addCount(block.content);
+    } else if (block.type === "summary") {
+      addCount(block.content);
+    }
+  }
+  return counts;
+}
+function buildUuidMapFromBlocks(blocks) {
+  const map2 = new Map;
+  for (const block of blocks) {
+    if ("uuid" in block && block.uuid) {
+      map2.set(block.uuid, block.lineNumber);
+    }
+  }
+  return map2;
+}
 function formatToolText(text, wordLimit, skipWords) {
   if (wordLimit !== undefined) {
-    const { content, suffix, isEmpty } = truncateContent(text, wordLimit, skipWords ?? 0);
+    const { content, prefix, suffix, isEmpty } = truncateContent(text, wordLimit, skipWords ?? 0);
     if (isEmpty) {
-      return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockSuffix: "" };
+      return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockPrefix: "", blockSuffix: "" };
     }
     const isMultiline2 = content.includes(`
 `);
     const escaped = escapeQuotes(content);
-    const inline = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
+    const inline = prefix || suffix ? `${prefix}"${escaped}"${suffix}` : `"${escaped}"`;
     return {
       isEmpty: false,
       isMultiline: isMultiline2,
       inline,
       blockContent: content,
+      blockPrefix: prefix,
       blockSuffix: suffix
     };
   }
@@ -15360,6 +15446,7 @@ function formatToolText(text, wordLimit, skipWords) {
     isMultiline,
     inline: `"${escapeQuotes(firstLine)}"`,
     blockContent: text,
+    blockPrefix: "",
     blockSuffix: ""
   };
 }
@@ -15450,7 +15537,12 @@ function addFormattedParam(headerParams, multilineParams, name, text, wordLimit,
   if (formatted.isEmpty)
     return;
   if (formatted.isMultiline) {
-    multilineParams.push({ name, content: formatted.blockContent, suffix: formatted.blockSuffix || undefined });
+    multilineParams.push({
+      name,
+      content: formatted.blockContent,
+      prefix: formatted.blockPrefix || undefined,
+      suffix: formatted.blockSuffix || undefined
+    });
   } else {
     headerParams.push(`${name}=${formatted.inline}`);
   }
@@ -15626,21 +15718,6 @@ function formatGenericTool({ input, redact, wordLimit, skipWords }) {
   }
   return { headerParams, multilineParams };
 }
-function formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("system");
-  if (entry.subtype)
-    parts.push(`subtype=${entry.subtype}`);
-  if (entry.level && entry.level !== "info")
-    parts.push(`level=${entry.level}`);
-  return formatContentBody(parts.join("|"), entry.content || "", redact, wordLimit, skipWords);
-}
-function formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords) {
-  return formatContentBody(`${lineNumber}|summary`, entry.summary, redact, wordLimit, skipWords);
-}
 
 // cli/lib/messages.ts
 function getCliPath() {
@@ -15726,7 +15803,6 @@ var usage = {
       "Options:",
       "  N             Entry number to read (full content)",
       "  N-M           Entry range to read (with truncation)",
-      "  --full        Show all entries with full content (no truncation)",
       "  --target N    Target total words (default 2000)",
       "  --skip N      Skip first N words per field (for pagination)",
       "  -C N          Show N entries of context before and after",
@@ -15747,11 +15823,9 @@ var usage = {
       "Examples:",
       "  read 02ed                          # all entries (~2000 words)",
       "  read 02ed --target 500             # tighter truncation",
-      "  read 02ed --full                   # all entries (full content)",
       "  read 02ed --skip 50                # skip first 50 words per field",
       "  read 02ed 5                        # entry 5 (full content)",
       "  read 02ed 10-20                    # entries 10 through 20",
-      "  read 02ed 10-20 --full             # range without truncation",
       "  read 02ed --show thinking          # show full thinking content",
       "  read 02ed --show tool:Bash:result  # show Bash command results",
       "  read 02ed --hide user              # redact user messages to word counts"
@@ -15762,7 +15836,7 @@ var usage = {
     return [
       "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
       "",
-      "Search sessions for a pattern (JavaScript regex).",
+      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
       "Use -- to separate options from pattern if needed.",
       "",
       "Options:",
@@ -15770,7 +15844,7 @@ var usage = {
       "  -c              Count matches per session only",
       "  -l              List matching session IDs only",
       "  -m N            Stop after N total matches",
-      "  -C N            Show N lines of context around match",
+      "  -C N            Show N words of context around match (default: 10)",
       "  -s <session>    Search only in specified session (prefix match)",
       "  --in <fields>   Search only specified fields (comma-separated)",
       "",
@@ -15782,10 +15856,12 @@ var usage = {
       "",
       "Examples:",
       '  grep "TODO"                    # find TODO in sessions',
-      '  grep -i "error" -C 2           # case insensitive with context',
+      '  grep -i "error" -C 20          # case insensitive, 20 words context',
       '  grep -c "function"             # count matches per session',
       '  grep -l "#2597"                # list sessions mentioning issue',
       '  grep -s 02ed "bug"             # search only in session 02ed...',
+      '  grep "error|warning|bug"       # find any of these terms (OR)',
+      '  grep "TODO|FIXME|XXX"          # find code comments',
       '  grep --in tool:result "error"  # search only in tool results',
       '  grep --in user,assistant "fix" # search only user and assistant'
     ].join(`
@@ -15864,8 +15940,62 @@ function printWarning(message) {
 }
 
 // cli/commands/grep.ts
+var DEFAULT_CONTEXT_WORDS = 10;
 function printUsage() {
   console.log(usage.grep());
+}
+function computeMinimalPrefixes(sessionIds) {
+  const prefixes = new Map;
+  const minLen = 4;
+  for (const id of sessionIds) {
+    let len = minLen;
+    while (len <= id.length) {
+      const prefix = id.slice(0, len);
+      const conflicts = sessionIds.filter((other) => other !== id && other.startsWith(prefix));
+      if (conflicts.length === 0) {
+        prefixes.set(id, prefix);
+        break;
+      }
+      len++;
+    }
+    if (!prefixes.has(id)) {
+      prefixes.set(id, id);
+    }
+  }
+  return prefixes;
+}
+function getSearchableFieldValues(block, filter) {
+  const values = [];
+  if (block.type === "user" && filter.isSearchable("user")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "assistant" && filter.isSearchable("assistant")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "tool") {
+    const toolName = block.toolName;
+    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+      for (const value of Object.values(block.toolInput)) {
+        if (value !== null && value !== undefined) {
+          values.push(String(value));
+        }
+      }
+    }
+    if (filter.isSearchable("tool:result") || filter.isSearchable(`tool:${toolName}:result`)) {
+      if (block.toolResult)
+        values.push(block.toolResult);
+    }
+  } else if (block.type === "system" && filter.isSearchable("system")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "summary" && filter.isSearchable("summary")) {
+    if (block.content)
+      values.push(block.content);
+  }
+  return values;
 }
 async function grep() {
   const args = process.argv.slice(3);
@@ -15907,6 +16037,15 @@ async function grep() {
       return 1;
     }
   }
+  const allSessionIds = [];
+  for (const file2 of jsonlFiles) {
+    const path = join3(sessionsDir, file2);
+    const session = await readExtractedSession(path);
+    if (session && !session.meta.agentId) {
+      allSessionIds.push(session.meta.sessionId);
+    }
+  }
+  const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
   let totalMatches = 0;
   const sessionCounts = [];
   const matchingSessions = [];
@@ -15917,47 +16056,39 @@ async function grep() {
     const session = await readExtractedSession(path);
     if (!session || session.meta.agentId)
       continue;
-    const sessionId = session.meta.sessionId.slice(0, 8);
-    const searchesToolResult = options.fieldFilter.isSearchable("tool:result");
-    const entriesToSearch = searchesToolResult ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry })) : getLogicalEntries(session.entries);
+    const sessionId = session.meta.sessionId;
+    const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
+    const parsed = parseSession(session.meta, session.entries);
     let sessionMatchCount = 0;
-    const sessionMatches = [];
-    for (const { lineNumber, entry } of entriesToSearch) {
+    for (const block of parsed.blocks) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches)
         break;
-      const content = extractEntryContent(entry, options.fieldFilter);
-      const lines = content.split(`
-`);
-      for (let i = 0;i < lines.length; i++) {
-        if (options.maxMatches !== null && totalMatches >= options.maxMatches)
-          break;
-        const line = lines[i];
-        if (options.pattern.test(line)) {
-          totalMatches++;
-          sessionMatchCount++;
-          if (!options.countOnly && !options.listOnly) {
-            const contextBefore = lines.slice(Math.max(0, i - options.contextLines), i);
-            const contextAfter = lines.slice(i + 1, i + 1 + options.contextLines);
-            sessionMatches.push({
-              sessionId,
-              entryNumber: lineNumber,
-              entryType: entry.type,
-              line,
-              contextBefore,
-              contextAfter
-            });
+      const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
+      if (fieldValues.length === 0)
+        continue;
+      const hasMatch = fieldValues.some((value) => options.pattern.test(value));
+      if (!hasMatch)
+        continue;
+      totalMatches++;
+      sessionMatchCount++;
+      if (!options.countOnly && !options.listOnly) {
+        const formatted = formatBlock(block, {
+          sessionPrefix,
+          cwd,
+          truncation: {
+            type: "matchContext",
+            pattern: options.pattern,
+            contextWords: options.contextWords
           }
+        });
+        if (formatted) {
+          console.log(formatted);
         }
       }
     }
     if (sessionMatchCount > 0) {
-      matchingSessions.push(sessionId);
-      sessionCounts.push({ sessionId, count: sessionMatchCount });
-      if (!options.countOnly && !options.listOnly) {
-        for (const match of sessionMatches) {
-          outputMatch(match, options.contextLines > 0);
-        }
-      }
+      matchingSessions.push(sessionPrefix);
+      sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
     }
   }
   if (options.countOnly) {
@@ -15988,11 +16119,11 @@ function parseGrepOptions(args) {
       return null;
     }
   }
-  let contextLines = 0;
+  let contextWords = DEFAULT_CONTEXT_WORDS;
   const cValue = getFlagValue("-C");
   if (cValue !== undefined) {
-    contextLines = parseInt(cValue, 10);
-    if (isNaN(contextLines) || contextLines < 0) {
+    contextWords = parseInt(cValue, 10);
+    if (isNaN(contextWords) || contextWords < 0) {
       printError(errors3.invalidNonNegative("-C"));
       return null;
     }
@@ -16030,98 +16161,10 @@ function parseGrepOptions(args) {
     countOnly,
     listOnly,
     maxMatches,
-    contextLines,
+    contextWords,
     fieldFilter,
     sessionFilter
   };
-}
-function extractEntryContent(entry, filter) {
-  const parts = [];
-  if (entry.type === "user") {
-    const content = entry.message.content;
-    if (typeof content === "string") {
-      if (filter.isSearchable("user")) {
-        parts.push(content);
-      }
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === "text" && "text" in block) {
-          if (filter.isSearchable("user")) {
-            parts.push(block.text);
-          }
-        } else if (block.type === "tool_result" && "content" in block) {
-          if (filter.isSearchable("tool:result")) {
-            const resultContent = block.content;
-            if (typeof resultContent === "string") {
-              parts.push(resultContent);
-            } else if (Array.isArray(resultContent)) {
-              for (const item of resultContent) {
-                if (item.type === "text" && "text" in item) {
-                  parts.push(item.text);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  } else if (entry.type === "assistant") {
-    const content = entry.message.content;
-    if (typeof content === "string") {
-      if (filter.isSearchable("assistant")) {
-        parts.push(content);
-      }
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        const text = extractBlockContent(block, filter);
-        if (text)
-          parts.push(text);
-      }
-    }
-  } else if (entry.type === "system") {
-    if (filter.isSearchable("system") && typeof entry.content === "string") {
-      parts.push(entry.content);
-    }
-  } else if (entry.type === "summary") {
-    if (filter.isSearchable("summary")) {
-      parts.push(entry.summary);
-    }
-  }
-  return parts.join(`
-`);
-}
-function extractBlockContent(block, filter) {
-  if (block.type === "text" && "text" in block) {
-    if (filter.isSearchable("assistant")) {
-      return block.text;
-    }
-  }
-  if (block.type === "thinking" && "thinking" in block) {
-    if (filter.isSearchable("thinking")) {
-      return block.thinking;
-    }
-  }
-  if (block.type === "tool_use" && "input" in block) {
-    const toolName = "name" in block ? block.name : "unknown";
-    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
-      return JSON.stringify(block.input);
-    }
-  }
-  return null;
-}
-function outputMatch(match, showContext) {
-  const prefix = `${match.sessionId}:${match.entryNumber}|${match.entryType}|`;
-  if (showContext) {
-    for (const line of match.contextBefore) {
-      console.log(`${prefix} ${line}`);
-    }
-  }
-  console.log(`${prefix} ${match.line}`);
-  if (showContext) {
-    for (const line of match.contextAfter) {
-      console.log(`${prefix} ${line}`);
-    }
-  }
 }
 
 // cli/commands/index.ts
@@ -16129,7 +16172,7 @@ import { readdir as readdir3 } from "fs/promises";
 import { homedir as homedir3 } from "os";
 import { join as join4 } from "path";
 var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function computeMinimalPrefixes(ids) {
+function computeMinimalPrefixes2(ids) {
   const result = new Map;
   const minLen = 4;
   for (const id of ids) {
@@ -16215,16 +16258,18 @@ async function index() {
     const path = join4(sessionsDir, file2);
     const session = await readExtractedSession(path);
     if (session) {
-      allSessions.set(session.meta.sessionId, session);
+      const parsed = parseSession(session.meta, session.entries);
+      const sessionInfo = { ...session, parsed };
+      allSessions.set(session.meta.sessionId, sessionInfo);
       if (session.meta.agentId) {
-        allSessions.set(session.meta.agentId, session);
+        allSessions.set(session.meta.agentId, sessionInfo);
       }
     }
   }
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
   const sessionIds = mainSessions.map((s) => s.meta.sessionId);
-  const idPrefixes = computeMinimalPrefixes(sessionIds);
+  const idPrefixes = computeMinimalPrefixes2(sessionIds);
   console.log("ID DATETIME MSGS USER_MESSAGES BASH_CALLS WEB_FETCHES WEB_SEARCHES LINES_ADDED LINES_REMOVED FILES_TOUCHED SIGNIFICANT_LOCATIONS SUMMARY COMMITS");
   let prevDate = "";
   let prevYear = "";
@@ -16244,7 +16289,7 @@ function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYe
   const summary = escapeFileRefs ? rawSummary.replace(/@/g, "\\@") : rawSummary;
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
-  const stats = computeSessionStats(entries, allSessions, new Set, cwd);
+  const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set, cwd);
   const fmt = (n) => n === 0 ? "" : String(n);
   const { display: datetime3, date: date5, year } = formatRelativeDateTime(meta3.rawMtime, prevDate, prevYear);
   const line = [
@@ -16264,7 +16309,7 @@ function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYe
   ].join(" ");
   return { line, date: date5, year };
 }
-function computeSessionStats(entries, allSessions, visited, cwd) {
+function computeSessionStats(blocks, allSessions, visited, cwd) {
   const stats = {
     userCount: 0,
     linesAdded: 0,
@@ -16277,68 +16322,50 @@ function computeSessionStats(entries, allSessions, visited, cwd) {
   };
   const fileStats = new Map;
   const subagentIds = [];
-  for (const entry of entries) {
-    if (entry.type === "user") {
-      const content = entry.message.content;
-      if (typeof content === "string" || !Array.isArray(content)) {
-        stats.userCount++;
-      } else {
-        const hasUserText = content.some((b) => b.type === "text");
-        if (hasUserText)
-          stats.userCount++;
+  for (const block of blocks) {
+    if (block.type === "user") {
+      stats.userCount++;
+    } else if (block.type === "tool") {
+      const { toolName, toolInput, agentId } = block;
+      if (agentId) {
+        subagentIds.push(agentId);
       }
-      if ("agentId" in entry && typeof entry.agentId === "string") {
-        subagentIds.push(entry.agentId);
-      }
-    }
-    if (entry.type === "assistant") {
-      const content = entry.message.content;
-      if (!Array.isArray(content))
-        continue;
-      for (const block of content) {
-        if (block.type !== "tool_use" || !("name" in block))
-          continue;
-        const toolName = block.name;
-        const input = block.input;
-        switch (toolName) {
-          case "Edit": {
-            const filePath = input.file_path;
-            const oldString = input.old_string;
-            const newString = input.new_string;
-            if (typeof filePath === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              if (typeof oldString === "string") {
-                current.removed += countLines2(oldString);
-              }
-              if (typeof newString === "string") {
-                current.added += countLines2(newString);
-              }
-              fileStats.set(filePath, current);
+      switch (toolName) {
+        case "Edit": {
+          const filePath = toolInput.file_path;
+          const oldString = toolInput.old_string;
+          const newString = toolInput.new_string;
+          if (typeof filePath === "string") {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            if (typeof oldString === "string") {
+              current.removed += countLines2(oldString);
             }
-            break;
-          }
-          case "Write": {
-            const filePath = input.file_path;
-            const fileContent = input.content;
-            if (typeof filePath === "string" && typeof fileContent === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              current.added += countLines2(fileContent);
-              fileStats.set(filePath, current);
+            if (typeof newString === "string") {
+              current.added += countLines2(newString);
             }
-            break;
+            fileStats.set(filePath, current);
           }
-          case "Bash":
-            stats.bashCount++;
-            break;
-          case "WebFetch":
-            stats.fetchCount++;
-            break;
-          case "WebSearch":
-            stats.searchCount++;
-            break;
-          case "Task":
-            break;
+          break;
         }
+        case "Write": {
+          const filePath = toolInput.file_path;
+          const fileContent = toolInput.content;
+          if (typeof filePath === "string" && typeof fileContent === "string") {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            current.added += countLines2(fileContent);
+            fileStats.set(filePath, current);
+          }
+          break;
+        }
+        case "Bash":
+          stats.bashCount++;
+          break;
+        case "WebFetch":
+          stats.fetchCount++;
+          break;
+        case "WebSearch":
+          stats.searchCount++;
+          break;
       }
     }
   }
@@ -16349,7 +16376,7 @@ function computeSessionStats(entries, allSessions, visited, cwd) {
     const subSession = allSessions.get(agentId);
     if (!subSession)
       continue;
-    const subStats = computeSessionStats(subSession.entries, allSessions, visited, cwd);
+    const subStats = computeSessionStats(subSession.parsed.blocks, allSessions, visited, cwd);
     stats.linesAdded += subStats.linesAdded;
     stats.linesRemoved += subStats.linesRemoved;
     stats.bashCount += subStats.bashCount;
@@ -16859,102 +16886,6 @@ async function login2() {
 // cli/commands/read.ts
 import { readFile as readFile3, readdir as readdir4 } from "fs/promises";
 import { join as join5 } from "path";
-
-// cli/lib/range-format.ts
-var DEFAULT_TARGET_WORDS2 = 2000;
-function formatRangeEntries(rangeEntries, options) {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS2, skipWords = 0, fieldFilter, allEntries } = options;
-  const toolResults = collectToolResults(allEntries);
-  let wordLimit;
-  if (redact) {
-    const wordCounts = collectWordCounts2(rangeEntries, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-  const results = [];
-  let prevDate;
-  for (let i = 0;i < rangeEntries.length; i++) {
-    const { lineNumber, entry } = rangeEntries[i];
-    const timestamp = getTimestamp(entry);
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = i === 0;
-    const formatted = formatEntry(entry, {
-      lineNumber,
-      toolResults,
-      redact,
-      prevDate,
-      isFirst,
-      wordLimit,
-      skipWords,
-      fieldFilter
-    });
-    if (formatted) {
-      results.push(formatted);
-    }
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-  }
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-  const separator = redact ? `
-` : `
-
-`;
-  return results.join(separator);
-}
-function collectWordCounts2(entries, skipWords) {
-  const counts = [];
-  function addCount(text) {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-  for (const { entry } of entries) {
-    if (entry.type === "user") {
-      const content = getUserMessageContent2(entry.message.content);
-      addCount(content);
-    } else if (entry.type === "assistant") {
-      const blocks = entry.message.content;
-      if (typeof blocks === "string") {
-        addCount(blocks);
-      } else if (Array.isArray(blocks)) {
-        for (const block of blocks) {
-          if (block.type === "text" && "text" in block) {
-            addCount(block.text);
-          } else if (block.type === "thinking" && "thinking" in block) {
-            addCount(block.thinking);
-          }
-        }
-      }
-    } else if (entry.type === "summary") {
-      addCount(entry.summary);
-    } else if (entry.type === "system") {
-      addCount(entry.content || "");
-    }
-  }
-  return counts;
-}
-function getUserMessageContent2(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const textParts = [];
-  for (const block of content) {
-    if (block.type === "tool_result")
-      continue;
-    if (block.type === "text" && "text" in block && block.text) {
-      textParts.push(block.text);
-    }
-  }
-  return textParts.join(`
-`);
-}
-
-// cli/commands/read.ts
 function printUsage3() {
   console.log(usage.read());
 }
@@ -16984,7 +16915,6 @@ async function read() {
       return null;
     return argList[idx + 1] ?? null;
   }
-  const fullFlag = args.includes("--full");
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
   const contextC = parseNumericFlag(args, "-C");
@@ -16999,7 +16929,7 @@ async function read() {
     const hide = hideFields ? parseFieldList(hideFields) : [];
     fieldFilter = new ReadFieldFilter(show, hide);
   }
-  const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flags = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
   const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
   const filteredArgs = args.filter((a, i) => {
     if (flags.has(a))
@@ -17080,58 +17010,151 @@ async function read() {
       allEntries.push(result.data);
     }
   }
-  const logicalEntries = getLogicalEntries(allEntries);
-  const toolResults = collectToolResults(allEntries);
-  if (rangeStart !== null && rangeEnd !== null) {
-    const rangeEntries = logicalEntries.filter((e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd);
-    if (rangeEntries.length === 0) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(errors3.rangeNotFound(rangeStart, rangeEnd, maxLine));
-      return 1;
-    }
-    const output = formatRangeEntries(rangeEntries, {
-      redact: !fullFlag,
-      targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined,
-      fieldFilter,
-      allEntries
-    });
-    console.log(output);
-  } else if (entryNumber === null) {
+  if (entryNumber === null && rangeStart === null) {
     const output = formatSession(allEntries, {
-      redact: !fullFlag,
+      redact: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
       fieldFilter
     });
     console.log(output);
-  } else {
-    const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
-    if (targetIdx === -1) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
+    return 0;
+  }
+  const meta3 = createMinimalMeta(allEntries.length);
+  const parsed = parseSession(meta3, allEntries);
+  const { blocks } = parsed;
+  const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
+  const maxLine = lineNumbers.at(-1) ?? 0;
+  if (rangeStart !== null && rangeEnd !== null) {
+    const rangeBlocks = blocks.filter((b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd);
+    if (rangeBlocks.length === 0) {
+      printError(errors3.rangeNotFound(rangeStart, rangeEnd, maxLine));
+      return 1;
+    }
+    const output = formatBlocks(rangeBlocks, {
+      redact: true,
+      targetWords: targetWords ?? undefined,
+      skipWords: skipWords ?? undefined,
+      fieldFilter,
+      cwd
+    });
+    console.log(output);
+  } else if (entryNumber !== null) {
+    const targetBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
+    if (targetBlocks.length === 0) {
       printError(errors3.entryNotFound(entryNumber, maxLine));
       return 1;
     }
     const before = contextB ?? contextC ?? 0;
     const after = contextA ?? contextC ?? 0;
-    const startIdx = Math.max(0, targetIdx - before);
-    const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
+    const minLine = Math.max(1, entryNumber - before);
+    const maxContextLine = Math.min(maxLine, entryNumber + after);
+    const contextBlocks = blocks.filter((b) => b.lineNumber >= minLine && b.lineNumber <= maxContextLine);
     const output = [];
-    for (let i = startIdx;i <= endIdx; i++) {
-      const { lineNumber, entry } = logicalEntries[i];
-      const formatted = formatEntry(entry, {
-        lineNumber,
-        redact: i !== targetIdx,
-        toolResults,
+    let prevDate;
+    for (const block of contextBlocks) {
+      const isTarget = block.lineNumber === entryNumber;
+      const timestamp = "timestamp" in block ? block.timestamp : undefined;
+      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+      const isFirst = block === contextBlocks[0];
+      const truncation = isTarget ? { type: "full" } : { type: "summary" };
+      const formatted = formatBlock(block, {
+        showTimestamp: true,
+        prevDate,
+        isFirst,
+        cwd,
+        truncation,
         fieldFilter
       });
-      if (formatted)
+      if (formatted) {
         output.push(formatted);
+      }
+      if (currentDate) {
+        prevDate = currentDate;
+      }
     }
     console.log(output.join(`
 `));
   }
   return 0;
+}
+function createMinimalMeta(entryCount) {
+  return {
+    _type: "hive-mind-meta",
+    version: "0.1",
+    sessionId: "unknown",
+    checkoutId: "unknown",
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: "unknown",
+    messageCount: entryCount
+  };
+}
+var DEFAULT_TARGET_WORDS2 = 2000;
+function formatBlocks(blocks, options) {
+  const {
+    redact = false,
+    targetWords = DEFAULT_TARGET_WORDS2,
+    skipWords = 0,
+    fieldFilter,
+    cwd
+  } = options;
+  let wordLimit;
+  if (redact) {
+    const wordCounts = collectWordCountsFromBlocks2(blocks, skipWords);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+  }
+  const results = [];
+  let prevDate;
+  for (let i = 0;i < blocks.length; i++) {
+    const block = blocks[i];
+    const timestamp = "timestamp" in block ? block.timestamp : undefined;
+    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+    const isFirst = i === 0;
+    const truncation = redact ? wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "summary" } : { type: "full" };
+    const formatted = formatBlock(block, {
+      showTimestamp: true,
+      prevDate,
+      isFirst,
+      cwd,
+      truncation,
+      fieldFilter
+    });
+    if (formatted) {
+      results.push(formatted);
+    }
+    if (currentDate) {
+      prevDate = currentDate;
+    }
+  }
+  if (redact && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+  const separator = redact ? `
+` : `
+
+`;
+  return results.join(separator);
+}
+function collectWordCountsFromBlocks2(blocks, skipWords) {
+  const counts = [];
+  function addCount(text) {
+    const words = countWords(text);
+    const afterSkip = Math.max(0, words - skipWords);
+    if (afterSkip > 0) {
+      counts.push(afterSkip);
+    }
+  }
+  for (const block of blocks) {
+    if (block.type === "user" || block.type === "assistant" || block.type === "system") {
+      addCount(block.content);
+    } else if (block.type === "thinking") {
+      addCount(block.content);
+    } else if (block.type === "summary") {
+      addCount(block.content);
+    }
+  }
+  return counts;
 }
 
 // cli/commands/session-start.ts

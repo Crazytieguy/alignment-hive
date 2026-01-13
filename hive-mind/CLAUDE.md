@@ -8,6 +8,8 @@ When committing changes, always run:
 
 Both must pass before committing.
 
+**Note:** Do not pipe test output with `2>&1 | head` - this can stall the process. Run tests without piping.
+
 ## Session Metadata
 
 Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.

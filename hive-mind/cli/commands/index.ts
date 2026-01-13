@@ -9,11 +9,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
 import { printError } from "../lib/output";
+import { parseSession } from "../lib/parse";
+import type { LogicalBlock, ParsedSession } from "../lib/parse";
 import type { ContentBlock, HiveMindMeta, KnownEntry } from "../lib/schemas";
 
 interface SessionInfo {
   meta: HiveMindMeta;
   entries: Array<KnownEntry>;
+  parsed: ParsedSession;
 }
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -135,10 +138,12 @@ export async function index(): Promise<number> {
     const path = join(sessionsDir, file);
     const session = await readExtractedSession(path);
     if (session) {
-      allSessions.set(session.meta.sessionId, session);
+      const parsed = parseSession(session.meta, session.entries);
+      const sessionInfo: SessionInfo = { ...session, parsed };
+      allSessions.set(session.meta.sessionId, sessionInfo);
       // Also index by agentId for agent sessions
       if (session.meta.agentId) {
-        allSessions.set(session.meta.agentId, session);
+        allSessions.set(session.meta.agentId, sessionInfo);
       }
     }
   }
@@ -186,8 +191,8 @@ function formatSessionLine(
     .map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message))
     .join(" ");
 
-  // Compute stats including subagents
-  const stats = computeSessionStats(entries, allSessions, new Set(), cwd);
+  // Compute stats including subagents (using parsed blocks)
+  const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set(), cwd);
 
   // Format numbers, blank for 0
   const fmt = (n: number) => (n === 0 ? "" : String(n));
@@ -215,7 +220,7 @@ function formatSessionLine(
 }
 
 function computeSessionStats(
-  entries: Array<KnownEntry>,
+  blocks: Array<LogicalBlock>,
   allSessions: Map<string, SessionInfo>,
   visited: Set<string>,
   cwd: string
@@ -234,70 +239,53 @@ function computeSessionStats(
   const fileStats = new Map<string, FileStats>();
   const subagentIds: Array<string> = [];
 
-  for (const entry of entries) {
-    if (entry.type === "user") {
-      const content = entry.message.content;
-      if (typeof content === "string" || !Array.isArray(content)) {
-        stats.userCount++;
-      } else {
-        const hasUserText = content.some((b) => b.type === "text");
-        if (hasUserText) stats.userCount++;
+  for (const block of blocks) {
+    if (block.type === "user") {
+      stats.userCount++;
+    } else if (block.type === "tool") {
+      const { toolName, toolInput, agentId } = block;
+
+      // Track subagent IDs from Task tool results
+      if (agentId) {
+        subagentIds.push(agentId);
       }
 
-      if ("agentId" in entry && typeof entry.agentId === "string") {
-        subagentIds.push(entry.agentId);
-      }
-    }
-
-    if (entry.type === "assistant") {
-      const content = entry.message.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const block of content) {
-        if (block.type !== "tool_use" || !("name" in block)) continue;
-
-        const toolName = block.name;
-        const input = block.input;
-
-        switch (toolName) {
-          case "Edit": {
-            const filePath = input.file_path;
-            const oldString = input.old_string;
-            const newString = input.new_string;
-            if (typeof filePath === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              if (typeof oldString === "string") {
-                current.removed += countLines(oldString);
-              }
-              if (typeof newString === "string") {
-                current.added += countLines(newString);
-              }
-              fileStats.set(filePath, current);
+      switch (toolName) {
+        case "Edit": {
+          const filePath = toolInput.file_path;
+          const oldString = toolInput.old_string;
+          const newString = toolInput.new_string;
+          if (typeof filePath === "string") {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            if (typeof oldString === "string") {
+              current.removed += countLines(oldString);
             }
-            break;
-          }
-          case "Write": {
-            const filePath = input.file_path;
-            const fileContent = input.content;
-            if (typeof filePath === "string" && typeof fileContent === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              current.added += countLines(fileContent);
-              fileStats.set(filePath, current);
+            if (typeof newString === "string") {
+              current.added += countLines(newString);
             }
-            break;
+            fileStats.set(filePath, current);
           }
-          case "Bash":
-            stats.bashCount++;
-            break;
-          case "WebFetch":
-            stats.fetchCount++;
-            break;
-          case "WebSearch":
-            stats.searchCount++;
-            break;
-          case "Task":
-            break;
+          break;
         }
+        case "Write": {
+          const filePath = toolInput.file_path;
+          const fileContent = toolInput.content;
+          if (typeof filePath === "string" && typeof fileContent === "string") {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            current.added += countLines(fileContent);
+            fileStats.set(filePath, current);
+          }
+          break;
+        }
+        case "Bash":
+          stats.bashCount++;
+          break;
+        case "WebFetch":
+          stats.fetchCount++;
+          break;
+        case "WebSearch":
+          stats.searchCount++;
+          break;
       }
     }
   }
@@ -309,7 +297,7 @@ function computeSessionStats(
     const subSession = allSessions.get(agentId);
     if (!subSession) continue;
 
-    const subStats = computeSessionStats(subSession.entries, allSessions, visited, cwd);
+    const subStats = computeSessionStats(subSession.parsed.blocks, allSessions, visited, cwd);
     stats.linesAdded += subStats.linesAdded;
     stats.linesRemoved += subStats.linesRemoved;
     stats.bashCount += subStats.bashCount;

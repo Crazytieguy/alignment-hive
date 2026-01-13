@@ -2,12 +2,15 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
 import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
-import { collectToolResults, formatEntry, formatSession, getLogicalEntries } from "../lib/format";
+import { formatBlock, formatSession } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
-import { formatRangeEntries } from "../lib/range-format";
+import { parseSession } from "../lib/parse";
 import { parseKnownEntry } from "../lib/schemas";
-import type { KnownEntry } from "../lib/schemas";
+import { computeUniformLimit, countWords } from "../lib/truncation";
+import type { TruncationStrategy } from "../lib/format";
+import type { LogicalBlock } from "../lib/parse";
+import type { HiveMindMeta, KnownEntry } from "../lib/schemas";
 
 function printUsage(): void {
   console.log(usage.read());
@@ -41,7 +44,6 @@ export async function read(): Promise<number> {
     return argList[idx + 1] ?? null;
   }
 
-  const fullFlag = args.includes("--full");
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
   const contextC = parseNumericFlag(args, "-C");
@@ -58,7 +60,7 @@ export async function read(): Promise<number> {
     fieldFilter = new ReadFieldFilter(show, hide);
   }
 
-  const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flags = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
   const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
   const filteredArgs = args.filter((a, i) => {
     if (flags.has(a)) return false;
@@ -150,62 +152,211 @@ export async function read(): Promise<number> {
     }
   }
 
-  const logicalEntries = getLogicalEntries(allEntries);
-  const toolResults = collectToolResults(allEntries);
+  // Full session read - use formatSession which handles everything internally
+  if (entryNumber === null && rangeStart === null) {
+    const output = formatSession(allEntries, {
+      redact: true,
+      targetWords: targetWords ?? undefined,
+      skipWords: skipWords ?? undefined,
+      fieldFilter,
+    });
+    console.log(output);
+    return 0;
+  }
+
+  // Parse into blocks for range/single entry reading
+  const meta = createMinimalMeta(allEntries.length);
+  const parsed = parseSession(meta, allEntries);
+  const { blocks } = parsed;
+
+  // Get unique line numbers to find the max
+  const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
+  const maxLine = lineNumbers.at(-1) ?? 0;
 
   if (rangeStart !== null && rangeEnd !== null) {
-    const rangeEntries = logicalEntries.filter(
-      (e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd
+    // Range read
+    const rangeBlocks = blocks.filter(
+      (b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd
     );
 
-    if (rangeEntries.length === 0) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
+    if (rangeBlocks.length === 0) {
       printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
       return 1;
     }
 
-    const output = formatRangeEntries(rangeEntries, {
-      redact: !fullFlag,
+    const output = formatBlocks(rangeBlocks, {
+      redact: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
       fieldFilter,
-      allEntries,
+      cwd,
     });
     console.log(output);
-  } else if (entryNumber === null) {
-    const output = formatSession(allEntries, {
-      redact: !fullFlag,
-      targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined,
-      fieldFilter,
-    });
-    console.log(output);
-  } else {
-    const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
-    if (targetIdx === -1) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
+  } else if (entryNumber !== null) {
+    // Single entry with optional context
+    const targetBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
+    if (targetBlocks.length === 0) {
       printError(errors.entryNotFound(entryNumber, maxLine));
       return 1;
     }
 
     const before = contextB ?? contextC ?? 0;
     const after = contextA ?? contextC ?? 0;
-    const startIdx = Math.max(0, targetIdx - before);
-    const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
 
+    // Find line numbers in context range
+    const minLine = Math.max(1, entryNumber - before);
+    const maxContextLine = Math.min(maxLine, entryNumber + after);
+
+    const contextBlocks = blocks.filter(
+      (b) => b.lineNumber >= minLine && b.lineNumber <= maxContextLine
+    );
+
+    // Format with full content for target entry, redacted for context
     const output: Array<string> = [];
-    for (let i = startIdx; i <= endIdx; i++) {
-      const { lineNumber, entry } = logicalEntries[i];
-      const formatted = formatEntry(entry, {
-        lineNumber,
-        redact: i !== targetIdx,
-        toolResults,
+    let prevDate: string | undefined;
+
+    for (const block of contextBlocks) {
+      const isTarget = block.lineNumber === entryNumber;
+      const timestamp = "timestamp" in block ? block.timestamp : undefined;
+      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+      const isFirst = block === contextBlocks[0];
+
+      const truncation: TruncationStrategy = isTarget
+        ? { type: "full" }
+        : { type: "summary" };
+
+      const formatted = formatBlock(block, {
+        showTimestamp: true,
+        prevDate,
+        isFirst,
+        cwd,
+        truncation,
         fieldFilter,
       });
-      if (formatted) output.push(formatted);
+
+      if (formatted) {
+        output.push(formatted);
+      }
+
+      if (currentDate) {
+        prevDate = currentDate;
+      }
     }
     console.log(output.join("\n"));
   }
 
   return 0;
+}
+
+/**
+ * Create a minimal meta object for parseSession.
+ */
+function createMinimalMeta(entryCount: number): HiveMindMeta {
+  return {
+    _type: "hive-mind-meta" as const,
+    version: "0.1" as const,
+    sessionId: "unknown",
+    checkoutId: "unknown",
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: "unknown",
+    messageCount: entryCount,
+  };
+}
+
+const DEFAULT_TARGET_WORDS = 2000;
+
+/**
+ * Format a list of blocks with uniform word limit truncation.
+ */
+function formatBlocks(
+  blocks: Array<LogicalBlock>,
+  options: {
+    redact?: boolean;
+    targetWords?: number;
+    skipWords?: number;
+    fieldFilter?: ReadFieldFilter;
+    cwd?: string;
+  }
+): string {
+  const {
+    redact = false,
+    targetWords = DEFAULT_TARGET_WORDS,
+    skipWords = 0,
+    fieldFilter,
+    cwd,
+  } = options;
+
+  let wordLimit: number | undefined;
+  if (redact) {
+    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+  }
+
+  const results: Array<string> = [];
+  let prevDate: string | undefined;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const timestamp = "timestamp" in block ? block.timestamp : undefined;
+    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+    const isFirst = i === 0;
+
+    const truncation: TruncationStrategy | undefined = redact
+      ? wordLimit !== undefined
+        ? { type: "wordLimit", limit: wordLimit, skip: skipWords }
+        : { type: "summary" }
+      : { type: "full" };
+
+    const formatted = formatBlock(block, {
+      showTimestamp: true,
+      prevDate,
+      isFirst,
+      cwd,
+      truncation,
+      fieldFilter,
+    });
+
+    if (formatted) {
+      results.push(formatted);
+    }
+
+    if (currentDate) {
+      prevDate = currentDate;
+    }
+  }
+
+  if (redact && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+
+  const separator = redact ? "\n" : "\n\n";
+  return results.join(separator);
+}
+
+/**
+ * Collect word counts from blocks for computing uniform truncation limit.
+ */
+function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {
+  const counts: Array<number> = [];
+
+  function addCount(text: string): void {
+    const words = countWords(text);
+    const afterSkip = Math.max(0, words - skipWords);
+    if (afterSkip > 0) {
+      counts.push(afterSkip);
+    }
+  }
+
+  for (const block of blocks) {
+    if (block.type === "user" || block.type === "assistant" || block.type === "system") {
+      addCount(block.content);
+    } else if (block.type === "thinking") {
+      addCount(block.content);
+    } else if (block.type === "summary") {
+      addCount(block.content);
+    }
+  }
+
+  return counts;
 }

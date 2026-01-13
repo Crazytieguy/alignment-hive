@@ -130,7 +130,8 @@ describe("grep command", () => {
     await grep();
 
     expect(consoleOutput.some((line) => line.includes("TODO"))).toBe(true);
-    expect(consoleOutput.some((line) => line.includes("test-ses"))).toBe(true);
+    // Uses minimal prefix - "test" is unique enough
+    expect(consoleOutput.some((line) => line.includes("test"))).toBe(true);
   });
 
   test("case insensitive search with -i flag", async () => {
@@ -171,8 +172,8 @@ describe("grep command", () => {
     const { grep } = await import("../commands/grep");
     await grep();
 
-    // Should output session:count format
-    expect(consoleOutput.some((line) => /test-ses.*:\d+/.test(line))).toBe(true);
+    // Should output session:count format (with minimal prefix)
+    expect(consoleOutput.some((line) => /test.*:\d+/.test(line))).toBe(true);
   });
 
   test("list mode with -l flag", async () => {
@@ -188,9 +189,9 @@ describe("grep command", () => {
     const { grep } = await import("../commands/grep");
     await grep();
 
-    // Should output only session ID, not the matching line
+    // Should output only session ID, not the matching line (with minimal prefix)
     expect(consoleOutput.length).toBe(1);
-    expect(consoleOutput[0]).toMatch(/^test-ses/);
+    expect(consoleOutput[0]).toMatch(/^test/);
     expect(consoleOutput[0]).not.toContain("find me");
   });
 
@@ -431,29 +432,8 @@ describe("read command", () => {
     await read();
 
     const output = consoleOutput.join("\n");
-    // Should show truncation indicator (format is "+Nwords")
-    expect(output).toMatch(/\+\d+words/);
-  });
-
-  test("reads all entries full with --full flag", async () => {
-    await writeFile(
-      join(sessionsDir, "read-test-2.jsonl"),
-      createTestSession("read-test-2", [
-        userEntry("1", "line1\nline2\nline3"),
-        assistantEntry("2", "1", "response"),
-      ])
-    );
-
-    process.argv = ["node", "cli", "read", "read-test-2", "--full"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should show all lines without truncation
-    expect(output).toContain("line1");
-    expect(output).toContain("line2");
-    expect(output).toContain("line3");
-    expect(output).not.toContain("[+");
+    // Should show truncation indicator (format is "...Nwords")
+    expect(output).toMatch(/\.\.\.\d+words/);
   });
 
   test("reads specific entry by number", async () => {
@@ -730,28 +710,6 @@ describe("read command", () => {
     expect(output).toMatch(/^4\|/m);
     expect(output).not.toMatch(/^1\|/m);
     expect(output).not.toMatch(/^2\|/m);
-  });
-
-  test("range read with --full flag shows full content", async () => {
-    await writeFile(
-      join(sessionsDir, "read-range-3.jsonl"),
-      createTestSession("read-range-3", [
-        userEntry("1", "short"),
-        assistantEntry("2", "1", "line1\nline2\nline3\nline4\nline5\nline6"),
-        userEntry("3", "short"),
-      ])
-    );
-
-    process.argv = ["node", "cli", "read", "read-range-3", "1-2", "--full"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should show all lines without truncation markers
-    expect(output).toContain("line1");
-    expect(output).toContain("line6");
-    expect(output).not.toContain("[+");
-    expect(output).not.toContain("Limited to");
   });
 
   test("range read shows truncation notice when truncating", async () => {

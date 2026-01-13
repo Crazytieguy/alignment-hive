@@ -23,6 +23,7 @@ Think broadly about what might be relevant:
 - **Failed approaches** - What didn't work and why (often more valuable than what did)
 - **Outstanding issues** - Known problems, limitations, tech debt that might affect current work
 - **Dependencies** - Related decisions that inform or constrain the current question
+- **Temporary code** - Debug scripts, one-off utilities, or workarounds that solved similar problems (even if later removed)
 
 A question about caching might lead to finding: performance discussions, user preferences about dependencies, architectural decisions about the API layer, and known issues that would interact with caching.
 
@@ -72,24 +73,28 @@ Before concluding:
 
 **Return direct quotes, not analysis.** Output should be 80%+ blockquotes from session history. Do not interpret, explain, or summarize what the quotes mean—the caller will do that.
 
+**Label the source.** Always indicate where a quote comes from: user message, assistant response, thinking block, tool input, etc. This helps the caller understand the context and weight of each quote.
+
 ```
 ## Findings
 
 **[Topic]** (session 02ed, around Jan 3; commits abc1234, def5678)
 
-> "Direct quote from the session that captures the key point..."
+> [user] "Direct quote from the session that captures the key point..."
 
-> "Another relevant quote, possibly from a different part of the discussion..."
+> [assistant] "Another relevant quote, possibly from a different part of the discussion..."
+
+> [thinking] "Internal reasoning that reveals the decision process..."
 
 [One sentence connecting the quotes if needed]
 
 **[Related context]** (session ec4d, Dec 30)
 
-> "Earlier quote that provides background..."
+> [user] "Earlier quote that provides background..."
 
 ## User Preferences Noted
 
-> "I prefer X over Y because..." (session 6e85, Jan 2)
+> [user] "I prefer X over Y because..." (session 6e85, Jan 2)
 
 ## Gaps
 - [What was looked for but not found]

@@ -8,10 +8,10 @@
  *   grep -c <pattern>                 - count matches per session
  *   grep -l <pattern>                 - list matching session IDs only
  *   grep -m N <pattern>               - stop after N total matches
- *   grep -C N <pattern>               - show N lines context around match
+ *   grep -C N <pattern>               - show N words context around match
  *   grep --in <fields> <pattern>      - search only specified fields
  *
- * Pattern is a JavaScript regex (like grep -E extended regex).
+ * Pattern is a JavaScript regex (same as grep -E extended regex).
  * By default, searches user, assistant, thinking, tool:input, system, summary.
  * Use --in to specify which fields to search (e.g., --in tool:result).
  * Agent sessions excluded (same as index command).
@@ -21,32 +21,89 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
 import { GrepFieldFilter, parseFieldList } from "../lib/field-filter";
-import { getLogicalEntries } from "../lib/format";
+import { formatBlock } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
-import type { ContentBlock, KnownEntry } from "../lib/schemas";
+import { parseSession } from "../lib/parse";
+import type { LogicalBlock } from "../lib/parse";
+
+const DEFAULT_CONTEXT_WORDS = 10;
 
 interface GrepOptions {
   pattern: RegExp;
   countOnly: boolean;
   listOnly: boolean;
   maxMatches: number | null;
-  contextLines: number;
+  contextWords: number;
   fieldFilter: GrepFieldFilter;
   sessionFilter: string | null;
 }
 
-interface Match {
-  sessionId: string;
-  entryNumber: number;
-  entryType: string;
-  line: string;
-  contextBefore: Array<string>;
-  contextAfter: Array<string>;
-}
 
 function printUsage(): void {
   console.log(usage.grep());
+}
+
+/**
+ * Compute minimal unique prefixes for session IDs.
+ */
+function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> {
+  const prefixes = new Map<string, string>();
+  const minLen = 4;
+
+  for (const id of sessionIds) {
+    let len = minLen;
+    while (len <= id.length) {
+      const prefix = id.slice(0, len);
+      const conflicts = sessionIds.filter((other) => other !== id && other.startsWith(prefix));
+      if (conflicts.length === 0) {
+        prefixes.set(id, prefix);
+        break;
+      }
+      len++;
+    }
+    if (!prefixes.has(id)) {
+      prefixes.set(id, id);
+    }
+  }
+
+  return prefixes;
+}
+
+/**
+ * Get searchable field values from a block.
+ * Returns only the actual values (not keys/labels).
+ */
+function getSearchableFieldValues(block: LogicalBlock, filter: GrepFieldFilter): Array<string> {
+  const values: Array<string> = [];
+
+  if (block.type === "user" && filter.isSearchable("user")) {
+    if (block.content) values.push(block.content);
+  } else if (block.type === "assistant" && filter.isSearchable("assistant")) {
+    if (block.content) values.push(block.content);
+  } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
+    if (block.content) values.push(block.content);
+  } else if (block.type === "tool") {
+    // Search only in VALUES, not keys
+    const toolName = block.toolName;
+    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+      // Extract just the values from toolInput
+      for (const value of Object.values(block.toolInput)) {
+        if (value !== null && value !== undefined) {
+          values.push(String(value));
+        }
+      }
+    }
+    if (filter.isSearchable("tool:result") || filter.isSearchable(`tool:${toolName}:result`)) {
+      if (block.toolResult) values.push(block.toolResult);
+    }
+  } else if (block.type === "system" && filter.isSearchable("system")) {
+    if (block.content) values.push(block.content);
+  } else if (block.type === "summary" && filter.isSearchable("summary")) {
+    if (block.content) values.push(block.content);
+  }
+
+  return values;
 }
 
 export async function grep(): Promise<number> {
@@ -99,6 +156,17 @@ export async function grep(): Promise<number> {
     }
   }
 
+  // Collect all session IDs for minimal prefix computation
+  const allSessionIds: Array<string> = [];
+  for (const file of jsonlFiles) {
+    const path = join(sessionsDir, file);
+    const session = await readExtractedSession(path);
+    if (session && !session.meta.agentId) {
+      allSessionIds.push(session.meta.sessionId);
+    }
+  }
+  const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
+
   let totalMatches = 0;
   const sessionCounts: Array<{ sessionId: string; count: number }> = [];
   const matchingSessions: Array<string> = [];
@@ -112,58 +180,49 @@ export async function grep(): Promise<number> {
     // Skip agent sessions (same as index command)
     if (!session || session.meta.agentId) continue;
 
-    const sessionId = session.meta.sessionId.slice(0, 8);
+    const sessionId = session.meta.sessionId;
+    const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
 
-    // When searching tool:result, include all entries; otherwise use logical entries
-    const searchesToolResult = options.fieldFilter.isSearchable("tool:result");
-    const entriesToSearch: Array<{ lineNumber: number; entry: KnownEntry }> = searchesToolResult
-      ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry }))
-      : getLogicalEntries(session.entries);
+    // Parse session into logical blocks
+    const parsed = parseSession(session.meta, session.entries);
 
     let sessionMatchCount = 0;
-    const sessionMatches: Array<Match> = [];
 
-    for (const { lineNumber, entry } of entriesToSearch) {
+    for (const block of parsed.blocks) {
       if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
-      const content = extractEntryContent(entry, options.fieldFilter);
-      const lines = content.split("\n");
+      // Get searchable field values for this block
+      const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
+      if (fieldValues.length === 0) continue;
 
-      for (let i = 0; i < lines.length; i++) {
-        if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
+      // Check if any field value matches the pattern
+      const hasMatch = fieldValues.some((value) => options.pattern.test(value));
+      if (!hasMatch) continue;
 
-        const line = lines[i];
-        if (options.pattern.test(line)) {
-          totalMatches++;
-          sessionMatchCount++;
+      totalMatches++;
+      sessionMatchCount++;
 
-          if (!options.countOnly && !options.listOnly) {
-            const contextBefore = lines.slice(Math.max(0, i - options.contextLines), i);
-            const contextAfter = lines.slice(i + 1, i + 1 + options.contextLines);
+      if (!options.countOnly && !options.listOnly) {
+        // Format with match context - formatBlock finds matches using the pattern
+        const formatted = formatBlock(block, {
+          sessionPrefix,
+          cwd,
+          truncation: {
+            type: "matchContext",
+            pattern: options.pattern,
+            contextWords: options.contextWords,
+          },
+        });
 
-            sessionMatches.push({
-              sessionId,
-              entryNumber: lineNumber,
-              entryType: entry.type,
-              line,
-              contextBefore,
-              contextAfter,
-            });
-          }
+        if (formatted) {
+          console.log(formatted);
         }
       }
     }
 
     if (sessionMatchCount > 0) {
-      matchingSessions.push(sessionId);
-      sessionCounts.push({ sessionId, count: sessionMatchCount });
-
-      // Output matches for this session if not in count/list mode
-      if (!options.countOnly && !options.listOnly) {
-        for (const match of sessionMatches) {
-          outputMatch(match, options.contextLines > 0);
-        }
-      }
+      matchingSessions.push(sessionPrefix);
+      sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
     }
   }
 
@@ -202,12 +261,12 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     }
   }
 
-  // Parse -C N (context lines)
-  let contextLines = 0;
+  // Parse -C N (context words)
+  let contextWords = DEFAULT_CONTEXT_WORDS;
   const cValue = getFlagValue("-C");
   if (cValue !== undefined) {
-    contextLines = parseInt(cValue, 10);
-    if (isNaN(contextLines) || contextLines < 0) {
+    contextWords = parseInt(cValue, 10);
+    if (isNaN(contextWords) || contextWords < 0) {
       printError(errors.invalidNonNegative("-C"));
       return null;
     }
@@ -251,102 +310,8 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     countOnly,
     listOnly,
     maxMatches,
-    contextLines,
+    contextWords,
     fieldFilter,
     sessionFilter,
   };
-}
-
-function extractEntryContent(entry: KnownEntry, filter: GrepFieldFilter): string {
-  const parts: Array<string> = [];
-
-  if (entry.type === "user") {
-    const content = entry.message.content;
-    if (typeof content === "string") {
-      if (filter.isSearchable("user")) {
-        parts.push(content);
-      }
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === "text" && "text" in block) {
-          if (filter.isSearchable("user")) {
-            parts.push(block.text);
-          }
-        } else if (block.type === "tool_result" && "content" in block) {
-          if (filter.isSearchable("tool:result")) {
-            const resultContent = block.content;
-            if (typeof resultContent === "string") {
-              parts.push(resultContent);
-            } else if (Array.isArray(resultContent)) {
-              for (const item of resultContent) {
-                if (item.type === "text" && "text" in item) {
-                  parts.push(item.text);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  } else if (entry.type === "assistant") {
-    const content = entry.message.content;
-    if (typeof content === "string") {
-      if (filter.isSearchable("assistant")) {
-        parts.push(content);
-      }
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        const text = extractBlockContent(block, filter);
-        if (text) parts.push(text);
-      }
-    }
-  } else if (entry.type === "system") {
-    if (filter.isSearchable("system") && typeof entry.content === "string") {
-      parts.push(entry.content);
-    }
-  } else if (entry.type === "summary") {
-    if (filter.isSearchable("summary")) {
-      parts.push(entry.summary);
-    }
-  }
-
-  return parts.join("\n");
-}
-
-function extractBlockContent(block: ContentBlock, filter: GrepFieldFilter): string | null {
-  if (block.type === "text" && "text" in block) {
-    if (filter.isSearchable("assistant")) {
-      return block.text;
-    }
-  }
-  if (block.type === "thinking" && "thinking" in block) {
-    if (filter.isSearchable("thinking")) {
-      return block.thinking;
-    }
-  }
-  if (block.type === "tool_use" && "input" in block) {
-    const toolName = "name" in block ? (block as { name: string }).name : "unknown";
-    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
-      return JSON.stringify(block.input);
-    }
-  }
-  return null;
-}
-
-function outputMatch(match: Match, showContext: boolean): void {
-  const prefix = `${match.sessionId}:${match.entryNumber}|${match.entryType}|`;
-
-  if (showContext) {
-    for (const line of match.contextBefore) {
-      console.log(`${prefix} ${line}`);
-    }
-  }
-
-  console.log(`${prefix} ${match.line}`);
-
-  if (showContext) {
-    for (const line of match.contextAfter) {
-      console.log(`${prefix} ${line}`);
-    }
-  }
 }
