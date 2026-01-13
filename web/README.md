@@ -74,9 +74,14 @@ The build command is: `bunx convex deploy --cmd 'bun run build'`
 
 This ensures both Convex backend and Vite frontend are built for production.
 
+## Dark Mode
+
+The app automatically respects system dark mode preference via CSS `prefers-color-scheme` media query. No user toggle needed. All shadcn components include dark mode colors in `src/app.css`.
+
 ## TODO: Branding & Polish
 
-- [ ] **WorkOS Branding**: Configure WorkOS login page branding in [WorkOS Dashboard](https://dashboard.workos.com) → Organizations → Branding to match alignment-hive aesthetic
-- [ ] **Favicon**: Add `public/favicon.ico` and update `src/start.tsx` to reference it
-- [ ] **Meta Tags**: Add Open Graph tags and social sharing metadata
-- [ ] **Error Pages**: Create dedicated error pages for various failure scenarios
+- [ ] **WorkOS Branding**: Configure login page in [WorkOS Dashboard](https://dashboard.workos.com) → Organizations → Branding
+- [ ] **Favicon**: Add `public/favicon.ico` and reference in `src/start.tsx`
+- [ ] **Meta Tags**: Add Open Graph and social sharing metadata
+- [ ] **Error Pages**: Create dedicated error pages for failure scenarios
+- [ ] **Dashboard**: Build `/authenticated/*` routes for post-login experience

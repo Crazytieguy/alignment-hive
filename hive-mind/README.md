@@ -1,103 +1,34 @@
-# hive-mind CLI
+# hive-mind
 
-The hive-mind CLI enables Claude Code users to extract and submit session learnings to the alignment-hive knowledge base.
-
-## What it does
-
-- **Session Extraction**: Automatically extracts Claude Code session information
-- **Local Review**: Users review extractions before submission (24-hour window)
-- **Knowledge Submission**: Contributes sessions to shared knowledge base for other researchers
-- **Privacy Controls**: Users control what gets shared and can retract submissions
+A system for alignment researchers to extract and share session learnings across the community.
 
 ## Development
 
-### Setup
+When committing changes, always run:
+- `bun test`
+- `bun run lint`
 
-From the repository root:
+Both must pass before committing.
 
+## Session Metadata
+
+Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.
+
+## Re-extracting Sessions
+
+To re-extract all sessions (e.g., after schema changes):
 ```bash
-# Install dependencies for entire workspace
-bun install
-
-# Navigate to CLI directory
-cd hive-mind
-```
-
-### Available Commands
-
-```bash
-bun run test         # Run CLI tests
-bun run lint         # Type check and ESLint
-bun run cli:build    # Bundle CLI to ../plugins/hive-mind/cli.js
-```
-
-### Running CLI During Development
-
-From the project root:
-
-```bash
-bun hive-mind/cli/cli.ts <command> [args]
-```
-
-Examples:
-
-```bash
-bun hive-mind/cli/cli.ts login
-bun hive-mind/cli/cli.ts extract
-bun hive-mind/cli/cli.ts retrieve --query "authentication"
-```
-
-### Environment Variables
-
-Set `HIVE_MIND_CLIENT_ID` to override the WorkOS client ID (useful for local testing with staging):
-
-```bash
-# Use staging credentials locally
-export HIVE_MIND_CLIENT_ID=client_01KE10CYZ10VVZPJVRQBJESK1A
-bun hive-mind/cli/cli.ts login
-```
-
-The default is production client ID (configured in `cli/lib/config.ts`).
-
-### User-Facing Messages
-
-All user-facing strings are centralized in `cli/lib/messages.ts`. When updating:
-
-1. Edit messages in `cli/lib/messages.ts`
-2. Run `bun run cli:build` to rebundle
-3. Bump version in `plugins/hive-mind/plugin.json` for auto-update to users
-
-### Git Hooks
-
-To automatically rebuild the CLI on commit:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-### Regenerating Sessions
-
-After schema or extraction logic changes, re-extract all sessions:
-
-```bash
-# From project root
 rm -rf .claude/hive-mind/sessions/
 bun hive-mind/cli/cli.ts session-start
 ```
 
-## Architecture
+## Regenerating Snapshot Tests
 
-- **CLI**: TypeScript with Bun runtime, bundles to `plugins/hive-mind/cli.js`
-- **Auth**: WorkOS device authorization flow
-- **Storage**: Local `~/.claude/hive-mind/` directory
-- **Backend**: Convex serverless functions
-- **Web Integration**: Connects with web app at alignment-hive.com
+The format tests use custom snapshot logic. To update snapshots:
+```bash
+UPDATE_SNAPSHOTS=1 bun test
+```
 
-## File Structure
+## Skill and CLI Sync
 
-- `cli/` - CLI source code
-  - `cli.ts` - CLI entry point
-  - `commands/` - Command implementations
-  - `lib/` - Shared utilities
-  - `tests/` - Test suite
-- `CLAUDE.md` - Development guidelines (auto-loads this README)
+The retrieval skill dynamically includes `--help` output. When CLI behavior changes, update the `--help` text in the command file and bump the plugin version.
