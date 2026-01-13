@@ -15834,6 +15834,7 @@ var errors3 = {
   emptySession: "Session has no entries",
   noPattern: "No pattern specified",
   invalidRegex: (error48) => `Invalid regex: ${error48}`,
+  invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd) => `Unknown command: ${cmd}`,
   unexpectedResponse: "Unexpected response from server",
   bunNotInstalled: () => {
@@ -15896,6 +15897,7 @@ var usage = {
   grep: () => {
     return [
       "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "                      [--after <time>] [--before <time>]",
       "",
       "Search sessions for a pattern (JavaScript regex, same as grep -E).",
       "Use -- to separate options from pattern if needed.",
@@ -15908,6 +15910,12 @@ var usage = {
       "  -C N            Show N words of context around match (default: 10)",
       "  -s <session>    Search only in specified session (prefix match)",
       "  --in <fields>   Search only specified fields (comma-separated)",
+      "  --after <time>  Include only results after this time",
+      "  --before <time> Include only results before this time",
+      "",
+      "Time formats:",
+      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
+      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
       "",
       "Field specifiers:",
       "  user, assistant, thinking, system, summary",
@@ -15924,7 +15932,9 @@ var usage = {
       '  grep "error|warning|bug"       # find any of these terms (OR)',
       '  grep "TODO|FIXME|XXX"          # find code comments',
       '  grep --in tool:result "error"  # search only in tool results',
-      '  grep --in user,assistant "fix" # search only user and assistant'
+      '  grep --in user,assistant "fix" # search only user and assistant',
+      '  grep --after 2d "error"        # errors in last 2 days',
+      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1'
     ].join(`
 `);
   },
@@ -15998,6 +16008,53 @@ function printInfo(message) {
 }
 function printWarning(message) {
   console.log(colors.yellow(message));
+}
+
+// cli/lib/time-filter.ts
+function parseRelativeTime(value) {
+  const match = value.match(/^(\d+)([mhdw])$/);
+  if (!match)
+    return null;
+  const amount = parseInt(match[1], 10);
+  const unit = match[2];
+  const now = Date.now();
+  switch (unit) {
+    case "m":
+      return new Date(now - amount * 60 * 1000);
+    case "h":
+      return new Date(now - amount * 60 * 60 * 1000);
+    case "d":
+      return new Date(now - amount * 24 * 60 * 60 * 1000);
+    case "w":
+      return new Date(now - amount * 7 * 24 * 60 * 60 * 1000);
+    default:
+      return null;
+  }
+}
+function parseAbsoluteTime(value) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [y, m, d] = value.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  const date5 = new Date(value);
+  if (!isNaN(date5.getTime()))
+    return date5;
+  return null;
+}
+function parseTimeSpec(value) {
+  return parseRelativeTime(value) ?? parseAbsoluteTime(value);
+}
+function isInTimeRange(timestamp, range) {
+  if (!timestamp)
+    return false;
+  const date5 = new Date(timestamp);
+  if (isNaN(date5.getTime()))
+    return false;
+  if (range.after && date5 < range.after)
+    return false;
+  if (range.before && date5 > range.before)
+    return false;
+  return true;
 }
 
 // cli/commands/grep.ts
@@ -16123,6 +16180,11 @@ async function grep() {
     const matchingIndices = new Set;
     for (let i = 0;i < parsed.blocks.length; i++) {
       const block = parsed.blocks[i];
+      if (options.afterTime || options.beforeTime) {
+        if (!isInTimeRange(block.timestamp, { after: options.afterTime, before: options.beforeTime })) {
+          continue;
+        }
+      }
       const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
       if (fieldValues.length === 0)
         continue;
@@ -16202,8 +16264,26 @@ function parseGrepOptions(args) {
   const searchInValue = getFlagValue("--in");
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
   const fieldFilter = new GrepFieldFilter(searchIn);
-  const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
+  let afterTime = null;
+  const afterValue = getFlagValue("--after");
+  if (afterValue !== undefined) {
+    afterTime = parseTimeSpec(afterValue);
+    if (!afterTime) {
+      printError(errors3.invalidTimeSpec("--after", afterValue));
+      return null;
+    }
+  }
+  let beforeTime = null;
+  const beforeValue = getFlagValue("--before");
+  if (beforeValue !== undefined) {
+    beforeTime = parseTimeSpec(beforeValue);
+    if (!beforeTime) {
+      printError(errors3.invalidTimeSpec("--before", beforeValue));
+      return null;
+    }
+  }
+  const flagsWithValues = new Set(["-m", "-C", "-s", "--in", "--after", "--before"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in", "--after", "--before"]);
   let patternStr = null;
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
@@ -16233,7 +16313,9 @@ function parseGrepOptions(args) {
     maxMatches,
     contextWords,
     fieldFilter,
-    sessionFilter
+    sessionFilter,
+    afterTime,
+    beforeTime
   };
 }
 

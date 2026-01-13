@@ -6,6 +6,7 @@ import { formatBlocks } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
+import { isInTimeRange, parseTimeSpec } from "../lib/time-filter";
 import type { LogicalBlock } from "../lib/parse";
 
 const DEFAULT_CONTEXT_WORDS = 10;
@@ -18,6 +19,8 @@ interface GrepOptions {
   contextWords: number;
   fieldFilter: GrepFieldFilter;
   sessionFilter: string | null;
+  afterTime: Date | null;
+  beforeTime: Date | null;
 }
 
 function printUsage(): void {
@@ -156,6 +159,13 @@ export async function grep(): Promise<number> {
     const matchingIndices = new Set<number>();
     for (let i = 0; i < parsed.blocks.length; i++) {
       const block = parsed.blocks[i];
+
+      if (options.afterTime || options.beforeTime) {
+        if (!isInTimeRange(block.timestamp, { after: options.afterTime, before: options.beforeTime })) {
+          continue;
+        }
+      }
+
       const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
       if (fieldValues.length === 0) continue;
 
@@ -247,8 +257,28 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
   const fieldFilter = new GrepFieldFilter(searchIn);
 
-  const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
+  let afterTime: Date | null = null;
+  const afterValue = getFlagValue("--after");
+  if (afterValue !== undefined) {
+    afterTime = parseTimeSpec(afterValue);
+    if (!afterTime) {
+      printError(errors.invalidTimeSpec("--after", afterValue));
+      return null;
+    }
+  }
+
+  let beforeTime: Date | null = null;
+  const beforeValue = getFlagValue("--before");
+  if (beforeValue !== undefined) {
+    beforeTime = parseTimeSpec(beforeValue);
+    if (!beforeTime) {
+      printError(errors.invalidTimeSpec("--before", beforeValue));
+      return null;
+    }
+  }
+
+  const flagsWithValues = new Set(["-m", "-C", "-s", "--in", "--after", "--before"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in", "--after", "--before"]);
   let patternStr: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
@@ -282,5 +312,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
     contextWords,
     fieldFilter,
     sessionFilter,
+    afterTime,
+    beforeTime,
   };
 }

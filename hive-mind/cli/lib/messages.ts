@@ -61,6 +61,8 @@ export const errors = {
   emptySession: "Session has no entries",
   noPattern: "No pattern specified",
   invalidRegex: (error: string): string => `Invalid regex: ${error}`,
+  invalidTimeSpec: (flag: string, value: string): string =>
+    `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd: string): string => `Unknown command: ${cmd}`,
   unexpectedResponse: "Unexpected response from server",
   bunNotInstalled: (): string => {
@@ -123,6 +125,7 @@ export const usage = {
   grep: (): string => {
     return [
       "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "                      [--after <time>] [--before <time>]",
       "",
       "Search sessions for a pattern (JavaScript regex, same as grep -E).",
       "Use -- to separate options from pattern if needed.",
@@ -135,6 +138,12 @@ export const usage = {
       "  -C N            Show N words of context around match (default: 10)",
       "  -s <session>    Search only in specified session (prefix match)",
       "  --in <fields>   Search only specified fields (comma-separated)",
+      "  --after <time>  Include only results after this time",
+      "  --before <time> Include only results before this time",
+      "",
+      "Time formats:",
+      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
+      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
       "",
       "Field specifiers:",
       "  user, assistant, thinking, system, summary",
@@ -152,6 +161,8 @@ export const usage = {
       '  grep "TODO|FIXME|XXX"          # find code comments',
       '  grep --in tool:result "error"  # search only in tool results',
       '  grep --in user,assistant "fix" # search only user and assistant',
+      '  grep --after 2d "error"        # errors in last 2 days',
+      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1',
     ].join("\n");
   },
 

@@ -386,6 +386,83 @@ describe("grep command", () => {
 
     expect(consoleOutput.some((line) => line.includes("Usage"))).toBe(true);
   });
+
+  test("filters by --after time", async () => {
+    await writeFile(
+      join(sessionsDir, "time-test-1.jsonl"),
+      createTestSession("time-test-1", [
+        { ...userEntry("1", "OLD message"), timestamp: "2020-01-01T00:00:00Z" },
+        { ...assistantEntry("2", "1", "old response"), timestamp: "2020-01-01T00:00:01Z" },
+        { ...userEntry("3", "NEW message"), timestamp: "2025-06-01T00:00:00Z" },
+        { ...assistantEntry("4", "3", "new response"), timestamp: "2025-06-01T00:00:01Z" },
+      ])
+    );
+
+    process.argv = ["node", "cli", "grep", "--after", "2024-01-01", "message"];
+    const { grep } = await import("../commands/grep");
+    await grep();
+
+    expect(consoleOutput.some((line) => line.includes("NEW"))).toBe(true);
+    expect(consoleOutput.some((line) => line.includes("OLD"))).toBe(false);
+  });
+
+  test("filters by --before time", async () => {
+    await writeFile(
+      join(sessionsDir, "time-test-2.jsonl"),
+      createTestSession("time-test-2", [
+        { ...userEntry("1", "OLD message"), timestamp: "2020-01-01T00:00:00Z" },
+        { ...assistantEntry("2", "1", "old response"), timestamp: "2020-01-01T00:00:01Z" },
+        { ...userEntry("3", "NEW message"), timestamp: "2025-06-01T00:00:00Z" },
+        { ...assistantEntry("4", "3", "new response"), timestamp: "2025-06-01T00:00:01Z" },
+      ])
+    );
+
+    process.argv = ["node", "cli", "grep", "--before", "2021-01-01", "message"];
+    const { grep } = await import("../commands/grep");
+    await grep();
+
+    expect(consoleOutput.some((line) => line.includes("OLD"))).toBe(true);
+    expect(consoleOutput.some((line) => line.includes("NEW"))).toBe(false);
+  });
+
+  test("combines --after and --before for time window", async () => {
+    await writeFile(
+      join(sessionsDir, "time-test-3.jsonl"),
+      createTestSession("time-test-3", [
+        { ...userEntry("1", "EARLY message"), timestamp: "2020-01-01T00:00:00Z" },
+        { ...userEntry("2", "MIDDLE message"), timestamp: "2023-06-01T00:00:00Z" },
+        { ...userEntry("3", "LATE message"), timestamp: "2025-06-01T00:00:00Z" },
+      ])
+    );
+
+    process.argv = ["node", "cli", "grep", "--after", "2022-01-01", "--before", "2024-01-01", "message"];
+    const { grep } = await import("../commands/grep");
+    await grep();
+
+    expect(consoleOutput.some((line) => line.includes("MIDDLE"))).toBe(true);
+    expect(consoleOutput.some((line) => line.includes("EARLY"))).toBe(false);
+    expect(consoleOutput.some((line) => line.includes("LATE"))).toBe(false);
+  });
+
+  test("shows error for invalid --after time spec", async () => {
+    await writeFile(
+      join(sessionsDir, "time-test-4.jsonl"),
+      createTestSession("time-test-4", [userEntry("1", "test")])
+    );
+
+    const errorOutput: Array<string> = [];
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: Array<unknown>) => {
+      errorOutput.push(args.map(String).join(" "));
+    });
+
+    process.argv = ["node", "cli", "grep", "--after", "invalid-time", "test"];
+    const { grep } = await import("../commands/grep");
+    await grep();
+
+    errorSpy.mockRestore();
+
+    expect(errorOutput.some((line) => line.includes("Invalid --after"))).toBe(true);
+  });
 });
 
 describe("read command", () => {
