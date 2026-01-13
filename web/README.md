@@ -81,7 +81,6 @@ The app automatically respects system dark mode preference via CSS `prefers-colo
 ## TODO: Branding & Polish
 
 - [ ] **WorkOS Branding**: Configure login page in [WorkOS Dashboard](https://dashboard.workos.com) → Organizations → Branding
-- [ ] **Favicon**: Add `public/favicon.ico` and reference in `src/start.tsx`
 - [ ] **Meta Tags**: Add Open Graph and social sharing metadata
 - [ ] **Error Pages**: Create dedicated error pages for failure scenarios
 - [ ] **Dashboard**: Build `/authenticated/*` routes for post-login experience

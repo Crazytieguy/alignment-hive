@@ -1,9 +1,15 @@
 import { createFileRoute, useSearch } from '@tanstack/react-router';
 import { getAuth, getSignInUrl } from '@workos/authkit-tanstack-react-start';
+import { z } from 'zod';
 import { Button } from '@/components/ui/button';
+
+const searchSchema = z.object({
+  error: z.string().optional().catch(undefined),
+});
 
 export const Route = createFileRoute('/')({
   component: Home,
+  validateSearch: searchSchema,
   loader: async () => {
     const { user } = await getAuth();
     const signInUrl = await getSignInUrl();
@@ -66,17 +72,17 @@ function Home() {
 }
 
 function ErrorBanner() {
-  const search = useSearch({ from: '/' });
+  const { error } = useSearch({ from: '/' });
 
-  if (!search.error) return null;
+  if (!error) return null;
+
+  const message = error === 'auth_failed'
+    ? 'Authentication failed. Please try again.'
+    : 'Something went wrong.';
 
   return (
     <div className="fixed bottom-4 right-4 max-w-sm p-4 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-lg shadow-lg">
-      <p className="text-sm text-red-800 dark:text-red-200">
-        {search.error === 'auth_failed'
-          ? 'Authentication failed. Please try again.'
-          : 'Something went wrong.'}
-      </p>
+      <p className="text-sm text-red-800 dark:text-red-200">{message}</p>
     </div>
   );
 }

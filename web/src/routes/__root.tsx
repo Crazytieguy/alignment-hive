@@ -9,11 +9,10 @@ import type { ConvexQueryClient } from '@convex-dev/react-query';
 
 const fetchWorkosAuth = createServerFn({ method: 'GET' }).handler(async () => {
   const auth = await getAuth();
-  const { user } = auth;
 
   return {
-    userId: user?.id ?? null,
-    token: user ? auth.accessToken : null,
+    userId: auth.user?.id ?? null,
+    token: auth.user ? auth.accessToken : null,
   };
 });
 

@@ -2,7 +2,6 @@ import { createFileRoute } from '@tanstack/react-router';
 import { getAuth } from '@workos/authkit-tanstack-react-start';
 import type { User } from '@workos/authkit-tanstack-react-start';
 import { Github } from 'lucide-react';
-import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 
 export const Route = createFileRoute('/_authenticated/welcome')({
