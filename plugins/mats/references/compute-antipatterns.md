@@ -15,6 +15,224 @@ Each pattern includes:
 
 ---
 
+# Part 1: API-Based Workflows
+
+These patterns apply to codebases using external LLM APIs (OpenAI, Anthropic, Together, LiteLLM, etc.).
+
+## Category A: API Cost Optimization
+
+### A.1 Sequential API Calls Instead of Batching
+
+**Severity:** High
+**Confidence:** 85%
+
+**Problem:** Making individual API calls in a loop instead of batching requests.
+
+**Impact:** Higher latency, potential rate limiting, missed batch pricing discounts where available.
+
+**Detection patterns:**
+- `client.chat.completions.create()` inside `for` loop
+- `openai.Completion.create()` called per-item
+- Sequential `await` calls without gathering
+
+**Fix:** Batch requests where API supports it, or use async concurrency.
+
+**Example:**
+```python
+# BAD - sequential calls, slow
+results = []
+for prompt in prompts:
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    results.append(response)
+
+# GOOD - concurrent async calls
+import asyncio
+
+async def get_completion(prompt):
+    return await async_client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+results = await asyncio.gather(*[get_completion(p) for p in prompts])
+
+# ALSO GOOD - use batch API if available
+# OpenAI Batch API for large offline jobs (50% cost savings)
+```
+
+---
+
+### A.2 Not Caching API Responses
+
+**Severity:** High
+**Confidence:** 80%
+
+**Problem:** Repeating identical API calls without caching results.
+
+**Impact:** Wasted API spend, especially during development/debugging.
+
+**Detection patterns:**
+- No caching decorator or cache lookup before API calls
+- Same prompts sent repeatedly across runs
+- No response persistence to disk
+
+**Fix:** Cache responses by prompt hash, persist between runs.
+
+**Example:**
+```python
+# BAD - pays for same completion every run
+def get_analysis(text):
+    return client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": f"Analyze: {text}"}]
+    )
+
+# GOOD - cache to disk
+import hashlib
+import json
+from pathlib import Path
+
+CACHE_DIR = Path(".cache/api_responses")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+def get_analysis_cached(text):
+    cache_key = hashlib.md5(text.encode()).hexdigest()
+    cache_file = CACHE_DIR / f"{cache_key}.json"
+
+    if cache_file.exists():
+        return json.loads(cache_file.read_text())
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": f"Analyze: {text}"}]
+    )
+    result = response.choices[0].message.content
+    cache_file.write_text(json.dumps(result))
+    return result
+```
+
+---
+
+### A.3 No Checkpointing for Large Dataset Processing
+
+**Severity:** High
+**Confidence:** 85%
+
+**Problem:** Processing large datasets without saving progress.
+
+**Impact:** If job fails at 90%, must restart and re-pay for all API calls.
+
+**Detection patterns:**
+- Large loop over dataset items with API calls
+- No intermediate saves or resume logic
+- Results only saved at end
+
+**Fix:** Save results incrementally, implement resume from checkpoint.
+
+**Example:**
+```python
+# BAD - lose all progress on failure
+results = []
+for item in large_dataset:  # 10,000 items
+    results.append(call_api(item))
+save_results(results)  # crash here = start over
+
+# GOOD - checkpoint progress
+import json
+from pathlib import Path
+
+checkpoint_file = Path("checkpoint.json")
+if checkpoint_file.exists():
+    results = json.loads(checkpoint_file.read_text())
+    start_idx = len(results)
+else:
+    results = []
+    start_idx = 0
+
+for i, item in enumerate(large_dataset[start_idx:], start=start_idx):
+    results.append(call_api(item))
+    if i % 100 == 0:  # checkpoint every 100 items
+        checkpoint_file.write_text(json.dumps(results))
+
+save_results(results)
+```
+
+---
+
+### A.4 Using Expensive Model When Cheaper Would Suffice
+
+**Severity:** Medium
+**Confidence:** 60%
+
+**Problem:** Using GPT-4/Claude Opus for tasks that GPT-3.5/Haiku could handle.
+
+**Impact:** 10-30x cost difference for comparable results on simpler tasks.
+
+**Detection patterns:**
+- `model="gpt-4"` or `model="claude-3-opus"` for classification/extraction
+- Expensive models for simple formatting tasks
+- No model selection based on task complexity
+
+**Fix:** Use cheaper models for simpler tasks, reserve expensive models for complex reasoning.
+
+**Example:**
+```python
+# BAD - $0.03/1K tokens for simple extraction
+response = client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": "Extract the email from: ..."}]
+)
+
+# GOOD - $0.0005/1K tokens, same result
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "Extract the email from: ..."}]
+)
+```
+
+---
+
+### A.5 Not Using Prompt Caching
+
+**Severity:** Medium
+**Confidence:** 70%
+
+**Problem:** Repeating long system prompts without leveraging prompt caching.
+
+**Impact:** Pay full price for identical prompt prefixes on every call.
+
+**Detection patterns:**
+- Long system prompts (>1000 tokens) repeated across calls
+- Many API calls with same prefix
+- Not using providers' caching features
+
+**Fix:** Structure prompts to maximize cache hits, use provider caching features.
+
+**Example:**
+```python
+# Anthropic prompt caching example
+response = client.messages.create(
+    model="claude-3-sonnet",
+    system=[
+        {
+            "type": "text",
+            "text": long_system_prompt,
+            "cache_control": {"type": "ephemeral"}  # Enable caching
+        }
+    ],
+    messages=[{"role": "user", "content": user_input}]
+)
+```
+
+---
+
+# Part 2: Local GPU Workflows
+
+These patterns apply to codebases that load and run models locally.
+
 ## Category 1: Model Loading & State Management
 
 ### 1.1 Reloading Model to Reset After Weight Modifications
