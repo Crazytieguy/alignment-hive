@@ -32,12 +32,12 @@ export const Route = createRootRouteWithContext<{
         content: 'width=device-width, initial-scale=1',
       },
       {
-        title: 'Convex + TanStack Start + WorkOS AuthKit',
+        title: 'Alignment Hive',
       },
     ],
     links: [
       { rel: 'stylesheet', href: appCssUrl },
-      { rel: 'icon', href: '/convex.svg' },
+      { rel: 'icon', href: '/favicon.svg' },
     ],
   }),
   component: RootComponent,
@@ -45,8 +45,6 @@ export const Route = createRootRouteWithContext<{
   beforeLoad: async (ctx) => {
     const { userId, token } = await fetchWorkosAuth();
 
-    // During SSR only (the only time serverHttpClient exists),
-    // set the Clerk auth token to make HTTP queries with.
     if (token) {
       ctx.context.convexQueryClient.serverHttpClient?.setAuth(token);
     }

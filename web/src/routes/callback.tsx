@@ -7,7 +7,6 @@ export const Route = createFileRoute('/callback')({
       GET: async (ctx) => {
         const response = await handleCallbackRoute(ctx);
 
-        // If it's a redirect response, change the Location to /welcome
         if (response.status === 307 || response.status === 302) {
           const headers = new Headers(response.headers);
           headers.set('Location', '/welcome');

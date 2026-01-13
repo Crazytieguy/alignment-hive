@@ -1,19 +1,13 @@
-import { createFileRoute, redirect, Link } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import { getAuth } from '@workos/authkit-tanstack-react-start';
 import type { User } from '@workos/authkit-tanstack-react-start';
 import { Github } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 
-export const Route = createFileRoute('/welcome' as any)({
+export const Route = createFileRoute('/_authenticated/welcome')({
   loader: async () => {
     const { user } = await getAuth();
-
-    // If not authenticated, redirect to home
-    if (!user) {
-      throw redirect({ href: '/' });
-    }
-
     return user;
   },
   component: WelcomePage,
@@ -31,7 +25,7 @@ function WelcomePage() {
               You're connected
             </h1>
             <p className="text-muted-foreground">
-              Signed in as {user?.email || 'User'}
+              Signed in as {user.email}
             </p>
           </div>
           <a

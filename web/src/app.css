@@ -119,8 +119,6 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* Dark mode variables applied via prefers-color-scheme media query above */
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
