@@ -310,8 +310,9 @@ function formatMatchesWithContext(
       }
     }
 
-    const rangeWords = words.slice(range.start, range.end + 1).map((w) => w.word);
-    outputParts.push(rangeWords.join(' '));
+    const startChar = words[range.start].start;
+    const endChar = words[range.end].end;
+    outputParts.push(text.slice(startChar, endChar));
 
     lastEnd = range.end;
   }
