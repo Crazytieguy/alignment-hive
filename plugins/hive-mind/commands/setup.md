@@ -12,7 +12,7 @@ Guide the user through setting up hive-mind for session sharing.
 
 Output for `which bun`:
 ```
-!`which bun`
+!`which bun || echo "not found"`
 ```
 
 Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js setup --status` (only if bun is installed):
