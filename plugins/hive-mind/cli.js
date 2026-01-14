@@ -321,7 +321,8 @@ var SECRET_RULES = [
   { id: "yandex-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
   { id: "yandex-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
   { id: "yandex-aws-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["zendesk"] }
+  { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["zendesk"] },
+  { id: "high-entropy-secret", regex: new RegExp(`\\b([A-Za-z0-9_\\-./+=]{20,200})\\b`, "g"), entropy: 4, notHexOnly: true }
 ];
 var ALL_KEYWORDS = new Set([
   "-----begin",
@@ -652,6 +653,9 @@ function detectSecrets(content) {
       const end = start + match[0].length;
       const entropy = rule.entropy ? shannonEntropy(secretValue) : undefined;
       if (rule.entropy && entropy !== undefined && entropy < rule.entropy) {
+        continue;
+      }
+      if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
         continue;
       }
       matches.push({

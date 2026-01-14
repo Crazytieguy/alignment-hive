@@ -102,6 +102,11 @@ export function detectSecrets(content: string): Array<SecretMatch> {
         continue;
       }
 
+      // Skip hex-only strings if the rule requires it (e.g., high-entropy safety net)
+      if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
+        continue;
+      }
+
       matches.push({
         ruleId: rule.id,
         match: match[0],

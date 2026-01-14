@@ -196,3 +196,37 @@ describe("SAFE_KEYS optimization", () => {
     expect(sanitized.type.nested).toContain("[REDACTED:");
   });
 });
+
+describe("high-entropy safety net", () => {
+  test("catches high-entropy secrets without known patterns", () => {
+    // This is a WorkOS-style key that doesn't match any specific pattern
+    const unknownSecret =
+      "sk_a2V5XzAxS0VXSDRKNVZLODU5M0JTUEQ5NlBOMlFaLGVDQ1dtZkF1d0NhT0xlTHhKRTBsOTROQ3k";
+    const secrets = detectSecrets(unknownSecret);
+    expect(secrets.length).toBeGreaterThan(0);
+    expect(secrets[0].ruleId).toBe("high-entropy-secret");
+  });
+
+  test("excludes hex-only strings (hashes)", () => {
+    const sha256 =
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    const gitCommit = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+
+    expect(detectSecrets(sha256)).toHaveLength(0);
+    expect(detectSecrets(sha1)).toHaveLength(0);
+    expect(detectSecrets(gitCommit)).toHaveLength(0);
+  });
+
+  test("excludes short strings", () => {
+    // 19 chars - below threshold
+    const shortString = "aBcDeFgHiJkLmNoPqRs";
+    expect(detectSecrets(shortString)).toHaveLength(0);
+  });
+
+  test("excludes low-entropy strings", () => {
+    // Long but repetitive/low entropy
+    const lowEntropy = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    expect(detectSecrets(lowEntropy)).toHaveLength(0);
+  });
+});
