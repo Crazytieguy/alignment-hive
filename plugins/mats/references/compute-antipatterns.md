@@ -21,25 +21,80 @@ These patterns apply to codebases using external LLM APIs (OpenAI, Anthropic, To
 
 ## Category A: API Cost Optimization
 
-### A.1 Sequential API Calls Instead of Batching
+### A.1 Not Using Batch API for Large Offline Jobs
 
 **Severity:** High
-**Confidence:** 85%
+**Confidence:** 75%
 
-**Problem:** Making individual API calls in a loop instead of batching requests.
+**Problem:** Running large evaluation jobs with synchronous API calls instead of using batch APIs.
 
-**Impact:** Higher latency, potential rate limiting, missed batch pricing discounts where available.
+**Impact:** Paying full price when batch APIs offer 50% cost savings for jobs that don't need immediate results.
 
 **Detection patterns:**
-- `client.chat.completions.create()` inside `for` loop
-- `openai.Completion.create()` called per-item
-- Sequential `await` calls without gathering
+- Large loops (1000+ items) with synchronous API calls
+- Evaluation/benchmark scripts without time pressure
+- No use of batch job submission APIs
 
-**Fix:** Batch requests where API supports it, or use async concurrency.
+**Fix:** Use provider batch APIs for large offline workloads.
 
 **Example:**
 ```python
-# BAD - sequential calls, slow
+# BAD - pays full price for 10,000 evaluations
+results = []
+for item in eval_dataset:  # 10,000 items
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": item["prompt"]}]
+    )
+    results.append(response)
+
+# GOOD - OpenAI Batch API (50% cost savings, results within 24h)
+import json
+
+# Prepare batch file
+with open("batch_input.jsonl", "w") as f:
+    for i, item in enumerate(eval_dataset):
+        request = {
+            "custom_id": f"eval-{i}",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": item["prompt"]}]
+            }
+        }
+        f.write(json.dumps(request) + "\n")
+
+# Upload and submit batch
+batch_file = client.files.create(file=open("batch_input.jsonl", "rb"), purpose="batch")
+batch_job = client.batches.create(input_file_id=batch_file.id, endpoint="/v1/chat/completions", completion_window="24h")
+
+# Check status later, download results when complete
+```
+
+**Note:** Batch APIs are available from OpenAI, Anthropic, and other providers. Check your provider's documentation.
+
+---
+
+### A.2 Sequential API Calls Instead of Parallel
+
+**Severity:** Medium
+**Confidence:** 80%
+
+**Problem:** Making API calls one at a time instead of running them concurrently.
+
+**Impact:** Total time = N × latency per call. Parallel calls can reduce wall-clock time by 10-100x.
+
+**Detection patterns:**
+- `for` loop with API call inside, awaiting each result
+- No use of `asyncio.gather()`, `concurrent.futures`, or similar
+- Processing items one at a time when order doesn't matter
+
+**Fix:** Use async concurrency to parallelize independent API calls.
+
+**Example:**
+```python
+# BAD - 100 calls × 1s each = 100 seconds
 results = []
 for prompt in prompts:
     response = client.chat.completions.create(
@@ -48,7 +103,7 @@ for prompt in prompts:
     )
     results.append(response)
 
-# GOOD - concurrent async calls
+# GOOD - 100 calls in parallel ≈ few seconds (respecting rate limits)
 import asyncio
 
 async def get_completion(prompt):
@@ -57,15 +112,19 @@ async def get_completion(prompt):
         messages=[{"role": "user", "content": prompt}]
     )
 
-results = await asyncio.gather(*[get_completion(p) for p in prompts])
+# Run with concurrency limit to respect rate limits
+semaphore = asyncio.Semaphore(10)  # max 10 concurrent
 
-# ALSO GOOD - use batch API if available
-# OpenAI Batch API for large offline jobs (50% cost savings)
+async def get_completion_limited(prompt):
+    async with semaphore:
+        return await get_completion(prompt)
+
+results = await asyncio.gather(*[get_completion_limited(p) for p in prompts])
 ```
 
 ---
 
-### A.2 Not Caching API Responses
+### A.3 Not Caching API Responses
 
 **Severity:** High
 **Confidence:** 80%
@@ -116,7 +175,7 @@ def get_analysis_cached(text):
 
 ---
 
-### A.3 No Checkpointing for Large Dataset Processing
+### A.4 No Checkpointing for Large Dataset Processing
 
 **Severity:** High
 **Confidence:** 85%
@@ -158,39 +217,6 @@ for i, item in enumerate(large_dataset[start_idx:], start=start_idx):
         checkpoint_file.write_text(json.dumps(results))
 
 save_results(results)
-```
-
----
-
-### A.4 Using Expensive Model When Cheaper Would Suffice
-
-**Severity:** Medium
-**Confidence:** 60%
-
-**Problem:** Using GPT-4/Claude Opus for tasks that GPT-3.5/Haiku could handle.
-
-**Impact:** 10-30x cost difference for comparable results on simpler tasks.
-
-**Detection patterns:**
-- `model="gpt-4"` or `model="claude-3-opus"` for classification/extraction
-- Expensive models for simple formatting tasks
-- No model selection based on task complexity
-
-**Fix:** Use cheaper models for simpler tasks, reserve expensive models for complex reasoning.
-
-**Example:**
-```python
-# BAD - $0.03/1K tokens for simple extraction
-response = client.chat.completions.create(
-    model="gpt-4",
-    messages=[{"role": "user", "content": "Extract the email from: ..."}]
-)
-
-# GOOD - $0.0005/1K tokens, same result
-response = client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[{"role": "user", "content": "Extract the email from: ..."}]
-)
 ```
 
 ---
