@@ -19,7 +19,6 @@ import { join as join4 } from "path";
 import { createReadStream } from "fs";
 import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
-import { homedir as homedir2 } from "os";
 import { basename as basename2, dirname, join as join2 } from "path";
 
 // cli/lib/config.ts
@@ -82,6 +81,22 @@ function getCanonicalProjectName(cwd) {
     return canonical;
   } catch {
     return basename(cwd);
+  }
+}
+function getTranscriptsDirFile(hiveMindDir) {
+  return join(hiveMindDir, "transcripts-dir");
+}
+async function saveTranscriptsDir(hiveMindDir, dir) {
+  const file = getTranscriptsDirFile(hiveMindDir);
+  await mkdir(hiveMindDir, { recursive: true });
+  await writeFile(file, dir, "utf-8");
+}
+async function loadTranscriptsDir(hiveMindDir) {
+  try {
+    const content = await readFile(getTranscriptsDirFile(hiveMindDir), "utf-8");
+    return content.trim();
+  } catch {
+    return null;
   }
 }
 
@@ -14520,42 +14535,35 @@ async function readExtractedSession(extractedPath) {
     return null;
   }
 }
-function getProjectsDir(cwd) {
-  return join2(homedir2(), ".claude", "projects", cwd.replace(/\//g, "-"));
-}
 function getHiveMindSessionsDir(projectCwd) {
   return join2(projectCwd, ".claude", "hive-mind", "sessions");
 }
 async function findRawSessions(rawDir) {
-  try {
-    const files = await readdir(rawDir);
-    const sessions = [];
-    for (const f of files) {
-      if (f.endsWith(".jsonl")) {
-        if (f.startsWith("agent-")) {
-          sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
-        } else {
-          sessions.push({ path: join2(rawDir, f) });
-        }
-        continue;
+  const files = await readdir(rawDir);
+  const sessions = [];
+  for (const f of files) {
+    if (f.endsWith(".jsonl")) {
+      if (f.startsWith("agent-")) {
+        sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+      } else {
+        sessions.push({ path: join2(rawDir, f) });
       }
-      const subagentsDir = join2(rawDir, f, "subagents");
-      try {
-        const subagentFiles = await readdir(subagentsDir);
-        for (const sf of subagentFiles) {
-          if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
-            sessions.push({
-              path: join2(subagentsDir, sf),
-              agentId: sf.replace("agent-", "").replace(".jsonl", "")
-            });
-          }
-        }
-      } catch {}
+      continue;
     }
-    return sessions;
-  } catch {
-    return [];
+    const subagentsDir = join2(rawDir, f, "subagents");
+    try {
+      const subagentFiles = await readdir(subagentsDir);
+      for (const sf of subagentFiles) {
+        if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
+          sessions.push({
+            path: join2(subagentsDir, sf),
+            agentId: sf.replace("agent-", "").replace(".jsonl", "")
+          });
+        }
+      }
+    } catch {}
   }
+  return sessions;
 }
 async function needsExtraction(rawPath, extractedPath) {
   try {
@@ -14568,10 +14576,9 @@ async function needsExtraction(rawPath, extractedPath) {
     return true;
   }
 }
-async function extractAllSessions(cwd, transcriptPath) {
-  const rawDir = transcriptPath ? dirname(transcriptPath) : getProjectsDir(cwd);
+async function extractAllSessions(cwd, transcriptsDir) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const rawSessions = await findRawSessions(rawDir);
+  const rawSessions = await findRawSessions(transcriptsDir);
   let extracted = 0;
   const schemaErrors = [];
   for (const session of rawSessions) {
@@ -16583,7 +16590,7 @@ function parseGrepOptions(args) {
 
 // cli/commands/index.ts
 import { readdir as readdir6 } from "fs/promises";
-import { homedir as homedir3 } from "os";
+import { homedir as homedir2 } from "os";
 import { join as join7 } from "path";
 
 // cli/lib/upload-eligibility.ts
@@ -17134,7 +17141,7 @@ function computeSignificantLocations(fileStats, cwd) {
     return [];
   const root = { children: new Map, added: 0, removed: 0 };
   const cwdPrefix = cwd.replace(/^\//, "").replace(/\/$/, "") + "/";
-  const homePrefix = homedir3().replace(/^\//, "") + "/";
+  const homePrefix = homedir2().replace(/^\//, "") + "/";
   for (const [filePath, stats] of fileStats) {
     let normalizedPath = filePath.replace(/^\//, "");
     if (normalizedPath.startsWith(cwdPrefix)) {
@@ -17512,11 +17519,11 @@ async function read() {
 
 // cli/commands/session-start.ts
 import { readdir as readdir8 } from "fs/promises";
-import { join as join9 } from "path";
+import { dirname as dirname2, join as join9 } from "path";
 import { spawn } from "child_process";
 
 // cli/lib/alias.ts
-import { homedir as homedir4 } from "os";
+import { homedir as homedir3 } from "os";
 import { readFile as readFile4, writeFile as writeFile4 } from "fs/promises";
 var ALIAS_NAME = "hive-mind";
 function getExpectedAliasCommand() {
@@ -17526,7 +17533,7 @@ function getExpectedAliasCommand() {
 }
 function expandPath(path) {
   if (path.startsWith("~")) {
-    return path.replace("~", homedir4());
+    return path.replace("~", homedir3());
   }
   return path;
 }
@@ -18602,15 +18609,66 @@ async function saveUpload(sessionId, storageId) {
 }
 
 // cli/commands/session-start.ts
+async function readStdinWithTimeout(timeoutMs) {
+  if (process.stdin.isTTY)
+    return null;
+  return new Promise((resolve) => {
+    let data = "";
+    const timeout = setTimeout(() => {
+      process.stdin.removeAllListeners();
+      resolve(data || null);
+    }, timeoutMs);
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      clearTimeout(timeout);
+      resolve(data || null);
+    });
+    process.stdin.on("error", () => {
+      clearTimeout(timeout);
+      resolve(null);
+    });
+    process.stdin.resume();
+  });
+}
+async function readHookInput() {
+  const input = await readStdinWithTimeout(100);
+  if (!input)
+    return {};
+  try {
+    const data = JSON.parse(input);
+    return {
+      transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
+      cwd: typeof data.cwd === "string" ? data.cwd : undefined
+    };
+  } catch {
+    return {};
+  }
+}
 var AUTO_UPLOAD_DELAY_MINUTES = 10;
 async function sessionStart() {
   const messages = [];
-  const cwd = process.env.CWD || process.cwd();
-  const transcriptPath = process.env.TRANSCRIPT_PATH;
+  const hookInput = await readHookInput();
+  const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join9(cwd, ".claude", "hive-mind");
+  let transcriptsDir;
+  if (hookInput.transcriptPath) {
+    transcriptsDir = dirname2(hookInput.transcriptPath);
+    await saveTranscriptsDir(hiveMindDir, transcriptsDir);
+  } else {
+    const saved = await loadTranscriptsDir(hiveMindDir);
+    if (!saved) {
+      messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
+      hookOutput(`hive-mind: ${messages[0]}`);
+      return 1;
+    }
+    transcriptsDir = saved;
+  }
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
   try {
-    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
+    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
     if (extracted > 0) {
       messages.push(hook.extracted(extracted));
     }

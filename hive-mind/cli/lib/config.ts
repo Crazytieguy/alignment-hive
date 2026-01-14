@@ -72,3 +72,22 @@ export function getCanonicalProjectName(cwd: string): string {
     return basename(cwd);
   }
 }
+
+function getTranscriptsDirFile(hiveMindDir: string): string {
+  return join(hiveMindDir, "transcripts-dir");
+}
+
+export async function saveTranscriptsDir(hiveMindDir: string, dir: string): Promise<void> {
+  const file = getTranscriptsDirFile(hiveMindDir);
+  await mkdir(hiveMindDir, { recursive: true });
+  await writeFile(file, dir, "utf-8");
+}
+
+export async function loadTranscriptsDir(hiveMindDir: string): Promise<string | null> {
+  try {
+    const content = await readFile(getTranscriptsDirFile(hiveMindDir), "utf-8");
+    return content.trim();
+  } catch {
+    return null;
+  }
+}

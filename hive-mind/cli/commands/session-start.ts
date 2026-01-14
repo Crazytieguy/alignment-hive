@@ -1,27 +1,87 @@
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { hasAlias, updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
-import { getCanonicalProjectName, getCheckoutId } from "../lib/config";
+import { getCanonicalProjectName, getCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
 import { heartbeatSession, pingCheckout } from "../lib/convex";
 import { extractAllSessions, getHiveMindSessionsDir, readExtractedMeta } from "../lib/extraction";
 import { getCliPath, hook } from "../lib/messages";
 import { hookOutput } from "../lib/output";
 import { getEligibleSessions, getPendingSessions } from "../lib/upload-eligibility";
 
+interface HookInput {
+  transcriptPath?: string;
+  cwd?: string;
+}
+
+async function readStdinWithTimeout(timeoutMs: number): Promise<string | null> {
+  if (process.stdin.isTTY) return null;
+
+  return new Promise((resolve) => {
+    let data = "";
+    const timeout = setTimeout(() => {
+      process.stdin.removeAllListeners();
+      resolve(data || null);
+    }, timeoutMs);
+
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      clearTimeout(timeout);
+      resolve(data || null);
+    });
+    process.stdin.on("error", () => {
+      clearTimeout(timeout);
+      resolve(null);
+    });
+    process.stdin.resume();
+  });
+}
+
+async function readHookInput(): Promise<HookInput> {
+  const input = await readStdinWithTimeout(100);
+  if (!input) return {};
+
+  try {
+    const data = JSON.parse(input) as Record<string, unknown>;
+    return {
+      transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
+      cwd: typeof data.cwd === "string" ? data.cwd : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 const AUTO_UPLOAD_DELAY_MINUTES = 10;
 
 export async function sessionStart(): Promise<number> {
   const messages: Array<string> = [];
-  const cwd = process.env.CWD || process.cwd();
-  const transcriptPath = process.env.TRANSCRIPT_PATH;
+  const hookInput = await readHookInput();
+  const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join(cwd, ".claude", "hive-mind");
+
+  let transcriptsDir: string;
+  if (hookInput.transcriptPath) {
+    transcriptsDir = dirname(hookInput.transcriptPath);
+    await saveTranscriptsDir(hiveMindDir, transcriptsDir);
+  } else {
+    const saved = await loadTranscriptsDir(hiveMindDir);
+    if (!saved) {
+      messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
+      hookOutput(`hive-mind: ${messages[0]}`);
+      return 1;
+    }
+    transcriptsDir = saved;
+  }
 
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
 
   try {
-    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
+    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
     if (extracted > 0) {
       messages.push(hook.extracted(extracted));
     }
@@ -45,9 +105,7 @@ export async function sessionStart(): Promise<number> {
         messages.push(hook.aliasUpdated());
       }
       userHasAlias = await hasAlias();
-    } catch {
-      // Ignore alias errors
-    }
+    } catch {}
   }
 
   if (status.needsLogin) {
@@ -79,9 +137,7 @@ export async function sessionStart(): Promise<number> {
           messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
         }
       }
-    } catch {
-      // Ignore eligibility check errors
-    }
+    } catch {}
   }
 
   if (messages.length > 0) {
@@ -89,7 +145,6 @@ export async function sessionStart(): Promise<number> {
     hookOutput(formatted.join("\n"));
   }
 
-  // Convex client keeps connections alive, so we force exit after heartbeats
   sendHeartbeats(cwd, status.authenticated).finally(() => process.exit(0));
   await new Promise((resolve) => setTimeout(resolve, 100));
   process.exit(0);

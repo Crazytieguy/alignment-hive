@@ -1,7 +1,6 @@
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getCheckoutId } from "./config";
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from "./sanitize";
@@ -156,46 +155,38 @@ export async function readExtractedSession(
   }
 }
 
-function getProjectsDir(cwd: string): string {
-  return join(homedir(), ".claude", "projects", cwd.replace(/\//g, "-"));
-}
-
 export function getHiveMindSessionsDir(projectCwd: string): string {
   return join(projectCwd, ".claude", "hive-mind", "sessions");
 }
 
 async function findRawSessions(rawDir: string) {
-  try {
-    const files = await readdir(rawDir);
-    const sessions: Array<{ path: string; agentId?: string }> = [];
+  const files = await readdir(rawDir);
+  const sessions: Array<{ path: string; agentId?: string }> = [];
 
-    for (const f of files) {
-      if (f.endsWith(".jsonl")) {
-        if (f.startsWith("agent-")) {
-          sessions.push({ path: join(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
-        } else {
-          sessions.push({ path: join(rawDir, f) });
-        }
-        continue;
+  for (const f of files) {
+    if (f.endsWith(".jsonl")) {
+      if (f.startsWith("agent-")) {
+        sessions.push({ path: join(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+      } else {
+        sessions.push({ path: join(rawDir, f) });
       }
-
-      const subagentsDir = join(rawDir, f, "subagents");
-      try {
-        const subagentFiles = await readdir(subagentsDir);
-        for (const sf of subagentFiles) {
-          if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
-            sessions.push({
-              path: join(subagentsDir, sf),
-              agentId: sf.replace("agent-", "").replace(".jsonl", ""),
-            });
-          }
-        }
-      } catch {}
+      continue;
     }
-    return sessions;
-  } catch {
-    return [];
+
+    const subagentsDir = join(rawDir, f, "subagents");
+    try {
+      const subagentFiles = await readdir(subagentsDir);
+      for (const sf of subagentFiles) {
+        if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
+          sessions.push({
+            path: join(subagentsDir, sf),
+            agentId: sf.replace("agent-", "").replace(".jsonl", ""),
+          });
+        }
+      }
+    } catch {}
   }
+  return sessions;
 }
 
 async function needsExtraction(rawPath: string, extractedPath: string): Promise<boolean> {
@@ -214,11 +205,10 @@ export interface ExtractionResult {
   schemaErrors: Array<{ sessionId: string; errors: Array<string> }>;
 }
 
-export async function extractAllSessions(cwd: string, transcriptPath?: string): Promise<ExtractionResult> {
-  const rawDir = transcriptPath ? dirname(transcriptPath) : getProjectsDir(cwd);
+export async function extractAllSessions(cwd: string, transcriptsDir: string): Promise<ExtractionResult> {
   const extractedDir = getHiveMindSessionsDir(cwd);
 
-  const rawSessions = await findRawSessions(rawDir);
+  const rawSessions = await findRawSessions(transcriptsDir);
   let extracted = 0;
   const schemaErrors: ExtractionResult["schemaErrors"] = [];
 
@@ -230,7 +220,6 @@ export async function extractAllSessions(cwd: string, transcriptPath?: string): 
       try {
         const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
         if (result) {
-          // Only count main sessions, not agents
           if (!agentId) {
             extracted++;
           }
