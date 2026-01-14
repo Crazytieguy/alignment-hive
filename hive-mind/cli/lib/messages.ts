@@ -52,6 +52,12 @@ export const hook = {
     const shell = getShellConfig();
     return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
   },
+  extractionsFailed: (count: number): string => {
+    return `Failed to extract ${count} session${count === 1 ? '' : 's'}`;
+  },
+  sessionCheckFailed: (): string => {
+    return 'Failed to check session upload status';
+  },
 };
 
 export const errors = {

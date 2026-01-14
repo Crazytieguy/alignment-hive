@@ -81,9 +81,12 @@ export async function sessionStart(): Promise<number> {
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
 
   try {
-    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
+    const { extracted, failed, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
     if (extracted > 0) {
       messages.push(hook.extracted(extracted));
+    }
+    if (failed > 0) {
+      messages.push(hook.extractionsFailed(failed));
     }
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
@@ -137,7 +140,9 @@ export async function sessionStart(): Promise<number> {
           messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
         }
       }
-    } catch {}
+    } catch {
+      messages.push(hook.sessionCheckFailed());
+    }
   }
 
   if (messages.length > 0) {

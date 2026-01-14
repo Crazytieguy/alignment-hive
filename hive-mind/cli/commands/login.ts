@@ -1,6 +1,5 @@
 import { createInterface } from "node:readline";
 import { z } from "zod";
-import { hasAlias, setupAlias } from "../lib/alias";
 import {
   AuthDataSchema,
   checkAuthStatus,
@@ -9,7 +8,7 @@ import {
   refreshToken,
   saveAuthData,
 } from "../lib/auth";
-import { WORKOS_CLIENT_ID, getShellConfig } from "../lib/config";
+import { WORKOS_CLIENT_ID } from "../lib/config";
 import { setup as msg } from "../lib/messages";
 import {
   colors,
@@ -79,29 +78,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function promptAliasSetup(): Promise<boolean> {
-  const alreadyHasAlias = await hasAlias();
-  if (alreadyHasAlias) return true;
-
-  console.log("");
-  console.log(`  ${msg.aliasPrompt}`);
-  console.log(`  ${msg.aliasExplain}`);
-  console.log("");
-
-  if (await confirm(`  ${msg.aliasConfirm}`, true)) {
-    const { success } = await setupAlias();
-    if (success) {
-      const shell = getShellConfig();
-      printSuccess(msg.aliasSuccess);
-      console.log(`  ${msg.aliasActivate(shell.sourceCmd)}`);
-      return true;
-    } else {
-      printWarning(msg.aliasFailed);
-    }
-  }
-  return false;
-}
-
 async function checkExistingAuth(): Promise<boolean> {
   const status = await checkAuthStatus(false);
 
@@ -128,13 +104,6 @@ async function tryRefresh(): Promise<{ success: boolean; user?: { first_name?: s
   }
 
   return { success: false };
-}
-
-async function promptConsent(userHasAlias: boolean): Promise<boolean> {
-  console.log("");
-  console.log(msg.consentInfo(userHasAlias));
-  console.log("");
-  return await confirm(msg.consentConfirm, true);
 }
 
 async function deviceAuthFlow(): Promise<number> {
@@ -260,8 +229,7 @@ async function showStatus(): Promise<number> {
   return 0;
 }
 
-export async function setup(): Promise<number> {
-  // Handle --status flag
+export async function login(): Promise<number> {
   if (process.argv.includes("--status")) {
     return showStatus();
   }
@@ -269,29 +237,16 @@ export async function setup(): Promise<number> {
   console.log("");
   console.log(`  ${msg.header}`);
   console.log(`  ${"\u2500".repeat(15)}`);
-
-  // Alias setup first
-  const userHasAlias = await promptAliasSetup();
-
-  // Consent before any auth
-  if (!(await promptConsent(userHasAlias))) {
-    console.log(msg.consentDeclined);
-    return 0;
-  }
-
   console.log("");
 
-  // Check if already authenticated
   if (!(await checkExistingAuth())) {
     return 0;
   }
 
-  // Try to refresh existing token
   const refreshResult = await tryRefresh();
   if (refreshResult.success) {
     return 0;
   }
 
-  // Full device auth flow
   return await deviceAuthFlow();
 }

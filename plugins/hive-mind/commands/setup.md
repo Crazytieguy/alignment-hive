@@ -1,7 +1,7 @@
 ---
 description: Walk through hive-mind installation and authentication
 disable-model-invocation: true
-allowed-tools: Bash(which bun:*), Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*)
+allowed-tools: Bash(which bun:*), Bash(curl -fsSL https://bun.sh/install*), Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*)
 ---
 
 # hive-mind Setup
@@ -15,21 +15,28 @@ Output for `which bun`:
 !`which bun || echo "not found"`
 ```
 
-Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js setup --status` (only if bun is installed):
+Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js login --status` (only if bun is installed):
 ```
-!`which bun > /dev/null && bun ${CLAUDE_PLUGIN_ROOT}/cli.js setup --status || echo "bun not installed"`
+!`which bun > /dev/null && bun ${CLAUDE_PLUGIN_ROOT}/cli.js login --status || echo "bun not installed"`
 ```
 
-## Step 1: Install Bun (if needed)
+## Step 1: Install Bun and Set Up Command
 
-If bun is not installed, run:
+If bun is not installed, install it:
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
 
+Then set up the `hive-mind` command:
+```bash
+bun ${CLAUDE_PLUGIN_ROOT}/cli.js setup-alias
+```
+
+These steps don't require user confirmation - just run them.
+
 ## Step 2: Explain Privacy and Get Consent
 
-Before running setup, explain what hive-mind does:
+Before proceeding with login, explain what hive-mind does:
 
 **The basics:**
 - Your Claude Code sessions can be shared with the alignment research community
@@ -49,16 +56,15 @@ Before running setup, explain what hive-mind does:
 
 If the user agrees to proceed, have them run this command **in a separate terminal window**:
 
-Output for `echo "bun ${CLAUDE_PLUGIN_ROOT}/cli.js setup"`:
 ```
-!`echo "bun ${CLAUDE_PLUGIN_ROOT}/cli.js setup"`
+hive-mind login
 ```
 
-This opens a browser for authentication. Wait for the user to complete setup before continuing.
+This opens a browser for authentication. Wait for the user to complete login before continuing.
 
 ## Step 3: Gitignore Decision
 
-After setup completes, explain the gitignore tradeoff for `.claude/hive-mind/sessions/`:
+After login completes, explain the gitignore tradeoff for `.claude/hive-mind/sessions/`:
 
 **Not gitignoring (default):**
 - Sessions sync when you push/pull the repo

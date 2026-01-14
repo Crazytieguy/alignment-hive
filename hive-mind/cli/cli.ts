@@ -5,7 +5,8 @@ import { grep } from "./commands/grep";
 import { index } from "./commands/index";
 import { read } from "./commands/read";
 import { sessionStart } from "./commands/session-start";
-import { setup } from "./commands/setup";
+import { login } from "./commands/login";
+import { setupAliasCommand } from "./commands/setup-alias";
 import { upload } from "./commands/upload";
 import { errors, usage } from "./lib/messages";
 import { printError } from "./lib/output";
@@ -15,7 +16,8 @@ const COMMANDS = {
   grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
   read: { description: "Read session entries", handler: read },
-  setup: { description: "Set up hive-mind (login + alias)", handler: setup },
+  login: { description: "Log in to hive-mind", handler: login },
+  "setup-alias": { description: "Add hive-mind command to shell config", handler: setupAliasCommand },
   upload: { description: "Upload eligible sessions", handler: upload },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
 } as const;

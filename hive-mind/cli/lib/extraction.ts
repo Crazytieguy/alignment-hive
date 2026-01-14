@@ -202,6 +202,7 @@ async function needsExtraction(rawPath: string, extractedPath: string): Promise<
 
 export interface ExtractionResult {
   extracted: number;
+  failed: number;
   schemaErrors: Array<{ sessionId: string; errors: Array<string> }>;
 }
 
@@ -210,6 +211,7 @@ export async function extractAllSessions(cwd: string, transcriptsDir: string): P
 
   const rawSessions = await findRawSessions(transcriptsDir);
   let extracted = 0;
+  let failed = 0;
   const schemaErrors: ExtractionResult["schemaErrors"] = [];
 
   for (const session of rawSessions) {
@@ -228,10 +230,12 @@ export async function extractAllSessions(cwd: string, transcriptsDir: string): P
           }
         }
       } catch (error) {
-        console.error(`Failed to extract ${basename(rawPath, ".jsonl")}:`, error);
+        if (!agentId) {
+          failed++;
+        }
       }
     }
   }
 
-  return { extracted, schemaErrors };
+  return { extracted, failed, schemaErrors };
 }

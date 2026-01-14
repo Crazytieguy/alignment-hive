@@ -60,29 +60,34 @@ export async function isAliasUpToDate(): Promise<boolean> {
 }
 
 export async function setupAlias(): Promise<{ success: boolean; alreadyExists: boolean }> {
-  const config = await readShellConfig();
   const expected = getExpectedAliasCommand();
+  return setupAliasWithCommand(expected);
+}
+
+export async function setupAliasWithRoot(pluginRoot: string): Promise<{ success: boolean; alreadyExists: boolean }> {
+  const expected = `bun ${pluginRoot}/cli.js`;
+  return setupAliasWithCommand(expected);
+}
+
+async function setupAliasWithCommand(expected: string): Promise<{ success: boolean; alreadyExists: boolean }> {
+  const config = await readShellConfig();
   const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
 
   if (!config) {
-    // Shell config doesn't exist, create it with just the alias
     const success = await writeShellConfig(`${aliasLine}\n`);
     return { success, alreadyExists: false };
   }
 
   const match = config.match(ALIAS_REGEX);
   if (match) {
-    // Alias exists
     if (match[2] === expected) {
       return { success: true, alreadyExists: true };
     }
-    // Update existing alias
     const updated = config.replace(ALIAS_REGEX, aliasLine);
     const success = await writeShellConfig(updated);
     return { success, alreadyExists: false };
   }
 
-  // Add alias at end of file
   const separator = config.endsWith("\n") ? "" : "\n";
   const updated = `${config}${separator}${aliasLine}\n`;
   const success = await writeShellConfig(updated);

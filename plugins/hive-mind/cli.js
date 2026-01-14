@@ -14580,6 +14580,7 @@ async function extractAllSessions(cwd, transcriptsDir) {
   const extractedDir = getHiveMindSessionsDir(cwd);
   const rawSessions = await findRawSessions(transcriptsDir);
   let extracted = 0;
+  let failed = 0;
   const schemaErrors = [];
   for (const session of rawSessions) {
     const { path: rawPath, agentId } = session;
@@ -14596,11 +14597,13 @@ async function extractAllSessions(cwd, transcriptsDir) {
           }
         }
       } catch (error48) {
-        console.error(`Failed to extract ${basename2(rawPath, ".jsonl")}:`, error48);
+        if (!agentId) {
+          failed++;
+        }
       }
     }
   }
-  return { extracted, schemaErrors };
+  return { extracted, failed, schemaErrors };
 }
 
 // cli/lib/messages.ts
@@ -14653,6 +14656,12 @@ var hook = {
   aliasUpdated: () => {
     const shell = getShellConfig();
     return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
+  },
+  extractionsFailed: (count) => {
+    return `Failed to extract ${count} session${count === 1 ? "" : "s"}`;
+  },
+  sessionCheckFailed: () => {
+    return "Failed to check session upload status";
   }
 };
 var errors3 = {
@@ -17569,8 +17578,15 @@ async function hasAlias() {
   return existing !== null;
 }
 async function setupAlias() {
-  const config2 = await readShellConfig();
   const expected = getExpectedAliasCommand();
+  return setupAliasWithCommand(expected);
+}
+async function setupAliasWithRoot(pluginRoot) {
+  const expected = `bun ${pluginRoot}/cli.js`;
+  return setupAliasWithCommand(expected);
+}
+async function setupAliasWithCommand(expected) {
+  const config2 = await readShellConfig();
   const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
   if (!config2) {
     const success3 = await writeShellConfig(`${aliasLine}
@@ -18668,9 +18684,12 @@ async function sessionStart() {
   }
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
   try {
-    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
+    const { extracted, failed, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
     if (extracted > 0) {
       messages.push(hook.extracted(extracted));
+    }
+    if (failed > 0) {
+      messages.push(hook.extractionsFailed(failed));
     }
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
@@ -18716,7 +18735,9 @@ async function sessionStart() {
           messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
         }
       }
-    } catch {}
+    } catch {
+      messages.push(hook.sessionCheckFailed());
+    }
   }
   if (messages.length > 0) {
     const formatted = messages.map((msg, i2) => i2 === 0 ? `hive-mind: ${msg}` : `\u2192 ${msg}`);
@@ -18767,7 +18788,7 @@ function scheduleAutoUpload(sessionId) {
   }
 }
 
-// cli/commands/setup.ts
+// cli/commands/login.ts
 import { createInterface as createInterface3 } from "readline";
 var WORKOS_API_URL2 = "https://api.workos.com/user_management";
 var DeviceAuthResponseSchema = exports_external.object({
@@ -18823,27 +18844,6 @@ async function openBrowser(url2) {
 function sleep2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function promptAliasSetup() {
-  const alreadyHasAlias = await hasAlias();
-  if (alreadyHasAlias)
-    return true;
-  console.log("");
-  console.log(`  ${setup.aliasPrompt}`);
-  console.log(`  ${setup.aliasExplain}`);
-  console.log("");
-  if (await confirm2(`  ${setup.aliasConfirm}`, true)) {
-    const { success: success2 } = await setupAlias();
-    if (success2) {
-      const shell = getShellConfig();
-      printSuccess(setup.aliasSuccess);
-      console.log(`  ${setup.aliasActivate(shell.sourceCmd)}`);
-      return true;
-    } else {
-      printWarning(setup.aliasFailed);
-    }
-  }
-  return false;
-}
 async function checkExistingAuth() {
   const status = await checkAuthStatus(false);
   if (status.authenticated && status.user) {
@@ -18865,12 +18865,6 @@ async function tryRefresh() {
     return { success: true, user: newAuthData.user };
   }
   return { success: false };
-}
-async function promptConsent(userHasAlias) {
-  console.log("");
-  console.log(setup.consentInfo(userHasAlias));
-  console.log("");
-  return await confirm2(setup.consentConfirm, true);
 }
 async function deviceAuthFlow() {
   printInfo(setup.starting);
@@ -18972,18 +18966,13 @@ async function showStatus() {
   }
   return 0;
 }
-async function setup2() {
+async function login() {
   if (process.argv.includes("--status")) {
     return showStatus();
   }
   console.log("");
   console.log(`  ${setup.header}`);
   console.log(`  ${"\u2500".repeat(15)}`);
-  const userHasAlias = await promptAliasSetup();
-  if (!await promptConsent(userHasAlias)) {
-    console.log(setup.consentDeclined);
-    return 0;
-  }
   console.log("");
   if (!await checkExistingAuth()) {
     return 0;
@@ -18993,6 +18982,25 @@ async function setup2() {
     return 0;
   }
   return await deviceAuthFlow();
+}
+
+// cli/commands/setup-alias.ts
+import { dirname as dirname3 } from "path";
+async function setupAliasCommand() {
+  const pluginRoot = dirname3(process.argv[1]);
+  const { success: success2, alreadyExists } = await setupAliasWithRoot(pluginRoot);
+  if (!success2) {
+    printError("Failed to set up alias");
+    return 1;
+  }
+  const shell = getShellConfig();
+  if (alreadyExists) {
+    console.log("hive-mind command already set up");
+  } else {
+    printSuccess("hive-mind command added to shell config");
+    console.log(`Run \`${shell.sourceCmd}\` or open a new terminal to use it`);
+  }
+  return 0;
 }
 
 // cli/commands/upload.ts
@@ -19217,7 +19225,8 @@ var COMMANDS = {
   grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
   read: { description: "Read session entries", handler: read },
-  setup: { description: "Set up hive-mind (login + alias)", handler: setup2 },
+  login: { description: "Log in to hive-mind", handler: login },
+  "setup-alias": { description: "Add hive-mind command to shell config", handler: setupAliasCommand },
   upload: { description: "Upload eligible sessions", handler: upload },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
 };
