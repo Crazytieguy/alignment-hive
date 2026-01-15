@@ -41,12 +41,8 @@ export async function read(): Promise<number> {
 
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
-  const contextC = parseNumericFlag(args, "-C");
-  const contextB = parseNumericFlag(args, "-B");
-  const contextA = parseNumericFlag(args, "-A");
   const showFields = parseStringFlag(args, "--show");
   const hideFields = parseStringFlag(args, "--hide");
-  const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
 
   let fieldFilter: ReadFieldFilter | undefined;
   if (showFields || hideFields) {
@@ -55,10 +51,9 @@ export async function read(): Promise<number> {
     fieldFilter = new ReadFieldFilter(show, hide);
   }
 
-  const flags = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
-  const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flagsWithValues = new Set(["--skip", "--target", "--show", "--hide"]);
   const filteredArgs = args.filter((a, i) => {
-    if (flags.has(a)) return false;
+    if (flagsWithValues.has(a)) return false;
     for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
       if (flagIdx !== -1 && i === flagIdx + 1) return false;
@@ -125,11 +120,6 @@ export async function read(): Promise<number> {
     }
   }
 
-  if (hasContextFlags && entryNumber === null) {
-    printError(errors.contextRequiresEntry);
-    return 1;
-  }
-
   const session = await readExtractedSession(sessionFile);
   if (!session || session.entries.length === 0) {
     printError(errors.emptySession);
@@ -173,23 +163,14 @@ export async function read(): Promise<number> {
     });
     console.log(output);
   } else if (entryNumber !== null) {
-    const hasTarget = blocks.some((b) => b.lineNumber === entryNumber);
-    if (!hasTarget) {
+    const entryBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
+    if (entryBlocks.length === 0) {
       printError(errors.entryNotFound(entryNumber, maxLine));
       return 1;
     }
 
-    const before = contextB ?? contextC ?? 0;
-    const after = contextA ?? contextC ?? 0;
-    const minLine = Math.max(1, entryNumber - before);
-    const maxContextLine = Math.min(maxLine, entryNumber + after);
-
-    const output = formatBlocks(blocks, {
-      getTruncation: (block) =>
-        block.lineNumber === entryNumber ? { type: "full" } : { type: "summary" },
-      shouldOutput: (block) =>
-        block.lineNumber >= minLine && block.lineNumber <= maxContextLine,
-      separator: "\n",
+    const output = formatBlocks(entryBlocks, {
+      redact: false,
       fieldFilter,
       cwd,
     });

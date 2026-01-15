@@ -12,7 +12,7 @@ When committing changes, always run:
 
 Both must pass before committing.
 
-**Note:** Do not pipe test output with `2>&1 | head` - this can stall the process. Run tests without piping.
+**Important:** Never pipe test output (e.g., `bun test 2>&1 | head`). This causes the process to stall indefinitely. Always run tests without piping.
 
 ## Session Metadata
 

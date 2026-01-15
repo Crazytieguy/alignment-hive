@@ -14733,7 +14733,6 @@ var errors3 = {
   rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
   invalidEntry: (value) => `Invalid entry number: "${value}"`,
   invalidRange: (value) => `Invalid range: "${value}"`,
-  contextRequiresEntry: "Context flags (-C, -B, -A) require an entry number",
   emptySession: "Session has no entries",
   noPattern: "No pattern specified",
   invalidRegex: (error48) => `Invalid regex: ${error48}`,
@@ -14759,12 +14758,9 @@ var usage = {
       "",
       "Options:",
       "  N             Entry number to read (full content)",
-      "  N-M           Entry range to read (with truncation)",
+      "  N-M           Entry range to read",
       "  --target N    Target total words (default 2000)",
       "  --skip N      Skip first N words per field (for pagination)",
-      "  -C N          Show N entries of context before and after",
-      "  -B N          Show N entries of context before",
-      "  -A N          Show N entries of context after",
       "  --show FIELDS Show full content for fields (comma-separated)",
       "  --hide FIELDS Redact fields to word counts (comma-separated)",
       "",
@@ -15552,19 +15548,6 @@ function countLines(text) {
   return text.split(`
 `).length;
 }
-function formatQuotedSummary(text, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN) {
-  if (!text)
-    return '""';
-  const lines = text.split(`
-`);
-  const firstLine = truncateFirstLine(lines[0], maxFirstLineLen);
-  const escaped = escapeQuotes(firstLine);
-  if (lines.length === 1) {
-    return `"${escaped}"`;
-  }
-  const totalWords = countWords(text);
-  return `"${escaped}"...${totalWords}words`;
-}
 var MIN_TRUNCATION_THRESHOLD = 3;
 function truncateContent(text, wordLimit, skipWords) {
   if (!text)
@@ -15710,11 +15693,6 @@ function formatBlockContent(header, content, truncation) {
   if (!content && !truncation)
     return header;
   switch (truncation?.type) {
-    case "full":
-      if (!content)
-        return header;
-      return `${header}
-${indent(content, 2)}`;
     case "wordLimit": {
       const { content: truncated, prefix, suffix, isEmpty } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
       if (isEmpty)
@@ -15738,11 +15716,11 @@ ${formatTruncatedBlock(truncated, prefix, suffix)}`;
       return `${header}
 ${indent(output, 2)}`;
     }
-    case "summary":
     default:
       if (!content)
         return header;
-      return `${header}|${formatQuotedSummary(content)}`;
+      return `${header}
+${indent(content, 2)}`;
   }
 }
 function formatMatchesWithContext(text, matchPositions, contextWords) {
@@ -15936,7 +15914,7 @@ function formatBlocks(blocks, options = {}) {
       cwd = block.cwd;
     }
     const parentIndicator = computeParentIndicator(block, prevUuid, prevLineNumber);
-    const truncation = getTruncation ? getTruncation(block, i) : redact ? wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "summary" } : { type: "full" };
+    const truncation = getTruncation ? getTruncation(block, i) : redact && wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "full" };
     const includeInOutput = shouldOutput ? shouldOutput(block, i) : true;
     if (includeInOutput) {
       const timestamp = "timestamp" in block ? block.timestamp : undefined;
@@ -16021,20 +15999,13 @@ function formatSession(entries, options = {}) {
 }
 function collectWordCountsFromBlocks(blocks, skipWords) {
   const counts = [];
-  function addCount(text) {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
   for (const block of blocks) {
-    if (block.type === "user" || block.type === "assistant" || block.type === "system") {
-      addCount(block.content);
-    } else if (block.type === "thinking") {
-      addCount(block.content);
-    } else if (block.type === "summary") {
-      addCount(block.content);
+    if (block.type === "user" || block.type === "assistant" || block.type === "system" || block.type === "thinking" || block.type === "summary") {
+      const words = countWords(block.content);
+      const afterSkip = Math.max(0, words - skipWords);
+      if (afterSkip > 0) {
+        counts.push(afterSkip);
+      }
     }
   }
   return counts;
@@ -17442,22 +17413,17 @@ async function read() {
   }
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
-  const contextC = parseNumericFlag(args, "-C");
-  const contextB = parseNumericFlag(args, "-B");
-  const contextA = parseNumericFlag(args, "-A");
   const showFields = parseStringFlag(args, "--show");
   const hideFields = parseStringFlag(args, "--hide");
-  const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
   let fieldFilter;
   if (showFields || hideFields) {
     const show = showFields ? parseFieldList(showFields) : [];
     const hide = hideFields ? parseFieldList(hideFields) : [];
     fieldFilter = new ReadFieldFilter(show, hide);
   }
-  const flags = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
-  const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flagsWithValues = new Set(["--skip", "--target", "--show", "--hide"]);
   const filteredArgs = args.filter((a, i) => {
-    if (flags.has(a))
+    if (flagsWithValues.has(a))
       return false;
     for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
@@ -17517,10 +17483,6 @@ async function read() {
       }
     }
   }
-  if (hasContextFlags && entryNumber === null) {
-    printError(errors3.contextRequiresEntry);
-    return 1;
-  }
   const session = await readExtractedSession(sessionFile);
   if (!session || session.entries.length === 0) {
     printError(errors3.emptySession);
@@ -17556,20 +17518,13 @@ async function read() {
     });
     console.log(output);
   } else if (entryNumber !== null) {
-    const hasTarget = blocks.some((b) => b.lineNumber === entryNumber);
-    if (!hasTarget) {
+    const entryBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
+    if (entryBlocks.length === 0) {
       printError(errors3.entryNotFound(entryNumber, maxLine));
       return 1;
     }
-    const before = contextB ?? contextC ?? 0;
-    const after = contextA ?? contextC ?? 0;
-    const minLine = Math.max(1, entryNumber - before);
-    const maxContextLine = Math.min(maxLine, entryNumber + after);
-    const output = formatBlocks(blocks, {
-      getTruncation: (block) => block.lineNumber === entryNumber ? { type: "full" } : { type: "summary" },
-      shouldOutput: (block) => block.lineNumber >= minLine && block.lineNumber <= maxContextLine,
-      separator: `
-`,
+    const output = formatBlocks(entryBlocks, {
+      redact: false,
       fieldFilter,
       cwd
     });

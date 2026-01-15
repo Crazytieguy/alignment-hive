@@ -22,17 +22,6 @@ function countLines(text: string): number {
   return text.split('\n').length;
 }
 
-function formatQuotedSummary(text: string, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN): string {
-  if (!text) return '""';
-  const lines = text.split('\n');
-  const firstLine = truncateFirstLine(lines[0], maxFirstLineLen);
-  const escaped = escapeQuotes(firstLine);
-  if (lines.length === 1) {
-    return `"${escaped}"`;
-  }
-  const totalWords = countWords(text);
-  return `"${escaped}"...${totalWords}words`;
-}
 
 const MIN_TRUNCATION_THRESHOLD = 3;
 
@@ -142,7 +131,6 @@ export interface SessionFormatOptions {
 export type TruncationStrategy =
   | { type: 'wordLimit'; limit: number; skip?: number }
   | { type: 'matchContext'; pattern: RegExp; contextWords: number }
-  | { type: 'summary' }
   | { type: 'full' };
 
 export interface FormatBlockOptions {
@@ -240,10 +228,6 @@ function formatBlockContent(
   if (!content && !truncation) return header;
 
   switch (truncation?.type) {
-    case 'full':
-      if (!content) return header;
-      return `${header}\n${indent(content, 2)}`;
-
     case 'wordLimit': {
       const { content: truncated, prefix, suffix, isEmpty } = truncateContent(
         content,
@@ -266,10 +250,9 @@ function formatBlockContent(
       return `${header}\n${indent(output, 2)}`;
     }
 
-    case 'summary':
     default:
       if (!content) return header;
-      return `${header}|${formatQuotedSummary(content)}`;
+      return `${header}\n${indent(content, 2)}`;
   }
 }
 
@@ -523,10 +506,8 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
     // Determine truncation strategy
     const truncation: TruncationStrategy = getTruncation
       ? getTruncation(block, i)
-      : redact
-        ? wordLimit !== undefined
-          ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
-          : { type: 'summary' }
+      : redact && wordLimit !== undefined
+        ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
         : { type: 'full' };
 
     // Check if we should output this block
@@ -624,21 +605,19 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
 function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {
   const counts: Array<number> = [];
 
-  function addCount(text: string): void {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-
   for (const block of blocks) {
-    if (block.type === 'user' || block.type === 'assistant' || block.type === 'system') {
-      addCount(block.content);
-    } else if (block.type === 'thinking') {
-      addCount(block.content);
-    } else if (block.type === 'summary') {
-      addCount(block.content);
+    if (
+      block.type === 'user' ||
+      block.type === 'assistant' ||
+      block.type === 'system' ||
+      block.type === 'thinking' ||
+      block.type === 'summary'
+    ) {
+      const words = countWords(block.content);
+      const afterSkip = Math.max(0, words - skipWords);
+      if (afterSkip > 0) {
+        counts.push(afterSkip);
+      }
     }
   }
 

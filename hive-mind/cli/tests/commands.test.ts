@@ -495,7 +495,7 @@ describe("read command", () => {
     await rm(tempDir, { recursive: true });
   });
 
-  test("reads all entries truncated by default", async () => {
+  test("reads all entries with full content when under target", async () => {
     await writeFile(
       join(sessionsDir, "read-test-1.jsonl"),
       createTestSession("read-test-1", [
@@ -509,8 +509,10 @@ describe("read command", () => {
     await read();
 
     const output = consoleOutput.join("\n");
-    // Should show truncation indicator (format is "...Nwords")
-    expect(output).toMatch(/\.\.\.\d+words/);
+    // Should show full content since it's under the target word limit
+    expect(output).toContain("line1");
+    expect(output).toContain("line5");
+    expect(output).toContain("response");
   });
 
   test("reads specific entry by number", async () => {
@@ -530,164 +532,6 @@ describe("read command", () => {
 
     const output = consoleOutput.join("\n");
     expect(output).toContain("second entry");
-  });
-
-  test("context before and after with -C flag", async () => {
-    await writeFile(
-      join(sessionsDir, "read-test-4.jsonl"),
-      createTestSession("read-test-4", [
-        userEntry("1", "entry one"),
-        assistantEntry("2", "1", "entry two"),
-        userEntry("3", "entry three TARGET"),
-        assistantEntry("4", "3", "entry four"),
-        userEntry("5", "entry five"),
-        assistantEntry("6", "5", "entry six"),
-      ])
-    );
-
-    process.argv = ["node", "cli", "read", "read-test-4", "3", "-C", "1"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should show entry 2, 3 (target), and 4
-    expect(output).toContain("entry two");
-    expect(output).toContain("TARGET");
-    expect(output).toContain("entry four");
-    // Should NOT show entry 1 or 5
-    expect(output).not.toContain("entry one");
-    expect(output).not.toContain("entry five");
-  });
-
-  test("context before with -B flag", async () => {
-    await writeFile(
-      join(sessionsDir, "read-test-5.jsonl"),
-      createTestSession("read-test-5", [
-        userEntry("1", "entry one"),
-        assistantEntry("2", "1", "entry two"),
-        userEntry("3", "entry three TARGET"),
-        assistantEntry("4", "3", "entry four"),
-      ])
-    );
-
-    process.argv = ["node", "cli", "read", "read-test-5", "3", "-B", "2"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should show entries 1, 2, 3 (target)
-    expect(output).toContain("entry one");
-    expect(output).toContain("entry two");
-    expect(output).toContain("TARGET");
-    // Should NOT show entry 4
-    expect(output).not.toContain("entry four");
-  });
-
-  test("context after with -A flag", async () => {
-    await writeFile(
-      join(sessionsDir, "read-test-6.jsonl"),
-      createTestSession("read-test-6", [
-        userEntry("1", "entry one"),
-        assistantEntry("2", "1", "entry two"),
-        userEntry("3", "entry three TARGET"),
-        assistantEntry("4", "3", "entry four"),
-        userEntry("5", "entry five"),
-        assistantEntry("6", "5", "entry six"),
-      ])
-    );
-
-    // Note: Using different values for entry number (3) and -A value (2) to avoid
-    // a parsing quirk where identical values get filtered together
-    process.argv = ["node", "cli", "read", "read-test-6", "3", "-A", "2"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should show entries 3 (target), 4, 5
-    expect(output).toContain("TARGET");
-    expect(output).toContain("entry four");
-    expect(output).toContain("entry five");
-    // Should NOT show entries 1, 2, or 6
-    expect(output).not.toContain("entry one");
-    expect(output).not.toContain("entry two");
-    expect(output).not.toContain("entry six");
-  });
-
-  test("combined -B and -A flags", async () => {
-    await writeFile(
-      join(sessionsDir, "read-test-7.jsonl"),
-      createTestSession("read-test-7", [
-        userEntry("1", "entry one"),
-        assistantEntry("2", "1", "entry two"),
-        userEntry("3", "entry three TARGET"),
-        assistantEntry("4", "3", "entry four"),
-        userEntry("5", "entry five"),
-        assistantEntry("6", "5", "entry six"),
-      ])
-    );
-
-    process.argv = ["node", "cli", "read", "read-test-7", "3", "-B", "1", "-A", "2"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should show entries 2, 3 (target), 4, 5
-    expect(output).toContain("entry two");
-    expect(output).toContain("TARGET");
-    expect(output).toContain("entry four");
-    expect(output).toContain("entry five");
-    // Should NOT show entry 1 or 6
-    expect(output).not.toContain("entry one");
-    expect(output).not.toContain("entry six");
-  });
-
-  test("context flags require entry number", async () => {
-    await writeFile(
-      join(sessionsDir, "read-test-8.jsonl"),
-      createTestSession("read-test-8", [
-        userEntry("1", "entry"),
-        assistantEntry("2", "1", "response"),
-      ])
-    );
-
-    // Mock console.error to capture error output
-    const errorOutput: Array<string> = [];
-    const errorSpy = spyOn(console, "error").mockImplementation((...args: Array<unknown>) => {
-      errorOutput.push(args.map(String).join(" "));
-    });
-
-    process.argv = ["node", "cli", "read", "read-test-8", "-C", "2"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    errorSpy.mockRestore();
-
-    // Should show error about context flags requiring entry number
-    expect(errorOutput.some((line) => line.includes("require") && line.includes("entry"))).toBe(true);
-  });
-
-  test("handles entry number same as flag value (regression test)", async () => {
-    // This tests the fix for a bug where entry number "2" was incorrectly filtered
-    // when -A value was also "2"
-    await writeFile(
-      join(sessionsDir, "read-test-regression.jsonl"),
-      createTestSession("read-test-regression", [
-        userEntry("1", "entry one"),
-        assistantEntry("2", "1", "entry two TARGET"),
-        userEntry("3", "entry three"),
-        assistantEntry("4", "3", "entry four"),
-      ])
-    );
-
-    process.argv = ["node", "cli", "read", "read-test-regression", "2", "-A", "2"];
-    const { read } = await import("../commands/read");
-    await read();
-
-    const output = consoleOutput.join("\n");
-    // Should correctly read entry 2 with 2 entries after
-    expect(output).toContain("TARGET");
-    expect(output).toContain("entry three");
-    expect(output).toContain("entry four");
   });
 
   test("session prefix matching", async () => {
