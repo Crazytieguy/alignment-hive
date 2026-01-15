@@ -59,6 +59,10 @@ export const hook = {
 };
 
 export const errors = {
+  schemaError: (path: string, error: string): string =>
+    `Schema error in ${path}: ${error}`,
+  authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
+  refreshSchemaError: (error: string): string => `Token refresh response schema error: ${error}`,
   noSessions: 'No sessions found yet. Sessions are extracted automatically when you start Claude Code.',
   noSessionsIn: (dir: string): string => `No sessions in ${dir}`,
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
@@ -224,6 +228,15 @@ export const usage = {
       '  SIGNIFICANT_LOCATIONS Paths where >30% of work happened',
       '  SUMMARY              Session summary or first user prompt',
       '  COMMITS              Git commit hashes from the session',
+    ].join('\n');
+  },
+
+  upload: (): string => {
+    return [
+      'Usage: upload <session-id>',
+      '',
+      'Upload a session to the shared knowledge base.',
+      'Use `index --pending` to see upload eligibility status.',
     ].join('\n');
   },
 };

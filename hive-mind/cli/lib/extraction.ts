@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
 import { getOrCreateCheckoutId, loadTranscriptsDir } from "./config";
+import { errors } from "./messages";
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from "./sanitize";
 import { HiveMindMetaSchema, parseKnownEntry } from "./schemas";
 import type { HiveMindMeta, KnownEntry } from "./schemas";
@@ -149,7 +150,11 @@ export async function readExtractedMeta(extractedPath: string): Promise<HiveMind
     const firstLine = await readFirstLine(extractedPath);
     if (!firstLine) return null;
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) {
+      console.error(errors.schemaError(extractedPath, parsed.error.message));
+      return null;
+    }
+    return parsed.data;
   } catch {
     return null;
   }
@@ -164,7 +169,10 @@ export async function readExtractedSession(
     if (lines.length === 0) return null;
 
     const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
-    if (!metaParsed.success) return null;
+    if (!metaParsed.success) {
+      console.error(errors.schemaError(extractedPath, metaParsed.error.message));
+      return null;
+    }
 
     const entries: Array<KnownEntry> = [];
     for (let i = 1; i < lines.length; i++) {
@@ -175,6 +183,29 @@ export async function readExtractedSession(
     return { meta: metaParsed.data, entries };
   } catch {
     return null;
+  }
+}
+
+export async function markSessionUploaded(sessionPath: string): Promise<boolean> {
+  try {
+    const content = await readFile(sessionPath, "utf-8");
+    const newlineIndex = content.indexOf("\n");
+    if (newlineIndex === -1) return false;
+
+    const firstLine = content.slice(0, newlineIndex);
+    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    if (!parsed.success) {
+      console.error(errors.schemaError(sessionPath, parsed.error.message));
+      return false;
+    }
+
+    const meta = { ...parsed.data, uploadedAt: new Date().toISOString() };
+    const newContent = JSON.stringify(meta) + content.slice(newlineIndex);
+
+    await writeFile(sessionPath, newContent);
+    return true;
+  } catch {
+    return false;
   }
 }
 

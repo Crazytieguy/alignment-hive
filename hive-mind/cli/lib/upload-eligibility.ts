@@ -47,6 +47,17 @@ export function checkSessionEligibility(
     };
   }
 
+  if (meta.uploadedAt) {
+    return {
+      sessionId,
+      meta,
+      eligible: false,
+      excluded: false,
+      eligibleAt: null,
+      reason: "Already uploaded",
+    };
+  }
+
   const now = Date.now();
   const rawMtimeMs = new Date(meta.rawMtime).getTime();
 

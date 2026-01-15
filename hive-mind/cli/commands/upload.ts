@@ -3,13 +3,11 @@ import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth.js';
 import { getCanonicalProjectName } from '../lib/config.js';
 import { generateUploadUrl, heartbeatSession, saveUpload } from '../lib/convex.js';
-import { getHiveMindSessionsDir, readExtractedMeta, readExtractedSession } from '../lib/extraction.js';
-import { errors, uploadCmd } from '../lib/messages.js';
-import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
+import { getHiveMindSessionsDir, markSessionUploaded, readExtractedMeta, readExtractedSession } from '../lib/extraction.js';
+import { errors, uploadCmd, usage } from '../lib/messages.js';
+import { printError, printInfo, printSuccess } from '../lib/output.js';
 import { parseSession } from '../lib/parse.js';
-import { getAllSessionsEligibility } from '../lib/upload-eligibility.js';
-import { confirm, formatSessionId, lookupSession, sleep } from '../lib/utils.js';
-import type { SessionEligibility } from '../lib/upload-eligibility.js';
+import { lookupSession, sleep } from '../lib/utils.js';
 
 async function uploadSession(
   cwd: string,
@@ -68,6 +66,7 @@ async function uploadSession(
       return { success: false, error: 'Failed to save upload metadata' };
     }
 
+    await markSessionUploaded(sessionPath);
     return { success: true };
   } catch (error) {
     return {
@@ -113,19 +112,6 @@ async function uploadSessionWithAgents(
   }
 
   return { success: true, agentCount };
-}
-
-function formatEligibility(e: SessionEligibility): string {
-  const id = formatSessionId(e.sessionId);
-  const lines = `${e.meta.messageCount} lines`;
-
-  if (e.excluded) {
-    return `  ${colors.yellow('✗')} ${id}  ${lines}  ${colors.yellow('excluded')}`;
-  }
-  if (e.eligible) {
-    return `  ${colors.green('✓')} ${id}  ${lines}  ${colors.green('ready')}`;
-  }
-  return `  ${colors.blue('○')} ${id}  ${lines}  ${colors.blue(e.reason)}`;
 }
 
 async function uploadSingleSession(
@@ -179,85 +165,7 @@ async function uploadSingleSession(
   }
 }
 
-async function interactiveUpload(cwd: string): Promise<number> {
-  console.log('');
-  printInfo(uploadCmd.checking);
-  console.log('');
-
-  const allSessions = await getAllSessionsEligibility(cwd);
-
-  if (allSessions.length === 0) {
-    console.log(uploadCmd.noExtractedSessions);
-    return 0;
-  }
-
-  console.log(uploadCmd.sessionsHeader);
-  for (const session of allSessions) {
-    console.log(formatEligibility(session));
-  }
-  console.log('');
-
-  const eligible = allSessions.filter((s) => s.eligible);
-
-  if (eligible.length === 0) {
-    console.log(uploadCmd.noSessionsReady);
-    const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
-    if (pending.length > 0) {
-      console.log(uploadCmd.pendingCount(pending.length));
-    }
-    return 0;
-  }
-
-  console.log(uploadCmd.readyCount(eligible.length));
-  console.log('');
-
-  if (!(await confirm(uploadCmd.confirmUpload))) {
-    console.log(uploadCmd.cancelled);
-    return 0;
-  }
-
-  console.log('');
-
-  let succeeded = 0;
-  let failed = 0;
-
-  for (const session of eligible) {
-    process.stdout.write(`${uploadCmd.uploading(formatSessionId(session.sessionId))} `);
-    const result = await uploadSessionWithAgents(cwd, session.sessionId);
-
-    if (result.success) {
-      if (result.agentCount > 0) {
-        console.log(colors.green(`${uploadCmd.done} (+${result.agentCount} agents)`));
-      } else {
-        console.log(colors.green(uploadCmd.done));
-      }
-      succeeded++;
-    } else {
-      console.log(colors.red(uploadCmd.failed(result.error || 'Unknown error')));
-      failed++;
-    }
-  }
-
-  console.log('');
-  if (succeeded > 0) {
-    printSuccess(uploadCmd.uploadedCount(succeeded));
-  }
-  if (failed > 0) {
-    printError(uploadCmd.failedCount(failed));
-  }
-
-  return failed > 0 ? 1 : 0;
-}
-
 export async function upload(): Promise<number> {
-  const cwd = process.env.CWD || process.cwd();
-
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) {
-    printError(uploadCmd.notAuthenticated);
-    return 1;
-  }
-
   const args = process.argv.slice(3);
   let sessionId: string | null = null;
   let delaySeconds = 0;
@@ -272,9 +180,18 @@ export async function upload(): Promise<number> {
     }
   }
 
-  if (sessionId) {
-    return await uploadSingleSession(cwd, sessionId, delaySeconds);
+  if (!sessionId) {
+    console.log(usage.upload());
+    return 1;
   }
 
-  return await interactiveUpload(cwd);
+  const cwd = process.env.CWD || process.cwd();
+
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) {
+    printError(uploadCmd.notAuthenticated);
+    return 1;
+  }
+
+  return await uploadSingleSession(cwd, sessionId, delaySeconds);
 }

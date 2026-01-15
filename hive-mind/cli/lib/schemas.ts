@@ -208,6 +208,7 @@ export const HiveMindMetaSchema = z.object({
   parentSessionId: z.string().optional(),
   schemaErrors: z.array(z.string()).optional(),
   excluded: z.boolean().optional(),
+  uploadedAt: z.string().optional(),
 });
 
 export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;

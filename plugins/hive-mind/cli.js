@@ -101,6 +101,340 @@ async function loadTranscriptsDir(hiveMindDir) {
   }
 }
 
+// cli/lib/messages.ts
+function getCliCommand(hasAlias) {
+  if (hasAlias) {
+    return "hive-mind";
+  }
+  return `bun ${process.argv[1]}`;
+}
+var hook = {
+  notLoggedIn: () => {
+    return "To connect: run /hive-mind:setup";
+  },
+  loggedIn: (displayName) => {
+    return `Connected as ${displayName}`;
+  },
+  extracted: (count) => {
+    return `Extracted ${count} session${count === 1 ? "" : "s"}`;
+  },
+  schemaErrors: (errorCount, sessionCount, errors) => {
+    const unique = [...new Set(errors)];
+    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
+  },
+  extractionFailed: (error) => {
+    return `Extraction failed: ${error}`;
+  },
+  bunNotInstalled: () => {
+    return "To set up hive-mind: run /hive-mind:setup";
+  },
+  pendingSessions: (count, earliestUploadAt, userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    if (earliestUploadAt) {
+      const now = Date.now();
+      const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - now) / (1000 * 60)));
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+      if (count === 1) {
+        return `1 session uploads in ${timeStr}. To review: ${cli} index --pending`;
+      }
+      return `${count} sessions pending, first uploads in ${timeStr}. To review: ${cli} index --pending`;
+    }
+    return `${count} session${count === 1 ? "" : "s"} ready to upload. To review: ${cli} index --pending`;
+  },
+  uploadingSessions: (count, userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    return `Uploading ${count} session${count === 1 ? "" : "s"} in 10 min. To review: ${cli} index --pending`;
+  },
+  aliasUpdated: () => {
+    const shell = getShellConfig();
+    return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
+  },
+  extractionsFailed: (count) => {
+    return `Failed to extract ${count} session${count === 1 ? "" : "s"}`;
+  },
+  sessionCheckFailed: () => {
+    return "Failed to check session upload status";
+  }
+};
+var errors = {
+  schemaError: (path, error) => `Schema error in ${path}: ${error}`,
+  authSchemaError: (error) => `Auth data schema error: ${error}`,
+  refreshSchemaError: (error) => `Token refresh response schema error: ${error}`,
+  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
+  noSessionsIn: (dir) => `No sessions in ${dir}`,
+  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
+  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
+  andMore: (count) => `  ... and ${count} more`,
+  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
+  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
+  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
+  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
+  invalidEntry: (value) => `Invalid entry number: "${value}"`,
+  invalidRange: (value) => `Invalid range: "${value}"`,
+  emptySession: "Session has no entries",
+  noPattern: "No pattern specified",
+  invalidRegex: (error) => `Invalid regex: ${error}`,
+  invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
+  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
+  unexpectedResponse: "Unexpected response from server",
+  bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash",
+  loginStatusYes: (displayName) => `logged in: yes (${displayName})`,
+  loginStatusNo: "logged in: no"
+};
+var usage = {
+  main: (commands) => {
+    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
+    for (const { name, description } of commands) {
+      lines.push(`  ${name.padEnd(15)} ${description}`);
+    }
+    return lines.join(`
+`);
+  },
+  read: () => {
+    return [
+      "Usage: read <session-id> [N | N-M] [options]",
+      "",
+      "Read session entries. Session ID supports prefix matching.",
+      "",
+      "Options:",
+      "  N             Entry number to read (full content)",
+      "  N-M           Entry range to read",
+      "  --target N    Target total words (default 2000)",
+      "  --skip N      Skip first N words per field (for pagination)",
+      "  --show FIELDS Show full content for fields (comma-separated)",
+      "  --hide FIELDS Redact fields to word counts (comma-separated)",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
+      "",
+      "Truncation:",
+      "  Text is adaptively truncated to fit within the target word count.",
+      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
+      "  Use --skip with the shown N value to continue reading.",
+      "",
+      "Examples:",
+      "  read 02ed                          # all entries (~2000 words)",
+      "  read 02ed --target 500             # tighter truncation",
+      "  read 02ed --skip 50                # skip first 50 words per field",
+      "  read 02ed 5                        # entry 5 (full content)",
+      "  read 02ed 10-20                    # entries 10 through 20",
+      "  read 02ed --show thinking          # show full thinking content",
+      "  read 02ed --show tool:Bash:result  # show Bash command results",
+      "  read 02ed --hide user              # redact user messages to word counts"
+    ].join(`
+`);
+  },
+  grep: () => {
+    return [
+      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "                      [--after <time>] [--before <time>]",
+      "",
+      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
+      "Use -- to separate options from pattern if needed.",
+      "",
+      "Options:",
+      "  -i              Case insensitive search",
+      "  -c              Count matches per session only",
+      "  -l              List matching session IDs only",
+      "  -m N            Stop after N total matches",
+      "  -C N            Show N words of context around match (default: 10)",
+      "  -s <session>    Search only in specified session (prefix match)",
+      "  --in <fields>   Search only specified fields (comma-separated)",
+      "  --after <time>  Include only results after this time",
+      "  --before <time> Include only results before this time",
+      "",
+      "Time formats:",
+      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
+      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
+      "",
+      "Default fields: user, assistant, thinking, tool:input, system, summary",
+      "",
+      "Examples:",
+      '  grep "TODO"                    # find TODO in sessions',
+      '  grep -i "error" -C 20          # case insensitive, 20 words context',
+      '  grep -c "function"             # count matches per session',
+      '  grep -l "#2597"                # list sessions mentioning issue',
+      '  grep -s 02ed "bug"             # search only in session 02ed...',
+      '  grep "error|warning|bug"       # find any of these terms (OR)',
+      '  grep "TODO|FIXME|XXX"          # find code comments',
+      '  grep --in tool:result "error"  # search only in tool results',
+      '  grep --in user,assistant "fix" # search only user and assistant',
+      '  grep --after 2d "error"        # errors in last 2 days',
+      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1'
+    ].join(`
+`);
+  },
+  index: () => {
+    return [
+      "Usage: index",
+      "",
+      "List extracted sessions with statistics and summaries.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Output columns:",
+      "  ID                    Session ID prefix",
+      "  DATETIME              Session modification time",
+      "  MSGS                  Total message count",
+      "  USER_MESSAGES         User message count",
+      "  BASH_CALLS            Bash commands executed",
+      "  WEB_FETCHES           Web fetches",
+      "  WEB_SEARCHES          Web searches",
+      "  LINES_ADDED           Lines added",
+      "  LINES_REMOVED         Lines removed",
+      "  FILES_TOUCHED         Files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY               Session summary or first prompt",
+      "  COMMITS               Git commits from the session"
+    ].join(`
+`);
+  },
+  indexFull: () => {
+    return [
+      "Usage: index [--escape-file-refs] [--pending]",
+      "",
+      "List all extracted sessions with statistics, summary, and commits.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Options:",
+      "  --escape-file-refs  Escape @ symbols to prevent file reference interpretation",
+      "  --pending           Show upload eligibility status for each session",
+      "",
+      "Output columns:",
+      "  ID                   Session ID prefix (first 16 chars)",
+      "  DATETIME             Session modification time",
+      "  MSGS                 Total message count",
+      "  USER_MESSAGES        User message count",
+      "  BASH_CALLS           Bash commands executed",
+      "  WEB_FETCHES          Web fetches",
+      "  WEB_SEARCHES         Web searches",
+      "  LINES_ADDED          Lines added",
+      "  LINES_REMOVED        Lines removed",
+      "  FILES_TOUCHED        Number of unique files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY              Session summary or first user prompt",
+      "  COMMITS              Git commit hashes from the session"
+    ].join(`
+`);
+  },
+  upload: () => {
+    return [
+      "Usage: upload <session-id>",
+      "",
+      "Upload a session to the shared knowledge base.",
+      "Use `index --pending` to see upload eligibility status."
+    ].join(`
+`);
+  }
+};
+var setup = {
+  header: "Join the hive-mind shared knowledge base",
+  alreadyLoggedIn: "You're already connected.",
+  confirmRelogin: "Do you want to reconnect?",
+  refreshing: "Refreshing your session...",
+  refreshSuccess: "Session refreshed!",
+  starting: "Starting authentication...",
+  deviceAuth: (url, code) => {
+    return [
+      "Open this URL in your browser:",
+      "",
+      `  ${url}`,
+      "",
+      "Confirm this code matches:",
+      "",
+      `  ${code}`
+    ].join(`
+`);
+  },
+  browserOpened: "Browser opened. Confirm the code and approve.",
+  openManually: "Open the URL manually, then confirm the code.",
+  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
+  success: "You're connected!",
+  welcome: (name, email) => name ? `Welcome, ${name} (${email})!` : `Logged in as: ${email}`,
+  consentInfo: (userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    return `Your sessions will contribute to the shared knowledge base.
+You'll have 24 hours to review sessions before auto-submission.
+Run \`${cli} exclude\` anytime to opt out.`;
+  },
+  consentConfirm: "Continue?",
+  consentDeclined: "Setup cancelled. Run setup again if you change your mind.",
+  timeout: "Authentication timed out. Please try again.",
+  startFailed: (error) => `Couldn't start authentication: ${error}`,
+  authFailed: (error) => `Authentication failed: ${error}`,
+  unexpectedAuthResponse: "Unexpected response from authentication server",
+  aliasPrompt: "Set up a command to run hive-mind more easily?",
+  aliasExplain: "This adds `alias hive-mind=...` to your shell config.",
+  aliasConfirm: "Set up hive-mind command?",
+  aliasSuccess: "Command added!",
+  aliasActivate: (sourceCmd) => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
+  aliasFailed: "Couldn't add command automatically.",
+  alreadySetUp: "hive-mind command already set up"
+};
+var indexCmd = {
+  noSessionsDir: "No sessions found. Run 'extract' first.",
+  noSessionsIn: (dir) => `No sessions found in ${dir}`,
+  uploadStatus: "Upload eligibility status:",
+  noExtractedSessions: "No extracted sessions found.",
+  total: (count, summary) => `Total: ${count} sessions (${summary})`,
+  runUpload: "Run 'hive-mind upload' to upload ready sessions.",
+  excludeSession: "To exclude a session: hive-mind exclude <session-id>",
+  excludeAll: "To exclude all sessions: hive-mind exclude --all"
+};
+var excludeCmd = {
+  noSessionsDir: "No sessions directory found",
+  noSessions: "No sessions found.",
+  allAlreadyExcluded: "All sessions are already excluded.",
+  foundNonExcluded: (count) => `Found ${count} session(s) not yet excluded.`,
+  confirmExcludeAll: "Exclude all sessions from upload?",
+  cancelled: "Cancelled.",
+  excludedCount: (count) => `Excluded ${count} session(s)`,
+  failedCount: (count) => `Failed to exclude ${count} session(s)`,
+  sessionNotFound: (id) => `Session '${id}' not found`,
+  ambiguousSession: (id, count) => `Ambiguous session ID '${id}' matches ${count} sessions`,
+  matches: "Matches:",
+  couldNotRead: (id) => `Could not read session '${id}'`,
+  alreadyExcluded: (id) => `Session ${id} is already excluded`,
+  excluded: (id) => `Excluded session ${id}`,
+  failedToExclude: (id) => `Failed to exclude session ${id}`,
+  cannotExcludeAgent: "Agent sessions cannot be excluded directly. Exclude the parent session instead.",
+  usage: "Usage: hive-mind exclude <session-id> or hive-mind exclude --all",
+  excludedLine: (id) => `  \u2717 ${id} excluded`,
+  failedLine: (id) => `  ! ${id} failed`
+};
+var uploadCmd = {
+  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
+  waitingDelay: (seconds) => `Waiting ${seconds} seconds before upload...`,
+  sessionNotFound: (id) => `Session '${id}' not found`,
+  ambiguousSession: (id, count) => `Multiple sessions match '${id}' (${count} matches):`,
+  sessionExcluded: (id) => `Session ${id} was excluded, skipping`,
+  uploading: (id) => `Uploading ${id}...`,
+  uploaded: (id) => `Uploaded ${id}`,
+  uploadedWithAgents: (id, agentCount) => `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? "" : "s"})`,
+  failedToUpload: (id, error) => `Failed to upload ${id}: ${error}`,
+  checking: "Checking for sessions ready to upload...",
+  noExtractedSessions: "No extracted sessions found.",
+  sessionsHeader: "Sessions:",
+  noSessionsReady: "No sessions ready for upload.",
+  pendingCount: (count) => `${count} session(s) still in review period.`,
+  readyCount: (count) => `${count} session(s) ready for upload.`,
+  confirmUpload: "Upload these sessions?",
+  cancelled: "Cancelled.",
+  uploadedCount: (count) => `Uploaded ${count} session(s)`,
+  failedCount: (count) => `Failed to upload ${count} session(s)`,
+  done: "done",
+  failed: (error) => `failed: ${error}`
+};
+
 // cli/lib/secret-rules.ts
 var SECRET_RULES = [
   { id: "1password-secret-key", regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"), entropy: 3.8, keywords: ["a3-"] },
@@ -14412,7 +14746,8 @@ var HiveMindMetaSchema = exports_external.object({
   agentId: exports_external.string().optional(),
   parentSessionId: exports_external.string().optional(),
   schemaErrors: exports_external.array(exports_external.string()).optional(),
-  excluded: exports_external.boolean().optional()
+  excluded: exports_external.boolean().optional(),
+  uploadedAt: exports_external.string().optional()
 });
 
 // cli/lib/extraction.ts
@@ -14529,7 +14864,11 @@ async function readExtractedMeta(extractedPath) {
     if (!firstLine)
       return null;
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) {
+      console.error(errors.schemaError(extractedPath, parsed.error.message));
+      return null;
+    }
+    return parsed.data;
   } catch {
     return null;
   }
@@ -14542,8 +14881,10 @@ async function readExtractedSession(extractedPath) {
     if (lines.length === 0)
       return null;
     const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
-    if (!metaParsed.success)
+    if (!metaParsed.success) {
+      console.error(errors.schemaError(extractedPath, metaParsed.error.message));
       return null;
+    }
     const entries = [];
     for (let i = 1;i < lines.length; i++) {
       const result = parseKnownEntry(JSON.parse(lines[i]));
@@ -14553,6 +14894,27 @@ async function readExtractedSession(extractedPath) {
     return { meta: metaParsed.data, entries };
   } catch {
     return null;
+  }
+}
+async function markSessionUploaded(sessionPath) {
+  try {
+    const content = await readFile2(sessionPath, "utf-8");
+    const newlineIndex = content.indexOf(`
+`);
+    if (newlineIndex === -1)
+      return false;
+    const firstLine = content.slice(0, newlineIndex);
+    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    if (!parsed.success) {
+      console.error(errors.schemaError(sessionPath, parsed.error.message));
+      return false;
+    }
+    const meta3 = { ...parsed.data, uploadedAt: new Date().toISOString() };
+    const newContent = JSON.stringify(meta3) + content.slice(newlineIndex);
+    await writeFile2(sessionPath, newContent);
+    return true;
+  } catch {
+    return false;
   }
 }
 function getHiveMindSessionsDir(projectCwd) {
@@ -14663,328 +15025,6 @@ async function extractSingleSession(cwd, sessionId) {
   });
   return result !== null;
 }
-
-// cli/lib/messages.ts
-function getCliCommand(hasAlias) {
-  if (hasAlias) {
-    return "hive-mind";
-  }
-  return `bun ${process.argv[1]}`;
-}
-var hook = {
-  notLoggedIn: () => {
-    return "To connect: run /hive-mind:setup";
-  },
-  loggedIn: (displayName) => {
-    return `Connected as ${displayName}`;
-  },
-  extracted: (count) => {
-    return `Extracted ${count} session${count === 1 ? "" : "s"}`;
-  },
-  schemaErrors: (errorCount, sessionCount, errors3) => {
-    const unique = [...new Set(errors3)];
-    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
-  },
-  extractionFailed: (error48) => {
-    return `Extraction failed: ${error48}`;
-  },
-  bunNotInstalled: () => {
-    return "To set up hive-mind: run /hive-mind:setup";
-  },
-  pendingSessions: (count, earliestUploadAt, userHasAlias) => {
-    const cli = getCliCommand(userHasAlias);
-    if (earliestUploadAt) {
-      const now = Date.now();
-      const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - now) / (1000 * 60)));
-      const hours = Math.floor(totalMinutes / 60);
-      const minutes = totalMinutes % 60;
-      const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-      if (count === 1) {
-        return `1 session uploads in ${timeStr}. To review: ${cli} index --pending`;
-      }
-      return `${count} sessions pending, first uploads in ${timeStr}. To review: ${cli} index --pending`;
-    }
-    return `${count} session${count === 1 ? "" : "s"} ready to upload. To review: ${cli} index --pending`;
-  },
-  uploadingSessions: (count, userHasAlias) => {
-    const cli = getCliCommand(userHasAlias);
-    return `Uploading ${count} session${count === 1 ? "" : "s"} in 10 min. To review: ${cli} index --pending`;
-  },
-  aliasUpdated: () => {
-    const shell = getShellConfig();
-    return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
-  },
-  extractionsFailed: (count) => {
-    return `Failed to extract ${count} session${count === 1 ? "" : "s"}`;
-  },
-  sessionCheckFailed: () => {
-    return "Failed to check session upload status";
-  }
-};
-var errors3 = {
-  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
-  noSessionsIn: (dir) => `No sessions in ${dir}`,
-  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
-  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
-  andMore: (count) => `  ... and ${count} more`,
-  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
-  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
-  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
-  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
-  invalidEntry: (value) => `Invalid entry number: "${value}"`,
-  invalidRange: (value) => `Invalid range: "${value}"`,
-  emptySession: "Session has no entries",
-  noPattern: "No pattern specified",
-  invalidRegex: (error48) => `Invalid regex: ${error48}`,
-  invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
-  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
-  unexpectedResponse: "Unexpected response from server",
-  bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash",
-  loginStatusYes: (displayName) => `logged in: yes (${displayName})`,
-  loginStatusNo: "logged in: no"
-};
-var usage = {
-  main: (commands) => {
-    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
-    for (const { name, description } of commands) {
-      lines.push(`  ${name.padEnd(15)} ${description}`);
-    }
-    return lines.join(`
-`);
-  },
-  read: () => {
-    return [
-      "Usage: read <session-id> [N | N-M] [options]",
-      "",
-      "Read session entries. Session ID supports prefix matching.",
-      "",
-      "Options:",
-      "  N             Entry number to read (full content)",
-      "  N-M           Entry range to read",
-      "  --target N    Target total words (default 2000)",
-      "  --skip N      Skip first N words per field (for pagination)",
-      "  --show FIELDS Show full content for fields (comma-separated)",
-      "  --hide FIELDS Redact fields to word counts (comma-separated)",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
-      "",
-      "Truncation:",
-      "  Text is adaptively truncated to fit within the target word count.",
-      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
-      "  Use --skip with the shown N value to continue reading.",
-      "",
-      "Examples:",
-      "  read 02ed                          # all entries (~2000 words)",
-      "  read 02ed --target 500             # tighter truncation",
-      "  read 02ed --skip 50                # skip first 50 words per field",
-      "  read 02ed 5                        # entry 5 (full content)",
-      "  read 02ed 10-20                    # entries 10 through 20",
-      "  read 02ed --show thinking          # show full thinking content",
-      "  read 02ed --show tool:Bash:result  # show Bash command results",
-      "  read 02ed --hide user              # redact user messages to word counts"
-    ].join(`
-`);
-  },
-  grep: () => {
-    return [
-      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
-      "                      [--after <time>] [--before <time>]",
-      "",
-      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
-      "Use -- to separate options from pattern if needed.",
-      "",
-      "Options:",
-      "  -i              Case insensitive search",
-      "  -c              Count matches per session only",
-      "  -l              List matching session IDs only",
-      "  -m N            Stop after N total matches",
-      "  -C N            Show N words of context around match (default: 10)",
-      "  -s <session>    Search only in specified session (prefix match)",
-      "  --in <fields>   Search only specified fields (comma-separated)",
-      "  --after <time>  Include only results after this time",
-      "  --before <time> Include only results before this time",
-      "",
-      "Time formats:",
-      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
-      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
-      "",
-      "Default fields: user, assistant, thinking, tool:input, system, summary",
-      "",
-      "Examples:",
-      '  grep "TODO"                    # find TODO in sessions',
-      '  grep -i "error" -C 20          # case insensitive, 20 words context',
-      '  grep -c "function"             # count matches per session',
-      '  grep -l "#2597"                # list sessions mentioning issue',
-      '  grep -s 02ed "bug"             # search only in session 02ed...',
-      '  grep "error|warning|bug"       # find any of these terms (OR)',
-      '  grep "TODO|FIXME|XXX"          # find code comments',
-      '  grep --in tool:result "error"  # search only in tool results',
-      '  grep --in user,assistant "fix" # search only user and assistant',
-      '  grep --after 2d "error"        # errors in last 2 days',
-      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1'
-    ].join(`
-`);
-  },
-  index: () => {
-    return [
-      "Usage: index",
-      "",
-      "List extracted sessions with statistics and summaries.",
-      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
-      "Statistics include work from subagent sessions.",
-      "",
-      "Output columns:",
-      "  ID                    Session ID prefix",
-      "  DATETIME              Session modification time",
-      "  MSGS                  Total message count",
-      "  USER_MESSAGES         User message count",
-      "  BASH_CALLS            Bash commands executed",
-      "  WEB_FETCHES           Web fetches",
-      "  WEB_SEARCHES          Web searches",
-      "  LINES_ADDED           Lines added",
-      "  LINES_REMOVED         Lines removed",
-      "  FILES_TOUCHED         Files modified",
-      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
-      "  SUMMARY               Session summary or first prompt",
-      "  COMMITS               Git commits from the session"
-    ].join(`
-`);
-  },
-  indexFull: () => {
-    return [
-      "Usage: index [--escape-file-refs] [--pending]",
-      "",
-      "List all extracted sessions with statistics, summary, and commits.",
-      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
-      "Statistics include work from subagent sessions.",
-      "",
-      "Options:",
-      "  --escape-file-refs  Escape @ symbols to prevent file reference interpretation",
-      "  --pending           Show upload eligibility status for each session",
-      "",
-      "Output columns:",
-      "  ID                   Session ID prefix (first 16 chars)",
-      "  DATETIME             Session modification time",
-      "  MSGS                 Total message count",
-      "  USER_MESSAGES        User message count",
-      "  BASH_CALLS           Bash commands executed",
-      "  WEB_FETCHES          Web fetches",
-      "  WEB_SEARCHES         Web searches",
-      "  LINES_ADDED          Lines added",
-      "  LINES_REMOVED        Lines removed",
-      "  FILES_TOUCHED        Number of unique files modified",
-      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
-      "  SUMMARY              Session summary or first user prompt",
-      "  COMMITS              Git commit hashes from the session"
-    ].join(`
-`);
-  }
-};
-var setup = {
-  header: "Join the hive-mind shared knowledge base",
-  alreadyLoggedIn: "You're already connected.",
-  confirmRelogin: "Do you want to reconnect?",
-  refreshing: "Refreshing your session...",
-  refreshSuccess: "Session refreshed!",
-  starting: "Starting authentication...",
-  deviceAuth: (url2, code) => {
-    return [
-      "Open this URL in your browser:",
-      "",
-      `  ${url2}`,
-      "",
-      "Confirm this code matches:",
-      "",
-      `  ${code}`
-    ].join(`
-`);
-  },
-  browserOpened: "Browser opened. Confirm the code and approve.",
-  openManually: "Open the URL manually, then confirm the code.",
-  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
-  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
-  success: "You're connected!",
-  welcome: (name, email3) => name ? `Welcome, ${name} (${email3})!` : `Logged in as: ${email3}`,
-  consentInfo: (userHasAlias) => {
-    const cli = getCliCommand(userHasAlias);
-    return `Your sessions will contribute to the shared knowledge base.
-You'll have 24 hours to review sessions before auto-submission.
-Run \`${cli} exclude\` anytime to opt out.`;
-  },
-  consentConfirm: "Continue?",
-  consentDeclined: "Setup cancelled. Run setup again if you change your mind.",
-  timeout: "Authentication timed out. Please try again.",
-  startFailed: (error48) => `Couldn't start authentication: ${error48}`,
-  authFailed: (error48) => `Authentication failed: ${error48}`,
-  unexpectedAuthResponse: "Unexpected response from authentication server",
-  aliasPrompt: "Set up a command to run hive-mind more easily?",
-  aliasExplain: "This adds `alias hive-mind=...` to your shell config.",
-  aliasConfirm: "Set up hive-mind command?",
-  aliasSuccess: "Command added!",
-  aliasActivate: (sourceCmd) => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
-  aliasFailed: "Couldn't add command automatically.",
-  alreadySetUp: "hive-mind command already set up"
-};
-var indexCmd = {
-  noSessionsDir: "No sessions found. Run 'extract' first.",
-  noSessionsIn: (dir) => `No sessions found in ${dir}`,
-  uploadStatus: "Upload eligibility status:",
-  noExtractedSessions: "No extracted sessions found.",
-  total: (count, summary) => `Total: ${count} sessions (${summary})`,
-  runUpload: "Run 'hive-mind upload' to upload ready sessions.",
-  excludeSession: "To exclude a session: hive-mind exclude <session-id>",
-  excludeAll: "To exclude all sessions: hive-mind exclude --all"
-};
-var excludeCmd = {
-  noSessionsDir: "No sessions directory found",
-  noSessions: "No sessions found.",
-  allAlreadyExcluded: "All sessions are already excluded.",
-  foundNonExcluded: (count) => `Found ${count} session(s) not yet excluded.`,
-  confirmExcludeAll: "Exclude all sessions from upload?",
-  cancelled: "Cancelled.",
-  excludedCount: (count) => `Excluded ${count} session(s)`,
-  failedCount: (count) => `Failed to exclude ${count} session(s)`,
-  sessionNotFound: (id) => `Session '${id}' not found`,
-  ambiguousSession: (id, count) => `Ambiguous session ID '${id}' matches ${count} sessions`,
-  matches: "Matches:",
-  couldNotRead: (id) => `Could not read session '${id}'`,
-  alreadyExcluded: (id) => `Session ${id} is already excluded`,
-  excluded: (id) => `Excluded session ${id}`,
-  failedToExclude: (id) => `Failed to exclude session ${id}`,
-  cannotExcludeAgent: "Agent sessions cannot be excluded directly. Exclude the parent session instead.",
-  usage: "Usage: hive-mind exclude <session-id> or hive-mind exclude --all",
-  excludedLine: (id) => `  \u2717 ${id} excluded`,
-  failedLine: (id) => `  ! ${id} failed`
-};
-var uploadCmd = {
-  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
-  waitingDelay: (seconds) => `Waiting ${seconds} seconds before upload...`,
-  sessionNotFound: (id) => `Session '${id}' not found`,
-  ambiguousSession: (id, count) => `Multiple sessions match '${id}' (${count} matches):`,
-  sessionExcluded: (id) => `Session ${id} was excluded, skipping`,
-  uploading: (id) => `Uploading ${id}...`,
-  uploaded: (id) => `Uploaded ${id}`,
-  uploadedWithAgents: (id, agentCount) => `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? "" : "s"})`,
-  failedToUpload: (id, error48) => `Failed to upload ${id}: ${error48}`,
-  checking: "Checking for sessions ready to upload...",
-  noExtractedSessions: "No extracted sessions found.",
-  sessionsHeader: "Sessions:",
-  noSessionsReady: "No sessions ready for upload.",
-  pendingCount: (count) => `${count} session(s) still in review period.`,
-  readyCount: (count) => `${count} session(s) ready for upload.`,
-  confirmUpload: "Upload these sessions?",
-  cancelled: "Cancelled.",
-  uploadedCount: (count) => `Uploaded ${count} session(s)`,
-  failedCount: (count) => `Failed to upload ${count} session(s)`,
-  done: "done",
-  failed: (error48) => `failed: ${error48}`
-};
 
 // cli/lib/output.ts
 var colors = {
@@ -16499,12 +16539,12 @@ async function grep() {
   try {
     files = await readdir4(sessionsDir);
   } catch {
-    printError(errors3.noSessions);
+    printError(errors.noSessions);
     return 1;
   }
   let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(errors3.noSessionsIn(sessionsDir));
+    printError(errors.noSessionsIn(sessionsDir));
     return 1;
   }
   if (options.sessionFilter) {
@@ -16514,7 +16554,7 @@ async function grep() {
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
     if (jsonlFiles.length === 0) {
-      printError(errors3.sessionNotFound(prefix));
+      printError(errors.sessionNotFound(prefix));
       return 1;
     }
   }
@@ -16610,7 +16650,7 @@ function parseGrepOptions(args) {
   if (mValue !== undefined) {
     maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
-      printError(errors3.invalidNumber("-m", mValue));
+      printError(errors.invalidNumber("-m", mValue));
       return null;
     }
   }
@@ -16619,7 +16659,7 @@ function parseGrepOptions(args) {
   if (cValue !== undefined) {
     contextWords = parseInt(cValue, 10);
     if (isNaN(contextWords) || contextWords < 0) {
-      printError(errors3.invalidNonNegative("-C"));
+      printError(errors.invalidNonNegative("-C"));
       return null;
     }
   }
@@ -16632,7 +16672,7 @@ function parseGrepOptions(args) {
   if (afterValue !== undefined) {
     afterTime = parseTimeSpec(afterValue);
     if (!afterTime) {
-      printError(errors3.invalidTimeSpec("--after", afterValue));
+      printError(errors.invalidTimeSpec("--after", afterValue));
       return null;
     }
   }
@@ -16641,7 +16681,7 @@ function parseGrepOptions(args) {
   if (beforeValue !== undefined) {
     beforeTime = parseTimeSpec(beforeValue);
     if (!beforeTime) {
-      printError(errors3.invalidTimeSpec("--before", beforeValue));
+      printError(errors.invalidTimeSpec("--before", beforeValue));
       return null;
     }
   }
@@ -16659,14 +16699,14 @@ function parseGrepOptions(args) {
     break;
   }
   if (!patternStr) {
-    printError(errors3.noPattern);
+    printError(errors.noPattern);
     return null;
   }
   let pattern;
   try {
     pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
   } catch (e) {
-    printError(errors3.invalidRegex(e instanceof Error ? e.message : String(e)));
+    printError(errors.invalidRegex(e instanceof Error ? e.message : String(e)));
     return null;
   }
   return {
@@ -16683,17 +16723,37 @@ function parseGrepOptions(args) {
 }
 
 // cli/commands/index.ts
-import { readdir as readdir6 } from "fs/promises";
+import { readdir as readdir5 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join7 } from "path";
 
-// cli/lib/upload-eligibility.ts
-import { readdir as readdir5 } from "fs/promises";
-import { join as join6 } from "path";
-
 // cli/lib/auth.ts
-import { mkdir as mkdir3 } from "fs/promises";
+import { mkdir as mkdir3, rmdir } from "fs/promises";
+import { join as join6 } from "path";
+var AUTH_LOCK_FILE = join6(AUTH_DIR, "auth.lock");
+var LOCK_TIMEOUT_MS = 1e4;
+var LOCK_RETRY_INTERVAL_MS = 50;
 var WORKOS_API_URL = "https://api.workos.com/user_management";
+async function acquireLock() {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await mkdir3(AUTH_LOCK_FILE);
+      return true;
+    } catch (err) {
+      const isLockHeld = err instanceof Error && "code" in err && err.code === "EEXIST";
+      if (!isLockHeld)
+        return false;
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_INTERVAL_MS));
+    }
+  }
+  return false;
+}
+async function releaseLock() {
+  try {
+    await rmdir(AUTH_LOCK_FILE);
+  } catch {}
+}
 var AuthUserSchema = exports_external.object({
   id: exports_external.string(),
   email: exports_external.string(),
@@ -16734,7 +16794,11 @@ async function loadAuthData() {
       return null;
     const data = await file2.json();
     const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) {
+      console.error(errors.authSchemaError(parsed.error.message));
+      return null;
+    }
+    return parsed.data;
   } catch {
     return null;
   }
@@ -16756,8 +16820,10 @@ async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
     });
     const data = await response.json();
     const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success)
+    if (!parsed.success) {
+      console.error(errors.refreshSchemaError(parsed.error.message));
       return null;
+    }
     return {
       ...parsed.data,
       authenticated_at: existingAuthenticatedAt
@@ -16766,23 +16832,42 @@ async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
     return null;
   }
 }
+var NOT_AUTHENTICATED = { authenticated: false, needsLogin: true };
+function authenticated(user) {
+  return { authenticated: true, user, needsLogin: false };
+}
+async function refreshWithLock(fallbackAuthData) {
+  const gotLock = await acquireLock();
+  if (!gotLock)
+    return NOT_AUTHENTICATED;
+  try {
+    const freshAuthData = await loadAuthData();
+    if (freshAuthData?.access_token && !isTokenExpired(freshAuthData.access_token)) {
+      return authenticated(freshAuthData.user);
+    }
+    const tokenToRefresh = freshAuthData?.refresh_token ?? fallbackAuthData.refresh_token;
+    const authenticatedAt = freshAuthData?.authenticated_at ?? fallbackAuthData.authenticated_at;
+    const newAuthData = await refreshToken(tokenToRefresh, authenticatedAt);
+    if (!newAuthData)
+      return NOT_AUTHENTICATED;
+    await saveAuthData(newAuthData);
+    return authenticated(newAuthData.user);
+  } finally {
+    await releaseLock();
+  }
+}
 async function checkAuthStatus(attemptRefresh = true) {
   const authData = await loadAuthData();
   if (!authData?.access_token) {
-    return { authenticated: false, needsLogin: true };
+    return NOT_AUTHENTICATED;
   }
-  if (isTokenExpired(authData.access_token)) {
-    if (!attemptRefresh || !authData.refresh_token) {
-      return { authenticated: false, needsLogin: true };
-    }
-    const newAuthData = await refreshToken(authData.refresh_token, authData.authenticated_at);
-    if (!newAuthData) {
-      return { authenticated: false, needsLogin: true };
-    }
-    await saveAuthData(newAuthData);
-    return { authenticated: true, user: newAuthData.user, needsLogin: false };
+  if (!isTokenExpired(authData.access_token)) {
+    return authenticated(authData.user);
   }
-  return { authenticated: true, user: authData.user, needsLogin: false };
+  if (!attemptRefresh || !authData.refresh_token) {
+    return NOT_AUTHENTICATED;
+  }
+  return refreshWithLock(authData);
 }
 function getUserDisplayName(user) {
   return user.first_name || user.email;
@@ -16814,6 +16899,16 @@ function checkSessionEligibility(meta3, authIssuedAt) {
       reason: "Excluded by user"
     };
   }
+  if (meta3.uploadedAt) {
+    return {
+      sessionId,
+      meta: meta3,
+      eligible: false,
+      excluded: false,
+      eligibleAt: null,
+      reason: "Already uploaded"
+    };
+  }
   const now = Date.now();
   const rawMtimeMs = new Date(meta3.rawMtime).getTime();
   const sessionEligibleAt = rawMtimeMs + SESSION_REVIEW_PERIOD_MS;
@@ -16839,24 +16934,6 @@ function checkSessionEligibility(meta3, authIssuedAt) {
     eligibleAt,
     reason: "Ready for upload"
   };
-}
-async function getAllSessionsEligibility(cwd) {
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-  const authIssuedAt = await getAuthIssuedAt();
-  let files;
-  try {
-    files = await readdir5(sessionsDir);
-  } catch {
-    return [];
-  }
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  const results = await Promise.all(jsonlFiles.map(async (file2) => {
-    const meta3 = await readExtractedMeta(join6(sessionsDir, file2));
-    if (!meta3 || meta3.agentId)
-      return null;
-    return checkSessionEligibility(meta3, authIssuedAt);
-  }));
-  return results.filter((r) => r !== null);
 }
 
 // cli/commands/index.ts
@@ -16934,7 +17011,7 @@ async function showPendingStatus(cwd) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir6(sessionsDir);
+    files = await readdir5(sessionsDir);
   } catch {
     console.log(indexCmd.noExtractedSessions);
     return 0;
@@ -17032,7 +17109,7 @@ async function index() {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir6(sessionsDir);
+    files = await readdir5(sessionsDir);
   } catch {
     printError(indexCmd.noSessionsDir);
     return 1;
@@ -17403,7 +17480,7 @@ function getToolResultText(content) {
 }
 
 // cli/commands/read.ts
-import { readdir as readdir7 } from "fs/promises";
+import { readdir as readdir6 } from "fs/promises";
 import { join as join8 } from "path";
 function printUsage3() {
   console.log(usage.read());
@@ -17461,9 +17538,9 @@ async function read() {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir7(sessionsDir);
+    files = await readdir6(sessionsDir);
   } catch {
-    printError(errors3.noSessions);
+    printError(errors.noSessions);
     return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
@@ -17472,16 +17549,16 @@ async function read() {
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
   if (matches2.length === 0) {
-    printError(errors3.sessionNotFound(sessionIdPrefix));
+    printError(errors.sessionNotFound(sessionIdPrefix));
     return 1;
   }
   if (matches2.length > 1) {
-    printError(errors3.multipleSessions(sessionIdPrefix));
+    printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches2.slice(0, 5)) {
       console.log(`  ${m.replace(".jsonl", "")}`);
     }
     if (matches2.length > 5) {
-      console.log(errors3.andMore(matches2.length - 5));
+      console.log(errors.andMore(matches2.length - 5));
     }
     return 1;
   }
@@ -17495,20 +17572,20 @@ async function read() {
       rangeStart = parseInt(rangeMatch[1], 10);
       rangeEnd = parseInt(rangeMatch[2], 10);
       if (rangeStart < 1 || rangeEnd < 1 || rangeStart > rangeEnd) {
-        printError(errors3.invalidRange(entryArg));
+        printError(errors.invalidRange(entryArg));
         return 1;
       }
     } else {
       entryNumber = parseInt(entryArg, 10);
       if (isNaN(entryNumber) || entryNumber < 1) {
-        printError(errors3.invalidEntry(entryArg));
+        printError(errors.invalidEntry(entryArg));
         return 1;
       }
     }
   }
   const session = await readExtractedSession(sessionFile);
   if (!session || session.entries.length === 0) {
-    printError(errors3.emptySession);
+    printError(errors.emptySession);
     return 1;
   }
   const { meta: meta3, entries } = session;
@@ -17529,7 +17606,7 @@ async function read() {
   if (rangeStart !== null && rangeEnd !== null) {
     const rangeBlocks = blocks.filter((b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd);
     if (rangeBlocks.length === 0) {
-      printError(errors3.rangeNotFound(rangeStart, rangeEnd, maxLine));
+      printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
       return 1;
     }
     const output = formatBlocks(rangeBlocks, {
@@ -17543,7 +17620,7 @@ async function read() {
   } else if (entryNumber !== null) {
     const entryBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
     if (entryBlocks.length === 0) {
-      printError(errors3.entryNotFound(entryNumber, maxLine));
+      printError(errors.entryNotFound(entryNumber, maxLine));
       return 1;
     }
     const output = formatBlocks(entryBlocks, {
@@ -18972,9 +19049,9 @@ async function showStatus() {
   const status = await checkAuthStatus(false);
   if (status.authenticated && status.user) {
     const displayName = getUserDisplayName(status.user);
-    console.log(errors3.loginStatusYes(displayName));
+    console.log(errors.loginStatusYes(displayName));
   } else {
-    console.log(errors3.loginStatusNo);
+    console.log(errors.loginStatusNo);
   }
   return 0;
 }
@@ -19060,6 +19137,7 @@ async function uploadSession(cwd, sessionId) {
     if (!saved) {
       return { success: false, error: "Failed to save upload metadata" };
     }
+    await markSessionUploaded(sessionPath);
     return { success: true };
   } catch (error48) {
     return {
@@ -19098,17 +19176,6 @@ async function uploadSessionWithAgents(cwd, sessionId) {
   }
   return { success: true, agentCount };
 }
-function formatEligibility(e) {
-  const id = formatSessionId(e.sessionId);
-  const lines = `${e.meta.messageCount} lines`;
-  if (e.excluded) {
-    return `  ${colors.yellow("\u2717")} ${id}  ${lines}  ${colors.yellow("excluded")}`;
-  }
-  if (e.eligible) {
-    return `  ${colors.green("\u2713")} ${id}  ${lines}  ${colors.green("ready")}`;
-  }
-  return `  ${colors.blue("\u25CB")} ${id}  ${lines}  ${colors.blue(e.reason)}`;
-}
 async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
   if (delaySeconds > 0) {
     printInfo(uploadCmd.waitingDelay(delaySeconds));
@@ -19125,7 +19192,7 @@ async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
       console.log(`  ${m}`);
     }
     if (lookup2.matches.length > 5) {
-      console.log(errors3.andMore(lookup2.matches.length - 5));
+      console.log(errors.andMore(lookup2.matches.length - 5));
     }
     return 1;
   }
@@ -19148,69 +19215,7 @@ async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
     return 1;
   }
 }
-async function interactiveUpload(cwd) {
-  console.log("");
-  printInfo(uploadCmd.checking);
-  console.log("");
-  const allSessions = await getAllSessionsEligibility(cwd);
-  if (allSessions.length === 0) {
-    console.log(uploadCmd.noExtractedSessions);
-    return 0;
-  }
-  console.log(uploadCmd.sessionsHeader);
-  for (const session of allSessions) {
-    console.log(formatEligibility(session));
-  }
-  console.log("");
-  const eligible = allSessions.filter((s) => s.eligible);
-  if (eligible.length === 0) {
-    console.log(uploadCmd.noSessionsReady);
-    const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
-    if (pending.length > 0) {
-      console.log(uploadCmd.pendingCount(pending.length));
-    }
-    return 0;
-  }
-  console.log(uploadCmd.readyCount(eligible.length));
-  console.log("");
-  if (!await confirm(uploadCmd.confirmUpload)) {
-    console.log(uploadCmd.cancelled);
-    return 0;
-  }
-  console.log("");
-  let succeeded = 0;
-  let failed = 0;
-  for (const session of eligible) {
-    process.stdout.write(`${uploadCmd.uploading(formatSessionId(session.sessionId))} `);
-    const result = await uploadSessionWithAgents(cwd, session.sessionId);
-    if (result.success) {
-      if (result.agentCount > 0) {
-        console.log(colors.green(`${uploadCmd.done} (+${result.agentCount} agents)`));
-      } else {
-        console.log(colors.green(uploadCmd.done));
-      }
-      succeeded++;
-    } else {
-      console.log(colors.red(uploadCmd.failed(result.error || "Unknown error")));
-      failed++;
-    }
-  }
-  console.log("");
-  if (succeeded > 0) {
-    printSuccess(uploadCmd.uploadedCount(succeeded));
-  }
-  if (failed > 0) {
-    printError(uploadCmd.failedCount(failed));
-  }
-  return failed > 0 ? 1 : 0;
-}
 async function upload() {
-  const cwd = process.env.CWD || process.cwd();
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) {
-    printError(uploadCmd.notAuthenticated);
-    return 1;
-  }
   const args = process.argv.slice(3);
   let sessionId = null;
   let delaySeconds = 0;
@@ -19223,10 +19228,17 @@ async function upload() {
       sessionId = arg;
     }
   }
-  if (sessionId) {
-    return await uploadSingleSession(cwd, sessionId, delaySeconds);
+  if (!sessionId) {
+    console.log(usage.upload());
+    return 1;
   }
-  return await interactiveUpload(cwd);
+  const cwd = process.env.CWD || process.cwd();
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) {
+    printError(uploadCmd.notAuthenticated);
+    return 1;
+  }
+  return await uploadSingleSession(cwd, sessionId, delaySeconds);
 }
 
 // cli/commands/heartbeat.ts
@@ -19286,7 +19298,7 @@ async function main() {
     return;
   }
   if (!(command in COMMANDS)) {
-    printError(errors3.unknownCommand(command));
+    printError(errors.unknownCommand(command));
     console.log("");
     printUsage4();
     process.exit(1);
