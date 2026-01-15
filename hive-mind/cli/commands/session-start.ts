@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { hasAlias, updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
@@ -168,28 +170,44 @@ async function sendHeartbeats(cwd: string, authenticated: boolean): Promise<void
   }
 
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const project = getCanonicalProjectName(cwd);
 
-  for (const file of jsonlFiles) {
-    const meta = await readExtractedMeta(join(sessionsDir, file));
-    if (!meta) continue;
+  await Promise.all(
+    jsonlFiles.map(async (file) => {
+      const meta = await readExtractedMeta(join(sessionsDir, file));
+      if (!meta) return;
 
-    await heartbeatSession({
-      sessionId: meta.sessionId,
-      checkoutId: meta.checkoutId,
-      project: getCanonicalProjectName(cwd),
-      lineCount: meta.messageCount,
-      parentSessionId: meta.parentSessionId,
-    });
-  }
+      await heartbeatSession({
+        sessionId: meta.sessionId,
+        checkoutId: meta.checkoutId,
+        project,
+        lineCount: meta.messageCount,
+        parentSessionId: meta.parentSessionId,
+      });
+    })
+  );
+}
+
+/** Find bun executable - check standard install locations first since hooks
+ * run in non-interactive shells that don't have ~/.bun/bin in PATH */
+function getBunPath(): string {
+  const bunInstall = process.env.BUN_INSTALL;
+  const customPath = bunInstall ? join(bunInstall, "bin", "bun") : null;
+  const standardPath = join(homedir(), ".bun", "bin", "bun");
+
+  if (customPath && existsSync(customPath)) return customPath;
+  if (existsSync(standardPath)) return standardPath;
+  return "bun";
 }
 
 function scheduleAutoUpload(sessionId: string): boolean {
   const cliPath = getCliPath();
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+  const bunPath = getBunPath();
 
   try {
     const child = spawn(
-      "bun",
+      bunPath,
       [cliPath, "upload", sessionId, "--delay", String(delaySeconds)],
       {
         detached: true,

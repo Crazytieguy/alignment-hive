@@ -17531,8 +17531,10 @@ async function read() {
 }
 
 // cli/commands/session-start.ts
+import { existsSync } from "fs";
 import { readdir as readdir8 } from "fs/promises";
 import { dirname as dirname2, join as join9 } from "path";
+import { homedir as homedir4 } from "os";
 import { spawn } from "child_process";
 
 // cli/lib/alias.ts
@@ -18763,24 +18765,36 @@ async function sendHeartbeats(cwd, authenticated) {
     return;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  for (const file2 of jsonlFiles) {
+  const project = getCanonicalProjectName(cwd);
+  await Promise.all(jsonlFiles.map(async (file2) => {
     const meta3 = await readExtractedMeta(join9(sessionsDir, file2));
     if (!meta3)
-      continue;
+      return;
     await heartbeatSession({
       sessionId: meta3.sessionId,
       checkoutId: meta3.checkoutId,
-      project: getCanonicalProjectName(cwd),
+      project,
       lineCount: meta3.messageCount,
       parentSessionId: meta3.parentSessionId
     });
-  }
+  }));
+}
+function getBunPath() {
+  const bunInstall = process.env.BUN_INSTALL;
+  const customPath = bunInstall ? join9(bunInstall, "bin", "bun") : null;
+  const standardPath = join9(homedir4(), ".bun", "bin", "bun");
+  if (customPath && existsSync(customPath))
+    return customPath;
+  if (existsSync(standardPath))
+    return standardPath;
+  return "bun";
 }
 function scheduleAutoUpload(sessionId) {
   const cliPath = getCliPath();
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+  const bunPath = getBunPath();
   try {
-    const child = spawn("bun", [cliPath, "upload", sessionId, "--delay", String(delaySeconds)], {
+    const child = spawn(bunPath, [cliPath, "upload", sessionId, "--delay", String(delaySeconds)], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env, CWD: process.env.CWD || process.cwd() }
