@@ -1,7 +1,7 @@
 ---
 name: retrieval
 description: Retrieval instructions for searching session history. Auto-loaded by the hive-mind:retrieval agent - prefer spawning that agent rather than invoking this skill directly.
-allowed-tools: Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git:*)
+allowed-tools: Bash(command -v hive-mind:*), Bash(printf:*), Bash(hive-mind:*), Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git:*)
 ---
 
 Approach this as memory archaeology: excavate layers of project history to uncover relevant artifacts.
@@ -35,16 +35,16 @@ Use Bash to run CLI commands and git. Cross-reference between them—commits and
 
 ### CLI Commands
 
-Run commands via: `bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>`
+!`command -v hive-mind >/dev/null 2>&1 && printf 'Run commands via: \x60hive-mind <command>\x60\n' || printf 'Run commands via: \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60\n'`
 
-Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help`:
+!`command -v hive-mind >/dev/null 2>&1 && printf 'Output for \x60hive-mind grep --help\x60:\n' || printf 'Output for \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help\x60:\n'`
 ```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help`
+!`command -v hive-mind >/dev/null 2>&1 && hive-mind grep --help || bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help`
 ```
 
-Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help`:
+!`command -v hive-mind >/dev/null 2>&1 && printf 'Output for \x60hive-mind read --help\x60:\n' || printf 'Output for \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help\x60:\n'`
 ```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help`
+!`command -v hive-mind >/dev/null 2>&1 && hive-mind read --help || bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help`
 ```
 
 ## Project History
@@ -54,9 +54,9 @@ Output for `git log --oneline`:
 !`git log --oneline 2>/dev/null || echo "(no git history available)"`
 ```
 
-Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js index`:
+!`command -v hive-mind >/dev/null 2>&1 && printf 'Output for \x60hive-mind index\x60:\n' || printf 'Output for \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js index\x60:\n'`
 ```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs`
+!`command -v hive-mind >/dev/null 2>&1 && hive-mind index --escape-file-refs || bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs`
 ```
 
 ## Output Format
