@@ -381,7 +381,17 @@ Environment variables configured in Vercel dashboard:
 - [Convex HTTP Actions](https://docs.convex.dev/functions/http-actions)
 - [Fly.io Machines API](https://fly.io/docs/machines/api/)
 
+## Future Optimization Ideas
+
+### Incremental extraction
+Currently we read and parse the entire raw session file when extraction is needed. For large sessions (100MB+), this takes 1+ seconds. Could track extraction progress in metadata and only process new entries since last extraction.
+
+### Multi-hook extraction
+Currently extraction only runs in SessionStart hook. Running it in other hooks (Stop, compact) would spread the work and reduce the burst of extraction on session start.
+
+### Background parsing with error reporting
+Move parsing entirely to background process. Store schema errors somewhere (local file or server) for later retrieval instead of blocking on parse-only check.
+
 ## Known Issues / TODOs
 
-### Extraction count bug
-Running `session-start` repeatedly shows "Extracted N sessions" even when no new Claude Code sessions occurred. Need to investigate why `needsExtraction` is returning true for sessions that haven't changed.
+None currently tracked.
