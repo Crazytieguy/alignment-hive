@@ -7,9 +7,7 @@ import { formatSession } from "../lib/format";
 import { parseKnownEntry } from "../lib/schemas";
 import type { KnownEntry } from "../lib/schemas";
 
-// Tests run from hive-mind/, but sessions are at repo root
-const repoRoot = dirname(dirname(dirname(import.meta.dir)));
-const sessionsDir = join(repoRoot, ".claude", "hive-mind", "sessions");
+const fixturesDir = join(dirname(import.meta.dir), "lib", "fixtures");
 const snapshotsDir = join(import.meta.dir, "__snapshots__");
 
 const TEST_SESSIONS = [
@@ -24,11 +22,11 @@ const TEST_SESSIONS = [
 ];
 
 async function loadSessionEntries(sessionPrefix: string): Promise<Array<KnownEntry>> {
-  const files = await readdir(sessionsDir);
+  const files = await readdir(fixturesDir);
   const match = files.find(f => f.startsWith(sessionPrefix) && f.endsWith(".jsonl"));
   if (!match) throw new Error(`No session matching ${sessionPrefix}`);
 
-  const content = await readFile(join(sessionsDir, match), "utf-8");
+  const content = await readFile(join(fixturesDir, match), "utf-8");
   const lines = Array.from(parseJsonl(content));
   const rawEntries = lines.slice(1); // Skip metadata
 
