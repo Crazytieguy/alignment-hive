@@ -21,7 +21,12 @@ This is a **bun monorepo**:
 
 ## Plugin Versioning
 
-When updating plugin content (skills, commands, hooks, etc.), you must bump the version in `plugin.json` for users to receive the update. The auto-update system compares installed versions with marketplace versions - without a version bump, changes won't propagate to users.
+When updating plugin content (skills, commands, hooks, etc.), you must bump the version in the plugin's `plugin.json` for users to receive the update. The auto-update system compares installed versions with marketplace versions - without a version bump, changes won't propagate to users.
+
+Plugin locations:
+- `plugins/hive-mind/.claude-plugin/plugin.json`
+- `plugins/mats/.claude-plugin/plugin.json`
+- `plugins/llms-fetch-mcp/.claude-plugin/plugin.json`
 
 **Auto-expanding bash commands fail hard.** If `!`command`` returns non-zero, the entire skill/agent/command fails to load. Use fallbacks like `command 2>/dev/null || echo "fallback"`.
 
