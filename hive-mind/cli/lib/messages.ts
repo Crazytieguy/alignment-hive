@@ -233,9 +233,9 @@ export const usage = {
 
   upload: (): string => {
     return [
-      'Usage: upload <session-id>',
+      'Usage: upload <session-id>... [--delay N]',
       '',
-      'Upload a session to the shared knowledge base.',
+      'Upload one or more sessions to the shared knowledge base.',
       'Use `index --pending` to see upload eligibility status.',
     ].join('\n');
   },

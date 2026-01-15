@@ -167,7 +167,7 @@ async function uploadSingleSession(
 
 export async function upload(): Promise<number> {
   const args = process.argv.slice(3);
-  let sessionId: string | null = null;
+  const sessionIds: Array<string> = [];
   let delaySeconds = 0;
 
   for (let i = 0; i < args.length; i++) {
@@ -176,11 +176,11 @@ export async function upload(): Promise<number> {
       delaySeconds = parseInt(args[i + 1], 10);
       i++;
     } else if (!arg.startsWith('-')) {
-      sessionId = arg;
+      sessionIds.push(arg);
     }
   }
 
-  if (!sessionId) {
+  if (sessionIds.length === 0) {
     console.log(usage.upload());
     return 1;
   }
@@ -193,5 +193,10 @@ export async function upload(): Promise<number> {
     return 1;
   }
 
-  return await uploadSingleSession(cwd, sessionId, delaySeconds);
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    const result = await uploadSingleSession(cwd, sessionId, delaySeconds);
+    if (result !== 0) failures++;
+  }
+  return failures > 0 ? 1 : 0;
 }

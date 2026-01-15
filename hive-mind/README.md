@@ -18,6 +18,10 @@ Both must pass before committing.
 
 Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.
 
+## User-Facing Messages
+
+All user-facing strings (CLI output, error messages, help text) should be defined in `cli/lib/messages.ts`. This centralizes text for consistency and potential i18n.
+
 ## Re-extracting Sessions
 
 To re-extract all sessions (e.g., after schema changes):

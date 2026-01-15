@@ -327,9 +327,9 @@ var usage = {
   },
   upload: () => {
     return [
-      "Usage: upload <session-id>",
+      "Usage: upload <session-id>... [--delay N]",
       "",
-      "Upload a session to the shared knowledge base.",
+      "Upload one or more sessions to the shared knowledge base.",
       "Use `index --pending` to see upload eligibility status."
     ].join(`
 `);
@@ -15218,19 +15218,24 @@ async function exclude() {
 // cli/commands/extract.ts
 async function extract() {
   const cwd = process.env.CWD || process.cwd();
-  const sessionId = process.argv[3];
-  if (!sessionId) {
+  const sessionIds = process.argv.slice(3);
+  if (sessionIds.length === 0) {
     return 1;
   }
-  try {
-    const success2 = await extractSingleSession(cwd, sessionId);
-    return success2 ? 0 : 1;
-  } catch (error48) {
-    if (process.env.DEBUG) {
-      console.error(`[extract] ${error48 instanceof Error ? error48.message : String(error48)}`);
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    try {
+      const success2 = await extractSingleSession(cwd, sessionId);
+      if (!success2)
+        failures++;
+    } catch (error48) {
+      if (process.env.DEBUG) {
+        console.error(`[extract] ${error48 instanceof Error ? error48.message : String(error48)}`);
+      }
+      failures++;
     }
-    return 1;
   }
+  return failures > 0 ? 1 : 0;
 }
 
 // cli/commands/grep.ts
@@ -18806,9 +18811,7 @@ async function sessionStart() {
       messages.push(hook.extracted(newNonAgentSessions.length));
       newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
     }
-    for (const session of sessionsToExtract) {
-      scheduleExtraction(session.sessionId);
-    }
+    scheduleExtractions(sessionsToExtract.map((s) => s.sessionId));
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
       const allErrors = schemaErrors.flatMap((s) => s.errors);
@@ -18841,7 +18844,8 @@ async function sessionStart() {
         messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
       }
       const eligible = eligibilityResults.filter((s) => s.eligible);
-      const uploadCount = eligible.filter((s) => scheduleAutoUpload(s.sessionId)).length;
+      const eligibleIds = eligible.map((s) => s.sessionId);
+      const uploadCount = scheduleAutoUploads(eligibleIds) ? eligibleIds.length : 0;
       if (uploadCount > 0) {
         messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
       }
@@ -18855,9 +18859,7 @@ async function sessionStart() {
 `));
   }
   if (status.authenticated && newSessionIds.length > 0) {
-    for (const sessionId of newSessionIds) {
-      scheduleHeartbeat(sessionId);
-    }
+    scheduleHeartbeats(newSessionIds);
   }
   process.exit(0);
 }
@@ -18884,15 +18886,21 @@ function spawnBackground(args) {
     return false;
   }
 }
-function scheduleExtraction(sessionId) {
-  return spawnBackground(["extract", sessionId]);
+function scheduleExtractions(sessionIds) {
+  if (sessionIds.length === 0)
+    return true;
+  return spawnBackground(["extract", ...sessionIds]);
 }
-function scheduleHeartbeat(sessionId) {
-  return spawnBackground(["heartbeat", sessionId]);
+function scheduleHeartbeats(sessionIds) {
+  if (sessionIds.length === 0)
+    return true;
+  return spawnBackground(["heartbeat", ...sessionIds]);
 }
-function scheduleAutoUpload(sessionId) {
+function scheduleAutoUploads(sessionIds) {
+  if (sessionIds.length === 0)
+    return true;
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  return spawnBackground(["upload", sessionId, "--delay", String(delaySeconds)]);
+  return spawnBackground(["upload", "--delay", String(delaySeconds), ...sessionIds]);
 }
 
 // cli/commands/login.ts
@@ -19217,7 +19225,7 @@ async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
 }
 async function upload() {
   const args = process.argv.slice(3);
-  let sessionId = null;
+  const sessionIds = [];
   let delaySeconds = 0;
   for (let i2 = 0;i2 < args.length; i2++) {
     const arg = args[i2];
@@ -19225,10 +19233,10 @@ async function upload() {
       delaySeconds = parseInt(args[i2 + 1], 10);
       i2++;
     } else if (!arg.startsWith("-")) {
-      sessionId = arg;
+      sessionIds.push(arg);
     }
   }
-  if (!sessionId) {
+  if (sessionIds.length === 0) {
     console.log(usage.upload());
     return 1;
   }
@@ -19238,38 +19246,52 @@ async function upload() {
     printError(uploadCmd.notAuthenticated);
     return 1;
   }
-  return await uploadSingleSession(cwd, sessionId, delaySeconds);
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    const result = await uploadSingleSession(cwd, sessionId, delaySeconds);
+    if (result !== 0)
+      failures++;
+  }
+  return failures > 0 ? 1 : 0;
 }
 
 // cli/commands/heartbeat.ts
 import { join as join11 } from "path";
 async function heartbeat() {
   const cwd = process.env.CWD || process.cwd();
-  const sessionId = process.argv[3];
-  if (!sessionId) {
+  const sessionIds = process.argv.slice(3);
+  if (sessionIds.length === 0) {
+    return 1;
+  }
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) {
     return 1;
   }
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const meta3 = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
-  if (!meta3) {
-    return 1;
-  }
   const project = getCanonicalProjectName(cwd);
-  try {
-    await heartbeatSession({
-      sessionId: meta3.sessionId,
-      checkoutId: meta3.checkoutId,
-      project,
-      lineCount: meta3.messageCount,
-      parentSessionId: meta3.parentSessionId
-    });
-    return 0;
-  } catch (error48) {
-    if (process.env.DEBUG) {
-      console.error(`[heartbeat] ${error48 instanceof Error ? error48.message : String(error48)}`);
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    const meta3 = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
+    if (!meta3) {
+      failures++;
+      continue;
     }
-    return 1;
+    try {
+      await heartbeatSession({
+        sessionId: meta3.sessionId,
+        checkoutId: meta3.checkoutId,
+        project,
+        lineCount: meta3.messageCount,
+        parentSessionId: meta3.parentSessionId
+      });
+    } catch (error48) {
+      if (process.env.DEBUG) {
+        console.error(`[heartbeat] ${error48 instanceof Error ? error48.message : String(error48)}`);
+      }
+      failures++;
+    }
   }
+  return failures > 0 ? 1 : 0;
 }
 
 // cli/cli.ts

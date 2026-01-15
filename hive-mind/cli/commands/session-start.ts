@@ -98,9 +98,7 @@ export async function sessionStart(): Promise<number> {
       newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
     }
 
-    for (const session of sessionsToExtract) {
-      scheduleExtraction(session.sessionId);
-    }
+    scheduleExtractions(sessionsToExtract.map((s) => s.sessionId));
 
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
@@ -143,7 +141,8 @@ export async function sessionStart(): Promise<number> {
       }
 
       const eligible = eligibilityResults.filter((s) => s.eligible);
-      const uploadCount = eligible.filter((s) => scheduleAutoUpload(s.sessionId)).length;
+      const eligibleIds = eligible.map((s) => s.sessionId);
+      const uploadCount = scheduleAutoUploads(eligibleIds) ? eligibleIds.length : 0;
       if (uploadCount > 0) {
         messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
       }
@@ -158,9 +157,7 @@ export async function sessionStart(): Promise<number> {
   }
 
   if (status.authenticated && newSessionIds.length > 0) {
-    for (const sessionId of newSessionIds) {
-      scheduleHeartbeat(sessionId);
-    }
+    scheduleHeartbeats(newSessionIds);
   }
   process.exit(0);
 }
@@ -191,15 +188,18 @@ function spawnBackground(args: Array<string>): boolean {
   }
 }
 
-function scheduleExtraction(sessionId: string): boolean {
-  return spawnBackground(["extract", sessionId]);
+function scheduleExtractions(sessionIds: Array<string>): boolean {
+  if (sessionIds.length === 0) return true;
+  return spawnBackground(["extract", ...sessionIds]);
 }
 
-function scheduleHeartbeat(sessionId: string): boolean {
-  return spawnBackground(["heartbeat", sessionId]);
+function scheduleHeartbeats(sessionIds: Array<string>): boolean {
+  if (sessionIds.length === 0) return true;
+  return spawnBackground(["heartbeat", ...sessionIds]);
 }
 
-function scheduleAutoUpload(sessionId: string): boolean {
+function scheduleAutoUploads(sessionIds: Array<string>): boolean {
+  if (sessionIds.length === 0) return true;
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  return spawnBackground(["upload", sessionId, "--delay", String(delaySeconds)]);
+  return spawnBackground(["upload", "--delay", String(delaySeconds), ...sessionIds]);
 }
