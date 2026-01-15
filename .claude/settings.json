@@ -18,7 +18,7 @@
       "Bash(bun run lint:*)",
       "Bash(bun run lint:fix:*)",
       "Bash(bun run dev)",
-      "Bash(bun run cli:build)",
+      "Bash(bun run build)",
       "Bash(bun hive-mind/cli/cli.ts:*)",
       "mcp__convex"
     ]

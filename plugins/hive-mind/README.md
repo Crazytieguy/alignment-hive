@@ -17,7 +17,7 @@ bun install          # Install dependencies
 bun run dev          # Run web app + Convex dev server
 bun run lint         # Typecheck + ESLint
 bun run test         # Run tests
-bun run cli:build    # Bundle CLI to plugins/hive-mind/cli.js
+bun run build        # Bundle CLI to plugins/hive-mind/cli.js
 ```
 
 To run CLI commands during development (from project root):

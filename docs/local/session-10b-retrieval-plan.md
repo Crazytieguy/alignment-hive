@@ -21,7 +21,7 @@ The CLI is invoked via Bun. During development:
 bun hive-mind/cli/cli.ts <command>
 ```
 
-In production (after `bun run cli:build`):
+In production (after `bun run build`):
 ```bash
 bun ~/.claude/plugins/hive-mind/cli.js <command>
 # Or via CLAUDE_PLUGIN_ROOT:

@@ -34,11 +34,11 @@ jobs:
         run: cd hive-mind && bun run test
 
       - name: Build CLI
-        run: cd hive-mind && bun run cli:build
+        run: cd hive-mind && bun run build
 
       - name: Verify CLI bundle is up to date
         run: |
           if ! git diff --exit-code plugins/hive-mind/cli.js; then
-            echo "::error::CLI bundle is out of date. Run 'cd hive-mind && bun run cli:build' and commit."
+            echo "::error::CLI bundle is out of date. Run 'cd hive-mind && bun run build' and commit."
             exit 1
           fi
