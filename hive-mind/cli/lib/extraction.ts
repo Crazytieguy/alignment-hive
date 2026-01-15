@@ -212,60 +212,102 @@ async function findRawSessions(rawDir: string) {
   return sessions;
 }
 
-async function needsExtraction(rawPath: string, extractedPath: string): Promise<boolean> {
-  try {
-    const [rawStat, extractedStat] = await Promise.all([stat(rawPath), stat(extractedPath)]);
-    return rawStat.mtime > extractedStat.mtime;
-  } catch {
-    return true;
-  }
-}
-
 export interface SessionToExtract {
   sessionId: string;
   rawPath: string;
   agentId?: string;
 }
 
-export interface ExtractionCheckResult {
+export interface SessionCheckResult {
+  /** Sessions that need extraction (new or updated) */
   sessionsToExtract: Array<SessionToExtract>;
+  /** Schema errors found during parsing */
   schemaErrors: Array<{ sessionId: string; errors: Array<string> }>;
+  /** All extracted sessions with their metadata (for eligibility checks) */
+  extractedSessions: Array<{ sessionId: string; meta: HiveMindMeta }>;
 }
 
-/** Check which sessions need extraction (parse-only, no sanitization) */
-export async function checkSessionsForExtraction(cwd: string, transcriptsDir: string): Promise<ExtractionCheckResult> {
+/** Check all sessions: which need extraction and provide metadata for eligibility */
+export async function checkAllSessions(cwd: string, transcriptsDir: string): Promise<SessionCheckResult> {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const rawSessions = await findRawSessions(transcriptsDir);
+
+  // Load raw sessions and extracted metadata in parallel
+  const [rawSessions, extractedMetaMap] = await Promise.all([
+    findRawSessions(transcriptsDir),
+    loadExtractedMetadata(extractedDir),
+  ]);
 
   const sessionsToExtract: Array<SessionToExtract> = [];
   const schemaErrors: Array<{ sessionId: string; errors: Array<string> }> = [];
 
+  // Check each raw session against extracted metadata
   await Promise.all(
     rawSessions.map(async (session) => {
       const { path: rawPath, agentId } = session;
-      const extractedPath = join(extractedDir, basename(rawPath));
+      const sessionId = basename(rawPath, ".jsonl");
+      const existingMeta = extractedMetaMap.get(sessionId);
 
-      if (!(await needsExtraction(rawPath, extractedPath))) {
-        return;
+      // Check if extraction is needed by comparing mtime with stored rawMtime
+      let needsExtract = false;
+      if (!existingMeta) {
+        needsExtract = true;
+      } else {
+        try {
+          const rawStat = await stat(rawPath);
+          const storedMtime = new Date(existingMeta.rawMtime).getTime();
+          needsExtract = rawStat.mtime.getTime() > storedMtime;
+        } catch {
+          needsExtract = true;
+        }
       }
 
-      const sessionId = basename(rawPath, ".jsonl");
-
-      try {
-        const parseResult = await parseSessionForErrors(rawPath);
-        if (parseResult.schemaErrors.length > 0) {
-          schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
-        }
-        if (parseResult.hasContent) {
+      if (needsExtract) {
+        try {
+          const parseResult = await parseSessionForErrors(rawPath);
+          if (parseResult.schemaErrors.length > 0) {
+            schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
+          }
+          if (parseResult.hasContent) {
+            sessionsToExtract.push({ sessionId, rawPath, agentId });
+          }
+        } catch {
           sessionsToExtract.push({ sessionId, rawPath, agentId });
         }
-      } catch {
-        sessionsToExtract.push({ sessionId, rawPath, agentId });
       }
     })
   );
 
-  return { sessionsToExtract, schemaErrors };
+  const extractedSessions = [...extractedMetaMap.entries()].map(([sessionId, meta]) => ({
+    sessionId,
+    meta,
+  }));
+
+  return { sessionsToExtract, schemaErrors, extractedSessions };
+}
+
+/** Load all extracted session metadata into a map */
+async function loadExtractedMetadata(extractedDir: string): Promise<Map<string, HiveMindMeta>> {
+  const metaMap = new Map<string, HiveMindMeta>();
+
+  let files: Array<string>;
+  try {
+    files = await readdir(extractedDir);
+  } catch {
+    return metaMap;
+  }
+
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+
+  await Promise.all(
+    jsonlFiles.map(async (file) => {
+      const meta = await readExtractedMeta(join(extractedDir, file));
+      if (meta) {
+        metaMap.set(meta.sessionId, meta);
+      }
+    })
+  );
+
+  return metaMap;
 }
 
 /** Full extraction for a single session (used by background process) */

@@ -14584,39 +14584,66 @@ async function findRawSessions(rawDir) {
   }
   return sessions;
 }
-async function needsExtraction(rawPath, extractedPath) {
-  try {
-    const [rawStat, extractedStat] = await Promise.all([stat(rawPath), stat(extractedPath)]);
-    return rawStat.mtime > extractedStat.mtime;
-  } catch {
-    return true;
-  }
-}
-async function checkSessionsForExtraction(cwd, transcriptsDir) {
+async function checkAllSessions(cwd, transcriptsDir) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const rawSessions = await findRawSessions(transcriptsDir);
+  const [rawSessions, extractedMetaMap] = await Promise.all([
+    findRawSessions(transcriptsDir),
+    loadExtractedMetadata(extractedDir)
+  ]);
   const sessionsToExtract = [];
   const schemaErrors = [];
   await Promise.all(rawSessions.map(async (session) => {
     const { path: rawPath, agentId } = session;
-    const extractedPath = join2(extractedDir, basename2(rawPath));
-    if (!await needsExtraction(rawPath, extractedPath)) {
-      return;
-    }
     const sessionId = basename2(rawPath, ".jsonl");
-    try {
-      const parseResult = await parseSessionForErrors(rawPath);
-      if (parseResult.schemaErrors.length > 0) {
-        schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
+    const existingMeta = extractedMetaMap.get(sessionId);
+    let needsExtract = false;
+    if (!existingMeta) {
+      needsExtract = true;
+    } else {
+      try {
+        const rawStat = await stat(rawPath);
+        const storedMtime = new Date(existingMeta.rawMtime).getTime();
+        needsExtract = rawStat.mtime.getTime() > storedMtime;
+      } catch {
+        needsExtract = true;
       }
-      if (parseResult.hasContent) {
+    }
+    if (needsExtract) {
+      try {
+        const parseResult = await parseSessionForErrors(rawPath);
+        if (parseResult.schemaErrors.length > 0) {
+          schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
+        }
+        if (parseResult.hasContent) {
+          sessionsToExtract.push({ sessionId, rawPath, agentId });
+        }
+      } catch {
         sessionsToExtract.push({ sessionId, rawPath, agentId });
       }
-    } catch {
-      sessionsToExtract.push({ sessionId, rawPath, agentId });
     }
   }));
-  return { sessionsToExtract, schemaErrors };
+  const extractedSessions = [...extractedMetaMap.entries()].map(([sessionId, meta3]) => ({
+    sessionId,
+    meta: meta3
+  }));
+  return { sessionsToExtract, schemaErrors, extractedSessions };
+}
+async function loadExtractedMetadata(extractedDir) {
+  const metaMap = new Map;
+  let files;
+  try {
+    files = await readdir(extractedDir);
+  } catch {
+    return metaMap;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  await Promise.all(jsonlFiles.map(async (file2) => {
+    const meta3 = await readExtractedMeta(join2(extractedDir, file2));
+    if (meta3) {
+      metaMap.set(meta3.sessionId, meta3);
+    }
+  }));
+  return metaMap;
 }
 async function extractSingleSession(cwd, sessionId) {
   const extractedDir = getHiveMindSessionsDir(cwd);
@@ -14985,21 +15012,16 @@ async function lookupSession(cwd, sessionIdPrefix) {
 }
 
 // cli/commands/exclude.ts
-async function excludeSession(sessionPath, meta3) {
+async function excludeSession(sessionPath) {
   try {
-    await extractSession({
-      rawPath: meta3.rawPath,
-      outputPath: sessionPath,
-      agentId: meta3.agentId
-    });
     const content = await readFile3(sessionPath, "utf-8");
     const lines = content.split(`
 `);
     if (lines.length === 0)
       return false;
-    const freshMeta = JSON.parse(lines[0]);
-    freshMeta.excluded = true;
-    lines[0] = JSON.stringify(freshMeta);
+    const meta3 = JSON.parse(lines[0]);
+    meta3.excluded = true;
+    lines[0] = JSON.stringify(meta3);
     await writeFile3(sessionPath, lines.join(`
 `));
     return true;
@@ -15046,7 +15068,7 @@ async function excludeAll(cwd) {
     if (!meta3 || meta3.excluded || meta3.agentId)
       continue;
     const sessionId = file2.replace(".jsonl", "");
-    if (await excludeSession(sessionPath, meta3)) {
+    if (await excludeSession(sessionPath)) {
       console.log(`  ${colors.yellow("\u2717")} ${formatSessionId(sessionId)} excluded`);
       succeeded++;
     } else {
@@ -15086,13 +15108,12 @@ async function excludeOne(cwd, sessionIdPrefix) {
     printInfo(excludeCmd.alreadyExcluded(formatSessionId(meta3.sessionId)));
     return 0;
   }
-  if (await excludeSession(sessionPath, meta3)) {
+  if (await excludeSession(sessionPath)) {
     printSuccess(excludeCmd.excluded(formatSessionId(meta3.sessionId)));
     return 0;
-  } else {
-    printError(excludeCmd.failedToExclude(formatSessionId(meta3.sessionId)));
-    return 1;
   }
+  printError(excludeCmd.failedToExclude(formatSessionId(meta3.sessionId)));
+  return 1;
 }
 async function exclude() {
   const cwd = process.env.CWD || process.cwd();
@@ -18696,21 +18717,23 @@ async function sessionStart() {
     transcriptsDir = saved;
   }
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
-  const [extractionCheck, status] = await Promise.all([
-    checkSessionsForExtraction(cwd, transcriptsDir).catch((error48) => ({
+  const [sessionCheck, status] = await Promise.all([
+    checkAllSessions(cwd, transcriptsDir).catch((error48) => ({
       error: error48 instanceof Error ? error48.message : String(error48)
     })),
     checkAuthStatus(true)
   ]);
-  let extractedSessionIds = [];
-  if ("error" in extractionCheck) {
-    messages.push(hook.extractionFailed(extractionCheck.error));
+  let newSessionIds = [];
+  let extractedSessions = [];
+  if ("error" in sessionCheck) {
+    messages.push(hook.extractionFailed(sessionCheck.error));
   } else {
-    const { sessionsToExtract, schemaErrors } = extractionCheck;
-    const nonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
-    if (nonAgentSessions.length > 0) {
-      messages.push(hook.extracted(nonAgentSessions.length));
-      extractedSessionIds = nonAgentSessions.map((s) => s.sessionId);
+    const { sessionsToExtract, schemaErrors } = sessionCheck;
+    extractedSessions = sessionCheck.extractedSessions;
+    const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
+    if (newNonAgentSessions.length > 0) {
+      messages.push(hook.extracted(newNonAgentSessions.length));
+      newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
     }
     for (const session of sessionsToExtract) {
       scheduleExtraction(session.sessionId);
@@ -18736,15 +18759,17 @@ async function sessionStart() {
   } else if (status.user) {
     messages.push(hook.loggedIn(getUserDisplayName(status.user)));
   }
-  if (status.authenticated) {
+  if (status.authenticated && extractedSessions.length > 0) {
     try {
-      const allSessions = await getAllSessionsEligibility(cwd);
-      const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
-      const eligible = allSessions.filter((s) => s.eligible);
+      const authIssuedAt = await getAuthIssuedAt();
+      const nonAgentSessions = extractedSessions.filter((s) => !s.meta.agentId);
+      const eligibilityResults = nonAgentSessions.map((s) => checkSessionEligibility(s.meta, authIssuedAt));
+      const pending = eligibilityResults.filter((s) => !s.eligible && !s.excluded);
       if (pending.length > 1) {
         const earliestUploadAt = pending.map((s) => s.eligibleAt).filter((t) => t !== null).sort((a, b) => a - b)[0] ?? null;
         messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
       }
+      const eligible = eligibilityResults.filter((s) => s.eligible);
       const uploadCount = eligible.filter((s) => scheduleAutoUpload(s.sessionId)).length;
       if (uploadCount > 0) {
         messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
@@ -18758,8 +18783,8 @@ async function sessionStart() {
     hookOutput(formatted.join(`
 `));
   }
-  if (status.authenticated && extractedSessionIds.length > 0) {
-    for (const sessionId of extractedSessionIds) {
+  if (status.authenticated && newSessionIds.length > 0) {
+    for (const sessionId of newSessionIds) {
       scheduleHeartbeat(sessionId);
     }
   }

@@ -1,29 +1,20 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { extractSession, getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction.js';
+import { getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction.js';
 import { excludeCmd } from '../lib/messages.js';
 import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
 import { confirm, formatSessionId, lookupSession } from '../lib/utils.js';
 import type { HiveMindMeta } from '../lib/schemas.js';
 
-async function excludeSession(sessionPath: string, meta: HiveMindMeta): Promise<boolean> {
+async function excludeSession(sessionPath: string): Promise<boolean> {
   try {
-    // Re-extract to ensure we have the latest content before excluding
-    // This is critical for mtime-based extraction checks
-    await extractSession({
-      rawPath: meta.rawPath,
-      outputPath: sessionPath,
-      agentId: meta.agentId,
-    });
-
-    // Read the freshly extracted content and mark as excluded
     const content = await readFile(sessionPath, 'utf-8');
     const lines = content.split('\n');
     if (lines.length === 0) return false;
 
-    const freshMeta = JSON.parse(lines[0]) as HiveMindMeta;
-    freshMeta.excluded = true;
-    lines[0] = JSON.stringify(freshMeta);
+    const meta = JSON.parse(lines[0]) as HiveMindMeta;
+    meta.excluded = true;
+    lines[0] = JSON.stringify(meta);
 
     await writeFile(sessionPath, lines.join('\n'));
     return true;
@@ -79,7 +70,7 @@ async function excludeAll(cwd: string): Promise<number> {
     if (!meta || meta.excluded || meta.agentId) continue;
 
     const sessionId = file.replace('.jsonl', '');
-    if (await excludeSession(sessionPath, meta)) {
+    if (await excludeSession(sessionPath)) {
       console.log(`  ${colors.yellow('✗')} ${formatSessionId(sessionId)} excluded`);
       succeeded++;
     } else {
@@ -128,13 +119,12 @@ async function excludeOne(cwd: string, sessionIdPrefix: string): Promise<number>
     return 0;
   }
 
-  if (await excludeSession(sessionPath, meta)) {
+  if (await excludeSession(sessionPath)) {
     printSuccess(excludeCmd.excluded(formatSessionId(meta.sessionId)));
     return 0;
-  } else {
-    printError(excludeCmd.failedToExclude(formatSessionId(meta.sessionId)));
-    return 1;
   }
+  printError(excludeCmd.failedToExclude(formatSessionId(meta.sessionId)));
+  return 1;
 }
 
 export async function exclude(): Promise<number> {

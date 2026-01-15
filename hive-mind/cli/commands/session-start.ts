@@ -6,10 +6,11 @@ import { updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
 import { getCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
 import { pingCheckout } from "../lib/convex";
-import { checkSessionsForExtraction } from "../lib/extraction";
+import { checkAllSessions } from "../lib/extraction";
 import { hook } from "../lib/messages";
 import { hookOutput } from "../lib/output";
-import { getAllSessionsEligibility } from "../lib/upload-eligibility";
+import { checkSessionEligibility, getAuthIssuedAt } from "../lib/upload-eligibility";
+import type { HiveMindMeta } from "../lib/schemas";
 
 interface HookInput {
   transcriptPath?: string;
@@ -74,24 +75,27 @@ export async function sessionStart(): Promise<number> {
 
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
 
-  // Run extraction check and auth in parallel - extraction check is parse-only (fast)
-  const [extractionCheck, status] = await Promise.all([
-    checkSessionsForExtraction(cwd, transcriptsDir).catch((error) => ({
+  // Run session check and auth in parallel - reads metadata once for both extraction and eligibility
+  const [sessionCheck, status] = await Promise.all([
+    checkAllSessions(cwd, transcriptsDir).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     })),
     checkAuthStatus(true),
   ]);
 
-  let extractedSessionIds: Array<string> = [];
-  if ("error" in extractionCheck) {
-    messages.push(hook.extractionFailed(extractionCheck.error));
-  } else {
-    const { sessionsToExtract, schemaErrors } = extractionCheck;
+  let newSessionIds: Array<string> = [];
+  let extractedSessions: Array<{ sessionId: string; meta: HiveMindMeta }> = [];
 
-    const nonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
-    if (nonAgentSessions.length > 0) {
-      messages.push(hook.extracted(nonAgentSessions.length));
-      extractedSessionIds = nonAgentSessions.map((s) => s.sessionId);
+  if ("error" in sessionCheck) {
+    messages.push(hook.extractionFailed(sessionCheck.error));
+  } else {
+    const { sessionsToExtract, schemaErrors } = sessionCheck;
+    extractedSessions = sessionCheck.extractedSessions;
+
+    const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
+    if (newNonAgentSessions.length > 0) {
+      messages.push(hook.extracted(newNonAgentSessions.length));
+      newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
     }
 
     for (const session of sessionsToExtract) {
@@ -122,12 +126,14 @@ export async function sessionStart(): Promise<number> {
     messages.push(hook.loggedIn(getUserDisplayName(status.user)));
   }
 
-  if (status.authenticated) {
+  // Compute eligibility from already-loaded metadata (no additional file reads)
+  if (status.authenticated && extractedSessions.length > 0) {
     try {
-      const allSessions = await getAllSessionsEligibility(cwd);
-      const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
-      const eligible = allSessions.filter((s) => s.eligible);
+      const authIssuedAt = await getAuthIssuedAt();
+      const nonAgentSessions = extractedSessions.filter((s) => !s.meta.agentId);
+      const eligibilityResults = nonAgentSessions.map((s) => checkSessionEligibility(s.meta, authIssuedAt));
 
+      const pending = eligibilityResults.filter((s) => !s.eligible && !s.excluded);
       if (pending.length > 1) {
         const earliestUploadAt = pending
           .map((s) => s.eligibleAt)
@@ -136,6 +142,7 @@ export async function sessionStart(): Promise<number> {
         messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
       }
 
+      const eligible = eligibilityResults.filter((s) => s.eligible);
       const uploadCount = eligible.filter((s) => scheduleAutoUpload(s.sessionId)).length;
       if (uploadCount > 0) {
         messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
@@ -150,8 +157,8 @@ export async function sessionStart(): Promise<number> {
     hookOutput(formatted.join("\n"));
   }
 
-  if (status.authenticated && extractedSessionIds.length > 0) {
-    for (const sessionId of extractedSessionIds) {
+  if (status.authenticated && newSessionIds.length > 0) {
+    for (const sessionId of newSessionIds) {
       scheduleHeartbeat(sessionId);
     }
   }
