@@ -1,18 +1,10 @@
 import { getShellConfig } from './config';
 
-export function getCliPath(): string {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return '~/.claude/plugins/hive-mind/cli.js';
-}
-
 export function getCliCommand(hasAlias: boolean): string {
   if (hasAlias) {
     return 'hive-mind';
   }
-  return `bun ${getCliPath()}`;
+  return `bun ${process.argv[1]}`;
 }
 
 export const hook = {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { exclude } from "./commands/exclude";
+import { extract } from "./commands/extract";
 import { grep } from "./commands/grep";
 import { index } from "./commands/index";
 import { read } from "./commands/read";
@@ -8,11 +9,13 @@ import { sessionStart } from "./commands/session-start";
 import { login } from "./commands/login";
 import { setupAliasCommand } from "./commands/setup-alias";
 import { upload } from "./commands/upload";
+import { heartbeat } from "./commands/heartbeat";
 import { errors, usage } from "./lib/messages";
 import { printError } from "./lib/output";
 
 const COMMANDS = {
   exclude: { description: "Exclude session from upload", handler: exclude },
+  extract: { description: "Extract session (internal)", handler: extract, hidden: true },
   grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
   read: { description: "Read session entries", handler: read },
@@ -20,15 +23,15 @@ const COMMANDS = {
   "setup-alias": { description: "Add hive-mind command to shell config", handler: setupAliasCommand },
   upload: { description: "Upload eligible sessions", handler: upload },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
+  heartbeat: { description: "Send heartbeat (internal)", handler: heartbeat, hidden: true },
 } as const;
 
 type CommandName = keyof typeof COMMANDS;
 
 function printUsage(): void {
-  const commands = Object.entries(COMMANDS).map(([name, { description }]) => ({
-    name,
-    description,
-  }));
+  const commands = Object.entries(COMMANDS)
+    .filter(([, def]) => !("hidden" in def))
+    .map(([name, { description }]) => ({ name, description }));
   console.log(usage.main(commands));
 }
 

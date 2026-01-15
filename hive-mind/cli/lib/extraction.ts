@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
-import { getCheckoutId } from "./config";
+import { getCheckoutId, loadTranscriptsDir } from "./config";
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from "./sanitize";
 import { HiveMindMetaSchema, parseKnownEntry } from "./schemas";
 import type { HiveMindMeta, KnownEntry } from "./schemas";
@@ -43,14 +43,35 @@ interface ExtractSessionOptions {
   agentId?: string;
 }
 
+interface ParseResult {
+  hasContent: boolean;
+  schemaErrors: Array<string>;
+}
+
+/** Parse session without sanitizing - fast check for errors */
+export async function parseSessionForErrors(rawPath: string): Promise<ParseResult> {
+  const content = await readFile(rawPath, "utf-8");
+  const schemaErrors: Array<string> = [];
+  let hasAssistant = false;
+
+  for (const rawEntry of parseJsonl(content)) {
+    const { entry, error } = transformEntry(rawEntry);
+    if (error) schemaErrors.push(error);
+    if (entry?.type === "assistant") hasAssistant = true;
+  }
+
+  return { hasContent: hasAssistant, schemaErrors };
+}
+
 export async function extractSession(options: ExtractSessionOptions) {
   const { rawPath, outputPath, agentId } = options;
   const hiveMindDir = dirname(dirname(outputPath));
 
-  const [content, rawStat, checkoutId] = await Promise.all([
+  const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
     readFile(rawPath, "utf-8"),
     stat(rawPath),
     getCheckoutId(hiveMindDir),
+    readExtractedMeta(outputPath),
   ]);
 
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
@@ -86,6 +107,8 @@ export async function extractSession(options: ExtractSessionOptions) {
     ...(agentId && { agentId }),
     ...(parentSessionId && { parentSessionId }),
     ...(schemaErrors.length > 0 && { schemaErrors }),
+    // Preserve excluded flag from previous extraction
+    ...(existingMeta?.excluded && { excluded: true }),
   };
 
   resetDetectSecretsStats();
@@ -191,51 +214,76 @@ async function findRawSessions(rawDir: string) {
 
 async function needsExtraction(rawPath: string, extractedPath: string): Promise<boolean> {
   try {
-    const rawStat = await stat(rawPath);
-    const meta = await readExtractedMeta(extractedPath);
-    if (!meta) return true;
-    return rawStat.mtime.toISOString() !== meta.rawMtime;
+    const [rawStat, extractedStat] = await Promise.all([stat(rawPath), stat(extractedPath)]);
+    return rawStat.mtime > extractedStat.mtime;
   } catch {
     return true;
   }
 }
 
-export interface ExtractionResult {
-  extracted: number;
-  failed: number;
+export interface SessionToExtract {
+  sessionId: string;
+  rawPath: string;
+  agentId?: string;
+}
+
+export interface ExtractionCheckResult {
+  sessionsToExtract: Array<SessionToExtract>;
   schemaErrors: Array<{ sessionId: string; errors: Array<string> }>;
 }
 
-export async function extractAllSessions(cwd: string, transcriptsDir: string): Promise<ExtractionResult> {
+/** Check which sessions need extraction (parse-only, no sanitization) */
+export async function checkSessionsForExtraction(cwd: string, transcriptsDir: string): Promise<ExtractionCheckResult> {
   const extractedDir = getHiveMindSessionsDir(cwd);
+  const rawSessions = await findRawSessions(transcriptsDir);
+
+  const sessionsToExtract: Array<SessionToExtract> = [];
+  const schemaErrors: Array<{ sessionId: string; errors: Array<string> }> = [];
+
+  await Promise.all(
+    rawSessions.map(async (session) => {
+      const { path: rawPath, agentId } = session;
+      const extractedPath = join(extractedDir, basename(rawPath));
+
+      if (!(await needsExtraction(rawPath, extractedPath))) {
+        return;
+      }
+
+      const sessionId = basename(rawPath, ".jsonl");
+
+      try {
+        const parseResult = await parseSessionForErrors(rawPath);
+        if (parseResult.schemaErrors.length > 0) {
+          schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
+        }
+        if (parseResult.hasContent) {
+          sessionsToExtract.push({ sessionId, rawPath, agentId });
+        }
+      } catch {
+        sessionsToExtract.push({ sessionId, rawPath, agentId });
+      }
+    })
+  );
+
+  return { sessionsToExtract, schemaErrors };
+}
+
+/** Full extraction for a single session (used by background process) */
+export async function extractSingleSession(cwd: string, sessionId: string): Promise<boolean> {
+  const extractedDir = getHiveMindSessionsDir(cwd);
+  const transcriptsDir = await loadTranscriptsDir(join(cwd, ".claude", "hive-mind"));
+  if (!transcriptsDir) return false;
 
   const rawSessions = await findRawSessions(transcriptsDir);
-  let extracted = 0;
-  let failed = 0;
-  const schemaErrors: ExtractionResult["schemaErrors"] = [];
+  const session = rawSessions.find((s) => basename(s.path, ".jsonl") === sessionId);
+  if (!session) return false;
 
-  for (const session of rawSessions) {
-    const { path: rawPath, agentId } = session;
-    const extractedPath = join(extractedDir, basename(rawPath));
+  const extractedPath = join(extractedDir, basename(session.path));
+  const result = await extractSession({
+    rawPath: session.path,
+    outputPath: extractedPath,
+    agentId: session.agentId,
+  });
 
-    if (await needsExtraction(rawPath, extractedPath)) {
-      try {
-        const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
-        if (result) {
-          if (!agentId) {
-            extracted++;
-          }
-          if (result.schemaErrors.length > 0) {
-            schemaErrors.push({ sessionId: basename(rawPath, ".jsonl"), errors: result.schemaErrors });
-          }
-        }
-      } catch (error) {
-        if (!agentId) {
-          failed++;
-        }
-      }
-    }
-  }
-
-  return { extracted, failed, schemaErrors };
+  return result !== null;
 }

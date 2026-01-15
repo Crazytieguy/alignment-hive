@@ -1,42 +1,34 @@
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
-import { hasAlias, updateAliasIfOutdated } from "../lib/alias";
+import { updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
-import { getCanonicalProjectName, getCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
-import { heartbeatSession, pingCheckout } from "../lib/convex";
-import { extractAllSessions, getHiveMindSessionsDir, readExtractedMeta } from "../lib/extraction";
-import { getCliPath, hook } from "../lib/messages";
+import { getCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
+import { pingCheckout } from "../lib/convex";
+import { checkSessionsForExtraction } from "../lib/extraction";
+import { hook } from "../lib/messages";
 import { hookOutput } from "../lib/output";
-import { getEligibleSessions, getPendingSessions } from "../lib/upload-eligibility";
+import { getAllSessionsEligibility } from "../lib/upload-eligibility";
 
 interface HookInput {
   transcriptPath?: string;
   cwd?: string;
 }
 
-async function readStdinWithTimeout(timeoutMs: number): Promise<string | null> {
+async function readStdin(): Promise<string | null> {
   if (process.stdin.isTTY) return null;
 
   return new Promise((resolve) => {
     let data = "";
-    const timeout = setTimeout(() => {
-      process.stdin.removeAllListeners();
-      resolve(data || null);
-    }, timeoutMs);
-
     process.stdin.setEncoding("utf-8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
     process.stdin.on("end", () => {
-      clearTimeout(timeout);
       resolve(data || null);
     });
     process.stdin.on("error", () => {
-      clearTimeout(timeout);
       resolve(null);
     });
     process.stdin.resume();
@@ -44,7 +36,7 @@ async function readStdinWithTimeout(timeoutMs: number): Promise<string | null> {
 }
 
 async function readHookInput(): Promise<HookInput> {
-  const input = await readStdinWithTimeout(100);
+  const input = await readStdin();
   if (!input) return {};
 
   try {
@@ -82,34 +74,45 @@ export async function sessionStart(): Promise<number> {
 
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
 
-  try {
-    const { extracted, failed, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
-    if (extracted > 0) {
-      messages.push(hook.extracted(extracted));
+  // Run extraction check and auth in parallel - extraction check is parse-only (fast)
+  const [extractionCheck, status] = await Promise.all([
+    checkSessionsForExtraction(cwd, transcriptsDir).catch((error) => ({
+      error: error instanceof Error ? error.message : String(error),
+    })),
+    checkAuthStatus(true),
+  ]);
+
+  let extractedSessionIds: Array<string> = [];
+  if ("error" in extractionCheck) {
+    messages.push(hook.extractionFailed(extractionCheck.error));
+  } else {
+    const { sessionsToExtract, schemaErrors } = extractionCheck;
+
+    const nonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
+    if (nonAgentSessions.length > 0) {
+      messages.push(hook.extracted(nonAgentSessions.length));
+      extractedSessionIds = nonAgentSessions.map((s) => s.sessionId);
     }
-    if (failed > 0) {
-      messages.push(hook.extractionsFailed(failed));
+
+    for (const session of sessionsToExtract) {
+      scheduleExtraction(session.sessionId);
     }
+
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
       const allErrors = schemaErrors.flatMap((s) => s.errors);
       messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
     }
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    messages.push(hook.extractionFailed(errorMsg));
   }
-
-  const status = await checkAuthStatus(true);
 
   let userHasAlias = false;
   if (status.authenticated) {
     try {
-      const aliasUpdated = await updateAliasIfOutdated();
-      if (aliasUpdated) {
+      const aliasResult = await updateAliasIfOutdated();
+      if (aliasResult.updated) {
         messages.push(hook.aliasUpdated());
       }
-      userHasAlias = await hasAlias();
+      userHasAlias = aliasResult.hasAlias;
     } catch {}
   }
 
@@ -121,7 +124,10 @@ export async function sessionStart(): Promise<number> {
 
   if (status.authenticated) {
     try {
-      const pending = await getPendingSessions(cwd);
+      const allSessions = await getAllSessionsEligibility(cwd);
+      const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
+      const eligible = allSessions.filter((s) => s.eligible);
+
       if (pending.length > 1) {
         const earliestUploadAt = pending
           .map((s) => s.eligibleAt)
@@ -130,17 +136,9 @@ export async function sessionStart(): Promise<number> {
         messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
       }
 
-      const eligible = await getEligibleSessions(cwd);
-      if (eligible.length > 0) {
-        let uploadCount = 0;
-        for (const session of eligible) {
-          if (scheduleAutoUpload(session.sessionId)) {
-            uploadCount++;
-          }
-        }
-        if (uploadCount > 0) {
-          messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
-        }
+      const uploadCount = eligible.filter((s) => scheduleAutoUpload(s.sessionId)).length;
+      if (uploadCount > 0) {
+        messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
       }
     } catch {
       messages.push(hook.sessionCheckFailed());
@@ -152,40 +150,12 @@ export async function sessionStart(): Promise<number> {
     hookOutput(formatted.join("\n"));
   }
 
-  sendHeartbeats(cwd, status.authenticated).finally(() => process.exit(0));
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  process.exit(0);
-}
-
-async function sendHeartbeats(cwd: string, authenticated: boolean): Promise<void> {
-  if (!authenticated) return;
-
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-
-  let files: Array<string>;
-  try {
-    files = await readdir(sessionsDir);
-  } catch {
-    return;
+  if (status.authenticated && extractedSessionIds.length > 0) {
+    for (const sessionId of extractedSessionIds) {
+      scheduleHeartbeat(sessionId);
+    }
   }
-
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  const project = getCanonicalProjectName(cwd);
-
-  await Promise.all(
-    jsonlFiles.map(async (file) => {
-      const meta = await readExtractedMeta(join(sessionsDir, file));
-      if (!meta) return;
-
-      await heartbeatSession({
-        sessionId: meta.sessionId,
-        checkoutId: meta.checkoutId,
-        project,
-        lineCount: meta.messageCount,
-        parentSessionId: meta.parentSessionId,
-      });
-    })
-  );
+  process.exit(0);
 }
 
 /** Find bun executable - check standard install locations first since hooks
@@ -200,24 +170,29 @@ function getBunPath(): string {
   return "bun";
 }
 
-function scheduleAutoUpload(sessionId: string): boolean {
-  const cliPath = getCliPath();
-  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  const bunPath = getBunPath();
-
+function spawnBackground(args: Array<string>): boolean {
   try {
-    const child = spawn(
-      bunPath,
-      [cliPath, "upload", sessionId, "--delay", String(delaySeconds)],
-      {
-        detached: true,
-        stdio: "ignore",
-        env: { ...process.env, CWD: process.env.CWD || process.cwd() },
-      }
-    );
+    const child = spawn(getBunPath(), [process.argv[1], ...args], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, CWD: process.env.CWD || process.cwd() },
+    });
     child.unref();
     return true;
   } catch {
     return false;
   }
+}
+
+function scheduleExtraction(sessionId: string): boolean {
+  return spawnBackground(["extract", sessionId]);
+}
+
+function scheduleHeartbeat(sessionId: string): boolean {
+  return spawnBackground(["heartbeat", sessionId]);
+}
+
+function scheduleAutoUpload(sessionId: string): boolean {
+  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+  return spawnBackground(["upload", sessionId, "--delay", String(delaySeconds)]);
 }

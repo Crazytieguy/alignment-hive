@@ -4,6 +4,8 @@ A system for alignment researchers to extract and share session learnings across
 
 ## Development
 
+**Important:** Always run CLI commands from the monorepo root (`alignment-hive/`), not from `hive-mind/`.
+
 When committing changes, always run:
 - `bun test`
 - `bun run lint`

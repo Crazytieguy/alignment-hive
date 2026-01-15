@@ -14443,13 +14443,27 @@ function transformEntry(rawEntry) {
   }
   return { entry: null };
 }
+async function parseSessionForErrors(rawPath) {
+  const content = await readFile2(rawPath, "utf-8");
+  const schemaErrors = [];
+  let hasAssistant = false;
+  for (const rawEntry of parseJsonl(content)) {
+    const { entry, error: error48 } = transformEntry(rawEntry);
+    if (error48)
+      schemaErrors.push(error48);
+    if (entry?.type === "assistant")
+      hasAssistant = true;
+  }
+  return { hasContent: hasAssistant, schemaErrors };
+}
 async function extractSession(options) {
   const { rawPath, outputPath, agentId } = options;
   const hiveMindDir = dirname(dirname(outputPath));
-  const [content, rawStat, checkoutId] = await Promise.all([
+  const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
     readFile2(rawPath, "utf-8"),
     stat(rawPath),
-    getCheckoutId(hiveMindDir)
+    getCheckoutId(hiveMindDir),
+    readExtractedMeta(outputPath)
   ]);
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries = [];
@@ -14478,7 +14492,8 @@ async function extractSession(options) {
     rawPath,
     ...agentId && { agentId },
     ...parentSessionId && { parentSessionId },
-    ...schemaErrors.length > 0 && { schemaErrors }
+    ...schemaErrors.length > 0 && { schemaErrors },
+    ...existingMeta?.excluded && { excluded: true }
   };
   resetDetectSecretsStats();
   const t0 = performance.now();
@@ -14571,58 +14586,62 @@ async function findRawSessions(rawDir) {
 }
 async function needsExtraction(rawPath, extractedPath) {
   try {
-    const rawStat = await stat(rawPath);
-    const meta3 = await readExtractedMeta(extractedPath);
-    if (!meta3)
-      return true;
-    return rawStat.mtime.toISOString() !== meta3.rawMtime;
+    const [rawStat, extractedStat] = await Promise.all([stat(rawPath), stat(extractedPath)]);
+    return rawStat.mtime > extractedStat.mtime;
   } catch {
     return true;
   }
 }
-async function extractAllSessions(cwd, transcriptsDir) {
+async function checkSessionsForExtraction(cwd, transcriptsDir) {
   const extractedDir = getHiveMindSessionsDir(cwd);
   const rawSessions = await findRawSessions(transcriptsDir);
-  let extracted = 0;
-  let failed = 0;
+  const sessionsToExtract = [];
   const schemaErrors = [];
-  for (const session of rawSessions) {
+  await Promise.all(rawSessions.map(async (session) => {
     const { path: rawPath, agentId } = session;
     const extractedPath = join2(extractedDir, basename2(rawPath));
-    if (await needsExtraction(rawPath, extractedPath)) {
-      try {
-        const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
-        if (result) {
-          if (!agentId) {
-            extracted++;
-          }
-          if (result.schemaErrors.length > 0) {
-            schemaErrors.push({ sessionId: basename2(rawPath, ".jsonl"), errors: result.schemaErrors });
-          }
-        }
-      } catch (error48) {
-        if (!agentId) {
-          failed++;
-        }
-      }
+    if (!await needsExtraction(rawPath, extractedPath)) {
+      return;
     }
-  }
-  return { extracted, failed, schemaErrors };
+    const sessionId = basename2(rawPath, ".jsonl");
+    try {
+      const parseResult = await parseSessionForErrors(rawPath);
+      if (parseResult.schemaErrors.length > 0) {
+        schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
+      }
+      if (parseResult.hasContent) {
+        sessionsToExtract.push({ sessionId, rawPath, agentId });
+      }
+    } catch {
+      sessionsToExtract.push({ sessionId, rawPath, agentId });
+    }
+  }));
+  return { sessionsToExtract, schemaErrors };
+}
+async function extractSingleSession(cwd, sessionId) {
+  const extractedDir = getHiveMindSessionsDir(cwd);
+  const transcriptsDir = await loadTranscriptsDir(join2(cwd, ".claude", "hive-mind"));
+  if (!transcriptsDir)
+    return false;
+  const rawSessions = await findRawSessions(transcriptsDir);
+  const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
+  if (!session)
+    return false;
+  const extractedPath = join2(extractedDir, basename2(session.path));
+  const result = await extractSession({
+    rawPath: session.path,
+    outputPath: extractedPath,
+    agentId: session.agentId
+  });
+  return result !== null;
 }
 
 // cli/lib/messages.ts
-function getCliPath() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return "~/.claude/plugins/hive-mind/cli.js";
-}
 function getCliCommand(hasAlias) {
   if (hasAlias) {
     return "hive-mind";
   }
-  return `bun ${getCliPath()}`;
+  return `bun ${process.argv[1]}`;
 }
 var hook = {
   notLoggedIn: () => {
@@ -14966,19 +14985,21 @@ async function lookupSession(cwd, sessionIdPrefix) {
 }
 
 // cli/commands/exclude.ts
-async function excludeSession(sessionPath) {
+async function excludeSession(sessionPath, meta3) {
   try {
+    await extractSession({
+      rawPath: meta3.rawPath,
+      outputPath: sessionPath,
+      agentId: meta3.agentId
+    });
     const content = await readFile3(sessionPath, "utf-8");
     const lines = content.split(`
 `);
     if (lines.length === 0)
       return false;
-    const meta3 = JSON.parse(lines[0]);
-    if (meta3.excluded) {
-      return true;
-    }
-    meta3.excluded = true;
-    lines[0] = JSON.stringify(meta3);
+    const freshMeta = JSON.parse(lines[0]);
+    freshMeta.excluded = true;
+    lines[0] = JSON.stringify(freshMeta);
     await writeFile3(sessionPath, lines.join(`
 `));
     return true;
@@ -15025,7 +15046,7 @@ async function excludeAll(cwd) {
     if (!meta3 || meta3.excluded || meta3.agentId)
       continue;
     const sessionId = file2.replace(".jsonl", "");
-    if (await excludeSession(sessionPath)) {
+    if (await excludeSession(sessionPath, meta3)) {
       console.log(`  ${colors.yellow("\u2717")} ${formatSessionId(sessionId)} excluded`);
       succeeded++;
     } else {
@@ -15065,7 +15086,7 @@ async function excludeOne(cwd, sessionIdPrefix) {
     printInfo(excludeCmd.alreadyExcluded(formatSessionId(meta3.sessionId)));
     return 0;
   }
-  if (await excludeSession(sessionPath)) {
+  if (await excludeSession(sessionPath, meta3)) {
     printSuccess(excludeCmd.excluded(formatSessionId(meta3.sessionId)));
     return 0;
   } else {
@@ -15085,6 +15106,21 @@ async function exclude() {
     return 1;
   }
   return await excludeOne(cwd, sessionId);
+}
+
+// cli/commands/extract.ts
+async function extract() {
+  const cwd = process.env.CWD || process.cwd();
+  const sessionId = process.argv[3];
+  if (!sessionId) {
+    return 1;
+  }
+  try {
+    const success2 = await extractSingleSession(cwd, sessionId);
+    return success2 ? 0 : 1;
+  } catch {
+    return 1;
+  }
 }
 
 // cli/commands/grep.ts
@@ -16768,25 +16804,14 @@ async function getAllSessionsEligibility(cwd) {
   } catch {
     return [];
   }
-  const results = [];
-  for (const file2 of files) {
-    if (!file2.endsWith(".jsonl"))
-      continue;
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const results = await Promise.all(jsonlFiles.map(async (file2) => {
     const meta3 = await readExtractedMeta(join6(sessionsDir, file2));
     if (!meta3 || meta3.agentId)
-      continue;
-    const eligibility = checkSessionEligibility(meta3, authIssuedAt);
-    results.push(eligibility);
-  }
-  return results;
-}
-async function getEligibleSessions(cwd) {
-  const all = await getAllSessionsEligibility(cwd);
-  return all.filter((s) => s.eligible);
-}
-async function getPendingSessions(cwd) {
-  const all = await getAllSessionsEligibility(cwd);
-  return all.filter((s) => !s.eligible && !s.excluded);
+      return null;
+    return checkSessionEligibility(meta3, authIssuedAt);
+  }));
+  return results.filter((r) => r !== null);
 }
 
 // cli/commands/index.ts
@@ -17527,7 +17552,6 @@ async function read() {
 
 // cli/commands/session-start.ts
 import { existsSync } from "fs";
-import { readdir as readdir8 } from "fs/promises";
 import { dirname as dirname2, join as join9 } from "path";
 import { homedir as homedir4 } from "os";
 import { spawn } from "child_process";
@@ -17537,9 +17561,7 @@ import { homedir as homedir3 } from "os";
 import { readFile as readFile4, writeFile as writeFile4 } from "fs/promises";
 var ALIAS_NAME = "hive-mind";
 function getExpectedAliasCommand() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  const cliPath = pluginRoot ? `${pluginRoot}/cli.js` : "~/.claude/plugins/hive-mind/cli.js";
-  return `bun ${cliPath}`;
+  return `bun ${process.argv[1]}`;
 }
 function expandPath(path) {
   if (path.startsWith("~")) {
@@ -17573,10 +17595,6 @@ async function getExistingAliasCommand() {
   if (!match)
     return null;
   return match[2];
-}
-async function hasAlias() {
-  const existing = await getExistingAliasCommand();
-  return existing !== null;
 }
 async function setupAlias() {
   const expected = getExpectedAliasCommand();
@@ -17614,12 +17632,12 @@ async function setupAliasWithCommand(expected) {
 async function updateAliasIfOutdated() {
   const existing = await getExistingAliasCommand();
   if (!existing)
-    return false;
+    return { updated: false, hasAlias: false };
   const expected = getExpectedAliasCommand();
   if (existing === expected)
-    return false;
+    return { updated: false, hasAlias: true };
   const { success: success2 } = await setupAlias();
-  return success2;
+  return { updated: success2, hasAlias: true };
 }
 
 // node_modules/convex/dist/esm/index.js
@@ -18626,32 +18644,26 @@ async function saveUpload(sessionId, storageId) {
 }
 
 // cli/commands/session-start.ts
-async function readStdinWithTimeout(timeoutMs) {
+async function readStdin() {
   if (process.stdin.isTTY)
     return null;
   return new Promise((resolve) => {
     let data = "";
-    const timeout = setTimeout(() => {
-      process.stdin.removeAllListeners();
-      resolve(data || null);
-    }, timeoutMs);
     process.stdin.setEncoding("utf-8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
     process.stdin.on("end", () => {
-      clearTimeout(timeout);
       resolve(data || null);
     });
     process.stdin.on("error", () => {
-      clearTimeout(timeout);
       resolve(null);
     });
     process.stdin.resume();
   });
 }
 async function readHookInput() {
-  const input = await readStdinWithTimeout(100);
+  const input = await readStdin();
   if (!input)
     return {};
   try {
@@ -18684,32 +18696,39 @@ async function sessionStart() {
     transcriptsDir = saved;
   }
   getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
-  try {
-    const { extracted, failed, schemaErrors } = await extractAllSessions(cwd, transcriptsDir);
-    if (extracted > 0) {
-      messages.push(hook.extracted(extracted));
+  const [extractionCheck, status] = await Promise.all([
+    checkSessionsForExtraction(cwd, transcriptsDir).catch((error48) => ({
+      error: error48 instanceof Error ? error48.message : String(error48)
+    })),
+    checkAuthStatus(true)
+  ]);
+  let extractedSessionIds = [];
+  if ("error" in extractionCheck) {
+    messages.push(hook.extractionFailed(extractionCheck.error));
+  } else {
+    const { sessionsToExtract, schemaErrors } = extractionCheck;
+    const nonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
+    if (nonAgentSessions.length > 0) {
+      messages.push(hook.extracted(nonAgentSessions.length));
+      extractedSessionIds = nonAgentSessions.map((s) => s.sessionId);
     }
-    if (failed > 0) {
-      messages.push(hook.extractionsFailed(failed));
+    for (const session of sessionsToExtract) {
+      scheduleExtraction(session.sessionId);
     }
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
       const allErrors = schemaErrors.flatMap((s) => s.errors);
       messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
     }
-  } catch (error48) {
-    const errorMsg = error48 instanceof Error ? error48.message : String(error48);
-    messages.push(hook.extractionFailed(errorMsg));
   }
-  const status = await checkAuthStatus(true);
   let userHasAlias = false;
   if (status.authenticated) {
     try {
-      const aliasUpdated = await updateAliasIfOutdated();
-      if (aliasUpdated) {
+      const aliasResult = await updateAliasIfOutdated();
+      if (aliasResult.updated) {
         messages.push(hook.aliasUpdated());
       }
-      userHasAlias = await hasAlias();
+      userHasAlias = aliasResult.hasAlias;
     } catch {}
   }
   if (status.needsLogin) {
@@ -18719,22 +18738,16 @@ async function sessionStart() {
   }
   if (status.authenticated) {
     try {
-      const pending = await getPendingSessions(cwd);
+      const allSessions = await getAllSessionsEligibility(cwd);
+      const pending = allSessions.filter((s) => !s.eligible && !s.excluded);
+      const eligible = allSessions.filter((s) => s.eligible);
       if (pending.length > 1) {
         const earliestUploadAt = pending.map((s) => s.eligibleAt).filter((t) => t !== null).sort((a, b) => a - b)[0] ?? null;
         messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
       }
-      const eligible = await getEligibleSessions(cwd);
-      if (eligible.length > 0) {
-        let uploadCount = 0;
-        for (const session of eligible) {
-          if (scheduleAutoUpload(session.sessionId)) {
-            uploadCount++;
-          }
-        }
-        if (uploadCount > 0) {
-          messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
-        }
+      const uploadCount = eligible.filter((s) => scheduleAutoUpload(s.sessionId)).length;
+      if (uploadCount > 0) {
+        messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
       }
     } catch {
       messages.push(hook.sessionCheckFailed());
@@ -18745,34 +18758,12 @@ async function sessionStart() {
     hookOutput(formatted.join(`
 `));
   }
-  sendHeartbeats(cwd, status.authenticated).finally(() => process.exit(0));
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  process.exit(0);
-}
-async function sendHeartbeats(cwd, authenticated) {
-  if (!authenticated)
-    return;
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-  let files;
-  try {
-    files = await readdir8(sessionsDir);
-  } catch {
-    return;
+  if (status.authenticated && extractedSessionIds.length > 0) {
+    for (const sessionId of extractedSessionIds) {
+      scheduleHeartbeat(sessionId);
+    }
   }
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  const project = getCanonicalProjectName(cwd);
-  await Promise.all(jsonlFiles.map(async (file2) => {
-    const meta3 = await readExtractedMeta(join9(sessionsDir, file2));
-    if (!meta3)
-      return;
-    await heartbeatSession({
-      sessionId: meta3.sessionId,
-      checkoutId: meta3.checkoutId,
-      project,
-      lineCount: meta3.messageCount,
-      parentSessionId: meta3.parentSessionId
-    });
-  }));
+  process.exit(0);
 }
 function getBunPath() {
   const bunInstall = process.env.BUN_INSTALL;
@@ -18784,12 +18775,9 @@ function getBunPath() {
     return standardPath;
   return "bun";
 }
-function scheduleAutoUpload(sessionId) {
-  const cliPath = getCliPath();
-  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  const bunPath = getBunPath();
+function spawnBackground(args) {
   try {
-    const child = spawn(bunPath, [cliPath, "upload", sessionId, "--delay", String(delaySeconds)], {
+    const child = spawn(getBunPath(), [process.argv[1], ...args], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env, CWD: process.env.CWD || process.cwd() }
@@ -18799,6 +18787,16 @@ function scheduleAutoUpload(sessionId) {
   } catch {
     return false;
   }
+}
+function scheduleExtraction(sessionId) {
+  return spawnBackground(["extract", sessionId]);
+}
+function scheduleHeartbeat(sessionId) {
+  return spawnBackground(["heartbeat", sessionId]);
+}
+function scheduleAutoUpload(sessionId) {
+  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+  return spawnBackground(["upload", sessionId, "--delay", String(delaySeconds)]);
 }
 
 // cli/commands/login.ts
@@ -19233,22 +19231,49 @@ async function upload() {
   return await interactiveUpload(cwd);
 }
 
+// cli/commands/heartbeat.ts
+import { join as join11 } from "path";
+async function heartbeat() {
+  const cwd = process.env.CWD || process.cwd();
+  const sessionId = process.argv[3];
+  if (!sessionId) {
+    return 1;
+  }
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const meta3 = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
+  if (!meta3) {
+    return 1;
+  }
+  const project = getCanonicalProjectName(cwd);
+  try {
+    await heartbeatSession({
+      sessionId: meta3.sessionId,
+      checkoutId: meta3.checkoutId,
+      project,
+      lineCount: meta3.messageCount,
+      parentSessionId: meta3.parentSessionId
+    });
+    return 0;
+  } catch {
+    return 1;
+  }
+}
+
 // cli/cli.ts
 var COMMANDS = {
   exclude: { description: "Exclude session from upload", handler: exclude },
+  extract: { description: "Extract session (internal)", handler: extract, hidden: true },
   grep: { description: "Search sessions for pattern", handler: grep },
   index: { description: "List extracted sessions", handler: index },
   read: { description: "Read session entries", handler: read },
   login: { description: "Log in to hive-mind", handler: login },
   "setup-alias": { description: "Add hive-mind command to shell config", handler: setupAliasCommand },
   upload: { description: "Upload eligible sessions", handler: upload },
-  "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
+  "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
+  heartbeat: { description: "Send heartbeat (internal)", handler: heartbeat, hidden: true }
 };
 function printUsage4() {
-  const commands = Object.entries(COMMANDS).map(([name, { description }]) => ({
-    name,
-    description
-  }));
+  const commands = Object.entries(COMMANDS).filter(([, def]) => !("hidden" in def)).map(([name, { description }]) => ({ name, description }));
   console.log(usage.main(commands));
 }
 async function main() {

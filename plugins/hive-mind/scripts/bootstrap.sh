@@ -31,10 +31,6 @@ if [ -z "$BUN_PATH" ]; then
     report_error "bun not found. Run /hive-mind:setup to install it."
 fi
 
-if ! "$BUN_PATH" --version &> /dev/null; then
-    report_error "bun found but failed to run. Try reinstalling bun."
-fi
-
 if [ ! -f "$PLUGIN_ROOT/cli.js" ]; then
     report_error "cli.js not found. Try reinstalling the plugin."
 fi

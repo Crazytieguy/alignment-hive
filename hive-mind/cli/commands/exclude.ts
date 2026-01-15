@@ -1,24 +1,29 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction.js';
+import { extractSession, getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction.js';
 import { excludeCmd } from '../lib/messages.js';
 import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
 import { confirm, formatSessionId, lookupSession } from '../lib/utils.js';
 import type { HiveMindMeta } from '../lib/schemas.js';
 
-async function excludeSession(sessionPath: string): Promise<boolean> {
+async function excludeSession(sessionPath: string, meta: HiveMindMeta): Promise<boolean> {
   try {
+    // Re-extract to ensure we have the latest content before excluding
+    // This is critical for mtime-based extraction checks
+    await extractSession({
+      rawPath: meta.rawPath,
+      outputPath: sessionPath,
+      agentId: meta.agentId,
+    });
+
+    // Read the freshly extracted content and mark as excluded
     const content = await readFile(sessionPath, 'utf-8');
     const lines = content.split('\n');
     if (lines.length === 0) return false;
 
-    const meta = JSON.parse(lines[0]) as HiveMindMeta;
-    if (meta.excluded) {
-      return true;
-    }
-
-    meta.excluded = true;
-    lines[0] = JSON.stringify(meta);
+    const freshMeta = JSON.parse(lines[0]) as HiveMindMeta;
+    freshMeta.excluded = true;
+    lines[0] = JSON.stringify(freshMeta);
 
     await writeFile(sessionPath, lines.join('\n'));
     return true;
@@ -74,7 +79,7 @@ async function excludeAll(cwd: string): Promise<number> {
     if (!meta || meta.excluded || meta.agentId) continue;
 
     const sessionId = file.replace('.jsonl', '');
-    if (await excludeSession(sessionPath)) {
+    if (await excludeSession(sessionPath, meta)) {
       console.log(`  ${colors.yellow('✗')} ${formatSessionId(sessionId)} excluded`);
       succeeded++;
     } else {
@@ -123,7 +128,7 @@ async function excludeOne(cwd: string, sessionIdPrefix: string): Promise<number>
     return 0;
   }
 
-  if (await excludeSession(sessionPath)) {
+  if (await excludeSession(sessionPath, meta)) {
     printSuccess(excludeCmd.excluded(formatSessionId(meta.sessionId)));
     return 0;
   } else {

@@ -91,19 +91,17 @@ export async function getAllSessionsEligibility(
     return [];
   }
 
-  const results: Array<SessionEligibility> = [];
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
 
-  for (const file of files) {
-    if (!file.endsWith(".jsonl")) continue;
+  const results = await Promise.all(
+    jsonlFiles.map(async (file) => {
+      const meta = await readExtractedMeta(join(sessionsDir, file));
+      if (!meta || meta.agentId) return null;
+      return checkSessionEligibility(meta, authIssuedAt);
+    })
+  );
 
-    const meta = await readExtractedMeta(join(sessionsDir, file));
-    if (!meta || meta.agentId) continue;
-
-    const eligibility = checkSessionEligibility(meta, authIssuedAt);
-    results.push(eligibility);
-  }
-
-  return results;
+  return results.filter((r): r is SessionEligibility => r !== null);
 }
 
 export async function getEligibleSessions(

@@ -5,9 +5,7 @@ import { getShellConfig } from "./config";
 const ALIAS_NAME = "hive-mind";
 
 export function getExpectedAliasCommand(): string {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  const cliPath = pluginRoot ? `${pluginRoot}/cli.js` : "~/.claude/plugins/hive-mind/cli.js";
-  return `bun ${cliPath}`;
+  return `bun ${process.argv[1]}`;
 }
 
 function expandPath(path: string): string {
@@ -48,17 +46,6 @@ export async function getExistingAliasCommand(): Promise<string | null> {
   return match[2];
 }
 
-export async function hasAlias(): Promise<boolean> {
-  const existing = await getExistingAliasCommand();
-  return existing !== null;
-}
-
-export async function isAliasUpToDate(): Promise<boolean> {
-  const existing = await getExistingAliasCommand();
-  if (!existing) return false;
-  return existing === getExpectedAliasCommand();
-}
-
 export async function setupAlias(): Promise<{ success: boolean; alreadyExists: boolean }> {
   const expected = getExpectedAliasCommand();
   return setupAliasWithCommand(expected);
@@ -94,13 +81,18 @@ async function setupAliasWithCommand(expected: string): Promise<{ success: boole
   return { success, alreadyExists: false };
 }
 
-export async function updateAliasIfOutdated(): Promise<boolean> {
+export interface AliasUpdateResult {
+  updated: boolean;
+  hasAlias: boolean;
+}
+
+export async function updateAliasIfOutdated(): Promise<AliasUpdateResult> {
   const existing = await getExistingAliasCommand();
-  if (!existing) return false;
+  if (!existing) return { updated: false, hasAlias: false };
 
   const expected = getExpectedAliasCommand();
-  if (existing === expected) return false;
+  if (existing === expected) return { updated: false, hasAlias: true };
 
   const { success } = await setupAlias();
-  return success;
+  return { updated: success, hasAlias: true };
 }
