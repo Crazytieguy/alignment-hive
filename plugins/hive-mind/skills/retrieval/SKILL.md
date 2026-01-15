@@ -51,7 +51,7 @@ Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help`:
 
 Output for `git log --oneline`:
 ```
-!`git log --oneline`
+!`git log --oneline 2>/dev/null || echo "(no git history available)"`
 ```
 
 Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js index`:
