@@ -56,7 +56,7 @@ Exit Claude Code and navigate to your project directory:
 cd ~/my-project && claude
 ```
 
-Works for both new and existing projects.
+Works for both new and existing projects. Ask Claude to help you set it up!
 
 ## Contributing
 
