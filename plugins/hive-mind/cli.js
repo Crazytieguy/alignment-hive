@@ -16622,7 +16622,8 @@ var AuthUserSchema = exports_external.object({
 var AuthDataSchema = exports_external.object({
   access_token: exports_external.string(),
   refresh_token: exports_external.string(),
-  user: AuthUserSchema
+  user: AuthUserSchema,
+  authenticated_at: exports_external.number().optional()
 });
 function decodeJwtPayload(token) {
   try {
@@ -16661,7 +16662,7 @@ async function saveAuthData(data) {
   await mkdir3(AUTH_DIR, { recursive: true });
   await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
 }
-async function refreshToken(refreshTokenValue) {
+async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
   try {
     const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
       method: "POST",
@@ -16674,7 +16675,12 @@ async function refreshToken(refreshTokenValue) {
     });
     const data = await response.json();
     const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success)
+      return null;
+    return {
+      ...parsed.data,
+      authenticated_at: existingAuthenticatedAt
+    };
   } catch {
     return null;
   }
@@ -16688,7 +16694,7 @@ async function checkAuthStatus(attemptRefresh = true) {
     if (!attemptRefresh || !authData.refresh_token) {
       return { authenticated: false, needsLogin: true };
     }
-    const newAuthData = await refreshToken(authData.refresh_token);
+    const newAuthData = await refreshToken(authData.refresh_token, authData.authenticated_at);
     if (!newAuthData) {
       return { authenticated: false, needsLogin: true };
     }
@@ -16702,30 +16708,18 @@ function getUserDisplayName(user) {
 }
 
 // cli/lib/upload-eligibility.ts
-var REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
-function decodeJwtPayload2(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
+var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;
 async function getAuthIssuedAt() {
   const authData = await loadAuthData();
-  if (!authData?.access_token)
+  if (!authData)
     return null;
-  const payload = decodeJwtPayload2(authData.access_token);
-  if (!payload || typeof payload.iat !== "number")
-    return null;
-  return payload.iat * 1000;
+  if (authData.authenticated_at === undefined) {
+    const now = Date.now();
+    await saveAuthData({ ...authData, authenticated_at: now });
+    return now;
+  }
+  return authData.authenticated_at;
 }
 function checkSessionEligibility(meta3, authIssuedAt) {
   const sessionId = meta3.sessionId;
@@ -16741,8 +16735,9 @@ function checkSessionEligibility(meta3, authIssuedAt) {
   }
   const now = Date.now();
   const rawMtimeMs = new Date(meta3.rawMtime).getTime();
-  const eligibilityBase = authIssuedAt ? Math.max(rawMtimeMs, authIssuedAt) : rawMtimeMs;
-  const eligibleAt = eligibilityBase + REVIEW_PERIOD_MS;
+  const sessionEligibleAt = rawMtimeMs + SESSION_REVIEW_PERIOD_MS;
+  const authEligibleAt = authIssuedAt ? authIssuedAt + AUTH_REVIEW_PERIOD_MS : 0;
+  const eligibleAt = Math.max(sessionEligibleAt, authEligibleAt);
   if (now < eligibleAt) {
     const remainingMs = eligibleAt - now;
     const remainingHours = Math.ceil(remainingMs / (60 * 60 * 1000));
@@ -18837,27 +18832,25 @@ async function confirm2(message, defaultYes = false) {
   });
 }
 async function openBrowser(url2) {
-  try {
-    if (process.platform === "darwin") {
+  if (process.platform === "darwin") {
+    try {
       await Bun.spawn(["open", url2]).exited;
       return true;
-    } else if (process.platform === "linux") {
+    } catch {
+      return false;
+    }
+  }
+  if (process.platform === "linux") {
+    for (const cmd of ["xdg-open", "wslview"]) {
       try {
-        await Bun.spawn(["xdg-open", url2]).exited;
+        await Bun.spawn([cmd, url2]).exited;
         return true;
       } catch {
-        try {
-          await Bun.spawn(["wslview", url2]).exited;
-          return true;
-        } catch {
-          return false;
-        }
+        continue;
       }
     }
-    return false;
-  } catch {
-    return false;
   }
+  return false;
 }
 function sleep2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -18876,7 +18869,7 @@ async function tryRefresh() {
   if (!authData?.refresh_token)
     return { success: false };
   printInfo(setup.refreshing);
-  const newAuthData = await refreshToken(authData.refresh_token);
+  const newAuthData = await refreshToken(authData.refresh_token, authData.authenticated_at);
   if (newAuthData) {
     await saveAuthData(newAuthData);
     printSuccess(setup.refreshSuccess);
@@ -18944,7 +18937,10 @@ async function deviceAuthFlow() {
     const tokenData = await tokenResponse.json();
     const authResult = AuthDataSchema.safeParse(tokenData);
     if (authResult.success) {
-      await saveAuthData(authResult.data);
+      await saveAuthData({
+        ...authResult.data,
+        authenticated_at: Date.now()
+      });
       console.log("");
       printSuccess(setup.success);
       console.log("");

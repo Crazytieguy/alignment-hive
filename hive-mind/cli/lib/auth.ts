@@ -15,6 +15,7 @@ export const AuthDataSchema = z.object({
   access_token: z.string(),
   refresh_token: z.string(),
   user: AuthUserSchema,
+  authenticated_at: z.number().optional(),
 });
 
 export type AuthUser = z.infer<typeof AuthUserSchema>;
@@ -62,6 +63,7 @@ export async function saveAuthData(data: AuthData): Promise<void> {
 
 export async function refreshToken(
   refreshTokenValue: string,
+  existingAuthenticatedAt?: number,
 ): Promise<AuthData | null> {
   try {
     const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
@@ -76,7 +78,13 @@ export async function refreshToken(
 
     const data = await response.json();
     const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) return null;
+
+    // Preserve authenticated_at from existing auth
+    return {
+      ...parsed.data,
+      authenticated_at: existingAuthenticatedAt,
+    };
   } catch {
     return null;
   }
@@ -102,7 +110,10 @@ export async function checkAuthStatus(
       return { authenticated: false, needsLogin: true };
     }
 
-    const newAuthData = await refreshToken(authData.refresh_token);
+    const newAuthData = await refreshToken(
+      authData.refresh_token,
+      authData.authenticated_at,
+    );
     if (!newAuthData) {
       return { authenticated: false, needsLogin: true };
     }

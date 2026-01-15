@@ -1,36 +1,24 @@
-import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
-import { loadAuthData } from './auth';
-import { getHiveMindSessionsDir, readExtractedMeta } from './extraction';
-import type { HiveMindMeta } from './schemas';
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { loadAuthData, saveAuthData } from "./auth";
+import { getHiveMindSessionsDir, readExtractedMeta } from "./extraction";
+import type { HiveMindMeta } from "./schemas";
 
-const REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
-
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-
-    let payload = parts[1];
-    const padding = 4 - (payload.length % 4);
-    if (padding < 4) {
-      payload += '='.repeat(padding);
-    }
-
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
+const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h for session age
+const AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h for auth age
 
 export async function getAuthIssuedAt(): Promise<number | null> {
   const authData = await loadAuthData();
-  if (!authData?.access_token) return null;
+  if (!authData) return null;
 
-  const payload = decodeJwtPayload(authData.access_token);
-  if (!payload || typeof payload.iat !== 'number') return null;
+  // Migration: if authenticated_at is missing, set it to now
+  if (authData.authenticated_at === undefined) {
+    const now = Date.now();
+    await saveAuthData({ ...authData, authenticated_at: now });
+    return now;
+  }
 
-  return payload.iat * 1000;
+  return authData.authenticated_at;
 }
 
 export interface SessionEligibility {
@@ -38,13 +26,13 @@ export interface SessionEligibility {
   meta: HiveMindMeta;
   eligible: boolean;
   excluded: boolean;
-  eligibleAt: number | null; // When it becomes eligible (if not yet)
+  eligibleAt: number | null;
   reason: string;
 }
 
 export function checkSessionEligibility(
   meta: HiveMindMeta,
-  authIssuedAt: number | null
+  authIssuedAt: number | null,
 ): SessionEligibility {
   const sessionId = meta.sessionId;
 
@@ -55,17 +43,17 @@ export function checkSessionEligibility(
       eligible: false,
       excluded: true,
       eligibleAt: null,
-      reason: 'Excluded by user',
+      reason: "Excluded by user",
     };
   }
 
   const now = Date.now();
   const rawMtimeMs = new Date(meta.rawMtime).getTime();
-  const eligibilityBase = authIssuedAt
-    ? Math.max(rawMtimeMs, authIssuedAt)
-    : rawMtimeMs;
 
-  const eligibleAt = eligibilityBase + REVIEW_PERIOD_MS;
+  // Decoupled review periods: 24h for session age, 4h for auth age
+  const sessionEligibleAt = rawMtimeMs + SESSION_REVIEW_PERIOD_MS;
+  const authEligibleAt = authIssuedAt ? authIssuedAt + AUTH_REVIEW_PERIOD_MS : 0;
+  const eligibleAt = Math.max(sessionEligibleAt, authEligibleAt);
 
   if (now < eligibleAt) {
     const remainingMs = eligibleAt - now;
@@ -86,12 +74,12 @@ export function checkSessionEligibility(
     eligible: true,
     excluded: false,
     eligibleAt,
-    reason: 'Ready for upload',
+    reason: "Ready for upload",
   };
 }
 
 export async function getAllSessionsEligibility(
-  cwd: string
+  cwd: string,
 ): Promise<Array<SessionEligibility>> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   const authIssuedAt = await getAuthIssuedAt();
@@ -106,7 +94,7 @@ export async function getAllSessionsEligibility(
   const results: Array<SessionEligibility> = [];
 
   for (const file of files) {
-    if (!file.endsWith('.jsonl')) continue;
+    if (!file.endsWith(".jsonl")) continue;
 
     const meta = await readExtractedMeta(join(sessionsDir, file));
     if (!meta || meta.agentId) continue;
@@ -119,14 +107,14 @@ export async function getAllSessionsEligibility(
 }
 
 export async function getEligibleSessions(
-  cwd: string
+  cwd: string,
 ): Promise<Array<SessionEligibility>> {
   const all = await getAllSessionsEligibility(cwd);
   return all.filter((s) => s.eligible);
 }
 
 export async function getPendingSessions(
-  cwd: string
+  cwd: string,
 ): Promise<Array<SessionEligibility>> {
   const all = await getAllSessionsEligibility(cwd);
   return all.filter((s) => !s.eligible && !s.excluded);

@@ -17,6 +17,7 @@ import {
   printSuccess,
   printWarning,
 } from "../lib/output";
+import type { AuthUser } from "../lib/auth";
 
 const WORKOS_API_URL = "https://api.workos.com/user_management";
 
@@ -51,27 +52,28 @@ async function confirm(message: string, defaultYes = false): Promise<boolean> {
 }
 
 async function openBrowser(url: string): Promise<boolean> {
-  try {
-    if (process.platform === "darwin") {
+  if (process.platform === "darwin") {
+    try {
       await Bun.spawn(["open", url]).exited;
       return true;
-    } else if (process.platform === "linux") {
+    } catch {
+      return false;
+    }
+  }
+
+  if (process.platform === "linux") {
+    // Try xdg-open first, then fall back to wslview for WSL
+    for (const cmd of ["xdg-open", "wslview"]) {
       try {
-        await Bun.spawn(["xdg-open", url]).exited;
+        await Bun.spawn([cmd, url]).exited;
         return true;
       } catch {
-        try {
-          await Bun.spawn(["wslview", url]).exited;
-          return true;
-        } catch {
-          return false;
-        }
+        continue;
       }
     }
-    return false;
-  } catch {
-    return false;
   }
+
+  return false;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -90,13 +92,16 @@ async function checkExistingAuth(): Promise<boolean> {
   return true;
 }
 
-async function tryRefresh(): Promise<{ success: boolean; user?: { first_name?: string; email: string } }> {
+async function tryRefresh(): Promise<{ success: boolean; user?: AuthUser }> {
   const authData = await loadAuthData();
   if (!authData?.refresh_token) return { success: false };
 
   printInfo(msg.refreshing);
 
-  const newAuthData = await refreshToken(authData.refresh_token);
+  const newAuthData = await refreshToken(
+    authData.refresh_token,
+    authData.authenticated_at,
+  );
   if (newAuthData) {
     await saveAuthData(newAuthData);
     printSuccess(msg.refreshSuccess);
@@ -177,7 +182,10 @@ async function deviceAuthFlow(): Promise<number> {
     const tokenData = await tokenResponse.json();
     const authResult = AuthDataSchema.safeParse(tokenData);
     if (authResult.success) {
-      await saveAuthData(authResult.data);
+      await saveAuthData({
+        ...authResult.data,
+        authenticated_at: Date.now(),
+      });
 
       console.log("");
       printSuccess(msg.success);
