@@ -111,8 +111,8 @@ export async function sessionStart(): Promise<number> {
   if (status.authenticated) {
     try {
       const aliasResult = await updateAliasIfOutdated();
-      if (aliasResult.updated) {
-        messages.push(hook.aliasUpdated());
+      if (aliasResult.updated && aliasResult.sourceCmd) {
+        messages.push(hook.aliasUpdated(aliasResult.sourceCmd));
       }
       userHasAlias = aliasResult.hasAlias;
     } catch {}

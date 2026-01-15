@@ -147,9 +147,8 @@ var hook = {
     const cli = getCliCommand(userHasAlias);
     return `Uploading ${count} session${count === 1 ? "" : "s"} in 10 min. To review: ${cli} index --pending`;
   },
-  aliasUpdated: () => {
-    const shell = getShellConfig();
-    return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
+  aliasUpdated: (sourceCmd) => {
+    return `hive-mind alias updated. To activate: ${sourceCmd}`;
   },
   extractionsFailed: (count) => {
     return `Failed to extract ${count} session${count === 1 ? "" : "s"}`;
@@ -17701,21 +17700,22 @@ async function setupAliasWithRoot(pluginRoot) {
   return setupAliasWithCommand(expected);
 }
 async function setupAliasWithCommand(expected) {
+  const shell = getShellConfig();
   const config2 = await readShellConfig();
   const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
   if (!config2) {
     const success3 = await writeShellConfig(`${aliasLine}
 `);
-    return { success: success3, alreadyExists: false };
+    return { success: success3, alreadyExists: false, sourceCmd: shell.sourceCmd };
   }
   const match = config2.match(ALIAS_REGEX);
   if (match) {
     if (match[2] === expected) {
-      return { success: true, alreadyExists: true };
+      return { success: true, alreadyExists: true, sourceCmd: shell.sourceCmd };
     }
     const updated2 = config2.replace(ALIAS_REGEX, aliasLine);
     const success3 = await writeShellConfig(updated2);
-    return { success: success3, alreadyExists: false };
+    return { success: success3, alreadyExists: false, sourceCmd: shell.sourceCmd };
   }
   const separator = config2.endsWith(`
 `) ? "" : `
@@ -17723,7 +17723,7 @@ async function setupAliasWithCommand(expected) {
   const updated = `${config2}${separator}${aliasLine}
 `;
   const success2 = await writeShellConfig(updated);
-  return { success: success2, alreadyExists: false };
+  return { success: success2, alreadyExists: false, sourceCmd: shell.sourceCmd };
 }
 async function updateAliasIfOutdated() {
   const existing = await getExistingAliasCommand();
@@ -17732,8 +17732,8 @@ async function updateAliasIfOutdated() {
   const expected = getExpectedAliasCommand();
   if (existing === expected)
     return { updated: false, hasAlias: true };
-  const { success: success2 } = await setupAlias();
-  return { updated: success2, hasAlias: true };
+  const { success: success2, sourceCmd } = await setupAlias();
+  return { updated: success2, hasAlias: true, sourceCmd };
 }
 
 // node_modules/convex/dist/esm/index.js
@@ -18830,8 +18830,8 @@ async function sessionStart() {
   if (status.authenticated) {
     try {
       const aliasResult = await updateAliasIfOutdated();
-      if (aliasResult.updated) {
-        messages.push(hook.aliasUpdated());
+      if (aliasResult.updated && aliasResult.sourceCmd) {
+        messages.push(hook.aliasUpdated(aliasResult.sourceCmd));
       }
       userHasAlias = aliasResult.hasAlias;
     } catch {}
@@ -19091,17 +19091,16 @@ async function login() {
 import { dirname as dirname3 } from "path";
 async function setupAliasCommand() {
   const pluginRoot = dirname3(process.argv[1]);
-  const { success: success2, alreadyExists } = await setupAliasWithRoot(pluginRoot);
+  const { success: success2, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
   if (!success2) {
     printError("Failed to set up alias");
     return 1;
   }
-  const shell = getShellConfig();
   if (alreadyExists) {
     printInfo(setup.alreadySetUp);
   } else {
     printSuccess("hive-mind command added to shell config");
-    console.log(setup.aliasActivate(shell.sourceCmd));
+    console.log(setup.aliasActivate(sourceCmd));
   }
   return 0;
 }

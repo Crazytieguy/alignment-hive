@@ -1,5 +1,3 @@
-import { getShellConfig } from './config';
-
 export function getCliCommand(hasAlias: boolean): string {
   if (hasAlias) {
     return 'hive-mind';
@@ -46,9 +44,8 @@ export const hook = {
     const cli = getCliCommand(userHasAlias);
     return `Uploading ${count} session${count === 1 ? '' : 's'} in 10 min. To review: ${cli} index --pending`;
   },
-  aliasUpdated: (): string => {
-    const shell = getShellConfig();
-    return `hive-mind alias updated. To activate: ${shell.sourceCmd}`;
+  aliasUpdated: (sourceCmd: string): string => {
+    return `hive-mind alias updated. To activate: ${sourceCmd}`;
   },
   extractionsFailed: (count: number): string => {
     return `Failed to extract ${count} session${count === 1 ? '' : 's'}`;
