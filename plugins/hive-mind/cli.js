@@ -14893,15 +14893,24 @@ var setup = {
   refreshing: "Refreshing your session...",
   refreshSuccess: "Session refreshed!",
   starting: "Starting authentication...",
-  visitUrl: "Visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
+  deviceAuth: (url2, code) => {
+    return [
+      "Open this URL in your browser:",
+      "",
+      `  ${url2}`,
+      "",
+      "Confirm this code matches:",
+      "",
+      `  ${code}`
+    ].join(`
+`);
+  },
   browserOpened: "Browser opened. Confirm the code and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
+  openManually: "Open the URL manually, then confirm the code.",
   waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
   waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
   success: "You're connected!",
-  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
-  welcomeEmail: (email3) => `Logged in as: ${email3}`,
+  welcome: (name, email3) => name ? `Welcome, ${name} (${email3})!` : `Logged in as: ${email3}`,
   consentInfo: (userHasAlias) => {
     const cli = getCliCommand(userHasAlias);
     return `Your sessions will contribute to the shared knowledge base.
@@ -18867,7 +18876,6 @@ async function checkExistingAuth() {
   const status = await checkAuthStatus(false);
   if (status.authenticated && status.user) {
     printWarning(setup.alreadyLoggedIn);
-    console.log("");
     return await confirm2(setup.confirmRelogin);
   }
   return true;
@@ -18887,7 +18895,6 @@ async function tryRefresh() {
 }
 async function deviceAuthFlow() {
   printInfo(setup.starting);
-  console.log("");
   const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -18908,25 +18915,15 @@ async function deviceAuthFlow() {
     return 1;
   }
   const deviceAuth = deviceAuthResult.data;
-  console.log("\u2501".repeat(65));
-  console.log("");
-  console.log(`  ${setup.visitUrl}`);
-  console.log("");
-  console.log(`    ${deviceAuth.verification_uri}`);
-  console.log("");
-  console.log(`  ${setup.confirmCode}`);
-  console.log("");
-  console.log(`    ${colors.green(deviceAuth.user_code)}`);
-  console.log("");
-  console.log("\u2501".repeat(65));
+  console.log(setup.deviceAuth(deviceAuth.verification_uri, colors.green(deviceAuth.user_code)));
   console.log("");
   if (await openBrowser(deviceAuth.verification_uri_complete)) {
     printInfo(setup.browserOpened);
   } else {
     printInfo(setup.openManually);
   }
-  console.log("");
   printInfo(setup.waiting(deviceAuth.expires_in));
+  console.log("");
   let interval = deviceAuth.interval * 1000;
   const startTime = Date.now();
   const expiresAt = startTime + deviceAuth.expires_in * 1000;
@@ -18951,13 +18948,7 @@ async function deviceAuthFlow() {
       });
       console.log("");
       printSuccess(setup.success);
-      console.log("");
-      const displayName = getUserDisplayName(authResult.data.user);
-      if (authResult.data.user.first_name) {
-        console.log(setup.welcomeNamed(displayName, authResult.data.user.email));
-      } else {
-        console.log(setup.welcomeEmail(authResult.data.user.email));
-      }
+      printSuccess(setup.welcome(authResult.data.user.first_name, authResult.data.user.email));
       return 0;
     }
     const errorData = tokenData;
@@ -18969,7 +18960,6 @@ async function deviceAuthFlow() {
       interval += 1000;
       continue;
     }
-    console.log("");
     printError(setup.authFailed(errorData.error || "unknown error"));
     if (errorData.error_description)
       printInfo(errorData.error_description);
@@ -18992,9 +18982,7 @@ async function login() {
   if (process.argv.includes("--status")) {
     return showStatus();
   }
-  console.log("");
-  console.log(`  ${setup.header}`);
-  console.log(`  ${"\u2500".repeat(15)}`);
+  printInfo(setup.header);
   console.log("");
   if (!await checkExistingAuth()) {
     return 0;

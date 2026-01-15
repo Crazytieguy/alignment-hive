@@ -85,7 +85,6 @@ async function checkExistingAuth(): Promise<boolean> {
 
   if (status.authenticated && status.user) {
     printWarning(msg.alreadyLoggedIn);
-    console.log("");
     return await confirm(msg.confirmRelogin);
   }
 
@@ -113,7 +112,6 @@ async function tryRefresh(): Promise<{ success: boolean; user?: AuthUser }> {
 
 async function deviceAuthFlow(): Promise<number> {
   printInfo(msg.starting);
-  console.log("");
 
   const response = await fetch(`${WORKOS_API_URL}/authorize/device`, {
     method: "POST",
@@ -139,17 +137,7 @@ async function deviceAuthFlow(): Promise<number> {
 
   const deviceAuth = deviceAuthResult.data;
 
-  console.log("\u2501".repeat(65));
-  console.log("");
-  console.log(`  ${msg.visitUrl}`);
-  console.log("");
-  console.log(`    ${deviceAuth.verification_uri}`);
-  console.log("");
-  console.log(`  ${msg.confirmCode}`);
-  console.log("");
-  console.log(`    ${colors.green(deviceAuth.user_code)}`);
-  console.log("");
-  console.log("\u2501".repeat(65));
+  console.log(msg.deviceAuth(deviceAuth.verification_uri, colors.green(deviceAuth.user_code)));
   console.log("");
 
   if (await openBrowser(deviceAuth.verification_uri_complete)) {
@@ -157,8 +145,8 @@ async function deviceAuthFlow(): Promise<number> {
   } else {
     printInfo(msg.openManually);
   }
-  console.log("");
   printInfo(msg.waiting(deviceAuth.expires_in));
+  console.log("");
 
   let interval = deviceAuth.interval * 1000;
   const startTime = Date.now();
@@ -189,14 +177,7 @@ async function deviceAuthFlow(): Promise<number> {
 
       console.log("");
       printSuccess(msg.success);
-      console.log("");
-
-      const displayName = getUserDisplayName(authResult.data.user);
-      if (authResult.data.user.first_name) {
-        console.log(msg.welcomeNamed(displayName, authResult.data.user.email));
-      } else {
-        console.log(msg.welcomeEmail(authResult.data.user.email));
-      }
+      printSuccess(msg.welcome(authResult.data.user.first_name, authResult.data.user.email));
 
       return 0;
     }
@@ -216,7 +197,6 @@ async function deviceAuthFlow(): Promise<number> {
       continue;
     }
 
-    console.log("");
     printError(msg.authFailed(errorData.error || "unknown error"));
     if (errorData.error_description) printInfo(errorData.error_description);
     return 1;
@@ -242,9 +222,7 @@ export async function login(): Promise<number> {
     return showStatus();
   }
 
-  console.log("");
-  console.log(`  ${msg.header}`);
-  console.log(`  ${"\u2500".repeat(15)}`);
+  printInfo(msg.header);
   console.log("");
 
   if (!(await checkExistingAuth())) {

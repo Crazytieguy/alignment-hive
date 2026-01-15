@@ -235,15 +235,24 @@ export const setup = {
   refreshing: 'Refreshing your session...',
   refreshSuccess: 'Session refreshed!',
   starting: 'Starting authentication...',
-  visitUrl: 'Visit this URL in your browser:',
-  confirmCode: 'Confirm this code matches:',
+  deviceAuth: (url: string, code: string): string => {
+    return [
+      'Open this URL in your browser:',
+      '',
+      `  ${url}`,
+      '',
+      'Confirm this code matches:',
+      '',
+      `  ${code}`,
+    ].join('\n');
+  },
   browserOpened: 'Browser opened. Confirm the code and approve.',
-  openManually: 'Open the URL in your browser, then confirm the code.',
+  openManually: 'Open the URL manually, then confirm the code.',
   waiting: (seconds: number): string => `Waiting for authentication... (expires in ${seconds}s)`,
   waitingProgress: (elapsed: number): string => `Waiting... (${elapsed}s elapsed)`,
   success: "You're connected!",
-  welcomeNamed: (name: string, email: string): string => `Welcome, ${name} (${email})!`,
-  welcomeEmail: (email: string): string => `Logged in as: ${email}`,
+  welcome: (name: string | null | undefined, email: string): string =>
+    name ? `Welcome, ${name} (${email})!` : `Logged in as: ${email}`,
   // Consent (shown before auth)
   consentInfo: (userHasAlias: boolean): string => {
     const cli = getCliCommand(userHasAlias);
