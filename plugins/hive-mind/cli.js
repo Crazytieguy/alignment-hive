@@ -30,7 +30,7 @@ import { basename, join } from "path";
 var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
 var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 var AUTH_FILE = join(AUTH_DIR, "auth.json");
-async function getCheckoutId(hiveMindDir) {
+async function getOrCreateCheckoutId(hiveMindDir) {
   const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
     const id = await readFile(checkoutIdFile, "utf-8");
@@ -49,6 +49,7 @@ checkout-id
       }
     } catch {
       await writeFile(gitignorePath, `checkout-id
+sessions/
 `);
     }
     return id;
@@ -14462,7 +14463,7 @@ async function extractSession(options) {
   const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
     readFile2(rawPath, "utf-8"),
     stat(rawPath),
-    getCheckoutId(hiveMindDir),
+    getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath)
   ]);
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
@@ -18722,7 +18723,7 @@ async function sessionStart() {
     }
     transcriptsDir = saved;
   }
-  getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
+  getOrCreateCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
   const [sessionCheck, status] = await Promise.all([
     checkAllSessions(cwd, transcriptsDir).catch((error48) => ({
       error: error48 instanceof Error ? error48.message : String(error48)

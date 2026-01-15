@@ -10,7 +10,7 @@ export const WORKOS_CLIENT_ID =
 export const AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 export const AUTH_FILE = join(AUTH_DIR, "auth.json");
 
-export async function getCheckoutId(hiveMindDir: string) {
+export async function getOrCreateCheckoutId(hiveMindDir: string) {
   const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
     const id = await readFile(checkoutIdFile, "utf-8");
@@ -26,7 +26,7 @@ export async function getCheckoutId(hiveMindDir: string) {
         await writeFile(gitignorePath, `${existing.trimEnd()}\ncheckout-id\n`);
       }
     } catch {
-      await writeFile(gitignorePath, "checkout-id\n");
+      await writeFile(gitignorePath, "checkout-id\nsessions/\n");
     }
     return id;
   }

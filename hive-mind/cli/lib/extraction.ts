@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
-import { getCheckoutId, loadTranscriptsDir } from "./config";
+import { getOrCreateCheckoutId, loadTranscriptsDir } from "./config";
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from "./sanitize";
 import { HiveMindMetaSchema, parseKnownEntry } from "./schemas";
 import type { HiveMindMeta, KnownEntry } from "./schemas";
@@ -70,7 +70,7 @@ export async function extractSession(options: ExtractSessionOptions) {
   const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
     readFile(rawPath, "utf-8"),
     stat(rawPath),
-    getCheckoutId(hiveMindDir),
+    getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath),
   ]);
 

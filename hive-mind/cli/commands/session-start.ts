@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
-import { getCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
+import { getOrCreateCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
 import { pingCheckout } from "../lib/convex";
 import { checkAllSessions } from "../lib/extraction";
 import { hook } from "../lib/messages";
@@ -73,7 +73,7 @@ export async function sessionStart(): Promise<number> {
     transcriptsDir = saved;
   }
 
-  getCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
+  getOrCreateCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
 
   // Run session check and auth in parallel - reads metadata once for both extraction and eligibility
   const [sessionCheck, status] = await Promise.all([

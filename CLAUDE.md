@@ -36,6 +36,4 @@ Use [uv](https://docs.astral.sh/uv/) with inline dependencies (PEP 723). Run scr
 
 ## hive-mind Session Files
 
-The `.claude/hive-mind/sessions/` directory contains extracted session data. These files **should be committed** - they're test fixtures and development data for hive-mind.
-
-However, **do not read or search these files** during normal development. They contain long conversation logs that will spam your context. Only access them when specifically working on session extraction or formatting.
+The `.claude/hive-mind/sessions/` directory contains extracted session data. These files are gitignored.

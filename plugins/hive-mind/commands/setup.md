@@ -62,17 +62,18 @@ hive-mind login
 
 This opens a browser for authentication. Wait for the user to complete login before continuing.
 
-## Step 3: Gitignore Decision
+## Step 3: Gitignore Info
 
-After login completes, explain the gitignore tradeoff for `.claude/hive-mind/sessions/`:
+After login completes, explain that sessions are gitignored by default:
 
-**Not gitignoring (default):**
-- Sessions sync when you push/pull the repo
-- Works across different machines and for collaborators
-
-**Gitignoring:**
+**Gitignored (default):**
+- The plugin automatically adds `sessions/` to `.claude/hive-mind/.gitignore`
 - Keeps the git repo clean (sessions can add many files)
 - Sessions stay only on the current machine
-- Add to .gitignore: `.claude/hive-mind/sessions/`
 
-Ask which the user prefers and help them configure it if they want to gitignore.
+**To commit sessions instead:**
+- Remove the `sessions/` line from `.claude/hive-mind/.gitignore`
+- Sessions will sync when you push/pull the repo
+- Works across different machines and for collaborators
+
+Let the user know this is just informational - the default works for most users.
