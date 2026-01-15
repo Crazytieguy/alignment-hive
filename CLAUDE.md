@@ -17,7 +17,7 @@ This is a **bun monorepo**:
 
 **For web app**: Read [web/README.md](web/README.md) for local development setup
 
-**For CLI**: Read [hive-mind/CLAUDE.md](hive-mind/CLAUDE.md) for development guidelines
+**For CLI**: Read [hive-mind/CLAUDE.md](hive-mind/CLAUDE.md) for development guidelines. Run CLI commands from the project root: `bun hive-mind/cli/cli.ts <command>`
 
 ## Plugin Versioning
 

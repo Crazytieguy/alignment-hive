@@ -297,7 +297,7 @@ export async function index(): Promise<number> {
   const idPrefixes = computeMinimalPrefixes(sessionIds);
 
   console.log(
-    "ID DATETIME MSGS USER_MESSAGES BASH_CALLS WEB_FETCHES WEB_SEARCHES LINES_ADDED LINES_REMOVED FILES_TOUCHED SIGNIFICANT_LOCATIONS SUMMARY COMMITS"
+    "ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS"
   );
   let prevDate = "";
   let prevYear = "";
@@ -346,10 +346,10 @@ function formatSessionLine(
     stats.linesAdded === 0 ? "" : `+${stats.linesAdded}`,
     stats.linesRemoved === 0 ? "" : `-${stats.linesRemoved}`,
     fmt(stats.filesTouched),
-    stats.significantLocations.join(" "),
+    stats.significantLocations.join(","),
     summary,
     commitList,
-  ].join(" ");
+  ].join("|");
 
   return { line, date, year };
 }
