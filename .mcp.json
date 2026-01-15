@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "convex": {
+      "command": "bunx",
+      "args": ["convex@latest", "mcp", "start"]
+    }
+  }
+}
