@@ -229,4 +229,17 @@ describe("high-entropy safety net", () => {
     const lowEntropy = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     expect(detectSecrets(lowEntropy)).toHaveLength(0);
   });
+
+  test("excludes file paths", () => {
+    const paths = [
+      "hive-mind/cli/lib/format.ts",
+      "~/.claude/plans/squishy-booping-beacon.md",
+      "plugins/hive-mind/skills/retrieval/SKILL.md",
+      "web/src/routes/_authenticated/welcome.tsx",
+      "/Users/yoav/projects/alignment-hive/",
+    ];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
+  });
 });

@@ -242,8 +242,7 @@ export const SECRET_RULES: SecretRule[] = [
   { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|\$)`, "gi"), keywords: ["zendesk"] },
 
   // Safety net: catch high-entropy strings that don't match specific patterns
-  // This catches secrets from services we don't have specific rules for
-  { id: "high-entropy-secret", regex: new RegExp(`\\b([A-Za-z0-9_\\-./+=]{20,200})\\b`, "g"), entropy: 4.0, notHexOnly: true },
+  { id: "high-entropy-secret", regex: new RegExp(`(?<![A-Za-z0-9_\\-./+=])([A-Za-z0-9_\\-./+=]{20,200})(?![A-Za-z0-9_\\-./+=])`, "g"), entropy: 4.0, notHexOnly: true },
 ];
 
 // All unique keywords for pre-filter optimization

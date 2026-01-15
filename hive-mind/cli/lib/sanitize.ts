@@ -60,6 +60,11 @@ function shannonEntropy(data: string): number {
   return entropy;
 }
 
+function looksLikeFilePath(s: string): boolean {
+  if (s.endsWith("/")) return true;
+  return s.includes("/") && /\.\w{1,4}$/.test(s);
+}
+
 let _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
 export function getDetectSecretsStats() {
   return _stats;
@@ -104,6 +109,10 @@ export function detectSecrets(content: string): Array<SecretMatch> {
 
       // Skip hex-only strings if the rule requires it (e.g., high-entropy safety net)
       if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
+        continue;
+      }
+
+      if (rule.id === "high-entropy-secret" && looksLikeFilePath(secretValue)) {
         continue;
       }
 
