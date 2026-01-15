@@ -68,3 +68,5 @@ Ask if the user wants to install hive-mind - local memory retrieval system, plus
   }
 }
 ```
+
+Tell the user to run `/hive-mind:setup` to complete the hive-mind configuration, after they restart Claude Code.
