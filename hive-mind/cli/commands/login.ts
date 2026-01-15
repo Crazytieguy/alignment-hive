@@ -9,7 +9,7 @@ import {
   saveAuthData,
 } from "../lib/auth";
 import { WORKOS_CLIENT_ID } from "../lib/config";
-import { setup as msg } from "../lib/messages";
+import { errors, setup as msg } from "../lib/messages";
 import {
   colors,
   printError,
@@ -126,7 +126,7 @@ async function deviceAuthFlow(): Promise<number> {
   if (errorResult.success && errorResult.data.error) {
     printError(msg.startFailed(errorResult.data.error));
     if (errorResult.data.error_description) {
-      console.log(errorResult.data.error_description);
+      printInfo(errorResult.data.error_description);
     }
     return 1;
   }
@@ -218,7 +218,7 @@ async function deviceAuthFlow(): Promise<number> {
 
     console.log("");
     printError(msg.authFailed(errorData.error || "unknown error"));
-    if (errorData.error_description) console.log(errorData.error_description);
+    if (errorData.error_description) printInfo(errorData.error_description);
     return 1;
   }
 
@@ -230,9 +230,9 @@ async function showStatus(): Promise<number> {
   const status = await checkAuthStatus(false);
   if (status.authenticated && status.user) {
     const displayName = getUserDisplayName(status.user);
-    console.log(`logged in: yes (${displayName})`);
+    console.log(errors.loginStatusYes(displayName));
   } else {
-    console.log("logged in: no");
+    console.log(errors.loginStatusNo);
   }
   return 0;
 }

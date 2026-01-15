@@ -4,7 +4,7 @@ import { checkAuthStatus } from '../lib/auth.js';
 import { getCanonicalProjectName } from '../lib/config.js';
 import { generateUploadUrl, heartbeatSession, saveUpload } from '../lib/convex.js';
 import { getHiveMindSessionsDir, readExtractedMeta, readExtractedSession } from '../lib/extraction.js';
-import { uploadCmd } from '../lib/messages.js';
+import { errors, uploadCmd } from '../lib/messages.js';
 import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
 import { parseSession } from '../lib/parse.js';
 import { getAllSessionsEligibility } from '../lib/upload-eligibility.js';
@@ -151,7 +151,7 @@ async function uploadSingleSession(
       console.log(`  ${m}`);
     }
     if (lookup.matches.length > 5) {
-      console.log(`  ... and ${lookup.matches.length - 5} more`);
+      console.log(errors.andMore(lookup.matches.length - 5));
     }
     return 1;
   }

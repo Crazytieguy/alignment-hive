@@ -14739,7 +14739,9 @@ var errors3 = {
   invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd) => `Unknown command: ${cmd}`,
   unexpectedResponse: "Unexpected response from server",
-  bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash"
+  bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash",
+  loginStatusYes: (displayName) => `logged in: yes (${displayName})`,
+  loginStatusNo: "logged in: no"
 };
 var usage = {
   main: (commands) => {
@@ -14853,6 +14855,35 @@ var usage = {
       "  COMMITS               Git commits from the session"
     ].join(`
 `);
+  },
+  indexFull: () => {
+    return [
+      "Usage: index [--escape-file-refs] [--pending]",
+      "",
+      "List all extracted sessions with statistics, summary, and commits.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Options:",
+      "  --escape-file-refs  Escape @ symbols to prevent file reference interpretation",
+      "  --pending           Show upload eligibility status for each session",
+      "",
+      "Output columns:",
+      "  ID                   Session ID prefix (first 16 chars)",
+      "  DATETIME             Session modification time",
+      "  MSGS                 Total message count",
+      "  USER_MESSAGES        User message count",
+      "  BASH_CALLS           Bash commands executed",
+      "  WEB_FETCHES          Web fetches",
+      "  WEB_SEARCHES         Web searches",
+      "  LINES_ADDED          Lines added",
+      "  LINES_REMOVED        Lines removed",
+      "  FILES_TOUCHED        Number of unique files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY              Session summary or first user prompt",
+      "  COMMITS              Git commit hashes from the session"
+    ].join(`
+`);
   }
 };
 var setup = {
@@ -14888,7 +14919,8 @@ Run \`${cli} exclude\` anytime to opt out.`;
   aliasConfirm: "Set up hive-mind command?",
   aliasSuccess: "Command added!",
   aliasActivate: (sourceCmd) => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
-  aliasFailed: "Couldn't add command automatically."
+  aliasFailed: "Couldn't add command automatically.",
+  alreadySetUp: "hive-mind command already set up"
 };
 var indexCmd = {
   noSessionsDir: "No sessions found. Run 'extract' first.",
@@ -14917,7 +14949,9 @@ var excludeCmd = {
   excluded: (id) => `Excluded session ${id}`,
   failedToExclude: (id) => `Failed to exclude session ${id}`,
   cannotExcludeAgent: "Agent sessions cannot be excluded directly. Exclude the parent session instead.",
-  usage: "Usage: hive-mind exclude <session-id> or hive-mind exclude --all"
+  usage: "Usage: hive-mind exclude <session-id> or hive-mind exclude --all",
+  excludedLine: (id) => `  \u2717 ${id} excluded`,
+  failedLine: (id) => `  ! ${id} failed`
 };
 var uploadCmd = {
   notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
@@ -15072,10 +15106,10 @@ async function excludeAll(cwd) {
       continue;
     const sessionId = file2.replace(".jsonl", "");
     if (await excludeSession(sessionPath)) {
-      console.log(`  ${colors.yellow("\u2717")} ${formatSessionId(sessionId)} excluded`);
+      console.log(colors.yellow(excludeCmd.excludedLine(formatSessionId(sessionId))));
       succeeded++;
     } else {
-      console.log(`  ${colors.red("!")} ${formatSessionId(sessionId)} failed`);
+      console.log(colors.red(excludeCmd.failedLine(formatSessionId(sessionId))));
       failed++;
     }
   }
@@ -15142,7 +15176,10 @@ async function extract() {
   try {
     const success2 = await extractSingleSession(cwd, sessionId);
     return success2 ? 0 : 1;
-  } catch {
+  } catch (error48) {
+    if (process.env.DEBUG) {
+      console.error(`[extract] ${error48 instanceof Error ? error48.message : String(error48)}`);
+    }
     return 1;
   }
 }
@@ -16851,30 +16888,7 @@ function formatRelativeDateTime(rawMtime, prevDate, prevYear) {
   return { display, date: date5, year };
 }
 function printUsage2() {
-  console.log("Usage: index [--escape-file-refs] [--pending]");
-  console.log(`
-List all extracted sessions with statistics, summary, and commits.`);
-  console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
-  console.log("Statistics include work from subagent sessions.");
-  console.log(`
-Options:`);
-  console.log("  --escape-file-refs  Escape @ symbols to prevent file reference interpretation");
-  console.log("  --pending           Show upload eligibility status for each session");
-  console.log(`
-Output columns:`);
-  console.log("  ID                   Session ID prefix (first 16 chars)");
-  console.log("  DATETIME             Session modification time");
-  console.log("  MSGS                 Total message count");
-  console.log("  USER_MESSAGES        User message count");
-  console.log("  BASH_CALLS           Bash commands executed");
-  console.log("  WEB_FETCHES          Web fetches");
-  console.log("  WEB_SEARCHES         Web searches");
-  console.log("  LINES_ADDED          Lines added");
-  console.log("  LINES_REMOVED        Lines removed");
-  console.log("  FILES_TOUCHED        Number of unique files modified");
-  console.log("  SIGNIFICANT_LOCATIONS Paths where >30% of work happened");
-  console.log("  SUMMARY              Session summary or first user prompt");
-  console.log("  COMMITS              Git commit hashes from the session");
+  console.log(usage.indexFull());
 }
 function formatPendingSession(info, idPrefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth) {
   const { eligibility, entries, agentCount } = info;
@@ -18565,6 +18579,11 @@ var components = componentsGeneric();
 
 // cli/lib/convex.ts
 var CONVEX_URL = process.env.CONVEX_URL ?? "https://grateful-warbler-176.convex.cloud";
+function debugLog(message) {
+  if (process.env.DEBUG) {
+    console.error(`[convex] ${message}`);
+  }
+}
 var clientInstance = null;
 function getConvexClient() {
   if (!clientInstance) {
@@ -18586,7 +18605,8 @@ async function pingCheckout(checkoutId) {
     const client = getConvexClient();
     await client.mutation(api2.sessions.upsertCheckout, { checkoutId });
     return true;
-  } catch {
+  } catch (error48) {
+    debugLog(`pingCheckout failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
     return false;
   }
 }
@@ -18597,7 +18617,8 @@ async function heartbeatSession(session) {
       return false;
     await client.mutation(api2.sessions.heartbeatSession, session);
     return true;
-  } catch {
+  } catch (error48) {
+    debugLog(`heartbeatSession failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
     return false;
   }
 }
@@ -18607,7 +18628,8 @@ async function generateUploadUrl(sessionId) {
     if (!client)
       return null;
     return await client.mutation(api2.sessions.generateUploadUrl, { sessionId });
-  } catch {
+  } catch (error48) {
+    debugLog(`generateUploadUrl failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
     return null;
   }
 }
@@ -18621,7 +18643,8 @@ async function saveUpload(sessionId, storageId) {
       storageId
     });
     return true;
-  } catch {
+  } catch (error48) {
+    debugLog(`saveUpload failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
     return false;
   }
 }
@@ -18875,7 +18898,7 @@ async function deviceAuthFlow() {
   if (errorResult.success && errorResult.data.error) {
     printError(setup.startFailed(errorResult.data.error));
     if (errorResult.data.error_description) {
-      console.log(errorResult.data.error_description);
+      printInfo(errorResult.data.error_description);
     }
     return 1;
   }
@@ -18949,7 +18972,7 @@ async function deviceAuthFlow() {
     console.log("");
     printError(setup.authFailed(errorData.error || "unknown error"));
     if (errorData.error_description)
-      console.log(errorData.error_description);
+      printInfo(errorData.error_description);
     return 1;
   }
   printError(setup.timeout);
@@ -18959,9 +18982,9 @@ async function showStatus() {
   const status = await checkAuthStatus(false);
   if (status.authenticated && status.user) {
     const displayName = getUserDisplayName(status.user);
-    console.log(`logged in: yes (${displayName})`);
+    console.log(errors3.loginStatusYes(displayName));
   } else {
-    console.log("logged in: no");
+    console.log(errors3.loginStatusNo);
   }
   return 0;
 }
@@ -18994,10 +19017,10 @@ async function setupAliasCommand() {
   }
   const shell = getShellConfig();
   if (alreadyExists) {
-    console.log("hive-mind command already set up");
+    printInfo(setup.alreadySetUp);
   } else {
     printSuccess("hive-mind command added to shell config");
-    console.log(`Run \`${shell.sourceCmd}\` or open a new terminal to use it`);
+    console.log(setup.aliasActivate(shell.sourceCmd));
   }
   return 0;
 }
@@ -19114,7 +19137,7 @@ async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
       console.log(`  ${m}`);
     }
     if (lookup2.matches.length > 5) {
-      console.log(`  ... and ${lookup2.matches.length - 5} more`);
+      console.log(errors3.andMore(lookup2.matches.length - 5));
     }
     return 1;
   }
@@ -19241,7 +19264,10 @@ async function heartbeat() {
       parentSessionId: meta3.parentSessionId
     });
     return 0;
-  } catch {
+  } catch (error48) {
+    if (process.env.DEBUG) {
+      console.error(`[heartbeat] ${error48 instanceof Error ? error48.message : String(error48)}`);
+    }
     return 1;
   }
 }

@@ -5,6 +5,12 @@ import { loadAuthData } from './auth';
 const CONVEX_URL =
   process.env.CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
+function debugLog(message: string): void {
+  if (process.env.DEBUG) {
+    console.error(`[convex] ${message}`);
+  }
+}
+
 let clientInstance: ConvexHttpClient | null = null;
 
 export function getConvexClient(): ConvexHttpClient {
@@ -30,7 +36,8 @@ export async function pingCheckout(checkoutId: string): Promise<boolean> {
     const client = getConvexClient();
     await client.mutation(api.sessions.upsertCheckout, { checkoutId });
     return true;
-  } catch {
+  } catch (error) {
+    debugLog(`pingCheckout failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }
@@ -48,7 +55,8 @@ export async function heartbeatSession(session: {
 
     await client.mutation(api.sessions.heartbeatSession, session);
     return true;
-  } catch {
+  } catch (error) {
+    debugLog(`heartbeatSession failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }
@@ -61,7 +69,8 @@ export async function generateUploadUrl(
     if (!client) return null;
 
     return await client.mutation(api.sessions.generateUploadUrl, { sessionId });
-  } catch {
+  } catch (error) {
+    debugLog(`generateUploadUrl failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
@@ -79,7 +88,8 @@ export async function saveUpload(
       storageId: storageId as any,
     });
     return true;
-  } catch {
+  } catch (error) {
+    debugLog(`saveUpload failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }

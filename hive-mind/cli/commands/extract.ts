@@ -11,7 +11,10 @@ export async function extract(): Promise<number> {
   try {
     const success = await extractSingleSession(cwd, sessionId);
     return success ? 0 : 1;
-  } catch {
+  } catch (error) {
+    if (process.env.DEBUG) {
+      console.error(`[extract] ${error instanceof Error ? error.message : String(error)}`);
+    }
     return 1;
   }
 }

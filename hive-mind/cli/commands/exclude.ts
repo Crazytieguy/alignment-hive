@@ -71,10 +71,10 @@ async function excludeAll(cwd: string): Promise<number> {
 
     const sessionId = file.replace('.jsonl', '');
     if (await excludeSession(sessionPath)) {
-      console.log(`  ${colors.yellow('✗')} ${formatSessionId(sessionId)} excluded`);
+      console.log(colors.yellow(excludeCmd.excludedLine(formatSessionId(sessionId))));
       succeeded++;
     } else {
-      console.log(`  ${colors.red('!')} ${formatSessionId(sessionId)} failed`);
+      console.log(colors.red(excludeCmd.failedLine(formatSessionId(sessionId))));
       failed++;
     }
   }

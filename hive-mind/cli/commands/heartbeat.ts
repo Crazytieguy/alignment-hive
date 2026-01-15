@@ -29,7 +29,10 @@ export async function heartbeat(): Promise<number> {
       parentSessionId: meta.parentSessionId,
     });
     return 0;
-  } catch {
+  } catch (error) {
+    if (process.env.DEBUG) {
+      console.error(`[heartbeat] ${error instanceof Error ? error.message : String(error)}`);
+    }
     return 1;
   }
 }

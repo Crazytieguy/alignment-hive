@@ -81,6 +81,8 @@ export const errors = {
   unknownCommand: (cmd: string): string => `Unknown command: ${cmd}`,
   unexpectedResponse: 'Unexpected response from server',
   bunNotInstalled: 'To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash',
+  loginStatusYes: (displayName: string): string => `logged in: yes (${displayName})`,
+  loginStatusNo: 'logged in: no',
 };
 
 export const usage = {
@@ -195,6 +197,35 @@ export const usage = {
       '  COMMITS               Git commits from the session',
     ].join('\n');
   },
+
+  indexFull: (): string => {
+    return [
+      'Usage: index [--escape-file-refs] [--pending]',
+      '',
+      'List all extracted sessions with statistics, summary, and commits.',
+      'Agent sessions are excluded (explore via Task tool calls in parent sessions).',
+      'Statistics include work from subagent sessions.',
+      '',
+      'Options:',
+      '  --escape-file-refs  Escape @ symbols to prevent file reference interpretation',
+      '  --pending           Show upload eligibility status for each session',
+      '',
+      'Output columns:',
+      '  ID                   Session ID prefix (first 16 chars)',
+      '  DATETIME             Session modification time',
+      '  MSGS                 Total message count',
+      '  USER_MESSAGES        User message count',
+      '  BASH_CALLS           Bash commands executed',
+      '  WEB_FETCHES          Web fetches',
+      '  WEB_SEARCHES         Web searches',
+      '  LINES_ADDED          Lines added',
+      '  LINES_REMOVED        Lines removed',
+      '  FILES_TOUCHED        Number of unique files modified',
+      '  SIGNIFICANT_LOCATIONS Paths where >30% of work happened',
+      '  SUMMARY              Session summary or first user prompt',
+      '  COMMITS              Git commit hashes from the session',
+    ].join('\n');
+  },
 };
 
 export const setup = {
@@ -231,6 +262,7 @@ export const setup = {
   aliasSuccess: 'Command added!',
   aliasActivate: (sourceCmd: string): string => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
   aliasFailed: "Couldn't add command automatically.",
+  alreadySetUp: 'hive-mind command already set up',
 };
 
 export const indexCmd = {
@@ -265,6 +297,8 @@ export const excludeCmd = {
   failedToExclude: (id: string): string => `Failed to exclude session ${id}`,
   cannotExcludeAgent: 'Agent sessions cannot be excluded directly. Exclude the parent session instead.',
   usage: 'Usage: hive-mind exclude <session-id> or hive-mind exclude --all',
+  excludedLine: (id: string): string => `  ✗ ${id} excluded`,
+  failedLine: (id: string): string => `  ! ${id} failed`,
 };
 
 export const uploadCmd = {

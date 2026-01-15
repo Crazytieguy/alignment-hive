@@ -2,7 +2,7 @@ import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { indexCmd } from "../lib/messages";
+import { indexCmd, usage } from "../lib/messages";
 import { colors, printError } from "../lib/output";
 import { parseSession } from "../lib/parse";
 import { checkSessionEligibility, getAuthIssuedAt } from "../lib/upload-eligibility";
@@ -80,27 +80,7 @@ interface FileStats {
 }
 
 function printUsage(): void {
-  console.log("Usage: index [--escape-file-refs] [--pending]");
-  console.log("\nList all extracted sessions with statistics, summary, and commits.");
-  console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
-  console.log("Statistics include work from subagent sessions.");
-  console.log("\nOptions:");
-  console.log("  --escape-file-refs  Escape @ symbols to prevent file reference interpretation");
-  console.log("  --pending           Show upload eligibility status for each session");
-  console.log("\nOutput columns:");
-  console.log("  ID                   Session ID prefix (first 16 chars)");
-  console.log("  DATETIME             Session modification time");
-  console.log("  MSGS                 Total message count");
-  console.log("  USER_MESSAGES        User message count");
-  console.log("  BASH_CALLS           Bash commands executed");
-  console.log("  WEB_FETCHES          Web fetches");
-  console.log("  WEB_SEARCHES         Web searches");
-  console.log("  LINES_ADDED          Lines added");
-  console.log("  LINES_REMOVED        Lines removed");
-  console.log("  FILES_TOUCHED        Number of unique files modified");
-  console.log("  SIGNIFICANT_LOCATIONS Paths where >30% of work happened");
-  console.log("  SUMMARY              Session summary or first user prompt");
-  console.log("  COMMITS              Git commit hashes from the session");
+  console.log(usage.indexFull());
 }
 
 interface PendingSessionInfo {

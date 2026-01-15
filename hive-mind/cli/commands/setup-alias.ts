@@ -1,7 +1,8 @@
 import { dirname } from "node:path";
-import { getShellConfig } from "../lib/config";
 import { setupAliasWithRoot } from "../lib/alias";
-import { printError, printSuccess } from "../lib/output";
+import { getShellConfig } from "../lib/config";
+import { setup } from "../lib/messages";
+import { printError, printInfo, printSuccess } from "../lib/output";
 
 export async function setupAliasCommand(): Promise<number> {
   // Derive plugin root from the script's own path (process.argv[1] is the cli.js path)
@@ -16,10 +17,10 @@ export async function setupAliasCommand(): Promise<number> {
 
   const shell = getShellConfig();
   if (alreadyExists) {
-    console.log("hive-mind command already set up");
+    printInfo(setup.alreadySetUp);
   } else {
     printSuccess("hive-mind command added to shell config");
-    console.log(`Run \`${shell.sourceCmd}\` or open a new terminal to use it`);
+    console.log(setup.aliasActivate(shell.sourceCmd));
   }
 
   return 0;
