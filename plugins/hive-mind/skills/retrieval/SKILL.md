@@ -4,11 +4,11 @@ description: Retrieval instructions for searching session history. Auto-loaded b
 allowed-tools: Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git:*)
 ---
 
-Memory archaeology: excavate layers of project history to uncover artifacts that explain the current state.
+Approach this as memory archaeology: excavate layers of project history to uncover relevant artifacts.
 
 **Retrieval, not interpretation.** Bring back direct quotes with timestamps. Let the artifacts speak for themselves. Do not analyze, summarize, or explain—just quote the relevant passages.
 
-**Be thorough.** The first result is rarely the best result. Keep digging until confident nothing relevant remains buried.
+**Be thorough.** The first result is rarely the best result. Try different search terms, check multiple sessions, and cross-reference with git history. Read session overviews even when grep doesn't match—relevant context often uses different words.
 
 ## What to Look For
 
@@ -23,9 +23,9 @@ Think broadly about what might be relevant:
 - **Failed approaches** - What didn't work and why (often more valuable than what did)
 - **Outstanding issues** - Known problems, limitations, tech debt that might affect current work
 - **Dependencies** - Related decisions that inform or constrain the current question
-- **Temporary code** - Debug scripts, one-off utilities, or workarounds that solved similar problems (even if later removed)
+- **Temporary work** - One-off scripts, exploratory analysis, or workarounds that solved similar problems (even if later removed)
 
-A question about caching might lead to finding: performance discussions, user preferences about dependencies, architectural decisions about the API layer, and known issues that would interact with caching.
+A question about evaluation prompts might lead to finding: past iterations and results, discussions about the model being evaluated, user preferences about methodology, and even unrelated experiments that revealed something about the target behavior.
 
 **Don't stop at the obvious.** If asked about X, also look for discussions that mention X indirectly, or decisions that would affect X even if X isn't named.
 
@@ -59,19 +59,9 @@ Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js index`:
 !`bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs`
 ```
 
-## Thoroughness
-
-**Keep searching until certain nothing remotely interesting remains.** Check multiple sessions. Try different search terms. Cross-reference with git history. Read session overviews even if grep didn't find matches - relevant context often uses different words.
-
-Before concluding:
-- Have at least 5+ candidate sessions been checked?
-- Have related terms been searched, not just the exact query?
-- Has git history been cross-referenced with session timestamps?
-- Could there be relevant context hiding in sessions about adjacent topics?
-
 ## Output Format
 
-**Return direct quotes, not analysis.** Output should be 80%+ blockquotes from session history. Do not interpret, explain, or summarize what the quotes mean—the caller will do that.
+**Return direct quotes, not analysis.** Output should be mostly blockquotes from session history. Do not interpret, explain, or summarize what the quotes mean—the caller will do that.
 
 **Label the source.** Always indicate where a quote comes from: user message, assistant response, thinking block, tool input, etc. This helps the caller understand the context and weight of each quote.
 
@@ -101,5 +91,3 @@ Before concluding:
 ```
 
 Note uncertainty when findings are related but not exact. If the requested information was not found, say so clearly—absence of evidence is also useful information.
-
-**One more search.** Before returning, do one more search with a different angle. The best findings often come from the last dig.
