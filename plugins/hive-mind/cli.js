@@ -14694,8 +14694,14 @@ var hook = {
     const cli = getCliCommand(userHasAlias);
     if (earliestUploadAt) {
       const now = Date.now();
-      const hoursRemaining = Math.ceil((earliestUploadAt - now) / (1000 * 60 * 60));
-      return `${count} session${count === 1 ? "" : "s"} uploading in ~${hoursRemaining}h. To review: ${cli} index --pending`;
+      const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - now) / (1000 * 60)));
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+      if (count === 1) {
+        return `1 session uploads in ${timeStr}. To review: ${cli} index --pending`;
+      }
+      return `${count} sessions pending, first uploads in ${timeStr}. To review: ${cli} index --pending`;
     }
     return `${count} session${count === 1 ? "" : "s"} ready to upload. To review: ${cli} index --pending`;
   },
