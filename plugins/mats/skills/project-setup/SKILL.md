@@ -1,6 +1,6 @@
 ---
 name: project-setup
-description: This skill should be used when the user asks to "start a new project", "set up a project", "initialize a repo", "create a new codebase", "help me get started", mentions "first session" or "project kickoff", or asks to "set up an existing project" or "configure this project".
+description: Use this skill liberally for anything related to project setup, architecture, structure, or organization. This includes starting new projects, improving existing codebases, reorganizing code, setting up tooling, or any conversation touching on how a project should be structured. When in doubt about whether this skill applies, use it.
 ---
 
 # Project Setup
