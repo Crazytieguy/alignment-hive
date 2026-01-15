@@ -35,28 +35,28 @@ Use Bash to run CLI commands and git. Cross-reference between them—commits and
 
 ### CLI Commands
 
-!`command -v hive-mind >/dev/null 2>&1 && printf 'Run commands via: \x60hive-mind <command>\x60\n' || printf 'Run commands via: \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60\n'`
+Run commands via: !`command -v hive-mind >/dev/null 2>&1 && echo '\x60hive-mind <command>\x60' || echo '\x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60'`
 
-!`command -v hive-mind >/dev/null 2>&1 && printf 'Output for \x60hive-mind grep --help\x60:\n' || printf 'Output for \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help\x60:\n'`
+`grep --help`:
 ```
-!`command -v hive-mind >/dev/null 2>&1 && hive-mind grep --help || bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help`
+!`hive-mind grep --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help 2>/dev/null || echo "(cli unavailable - install bun: https://bun.sh)"`
 ```
 
-!`command -v hive-mind >/dev/null 2>&1 && printf 'Output for \x60hive-mind read --help\x60:\n' || printf 'Output for \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help\x60:\n'`
+`read --help`:
 ```
-!`command -v hive-mind >/dev/null 2>&1 && hive-mind read --help || bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help`
+!`hive-mind read --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help 2>/dev/null || echo "(cli unavailable)"`
 ```
 
 ## Project History
 
-Output for `git log --oneline`:
+`git log --oneline`:
 ```
 !`git log --oneline 2>/dev/null || echo "(no git history available)"`
 ```
 
-!`command -v hive-mind >/dev/null 2>&1 && printf 'Output for \x60hive-mind index\x60:\n' || printf 'Output for \x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js index\x60:\n'`
+Session index:
 ```
-!`command -v hive-mind >/dev/null 2>&1 && hive-mind index --escape-file-refs || bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs`
+!`hive-mind index --escape-file-refs 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs 2>/dev/null || echo "(cli unavailable)"`
 ```
 
 ## Output Format
