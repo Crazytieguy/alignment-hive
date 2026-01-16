@@ -17,14 +17,14 @@ import { join as join4 } from "path";
 
 // cli/lib/extraction.ts
 import { createReadStream } from "fs";
-import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir2, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
 import { basename as basename2, dirname, join as join2 } from "path";
 
 // cli/lib/config.ts
 import { execSync } from "child_process";
 import { randomUUID } from "crypto";
-import { access, mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { basename, join } from "path";
 var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
@@ -81,20 +81,48 @@ function getCanonicalProjectName(cwd) {
     return basename(cwd);
   }
 }
-function getTranscriptsDirFile(hiveMindDir) {
-  return join(hiveMindDir, "transcripts-dir");
-}
-async function saveTranscriptsDir(hiveMindDir, dir) {
-  const file = getTranscriptsDirFile(hiveMindDir);
-  await ensureHiveMindDir(hiveMindDir);
-  await writeFile(file, dir, "utf-8");
-}
-async function loadTranscriptsDir(hiveMindDir) {
+async function isWorktree(cwd) {
   try {
-    const content = await readFile(getTranscriptsDirFile(hiveMindDir), "utf-8");
-    return content.trim();
+    const gitPath = join(cwd, ".git");
+    const gitStat = await stat(gitPath);
+    return gitStat.isFile();
+  } catch {
+    return false;
+  }
+}
+function getMainWorktreePath(cwd) {
+  try {
+    const output = execSync("git worktree list --porcelain", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const match = output.match(/^worktree (.+)$/m);
+    return match?.[1] ?? null;
   } catch {
     return null;
+  }
+}
+function getTranscriptsDirsFile(hiveMindDir) {
+  return join(hiveMindDir, "transcripts-dirs");
+}
+async function loadTranscriptsDirs(hiveMindDir) {
+  try {
+    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), "utf-8");
+    return content.split(`
+`).map((line) => line.trim()).filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+async function addTranscriptsDir(hiveMindDir, dir) {
+  await ensureHiveMindDir(hiveMindDir);
+  const existing = await loadTranscriptsDirs(hiveMindDir);
+  if (!existing.includes(dir)) {
+    existing.push(dir);
+    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join(`
+`) + `
+`, "utf-8");
   }
 }
 
@@ -14756,7 +14784,6 @@ var HiveMindMetaSchema = exports_external.object({
 
 // cli/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
-var INCLUDED_ENTRY_TYPES = ["user", "assistant", "summary", "system"];
 function* parseJsonl(content) {
   for (const line of content.split(`
 `)) {
@@ -14778,7 +14805,8 @@ function transformEntry(rawEntry) {
     return { entry: null, error: result.error };
   if (!result.data)
     return { entry: null };
-  if (INCLUDED_ENTRY_TYPES.includes(result.data.type)) {
+  const type = result.data.type;
+  if (type === "user" || type === "assistant" || type === "summary" || type === "system") {
     return { entry: result.data };
   }
   return { entry: null };
@@ -14801,7 +14829,7 @@ async function extractSession(options) {
   const hiveMindDir = dirname(dirname(outputPath));
   const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
     readFile2(rawPath, "utf-8"),
-    stat(rawPath),
+    stat2(rawPath),
     getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath)
   ]);
@@ -14951,12 +14979,26 @@ async function findRawSessions(rawDir) {
   }
   return sessions;
 }
-async function checkAllSessions(cwd, transcriptsDir) {
+async function checkAllSessions(cwd, transcriptsDirs) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const [rawSessions, extractedMetaMap] = await Promise.all([
-    findRawSessions(transcriptsDir),
+  const [rawSessionArrays, extractedMetaMap] = await Promise.all([
+    Promise.all(transcriptsDirs.map(async (dir) => {
+      try {
+        return await findRawSessions(dir);
+      } catch {
+        return [];
+      }
+    })),
     loadExtractedMetadata(extractedDir)
   ]);
+  const rawSessionMap = new Map;
+  for (const sessions of rawSessionArrays) {
+    for (const session of sessions) {
+      const sessionId = basename2(session.path, ".jsonl");
+      rawSessionMap.set(sessionId, session);
+    }
+  }
+  const rawSessions = [...rawSessionMap.values()];
   const sessionsToExtract = [];
   const schemaErrors = [];
   await Promise.all(rawSessions.map(async (session) => {
@@ -14968,7 +15010,7 @@ async function checkAllSessions(cwd, transcriptsDir) {
       needsExtract = true;
     } else {
       try {
-        const rawStat = await stat(rawPath);
+        const rawStat = await stat2(rawPath);
         const storedMtime = new Date(existingMeta.rawMtime).getTime();
         needsExtract = rawStat.mtime.getTime() > storedMtime;
       } catch {
@@ -15014,20 +15056,27 @@ async function loadExtractedMetadata(extractedDir) {
 }
 async function extractSingleSession(cwd, sessionId) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const transcriptsDir = await loadTranscriptsDir(join2(cwd, ".claude", "hive-mind"));
-  if (!transcriptsDir)
+  const transcriptsDirs = await loadTranscriptsDirs(join2(cwd, ".claude", "hive-mind"));
+  if (transcriptsDirs.length === 0)
     return false;
-  const rawSessions = await findRawSessions(transcriptsDir);
-  const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
-  if (!session)
-    return false;
-  const extractedPath = join2(extractedDir, basename2(session.path));
-  const result = await extractSession({
-    rawPath: session.path,
-    outputPath: extractedPath,
-    agentId: session.agentId
-  });
-  return result !== null;
+  for (const transcriptsDir of transcriptsDirs) {
+    try {
+      const rawSessions = await findRawSessions(transcriptsDir);
+      const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
+      if (session) {
+        const extractedPath = join2(extractedDir, basename2(session.path));
+        const result = await extractSession({
+          rawPath: session.path,
+          outputPath: extractedPath,
+          agentId: session.agentId
+        });
+        return result !== null;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 // cli/lib/output.ts
@@ -18784,22 +18833,37 @@ async function sessionStart() {
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join9(cwd, ".claude", "hive-mind");
-  let transcriptsDir;
+  let transcriptsDirs;
+  const inWorktree = await isWorktree(cwd);
   if (hookInput.transcriptPath) {
-    transcriptsDir = dirname2(hookInput.transcriptPath);
-    await saveTranscriptsDir(hiveMindDir, transcriptsDir);
+    const transcriptsDir = dirname2(hookInput.transcriptPath);
+    if (inWorktree) {
+      const mainPath = getMainWorktreePath(cwd);
+      if (mainPath) {
+        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
+        await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
+      }
+      transcriptsDirs = [transcriptsDir];
+    } else {
+      await addTranscriptsDir(hiveMindDir, transcriptsDir);
+      transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    }
   } else {
-    const saved = await loadTranscriptsDir(hiveMindDir);
-    if (!saved) {
+    if (inWorktree) {
       messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
       hookOutput(`hive-mind: ${messages[0]}`);
       return 1;
     }
-    transcriptsDir = saved;
+    transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    if (transcriptsDirs.length === 0) {
+      messages.push(hook.extractionFailed("No transcripts directories configured. Run a Claude Code session first."));
+      hookOutput(`hive-mind: ${messages[0]}`);
+      return 1;
+    }
   }
   getOrCreateCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
   const [sessionCheck, status] = await Promise.all([
-    checkAllSessions(cwd, transcriptsDir).catch((error48) => ({
+    checkAllSessions(cwd, transcriptsDirs).catch((error48) => ({
       error: error48 instanceof Error ? error48.message : String(error48)
     })),
     checkAuthStatus(true)

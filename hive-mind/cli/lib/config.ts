@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -74,21 +74,71 @@ export function getCanonicalProjectName(cwd: string): string {
   }
 }
 
-function getTranscriptsDirFile(hiveMindDir: string): string {
-  return join(hiveMindDir, "transcripts-dir");
-}
-
-export async function saveTranscriptsDir(hiveMindDir: string, dir: string): Promise<void> {
-  const file = getTranscriptsDirFile(hiveMindDir);
-  await ensureHiveMindDir(hiveMindDir);
-  await writeFile(file, dir, "utf-8");
-}
-
-export async function loadTranscriptsDir(hiveMindDir: string): Promise<string | null> {
+/**
+ * Check if the given directory is a git worktree (vs main repo).
+ * In a worktree, .git is a file pointing to the main repo's .git/worktrees/<name>.
+ * In a main repo, .git is a directory.
+ */
+export async function isWorktree(cwd: string): Promise<boolean> {
   try {
-    const content = await readFile(getTranscriptsDirFile(hiveMindDir), "utf-8");
-    return content.trim();
+    const gitPath = join(cwd, ".git");
+    const gitStat = await stat(gitPath);
+    return gitStat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the main worktree path from `git worktree list`.
+ * Returns null if not in a git repo or if git command fails.
+ */
+export function getMainWorktreePath(cwd: string): string | null {
+  try {
+    const output = execSync("git worktree list --porcelain", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    // First "worktree <path>" line is always the main worktree
+    const match = output.match(/^worktree (.+)$/m);
+    return match?.[1] ?? null;
   } catch {
     return null;
   }
 }
+
+function getTranscriptsDirsFile(hiveMindDir: string): string {
+  return join(hiveMindDir, "transcripts-dirs");
+}
+
+/**
+ * Load all transcripts directories from the transcripts-dirs file.
+ * Returns empty array if file doesn't exist.
+ */
+export async function loadTranscriptsDirs(hiveMindDir: string): Promise<Array<string>> {
+  try {
+    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), "utf-8");
+    return content
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Add a transcripts directory to the transcripts-dirs file.
+ * Deduplicates entries.
+ */
+export async function addTranscriptsDir(hiveMindDir: string, dir: string): Promise<void> {
+  await ensureHiveMindDir(hiveMindDir);
+  const existing = await loadTranscriptsDirs(hiveMindDir);
+  if (!existing.includes(dir)) {
+    existing.push(dir);
+    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join("\n") + "\n", "utf-8");
+  }
+}
+

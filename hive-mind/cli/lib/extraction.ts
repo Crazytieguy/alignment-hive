@@ -2,14 +2,13 @@ import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
-import { getOrCreateCheckoutId, loadTranscriptsDir } from "./config";
+import { getOrCreateCheckoutId, loadTranscriptsDirs } from "./config";
 import { errors } from "./messages";
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from "./sanitize";
 import { HiveMindMetaSchema, parseKnownEntry } from "./schemas";
 import type { HiveMindMeta, KnownEntry } from "./schemas";
 
 const HIVE_MIND_VERSION = "0.1" as const;
-const INCLUDED_ENTRY_TYPES = ["user", "assistant", "summary", "system"] as const;
 
 export function* parseJsonl(content: string) {
   for (const line of content.split("\n")) {
@@ -32,8 +31,9 @@ function transformEntry(rawEntry: unknown): { entry: ExtractedEntry | null; erro
   if (result.error) return { entry: null, error: result.error };
   if (!result.data) return { entry: null };
 
-  if (INCLUDED_ENTRY_TYPES.includes(result.data.type as (typeof INCLUDED_ENTRY_TYPES)[number])) {
-    return { entry: result.data as ExtractedEntry };
+  const type = result.data.type;
+  if (type === "user" || type === "assistant" || type === "summary" || type === "system") {
+    return { entry: result.data };
   }
   return { entry: null };
 }
@@ -238,7 +238,9 @@ async function findRawSessions(rawDir: string) {
           });
         }
       }
-    } catch {}
+    } catch {
+      // Subagents directory doesn't exist - continue
+    }
   }
   return sessions;
 }
@@ -259,14 +261,33 @@ export interface SessionCheckResult {
 }
 
 /** Check all sessions: which need extraction and provide metadata for eligibility */
-export async function checkAllSessions(cwd: string, transcriptsDir: string): Promise<SessionCheckResult> {
+export async function checkAllSessions(cwd: string, transcriptsDirs: Array<string>): Promise<SessionCheckResult> {
   const extractedDir = getHiveMindSessionsDir(cwd);
 
-  // Load raw sessions and extracted metadata in parallel
-  const [rawSessions, extractedMetaMap] = await Promise.all([
-    findRawSessions(transcriptsDir),
+  // Load raw sessions from all directories and extracted metadata in parallel
+  const [rawSessionArrays, extractedMetaMap] = await Promise.all([
+    Promise.all(
+      transcriptsDirs.map(async (dir) => {
+        try {
+          return await findRawSessions(dir);
+        } catch {
+          // Skip non-existent/inaccessible directories gracefully
+          return [];
+        }
+      })
+    ),
     loadExtractedMetadata(extractedDir),
   ]);
+
+  // Flatten and deduplicate by session ID (later directories override earlier)
+  const rawSessionMap = new Map<string, { path: string; agentId?: string }>();
+  for (const sessions of rawSessionArrays) {
+    for (const session of sessions) {
+      const sessionId = basename(session.path, ".jsonl");
+      rawSessionMap.set(sessionId, session);
+    }
+  }
+  const rawSessions = [...rawSessionMap.values()];
 
   const sessionsToExtract: Array<SessionToExtract> = [];
   const schemaErrors: Array<{ sessionId: string; errors: Array<string> }> = [];
@@ -344,19 +365,28 @@ async function loadExtractedMetadata(extractedDir: string): Promise<Map<string, 
 /** Full extraction for a single session (used by background process) */
 export async function extractSingleSession(cwd: string, sessionId: string): Promise<boolean> {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const transcriptsDir = await loadTranscriptsDir(join(cwd, ".claude", "hive-mind"));
-  if (!transcriptsDir) return false;
+  const transcriptsDirs = await loadTranscriptsDirs(join(cwd, ".claude", "hive-mind"));
+  if (transcriptsDirs.length === 0) return false;
 
-  const rawSessions = await findRawSessions(transcriptsDir);
-  const session = rawSessions.find((s) => basename(s.path, ".jsonl") === sessionId);
-  if (!session) return false;
+  // Search all transcript directories for the session
+  for (const transcriptsDir of transcriptsDirs) {
+    try {
+      const rawSessions = await findRawSessions(transcriptsDir);
+      const session = rawSessions.find((s) => basename(s.path, ".jsonl") === sessionId);
+      if (session) {
+        const extractedPath = join(extractedDir, basename(session.path));
+        const result = await extractSession({
+          rawPath: session.path,
+          outputPath: extractedPath,
+          agentId: session.agentId,
+        });
+        return result !== null;
+      }
+    } catch {
+      // Skip inaccessible directories
+      continue;
+    }
+  }
 
-  const extractedPath = join(extractedDir, basename(session.path));
-  const result = await extractSession({
-    rawPath: session.path,
-    outputPath: extractedPath,
-    agentId: session.agentId,
-  });
-
-  return result !== null;
+  return false;
 }

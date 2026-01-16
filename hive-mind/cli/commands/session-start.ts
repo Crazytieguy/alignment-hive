@@ -4,7 +4,13 @@ import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { updateAliasIfOutdated } from "../lib/alias";
 import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
-import { getOrCreateCheckoutId, loadTranscriptsDir, saveTranscriptsDir } from "../lib/config";
+import {
+  addTranscriptsDir,
+  getMainWorktreePath,
+  getOrCreateCheckoutId,
+  isWorktree,
+  loadTranscriptsDirs,
+} from "../lib/config";
 import { pingCheckout } from "../lib/convex";
 import { checkAllSessions } from "../lib/extraction";
 import { hook } from "../lib/messages";
@@ -59,25 +65,50 @@ export async function sessionStart(): Promise<number> {
   const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join(cwd, ".claude", "hive-mind");
 
-  let transcriptsDir: string;
+  // Determine transcripts directory and directories to check
+  let transcriptsDirs: Array<string>;
+  const inWorktree = await isWorktree(cwd);
+
   if (hookInput.transcriptPath) {
-    transcriptsDir = dirname(hookInput.transcriptPath);
-    await saveTranscriptsDir(hiveMindDir, transcriptsDir);
+    const transcriptsDir = dirname(hookInput.transcriptPath);
+
+    if (inWorktree) {
+      // Register with main worktree's transcripts-dirs
+      const mainPath = getMainWorktreePath(cwd);
+      if (mainPath) {
+        const mainHiveMindDir = join(mainPath, ".claude", "hive-mind");
+        await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
+      }
+      // Worktree only checks its own transcripts
+      transcriptsDirs = [transcriptsDir];
+    } else {
+      // Main worktree: register itself and check all directories
+      await addTranscriptsDir(hiveMindDir, transcriptsDir);
+      transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    }
   } else {
-    const saved = await loadTranscriptsDir(hiveMindDir);
-    if (!saved) {
+    // No transcript path provided - load from saved directories
+    if (inWorktree) {
       messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
       hookOutput(`hive-mind: ${messages[0]}`);
       return 1;
     }
-    transcriptsDir = saved;
+    transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    if (transcriptsDirs.length === 0) {
+      messages.push(hook.extractionFailed("No transcripts directories configured. Run a Claude Code session first."));
+      hookOutput(`hive-mind: ${messages[0]}`);
+      return 1;
+    }
   }
 
-  getOrCreateCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
+  // Fire-and-forget checkout ping for analytics
+  getOrCreateCheckoutId(hiveMindDir)
+    .then((checkoutId) => pingCheckout(checkoutId))
+    .catch(() => {});
 
   // Run session check and auth in parallel - reads metadata once for both extraction and eligibility
   const [sessionCheck, status] = await Promise.all([
-    checkAllSessions(cwd, transcriptsDir).catch((error) => ({
+    checkAllSessions(cwd, transcriptsDirs).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     })),
     checkAuthStatus(true),
