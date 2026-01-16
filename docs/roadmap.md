@@ -1,10 +1,14 @@
 # Roadmap
 
-Current priority: Technical infrastructure first, then content.
+## Completed
+
+**hive-mind v0.1** - Local extraction, CLI retrieval, session upload to Convex with 24h review period.
 
 ## In Progress
 
-**hive-mind** - See [hive-mind-plan.md](hive-mind-plan.md) for detailed design and session plan.
+**hive-mind v0.2** - See [hive-mind-plan.md](hive-mind-plan.md) for details.
+- Processing Pipeline (Fly.io)
+- Admin Web App
 
 ## Planned Skills
 
