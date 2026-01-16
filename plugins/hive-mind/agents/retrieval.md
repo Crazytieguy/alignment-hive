@@ -3,7 +3,7 @@ name: retrieval
 description: |
   Use this agent when historical context might help - which is more often than you'd expect. This agent searches past Claude Code sessions and returns relevant quotes about decisions, preferences, issues, failed approaches, and discussions.
 
-  **Especially useful when planning** - users are willing to wait for thorough context.
+  **Whenever you're planning anything—spawn it.** New feature, refactor, bug fix, research direction—historical context surfaces failed approaches, user preferences, and prior decisions that prevent planning mistakes.
 
   **Can be spawned in parallel with the Explore agent** to get both current code and historical context.
 
