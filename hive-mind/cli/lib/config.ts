@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -10,6 +10,16 @@ export const WORKOS_CLIENT_ID =
 export const AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 export const AUTH_FILE = join(AUTH_DIR, "auth.json");
 
+export async function ensureHiveMindDir(hiveMindDir: string) {
+  await mkdir(hiveMindDir, { recursive: true });
+  const gitignorePath = join(hiveMindDir, ".gitignore");
+  try {
+    await access(gitignorePath);
+  } catch {
+    await writeFile(gitignorePath, "*\n");
+  }
+}
+
 export async function getOrCreateCheckoutId(hiveMindDir: string) {
   const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
@@ -17,17 +27,8 @@ export async function getOrCreateCheckoutId(hiveMindDir: string) {
     return id.trim();
   } catch {
     const id = randomUUID();
-    await mkdir(hiveMindDir, { recursive: true });
+    await ensureHiveMindDir(hiveMindDir);
     await writeFile(checkoutIdFile, id);
-    const gitignorePath = join(hiveMindDir, ".gitignore");
-    try {
-      const existing = await readFile(gitignorePath, "utf-8");
-      if (!existing.includes("checkout-id")) {
-        await writeFile(gitignorePath, `${existing.trimEnd()}\ncheckout-id\n`);
-      }
-    } catch {
-      await writeFile(gitignorePath, "checkout-id\nsessions/\n");
-    }
     return id;
   }
 }
@@ -79,7 +80,7 @@ function getTranscriptsDirFile(hiveMindDir: string): string {
 
 export async function saveTranscriptsDir(hiveMindDir: string, dir: string): Promise<void> {
   const file = getTranscriptsDirFile(hiveMindDir);
-  await mkdir(hiveMindDir, { recursive: true });
+  await ensureHiveMindDir(hiveMindDir);
   await writeFile(file, dir, "utf-8");
 }
 

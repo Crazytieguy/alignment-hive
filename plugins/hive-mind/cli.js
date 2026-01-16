@@ -24,12 +24,22 @@ import { basename as basename2, dirname, join as join2 } from "path";
 // cli/lib/config.ts
 import { execSync } from "child_process";
 import { randomUUID } from "crypto";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { basename, join } from "path";
 var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
 var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 var AUTH_FILE = join(AUTH_DIR, "auth.json");
+async function ensureHiveMindDir(hiveMindDir) {
+  await mkdir(hiveMindDir, { recursive: true });
+  const gitignorePath = join(hiveMindDir, ".gitignore");
+  try {
+    await access(gitignorePath);
+  } catch {
+    await writeFile(gitignorePath, `*
+`);
+  }
+}
 async function getOrCreateCheckoutId(hiveMindDir) {
   const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
@@ -37,21 +47,8 @@ async function getOrCreateCheckoutId(hiveMindDir) {
     return id.trim();
   } catch {
     const id = randomUUID();
-    await mkdir(hiveMindDir, { recursive: true });
+    await ensureHiveMindDir(hiveMindDir);
     await writeFile(checkoutIdFile, id);
-    const gitignorePath = join(hiveMindDir, ".gitignore");
-    try {
-      const existing = await readFile(gitignorePath, "utf-8");
-      if (!existing.includes("checkout-id")) {
-        await writeFile(gitignorePath, `${existing.trimEnd()}
-checkout-id
-`);
-      }
-    } catch {
-      await writeFile(gitignorePath, `checkout-id
-sessions/
-`);
-    }
     return id;
   }
 }
@@ -89,7 +86,7 @@ function getTranscriptsDirFile(hiveMindDir) {
 }
 async function saveTranscriptsDir(hiveMindDir, dir) {
   const file = getTranscriptsDirFile(hiveMindDir);
-  await mkdir(hiveMindDir, { recursive: true });
+  await ensureHiveMindDir(hiveMindDir);
   await writeFile(file, dir, "utf-8");
 }
 async function loadTranscriptsDir(hiveMindDir) {
