@@ -31,7 +31,7 @@ If a tool would be useful and isn't installed, ask if the user would like to ins
 
 ## Living Documentation
 
-A useful pattern: treat README.md as a working document that evolves with the project, and add a CLAUDE.md with instructions to keep it updated.
+A useful pattern: treat README.md as a working document that evolves with the project, and add a CLAUDE.md with instructions to keep it updated. Reference the README from CLAUDE.md using `@README.md` so Claude always has context on the project.
 
 ## Claude Code Plugins
 
@@ -56,7 +56,7 @@ After installing plugins, tell the user to exit ("/exit") and continue the sessi
 
 ## MATS / Alignment Researchers
 
-Ask if the user wants to install hive-mind - local memory retrieval system, plus shared knowledge from other researchers' Claude sessions, and your sessions contribute back. Sharing requires an invite (MATS fellows: check your email).
+**Always ask** if the user wants to install hive-mind. This is a key part of the alignment research workflow - don't skip it. hive-mind provides local memory retrieval, shared knowledge from other researchers' Claude sessions, and your sessions contribute back. Sharing requires an invite (MATS fellows: check your email).
 
 ```json
 {
