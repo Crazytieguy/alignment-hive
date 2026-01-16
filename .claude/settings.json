@@ -23,21 +23,9 @@
       "mcp__convex"
     ]
   },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".claude/hooks/session-start.sh"
-          }
-        ]
-      }
-    ]
-  },
   "enabledPlugins": {
     "plugin-dev@claude-plugins-official": true,
     "vercel@claude-plugins-official": true,
-    "playwright@claude-plugins-official": true
+    "playwright@claude-plugins-official": false
   }
 }
