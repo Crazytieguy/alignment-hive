@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { GrepFieldFilter, parseFieldList } from "../lib/field-filter";
+import { SearchFieldFilter, parseFieldList } from "../lib/field-filter";
 import { formatBlocks } from "../lib/format";
 import { errors, usage } from "../lib/messages";
 import { printError } from "../lib/output";
@@ -11,20 +11,20 @@ import type { LogicalBlock } from "../lib/parse";
 
 const DEFAULT_CONTEXT_WORDS = 10;
 
-interface GrepOptions {
+interface SearchOptions {
   pattern: RegExp;
   countOnly: boolean;
   listOnly: boolean;
   maxMatches: number | null;
   contextWords: number;
-  fieldFilter: GrepFieldFilter;
+  fieldFilter: SearchFieldFilter;
   sessionFilter: string | null;
   afterTime: Date | null;
   beforeTime: Date | null;
 }
 
 function printUsage(): void {
-  console.log(usage.grep());
+  console.log(usage.search());
 }
 
 function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> {
@@ -50,7 +50,7 @@ function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> 
   return prefixes;
 }
 
-function getSearchableFieldValues(block: LogicalBlock, filter: GrepFieldFilter): Array<string> {
+function getSearchableFieldValues(block: LogicalBlock, filter: SearchFieldFilter): Array<string> {
   const values: Array<string> = [];
 
   if (block.type === "user" && filter.isSearchable("user")) {
@@ -80,7 +80,7 @@ function getSearchableFieldValues(block: LogicalBlock, filter: GrepFieldFilter):
   return values;
 }
 
-export async function grep(): Promise<number> {
+export async function search(): Promise<number> {
   const args = process.argv.slice(3);
 
   const doubleDashIdx = args.indexOf("--");
@@ -95,7 +95,7 @@ export async function grep(): Promise<number> {
     return 1;
   }
 
-  const options = parseGrepOptions(args);
+  const options = parseSearchOptions(args);
   if (!options) return 1;
 
   const cwd = process.cwd();
@@ -220,7 +220,7 @@ export async function grep(): Promise<number> {
   return 0;
 }
 
-function parseGrepOptions(args: Array<string>): GrepOptions | null {
+function parseSearchOptions(args: Array<string>): SearchOptions | null {
   function getFlagValue(flag: string): string | undefined {
     const idx = args.indexOf(flag);
     return idx !== -1 ? args[idx + 1] : undefined;
@@ -255,7 +255,7 @@ function parseGrepOptions(args: Array<string>): GrepOptions | null {
   const sessionFilter = getFlagValue("-s") ?? null;
   const searchInValue = getFlagValue("--in");
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
-  const fieldFilter = new GrepFieldFilter(searchIn);
+  const fieldFilter = new SearchFieldFilter(searchIn);
 
   let afterTime: Date | null = null;
   const afterValue = getFlagValue("--after");

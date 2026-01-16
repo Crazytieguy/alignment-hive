@@ -1,5 +1,5 @@
 /**
- * Tests for CLI commands: grep and read
+ * Tests for CLI commands: search and read
  *
  * These tests verify public behavior by:
  * 1. Creating temp session files
@@ -81,7 +81,7 @@ const userWithToolResult = (uuid: string, parentUuid: string, toolUseId: string,
   },
 });
 
-describe("grep command", () => {
+describe("search command", () => {
   let tempDir: string;
   let sessionsDir: string;
   let originalCwd: () => string;
@@ -125,9 +125,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "TODO"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "TODO"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("TODO"))).toBe(true);
     // Uses minimal prefix - "test" is unique enough
@@ -144,16 +144,16 @@ describe("grep command", () => {
     );
 
     // Without -i, should not match lowercase when searching uppercase
-    process.argv = ["node", "cli", "grep", "HELLO"];
-    const { grep } = await import("../commands/grep");
+    process.argv = ["node", "cli", "search", "HELLO"];
+    const { search } = await import("../commands/search");
     consoleOutput = [];
-    await grep();
+    await search();
     const withoutI = consoleOutput.filter((line) => line.includes("hello")).length;
 
     // With -i, should match both
-    process.argv = ["node", "cli", "grep", "-i", "HELLO"];
+    process.argv = ["node", "cli", "search", "-i", "HELLO"];
     consoleOutput = [];
-    await grep();
+    await search();
     const withI = consoleOutput.filter((line) => line.toLowerCase().includes("hello")).length;
 
     expect(withI).toBeGreaterThan(withoutI);
@@ -168,9 +168,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "-c", "error"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "-c", "error"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Should output session:count format (with minimal prefix)
     expect(consoleOutput.some((line) => /test.*:\d+/.test(line))).toBe(true);
@@ -185,9 +185,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "-l", "find"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "-l", "find"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Should output only session ID, not the matching line (with minimal prefix)
     expect(consoleOutput.length).toBe(1);
@@ -204,9 +204,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "-m", "2", "match"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "-m", "2", "match"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Should stop after 2 matching blocks (block headers start with session prefix and line number)
     const blockCount = consoleOutput.filter((line) => /^test.*\|\d+\|/.test(line)).length;
@@ -222,9 +222,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "-C", "1", "TARGET"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "-C", "1", "TARGET"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Should show context lines around match
     const output = consoleOutput.join("\n");
@@ -242,9 +242,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "SECRET_THOUGHT"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "SECRET_THOUGHT"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("SECRET_THOUGHT"))).toBe(true);
   });
@@ -260,9 +260,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "SPECIAL_FILE"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "SPECIAL_FILE"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("SPECIAL_FILE"))).toBe(true);
   });
@@ -281,9 +281,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "UNIQUE_OUTPUT_12345"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "UNIQUE_OUTPUT_12345"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Tool result content in tool-result-only entries is not searched by default
     expect(consoleOutput.some((line) => line.includes("UNIQUE_OUTPUT_12345"))).toBe(false);
@@ -300,9 +300,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "--in", "tool:result", "SEARCHABLE_OUTPUT_67890"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "--in", "tool:result", "SEARCHABLE_OUTPUT_67890"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // With --in tool:result, tool result content IS searched
     expect(consoleOutput.some((line) => line.includes("SEARCHABLE_OUTPUT_67890"))).toBe(true);
@@ -325,9 +325,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "-s", "session-aaa", "FINDME"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "-s", "session-aaa", "FINDME"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Should find in aaa session only
     expect(consoleOutput.some((line) => line.includes("aaa"))).toBe(true);
@@ -353,9 +353,9 @@ describe("grep command", () => {
       ], { agentId: "abc123" })
     );
 
-    process.argv = ["node", "cli", "grep", "FINDME"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "FINDME"];
+    const { search } = await import("../commands/search");
+    await search();
 
     // Should find regular session
     expect(consoleOutput.some((line) => line.includes("regular"))).toBe(true);
@@ -372,17 +372,17 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "error\\d+"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "error\\d+"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("error123"))).toBe(true);
   });
 
   test("shows usage when no pattern provided", async () => {
-    process.argv = ["node", "cli", "grep"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("Usage"))).toBe(true);
   });
@@ -398,9 +398,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "--after", "2024-01-01", "message"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "--after", "2024-01-01", "message"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("NEW"))).toBe(true);
     expect(consoleOutput.some((line) => line.includes("OLD"))).toBe(false);
@@ -417,9 +417,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "--before", "2021-01-01", "message"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "--before", "2021-01-01", "message"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("OLD"))).toBe(true);
     expect(consoleOutput.some((line) => line.includes("NEW"))).toBe(false);
@@ -435,9 +435,9 @@ describe("grep command", () => {
       ])
     );
 
-    process.argv = ["node", "cli", "grep", "--after", "2022-01-01", "--before", "2024-01-01", "message"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "--after", "2022-01-01", "--before", "2024-01-01", "message"];
+    const { search } = await import("../commands/search");
+    await search();
 
     expect(consoleOutput.some((line) => line.includes("MIDDLE"))).toBe(true);
     expect(consoleOutput.some((line) => line.includes("EARLY"))).toBe(false);
@@ -455,9 +455,9 @@ describe("grep command", () => {
       errorOutput.push(args.map(String).join(" "));
     });
 
-    process.argv = ["node", "cli", "grep", "--after", "invalid-time", "test"];
-    const { grep } = await import("../commands/grep");
-    await grep();
+    process.argv = ["node", "cli", "search", "--after", "invalid-time", "test"];
+    const { search } = await import("../commands/search");
+    await search();
 
     errorSpy.mockRestore();
 

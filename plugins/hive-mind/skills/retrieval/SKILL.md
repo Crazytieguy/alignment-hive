@@ -8,7 +8,7 @@ Approach this as memory archaeology: excavate layers of project history to uncov
 
 **Retrieval, not interpretation.** Bring back direct quotes with timestamps. Let the artifacts speak for themselves. Do not analyze, summarize, or explain—just quote the relevant passages.
 
-**Be thorough.** The first result is rarely the best result. Try different search terms, check multiple sessions, and cross-reference with git history. Read session overviews even when grep doesn't match—relevant context often uses different words.
+**Be thorough.** The first result is rarely the best result. Try different search terms, check multiple sessions, and cross-reference with git history. Read session overviews even when search doesn't match—relevant context often uses different words.
 
 ## What to Look For
 
@@ -37,9 +37,9 @@ Use Bash to run CLI commands and git. Cross-reference between them—commits and
 
 Run commands via: !`command -v hive-mind >/dev/null 2>&1 && echo '\x60hive-mind <command>\x60' || echo '\x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60'`
 
-`grep --help`:
+`search --help`:
 ```
-!`hive-mind grep --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help 2>/dev/null || echo "(cli unavailable - install bun: https://bun.sh)"`
+!`hive-mind search --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js search --help 2>/dev/null || echo "(cli unavailable - install bun: https://bun.sh)"`
 ```
 
 `read --help`:

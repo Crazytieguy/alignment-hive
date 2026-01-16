@@ -251,12 +251,12 @@ var usage = {
     ].join(`
 `);
   },
-  grep: () => {
+  search: () => {
     return [
-      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
-      "                      [--after <time>] [--before <time>]",
+      "Usage: search <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "                        [--after <time>] [--before <time>]",
       "",
-      "Search sessions for a pattern (JavaScript regex, same as grep -E).",
+      "Search sessions for a pattern (JavaScript regex).",
       "Use -- to separate options from pattern if needed.",
       "",
       "Options:",
@@ -281,17 +281,17 @@ var usage = {
       "Default fields: user, assistant, thinking, tool:input, system, summary",
       "",
       "Examples:",
-      '  grep "TODO"                    # find TODO in sessions',
-      '  grep -i "error" -C 20          # case insensitive, 20 words context',
-      '  grep -c "function"             # count matches per session',
-      '  grep -l "#2597"                # list sessions mentioning issue',
-      '  grep -s 02ed "bug"             # search only in session 02ed...',
-      '  grep "error|warning|bug"       # find any of these terms (OR)',
-      '  grep "TODO|FIXME|XXX"          # find code comments',
-      '  grep --in tool:result "error"  # search only in tool results',
-      '  grep --in user,assistant "fix" # search only user and assistant',
-      '  grep --after 2d "error"        # errors in last 2 days',
-      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1'
+      '  search "TODO"                    # find TODO in sessions',
+      '  search -i "error" -C 20          # case insensitive, 20 words context',
+      '  search -c "function"             # count matches per session',
+      '  search -l "#2597"                # list sessions mentioning issue',
+      '  search -s 02ed "bug"             # search only in session 02ed...',
+      '  search "error|warning|bug"       # find any of these terms (OR)',
+      '  search "TODO|FIXME|XXX"          # find code comments',
+      '  search --in tool:result "error"  # search only in tool results',
+      '  search --in user,assistant "fix" # search only user and assistant',
+      '  search --after 2d "error"        # errors in last 2 days',
+      '  search --after 2025-01-01 "fix"  # fixes since Jan 1'
     ].join(`
 `);
   },
@@ -15291,7 +15291,7 @@ async function extract() {
   return failures > 0 ? 1 : 0;
 }
 
-// cli/commands/grep.ts
+// cli/commands/search.ts
 import { readdir as readdir4 } from "fs/promises";
 import { join as join5 } from "path";
 
@@ -15323,7 +15323,7 @@ var READ_DEFAULT_SHOWN = new Set([
   "system",
   "summary"
 ]);
-var GREP_DEFAULT_SEARCH = new Set([
+var SEARCH_DEFAULT_FIELDS = new Set([
   "user",
   "assistant",
   "thinking",
@@ -15372,11 +15372,11 @@ class ReadFieldFilter {
   }
 }
 
-class GrepFieldFilter {
+class SearchFieldFilter {
   searchFields;
   constructor(searchIn) {
     if (searchIn === null || searchIn.length === 0) {
-      this.searchFields = new Set(GREP_DEFAULT_SEARCH);
+      this.searchFields = new Set(SEARCH_DEFAULT_FIELDS);
     } else {
       this.searchFields = new Set(searchIn);
     }
@@ -16518,10 +16518,10 @@ function isInTimeRange(timestamp, range) {
   return true;
 }
 
-// cli/commands/grep.ts
+// cli/commands/search.ts
 var DEFAULT_CONTEXT_WORDS = 10;
 function printUsage() {
-  console.log(usage.grep());
+  console.log(usage.search());
 }
 function computeMinimalPrefixes(sessionIds) {
   const prefixes = new Map;
@@ -16576,7 +16576,7 @@ function getSearchableFieldValues(block, filter) {
   }
   return values;
 }
-async function grep() {
+async function search() {
   const args = process.argv.slice(3);
   const doubleDashIdx = args.indexOf("--");
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
@@ -16588,7 +16588,7 @@ async function grep() {
     printUsage();
     return 1;
   }
-  const options = parseGrepOptions(args);
+  const options = parseSearchOptions(args);
   if (!options)
     return 1;
   const cwd = process.cwd();
@@ -16695,7 +16695,7 @@ async function grep() {
   }
   return 0;
 }
-function parseGrepOptions(args) {
+function parseSearchOptions(args) {
   function getFlagValue(flag) {
     const idx = args.indexOf(flag);
     return idx !== -1 ? args[idx + 1] : undefined;
@@ -16724,7 +16724,7 @@ function parseGrepOptions(args) {
   const sessionFilter = getFlagValue("-s") ?? null;
   const searchInValue = getFlagValue("--in");
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
-  const fieldFilter = new GrepFieldFilter(searchIn);
+  const fieldFilter = new SearchFieldFilter(searchIn);
   let afterTime = null;
   const afterValue = getFlagValue("--after");
   if (afterValue !== undefined) {
@@ -19366,7 +19366,7 @@ async function heartbeat() {
 var COMMANDS = {
   exclude: { description: "Exclude session from upload", handler: exclude },
   extract: { description: "Extract session (internal)", handler: extract, hidden: true },
-  grep: { description: "Search sessions for pattern", handler: grep },
+  search: { description: "Search sessions for pattern", handler: search },
   index: { description: "List extracted sessions", handler: index },
   read: { description: "Read session entries", handler: read },
   login: { description: "Log in to hive-mind", handler: login },

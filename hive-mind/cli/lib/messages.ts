@@ -130,12 +130,12 @@ export const usage = {
     ].join('\n');
   },
 
-  grep: (): string => {
+  search: (): string => {
     return [
-      'Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]',
-      '                      [--after <time>] [--before <time>]',
+      'Usage: search <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]',
+      '                        [--after <time>] [--before <time>]',
       '',
-      'Search sessions for a pattern (JavaScript regex, same as grep -E).',
+      'Search sessions for a pattern (JavaScript regex).',
       'Use -- to separate options from pattern if needed.',
       '',
       'Options:',
@@ -160,17 +160,17 @@ export const usage = {
       'Default fields: user, assistant, thinking, tool:input, system, summary',
       '',
       'Examples:',
-      '  grep "TODO"                    # find TODO in sessions',
-      '  grep -i "error" -C 20          # case insensitive, 20 words context',
-      '  grep -c "function"             # count matches per session',
-      '  grep -l "#2597"                # list sessions mentioning issue',
-      '  grep -s 02ed "bug"             # search only in session 02ed...',
-      '  grep "error|warning|bug"       # find any of these terms (OR)',
-      '  grep "TODO|FIXME|XXX"          # find code comments',
-      '  grep --in tool:result "error"  # search only in tool results',
-      '  grep --in user,assistant "fix" # search only user and assistant',
-      '  grep --after 2d "error"        # errors in last 2 days',
-      '  grep --after 2025-01-01 "fix"  # fixes since Jan 1',
+      '  search "TODO"                    # find TODO in sessions',
+      '  search -i "error" -C 20          # case insensitive, 20 words context',
+      '  search -c "function"             # count matches per session',
+      '  search -l "#2597"                # list sessions mentioning issue',
+      '  search -s 02ed "bug"             # search only in session 02ed...',
+      '  search "error|warning|bug"       # find any of these terms (OR)',
+      '  search "TODO|FIXME|XXX"          # find code comments',
+      '  search --in tool:result "error"  # search only in tool results',
+      '  search --in user,assistant "fix" # search only user and assistant',
+      '  search --after 2d "error"        # errors in last 2 days',
+      '  search --after 2025-01-01 "fix"  # fixes since Jan 1',
     ].join('\n');
   },
 

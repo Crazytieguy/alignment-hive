@@ -38,7 +38,7 @@ export const READ_DEFAULT_SHOWN = new Set([
   'summary',
 ]);
 
-export const GREP_DEFAULT_SEARCH = new Set([
+export const SEARCH_DEFAULT_FIELDS = new Set([
   'user',
   'assistant',
   'thinking',
@@ -89,12 +89,12 @@ export class ReadFieldFilter {
   }
 }
 
-export class GrepFieldFilter {
+export class SearchFieldFilter {
   private searchFields: Set<string>;
 
   constructor(searchIn: Array<string> | null) {
     if (searchIn === null || searchIn.length === 0) {
-      this.searchFields = new Set(GREP_DEFAULT_SEARCH);
+      this.searchFields = new Set(SEARCH_DEFAULT_FIELDS);
     } else {
       this.searchFields = new Set(searchIn);
     }

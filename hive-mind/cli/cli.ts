@@ -2,7 +2,7 @@
 
 import { exclude } from "./commands/exclude";
 import { extract } from "./commands/extract";
-import { grep } from "./commands/grep";
+import { search } from "./commands/search";
 import { index } from "./commands/index";
 import { read } from "./commands/read";
 import { sessionStart } from "./commands/session-start";
@@ -16,7 +16,7 @@ import { printError } from "./lib/output";
 const COMMANDS = {
   exclude: { description: "Exclude session from upload", handler: exclude },
   extract: { description: "Extract session (internal)", handler: extract, hidden: true },
-  grep: { description: "Search sessions for pattern", handler: grep },
+  search: { description: "Search sessions for pattern", handler: search },
   index: { description: "List extracted sessions", handler: index },
   read: { description: "Read session entries", handler: read },
   login: { description: "Log in to hive-mind", handler: login },

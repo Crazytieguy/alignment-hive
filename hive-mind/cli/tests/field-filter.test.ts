@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-  GREP_DEFAULT_SEARCH,
-  GrepFieldFilter,
+  SEARCH_DEFAULT_FIELDS,
+  SearchFieldFilter,
   READ_DEFAULT_SHOWN,
   ReadFieldFilter,
   parseFieldList,
@@ -124,16 +124,16 @@ describe("ReadFieldFilter", () => {
   });
 });
 
-describe("GrepFieldFilter", () => {
+describe("SearchFieldFilter", () => {
   describe("default search fields", () => {
     test("defaults are correct", () => {
-      expect(GREP_DEFAULT_SEARCH).toEqual(
+      expect(SEARCH_DEFAULT_FIELDS).toEqual(
         new Set(["user", "assistant", "thinking", "tool:input", "system", "summary"])
       );
     });
 
     test("null searchIn uses defaults", () => {
-      const filter = new GrepFieldFilter(null);
+      const filter = new SearchFieldFilter(null);
       expect(filter.isSearchable("user")).toBe(true);
       expect(filter.isSearchable("assistant")).toBe(true);
       expect(filter.isSearchable("thinking")).toBe(true);
@@ -143,19 +143,19 @@ describe("GrepFieldFilter", () => {
     });
 
     test("tool:result not searchable by default", () => {
-      const filter = new GrepFieldFilter(null);
+      const filter = new SearchFieldFilter(null);
       expect(filter.isSearchable("tool:result")).toBe(false);
     });
   });
 
   describe("custom search fields", () => {
     test("empty array uses defaults", () => {
-      const filter = new GrepFieldFilter([]);
+      const filter = new SearchFieldFilter([]);
       expect(filter.isSearchable("user")).toBe(true);
     });
 
     test("explicit fields replaces defaults", () => {
-      const filter = new GrepFieldFilter(["user", "assistant"]);
+      const filter = new SearchFieldFilter(["user", "assistant"]);
       expect(filter.isSearchable("user")).toBe(true);
       expect(filter.isSearchable("assistant")).toBe(true);
       expect(filter.isSearchable("thinking")).toBe(false);
@@ -163,23 +163,23 @@ describe("GrepFieldFilter", () => {
     });
 
     test("can search tool:result when specified", () => {
-      const filter = new GrepFieldFilter(["tool:result"]);
+      const filter = new SearchFieldFilter(["tool:result"]);
       expect(filter.isSearchable("tool:result")).toBe(true);
       expect(filter.isSearchable("user")).toBe(false);
     });
 
     test("tool:Bash:input matches when tool:input specified", () => {
-      const filter = new GrepFieldFilter(["tool:input"]);
+      const filter = new SearchFieldFilter(["tool:input"]);
       expect(filter.isSearchable("tool:Bash:input")).toBe(true);
     });
 
     test("tool:input matches when tool:Bash:input specified", () => {
-      const filter = new GrepFieldFilter(["tool:Bash:input"]);
+      const filter = new SearchFieldFilter(["tool:Bash:input"]);
       expect(filter.isSearchable("tool:input")).toBe(true);
     });
 
     test("bare tool matches both inputs and results", () => {
-      const filter = new GrepFieldFilter(["tool"]);
+      const filter = new SearchFieldFilter(["tool"]);
       expect(filter.isSearchable("tool:input")).toBe(true);
       expect(filter.isSearchable("tool:result")).toBe(true);
       expect(filter.isSearchable("tool:Bash:input")).toBe(true);
