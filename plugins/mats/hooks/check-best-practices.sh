@@ -1,8 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION_FILE="$CLAUDE_PROJECT_DIR/.claude/mats:best-practices-version"
+VERSION_FILE="$CLAUDE_PROJECT_DIR/.claude/mats/best-practices-version"
 PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
+STATE_DIR="$CLAUDE_PROJECT_DIR/.claude/mats"
+
+# Ensure state directory exists so the model can write directly
+mkdir -p "$STATE_DIR"
 
 if [ ! -f "$PLUGIN_JSON" ]; then
   exit 0  # Can't check, fail silently
@@ -15,14 +19,14 @@ fi
 
 # Check version file
 if [ ! -f "$VERSION_FILE" ]; then
-  echo '{"systemMessage": "Best practices not yet reviewed. To set up: /mats:best-practices"}'
+  echo '{"systemMessage": "mats: Best practices available. To set up: /mats:best-practices"}'
   exit 0
 fi
 
 CURRENT_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "")
 
 if [ "$CURRENT_VERSION" != "$PLUGIN_VERSION" ]; then
-  echo '{"systemMessage": "New best practices available. To review: /mats:best-practices"}'
+  echo '{"systemMessage": "mats: New best practices available. To review: /mats:best-practices"}'
 fi
 
 exit 0
