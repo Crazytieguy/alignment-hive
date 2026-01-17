@@ -13,7 +13,7 @@ import {
 } from '../lib/config';
 import { pingCheckout } from '../lib/convex';
 import { checkAllSessions } from '../lib/extraction';
-import { hook } from '../lib/messages';
+import { errors, hook } from '../lib/messages';
 import { hookOutput } from '../lib/output';
 import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
 import type { HiveMindMeta } from '../lib/schemas';
@@ -61,6 +61,7 @@ const AUTO_UPLOAD_DELAY_MINUTES = 10;
 
 export async function sessionStart(): Promise<number> {
   const messages: Array<string> = [];
+  const collectedErrors: Array<string> = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join(cwd, '.claude', 'hive-mind');
@@ -120,8 +121,11 @@ export async function sessionStart(): Promise<number> {
   if ('error' in sessionCheck) {
     messages.push(hook.extractionFailed(sessionCheck.error));
   } else {
-    const { sessionsToExtract, schemaErrors } = sessionCheck;
+    const { sessionsToExtract, schemaErrors, errors: sessionErrors } = sessionCheck;
     extractedSessions = sessionCheck.extractedSessions;
+
+    // Collect all session check errors
+    collectedErrors.push(...sessionErrors);
 
     const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
     if (newNonAgentSessions.length > 0) {
@@ -138,6 +142,11 @@ export async function sessionStart(): Promise<number> {
     }
   }
 
+  // Collect auth errors
+  if (status.errors) {
+    collectedErrors.push(...status.errors);
+  }
+
   let userHasAlias = false;
   if (status.authenticated) {
     try {
@@ -146,7 +155,9 @@ export async function sessionStart(): Promise<number> {
         messages.push(hook.aliasUpdated(aliasResult.sourceCmd));
       }
       userHasAlias = aliasResult.hasAlias;
-    } catch {}
+    } catch (err) {
+      collectedErrors.push(errors.aliasUpdateFailed(err instanceof Error ? err.message : String(err)));
+    }
   }
 
   if (status.needsLogin) {
@@ -178,8 +189,17 @@ export async function sessionStart(): Promise<number> {
       if (uploadCount > 0) {
         messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
       }
-    } catch {
-      messages.push(hook.sessionCheckFailed());
+    } catch (err) {
+      collectedErrors.push(errors.eligibilityCheckFailed(err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  // Add collected errors to messages
+  if (collectedErrors.length > 0) {
+    if (process.env.HIVE_MIND_VERBOSE === "1") {
+      messages.push(...collectedErrors);
+    } else {
+      messages.push(hook.errorsOccurred(collectedErrors.length));
     }
   }
 

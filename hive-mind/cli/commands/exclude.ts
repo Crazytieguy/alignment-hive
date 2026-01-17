@@ -1,6 +1,6 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction.js';
+import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from '../lib/extraction.js';
 import { excludeCmd } from '../lib/messages.js';
 import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
 import { confirm, formatSessionId, lookupSession } from '../lib/utils.js';
@@ -42,8 +42,8 @@ async function excludeAll(cwd: string): Promise<number> {
 
   let nonExcludedCount = 0;
   for (const file of sessionFiles) {
-    const meta = await readExtractedMeta(join(sessionsDir, file));
-    if (meta && !meta.excluded && !meta.agentId) {
+    const metaResult = await readExtractedMeta(join(sessionsDir, file));
+    if (metaResult && !isMetaError(metaResult) && !metaResult.excluded && !metaResult.agentId) {
       nonExcludedCount++;
     }
   }
@@ -66,8 +66,8 @@ async function excludeAll(cwd: string): Promise<number> {
 
   for (const file of sessionFiles) {
     const sessionPath = join(sessionsDir, file);
-    const meta = await readExtractedMeta(sessionPath);
-    if (!meta || meta.excluded || meta.agentId) continue;
+    const metaResult = await readExtractedMeta(sessionPath);
+    if (!metaResult || isMetaError(metaResult) || metaResult.excluded || metaResult.agentId) continue;
 
     const sessionId = file.replace('.jsonl', '');
     if (await excludeSession(sessionPath)) {

@@ -1,24 +1,24 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { loadAuthData, saveAuthData } from './auth';
-import { getHiveMindSessionsDir, readExtractedMeta } from './extraction';
+import { isAuthError, loadAuthData, saveAuthData } from './auth';
+import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction';
 import type { HiveMindMeta } from './schemas';
 
 const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h for session age
 const AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h for auth age
 
 export async function getAuthIssuedAt(): Promise<number | null> {
-  const authData = await loadAuthData();
-  if (!authData) return null;
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult)) return null;
 
   // Migration: if authenticated_at is missing, set it to now
-  if (authData.authenticated_at === undefined) {
+  if (authResult.authenticated_at === undefined) {
     const now = Date.now();
-    await saveAuthData({ ...authData, authenticated_at: now });
+    await saveAuthData({ ...authResult, authenticated_at: now });
     return now;
   }
 
-  return authData.authenticated_at;
+  return authResult.authenticated_at;
 }
 
 export interface SessionEligibility {
@@ -101,9 +101,9 @@ export async function getAllSessionsEligibility(cwd: string): Promise<Array<Sess
 
   const results = await Promise.all(
     jsonlFiles.map(async (file) => {
-      const meta = await readExtractedMeta(join(sessionsDir, file));
-      if (!meta || meta.agentId) return null;
-      return checkSessionEligibility(meta, authIssuedAt);
+      const metaResult = await readExtractedMeta(join(sessionsDir, file));
+      if (!metaResult || isMetaError(metaResult) || metaResult.agentId) return null;
+      return checkSessionEligibility(metaResult, authIssuedAt);
     }),
   );
 

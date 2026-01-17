@@ -41,6 +41,14 @@ UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-mind' test
 
 The retrieval skill dynamically includes `--help` output. When CLI behavior changes, update the `--help` text in the command file and bump the plugin version.
 
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HIVE_MIND_VERBOSE` | Set to `1` to show full error details in session-start hook output. By default, errors are summarized as a count. Only affects the session-start hook. |
+| `HIVE_MIND_CLIENT_ID` | Override WorkOS client ID (for staging/testing). See below. |
+| `DEBUG` | Set to `1` to enable debug logging. |
+
 ## Local Development with Staging Auth
 
 To test the CLI against the staging WorkOS environment instead of production, copy the project root `.env.example` to `.env.local`:

@@ -53,12 +53,27 @@ export const hook = {
   sessionCheckFailed: (): string => {
     return 'Failed to check session upload status';
   },
+  errorsOccurred: (count: number): string => {
+    return `${count} error${count === 1 ? '' : 's'} occurred. Set HIVE_MIND_VERBOSE=1 for details.`;
+  },
 };
 
 export const errors = {
   schemaError: (path: string, error: string): string => `Schema error in ${path}: ${error}`,
   authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
   refreshSchemaError: (error: string): string => `Token refresh response schema error: ${error}`,
+  readTranscriptsDirFailed: (dir: string, error: string): string =>
+    `Failed to read transcripts directory ${dir}: ${error}`,
+  statFailed: (path: string, error: string): string =>
+    `Failed to stat ${path}: ${error}`,
+  parseSessionFailed: (sessionId: string, error: string): string =>
+    `Failed to parse session ${sessionId}: ${error}`,
+  aliasUpdateFailed: (error: string): string =>
+    `Failed to update alias: ${error}`,
+  eligibilityCheckFailed: (error: string): string =>
+    `Failed to check session eligibility: ${error}`,
+  markUploadedFailed: (error: string): string =>
+    `Failed to mark session uploaded: ${error}`,
   noSessions: 'No sessions found yet. Sessions are extracted automatically when you start Claude Code.',
   noSessionsIn: (dir: string): string => `No sessions in ${dir}`,
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,

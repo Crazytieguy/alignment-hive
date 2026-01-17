@@ -1,6 +1,6 @@
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
-import { loadAuthData } from './auth';
+import { isAuthError, loadAuthData } from './auth';
 
 const CONVEX_URL = process.env.CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
@@ -20,13 +20,13 @@ export function getConvexClient(): ConvexHttpClient {
 }
 
 export async function getAuthenticatedClient(): Promise<ConvexHttpClient | null> {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult)) {
     return null;
   }
 
   const client = getConvexClient();
-  client.setAuth(authData.access_token);
+  client.setAuth(authResult.access_token);
   return client;
 }
 

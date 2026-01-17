@@ -6,6 +6,8 @@ import { getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
 import { errors } from './messages';
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from './sanitize';
 import { HiveMindMetaSchema, parseKnownEntry } from './schemas';
+import { isErrorResult } from './auth';
+import type { ErrorResult } from './auth';
 import type { HiveMindMeta, KnownEntry } from './schemas';
 
 const HIVE_MIND_VERSION = '0.1' as const;
@@ -68,12 +70,15 @@ export async function extractSession(options: ExtractSessionOptions) {
   const { rawPath, outputPath, agentId } = options;
   const hiveMindDir = dirname(dirname(outputPath));
 
-  const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
+  const [content, rawStat, checkoutId, existingMetaResult] = await Promise.all([
     readFile(rawPath, 'utf-8'),
     stat(rawPath),
     getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath),
   ]);
+
+  // Ignore errors when reading existing meta - just treat as not found
+  const existingMeta = isMetaError(existingMetaResult) ? null : existingMetaResult;
 
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries: Array<ExtractedEntry> = [];
@@ -145,14 +150,15 @@ async function readFirstLine(filePath: string): Promise<string | null> {
   }
 }
 
-export async function readExtractedMeta(extractedPath: string): Promise<HiveMindMeta | null> {
+export type ReadMetaResult = HiveMindMeta | ErrorResult | null;
+
+export async function readExtractedMeta(extractedPath: string): Promise<ReadMetaResult> {
   try {
     const firstLine = await readFirstLine(extractedPath);
     if (!firstLine) return null;
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
-      console.error(errors.schemaError(extractedPath, parsed.error.message));
-      return null;
+      return { error: errors.schemaError(extractedPath, parsed.error.message) };
     }
     return parsed.data;
   } catch {
@@ -160,9 +166,13 @@ export async function readExtractedMeta(extractedPath: string): Promise<HiveMind
   }
 }
 
+export const isMetaError = isErrorResult<HiveMindMeta>;
+
+export type ReadSessionResult = { meta: HiveMindMeta; entries: Array<KnownEntry> } | { error: string } | null;
+
 export async function readExtractedSession(
   extractedPath: string,
-): Promise<{ meta: HiveMindMeta; entries: Array<KnownEntry> } | null> {
+): Promise<ReadSessionResult> {
   try {
     const content = await readFile(extractedPath, 'utf-8');
     const lines = content.split('\n').filter((l) => l.trim());
@@ -170,8 +180,7 @@ export async function readExtractedSession(
 
     const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
     if (!metaParsed.success) {
-      console.error(errors.schemaError(extractedPath, metaParsed.error.message));
-      return null;
+      return { error: errors.schemaError(extractedPath, metaParsed.error.message) };
     }
 
     const entries: Array<KnownEntry> = [];
@@ -186,26 +195,29 @@ export async function readExtractedSession(
   }
 }
 
-export async function markSessionUploaded(sessionPath: string): Promise<boolean> {
+export const isSessionError = isErrorResult<{ meta: HiveMindMeta; entries: Array<KnownEntry> }>;
+
+export type MarkUploadedResult = { success: true } | { success: false; error?: string };
+
+export async function markSessionUploaded(sessionPath: string): Promise<MarkUploadedResult> {
   try {
     const content = await readFile(sessionPath, 'utf-8');
     const newlineIndex = content.indexOf('\n');
-    if (newlineIndex === -1) return false;
+    if (newlineIndex === -1) return { success: false };
 
     const firstLine = content.slice(0, newlineIndex);
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
-      console.error(errors.schemaError(sessionPath, parsed.error.message));
-      return false;
+      return { success: false, error: errors.schemaError(sessionPath, parsed.error.message) };
     }
 
     const meta = { ...parsed.data, uploadedAt: new Date().toISOString() };
     const newContent = JSON.stringify(meta) + content.slice(newlineIndex);
 
     await writeFile(sessionPath, newContent);
-    return true;
-  } catch {
-    return false;
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: errors.markUploadedFailed(err instanceof Error ? err.message : String(err)) };
   }
 }
 
@@ -258,26 +270,32 @@ export interface SessionCheckResult {
   schemaErrors: Array<{ sessionId: string; errors: Array<string> }>;
   /** All extracted sessions with their metadata (for eligibility checks) */
   extractedSessions: Array<{ sessionId: string; meta: HiveMindMeta }>;
+  /** All errors encountered during session checking */
+  errors: Array<string>;
 }
 
 /** Check all sessions: which need extraction and provide metadata for eligibility */
 export async function checkAllSessions(cwd: string, transcriptsDirs: Array<string>): Promise<SessionCheckResult> {
   const extractedDir = getHiveMindSessionsDir(cwd);
+  const collectedErrors: Array<string> = [];
 
   // Load raw sessions from all directories and extracted metadata in parallel
-  const [rawSessionArrays, extractedMetaMap] = await Promise.all([
+  const [rawSessionArrays, extractedResult] = await Promise.all([
     Promise.all(
       transcriptsDirs.map(async (dir) => {
         try {
           return await findRawSessions(dir);
-        } catch {
-          // Skip non-existent/inaccessible directories gracefully
+        } catch (err) {
+          collectedErrors.push(errors.readTranscriptsDirFailed(dir, err instanceof Error ? err.message : String(err)));
           return [];
         }
       }),
     ),
     loadExtractedMetadata(extractedDir),
   ]);
+
+  const { metaMap: extractedMetaMap, errors: metadataErrors } = extractedResult;
+  collectedErrors.push(...metadataErrors);
 
   // Flatten and deduplicate by session ID (later directories override earlier)
   const rawSessionMap = new Map<string, { path: string; agentId?: string }>();
@@ -308,7 +326,8 @@ export async function checkAllSessions(cwd: string, transcriptsDirs: Array<strin
           const rawStat = await stat(rawPath);
           const storedMtime = new Date(existingMeta.rawMtime).getTime();
           needsExtract = rawStat.mtime.getTime() > storedMtime;
-        } catch {
+        } catch (err) {
+          collectedErrors.push(errors.statFailed(rawPath, err instanceof Error ? err.message : String(err)));
           needsExtract = true;
         }
       }
@@ -322,7 +341,8 @@ export async function checkAllSessions(cwd: string, transcriptsDirs: Array<strin
           if (parseResult.hasContent) {
             sessionsToExtract.push({ sessionId, rawPath, agentId });
           }
-        } catch {
+        } catch (err) {
+          collectedErrors.push(errors.parseSessionFailed(sessionId, err instanceof Error ? err.message : String(err)));
           sessionsToExtract.push({ sessionId, rawPath, agentId });
         }
       }
@@ -334,32 +354,40 @@ export async function checkAllSessions(cwd: string, transcriptsDirs: Array<strin
     meta,
   }));
 
-  return { sessionsToExtract, schemaErrors, extractedSessions };
+  return { sessionsToExtract, schemaErrors, extractedSessions, errors: collectedErrors };
+}
+
+interface LoadMetadataResult {
+  metaMap: Map<string, HiveMindMeta>;
+  errors: Array<string>;
 }
 
 /** Load all extracted session metadata into a map */
-async function loadExtractedMetadata(extractedDir: string): Promise<Map<string, HiveMindMeta>> {
+async function loadExtractedMetadata(extractedDir: string): Promise<LoadMetadataResult> {
   const metaMap = new Map<string, HiveMindMeta>();
+  const collectedErrors: Array<string> = [];
 
   let files: Array<string>;
   try {
     files = await readdir(extractedDir);
   } catch {
-    return metaMap;
+    return { metaMap, errors: collectedErrors };
   }
 
   const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
 
   await Promise.all(
     jsonlFiles.map(async (file) => {
-      const meta = await readExtractedMeta(join(extractedDir, file));
-      if (meta) {
-        metaMap.set(meta.sessionId, meta);
+      const result = await readExtractedMeta(join(extractedDir, file));
+      if (isMetaError(result)) {
+        collectedErrors.push(result.error);
+      } else if (result) {
+        metaMap.set(result.sessionId, result);
       }
     }),
   );
 
-  return metaMap;
+  return { metaMap, errors: collectedErrors };
 }
 
 /** Full extraction for a single session (used by background process) */

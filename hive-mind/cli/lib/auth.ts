@@ -73,15 +73,24 @@ function isTokenExpired(token: string): boolean {
   return payload.exp <= Math.floor(Date.now() / 1000);
 }
 
-export async function loadAuthData(): Promise<AuthData | null> {
+export type ErrorResult = { error: string };
+export type LoadAuthResult = AuthData | ErrorResult | null;
+
+/** Type guard for any result type that may contain an error */
+export function isErrorResult<T>(result: T | ErrorResult | null): result is ErrorResult {
+  return result !== null && typeof result === "object" && "error" in result;
+}
+
+export const isAuthError = isErrorResult<AuthData>;
+
+export async function loadAuthData(): Promise<LoadAuthResult> {
   try {
     const file = Bun.file(AUTH_FILE);
     if (!(await file.exists())) return null;
     const data = await file.json();
     const parsed = AuthDataSchema.safeParse(data);
     if (!parsed.success) {
-      console.error(errors.authSchemaError(parsed.error.message));
-      return null;
+      return { error: errors.authSchemaError(parsed.error.message) };
     }
     return parsed.data;
   } catch {
@@ -89,15 +98,18 @@ export async function loadAuthData(): Promise<AuthData | null> {
   }
 }
 
+
 export async function saveAuthData(data: AuthData): Promise<void> {
   await mkdir(AUTH_DIR, { recursive: true });
   await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
+export type RefreshResult = AuthData | ErrorResult | null;
+
 export async function refreshToken(
   refreshTokenValue: string,
   existingAuthenticatedAt?: number,
-): Promise<AuthData | null> {
+): Promise<RefreshResult> {
   try {
     const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
       method: 'POST',
@@ -112,8 +124,7 @@ export async function refreshToken(
     const data = await response.json();
     const parsed = AuthDataSchema.safeParse(data);
     if (!parsed.success) {
-      console.error(errors.refreshSchemaError(parsed.error.message));
-      return null;
+      return { error: errors.refreshSchemaError(parsed.error.message) };
     }
 
     // Preserve authenticated_at from existing auth
@@ -126,59 +137,85 @@ export async function refreshToken(
   }
 }
 
+
 export interface AuthStatus {
   authenticated: boolean;
   user?: AuthUser;
   needsLogin: boolean;
+  errors?: Array<string>;
 }
 
-const NOT_AUTHENTICATED: AuthStatus = { authenticated: false, needsLogin: true };
+function toOptionalErrors(arr: Array<string>): Array<string> | undefined {
+  return arr.length > 0 ? arr : undefined;
+}
 
-function authenticated(user: AuthUser): AuthStatus {
-  return { authenticated: true, user, needsLogin: false };
+function notAuthenticated(authErrors?: Array<string>): AuthStatus {
+  return { authenticated: false, needsLogin: true, errors: authErrors };
+}
+
+function authenticated(user: AuthUser, authErrors?: Array<string>): AuthStatus {
+  return { authenticated: true, user, needsLogin: false, errors: authErrors };
 }
 
 async function refreshWithLock(fallbackAuthData: AuthData): Promise<AuthStatus> {
+  const collectedErrors: Array<string> = [];
   const gotLock = await acquireLock();
-  if (!gotLock) return NOT_AUTHENTICATED;
+  if (!gotLock) return notAuthenticated();
 
   try {
     // Re-check after acquiring lock - another process may have refreshed
-    const freshAuthData = await loadAuthData();
+    const freshResult = await loadAuthData();
+    if (isAuthError(freshResult)) {
+      collectedErrors.push(freshResult.error);
+    }
+    const freshAuthData = isAuthError(freshResult) ? null : freshResult;
     if (freshAuthData?.access_token && !isTokenExpired(freshAuthData.access_token)) {
-      return authenticated(freshAuthData.user);
+      return authenticated(freshAuthData.user, toOptionalErrors(collectedErrors));
     }
 
     // Use fresh data if available, fall back to original
     const tokenToRefresh = freshAuthData?.refresh_token ?? fallbackAuthData.refresh_token;
     const authenticatedAt = freshAuthData?.authenticated_at ?? fallbackAuthData.authenticated_at;
 
-    const newAuthData = await refreshToken(tokenToRefresh, authenticatedAt);
-    if (!newAuthData) return NOT_AUTHENTICATED;
+    const refreshResult = await refreshToken(tokenToRefresh, authenticatedAt);
+    if (isErrorResult(refreshResult)) {
+      collectedErrors.push(refreshResult.error);
+      return notAuthenticated(collectedErrors);
+    }
+    if (!refreshResult) return notAuthenticated(toOptionalErrors(collectedErrors));
 
-    await saveAuthData(newAuthData);
-    return authenticated(newAuthData.user);
+    await saveAuthData(refreshResult);
+    return authenticated(refreshResult.user, toOptionalErrors(collectedErrors));
   } finally {
     await releaseLock();
   }
 }
 
 export async function checkAuthStatus(attemptRefresh = true): Promise<AuthStatus> {
-  const authData = await loadAuthData();
+  const collectedErrors: Array<string> = [];
+  const authResult = await loadAuthData();
+
+  if (isAuthError(authResult)) {
+    collectedErrors.push(authResult.error);
+  }
+  const authData = isAuthError(authResult) ? null : authResult;
 
   if (!authData?.access_token) {
-    return NOT_AUTHENTICATED;
+    return notAuthenticated(toOptionalErrors(collectedErrors));
   }
 
   if (!isTokenExpired(authData.access_token)) {
-    return authenticated(authData.user);
+    return authenticated(authData.user, toOptionalErrors(collectedErrors));
   }
 
   if (!attemptRefresh || !authData.refresh_token) {
-    return NOT_AUTHENTICATED;
+    return notAuthenticated(toOptionalErrors(collectedErrors));
   }
 
-  return refreshWithLock(authData);
+  // Pass collected errors through refresh flow
+  const refreshStatus = await refreshWithLock(authData);
+  const allErrors = [...collectedErrors, ...(refreshStatus.errors ?? [])];
+  return { ...refreshStatus, errors: toOptionalErrors(allErrors) };
 }
 
 export function getUserDisplayName(user: AuthUser): string {

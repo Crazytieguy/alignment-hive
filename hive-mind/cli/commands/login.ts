@@ -4,6 +4,8 @@ import {
   AuthDataSchema,
   checkAuthStatus,
   getUserDisplayName,
+  isAuthError,
+  isErrorResult,
   loadAuthData,
   refreshToken,
   saveAuthData,
@@ -86,16 +88,19 @@ async function checkExistingAuth(): Promise<boolean> {
 }
 
 async function tryRefresh(): Promise<{ success: boolean; user?: AuthUser }> {
-  const authData = await loadAuthData();
-  if (!authData?.refresh_token) return { success: false };
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult)) return { success: false };
 
   printInfo(msg.refreshing);
 
-  const newAuthData = await refreshToken(authData.refresh_token, authData.authenticated_at);
-  if (newAuthData) {
-    await saveAuthData(newAuthData);
+  const refreshResult = await refreshToken(
+    authResult.refresh_token,
+    authResult.authenticated_at,
+  );
+  if (refreshResult && !isErrorResult(refreshResult)) {
+    await saveAuthData(refreshResult);
     printSuccess(msg.refreshSuccess);
-    return { success: true, user: newAuthData.user };
+    return { success: true, user: refreshResult.user };
   }
 
   return { success: false };

@@ -13,13 +13,13 @@ var __export = (target, all) => {
 
 // cli/commands/exclude.ts
 import { readFile as readFile3, readdir as readdir3, writeFile as writeFile3 } from "fs/promises";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 
 // cli/lib/extraction.ts
 import { createReadStream } from "fs";
-import { mkdir as mkdir2, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir3, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
-import { basename as basename2, dirname, join as join2 } from "path";
+import { basename as basename2, dirname, join as join3 } from "path";
 
 // cli/lib/config.ts
 import { execSync } from "child_process";
@@ -180,12 +180,21 @@ var hook = {
   },
   sessionCheckFailed: () => {
     return "Failed to check session upload status";
+  },
+  errorsOccurred: (count) => {
+    return `${count} error${count === 1 ? "" : "s"} occurred. Set HIVE_MIND_VERBOSE=1 for details.`;
   }
 };
 var errors = {
   schemaError: (path, error) => `Schema error in ${path}: ${error}`,
   authSchemaError: (error) => `Auth data schema error: ${error}`,
   refreshSchemaError: (error) => `Token refresh response schema error: ${error}`,
+  readTranscriptsDirFailed: (dir, error) => `Failed to read transcripts directory ${dir}: ${error}`,
+  statFailed: (path, error) => `Failed to stat ${path}: ${error}`,
+  parseSessionFailed: (sessionId, error) => `Failed to parse session ${sessionId}: ${error}`,
+  aliasUpdateFailed: (error) => `Failed to update alias: ${error}`,
+  eligibilityCheckFailed: (error) => `Failed to check session eligibility: ${error}`,
+  markUploadedFailed: (error) => `Failed to mark session uploaded: ${error}`,
   noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
   noSessionsIn: (dir) => `No sessions in ${dir}`,
   sessionNotFound: (prefix) => `No session matching "${prefix}"`,
@@ -15690,6 +15699,175 @@ var HiveMindMetaSchema = exports_external.object({
   uploadedAt: exports_external.string().optional()
 });
 
+// cli/lib/auth.ts
+import { mkdir as mkdir2, rmdir } from "fs/promises";
+import { join as join2 } from "path";
+var AUTH_LOCK_FILE = join2(AUTH_DIR, "auth.lock");
+var LOCK_TIMEOUT_MS = 1e4;
+var LOCK_RETRY_INTERVAL_MS = 50;
+var WORKOS_API_URL = "https://api.workos.com/user_management";
+async function acquireLock() {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await mkdir2(AUTH_LOCK_FILE);
+      return true;
+    } catch (err) {
+      const isLockHeld = err instanceof Error && "code" in err && err.code === "EEXIST";
+      if (!isLockHeld)
+        return false;
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_INTERVAL_MS));
+    }
+  }
+  return false;
+}
+async function releaseLock() {
+  try {
+    await rmdir(AUTH_LOCK_FILE);
+  } catch {}
+}
+var AuthUserSchema = exports_external.object({
+  id: exports_external.string(),
+  email: exports_external.string(),
+  first_name: exports_external.string().optional(),
+  last_name: exports_external.string().optional()
+});
+var AuthDataSchema = exports_external.object({
+  access_token: exports_external.string(),
+  refresh_token: exports_external.string(),
+  user: AuthUserSchema,
+  authenticated_at: exports_external.number().optional()
+});
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number")
+    return true;
+  return payload.exp <= Math.floor(Date.now() / 1000);
+}
+function isErrorResult(result) {
+  return result !== null && typeof result === "object" && "error" in result;
+}
+var isAuthError = isErrorResult;
+async function loadAuthData() {
+  try {
+    const file2 = Bun.file(AUTH_FILE);
+    if (!await file2.exists())
+      return null;
+    const data = await file2.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    if (!parsed.success) {
+      return { error: errors.authSchemaError(parsed.error.message) };
+    }
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+async function saveAuthData(data) {
+  await mkdir2(AUTH_DIR, { recursive: true });
+  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
+}
+async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
+  try {
+    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshTokenValue,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const data = await response.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    if (!parsed.success) {
+      return { error: errors.refreshSchemaError(parsed.error.message) };
+    }
+    return {
+      ...parsed.data,
+      authenticated_at: existingAuthenticatedAt
+    };
+  } catch {
+    return null;
+  }
+}
+function toOptionalErrors(arr) {
+  return arr.length > 0 ? arr : undefined;
+}
+function notAuthenticated(authErrors) {
+  return { authenticated: false, needsLogin: true, errors: authErrors };
+}
+function authenticated(user, authErrors) {
+  return { authenticated: true, user, needsLogin: false, errors: authErrors };
+}
+async function refreshWithLock(fallbackAuthData) {
+  const collectedErrors = [];
+  const gotLock = await acquireLock();
+  if (!gotLock)
+    return notAuthenticated();
+  try {
+    const freshResult = await loadAuthData();
+    if (isAuthError(freshResult)) {
+      collectedErrors.push(freshResult.error);
+    }
+    const freshAuthData = isAuthError(freshResult) ? null : freshResult;
+    if (freshAuthData?.access_token && !isTokenExpired(freshAuthData.access_token)) {
+      return authenticated(freshAuthData.user, toOptionalErrors(collectedErrors));
+    }
+    const tokenToRefresh = freshAuthData?.refresh_token ?? fallbackAuthData.refresh_token;
+    const authenticatedAt = freshAuthData?.authenticated_at ?? fallbackAuthData.authenticated_at;
+    const refreshResult = await refreshToken(tokenToRefresh, authenticatedAt);
+    if (isErrorResult(refreshResult)) {
+      collectedErrors.push(refreshResult.error);
+      return notAuthenticated(collectedErrors);
+    }
+    if (!refreshResult)
+      return notAuthenticated(toOptionalErrors(collectedErrors));
+    await saveAuthData(refreshResult);
+    return authenticated(refreshResult.user, toOptionalErrors(collectedErrors));
+  } finally {
+    await releaseLock();
+  }
+}
+async function checkAuthStatus(attemptRefresh = true) {
+  const collectedErrors = [];
+  const authResult = await loadAuthData();
+  if (isAuthError(authResult)) {
+    collectedErrors.push(authResult.error);
+  }
+  const authData = isAuthError(authResult) ? null : authResult;
+  if (!authData?.access_token) {
+    return notAuthenticated(toOptionalErrors(collectedErrors));
+  }
+  if (!isTokenExpired(authData.access_token)) {
+    return authenticated(authData.user, toOptionalErrors(collectedErrors));
+  }
+  if (!attemptRefresh || !authData.refresh_token) {
+    return notAuthenticated(toOptionalErrors(collectedErrors));
+  }
+  const refreshStatus = await refreshWithLock(authData);
+  const allErrors = [...collectedErrors, ...refreshStatus.errors ?? []];
+  return { ...refreshStatus, errors: toOptionalErrors(allErrors) };
+}
+function getUserDisplayName(user) {
+  return user.first_name || user.email;
+}
+
 // cli/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
 function* parseJsonl(content) {
@@ -15735,12 +15913,13 @@ async function parseSessionForErrors(rawPath) {
 async function extractSession(options) {
   const { rawPath, outputPath, agentId } = options;
   const hiveMindDir = dirname(dirname(outputPath));
-  const [content, rawStat, checkoutId, existingMeta] = await Promise.all([
+  const [content, rawStat, checkoutId, existingMetaResult] = await Promise.all([
     readFile2(rawPath, "utf-8"),
     stat2(rawPath),
     getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath)
   ]);
+  const existingMeta = isMetaError(existingMetaResult) ? null : existingMetaResult;
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries = [];
   const schemaErrors = [];
@@ -15778,7 +15957,7 @@ async function extractSession(options) {
     const stats = getDetectSecretsStats();
     console.log(`[extract] Sanitization: ${(performance.now() - t0).toFixed(2)}ms | ` + `${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs`);
   }
-  await mkdir2(dirname(outputPath), { recursive: true });
+  await mkdir3(dirname(outputPath), { recursive: true });
   const lines = [JSON.stringify(meta3), ...sanitizedEntries.map((e) => JSON.stringify(e))];
   await writeFile2(outputPath, `${lines.join(`
 `)}
@@ -15805,14 +15984,14 @@ async function readExtractedMeta(extractedPath) {
       return null;
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
-      console.error(errors.schemaError(extractedPath, parsed.error.message));
-      return null;
+      return { error: errors.schemaError(extractedPath, parsed.error.message) };
     }
     return parsed.data;
   } catch {
     return null;
   }
 }
+var isMetaError = isErrorResult;
 async function readExtractedSession(extractedPath) {
   try {
     const content = await readFile2(extractedPath, "utf-8");
@@ -15822,8 +16001,7 @@ async function readExtractedSession(extractedPath) {
       return null;
     const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
     if (!metaParsed.success) {
-      console.error(errors.schemaError(extractedPath, metaParsed.error.message));
-      return null;
+      return { error: errors.schemaError(extractedPath, metaParsed.error.message) };
     }
     const entries = [];
     for (let i = 1;i < lines.length; i++) {
@@ -15836,29 +16014,29 @@ async function readExtractedSession(extractedPath) {
     return null;
   }
 }
+var isSessionError = isErrorResult;
 async function markSessionUploaded(sessionPath) {
   try {
     const content = await readFile2(sessionPath, "utf-8");
     const newlineIndex = content.indexOf(`
 `);
     if (newlineIndex === -1)
-      return false;
+      return { success: false };
     const firstLine = content.slice(0, newlineIndex);
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
-      console.error(errors.schemaError(sessionPath, parsed.error.message));
-      return false;
+      return { success: false, error: errors.schemaError(sessionPath, parsed.error.message) };
     }
     const meta3 = { ...parsed.data, uploadedAt: new Date().toISOString() };
     const newContent = JSON.stringify(meta3) + content.slice(newlineIndex);
     await writeFile2(sessionPath, newContent);
-    return true;
-  } catch {
-    return false;
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: errors.markUploadedFailed(err instanceof Error ? err.message : String(err)) };
   }
 }
 function getHiveMindSessionsDir(projectCwd) {
-  return join2(projectCwd, ".claude", "hive-mind", "sessions");
+  return join3(projectCwd, ".claude", "hive-mind", "sessions");
 }
 async function findRawSessions(rawDir) {
   const files = await readdir(rawDir);
@@ -15866,19 +16044,19 @@ async function findRawSessions(rawDir) {
   for (const f of files) {
     if (f.endsWith(".jsonl")) {
       if (f.startsWith("agent-")) {
-        sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+        sessions.push({ path: join3(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
       } else {
-        sessions.push({ path: join2(rawDir, f) });
+        sessions.push({ path: join3(rawDir, f) });
       }
       continue;
     }
-    const subagentsDir = join2(rawDir, f, "subagents");
+    const subagentsDir = join3(rawDir, f, "subagents");
     try {
       const subagentFiles = await readdir(subagentsDir);
       for (const sf of subagentFiles) {
         if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
           sessions.push({
-            path: join2(subagentsDir, sf),
+            path: join3(subagentsDir, sf),
             agentId: sf.replace("agent-", "").replace(".jsonl", "")
           });
         }
@@ -15889,16 +16067,20 @@ async function findRawSessions(rawDir) {
 }
 async function checkAllSessions(cwd, transcriptsDirs) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const [rawSessionArrays, extractedMetaMap] = await Promise.all([
+  const collectedErrors = [];
+  const [rawSessionArrays, extractedResult] = await Promise.all([
     Promise.all(transcriptsDirs.map(async (dir) => {
       try {
         return await findRawSessions(dir);
-      } catch {
+      } catch (err) {
+        collectedErrors.push(errors.readTranscriptsDirFailed(dir, err instanceof Error ? err.message : String(err)));
         return [];
       }
     })),
     loadExtractedMetadata(extractedDir)
   ]);
+  const { metaMap: extractedMetaMap, errors: metadataErrors } = extractedResult;
+  collectedErrors.push(...metadataErrors);
   const rawSessionMap = new Map;
   for (const sessions of rawSessionArrays) {
     for (const session of sessions) {
@@ -15921,7 +16103,8 @@ async function checkAllSessions(cwd, transcriptsDirs) {
         const rawStat = await stat2(rawPath);
         const storedMtime = new Date(existingMeta.rawMtime).getTime();
         needsExtract = rawStat.mtime.getTime() > storedMtime;
-      } catch {
+      } catch (err) {
+        collectedErrors.push(errors.statFailed(rawPath, err instanceof Error ? err.message : String(err)));
         needsExtract = true;
       }
     }
@@ -15934,7 +16117,8 @@ async function checkAllSessions(cwd, transcriptsDirs) {
         if (parseResult.hasContent) {
           sessionsToExtract.push({ sessionId, rawPath, agentId });
         }
-      } catch {
+      } catch (err) {
+        collectedErrors.push(errors.parseSessionFailed(sessionId, err instanceof Error ? err.message : String(err)));
         sessionsToExtract.push({ sessionId, rawPath, agentId });
       }
     }
@@ -15943,28 +16127,31 @@ async function checkAllSessions(cwd, transcriptsDirs) {
     sessionId,
     meta: meta3
   }));
-  return { sessionsToExtract, schemaErrors, extractedSessions };
+  return { sessionsToExtract, schemaErrors, extractedSessions, errors: collectedErrors };
 }
 async function loadExtractedMetadata(extractedDir) {
   const metaMap = new Map;
+  const collectedErrors = [];
   let files;
   try {
     files = await readdir(extractedDir);
   } catch {
-    return metaMap;
+    return { metaMap, errors: collectedErrors };
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   await Promise.all(jsonlFiles.map(async (file2) => {
-    const meta3 = await readExtractedMeta(join2(extractedDir, file2));
-    if (meta3) {
-      metaMap.set(meta3.sessionId, meta3);
+    const result = await readExtractedMeta(join3(extractedDir, file2));
+    if (isMetaError(result)) {
+      collectedErrors.push(result.error);
+    } else if (result) {
+      metaMap.set(result.sessionId, result);
     }
   }));
-  return metaMap;
+  return { metaMap, errors: collectedErrors };
 }
 async function extractSingleSession(cwd, sessionId) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const transcriptsDirs = await loadTranscriptsDirs(join2(cwd, ".claude", "hive-mind"));
+  const transcriptsDirs = await loadTranscriptsDirs(join3(cwd, ".claude", "hive-mind"));
   if (transcriptsDirs.length === 0)
     return false;
   for (const transcriptsDir of transcriptsDirs) {
@@ -15972,7 +16159,7 @@ async function extractSingleSession(cwd, sessionId) {
       const rawSessions = await findRawSessions(transcriptsDir);
       const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
       if (session) {
-        const extractedPath = join2(extractedDir, basename2(session.path));
+        const extractedPath = join3(extractedDir, basename2(session.path));
         const result = await extractSession({
           rawPath: session.path,
           outputPath: extractedPath,
@@ -16013,7 +16200,7 @@ function printWarning(message) {
 // cli/lib/utils.ts
 import { createInterface as createInterface2 } from "readline";
 import { readdir as readdir2 } from "fs/promises";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -16031,10 +16218,10 @@ function formatSessionId(id) {
 }
 async function lookupSession(cwd, sessionIdPrefix) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const exactPath = join3(sessionsDir, `${sessionIdPrefix}.jsonl`);
-  const exactMeta = await readExtractedMeta(exactPath);
-  if (exactMeta) {
-    return { type: "found", sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMeta };
+  const exactPath = join4(sessionsDir, `${sessionIdPrefix}.jsonl`);
+  const exactMetaResult = await readExtractedMeta(exactPath);
+  if (exactMetaResult && !isMetaError(exactMetaResult)) {
+    return { type: "found", sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMetaResult };
   }
   let files;
   try {
@@ -16050,12 +16237,12 @@ async function lookupSession(cwd, sessionIdPrefix) {
     return { type: "ambiguous", matches: matches.map((m) => m.replace(".jsonl", "")) };
   }
   const sessionId = matches[0].replace(".jsonl", "");
-  const sessionPath = join3(sessionsDir, matches[0]);
-  const meta3 = await readExtractedMeta(sessionPath);
-  if (!meta3) {
+  const sessionPath = join4(sessionsDir, matches[0]);
+  const metaResult = await readExtractedMeta(sessionPath);
+  if (!metaResult || isMetaError(metaResult)) {
     return { type: "not_found" };
   }
-  return { type: "found", sessionId, sessionPath, meta: meta3 };
+  return { type: "found", sessionId, sessionPath, meta: metaResult };
 }
 
 // cli/commands/exclude.ts
@@ -16092,8 +16279,8 @@ async function excludeAll(cwd) {
   }
   let nonExcludedCount = 0;
   for (const file2 of sessionFiles) {
-    const meta3 = await readExtractedMeta(join4(sessionsDir, file2));
-    if (meta3 && !meta3.excluded && !meta3.agentId) {
+    const metaResult = await readExtractedMeta(join5(sessionsDir, file2));
+    if (metaResult && !isMetaError(metaResult) && !metaResult.excluded && !metaResult.agentId) {
       nonExcludedCount++;
     }
   }
@@ -16110,9 +16297,9 @@ async function excludeAll(cwd) {
   let succeeded = 0;
   let failed = 0;
   for (const file2 of sessionFiles) {
-    const sessionPath = join4(sessionsDir, file2);
-    const meta3 = await readExtractedMeta(sessionPath);
-    if (!meta3 || meta3.excluded || meta3.agentId)
+    const sessionPath = join5(sessionsDir, file2);
+    const metaResult = await readExtractedMeta(sessionPath);
+    if (!metaResult || isMetaError(metaResult) || metaResult.excluded || metaResult.agentId)
       continue;
     const sessionId = file2.replace(".jsonl", "");
     if (await excludeSession(sessionPath)) {
@@ -16201,7 +16388,7 @@ async function extract() {
 
 // cli/commands/search.ts
 import { readdir as readdir4 } from "fs/promises";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 
 // cli/lib/field-filter.ts
 function parseFieldList(input) {
@@ -17530,10 +17717,14 @@ async function search() {
   }
   const allSessionIds = [];
   for (const file2 of jsonlFiles) {
-    const path = join5(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (session && !session.meta.agentId) {
-      allSessionIds.push(session.meta.sessionId);
+    const path = join6(sessionsDir, file2);
+    const sessionResult = await readExtractedSession(path);
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+      continue;
+    }
+    if (sessionResult && !sessionResult.meta.agentId) {
+      allSessionIds.push(sessionResult.meta.sessionId);
     }
   }
   const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
@@ -17543,13 +17734,13 @@ async function search() {
   for (const file2 of jsonlFiles) {
     if (options.maxMatches !== null && totalMatches >= options.maxMatches)
       break;
-    const path = join5(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (!session || session.meta.agentId)
+    const path = join6(sessionsDir, file2);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId)
       continue;
-    const sessionId = session.meta.sessionId;
+    const sessionId = sessionResult.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
-    const parsed = parseSession(session.meta, session.entries);
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
     const matchingIndices = new Set;
     for (let i = 0;i < parsed.blocks.length; i++) {
       const block = parsed.blocks[i];
@@ -17697,165 +17888,19 @@ import { readdir as readdir5 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join7 } from "path";
 
-// cli/lib/auth.ts
-import { mkdir as mkdir3, rmdir } from "fs/promises";
-import { join as join6 } from "path";
-var AUTH_LOCK_FILE = join6(AUTH_DIR, "auth.lock");
-var LOCK_TIMEOUT_MS = 1e4;
-var LOCK_RETRY_INTERVAL_MS = 50;
-var WORKOS_API_URL = "https://api.workos.com/user_management";
-async function acquireLock() {
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      await mkdir3(AUTH_LOCK_FILE);
-      return true;
-    } catch (err) {
-      const isLockHeld = err instanceof Error && "code" in err && err.code === "EEXIST";
-      if (!isLockHeld)
-        return false;
-      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_INTERVAL_MS));
-    }
-  }
-  return false;
-}
-async function releaseLock() {
-  try {
-    await rmdir(AUTH_LOCK_FILE);
-  } catch {}
-}
-var AuthUserSchema = exports_external.object({
-  id: exports_external.string(),
-  email: exports_external.string(),
-  first_name: exports_external.string().optional(),
-  last_name: exports_external.string().optional()
-});
-var AuthDataSchema = exports_external.object({
-  access_token: exports_external.string(),
-  refresh_token: exports_external.string(),
-  user: AuthUserSchema,
-  authenticated_at: exports_external.number().optional()
-});
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
-function isTokenExpired(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number")
-    return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
-}
-async function loadAuthData() {
-  try {
-    const file2 = Bun.file(AUTH_FILE);
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success) {
-      console.error(errors.authSchemaError(parsed.error.message));
-      return null;
-    }
-    return parsed.data;
-  } catch {
-    return null;
-  }
-}
-async function saveAuthData(data) {
-  await mkdir3(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
-}
-async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
-  try {
-    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const data = await response.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success) {
-      console.error(errors.refreshSchemaError(parsed.error.message));
-      return null;
-    }
-    return {
-      ...parsed.data,
-      authenticated_at: existingAuthenticatedAt
-    };
-  } catch {
-    return null;
-  }
-}
-var NOT_AUTHENTICATED = { authenticated: false, needsLogin: true };
-function authenticated(user) {
-  return { authenticated: true, user, needsLogin: false };
-}
-async function refreshWithLock(fallbackAuthData) {
-  const gotLock = await acquireLock();
-  if (!gotLock)
-    return NOT_AUTHENTICATED;
-  try {
-    const freshAuthData = await loadAuthData();
-    if (freshAuthData?.access_token && !isTokenExpired(freshAuthData.access_token)) {
-      return authenticated(freshAuthData.user);
-    }
-    const tokenToRefresh = freshAuthData?.refresh_token ?? fallbackAuthData.refresh_token;
-    const authenticatedAt = freshAuthData?.authenticated_at ?? fallbackAuthData.authenticated_at;
-    const newAuthData = await refreshToken(tokenToRefresh, authenticatedAt);
-    if (!newAuthData)
-      return NOT_AUTHENTICATED;
-    await saveAuthData(newAuthData);
-    return authenticated(newAuthData.user);
-  } finally {
-    await releaseLock();
-  }
-}
-async function checkAuthStatus(attemptRefresh = true) {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
-    return NOT_AUTHENTICATED;
-  }
-  if (!isTokenExpired(authData.access_token)) {
-    return authenticated(authData.user);
-  }
-  if (!attemptRefresh || !authData.refresh_token) {
-    return NOT_AUTHENTICATED;
-  }
-  return refreshWithLock(authData);
-}
-function getUserDisplayName(user) {
-  return user.first_name || user.email;
-}
-
 // cli/lib/upload-eligibility.ts
 var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
 var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;
 async function getAuthIssuedAt() {
-  const authData = await loadAuthData();
-  if (!authData)
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult))
     return null;
-  if (authData.authenticated_at === undefined) {
+  if (authResult.authenticated_at === undefined) {
     const now = Date.now();
-    await saveAuthData({ ...authData, authenticated_at: now });
+    await saveAuthData({ ...authResult, authenticated_at: now });
     return now;
   }
-  return authData.authenticated_at;
+  return authResult.authenticated_at;
 }
 function checkSessionEligibility(meta3, authIssuedAt) {
   const sessionId = meta3.sessionId;
@@ -17994,11 +18039,17 @@ async function showPendingStatus(cwd) {
   const mainSessions = [];
   for (const file2 of jsonlFiles) {
     const path = join7(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (!session || session.meta.agentId)
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
+      }
       continue;
-    const parsed = parseSession(session.meta, session.entries);
-    mainSessions.push({ ...session, parsed });
+    }
+    if (sessionResult.meta.agentId)
+      continue;
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    mainSessions.push({ ...sessionResult, parsed });
   }
   if (mainSessions.length === 0) {
     console.log(indexCmd.noExtractedSessions);
@@ -18092,14 +18143,18 @@ async function index() {
   const allSessions = new Map;
   for (const file2 of jsonlFiles) {
     const path = join7(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (session) {
-      const parsed = parseSession(session.meta, session.entries);
-      const sessionInfo = { ...session, parsed };
-      allSessions.set(session.meta.sessionId, sessionInfo);
-      if (session.meta.agentId) {
-        allSessions.set(session.meta.agentId, sessionInfo);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
       }
+      continue;
+    }
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const sessionInfo = { ...sessionResult, parsed };
+    allSessions.set(sessionResult.meta.sessionId, sessionInfo);
+    if (sessionResult.meta.agentId) {
+      allSessions.set(sessionResult.meta.agentId, sessionInfo);
     }
   }
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
@@ -18553,12 +18608,20 @@ async function read() {
       }
     }
   }
-  const session = await readExtractedSession(sessionFile);
-  if (!session || session.entries.length === 0) {
+  const sessionResult = await readExtractedSession(sessionFile);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+    } else {
+      printError(errors.emptySession);
+    }
+    return 1;
+  }
+  if (sessionResult.entries.length === 0) {
     printError(errors.emptySession);
     return 1;
   }
-  const { meta: meta3, entries } = session;
+  const { meta: meta3, entries } = sessionResult;
   if (entryNumber === null && rangeStart === null) {
     const output = formatSession(entries, {
       redact: true,
@@ -19649,12 +19712,12 @@ function getConvexClient() {
   return clientInstance;
 }
 async function getAuthenticatedClient() {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult)) {
     return null;
   }
   const client = getConvexClient();
-  client.setAuth(authData.access_token);
+  client.setAuth(authResult.access_token);
   return client;
 }
 async function pingCheckout(checkoutId) {
@@ -19742,6 +19805,7 @@ async function readHookInput() {
 var AUTO_UPLOAD_DELAY_MINUTES = 10;
 async function sessionStart() {
   const messages = [];
+  const collectedErrors = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join9(cwd, ".claude", "hive-mind");
@@ -19785,8 +19849,9 @@ async function sessionStart() {
   if ("error" in sessionCheck) {
     messages.push(hook.extractionFailed(sessionCheck.error));
   } else {
-    const { sessionsToExtract, schemaErrors } = sessionCheck;
+    const { sessionsToExtract, schemaErrors, errors: sessionErrors } = sessionCheck;
     extractedSessions = sessionCheck.extractedSessions;
+    collectedErrors.push(...sessionErrors);
     const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
     if (newNonAgentSessions.length > 0) {
       messages.push(hook.extracted(newNonAgentSessions.length));
@@ -19799,6 +19864,9 @@ async function sessionStart() {
       messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
     }
   }
+  if (status.errors) {
+    collectedErrors.push(...status.errors);
+  }
   let userHasAlias = false;
   if (status.authenticated) {
     try {
@@ -19807,7 +19875,9 @@ async function sessionStart() {
         messages.push(hook.aliasUpdated(aliasResult.sourceCmd));
       }
       userHasAlias = aliasResult.hasAlias;
-    } catch {}
+    } catch (err) {
+      collectedErrors.push(errors.aliasUpdateFailed(err instanceof Error ? err.message : String(err)));
+    }
   }
   if (status.needsLogin) {
     messages.push(hook.notLoggedIn());
@@ -19830,8 +19900,15 @@ async function sessionStart() {
       if (uploadCount > 0) {
         messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
       }
-    } catch {
-      messages.push(hook.sessionCheckFailed());
+    } catch (err) {
+      collectedErrors.push(errors.eligibilityCheckFailed(err instanceof Error ? err.message : String(err)));
+    }
+  }
+  if (collectedErrors.length > 0) {
+    if (process.env.HIVE_MIND_VERBOSE === "1") {
+      messages.push(...collectedErrors);
+    } else {
+      messages.push(hook.errorsOccurred(collectedErrors.length));
     }
   }
   if (messages.length > 0) {
@@ -19947,15 +20024,15 @@ async function checkExistingAuth() {
   return true;
 }
 async function tryRefresh() {
-  const authData = await loadAuthData();
-  if (!authData?.refresh_token)
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult))
     return { success: false };
   printInfo(setup.refreshing);
-  const newAuthData = await refreshToken(authData.refresh_token, authData.authenticated_at);
-  if (newAuthData) {
-    await saveAuthData(newAuthData);
+  const refreshResult = await refreshToken(authResult.refresh_token, authResult.authenticated_at);
+  if (refreshResult && !isErrorResult(refreshResult)) {
+    await saveAuthData(refreshResult);
     printSuccess(setup.refreshSuccess);
-    return { success: true, user: newAuthData.user };
+    return { success: true, user: refreshResult.user };
   }
   return { success: false };
 }
@@ -20090,16 +20167,16 @@ async function uploadSession(cwd, sessionId) {
   } catch {
     return { success: false, error: "Session file not found" };
   }
-  const meta3 = await readExtractedMeta(sessionPath);
-  if (!meta3) {
+  const metaResult = await readExtractedMeta(sessionPath);
+  if (!metaResult || isMetaError(metaResult)) {
     return { success: false, error: "Could not read session metadata" };
   }
   const heartbeatOk = await heartbeatSession({
-    sessionId: meta3.sessionId,
-    checkoutId: meta3.checkoutId,
+    sessionId: metaResult.sessionId,
+    checkoutId: metaResult.checkoutId,
     project: getCanonicalProjectName(cwd),
-    lineCount: meta3.messageCount,
-    parentSessionId: meta3.parentSessionId
+    lineCount: metaResult.messageCount,
+    parentSessionId: metaResult.parentSessionId
   });
   if (!heartbeatOk) {
     return { success: false, error: "Failed to heartbeat session" };
@@ -20125,7 +20202,12 @@ async function uploadSession(cwd, sessionId) {
     if (!saved) {
       return { success: false, error: "Failed to save upload metadata" };
     }
-    await markSessionUploaded(sessionPath);
+    const markResult = await markSessionUploaded(sessionPath);
+    if (!markResult.success && markResult.error) {
+      if (process.env.DEBUG) {
+        console.error(`[upload] ${markResult.error}`);
+      }
+    }
     return { success: true };
   } catch (error48) {
     return {
@@ -20137,10 +20219,14 @@ async function uploadSession(cwd, sessionId) {
 async function getAgentIds(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
-  const session = await readExtractedSession(sessionPath);
-  if (!session)
+  const sessionResult = await readExtractedSession(sessionPath);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult) && process.env.DEBUG) {
+      console.error(`[upload] ${sessionResult.error}`);
+    }
     return [];
-  const parsed = parseSession(session.meta, session.entries);
+  }
+  const parsed = parseSession(sessionResult.meta, sessionResult.entries);
   const agentIds = new Set;
   for (const block of parsed.blocks) {
     if (block.type === "tool" && block.agentId) {
@@ -20251,18 +20337,18 @@ async function heartbeat() {
   const project = getCanonicalProjectName(cwd);
   let failures = 0;
   for (const sessionId of sessionIds) {
-    const meta3 = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
-    if (!meta3) {
+    const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
+    if (!metaResult || isMetaError(metaResult)) {
       failures++;
       continue;
     }
     try {
       await heartbeatSession({
-        sessionId: meta3.sessionId,
-        checkoutId: meta3.checkoutId,
+        sessionId: metaResult.sessionId,
+        checkoutId: metaResult.checkoutId,
         project,
-        lineCount: meta3.messageCount,
-        parentSessionId: meta3.parentSessionId
+        lineCount: metaResult.messageCount,
+        parentSessionId: metaResult.parentSessionId
       });
     } catch (error48) {
       if (process.env.DEBUG) {

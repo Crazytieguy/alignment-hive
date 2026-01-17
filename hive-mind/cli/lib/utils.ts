@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { getHiveMindSessionsDir, readExtractedMeta } from './extraction.js';
+import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction.js';
 import type { HiveMindMeta } from './schemas.js';
 
 export function sleep(ms: number): Promise<void> {
@@ -31,9 +31,9 @@ export async function lookupSession(cwd: string, sessionIdPrefix: string): Promi
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
   const exactPath = join(sessionsDir, `${sessionIdPrefix}.jsonl`);
-  const exactMeta = await readExtractedMeta(exactPath);
-  if (exactMeta) {
-    return { type: 'found', sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMeta };
+  const exactMetaResult = await readExtractedMeta(exactPath);
+  if (exactMetaResult && !isMetaError(exactMetaResult)) {
+    return { type: 'found', sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMetaResult };
   }
 
   let files: Array<string>;
@@ -55,11 +55,11 @@ export async function lookupSession(cwd: string, sessionIdPrefix: string): Promi
 
   const sessionId = matches[0].replace('.jsonl', '');
   const sessionPath = join(sessionsDir, matches[0]);
-  const meta = await readExtractedMeta(sessionPath);
+  const metaResult = await readExtractedMeta(sessionPath);
 
-  if (!meta) {
+  if (!metaResult || isMetaError(metaResult)) {
     return { type: 'not_found' };
   }
 
-  return { type: 'found', sessionId, sessionPath, meta };
+  return { type: 'found', sessionId, sessionPath, meta: metaResult };
 }

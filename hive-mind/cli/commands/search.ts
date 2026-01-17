@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { getHiveMindSessionsDir, readExtractedSession } from '../lib/extraction';
+import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { SearchFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks } from '../lib/format';
 import { errors, usage } from '../lib/messages';
@@ -131,9 +131,13 @@ export async function search(): Promise<number> {
   const allSessionIds: Array<string> = [];
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
-    const session = await readExtractedSession(path);
-    if (session && !session.meta.agentId) {
-      allSessionIds.push(session.meta.sessionId);
+    const sessionResult = await readExtractedSession(path);
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+      continue;
+    }
+    if (sessionResult && !sessionResult.meta.agentId) {
+      allSessionIds.push(sessionResult.meta.sessionId);
     }
   }
   const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
@@ -146,14 +150,14 @@ export async function search(): Promise<number> {
     if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
     const path = join(sessionsDir, file);
-    const session = await readExtractedSession(path);
+    const sessionResult = await readExtractedSession(path);
 
-    if (!session || session.meta.agentId) continue;
+    if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId) continue;
 
-    const sessionId = session.meta.sessionId;
+    const sessionId = sessionResult.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
 
-    const parsed = parseSession(session.meta, session.entries);
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
 
     // Find matching block indices
     const matchingIndices = new Set<number>();

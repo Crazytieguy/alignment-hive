@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName } from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
-import { getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction';
+import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from '../lib/extraction';
 
 export async function heartbeat(): Promise<number> {
   const cwd = process.env.CWD || process.cwd();
@@ -22,19 +22,19 @@ export async function heartbeat(): Promise<number> {
   let failures = 0;
 
   for (const sessionId of sessionIds) {
-    const meta = await readExtractedMeta(join(sessionsDir, `${sessionId}.jsonl`));
-    if (!meta) {
+    const metaResult = await readExtractedMeta(join(sessionsDir, `${sessionId}.jsonl`));
+    if (!metaResult || isMetaError(metaResult)) {
       failures++;
       continue;
     }
 
     try {
       await heartbeatSession({
-        sessionId: meta.sessionId,
-        checkoutId: meta.checkoutId,
+        sessionId: metaResult.sessionId,
+        checkoutId: metaResult.checkoutId,
         project,
-        lineCount: meta.messageCount,
-        parentSessionId: meta.parentSessionId,
+        lineCount: metaResult.messageCount,
+        parentSessionId: metaResult.parentSessionId,
       });
     } catch (error) {
       if (process.env.DEBUG) {

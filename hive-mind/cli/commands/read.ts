@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { getHiveMindSessionsDir, readExtractedSession } from '../lib/extraction';
+import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';
 import { errors, usage } from '../lib/messages';
@@ -120,13 +120,21 @@ export async function read(): Promise<number> {
     }
   }
 
-  const session = await readExtractedSession(sessionFile);
-  if (!session || session.entries.length === 0) {
+  const sessionResult = await readExtractedSession(sessionFile);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+    } else {
+      printError(errors.emptySession);
+    }
+    return 1;
+  }
+  if (sessionResult.entries.length === 0) {
     printError(errors.emptySession);
     return 1;
   }
 
-  const { meta, entries } = session;
+  const { meta, entries } = sessionResult;
 
   if (entryNumber === null && rangeStart === null) {
     const output = formatSession(entries, {

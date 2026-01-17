@@ -5,6 +5,8 @@ import { getCanonicalProjectName } from '../lib/config.js';
 import { generateUploadUrl, heartbeatSession, saveUpload } from '../lib/convex.js';
 import {
   getHiveMindSessionsDir,
+  isMetaError,
+  isSessionError,
   markSessionUploaded,
   readExtractedMeta,
   readExtractedSession,
@@ -25,17 +27,17 @@ async function uploadSession(cwd: string, sessionId: string): Promise<{ success:
     return { success: false, error: 'Session file not found' };
   }
 
-  const meta = await readExtractedMeta(sessionPath);
-  if (!meta) {
+  const metaResult = await readExtractedMeta(sessionPath);
+  if (!metaResult || isMetaError(metaResult)) {
     return { success: false, error: 'Could not read session metadata' };
   }
 
   const heartbeatOk = await heartbeatSession({
-    sessionId: meta.sessionId,
-    checkoutId: meta.checkoutId,
+    sessionId: metaResult.sessionId,
+    checkoutId: metaResult.checkoutId,
     project: getCanonicalProjectName(cwd),
-    lineCount: meta.messageCount,
-    parentSessionId: meta.parentSessionId,
+    lineCount: metaResult.messageCount,
+    parentSessionId: metaResult.parentSessionId,
   });
 
   if (!heartbeatOk) {
@@ -68,7 +70,13 @@ async function uploadSession(cwd: string, sessionId: string): Promise<{ success:
       return { success: false, error: 'Failed to save upload metadata' };
     }
 
-    await markSessionUploaded(sessionPath);
+    const markResult = await markSessionUploaded(sessionPath);
+    if (!markResult.success && markResult.error) {
+      // Log but don't fail - upload already succeeded
+      if (process.env.DEBUG) {
+        console.error(`[upload] ${markResult.error}`);
+      }
+    }
     return { success: true };
   } catch (error) {
     return {
@@ -81,10 +89,15 @@ async function uploadSession(cwd: string, sessionId: string): Promise<{ success:
 async function getAgentIds(cwd: string, sessionId: string): Promise<Array<string>> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   const sessionPath = join(sessionsDir, `${sessionId}.jsonl`);
-  const session = await readExtractedSession(sessionPath);
-  if (!session) return [];
+  const sessionResult = await readExtractedSession(sessionPath);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult) && process.env.DEBUG) {
+      console.error(`[upload] ${sessionResult.error}`);
+    }
+    return [];
+  }
 
-  const parsed = parseSession(session.meta, session.entries);
+  const parsed = parseSession(sessionResult.meta, sessionResult.entries);
   const agentIds = new Set<string>();
   for (const block of parsed.blocks) {
     if (block.type === 'tool' && block.agentId) {

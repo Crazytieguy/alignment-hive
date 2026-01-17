@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { getHiveMindSessionsDir, readExtractedSession } from '../lib/extraction';
+import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { indexCmd, usage } from '../lib/messages';
 import { colors, printError } from '../lib/output';
 import { parseSession } from '../lib/parse';
@@ -153,11 +153,17 @@ async function showPendingStatus(cwd: string): Promise<number> {
 
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
-    const session = await readExtractedSession(path);
-    if (!session || session.meta.agentId) continue;
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
+      }
+      continue;
+    }
+    if (sessionResult.meta.agentId) continue;
 
-    const parsed = parseSession(session.meta, session.entries);
-    mainSessions.push({ ...session, parsed });
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    mainSessions.push({ ...sessionResult, parsed });
   }
 
   if (mainSessions.length === 0) {
@@ -275,14 +281,18 @@ export async function index(): Promise<number> {
   const allSessions = new Map<string, SessionInfo>();
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
-    const session = await readExtractedSession(path);
-    if (session) {
-      const parsed = parseSession(session.meta, session.entries);
-      const sessionInfo: SessionInfo = { ...session, parsed };
-      allSessions.set(session.meta.sessionId, sessionInfo);
-      if (session.meta.agentId) {
-        allSessions.set(session.meta.agentId, sessionInfo);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
       }
+      continue;
+    }
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const sessionInfo: SessionInfo = { ...sessionResult, parsed };
+    allSessions.set(sessionResult.meta.sessionId, sessionInfo);
+    if (sessionResult.meta.agentId) {
+      allSessions.set(sessionResult.meta.agentId, sessionInfo);
     }
   }
 
