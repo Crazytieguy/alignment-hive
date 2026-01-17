@@ -6,6 +6,7 @@
       "Skill(plugin-dev:create-plugin)",
       "Skill(plugin-dev:hook-development)",
       "Skill(plugin-dev:agent-development)",
+      "Skill(plugin-dev:command-development)",
       "WebSearch",
       "WebFetch(domain:workos.com)",
       "WebFetch(domain:docs.convex.dev)",
