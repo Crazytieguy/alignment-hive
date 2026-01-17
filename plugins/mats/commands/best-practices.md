@@ -1,6 +1,5 @@
 ---
-name: best-practices
-description: This skill should be used proactively whenever the user asks about "best practices", "how should I set up", "what's the right way to", "help me get started", "start a project", "set up my environment", "which plugins should I install", "how to configure Claude Code", "optimize for Claude", "make my project work better with Claude", "project structure", "what tools should I use", "improve my tooling", "improve my dev workflow", or mentions project architecture, tooling choices, or Claude Code configuration. Also use when the working directory appears empty or newly created. When in doubt, use it.
+description: Use when the user asks about "best practices", "how should I set up", "what's the right way to", "help me get started", "start a project", "set up my environment", "which plugins should I install", "how to configure Claude Code", "optimize for Claude", "make my project work better with Claude", "project structure", "what tools should I use", "improve my tooling", "improve my dev workflow", or mentions project architecture, tooling choices, or Claude Code configuration.
 ---
 
 # Best Practices
@@ -70,3 +69,7 @@ After installing plugins, tell the user to exit ("/exit") and continue the sessi
 ```
 
 Tell the user to run `/hive-mind:setup` to complete the hive-mind configuration, after they restart Claude Code.
+
+## Completion
+
+Once all recommendations have been either implemented or explicitly rejected by the user, write the current plugin version to `.claude/mats:best-practices-version`. Get the version from `!cat "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" | grep '"version"' | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'`.
