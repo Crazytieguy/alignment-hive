@@ -2,8 +2,7 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { loadAuthData } from './auth';
 
-const CONVEX_URL =
-  process.env.CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
+const CONVEX_URL = process.env.CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
 function debugLog(message: string): void {
   if (process.env.DEBUG) {
@@ -61,9 +60,7 @@ export async function heartbeatSession(session: {
   }
 }
 
-export async function generateUploadUrl(
-  sessionId: string
-): Promise<string | null> {
+export async function generateUploadUrl(sessionId: string): Promise<string | null> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return null;
@@ -75,10 +72,7 @@ export async function generateUploadUrl(
   }
 }
 
-export async function saveUpload(
-  sessionId: string,
-  storageId: string
-): Promise<boolean> {
+export async function saveUpload(sessionId: string, storageId: string): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return false;

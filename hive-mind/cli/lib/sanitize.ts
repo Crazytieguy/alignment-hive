@@ -1,27 +1,27 @@
-import { ALL_KEYWORDS, SECRET_RULES } from "./secret-rules";
+import { ALL_KEYWORDS, SECRET_RULES } from './secret-rules';
 
 const MAX_SANITIZE_DEPTH = 100;
 const MIN_SECRET_LENGTH = 8;
 
 const SAFE_KEYS = new Set([
-  "uuid",
-  "parentUuid",
-  "sessionId",
-  "tool_use_id",
-  "sourceToolUseID",
-  "id",
-  "type",
-  "role",
-  "subtype",
-  "level",
-  "stop_reason",
-  "timestamp",
-  "version",
-  "model",
-  "media_type",
-  "name",
-  "cwd",
-  "gitBranch",
+  'uuid',
+  'parentUuid',
+  'sessionId',
+  'tool_use_id',
+  'sourceToolUseID',
+  'id',
+  'type',
+  'role',
+  'subtype',
+  'level',
+  'stop_reason',
+  'timestamp',
+  'version',
+  'model',
+  'media_type',
+  'name',
+  'cwd',
+  'gitBranch',
 ]);
 
 function mightContainSecrets(content: string): boolean {
@@ -61,8 +61,8 @@ function shannonEntropy(data: string): number {
 }
 
 function looksLikeFilePath(s: string): boolean {
-  if (s.endsWith("/")) return true;
-  return s.includes("/") && /\.\w{1,4}$/.test(s);
+  if (s.endsWith('/')) return true;
+  return s.includes('/') && /\.\w{1,4}$/.test(s);
 }
 
 let _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
@@ -112,7 +112,7 @@ export function detectSecrets(content: string): Array<SecretMatch> {
         continue;
       }
 
-      if (rule.id === "high-entropy-secret" && looksLikeFilePath(secretValue)) {
+      if (rule.id === 'high-entropy-secret' && looksLikeFilePath(secretValue)) {
         continue;
       }
 
@@ -170,13 +170,13 @@ export function sanitizeString(content: string): string {
 export function sanitizeDeep<T>(value: T, depth = 0): T {
   if (depth > MAX_SANITIZE_DEPTH) return value;
   if (value === null || value === undefined) return value;
-  if (typeof value === "string") return sanitizeString(value) as T;
+  if (typeof value === 'string') return sanitizeString(value) as T;
   if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, depth + 1)) as T;
 
-  if (typeof value === "object") {
+  if (typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      if (SAFE_KEYS.has(key) && typeof val === "string") {
+      if (SAFE_KEYS.has(key) && typeof val === 'string') {
         result[key] = val;
       } else {
         result[key] = sanitizeDeep(val, depth + 1);

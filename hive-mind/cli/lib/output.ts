@@ -10,7 +10,7 @@ export function hookOutput(message: string): void {
 }
 
 export function printError(message: string): void {
-  console.error(`${colors.red("Error:")} ${message}`);
+  console.error(`${colors.red('Error:')} ${message}`);
 }
 
 export function printSuccess(message: string): void {

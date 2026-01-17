@@ -367,15 +367,7 @@ var setup = {
   refreshSuccess: "Session refreshed!",
   starting: "Starting authentication...",
   deviceAuth: (url, code) => {
-    return [
-      "Open this URL in your browser:",
-      "",
-      `  ${url}`,
-      "",
-      "Confirm this code matches:",
-      "",
-      `  ${code}`
-    ].join(`
+    return ["Open this URL in your browser:", "", `  ${url}`, "", "Confirm this code matches:", "", `  ${code}`].join(`
 `);
   },
   browserOpened: "Browser opened. Confirm the code and approve.",
@@ -461,227 +453,1147 @@ var uploadCmd = {
 
 // cli/lib/secret-rules.ts
 var SECRET_RULES = [
-  { id: "1password-secret-key", regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"), entropy: 3.8, keywords: ["a3-"] },
-  { id: "1password-service-account-token", regex: new RegExp(`ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}`, "gi"), entropy: 4, keywords: ["ops_"] },
-  { id: "adafruit-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["adafruit"] },
-  { id: "adobe-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["adobe"] },
-  { id: "adobe-client-secret", regex: new RegExp(`\\b(p8e-[a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["p8e-"] },
-  { id: "age-secret-key", regex: new RegExp(`AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}`, "gi"), keywords: ["age-secret-key-1"] },
-  { id: "airtable-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["airtable"] },
-  { id: "airtable-personnal-access-token", regex: new RegExp(`\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b`, "gi"), keywords: ["airtable"] },
-  { id: "algolia-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["algolia"] },
-  { id: "alibaba-access-key-id", regex: new RegExp(`\\b(LTAI[a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["ltai"] },
-  { id: "alibaba-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["alibaba"] },
-  { id: "anthropic-admin-api-key", regex: new RegExp(`\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-admin01"] },
-  { id: "anthropic-api-key", regex: new RegExp(`\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-api03"] },
+  {
+    id: "1password-secret-key",
+    regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"),
+    entropy: 3.8,
+    keywords: ["a3-"]
+  },
+  {
+    id: "1password-service-account-token",
+    regex: new RegExp(`ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}`, "gi"),
+    entropy: 4,
+    keywords: ["ops_"]
+  },
+  {
+    id: "adafruit-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["adafruit"]
+  },
+  {
+    id: "adobe-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["adobe"]
+  },
+  {
+    id: "adobe-client-secret",
+    regex: new RegExp(`\\b(p8e-[a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["p8e-"]
+  },
+  {
+    id: "age-secret-key",
+    regex: new RegExp(`AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}`, "gi"),
+    keywords: ["age-secret-key-1"]
+  },
+  {
+    id: "airtable-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["airtable"]
+  },
+  {
+    id: "airtable-personnal-access-token",
+    regex: new RegExp(`\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b`, "gi"),
+    keywords: ["airtable"]
+  },
+  {
+    id: "algolia-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["algolia"]
+  },
+  {
+    id: "alibaba-access-key-id",
+    regex: new RegExp(`\\b(LTAI[a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["ltai"]
+  },
+  {
+    id: "alibaba-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["alibaba"]
+  },
+  {
+    id: "anthropic-admin-api-key",
+    regex: new RegExp(`\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sk-ant-admin01"]
+  },
+  {
+    id: "anthropic-api-key",
+    regex: new RegExp(`\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sk-ant-api03"]
+  },
   { id: "artifactory-api-key", regex: new RegExp(`\\bAKCp[A-Za-z0-9]{69}\\b`, "gi"), entropy: 4.5, keywords: ["akcp"] },
-  { id: "artifactory-reference-token", regex: new RegExp(`\\bcmVmd[A-Za-z0-9]{59}\\b`, "gi"), entropy: 4.5, keywords: ["cmvmd"] },
-  { id: "asana-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
-  { id: "asana-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
-  { id: "atlassian-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["atlassian", "confluence", "jira", "atatt3"] },
-  { id: "authress-service-client-access-key", regex: new RegExp(`\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sc_", "ext_", "scauth_", "authress_"] },
-  { id: "aws-access-token", regex: new RegExp(`\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b`, "gi"), entropy: 3, keywords: ["a3t", "akia", "asia", "abia", "acca"] },
-  { id: "aws-amazon-bedrock-api-key-long-lived", regex: new RegExp(`\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["absk"] },
-  { id: "aws-amazon-bedrock-api-key-short-lived", regex: new RegExp(`bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t`, "gi"), entropy: 3, keywords: ["bedrock-api-key-"] },
-  { id: "azure-ad-client-secret", regex: new RegExp(`(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`, "gi"), entropy: 3, keywords: ["q~"] },
-  { id: "beamer-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["beamer"] },
-  { id: "bitbucket-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
-  { id: "bitbucket-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
-  { id: "bittrex-access-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
-  { id: "bittrex-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
-  { id: "cisco-meraki-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["meraki"] },
-  { id: "clickhouse-cloud-api-secret-key", regex: new RegExp(`\\b(4b1d[A-Za-z0-9]{38})\\b`, "gi"), entropy: 3, keywords: ["4b1d"] },
+  {
+    id: "artifactory-reference-token",
+    regex: new RegExp(`\\bcmVmd[A-Za-z0-9]{59}\\b`, "gi"),
+    entropy: 4.5,
+    keywords: ["cmvmd"]
+  },
+  {
+    id: "asana-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["asana"]
+  },
+  {
+    id: "asana-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["asana"]
+  },
+  {
+    id: "atlassian-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["atlassian", "confluence", "jira", "atatt3"]
+  },
+  {
+    id: "authress-service-client-access-key",
+    regex: new RegExp(`\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sc_", "ext_", "scauth_", "authress_"]
+  },
+  {
+    id: "aws-access-token",
+    regex: new RegExp(`\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b`, "gi"),
+    entropy: 3,
+    keywords: ["a3t", "akia", "asia", "abia", "acca"]
+  },
+  {
+    id: "aws-amazon-bedrock-api-key-long-lived",
+    regex: new RegExp(`\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["absk"]
+  },
+  {
+    id: "aws-amazon-bedrock-api-key-short-lived",
+    regex: new RegExp(`bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t`, "gi"),
+    entropy: 3,
+    keywords: ["bedrock-api-key-"]
+  },
+  {
+    id: "azure-ad-client-secret",
+    regex: new RegExp(`(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`, "gi"),
+    entropy: 3,
+    keywords: ["q~"]
+  },
+  {
+    id: "beamer-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["beamer"]
+  },
+  {
+    id: "bitbucket-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bitbucket"]
+  },
+  {
+    id: "bitbucket-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bitbucket"]
+  },
+  {
+    id: "bittrex-access-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bittrex"]
+  },
+  {
+    id: "bittrex-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bittrex"]
+  },
+  {
+    id: "cisco-meraki-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["meraki"]
+  },
+  {
+    id: "clickhouse-cloud-api-secret-key",
+    regex: new RegExp(`\\b(4b1d[A-Za-z0-9]{38})\\b`, "gi"),
+    entropy: 3,
+    keywords: ["4b1d"]
+  },
   { id: "clojars-api-token", regex: new RegExp(`CLOJARS_[a-z0-9]{60}`, "gi"), entropy: 2, keywords: ["clojars_"] },
-  { id: "cloudflare-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
-  { id: "cloudflare-global-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
-  { id: "cloudflare-origin-ca-key", regex: new RegExp(`\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare", "v1.0-"] },
-  { id: "codecov-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["codecov"] },
-  { id: "cohere-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["cohere", "co_api_key"] },
-  { id: "coinbase-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["coinbase"] },
-  { id: "confluent-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
-  { id: "confluent-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
-  { id: "contentful-delivery-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["contentful"] },
-  { id: "curl-auth-header", regex: new RegExp(`\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|$)`, "gi"), entropy: 2.75, keywords: ["curl"] },
-  { id: "curl-auth-user", regex: new RegExp(`\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|$)`, "gi"), entropy: 2, keywords: ["curl"] },
-  { id: "databricks-api-token", regex: new RegExp(`\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dapi"] },
-  { id: "datadog-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["datadog"] },
-  { id: "defined-networking-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dnkey"] },
-  { id: "digitalocean-access-token", regex: new RegExp(`\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["doo_v1_"] },
-  { id: "digitalocean-pat", regex: new RegExp(`\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dop_v1_"] },
-  { id: "digitalocean-refresh-token", regex: new RegExp(`\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dor_v1_"] },
-  { id: "discord-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["discord"] },
-  { id: "discord-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
-  { id: "discord-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
+  {
+    id: "cloudflare-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["cloudflare"]
+  },
+  {
+    id: "cloudflare-global-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["cloudflare"]
+  },
+  {
+    id: "cloudflare-origin-ca-key",
+    regex: new RegExp(`\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["cloudflare", "v1.0-"]
+  },
+  {
+    id: "codecov-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["codecov"]
+  },
+  {
+    id: "cohere-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["cohere", "co_api_key"]
+  },
+  {
+    id: "coinbase-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["coinbase"]
+  },
+  {
+    id: "confluent-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["confluent"]
+  },
+  {
+    id: "confluent-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["confluent"]
+  },
+  {
+    id: "contentful-delivery-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["contentful"]
+  },
+  {
+    id: "curl-auth-header",
+    regex: new RegExp(`\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|$)`, "gi"),
+    entropy: 2.75,
+    keywords: ["curl"]
+  },
+  {
+    id: "curl-auth-user",
+    regex: new RegExp(`\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|$)`, "gi"),
+    entropy: 2,
+    keywords: ["curl"]
+  },
+  {
+    id: "databricks-api-token",
+    regex: new RegExp(`\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["dapi"]
+  },
+  {
+    id: "datadog-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["datadog"]
+  },
+  {
+    id: "defined-networking-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dnkey"]
+  },
+  {
+    id: "digitalocean-access-token",
+    regex: new RegExp(`\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["doo_v1_"]
+  },
+  {
+    id: "digitalocean-pat",
+    regex: new RegExp(`\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["dop_v1_"]
+  },
+  {
+    id: "digitalocean-refresh-token",
+    regex: new RegExp(`\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dor_v1_"]
+  },
+  {
+    id: "discord-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["discord"]
+  },
+  {
+    id: "discord-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["discord"]
+  },
+  {
+    id: "discord-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["discord"]
+  },
   { id: "doppler-api-token", regex: new RegExp(`dp\\.pt\\.[a-z0-9]{43}`, "gi"), entropy: 2, keywords: ["dp.pt."] },
-  { id: "droneci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["droneci"] },
-  { id: "dropbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "dropbox-long-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "dropbox-short-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "duffel-api-token", regex: new RegExp(`duffel_(?:test|live)_[a-z0-9_\\-=]{43}`, "gi"), entropy: 2, keywords: ["duffel_"] },
-  { id: "dynatrace-api-token", regex: new RegExp(`dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}`, "gi"), entropy: 4, keywords: ["dt0c01."] },
+  {
+    id: "droneci-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["droneci"]
+  },
+  {
+    id: "dropbox-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dropbox"]
+  },
+  {
+    id: "dropbox-long-lived-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dropbox"]
+  },
+  {
+    id: "dropbox-short-lived-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dropbox"]
+  },
+  {
+    id: "duffel-api-token",
+    regex: new RegExp(`duffel_(?:test|live)_[a-z0-9_\\-=]{43}`, "gi"),
+    entropy: 2,
+    keywords: ["duffel_"]
+  },
+  {
+    id: "dynatrace-api-token",
+    regex: new RegExp(`dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}`, "gi"),
+    entropy: 4,
+    keywords: ["dt0c01."]
+  },
   { id: "easypost-api-token", regex: new RegExp(`\\bEZAK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["ezak"] },
   { id: "easypost-test-api-token", regex: new RegExp(`\\bEZTK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["eztk"] },
-  { id: "etsy-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["etsy"] },
-  { id: "facebook-access-token", regex: new RegExp(`\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
-  { id: "facebook-page-access-token", regex: new RegExp(`\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["eaam", "eaac"] },
-  { id: "facebook-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
-  { id: "fastly-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["fastly"] },
-  { id: "finicity-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
-  { id: "finicity-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
-  { id: "finnhub-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finnhub"] },
-  { id: "flickr-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["flickr"] },
-  { id: "flutterwave-encryption-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{12}`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
-  { id: "flutterwave-public-key", regex: new RegExp(`FLWPUBK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwpubk_test"] },
-  { id: "flutterwave-secret-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
-  { id: "flyio-access-token", regex: new RegExp(`\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["fo1_", "fm1", "fm2_"] },
+  {
+    id: "etsy-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["etsy"]
+  },
+  {
+    id: "facebook-access-token",
+    regex: new RegExp(`\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["facebook"]
+  },
+  {
+    id: "facebook-page-access-token",
+    regex: new RegExp(`\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["eaam", "eaac"]
+  },
+  {
+    id: "facebook-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["facebook"]
+  },
+  {
+    id: "fastly-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["fastly"]
+  },
+  {
+    id: "finicity-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["finicity"]
+  },
+  {
+    id: "finicity-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["finicity"]
+  },
+  {
+    id: "finnhub-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["finnhub"]
+  },
+  {
+    id: "flickr-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["flickr"]
+  },
+  {
+    id: "flutterwave-encryption-key",
+    regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{12}`, "gi"),
+    entropy: 2,
+    keywords: ["flwseck_test"]
+  },
+  {
+    id: "flutterwave-public-key",
+    regex: new RegExp(`FLWPUBK_TEST-[a-h0-9]{32}-X`, "gi"),
+    entropy: 2,
+    keywords: ["flwpubk_test"]
+  },
+  {
+    id: "flutterwave-secret-key",
+    regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{32}-X`, "gi"),
+    entropy: 2,
+    keywords: ["flwseck_test"]
+  },
+  {
+    id: "flyio-access-token",
+    regex: new RegExp(`\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["fo1_", "fm1", "fm2_"]
+  },
   { id: "frameio-api-token", regex: new RegExp(`fio-u-[a-z0-9\\-_=]{64}`, "gi"), keywords: ["fio-u-"] },
-  { id: "freemius-secret-key", regex: new RegExp(`["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`, "gi"), keywords: ["secret_key"] },
-  { id: "freshbooks-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["freshbooks"] },
-  { id: "gcp-api-key", regex: new RegExp(`\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["aiza"] },
-  { id: "generic-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:access|auth|(?:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"] },
-  { id: "github-app-token", regex: new RegExp(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghu_", "ghs_"] },
-  { id: "github-fine-grained-pat", regex: new RegExp(`github_pat_\\w{82}`, "gi"), entropy: 3, keywords: ["github_pat_"] },
+  {
+    id: "freemius-secret-key",
+    regex: new RegExp(`["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`, "gi"),
+    keywords: ["secret_key"]
+  },
+  {
+    id: "freshbooks-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["freshbooks"]
+  },
+  {
+    id: "gcp-api-key",
+    regex: new RegExp(`\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["aiza"]
+  },
+  {
+    id: "generic-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:access|auth|(?:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"]
+  },
+  {
+    id: "github-app-token",
+    regex: new RegExp(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`, "gi"),
+    entropy: 3,
+    keywords: ["ghu_", "ghs_"]
+  },
+  {
+    id: "github-fine-grained-pat",
+    regex: new RegExp(`github_pat_\\w{82}`, "gi"),
+    entropy: 3,
+    keywords: ["github_pat_"]
+  },
   { id: "github-oauth", regex: new RegExp(`gho_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["gho_"] },
   { id: "github-pat", regex: new RegExp(`ghp_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghp_"] },
   { id: "github-refresh-token", regex: new RegExp(`ghr_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghr_"] },
-  { id: "gitlab-cicd-job-token", regex: new RegExp(`glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}`, "gi"), entropy: 3, keywords: ["glcbt-"] },
+  {
+    id: "gitlab-cicd-job-token",
+    regex: new RegExp(`glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}`, "gi"),
+    entropy: 3,
+    keywords: ["glcbt-"]
+  },
   { id: "gitlab-deploy-token", regex: new RegExp(`gldt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["gldt-"] },
-  { id: "gitlab-feature-flag-client-token", regex: new RegExp(`glffct-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glffct-"] },
+  {
+    id: "gitlab-feature-flag-client-token",
+    regex: new RegExp(`glffct-[0-9a-zA-Z_\\-]{20}`, "gi"),
+    entropy: 3,
+    keywords: ["glffct-"]
+  },
   { id: "gitlab-feed-token", regex: new RegExp(`glft-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glft-"] },
-  { id: "gitlab-incoming-mail-token", regex: new RegExp(`glimt-[0-9a-zA-Z_\\-]{25}`, "gi"), entropy: 3, keywords: ["glimt-"] },
-  { id: "gitlab-kubernetes-agent-token", regex: new RegExp(`glagent-[0-9a-zA-Z_\\-]{50}`, "gi"), entropy: 3, keywords: ["glagent-"] },
-  { id: "gitlab-oauth-app-secret", regex: new RegExp(`gloas-[0-9a-zA-Z_\\-]{64}`, "gi"), entropy: 3, keywords: ["gloas-"] },
+  {
+    id: "gitlab-incoming-mail-token",
+    regex: new RegExp(`glimt-[0-9a-zA-Z_\\-]{25}`, "gi"),
+    entropy: 3,
+    keywords: ["glimt-"]
+  },
+  {
+    id: "gitlab-kubernetes-agent-token",
+    regex: new RegExp(`glagent-[0-9a-zA-Z_\\-]{50}`, "gi"),
+    entropy: 3,
+    keywords: ["glagent-"]
+  },
+  {
+    id: "gitlab-oauth-app-secret",
+    regex: new RegExp(`gloas-[0-9a-zA-Z_\\-]{64}`, "gi"),
+    entropy: 3,
+    keywords: ["gloas-"]
+  },
   { id: "gitlab-pat", regex: new RegExp(`glpat-[\\w-]{20}`, "gi"), entropy: 3, keywords: ["glpat-"] },
-  { id: "gitlab-pat-routable", regex: new RegExp(`\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glpat-"] },
+  {
+    id: "gitlab-pat-routable",
+    regex: new RegExp(`\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"),
+    entropy: 4,
+    keywords: ["glpat-"]
+  },
   { id: "gitlab-ptt", regex: new RegExp(`glptt-[0-9a-f]{40}`, "gi"), entropy: 3, keywords: ["glptt-"] },
   { id: "gitlab-rrt", regex: new RegExp(`GR1348941[\\w-]{20}`, "gi"), entropy: 3, keywords: ["gr1348941"] },
-  { id: "gitlab-runner-authentication-token", regex: new RegExp(`glrt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glrt-"] },
-  { id: "gitlab-runner-authentication-token-routable", regex: new RegExp(`\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glrt-"] },
+  {
+    id: "gitlab-runner-authentication-token",
+    regex: new RegExp(`glrt-[0-9a-zA-Z_\\-]{20}`, "gi"),
+    entropy: 3,
+    keywords: ["glrt-"]
+  },
+  {
+    id: "gitlab-runner-authentication-token-routable",
+    regex: new RegExp(`\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"),
+    entropy: 4,
+    keywords: ["glrt-"]
+  },
   { id: "gitlab-scim-token", regex: new RegExp(`glsoat-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glsoat-"] },
-  { id: "gitlab-session-cookie", regex: new RegExp(`_gitlab_session=[0-9a-z]{32}`, "gi"), entropy: 3, keywords: ["_gitlab_session="] },
-  { id: "gitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["gitter"] },
-  { id: "gocardless-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["live_", "gocardless"] },
-  { id: "grafana-api-key", regex: new RegExp(`\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["eyjrijoi"] },
-  { id: "grafana-cloud-api-token", regex: new RegExp(`\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glc_"] },
-  { id: "grafana-service-account-token", regex: new RegExp(`\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glsa_"] },
-  { id: "harness-api-key", regex: new RegExp(`(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}`, "gi"), keywords: ["pat.", "sat."] },
-  { id: "hashicorp-tf-api-token", regex: new RegExp(`[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}`, "gi"), entropy: 3.5, keywords: ["atlasv1"] },
-  { id: "hashicorp-tf-password", regex: new RegExp(`[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["administrator_login_password", "password"] },
-  { id: "heroku-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["heroku"] },
-  { id: "heroku-api-key-v2", regex: new RegExp(`\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hrku-aa"] },
-  { id: "hubspot-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["hubspot"] },
-  { id: "huggingface-access-token", regex: new RegExp(`\\b(hf_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["hf_"] },
-  { id: "huggingface-organization-api-token", regex: new RegExp(`\\b(api_org_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["api_org_"] },
-  { id: "infracost-api-token", regex: new RegExp(`\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ico-"] },
-  { id: "intercom-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["intercom"] },
-  { id: "intra42-client-secret", regex: new RegExp(`\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["intra", "s-s4t2ud-", "s-s4t2af-"] },
-  { id: "jfrog-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
-  { id: "jfrog-identity-token", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
-  { id: "jwt", regex: new RegExp(`\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ey"] },
-  { id: "kraken-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kraken"] },
-  { id: "kubernetes-secret-yaml", regex: new RegExp(`(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?[\\s\\S]{0,200}?\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))[\\s\\S]{0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`, "gi"), keywords: ["secret"] },
-  { id: "kucoin-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
-  { id: "kucoin-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
-  { id: "launchdarkly-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["launchdarkly"] },
+  {
+    id: "gitlab-session-cookie",
+    regex: new RegExp(`_gitlab_session=[0-9a-z]{32}`, "gi"),
+    entropy: 3,
+    keywords: ["_gitlab_session="]
+  },
+  {
+    id: "gitter-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["gitter"]
+  },
+  {
+    id: "gocardless-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["live_", "gocardless"]
+  },
+  {
+    id: "grafana-api-key",
+    regex: new RegExp(`\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["eyjrijoi"]
+  },
+  {
+    id: "grafana-cloud-api-token",
+    regex: new RegExp(`\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["glc_"]
+  },
+  {
+    id: "grafana-service-account-token",
+    regex: new RegExp(`\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["glsa_"]
+  },
+  {
+    id: "harness-api-key",
+    regex: new RegExp(`(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}`, "gi"),
+    keywords: ["pat.", "sat."]
+  },
+  {
+    id: "hashicorp-tf-api-token",
+    regex: new RegExp(`[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}`, "gi"),
+    entropy: 3.5,
+    keywords: ["atlasv1"]
+  },
+  {
+    id: "hashicorp-tf-password",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["administrator_login_password", "password"]
+  },
+  {
+    id: "heroku-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["heroku"]
+  },
+  {
+    id: "heroku-api-key-v2",
+    regex: new RegExp(`\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["hrku-aa"]
+  },
+  {
+    id: "hubspot-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["hubspot"]
+  },
+  {
+    id: "huggingface-access-token",
+    regex: new RegExp(`\\b(hf_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["hf_"]
+  },
+  {
+    id: "huggingface-organization-api-token",
+    regex: new RegExp(`\\b(api_org_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["api_org_"]
+  },
+  {
+    id: "infracost-api-token",
+    regex: new RegExp(`\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["ico-"]
+  },
+  {
+    id: "intercom-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["intercom"]
+  },
+  {
+    id: "intra42-client-secret",
+    regex: new RegExp(`\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["intra", "s-s4t2ud-", "s-s4t2af-"]
+  },
+  {
+    id: "jfrog-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["jfrog", "artifactory", "bintray", "xray"]
+  },
+  {
+    id: "jfrog-identity-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["jfrog", "artifactory", "bintray", "xray"]
+  },
+  {
+    id: "jwt",
+    regex: new RegExp(`\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["ey"]
+  },
+  {
+    id: "kraken-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["kraken"]
+  },
+  {
+    id: "kubernetes-secret-yaml",
+    regex: new RegExp(`(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?[\\s\\S]{0,200}?\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))[\\s\\S]{0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`, "gi"),
+    keywords: ["secret"]
+  },
+  {
+    id: "kucoin-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["kucoin"]
+  },
+  {
+    id: "kucoin-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["kucoin"]
+  },
+  {
+    id: "launchdarkly-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["launchdarkly"]
+  },
   { id: "linear-api-key", regex: new RegExp(`lin_api_[a-z0-9]{40}`, "gi"), entropy: 2, keywords: ["lin_api_"] },
-  { id: "linear-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linear"] },
-  { id: "linkedin-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
-  { id: "linkedin-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
-  { id: "lob-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_", "live_"] },
-  { id: "lob-pub-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_pub", "live_pub", "_pub"] },
-  { id: "looker-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
-  { id: "looker-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
-  { id: "mailchimp-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailchimp"] },
-  { id: "mailgun-private-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mailgun-pub-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mailgun-signing-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mapbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mapbox"] },
-  { id: "mattermost-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mattermost"] },
-  { id: "maxmind-license-key", regex: new RegExp(`\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["_mmk"] },
-  { id: "messagebird-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
-  { id: "messagebird-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
-  { id: "microsoft-teams-webhook", regex: new RegExp(`https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}`, "gi"), keywords: ["webhook.office.com", "webhookb2", "incomingwebhook"] },
-  { id: "netlify-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["netlify"] },
-  { id: "new-relic-browser-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrjs-"] },
-  { id: "new-relic-insert-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrii-"] },
-  { id: "new-relic-user-api-id", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["new-relic", "newrelic", "new_relic"] },
-  { id: "new-relic-user-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrak"] },
-  { id: "notion-api-token", regex: new RegExp(`\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["ntn_"] },
-  { id: "npm-access-token", regex: new RegExp(`\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["npm_"] },
-  { id: "nuget-config-password", regex: new RegExp(`<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>`, "gi"), entropy: 1, keywords: ["<add key="] },
-  { id: "nytimes-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nytimes", "new-york-times", "newyorktimes"] },
-  { id: "octopus-deploy-api-key", regex: new RegExp(`\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["api-"] },
-  { id: "okta-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["okta"] },
-  { id: "openai-api-key", regex: new RegExp(`\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["t3blbkfj"] },
-  { id: "openshift-user-token", regex: new RegExp(`\\b(sha256~[\\w-]{43})(?:[^\\w-]|$)`, "gi"), entropy: 3.5, keywords: ["sha256~"] },
-  { id: "perplexity-api-key", regex: new RegExp(`\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`, "gi"), entropy: 4, keywords: ["pplx-"] },
-  { id: "plaid-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["plaid"] },
-  { id: "plaid-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
-  { id: "plaid-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
-  { id: "planetscale-api-token", regex: new RegExp(`\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_tkn_"] },
-  { id: "planetscale-oauth-token", regex: new RegExp(`\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_oauth_"] },
-  { id: "planetscale-password", regex: new RegExp(`\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_pw_"] },
-  { id: "postman-api-token", regex: new RegExp(`\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pmak-"] },
-  { id: "prefect-api-token", regex: new RegExp(`\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pnu_"] },
-  { id: "private-key", regex: new RegExp(`-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----`, "gi"), keywords: ["-----begin"] },
-  { id: "privateai-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["privateai", "private_ai", "private-ai"] },
-  { id: "pulumi-api-token", regex: new RegExp(`\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pul-"] },
-  { id: "pypi-upload-token", regex: new RegExp(`pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}`, "gi"), entropy: 3, keywords: ["pypi-ageichlwas5vcmc"] },
-  { id: "rapidapi-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["rapidapi"] },
-  { id: "readme-api-token", regex: new RegExp(`\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rdme_"] },
-  { id: "rubygems-api-token", regex: new RegExp(`\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rubygems_"] },
-  { id: "scalingo-api-token", regex: new RegExp(`\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["tk-us-"] },
-  { id: "sendbird-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
-  { id: "sendbird-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
-  { id: "sendgrid-api-token", regex: new RegExp(`\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sg."] },
-  { id: "sendinblue-api-token", regex: new RegExp(`\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["xkeysib-"] },
-  { id: "sentry-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sentry"] },
-  { id: "sentry-org-token", regex: new RegExp(`\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|$)`, "gi"), entropy: 4.5, keywords: ["sntrys_eyjpyxqio"] },
-  { id: "sentry-user-token", regex: new RegExp(`\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["sntryu_"] },
-  { id: "settlemint-application-access-token", regex: new RegExp(`\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_aat"] },
-  { id: "settlemint-personal-access-token", regex: new RegExp(`\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_pat"] },
-  { id: "settlemint-service-access-token", regex: new RegExp(`\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_sat"] },
-  { id: "shippo-api-token", regex: new RegExp(`\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["shippo_"] },
+  {
+    id: "linear-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["linear"]
+  },
+  {
+    id: "linkedin-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["linkedin", "linked_in", "linked-in"]
+  },
+  {
+    id: "linkedin-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["linkedin", "linked_in", "linked-in"]
+  },
+  {
+    id: "lob-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["test_", "live_"]
+  },
+  {
+    id: "lob-pub-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["test_pub", "live_pub", "_pub"]
+  },
+  {
+    id: "looker-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["looker"]
+  },
+  {
+    id: "looker-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["looker"]
+  },
+  {
+    id: "mailchimp-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailchimp"]
+  },
+  {
+    id: "mailgun-private-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailgun"]
+  },
+  {
+    id: "mailgun-pub-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailgun"]
+  },
+  {
+    id: "mailgun-signing-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailgun"]
+  },
+  {
+    id: "mapbox-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mapbox"]
+  },
+  {
+    id: "mattermost-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mattermost"]
+  },
+  {
+    id: "maxmind-license-key",
+    regex: new RegExp(`\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["_mmk"]
+  },
+  {
+    id: "messagebird-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["messagebird", "message-bird", "message_bird"]
+  },
+  {
+    id: "messagebird-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["messagebird", "message-bird", "message_bird"]
+  },
+  {
+    id: "microsoft-teams-webhook",
+    regex: new RegExp(`https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}`, "gi"),
+    keywords: ["webhook.office.com", "webhookb2", "incomingwebhook"]
+  },
+  {
+    id: "netlify-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["netlify"]
+  },
+  {
+    id: "new-relic-browser-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nrjs-"]
+  },
+  {
+    id: "new-relic-insert-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nrii-"]
+  },
+  {
+    id: "new-relic-user-api-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["new-relic", "newrelic", "new_relic"]
+  },
+  {
+    id: "new-relic-user-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nrak"]
+  },
+  {
+    id: "notion-api-token",
+    regex: new RegExp(`\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["ntn_"]
+  },
+  {
+    id: "npm-access-token",
+    regex: new RegExp(`\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["npm_"]
+  },
+  {
+    id: "nuget-config-password",
+    regex: new RegExp(`<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>`, "gi"),
+    entropy: 1,
+    keywords: ["<add key="]
+  },
+  {
+    id: "nytimes-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nytimes", "new-york-times", "newyorktimes"]
+  },
+  {
+    id: "octopus-deploy-api-key",
+    regex: new RegExp(`\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["api-"]
+  },
+  {
+    id: "okta-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["okta"]
+  },
+  {
+    id: "openai-api-key",
+    regex: new RegExp(`\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["t3blbkfj"]
+  },
+  {
+    id: "openshift-user-token",
+    regex: new RegExp(`\\b(sha256~[\\w-]{43})(?:[^\\w-]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["sha256~"]
+  },
+  {
+    id: "perplexity-api-key",
+    regex: new RegExp(`\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`, "gi"),
+    entropy: 4,
+    keywords: ["pplx-"]
+  },
+  {
+    id: "plaid-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["plaid"]
+  },
+  {
+    id: "plaid-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["plaid"]
+  },
+  {
+    id: "plaid-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["plaid"]
+  },
+  {
+    id: "planetscale-api-token",
+    regex: new RegExp(`\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pscale_tkn_"]
+  },
+  {
+    id: "planetscale-oauth-token",
+    regex: new RegExp(`\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pscale_oauth_"]
+  },
+  {
+    id: "planetscale-password",
+    regex: new RegExp(`\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pscale_pw_"]
+  },
+  {
+    id: "postman-api-token",
+    regex: new RegExp(`\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pmak-"]
+  },
+  {
+    id: "prefect-api-token",
+    regex: new RegExp(`\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["pnu_"]
+  },
+  {
+    id: "private-key",
+    regex: new RegExp(`-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----`, "gi"),
+    keywords: ["-----begin"]
+  },
+  {
+    id: "privateai-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["privateai", "private_ai", "private-ai"]
+  },
+  {
+    id: "pulumi-api-token",
+    regex: new RegExp(`\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["pul-"]
+  },
+  {
+    id: "pypi-upload-token",
+    regex: new RegExp(`pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}`, "gi"),
+    entropy: 3,
+    keywords: ["pypi-ageichlwas5vcmc"]
+  },
+  {
+    id: "rapidapi-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["rapidapi"]
+  },
+  {
+    id: "readme-api-token",
+    regex: new RegExp(`\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["rdme_"]
+  },
+  {
+    id: "rubygems-api-token",
+    regex: new RegExp(`\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["rubygems_"]
+  },
+  {
+    id: "scalingo-api-token",
+    regex: new RegExp(`\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["tk-us-"]
+  },
+  {
+    id: "sendbird-access-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sendbird"]
+  },
+  {
+    id: "sendbird-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sendbird"]
+  },
+  {
+    id: "sendgrid-api-token",
+    regex: new RegExp(`\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sg."]
+  },
+  {
+    id: "sendinblue-api-token",
+    regex: new RegExp(`\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["xkeysib-"]
+  },
+  {
+    id: "sentry-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sentry"]
+  },
+  {
+    id: "sentry-org-token",
+    regex: new RegExp(`\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|$)`, "gi"),
+    entropy: 4.5,
+    keywords: ["sntrys_eyjpyxqio"]
+  },
+  {
+    id: "sentry-user-token",
+    regex: new RegExp(`\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["sntryu_"]
+  },
+  {
+    id: "settlemint-application-access-token",
+    regex: new RegExp(`\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sm_aat"]
+  },
+  {
+    id: "settlemint-personal-access-token",
+    regex: new RegExp(`\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sm_pat"]
+  },
+  {
+    id: "settlemint-service-access-token",
+    regex: new RegExp(`\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sm_sat"]
+  },
+  {
+    id: "shippo-api-token",
+    regex: new RegExp(`\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["shippo_"]
+  },
   { id: "shopify-access-token", regex: new RegExp(`shpat_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpat_"] },
-  { id: "shopify-custom-access-token", regex: new RegExp(`shpca_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpca_"] },
-  { id: "shopify-private-app-access-token", regex: new RegExp(`shppa_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shppa_"] },
+  {
+    id: "shopify-custom-access-token",
+    regex: new RegExp(`shpca_[a-fA-F0-9]{32}`, "gi"),
+    entropy: 2,
+    keywords: ["shpca_"]
+  },
+  {
+    id: "shopify-private-app-access-token",
+    regex: new RegExp(`shppa_[a-fA-F0-9]{32}`, "gi"),
+    entropy: 2,
+    keywords: ["shppa_"]
+  },
   { id: "shopify-shared-secret", regex: new RegExp(`shpss_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpss_"] },
-  { id: "sidekiq-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bundle_enterprise__contribsys__com", "bundle_gems__contribsys__com"] },
-  { id: "sidekiq-sensitive-url", regex: new RegExp(`\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)`, "gi"), keywords: ["gems.contribsys.com", "enterprise.contribsys.com"] },
-  { id: "slack-app-token", regex: new RegExp(`xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+`, "gi"), entropy: 2, keywords: ["xapp"] },
-  { id: "slack-bot-token", regex: new RegExp(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`, "gi"), entropy: 3, keywords: ["xoxb"] },
-  { id: "slack-config-access-token", regex: new RegExp(`xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}`, "gi"), entropy: 2, keywords: ["xoxe.xoxb-", "xoxe.xoxp-"] },
-  { id: "slack-config-refresh-token", regex: new RegExp(`xoxe-\\d-[A-Z0-9]{146}`, "gi"), entropy: 2, keywords: ["xoxe-"] },
-  { id: "slack-legacy-bot-token", regex: new RegExp(`xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}`, "gi"), entropy: 2, keywords: ["xoxb"] },
-  { id: "slack-legacy-token", regex: new RegExp(`xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+`, "gi"), entropy: 2, keywords: ["xoxo", "xoxs"] },
-  { id: "slack-legacy-workspace-token", regex: new RegExp(`xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}`, "gi"), entropy: 2, keywords: ["xoxa", "xoxr"] },
-  { id: "slack-user-token", regex: new RegExp(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`, "gi"), entropy: 2, keywords: ["xoxp-", "xoxe-"] },
-  { id: "slack-webhook-url", regex: new RegExp(`(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}`, "gi"), keywords: ["hooks.slack.com"] },
-  { id: "snyk-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["snyk"] },
-  { id: "sonar-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sonar"] },
-  { id: "sourcegraph-access-token", regex: new RegExp(`\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sgp_", "sourcegraph"] },
-  { id: "square-access-token", regex: new RegExp(`\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sq0atp-", "eaaa"] },
-  { id: "squarespace-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["squarespace"] },
-  { id: "stripe-access-token", regex: new RegExp(`\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"] },
-  { id: "sumologic-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
-  { id: "sumologic-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
-  { id: "telegram-bot-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["telegr"] },
-  { id: "travisci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["travis"] },
+  {
+    id: "sidekiq-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bundle_enterprise__contribsys__com", "bundle_gems__contribsys__com"]
+  },
+  {
+    id: "sidekiq-sensitive-url",
+    regex: new RegExp(`\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)`, "gi"),
+    keywords: ["gems.contribsys.com", "enterprise.contribsys.com"]
+  },
+  {
+    id: "slack-app-token",
+    regex: new RegExp(`xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+`, "gi"),
+    entropy: 2,
+    keywords: ["xapp"]
+  },
+  {
+    id: "slack-bot-token",
+    regex: new RegExp(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`, "gi"),
+    entropy: 3,
+    keywords: ["xoxb"]
+  },
+  {
+    id: "slack-config-access-token",
+    regex: new RegExp(`xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxe.xoxb-", "xoxe.xoxp-"]
+  },
+  {
+    id: "slack-config-refresh-token",
+    regex: new RegExp(`xoxe-\\d-[A-Z0-9]{146}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxe-"]
+  },
+  {
+    id: "slack-legacy-bot-token",
+    regex: new RegExp(`xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxb"]
+  },
+  {
+    id: "slack-legacy-token",
+    regex: new RegExp(`xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+`, "gi"),
+    entropy: 2,
+    keywords: ["xoxo", "xoxs"]
+  },
+  {
+    id: "slack-legacy-workspace-token",
+    regex: new RegExp(`xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxa", "xoxr"]
+  },
+  {
+    id: "slack-user-token",
+    regex: new RegExp(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxp-", "xoxe-"]
+  },
+  {
+    id: "slack-webhook-url",
+    regex: new RegExp(`(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}`, "gi"),
+    keywords: ["hooks.slack.com"]
+  },
+  {
+    id: "snyk-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["snyk"]
+  },
+  {
+    id: "sonar-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sonar"]
+  },
+  {
+    id: "sourcegraph-access-token",
+    regex: new RegExp(`\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sgp_", "sourcegraph"]
+  },
+  {
+    id: "square-access-token",
+    regex: new RegExp(`\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sq0atp-", "eaaa"]
+  },
+  {
+    id: "squarespace-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["squarespace"]
+  },
+  {
+    id: "stripe-access-token",
+    regex: new RegExp(`\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"]
+  },
+  {
+    id: "sumologic-access-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sumo"]
+  },
+  {
+    id: "sumologic-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sumo"]
+  },
+  {
+    id: "telegram-bot-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["telegr"]
+  },
+  {
+    id: "travisci-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["travis"]
+  },
   { id: "twilio-api-key", regex: new RegExp(`SK[0-9a-fA-F]{32}`, "gi"), entropy: 3, keywords: ["sk"] },
-  { id: "twitch-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitch"] },
-  { id: "twitter-access-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-api-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-bearer-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "typeform-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["tfp_"] },
-  { id: "vault-batch-token", regex: new RegExp(`\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hvb."] },
-  { id: "vault-service-token", regex: new RegExp(`\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["hvs.", "s."] },
-  { id: "yandex-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "yandex-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "yandex-aws-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["zendesk"] },
-  { id: "high-entropy-secret", regex: new RegExp(`(?<![A-Za-z0-9_\\-./+=])([A-Za-z0-9_\\-./+=]{20,200})(?![A-Za-z0-9_\\-./+=])`, "g"), entropy: 4, notHexOnly: true }
+  {
+    id: "twitch-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitch"]
+  },
+  {
+    id: "twitter-access-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-api-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-bearer-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "typeform-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["tfp_"]
+  },
+  {
+    id: "vault-batch-token",
+    regex: new RegExp(`\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["hvb."]
+  },
+  {
+    id: "vault-service-token",
+    regex: new RegExp(`\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["hvs.", "s."]
+  },
+  {
+    id: "yandex-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["yandex"]
+  },
+  {
+    id: "yandex-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["yandex"]
+  },
+  {
+    id: "yandex-aws-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["yandex"]
+  },
+  {
+    id: "zendesk-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["zendesk"]
+  },
+  {
+    id: "high-entropy-secret",
+    regex: new RegExp(`(?<![A-Za-z0-9_\\-./+=])([A-Za-z0-9_\\-./+=]{20,200})(?![A-Za-z0-9_\\-./+=])`, "g"),
+    entropy: 4,
+    notHexOnly: true
+  }
 ];
 var ALL_KEYWORDS = new Set([
   "-----begin",
@@ -14648,11 +15560,7 @@ var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
 });
-var ToolResultContentBlockSchema = exports_external.union([
-  TextBlockSchema,
-  ImageBlockSchema,
-  DocumentBlockSchema
-]);
+var ToolResultContentBlockSchema = exports_external.union([TextBlockSchema, ImageBlockSchema, DocumentBlockSchema]);
 var ToolResultBlockSchema = exports_external.looseObject({
   type: exports_external.literal("tool_result"),
   tool_use_id: exports_external.string(),
@@ -15315,22 +16223,8 @@ function matches(pattern, target) {
 function specificity(field) {
   return field.split(":").length;
 }
-var READ_DEFAULT_SHOWN = new Set([
-  "user",
-  "assistant",
-  "thinking",
-  "tool",
-  "system",
-  "summary"
-]);
-var SEARCH_DEFAULT_FIELDS = new Set([
-  "user",
-  "assistant",
-  "thinking",
-  "tool:input",
-  "system",
-  "summary"
-]);
+var READ_DEFAULT_SHOWN = new Set(["user", "assistant", "thinking", "tool", "system", "summary"]);
+var SEARCH_DEFAULT_FIELDS = new Set(["user", "assistant", "thinking", "tool:input", "system", "summary"]);
 
 class ReadFieldFilter {
   rules;
@@ -15838,7 +16732,12 @@ function formatBlockContent(header, content, truncation) {
     return header;
   switch (truncation?.type) {
     case "wordLimit": {
-      const { content: truncated, prefix, suffix, isEmpty } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
+      const {
+        content: truncated,
+        prefix,
+        suffix,
+        isEmpty
+      } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
       if (isEmpty)
         return null;
       if (!truncated.includes(`
@@ -16299,7 +17198,14 @@ function addFormattedParam(headerParams, multilineParams, name, text, truncation
     headerParams.push(`${name}=${formatted.inline}`);
   }
 }
-function formatBashTool({ input, result, redact, truncation, hideInput, hideResult }) {
+function formatBashTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideInput,
+  hideResult
+}) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const headerParams = [];
@@ -16395,7 +17301,13 @@ function formatTodoWriteTool({ input, redact }) {
 `) }] : []
   };
 }
-function formatAskUserQuestionTool({ input, result, redact, truncation, hideResult }) {
+function formatAskUserQuestionTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideResult
+}) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams = [`questions=${questions.length}`];
   const multilineParams = [];

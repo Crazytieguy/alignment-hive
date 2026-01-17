@@ -56,8 +56,7 @@ export const hook = {
 };
 
 export const errors = {
-  schemaError: (path: string, error: string): string =>
-    `Schema error in ${path}: ${error}`,
+  schemaError: (path: string, error: string): string => `Schema error in ${path}: ${error}`,
   authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
   refreshSchemaError: (error: string): string => `Token refresh response schema error: ${error}`,
   noSessions: 'No sessions found yet. Sessions are extracted automatically when you start Claude Code.',
@@ -246,15 +245,9 @@ export const setup = {
   refreshSuccess: 'Session refreshed!',
   starting: 'Starting authentication...',
   deviceAuth: (url: string, code: string): string => {
-    return [
-      'Open this URL in your browser:',
-      '',
-      `  ${url}`,
-      '',
-      'Confirm this code matches:',
-      '',
-      `  ${code}`,
-    ].join('\n');
+    return ['Open this URL in your browser:', '', `  ${url}`, '', 'Confirm this code matches:', '', `  ${code}`].join(
+      '\n',
+    );
   },
   browserOpened: 'Browser opened. Confirm the code and approve.',
   openManually: 'Open the URL manually, then confirm the code.',
@@ -289,8 +282,7 @@ export const indexCmd = {
   noSessionsIn: (dir: string): string => `No sessions found in ${dir}`,
   uploadStatus: 'Upload eligibility status:',
   noExtractedSessions: 'No extracted sessions found.',
-  total: (count: number, summary: string): string =>
-    `Total: ${count} sessions (${summary})`,
+  total: (count: number, summary: string): string => `Total: ${count} sessions (${summary})`,
   runUpload: "Run 'hive-mind upload' to upload ready sessions.",
   excludeSession: 'To exclude a session: hive-mind exclude <session-id>',
   excludeAll: 'To exclude all sessions: hive-mind exclude --all',
@@ -300,15 +292,13 @@ export const excludeCmd = {
   noSessionsDir: 'No sessions directory found',
   noSessions: 'No sessions found.',
   allAlreadyExcluded: 'All sessions are already excluded.',
-  foundNonExcluded: (count: number): string =>
-    `Found ${count} session(s) not yet excluded.`,
+  foundNonExcluded: (count: number): string => `Found ${count} session(s) not yet excluded.`,
   confirmExcludeAll: 'Exclude all sessions from upload?',
   cancelled: 'Cancelled.',
   excludedCount: (count: number): string => `Excluded ${count} session(s)`,
   failedCount: (count: number): string => `Failed to exclude ${count} session(s)`,
   sessionNotFound: (id: string): string => `Session '${id}' not found`,
-  ambiguousSession: (id: string, count: number): string =>
-    `Ambiguous session ID '${id}' matches ${count} sessions`,
+  ambiguousSession: (id: string, count: number): string => `Ambiguous session ID '${id}' matches ${count} sessions`,
   matches: 'Matches:',
   couldNotRead: (id: string): string => `Could not read session '${id}'`,
   alreadyExcluded: (id: string): string => `Session ${id} is already excluded`,
@@ -322,24 +312,20 @@ export const excludeCmd = {
 
 export const uploadCmd = {
   notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
-  waitingDelay: (seconds: number): string =>
-    `Waiting ${seconds} seconds before upload...`,
+  waitingDelay: (seconds: number): string => `Waiting ${seconds} seconds before upload...`,
   sessionNotFound: (id: string): string => `Session '${id}' not found`,
-  ambiguousSession: (id: string, count: number): string =>
-    `Multiple sessions match '${id}' (${count} matches):`,
+  ambiguousSession: (id: string, count: number): string => `Multiple sessions match '${id}' (${count} matches):`,
   sessionExcluded: (id: string): string => `Session ${id} was excluded, skipping`,
   uploading: (id: string): string => `Uploading ${id}...`,
   uploaded: (id: string): string => `Uploaded ${id}`,
   uploadedWithAgents: (id: string, agentCount: number): string =>
     `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? '' : 's'})`,
-  failedToUpload: (id: string, error: string): string =>
-    `Failed to upload ${id}: ${error}`,
+  failedToUpload: (id: string, error: string): string => `Failed to upload ${id}: ${error}`,
   checking: 'Checking for sessions ready to upload...',
   noExtractedSessions: 'No extracted sessions found.',
   sessionsHeader: 'Sessions:',
   noSessionsReady: 'No sessions ready for upload.',
-  pendingCount: (count: number): string =>
-    `${count} session(s) still in review period.`,
+  pendingCount: (count: number): string => `${count} session(s) still in review period.`,
   readyCount: (count: number): string => `${count} session(s) ready for upload.`,
   confirmUpload: 'Upload these sessions?',
   cancelled: 'Cancelled.',

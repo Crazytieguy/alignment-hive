@@ -1,14 +1,14 @@
-import { mkdir, rmdir } from "node:fs/promises";
-import { join } from "node:path";
-import { z } from "zod";
-import { AUTH_DIR, AUTH_FILE, WORKOS_CLIENT_ID } from "./config";
-import { errors } from "./messages";
+import { mkdir, rmdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { z } from 'zod';
+import { AUTH_DIR, AUTH_FILE, WORKOS_CLIENT_ID } from './config';
+import { errors } from './messages';
 
-const AUTH_LOCK_FILE = join(AUTH_DIR, "auth.lock");
+const AUTH_LOCK_FILE = join(AUTH_DIR, 'auth.lock');
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_RETRY_INTERVAL_MS = 50;
 
-const WORKOS_API_URL = "https://api.workos.com/user_management";
+const WORKOS_API_URL = 'https://api.workos.com/user_management';
 
 async function acquireLock(): Promise<boolean> {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
@@ -17,8 +17,7 @@ async function acquireLock(): Promise<boolean> {
       await mkdir(AUTH_LOCK_FILE);
       return true;
     } catch (err) {
-      const isLockHeld =
-        err instanceof Error && "code" in err && err.code === "EEXIST";
+      const isLockHeld = err instanceof Error && 'code' in err && err.code === 'EEXIST';
       if (!isLockHeld) return false;
       await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_INTERVAL_MS));
     }
@@ -53,13 +52,13 @@ export type AuthData = z.infer<typeof AuthDataSchema>;
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
-    const parts = token.split(".");
+    const parts = token.split('.');
     if (parts.length !== 3) return null;
 
     let payload = parts[1];
     const padding = 4 - (payload.length % 4);
     if (padding < 4) {
-      payload += "=".repeat(padding);
+      payload += '='.repeat(padding);
     }
 
     return JSON.parse(atob(payload));
@@ -70,7 +69,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
 function isTokenExpired(token: string): boolean {
   const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number") return true;
+  if (!payload || typeof payload.exp !== 'number') return true;
   return payload.exp <= Math.floor(Date.now() / 1000);
 }
 
@@ -101,10 +100,10 @@ export async function refreshToken(
 ): Promise<AuthData | null> {
   try {
     const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        grant_type: "refresh_token",
+        grant_type: 'refresh_token',
         refresh_token: refreshTokenValue,
         client_id: WORKOS_CLIENT_ID,
       }),

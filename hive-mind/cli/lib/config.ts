@@ -1,29 +1,28 @@
-import { execSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { basename, join } from 'node:path';
 
-export const WORKOS_CLIENT_ID =
-  process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
+export const WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? 'client_01KE10CZ6FFQB9TR2NVBQJ4AKV';
 
-export const AUTH_DIR = join(homedir(), ".claude", "hive-mind");
-export const AUTH_FILE = join(AUTH_DIR, "auth.json");
+export const AUTH_DIR = join(homedir(), '.claude', 'hive-mind');
+export const AUTH_FILE = join(AUTH_DIR, 'auth.json');
 
 export async function ensureHiveMindDir(hiveMindDir: string) {
   await mkdir(hiveMindDir, { recursive: true });
-  const gitignorePath = join(hiveMindDir, ".gitignore");
+  const gitignorePath = join(hiveMindDir, '.gitignore');
   try {
     await access(gitignorePath);
   } catch {
-    await writeFile(gitignorePath, "*\n");
+    await writeFile(gitignorePath, '*\n');
   }
 }
 
 export async function getOrCreateCheckoutId(hiveMindDir: string) {
-  const checkoutIdFile = join(hiveMindDir, "checkout-id");
+  const checkoutIdFile = join(hiveMindDir, 'checkout-id');
   try {
-    const id = await readFile(checkoutIdFile, "utf-8");
+    const id = await readFile(checkoutIdFile, 'utf-8');
     return id.trim();
   } catch {
     const id = randomUUID();
@@ -34,20 +33,20 @@ export async function getOrCreateCheckoutId(hiveMindDir: string) {
 }
 
 export function getShellConfig(): { file: string; sourceCmd: string } {
-  const shell = process.env.SHELL ?? "/bin/bash";
-  if (shell.includes("zsh")) {
-    return { file: "~/.zshrc", sourceCmd: "source ~/.zshrc" };
+  const shell = process.env.SHELL ?? '/bin/bash';
+  if (shell.includes('zsh')) {
+    return { file: '~/.zshrc', sourceCmd: 'source ~/.zshrc' };
   }
-  if (shell.includes("bash")) {
-    return { file: "~/.bashrc", sourceCmd: "source ~/.bashrc" };
+  if (shell.includes('bash')) {
+    return { file: '~/.bashrc', sourceCmd: 'source ~/.bashrc' };
   }
-  if (shell.includes("fish")) {
+  if (shell.includes('fish')) {
     return {
-      file: "~/.config/fish/config.fish",
-      sourceCmd: "source ~/.config/fish/config.fish",
+      file: '~/.config/fish/config.fish',
+      sourceCmd: 'source ~/.config/fish/config.fish',
     };
   }
-  return { file: "~/.profile", sourceCmd: "source ~/.profile" };
+  return { file: '~/.profile', sourceCmd: 'source ~/.profile' };
 }
 
 /**
@@ -56,17 +55,17 @@ export function getShellConfig(): { file: string; sourceCmd: string } {
  */
 export function getCanonicalProjectName(cwd: string): string {
   try {
-    const remoteUrl = execSync("git remote get-url origin", {
+    const remoteUrl = execSync('git remote get-url origin', {
       cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
 
     const canonical = remoteUrl
-      .replace(/^git@/, "")
-      .replace(/^https?:\/\//, "")
-      .replace(":", "/")
-      .replace(/\.git$/, "");
+      .replace(/^git@/, '')
+      .replace(/^https?:\/\//, '')
+      .replace(':', '/')
+      .replace(/\.git$/, '');
 
     return canonical;
   } catch {
@@ -81,7 +80,7 @@ export function getCanonicalProjectName(cwd: string): string {
  */
 export async function isWorktree(cwd: string): Promise<boolean> {
   try {
-    const gitPath = join(cwd, ".git");
+    const gitPath = join(cwd, '.git');
     const gitStat = await stat(gitPath);
     return gitStat.isFile();
   } catch {
@@ -95,10 +94,10 @@ export async function isWorktree(cwd: string): Promise<boolean> {
  */
 export function getMainWorktreePath(cwd: string): string | null {
   try {
-    const output = execSync("git worktree list --porcelain", {
+    const output = execSync('git worktree list --porcelain', {
       cwd,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     // First "worktree <path>" line is always the main worktree
@@ -110,7 +109,7 @@ export function getMainWorktreePath(cwd: string): string | null {
 }
 
 function getTranscriptsDirsFile(hiveMindDir: string): string {
-  return join(hiveMindDir, "transcripts-dirs");
+  return join(hiveMindDir, 'transcripts-dirs');
 }
 
 /**
@@ -119,9 +118,9 @@ function getTranscriptsDirsFile(hiveMindDir: string): string {
  */
 export async function loadTranscriptsDirs(hiveMindDir: string): Promise<Array<string>> {
   try {
-    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), "utf-8");
+    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), 'utf-8');
     return content
-      .split("\n")
+      .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
   } catch {
@@ -138,7 +137,6 @@ export async function addTranscriptsDir(hiveMindDir: string, dir: string): Promi
   const existing = await loadTranscriptsDirs(hiveMindDir);
   if (!existing.includes(dir)) {
     existing.push(dir);
-    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join("\n") + "\n", "utf-8");
+    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join('\n') + '\n', 'utf-8');
   }
 }
-

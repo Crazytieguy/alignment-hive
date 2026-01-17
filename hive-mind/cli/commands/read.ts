@@ -1,11 +1,11 @@
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
-import { formatBlocks, formatSession } from "../lib/format";
-import { errors, usage } from "../lib/messages";
-import { printError } from "../lib/output";
-import { parseSession } from "../lib/parse";
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { getHiveMindSessionsDir, readExtractedSession } from '../lib/extraction';
+import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
+import { formatBlocks, formatSession } from '../lib/format';
+import { errors, usage } from '../lib/messages';
+import { printError } from '../lib/output';
+import { parseSession } from '../lib/parse';
 
 function printUsage(): void {
   console.log(usage.read());
@@ -14,7 +14,7 @@ function printUsage(): void {
 export async function read(): Promise<number> {
   const args = process.argv.slice(3);
 
-  if (args.includes("--help") || args.includes("-h")) {
+  if (args.includes('--help') || args.includes('-h')) {
     printUsage();
     return 0;
   }
@@ -39,10 +39,10 @@ export async function read(): Promise<number> {
     return argList[idx + 1] ?? null;
   }
 
-  const targetWords = parseNumericFlag(args, "--target");
-  const skipWords = parseNumericFlag(args, "--skip");
-  const showFields = parseStringFlag(args, "--show");
-  const hideFields = parseStringFlag(args, "--hide");
+  const targetWords = parseNumericFlag(args, '--target');
+  const skipWords = parseNumericFlag(args, '--skip');
+  const showFields = parseStringFlag(args, '--show');
+  const hideFields = parseStringFlag(args, '--hide');
 
   let fieldFilter: ReadFieldFilter | undefined;
   if (showFields || hideFields) {
@@ -51,7 +51,7 @@ export async function read(): Promise<number> {
     fieldFilter = new ReadFieldFilter(show, hide);
   }
 
-  const flagsWithValues = new Set(["--skip", "--target", "--show", "--hide"]);
+  const flagsWithValues = new Set(['--skip', '--target', '--show', '--hide']);
   const filteredArgs = args.filter((a, i) => {
     if (flagsWithValues.has(a)) return false;
     for (const flag of flagsWithValues) {
@@ -74,9 +74,9 @@ export async function read(): Promise<number> {
     return 1;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
   const matches = jsonlFiles.filter((f) => {
-    const name = f.replace(".jsonl", "");
+    const name = f.replace('.jsonl', '');
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
 
@@ -88,7 +88,7 @@ export async function read(): Promise<number> {
   if (matches.length > 1) {
     printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches.slice(0, 5)) {
-      console.log(`  ${m.replace(".jsonl", "")}`);
+      console.log(`  ${m.replace('.jsonl', '')}`);
     }
     if (matches.length > 5) {
       console.log(errors.andMore(matches.length - 5));
@@ -145,9 +145,7 @@ export async function read(): Promise<number> {
   const maxLine = lineNumbers.at(-1) ?? 0;
 
   if (rangeStart !== null && rangeEnd !== null) {
-    const rangeBlocks = blocks.filter(
-      (b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd
-    );
+    const rangeBlocks = blocks.filter((b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd);
 
     if (rangeBlocks.length === 0) {
       printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
@@ -179,4 +177,3 @@ export async function read(): Promise<number> {
 
   return 0;
 }
-

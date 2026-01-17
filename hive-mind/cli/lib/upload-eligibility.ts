@@ -1,8 +1,8 @@
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { loadAuthData, saveAuthData } from "./auth";
-import { getHiveMindSessionsDir, readExtractedMeta } from "./extraction";
-import type { HiveMindMeta } from "./schemas";
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { loadAuthData, saveAuthData } from './auth';
+import { getHiveMindSessionsDir, readExtractedMeta } from './extraction';
+import type { HiveMindMeta } from './schemas';
 
 const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h for session age
 const AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h for auth age
@@ -30,10 +30,7 @@ export interface SessionEligibility {
   reason: string;
 }
 
-export function checkSessionEligibility(
-  meta: HiveMindMeta,
-  authIssuedAt: number | null,
-): SessionEligibility {
+export function checkSessionEligibility(meta: HiveMindMeta, authIssuedAt: number | null): SessionEligibility {
   const sessionId = meta.sessionId;
 
   if (meta.excluded) {
@@ -43,7 +40,7 @@ export function checkSessionEligibility(
       eligible: false,
       excluded: true,
       eligibleAt: null,
-      reason: "Excluded by user",
+      reason: 'Excluded by user',
     };
   }
 
@@ -54,7 +51,7 @@ export function checkSessionEligibility(
       eligible: false,
       excluded: false,
       eligibleAt: null,
-      reason: "Already uploaded",
+      reason: 'Already uploaded',
     };
   }
 
@@ -85,13 +82,11 @@ export function checkSessionEligibility(
     eligible: true,
     excluded: false,
     eligibleAt,
-    reason: "Ready for upload",
+    reason: 'Ready for upload',
   };
 }
 
-export async function getAllSessionsEligibility(
-  cwd: string,
-): Promise<Array<SessionEligibility>> {
+export async function getAllSessionsEligibility(cwd: string): Promise<Array<SessionEligibility>> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   const authIssuedAt = await getAuthIssuedAt();
 
@@ -102,29 +97,25 @@ export async function getAllSessionsEligibility(
     return [];
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
 
   const results = await Promise.all(
     jsonlFiles.map(async (file) => {
       const meta = await readExtractedMeta(join(sessionsDir, file));
       if (!meta || meta.agentId) return null;
       return checkSessionEligibility(meta, authIssuedAt);
-    })
+    }),
   );
 
   return results.filter((r): r is SessionEligibility => r !== null);
 }
 
-export async function getEligibleSessions(
-  cwd: string,
-): Promise<Array<SessionEligibility>> {
+export async function getEligibleSessions(cwd: string): Promise<Array<SessionEligibility>> {
   const all = await getAllSessionsEligibility(cwd);
   return all.filter((s) => s.eligible);
 }
 
-export async function getPendingSessions(
-  cwd: string,
-): Promise<Array<SessionEligibility>> {
+export async function getPendingSessions(cwd: string): Promise<Array<SessionEligibility>> {
   const all = await getAllSessionsEligibility(cwd);
   return all.filter((s) => !s.eligible && !s.excluded);
 }

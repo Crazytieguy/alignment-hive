@@ -1,8 +1,8 @@
-import { join } from "node:path";
-import { checkAuthStatus } from "../lib/auth";
-import { getCanonicalProjectName } from "../lib/config";
-import { heartbeatSession } from "../lib/convex";
-import { getHiveMindSessionsDir, readExtractedMeta } from "../lib/extraction";
+import { join } from 'node:path';
+import { checkAuthStatus } from '../lib/auth';
+import { getCanonicalProjectName } from '../lib/config';
+import { heartbeatSession } from '../lib/convex';
+import { getHiveMindSessionsDir, readExtractedMeta } from '../lib/extraction';
 
 export async function heartbeat(): Promise<number> {
   const cwd = process.env.CWD || process.cwd();

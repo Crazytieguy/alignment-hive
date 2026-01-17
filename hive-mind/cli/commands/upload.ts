@@ -3,16 +3,18 @@ import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth.js';
 import { getCanonicalProjectName } from '../lib/config.js';
 import { generateUploadUrl, heartbeatSession, saveUpload } from '../lib/convex.js';
-import { getHiveMindSessionsDir, markSessionUploaded, readExtractedMeta, readExtractedSession } from '../lib/extraction.js';
+import {
+  getHiveMindSessionsDir,
+  markSessionUploaded,
+  readExtractedMeta,
+  readExtractedSession,
+} from '../lib/extraction.js';
 import { errors, uploadCmd, usage } from '../lib/messages.js';
 import { printError, printInfo, printSuccess } from '../lib/output.js';
 import { parseSession } from '../lib/parse.js';
 import { lookupSession, sleep } from '../lib/utils.js';
 
-async function uploadSession(
-  cwd: string,
-  sessionId: string
-): Promise<{ success: boolean; error?: string }> {
+async function uploadSession(cwd: string, sessionId: string): Promise<{ success: boolean; error?: string }> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   const sessionPath = join(sessionsDir, `${sessionId}.jsonl`);
 
@@ -94,7 +96,7 @@ async function getAgentIds(cwd: string, sessionId: string): Promise<Array<string
 
 async function uploadSessionWithAgents(
   cwd: string,
-  sessionId: string
+  sessionId: string,
 ): Promise<{ success: boolean; error?: string; agentCount: number }> {
   const mainResult = await uploadSession(cwd, sessionId);
   if (!mainResult.success) {
@@ -114,11 +116,7 @@ async function uploadSessionWithAgents(
   return { success: true, agentCount };
 }
 
-async function uploadSingleSession(
-  cwd: string,
-  sessionIdPrefix: string,
-  delaySeconds: number
-): Promise<number> {
+async function uploadSingleSession(cwd: string, sessionIdPrefix: string, delaySeconds: number): Promise<number> {
   if (delaySeconds > 0) {
     printInfo(uploadCmd.waitingDelay(delaySeconds));
     await sleep(delaySeconds * 1000);

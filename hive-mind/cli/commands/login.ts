@@ -1,5 +1,5 @@
-import { createInterface } from "node:readline";
-import { z } from "zod";
+import { createInterface } from 'node:readline';
+import { z } from 'zod';
 import {
   AuthDataSchema,
   checkAuthStatus,
@@ -7,19 +7,13 @@ import {
   loadAuthData,
   refreshToken,
   saveAuthData,
-} from "../lib/auth";
-import { WORKOS_CLIENT_ID } from "../lib/config";
-import { errors, setup as msg } from "../lib/messages";
-import {
-  colors,
-  printError,
-  printInfo,
-  printSuccess,
-  printWarning,
-} from "../lib/output";
-import type { AuthUser } from "../lib/auth";
+} from '../lib/auth';
+import { WORKOS_CLIENT_ID } from '../lib/config';
+import { errors, setup as msg } from '../lib/messages';
+import { colors, printError, printInfo, printSuccess, printWarning } from '../lib/output';
+import type { AuthUser } from '../lib/auth';
 
-const WORKOS_API_URL = "https://api.workos.com/user_management";
+const WORKOS_API_URL = 'https://api.workos.com/user_management';
 
 const DeviceAuthResponseSchema = z.object({
   device_code: z.string(),
@@ -37,33 +31,33 @@ const ErrorResponseSchema = z.object({
 
 async function confirm(message: string, defaultYes = false): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const hint = defaultYes ? "[Y/n]" : "[y/N]";
+  const hint = defaultYes ? '[Y/n]' : '[y/N]';
   return new Promise((resolve) => {
     rl.question(`${message} ${hint} `, (answer) => {
       rl.close();
       const trimmed = answer.trim().toLowerCase();
-      if (trimmed === "") {
+      if (trimmed === '') {
         resolve(defaultYes);
       } else {
-        resolve(trimmed === "y" || trimmed === "yes");
+        resolve(trimmed === 'y' || trimmed === 'yes');
       }
     });
   });
 }
 
 async function openBrowser(url: string): Promise<boolean> {
-  if (process.platform === "darwin") {
+  if (process.platform === 'darwin') {
     try {
-      await Bun.spawn(["open", url]).exited;
+      await Bun.spawn(['open', url]).exited;
       return true;
     } catch {
       return false;
     }
   }
 
-  if (process.platform === "linux") {
+  if (process.platform === 'linux') {
     // Try xdg-open first, then fall back to wslview for WSL
-    for (const cmd of ["xdg-open", "wslview"]) {
+    for (const cmd of ['xdg-open', 'wslview']) {
       try {
         await Bun.spawn([cmd, url]).exited;
         return true;
@@ -97,10 +91,7 @@ async function tryRefresh(): Promise<{ success: boolean; user?: AuthUser }> {
 
   printInfo(msg.refreshing);
 
-  const newAuthData = await refreshToken(
-    authData.refresh_token,
-    authData.authenticated_at,
-  );
+  const newAuthData = await refreshToken(authData.refresh_token, authData.authenticated_at);
   if (newAuthData) {
     await saveAuthData(newAuthData);
     printSuccess(msg.refreshSuccess);
@@ -114,8 +105,8 @@ async function deviceAuthFlow(): Promise<number> {
   printInfo(msg.starting);
 
   const response = await fetch(`${WORKOS_API_URL}/authorize/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID }),
   });
 
@@ -138,7 +129,7 @@ async function deviceAuthFlow(): Promise<number> {
   const deviceAuth = deviceAuthResult.data;
 
   console.log(msg.deviceAuth(deviceAuth.verification_uri, colors.green(deviceAuth.user_code)));
-  console.log("");
+  console.log('');
 
   if (await openBrowser(deviceAuth.verification_uri_complete)) {
     printInfo(msg.browserOpened);
@@ -146,7 +137,7 @@ async function deviceAuthFlow(): Promise<number> {
     printInfo(msg.openManually);
   }
   printInfo(msg.waiting(deviceAuth.expires_in));
-  console.log("");
+  console.log('');
 
   let interval = deviceAuth.interval * 1000;
   const startTime = Date.now();
@@ -158,10 +149,10 @@ async function deviceAuthFlow(): Promise<number> {
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
 
     const tokenResponse = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
         device_code: deviceAuth.device_code,
         client_id: WORKOS_CLIENT_ID,
       }),
@@ -175,7 +166,7 @@ async function deviceAuthFlow(): Promise<number> {
         authenticated_at: Date.now(),
       });
 
-      console.log("");
+      console.log('');
       printSuccess(msg.success);
       printSuccess(msg.welcome(authResult.data.user.first_name, authResult.data.user.email));
 
@@ -187,17 +178,17 @@ async function deviceAuthFlow(): Promise<number> {
       error_description?: string;
     };
 
-    if (errorData.error === "authorization_pending") {
+    if (errorData.error === 'authorization_pending') {
       process.stdout.write(`\r  ${msg.waitingProgress(elapsed)}`);
       continue;
     }
 
-    if (errorData.error === "slow_down") {
+    if (errorData.error === 'slow_down') {
       interval += 1000;
       continue;
     }
 
-    printError(msg.authFailed(errorData.error || "unknown error"));
+    printError(msg.authFailed(errorData.error || 'unknown error'));
     if (errorData.error_description) printInfo(errorData.error_description);
     return 1;
   }
@@ -218,12 +209,12 @@ async function showStatus(): Promise<number> {
 }
 
 export async function login(): Promise<number> {
-  if (process.argv.includes("--status")) {
+  if (process.argv.includes('--status')) {
     return showStatus();
   }
 
   printInfo(msg.header);
-  console.log("");
+  console.log('');
 
   if (!(await checkExistingAuth())) {
     return 0;

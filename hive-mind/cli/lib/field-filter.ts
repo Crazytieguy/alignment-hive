@@ -29,23 +29,9 @@ interface FieldRule {
   specificity: number;
 }
 
-export const READ_DEFAULT_SHOWN = new Set([
-  'user',
-  'assistant',
-  'thinking',
-  'tool',
-  'system',
-  'summary',
-]);
+export const READ_DEFAULT_SHOWN = new Set(['user', 'assistant', 'thinking', 'tool', 'system', 'summary']);
 
-export const SEARCH_DEFAULT_FIELDS = new Set([
-  'user',
-  'assistant',
-  'thinking',
-  'tool:input',
-  'system',
-  'summary',
-]);
+export const SEARCH_DEFAULT_FIELDS = new Set(['user', 'assistant', 'thinking', 'tool:input', 'system', 'summary']);
 
 export class ReadFieldFilter {
   private rules: Array<FieldRule>;

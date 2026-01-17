@@ -1,16 +1,16 @@
-import { homedir } from "node:os";
-import { readFile, writeFile } from "node:fs/promises";
-import { getShellConfig } from "./config";
+import { homedir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
+import { getShellConfig } from './config';
 
-const ALIAS_NAME = "hive-mind";
+const ALIAS_NAME = 'hive-mind';
 
 export function getExpectedAliasCommand(): string {
   return `bun ${process.argv[1]}`;
 }
 
 function expandPath(path: string): string {
-  if (path.startsWith("~")) {
-    return path.replace("~", homedir());
+  if (path.startsWith('~')) {
+    return path.replace('~', homedir());
   }
   return path;
 }
@@ -18,7 +18,7 @@ function expandPath(path: string): string {
 async function readShellConfig(): Promise<string | null> {
   const { file } = getShellConfig();
   try {
-    return await readFile(expandPath(file), "utf-8");
+    return await readFile(expandPath(file), 'utf-8');
   } catch {
     return null;
   }
@@ -27,7 +27,7 @@ async function readShellConfig(): Promise<string | null> {
 async function writeShellConfig(content: string): Promise<boolean> {
   const { file } = getShellConfig();
   try {
-    await writeFile(expandPath(file), content, "utf-8");
+    await writeFile(expandPath(file), content, 'utf-8');
     return true;
   } catch {
     return false;
@@ -51,12 +51,16 @@ export async function setupAlias(): Promise<{ success: boolean; alreadyExists: b
   return setupAliasWithCommand(expected);
 }
 
-export async function setupAliasWithRoot(pluginRoot: string): Promise<{ success: boolean; alreadyExists: boolean; sourceCmd: string }> {
+export async function setupAliasWithRoot(
+  pluginRoot: string,
+): Promise<{ success: boolean; alreadyExists: boolean; sourceCmd: string }> {
   const expected = `bun ${pluginRoot}/cli.js`;
   return setupAliasWithCommand(expected);
 }
 
-async function setupAliasWithCommand(expected: string): Promise<{ success: boolean; alreadyExists: boolean; sourceCmd: string }> {
+async function setupAliasWithCommand(
+  expected: string,
+): Promise<{ success: boolean; alreadyExists: boolean; sourceCmd: string }> {
   const shell = getShellConfig();
   const config = await readShellConfig();
   const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
@@ -76,7 +80,7 @@ async function setupAliasWithCommand(expected: string): Promise<{ success: boole
     return { success, alreadyExists: false, sourceCmd: shell.sourceCmd };
   }
 
-  const separator = config.endsWith("\n") ? "" : "\n";
+  const separator = config.endsWith('\n') ? '' : '\n';
   const updated = `${config}${separator}${aliasLine}\n`;
   const success = await writeShellConfig(updated);
   return { success, alreadyExists: false, sourceCmd: shell.sourceCmd };

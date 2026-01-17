@@ -12,13 +12,13 @@ function parseRelativeTime(value: string): Date | null {
   const now = Date.now();
 
   switch (unit) {
-    case "m":
+    case 'm':
       return new Date(now - amount * 60 * 1000);
-    case "h":
+    case 'h':
       return new Date(now - amount * 60 * 60 * 1000);
-    case "d":
+    case 'd':
       return new Date(now - amount * 24 * 60 * 60 * 1000);
-    case "w":
+    case 'w':
       return new Date(now - amount * 7 * 24 * 60 * 60 * 1000);
     default:
       return null;
@@ -28,7 +28,7 @@ function parseRelativeTime(value: string): Date | null {
 function parseAbsoluteTime(value: string): Date | null {
   // Try date-only format (YYYY-MM-DD) - parse as local time at midnight
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [y, m, d] = value.split("-").map(Number);
+    const [y, m, d] = value.split('-').map(Number);
     return new Date(y, m - 1, d);
   }
 

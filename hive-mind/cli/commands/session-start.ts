@@ -1,22 +1,22 @@
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
-import { spawn } from "node:child_process";
-import { updateAliasIfOutdated } from "../lib/alias";
-import { checkAuthStatus, getUserDisplayName } from "../lib/auth";
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { spawn } from 'node:child_process';
+import { updateAliasIfOutdated } from '../lib/alias';
+import { checkAuthStatus, getUserDisplayName } from '../lib/auth';
 import {
   addTranscriptsDir,
   getMainWorktreePath,
   getOrCreateCheckoutId,
   isWorktree,
   loadTranscriptsDirs,
-} from "../lib/config";
-import { pingCheckout } from "../lib/convex";
-import { checkAllSessions } from "../lib/extraction";
-import { hook } from "../lib/messages";
-import { hookOutput } from "../lib/output";
-import { checkSessionEligibility, getAuthIssuedAt } from "../lib/upload-eligibility";
-import type { HiveMindMeta } from "../lib/schemas";
+} from '../lib/config';
+import { pingCheckout } from '../lib/convex';
+import { checkAllSessions } from '../lib/extraction';
+import { hook } from '../lib/messages';
+import { hookOutput } from '../lib/output';
+import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
+import type { HiveMindMeta } from '../lib/schemas';
 
 interface HookInput {
   transcriptPath?: string;
@@ -27,15 +27,15 @@ async function readStdin(): Promise<string | null> {
   if (process.stdin.isTTY) return null;
 
   return new Promise((resolve) => {
-    let data = "";
-    process.stdin.setEncoding("utf-8");
-    process.stdin.on("data", (chunk) => {
+    let data = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (chunk) => {
       data += chunk;
     });
-    process.stdin.on("end", () => {
+    process.stdin.on('end', () => {
       resolve(data || null);
     });
-    process.stdin.on("error", () => {
+    process.stdin.on('error', () => {
       resolve(null);
     });
     process.stdin.resume();
@@ -49,8 +49,8 @@ async function readHookInput(): Promise<HookInput> {
   try {
     const data = JSON.parse(input) as Record<string, unknown>;
     return {
-      transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
-      cwd: typeof data.cwd === "string" ? data.cwd : undefined,
+      transcriptPath: typeof data.transcript_path === 'string' ? data.transcript_path : undefined,
+      cwd: typeof data.cwd === 'string' ? data.cwd : undefined,
     };
   } catch {
     return {};
@@ -63,7 +63,7 @@ export async function sessionStart(): Promise<number> {
   const messages: Array<string> = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
-  const hiveMindDir = join(cwd, ".claude", "hive-mind");
+  const hiveMindDir = join(cwd, '.claude', 'hive-mind');
 
   // Determine transcripts directory and directories to check
   let transcriptsDirs: Array<string>;
@@ -76,7 +76,7 @@ export async function sessionStart(): Promise<number> {
       // Register with main worktree's transcripts-dirs
       const mainPath = getMainWorktreePath(cwd);
       if (mainPath) {
-        const mainHiveMindDir = join(mainPath, ".claude", "hive-mind");
+        const mainHiveMindDir = join(mainPath, '.claude', 'hive-mind');
         await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
       }
       // Worktree only checks its own transcripts
@@ -89,13 +89,13 @@ export async function sessionStart(): Promise<number> {
   } else {
     // No transcript path provided - load from saved directories
     if (inWorktree) {
-      messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
+      messages.push(hook.extractionFailed('No transcripts directory configured. Run a Claude Code session first.'));
       hookOutput(`hive-mind: ${messages[0]}`);
       return 1;
     }
     transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
     if (transcriptsDirs.length === 0) {
-      messages.push(hook.extractionFailed("No transcripts directories configured. Run a Claude Code session first."));
+      messages.push(hook.extractionFailed('No transcripts directories configured. Run a Claude Code session first.'));
       hookOutput(`hive-mind: ${messages[0]}`);
       return 1;
     }
@@ -117,7 +117,7 @@ export async function sessionStart(): Promise<number> {
   let newSessionIds: Array<string> = [];
   let extractedSessions: Array<{ sessionId: string; meta: HiveMindMeta }> = [];
 
-  if ("error" in sessionCheck) {
+  if ('error' in sessionCheck) {
     messages.push(hook.extractionFailed(sessionCheck.error));
   } else {
     const { sessionsToExtract, schemaErrors } = sessionCheck;
@@ -164,10 +164,11 @@ export async function sessionStart(): Promise<number> {
 
       const pending = eligibilityResults.filter((s) => !s.eligible && !s.excluded);
       if (pending.length > 1) {
-        const earliestUploadAt = pending
-          .map((s) => s.eligibleAt)
-          .filter((t): t is number => t !== null)
-          .sort((a, b) => a - b)[0] ?? null;
+        const earliestUploadAt =
+          pending
+            .map((s) => s.eligibleAt)
+            .filter((t): t is number => t !== null)
+            .sort((a, b) => a - b)[0] ?? null;
         messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
       }
 
@@ -184,7 +185,7 @@ export async function sessionStart(): Promise<number> {
 
   if (messages.length > 0) {
     const formatted = messages.map((msg, i) => (i === 0 ? `hive-mind: ${msg}` : `→ ${msg}`));
-    hookOutput(formatted.join("\n"));
+    hookOutput(formatted.join('\n'));
   }
 
   if (status.authenticated && newSessionIds.length > 0) {
@@ -197,19 +198,19 @@ export async function sessionStart(): Promise<number> {
  * run in non-interactive shells that don't have ~/.bun/bin in PATH */
 function getBunPath(): string {
   const bunInstall = process.env.BUN_INSTALL;
-  const customPath = bunInstall ? join(bunInstall, "bin", "bun") : null;
-  const standardPath = join(homedir(), ".bun", "bin", "bun");
+  const customPath = bunInstall ? join(bunInstall, 'bin', 'bun') : null;
+  const standardPath = join(homedir(), '.bun', 'bin', 'bun');
 
   if (customPath && existsSync(customPath)) return customPath;
   if (existsSync(standardPath)) return standardPath;
-  return "bun";
+  return 'bun';
 }
 
 function spawnBackground(args: Array<string>): boolean {
   try {
     const child = spawn(getBunPath(), [process.argv[1], ...args], {
       detached: true,
-      stdio: "ignore",
+      stdio: 'ignore',
       env: { ...process.env, CWD: process.env.CWD || process.cwd() },
     });
     child.unref();
@@ -221,16 +222,16 @@ function spawnBackground(args: Array<string>): boolean {
 
 function scheduleExtractions(sessionIds: Array<string>): boolean {
   if (sessionIds.length === 0) return true;
-  return spawnBackground(["extract", ...sessionIds]);
+  return spawnBackground(['extract', ...sessionIds]);
 }
 
 function scheduleHeartbeats(sessionIds: Array<string>): boolean {
   if (sessionIds.length === 0) return true;
-  return spawnBackground(["heartbeat", ...sessionIds]);
+  return spawnBackground(['heartbeat', ...sessionIds]);
 }
 
 function scheduleAutoUploads(sessionIds: Array<string>): boolean {
   if (sessionIds.length === 0) return true;
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  return spawnBackground(["upload", "--delay", String(delaySeconds), ...sessionIds]);
+  return spawnBackground(['upload', '--delay', String(delaySeconds), ...sessionIds]);
 }

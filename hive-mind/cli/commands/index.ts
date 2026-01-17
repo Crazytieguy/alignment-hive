@@ -1,14 +1,14 @@
-import { readdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { indexCmd, usage } from "../lib/messages";
-import { colors, printError } from "../lib/output";
-import { parseSession } from "../lib/parse";
-import { checkSessionEligibility, getAuthIssuedAt } from "../lib/upload-eligibility";
-import type { SessionEligibility } from "../lib/upload-eligibility";
-import type { LogicalBlock, ParsedSession } from "../lib/parse";
-import type { ContentBlock, HiveMindMeta, KnownEntry } from "../lib/schemas";
+import { readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { getHiveMindSessionsDir, readExtractedSession } from '../lib/extraction';
+import { indexCmd, usage } from '../lib/messages';
+import { colors, printError } from '../lib/output';
+import { parseSession } from '../lib/parse';
+import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
+import type { SessionEligibility } from '../lib/upload-eligibility';
+import type { LogicalBlock, ParsedSession } from '../lib/parse';
+import type { ContentBlock, HiveMindMeta, KnownEntry } from '../lib/schemas';
 
 interface SessionInfo {
   meta: HiveMindMeta;
@@ -16,7 +16,7 @@ interface SessionInfo {
   parsed: ParsedSession;
 }
 
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
   const result = new Map<string, string>();
@@ -39,20 +39,20 @@ export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> 
 function formatRelativeDateTime(
   rawMtime: string,
   prevDate: string,
-  prevYear: string
+  prevYear: string,
 ): { display: string; date: string; year: string } {
   const dateObj = new Date(rawMtime);
   const year = String(dateObj.getFullYear());
   const month = MONTH_NAMES[dateObj.getMonth()];
-  const day = String(dateObj.getDate()).padStart(2, "0");
-  const hours = String(dateObj.getHours()).padStart(2, "0");
-  const minutes = String(dateObj.getMinutes()).padStart(2, "0");
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  const hours = String(dateObj.getHours()).padStart(2, '0');
+  const minutes = String(dateObj.getMinutes()).padStart(2, '0');
 
   const date = `${month}${day}`;
   const time = `T${hours}:${minutes}`;
 
   let display: string;
-  if (year !== prevYear && prevYear !== "") {
+  if (year !== prevYear && prevYear !== '') {
     display = `${year}${date}${time}`;
   } else if (date !== prevDate) {
     display = `${date}${time}`;
@@ -95,27 +95,27 @@ function formatPendingSession(
   dateDisplay: string,
   maxAgentWidth: number,
   maxMsgWidth: number,
-  maxDateWidth: number
+  maxDateWidth: number,
 ): string {
   const { eligibility, entries, agentCount } = info;
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || '';
   const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
 
   const dateCol = dateDisplay.padEnd(maxDateWidth);
   const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
-  const agentText = agentCount > 0 ? `+${agentCount} agents` : "";
+  const agentText = agentCount > 0 ? `+${agentCount} agents` : '';
   const agentCol = agentText.padEnd(maxAgentWidth);
 
   let statusIcon: string;
   let statusText: string;
   if (eligibility.excluded) {
-    statusIcon = colors.yellow("✗");
-    statusText = colors.yellow("excluded".padEnd(14));
+    statusIcon = colors.yellow('✗');
+    statusText = colors.yellow('excluded'.padEnd(14));
   } else if (eligibility.eligible) {
-    statusIcon = colors.green("✓");
-    statusText = colors.green("ready".padEnd(14));
+    statusIcon = colors.green('✓');
+    statusText = colors.green('ready'.padEnd(14));
   } else {
-    statusIcon = colors.blue("○");
+    statusIcon = colors.blue('○');
     statusText = colors.blue(eligibility.reason.padEnd(14));
   }
 
@@ -125,7 +125,7 @@ function formatPendingSession(
 function countAgentsInBlocks(blocks: Array<LogicalBlock>): number {
   const agentIds = new Set<string>();
   for (const block of blocks) {
-    if (block.type === "tool" && block.agentId) {
+    if (block.type === 'tool' && block.agentId) {
       agentIds.add(block.agentId);
     }
   }
@@ -143,7 +143,7 @@ async function showPendingStatus(cwd: string): Promise<number> {
     return 0;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
   if (jsonlFiles.length === 0) {
     console.log(indexCmd.noExtractedSessions);
     return 0;
@@ -201,25 +201,21 @@ async function showPendingStatus(cwd: string): Promise<number> {
 
   const maxAgentWidth = Math.max(
     0,
-    ...pendingInfos.map((p) => (p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0))
+    ...pendingInfos.map((p) => (p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0)),
   );
-  const maxMsgWidth = Math.max(
-    ...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length)
-  );
-  const maxDateWidth = Math.max(
-    ...Array.from(dateDisplays.values()).map((d) => d.length)
-  );
+  const maxMsgWidth = Math.max(...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length));
+  const maxDateWidth = Math.max(...Array.from(dateDisplays.values()).map((d) => d.length));
 
   console.log(indexCmd.uploadStatus);
-  console.log("");
+  console.log('');
 
   for (const info of pendingInfos) {
     const prefix = idPrefixes.get(info.eligibility.sessionId) || info.eligibility.sessionId.slice(0, 8);
-    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || "";
+    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || '';
     console.log(formatPendingSession(info, prefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth));
   }
 
-  console.log("");
+  console.log('');
 
   const ready = pendingInfos.filter((s) => s.eligibility.eligible).length;
   const pending = pendingInfos.filter((s) => !s.eligibility.eligible && !s.eligibility.excluded).length;
@@ -229,15 +225,15 @@ async function showPendingStatus(cwd: string): Promise<number> {
   if (ready > 0) statusSummary.push(`${ready} ready`);
   if (pending > 0) statusSummary.push(`${pending} pending`);
   if (excluded > 0) statusSummary.push(`${excluded} excluded`);
-  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(", ")));
+  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(', ')));
 
   if (ready > 0) {
-    console.log("");
+    console.log('');
     console.log(indexCmd.runUpload);
   }
 
   if (ready > 0 || pending > 0) {
-    console.log("");
+    console.log('');
     console.log(indexCmd.excludeSession);
     console.log(indexCmd.excludeAll);
   }
@@ -248,18 +244,18 @@ async function showPendingStatus(cwd: string): Promise<number> {
 export async function index(): Promise<number> {
   const args = process.argv.slice(3);
 
-  if (args.includes("--help") || args.includes("-h")) {
+  if (args.includes('--help') || args.includes('-h')) {
     printUsage();
     return 0;
   }
 
   const cwd = process.cwd();
 
-  if (args.includes("--pending")) {
+  if (args.includes('--pending')) {
     return await showPendingStatus(cwd);
   }
 
-  const escapeFileRefs = args.includes("--escape-file-refs");
+  const escapeFileRefs = args.includes('--escape-file-refs');
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
   let files: Array<string>;
@@ -270,7 +266,7 @@ export async function index(): Promise<number> {
     return 1;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
   if (jsonlFiles.length === 0) {
     printError(indexCmd.noSessionsIn(sessionsDir));
     return 1;
@@ -297,13 +293,21 @@ export async function index(): Promise<number> {
   const idPrefixes = computeMinimalPrefixes(sessionIds);
 
   console.log(
-    "ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS"
+    'ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS',
   );
-  let prevDate = "";
-  let prevYear = "";
+  let prevDate = '';
+  let prevYear = '';
   for (const session of mainSessions) {
     const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
-    const { line, date, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear, escapeFileRefs);
+    const { line, date, year } = formatSessionLine(
+      session,
+      allSessions,
+      cwd,
+      prefix,
+      prevDate,
+      prevYear,
+      escapeFileRefs,
+    );
     console.log(line);
     prevDate = date;
     prevYear = year;
@@ -319,20 +323,20 @@ function formatSessionLine(
   idPrefix: string,
   prevDate: string,
   prevYear: string,
-  escapeFileRefs: boolean
+  escapeFileRefs: boolean,
 ): { line: string; date: string; year: string } {
   const { meta, entries } = session;
   const msgs = String(meta.messageCount);
-  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || "";
-  const summary = escapeFileRefs ? rawSummary.replace(/@/g, "\\@") : rawSummary;
+  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || '';
+  const summary = escapeFileRefs ? rawSummary.replace(/@/g, '\\@') : rawSummary;
 
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits
     .map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message))
-    .join(" ");
+    .join(' ');
 
   const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set(), cwd);
-  const fmt = (n: number) => (n === 0 ? "" : String(n));
+  const fmt = (n: number) => (n === 0 ? '' : String(n));
   const { display: datetime, date, year } = formatRelativeDateTime(meta.rawMtime, prevDate, prevYear);
 
   const line = [
@@ -343,13 +347,13 @@ function formatSessionLine(
     fmt(stats.bashCount),
     fmt(stats.fetchCount),
     fmt(stats.searchCount),
-    stats.linesAdded === 0 ? "" : `+${stats.linesAdded}`,
-    stats.linesRemoved === 0 ? "" : `-${stats.linesRemoved}`,
+    stats.linesAdded === 0 ? '' : `+${stats.linesAdded}`,
+    stats.linesRemoved === 0 ? '' : `-${stats.linesRemoved}`,
     fmt(stats.filesTouched),
-    stats.significantLocations.join(","),
+    stats.significantLocations.join(','),
     summary,
     commitList,
-  ].join("|");
+  ].join('|');
 
   return { line, date, year };
 }
@@ -358,7 +362,7 @@ function computeSessionStats(
   blocks: Array<LogicalBlock>,
   allSessions: Map<string, SessionInfo>,
   visited: Set<string>,
-  cwd: string
+  cwd: string,
 ): SessionStats {
   const stats: SessionStats = {
     userCount: 0,
@@ -375,9 +379,9 @@ function computeSessionStats(
   const subagentIds: Array<string> = [];
 
   for (const block of blocks) {
-    if (block.type === "user") {
+    if (block.type === 'user') {
       stats.userCount++;
-    } else if (block.type === "tool") {
+    } else if (block.type === 'tool') {
       const { toolName, toolInput, agentId } = block;
 
       if (agentId) {
@@ -385,39 +389,39 @@ function computeSessionStats(
       }
 
       switch (toolName) {
-        case "Edit": {
+        case 'Edit': {
           const filePath = toolInput.file_path;
           const oldString = toolInput.old_string;
           const newString = toolInput.new_string;
-          if (typeof filePath === "string") {
+          if (typeof filePath === 'string') {
             const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-            if (typeof oldString === "string") {
+            if (typeof oldString === 'string') {
               current.removed += countLines(oldString);
             }
-            if (typeof newString === "string") {
+            if (typeof newString === 'string') {
               current.added += countLines(newString);
             }
             fileStats.set(filePath, current);
           }
           break;
         }
-        case "Write": {
+        case 'Write': {
           const filePath = toolInput.file_path;
           const fileContent = toolInput.content;
-          if (typeof filePath === "string" && typeof fileContent === "string") {
+          if (typeof filePath === 'string' && typeof fileContent === 'string') {
             const current = fileStats.get(filePath) || { added: 0, removed: 0 };
             current.added += countLines(fileContent);
             fileStats.set(filePath, current);
           }
           break;
         }
-        case "Bash":
+        case 'Bash':
           stats.bashCount++;
           break;
-        case "WebFetch":
+        case 'WebFetch':
           stats.fetchCount++;
           break;
-        case "WebSearch":
+        case 'WebSearch':
           stats.searchCount++;
           break;
       }
@@ -453,7 +457,7 @@ function countLines(s: string): number {
   if (!s) return 0;
   let count = 1;
   for (const c of s) {
-    if (c === "\n") count++;
+    if (c === '\n') count++;
   }
   return count;
 }
@@ -468,17 +472,17 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
   if (fileStats.size === 0) return [];
 
   const root: PathNode = { children: new Map(), added: 0, removed: 0 };
-  const cwdPrefix = cwd.replace(/^\//, "").replace(/\/$/, "") + "/";
-  const homePrefix = homedir().replace(/^\//, "") + "/";
+  const cwdPrefix = cwd.replace(/^\//, '').replace(/\/$/, '') + '/';
+  const homePrefix = homedir().replace(/^\//, '') + '/';
 
   for (const [filePath, stats] of fileStats) {
-    let normalizedPath = filePath.replace(/^\//, "");
+    let normalizedPath = filePath.replace(/^\//, '');
     if (normalizedPath.startsWith(cwdPrefix)) {
       normalizedPath = normalizedPath.slice(cwdPrefix.length);
     } else if (normalizedPath.startsWith(homePrefix)) {
-      normalizedPath = "~/" + normalizedPath.slice(homePrefix.length);
+      normalizedPath = '~/' + normalizedPath.slice(homePrefix.length);
     }
-    const parts = normalizedPath.split("/");
+    const parts = normalizedPath.split('/');
     let node = root;
 
     for (const part of parts) {
@@ -546,7 +550,7 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
   return results.slice(0, 3);
 }
 
-const META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
+const META_XML_TAGS = ['<command-name>', '<local-command-', '<system-reminder>'];
 
 function isMetaXml(text: string): boolean {
   const trimmed = text.trim();
@@ -555,7 +559,7 @@ function isMetaXml(text: string): boolean {
 
 function isGarbageSummary(summary: string): boolean {
   const trimmed = summary.trim();
-  return isMetaXml(trimmed) || trimmed.startsWith("Caveat:");
+  return isMetaXml(trimmed) || trimmed.startsWith('Caveat:');
 }
 
 function findSummary(entries: Array<KnownEntry>): string | undefined {
@@ -563,10 +567,10 @@ function findSummary(entries: Array<KnownEntry>): string | undefined {
   const summaries: Array<{ summary: string; leafUuid?: string }> = [];
 
   for (const entry of entries) {
-    if ("uuid" in entry && typeof entry.uuid === "string") {
+    if ('uuid' in entry && typeof entry.uuid === 'string') {
       uuids.add(entry.uuid);
     }
-    if (entry.type === "summary") {
+    if (entry.type === 'summary') {
       summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
     }
   }
@@ -583,18 +587,18 @@ function findSummary(entries: Array<KnownEntry>): string | undefined {
 
 function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
   for (const entry of entries) {
-    if (entry.type !== "user") continue;
-    if ("isMeta" in entry && entry.isMeta === true) continue;
+    if (entry.type !== 'user') continue;
+    if ('isMeta' in entry && entry.isMeta === true) continue;
 
     const content = entry.message.content;
     if (!content) continue;
 
     let text: string | undefined;
-    if (typeof content === "string") {
+    if (typeof content === 'string') {
       text = content;
     } else if (Array.isArray(content)) {
       for (const block of content) {
-        if (block.type === "text" && "text" in block && typeof block.text === "string") {
+        if (block.type === 'text' && 'text' in block && typeof block.text === 'string') {
           text = block.text;
           break;
         }
@@ -605,7 +609,7 @@ function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
       const trimmed = text.trim();
       if (isMetaXml(trimmed)) continue;
 
-      const firstLine = trimmed.split("\n")[0].trim();
+      const firstLine = trimmed.split('\n')[0].trim();
       if (firstLine) {
         return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
       }
@@ -625,33 +629,33 @@ function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
   const pendingCommits = new Map<string, string>();
 
   for (const entry of entries) {
-    if (entry.type === "assistant") {
+    if (entry.type === 'assistant') {
       const content = entry.message.content;
       if (!Array.isArray(content)) continue;
 
       for (const block of content) {
-        if (block.type === "tool_use" && "name" in block && block.name === "Bash") {
+        if (block.type === 'tool_use' && 'name' in block && block.name === 'Bash') {
           const input = block.input;
           const command = input.command;
-          if (typeof command === "string" && command.includes("git commit")) {
+          if (typeof command === 'string' && command.includes('git commit')) {
             const message = extractCommitMessage(command);
-            if (message && "id" in block && typeof block.id === "string") {
+            if (message && 'id' in block && typeof block.id === 'string') {
               pendingCommits.set(block.id, message);
             }
           }
         }
       }
-    } else if (entry.type === "user") {
+    } else if (entry.type === 'user') {
       const content = entry.message.content;
       if (!Array.isArray(content)) continue;
 
       for (const block of content) {
-        if (block.type === "tool_result" && "tool_use_id" in block) {
+        if (block.type === 'tool_result' && 'tool_use_id' in block) {
           const toolUseId = block.tool_use_id;
           const message = pendingCommits.get(toolUseId);
           if (message) {
             const resultContent = getToolResultText(block.content as string | Array<ContentBlock> | undefined);
-            const success = resultContent.includes("[") && !resultContent.includes("error");
+            const success = resultContent.includes('[') && !resultContent.includes('error');
             const hash = extractCommitHash(resultContent);
             commits.push({ hash, message, success });
             pendingCommits.delete(toolUseId);
@@ -678,7 +682,7 @@ function extractCommitMessage(command: string): string | undefined {
   // Heredoc: -m "$(cat <<'EOF'\nmessage\nEOF\n)"
   const heredocMatch = command.match(/<<['"]?EOF['"]?\s*\n([\s\S]*?)\n\s*EOF/);
   if (heredocMatch) {
-    const firstLine = heredocMatch[1].trim().split("\n")[0].trim();
+    const firstLine = heredocMatch[1].trim().split('\n')[0].trim();
     if (firstLine) return firstLine;
   }
 
@@ -696,14 +700,14 @@ function extractCommitMessage(command: string): string | undefined {
 }
 
 function getToolResultText(content: string | Array<ContentBlock> | undefined): string {
-  if (!content) return "";
-  if (typeof content === "string") return content;
+  if (!content) return '';
+  if (typeof content === 'string') return content;
 
   const parts: Array<string> = [];
   for (const block of content) {
-    if (block.type === "text" && "text" in block) {
+    if (block.type === 'text' && 'text' in block) {
       parts.push(block.text);
     }
   }
-  return parts.join("\n");
+  return parts.join('\n');
 }

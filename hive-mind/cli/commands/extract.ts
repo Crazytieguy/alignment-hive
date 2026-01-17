@@ -1,4 +1,4 @@
-import { extractSingleSession } from "../lib/extraction";
+import { extractSingleSession } from '../lib/extraction';
 
 export async function extract(): Promise<number> {
   const cwd = process.env.CWD || process.cwd();

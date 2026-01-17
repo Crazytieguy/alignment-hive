@@ -22,7 +22,6 @@ function countLines(text: string): number {
   return text.split('\n').length;
 }
 
-
 const MIN_TRUNCATION_THRESHOLD = 3;
 
 function truncateContent(
@@ -127,7 +126,6 @@ export interface SessionFormatOptions {
   fieldFilter?: ReadFieldFilter;
 }
 
-
 export type TruncationStrategy =
   | { type: 'wordLimit'; limit: number; skip?: number }
   | { type: 'matchContext'; pattern: RegExp; contextWords: number }
@@ -186,7 +184,7 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
         parts.push(formatWordCount(block.content));
         return parts.join('|');
       }
-      const thinkingTruncation: TruncationStrategy = showFull ? { type: 'full' } : truncation ?? { type: 'full' };
+      const thinkingTruncation: TruncationStrategy = showFull ? { type: 'full' } : (truncation ?? { type: 'full' });
       return formatBlockContent(parts.join('|'), block.content, thinkingTruncation);
     }
 
@@ -220,20 +218,17 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
   }
 }
 
-function formatBlockContent(
-  header: string,
-  content: string,
-  truncation?: TruncationStrategy,
-): string | null {
+function formatBlockContent(header: string, content: string, truncation?: TruncationStrategy): string | null {
   if (!content && !truncation) return header;
 
   switch (truncation?.type) {
     case 'wordLimit': {
-      const { content: truncated, prefix, suffix, isEmpty } = truncateContent(
-        content,
-        truncation.limit,
-        truncation.skip ?? 0,
-      );
+      const {
+        content: truncated,
+        prefix,
+        suffix,
+        isEmpty,
+      } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
       if (isEmpty) return null;
       if (!truncated.includes('\n')) {
         const escaped = escapeQuotes(truncated);
@@ -396,7 +391,9 @@ function formatToolBlock(
           bodyLines.push('[result]');
           if (formatted.isMultiline) {
             const indentedResult = indent(formatted.blockContent, 2);
-            const prefixed = formatted.blockPrefix ? `  ${formatted.blockPrefix}${indentedResult.slice(2)}` : indentedResult;
+            const prefixed = formatted.blockPrefix
+              ? `  ${formatted.blockPrefix}${indentedResult.slice(2)}`
+              : indentedResult;
             bodyLines.push(formatted.blockSuffix ? prefixed + formatted.blockSuffix : prefixed);
           } else {
             bodyLines.push(`  ${formatted.inline}`);
@@ -452,7 +449,7 @@ export interface BlocksFormatOptions {
 function computeParentIndicator(
   block: LogicalBlock,
   prevUuid: string | undefined,
-  prevLineNumber: number
+  prevLineNumber: number,
 ): string | number | undefined {
   if (block.lineNumber === prevLineNumber || !prevUuid) {
     return undefined;
@@ -816,7 +813,14 @@ function addFormattedParam(
   }
 }
 
-function formatBashTool({ input, result, redact, truncation, hideInput, hideResult }: ToolFormatterOptions): ToolFormatResult {
+function formatBashTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideInput,
+  hideResult,
+}: ToolFormatterOptions): ToolFormatResult {
   const command = String(input.command || '').trim();
   const desc = input.description ? String(input.description) : undefined;
 
@@ -932,7 +936,13 @@ function formatTodoWriteTool({ input, redact }: ToolFormatterOptions): ToolForma
   };
 }
 
-function formatAskUserQuestionTool({ input, result, redact, truncation, hideResult }: ToolFormatterOptions): ToolFormatResult {
+function formatAskUserQuestionTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideResult,
+}: ToolFormatterOptions): ToolFormatResult {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams: Array<string> = [`questions=${questions.length}`];
   const multilineParams: Array<MultilineParam> = [];

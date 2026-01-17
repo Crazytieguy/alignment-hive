@@ -1,13 +1,13 @@
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { SearchFieldFilter, parseFieldList } from "../lib/field-filter";
-import { formatBlocks } from "../lib/format";
-import { errors, usage } from "../lib/messages";
-import { printError } from "../lib/output";
-import { parseSession } from "../lib/parse";
-import { isInTimeRange, parseTimeSpec } from "../lib/time-filter";
-import type { LogicalBlock } from "../lib/parse";
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { getHiveMindSessionsDir, readExtractedSession } from '../lib/extraction';
+import { SearchFieldFilter, parseFieldList } from '../lib/field-filter';
+import { formatBlocks } from '../lib/format';
+import { errors, usage } from '../lib/messages';
+import { printError } from '../lib/output';
+import { parseSession } from '../lib/parse';
+import { isInTimeRange, parseTimeSpec } from '../lib/time-filter';
+import type { LogicalBlock } from '../lib/parse';
 
 const DEFAULT_CONTEXT_WORDS = 10;
 
@@ -53,27 +53,27 @@ function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> 
 function getSearchableFieldValues(block: LogicalBlock, filter: SearchFieldFilter): Array<string> {
   const values: Array<string> = [];
 
-  if (block.type === "user" && filter.isSearchable("user")) {
+  if (block.type === 'user' && filter.isSearchable('user')) {
     if (block.content) values.push(block.content);
-  } else if (block.type === "assistant" && filter.isSearchable("assistant")) {
+  } else if (block.type === 'assistant' && filter.isSearchable('assistant')) {
     if (block.content) values.push(block.content);
-  } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
+  } else if (block.type === 'thinking' && filter.isSearchable('thinking')) {
     if (block.content) values.push(block.content);
-  } else if (block.type === "tool") {
+  } else if (block.type === 'tool') {
     const toolName = block.toolName;
-    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+    if (filter.isSearchable('tool:input') || filter.isSearchable(`tool:${toolName}:input`)) {
       for (const value of Object.values(block.toolInput)) {
         if (value !== null && value !== undefined) {
           values.push(String(value));
         }
       }
     }
-    if (filter.isSearchable("tool:result") || filter.isSearchable(`tool:${toolName}:result`)) {
+    if (filter.isSearchable('tool:result') || filter.isSearchable(`tool:${toolName}:result`)) {
       if (block.toolResult) values.push(block.toolResult);
     }
-  } else if (block.type === "system" && filter.isSearchable("system")) {
+  } else if (block.type === 'system' && filter.isSearchable('system')) {
     if (block.content) values.push(block.content);
-  } else if (block.type === "summary" && filter.isSearchable("summary")) {
+  } else if (block.type === 'summary' && filter.isSearchable('summary')) {
     if (block.content) values.push(block.content);
   }
 
@@ -83,9 +83,9 @@ function getSearchableFieldValues(block: LogicalBlock, filter: SearchFieldFilter
 export async function search(): Promise<number> {
   const args = process.argv.slice(3);
 
-  const doubleDashIdx = args.indexOf("--");
+  const doubleDashIdx = args.indexOf('--');
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
-  if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
+  if (argsBeforeDoubleDash.includes('--help') || argsBeforeDoubleDash.includes('-h')) {
     printUsage();
     return 0;
   }
@@ -109,7 +109,7 @@ export async function search(): Promise<number> {
     return 1;
   }
 
-  let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  let jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
   if (jsonlFiles.length === 0) {
     printError(errors.noSessionsIn(sessionsDir));
     return 1;
@@ -119,7 +119,7 @@ export async function search(): Promise<number> {
   if (options.sessionFilter) {
     const prefix = options.sessionFilter;
     jsonlFiles = jsonlFiles.filter((f) => {
-      const name = f.replace(".jsonl", "");
+      const name = f.replace('.jsonl', '');
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
     if (jsonlFiles.length === 0) {
@@ -192,16 +192,16 @@ export async function search(): Promise<number> {
         cwd,
         showTimestamp: false,
         getTruncation: () => ({
-          type: "matchContext" as const,
+          type: 'matchContext' as const,
           pattern: options.pattern,
           contextWords: options.contextWords,
         }),
         shouldOutput: (_block, i) => matchingIndices.has(i),
-        separator: "\n",
+        separator: '\n',
       });
 
       // Output each result line separately for consistent behavior
-      for (const line of output.split("\n")) {
+      for (const line of output.split('\n')) {
         if (line) console.log(line);
       }
     }
@@ -226,59 +226,59 @@ function parseSearchOptions(args: Array<string>): SearchOptions | null {
     return idx !== -1 ? args[idx + 1] : undefined;
   }
 
-  const caseInsensitive = args.includes("-i");
-  const countOnly = args.includes("-c");
-  const listOnly = args.includes("-l");
+  const caseInsensitive = args.includes('-i');
+  const countOnly = args.includes('-c');
+  const listOnly = args.includes('-l');
 
   // Parse -m N (max matches)
   let maxMatches: number | null = null;
-  const mValue = getFlagValue("-m");
+  const mValue = getFlagValue('-m');
   if (mValue !== undefined) {
     maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
-      printError(errors.invalidNumber("-m", mValue));
+      printError(errors.invalidNumber('-m', mValue));
       return null;
     }
   }
 
   // Parse -C N (context words)
   let contextWords = DEFAULT_CONTEXT_WORDS;
-  const cValue = getFlagValue("-C");
+  const cValue = getFlagValue('-C');
   if (cValue !== undefined) {
     contextWords = parseInt(cValue, 10);
     if (isNaN(contextWords) || contextWords < 0) {
-      printError(errors.invalidNonNegative("-C"));
+      printError(errors.invalidNonNegative('-C'));
       return null;
     }
   }
 
-  const sessionFilter = getFlagValue("-s") ?? null;
-  const searchInValue = getFlagValue("--in");
+  const sessionFilter = getFlagValue('-s') ?? null;
+  const searchInValue = getFlagValue('--in');
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
   const fieldFilter = new SearchFieldFilter(searchIn);
 
   let afterTime: Date | null = null;
-  const afterValue = getFlagValue("--after");
+  const afterValue = getFlagValue('--after');
   if (afterValue !== undefined) {
     afterTime = parseTimeSpec(afterValue);
     if (!afterTime) {
-      printError(errors.invalidTimeSpec("--after", afterValue));
+      printError(errors.invalidTimeSpec('--after', afterValue));
       return null;
     }
   }
 
   let beforeTime: Date | null = null;
-  const beforeValue = getFlagValue("--before");
+  const beforeValue = getFlagValue('--before');
   if (beforeValue !== undefined) {
     beforeTime = parseTimeSpec(beforeValue);
     if (!beforeTime) {
-      printError(errors.invalidTimeSpec("--before", beforeValue));
+      printError(errors.invalidTimeSpec('--before', beforeValue));
       return null;
     }
   }
 
-  const flagsWithValues = new Set(["-m", "-C", "-s", "--in", "--after", "--before"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in", "--after", "--before"]);
+  const flagsWithValues = new Set(['-m', '-C', '-s', '--in', '--after', '--before']);
+  const flags = new Set(['-i', '-c', '-l', '-m', '-C', '-s', '--in', '--after', '--before']);
   let patternStr: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
@@ -298,7 +298,7 @@ function parseSearchOptions(args: Array<string>): SearchOptions | null {
 
   let pattern: RegExp;
   try {
-    pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
+    pattern = new RegExp(patternStr, caseInsensitive ? 'i' : '');
   } catch (e) {
     printError(errors.invalidRegex(e instanceof Error ? e.message : String(e)));
     return null;

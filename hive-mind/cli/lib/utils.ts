@@ -27,10 +27,7 @@ export type SessionLookupResult =
   | { type: 'not_found' }
   | { type: 'ambiguous'; matches: Array<string> };
 
-export async function lookupSession(
-  cwd: string,
-  sessionIdPrefix: string
-): Promise<SessionLookupResult> {
+export async function lookupSession(cwd: string, sessionIdPrefix: string): Promise<SessionLookupResult> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
   const exactPath = join(sessionsDir, `${sessionIdPrefix}.jsonl`);
@@ -46,9 +43,7 @@ export async function lookupSession(
     return { type: 'not_found' };
   }
 
-  const matches = files.filter(
-    (f) => f.endsWith('.jsonl') && f.startsWith(sessionIdPrefix)
-  );
+  const matches = files.filter((f) => f.endsWith('.jsonl') && f.startsWith(sessionIdPrefix));
 
   if (matches.length === 0) {
     return { type: 'not_found' };

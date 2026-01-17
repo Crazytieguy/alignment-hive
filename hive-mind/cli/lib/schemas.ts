@@ -1,17 +1,17 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 export const TextBlockSchema = z.looseObject({
-  type: z.literal("text"),
+  type: z.literal('text'),
   text: z.string(),
 });
 
 export const ThinkingBlockSchema = z.looseObject({
-  type: z.literal("thinking"),
+  type: z.literal('thinking'),
   thinking: z.string(),
 });
 
 export const ToolUseBlockSchema = z.looseObject({
-  type: z.literal("tool_use"),
+  type: z.literal('tool_use'),
   id: z.string(),
   name: z.string(),
   input: z.record(z.string(), z.unknown()),
@@ -19,37 +19,33 @@ export const ToolUseBlockSchema = z.looseObject({
 
 const Base64SourceSchema = z
   .looseObject({
-    type: z.literal("base64"),
+    type: z.literal('base64'),
     media_type: z.string(),
     data: z.string().optional(),
   })
   .transform(({ data, ...rest }) => rest);
 
 export const ImageBlockSchema = z.looseObject({
-  type: z.literal("image"),
+  type: z.literal('image'),
   source: Base64SourceSchema,
 });
 
 export const DocumentBlockSchema = z.looseObject({
-  type: z.literal("document"),
+  type: z.literal('document'),
   source: Base64SourceSchema,
 });
 
-const ToolResultContentBlockSchema = z.union([
-  TextBlockSchema,
-  ImageBlockSchema,
-  DocumentBlockSchema,
-]);
+const ToolResultContentBlockSchema = z.union([TextBlockSchema, ImageBlockSchema, DocumentBlockSchema]);
 
 export type ToolResultContentBlock = z.infer<typeof ToolResultContentBlockSchema>;
 
 export const ToolResultBlockSchema = z.looseObject({
-  type: z.literal("tool_result"),
+  type: z.literal('tool_result'),
   tool_use_id: z.string(),
   content: z.union([z.string(), z.array(ToolResultContentBlockSchema)]).optional(),
 });
 
-export const KnownContentBlockSchema = z.discriminatedUnion("type", [
+export const KnownContentBlockSchema = z.discriminatedUnion('type', [
   TextBlockSchema,
   ThinkingBlockSchema,
   ToolUseBlockSchema,
@@ -85,14 +81,14 @@ export const AssistantMessageObjectSchema = z
   .transform(({ id, ...rest }) => rest);
 
 export const SummaryEntrySchema = z.looseObject({
-  type: z.literal("summary"),
+  type: z.literal('summary'),
   summary: z.string(),
   leafUuid: z.string().optional(),
 });
 
 export const UserEntrySchema = z
   .looseObject({
-    type: z.literal("user"),
+    type: z.literal('user'),
     uuid: z.string(),
     parentUuid: z.string().nullable(),
     timestamp: z.string(),
@@ -112,7 +108,7 @@ export const UserEntrySchema = z
   })
   .transform(({ toolUseResult, requestId, slug, userType, ...rest }) => {
     const agentId =
-      toolUseResult && typeof toolUseResult === "object" && "agentId" in toolUseResult
+      toolUseResult && typeof toolUseResult === 'object' && 'agentId' in toolUseResult
         ? (toolUseResult as { agentId?: string }).agentId
         : undefined;
     return { ...rest, ...(agentId && { agentId }) };
@@ -120,7 +116,7 @@ export const UserEntrySchema = z
 
 export const AssistantEntrySchema = z
   .looseObject({
-    type: z.literal("assistant"),
+    type: z.literal('assistant'),
     uuid: z.string(),
     parentUuid: z.string().nullable(),
     timestamp: z.string(),
@@ -133,7 +129,7 @@ export const AssistantEntrySchema = z
   .transform(({ requestId, slug, userType, ...rest }) => rest);
 
 export const SystemEntrySchema = z.looseObject({
-  type: z.literal("system"),
+  type: z.literal('system'),
   subtype: z.string().optional(),
   uuid: z.string().optional(),
   parentUuid: z.string().nullable().optional(),
@@ -143,14 +139,14 @@ export const SystemEntrySchema = z.looseObject({
 });
 
 export const FileHistorySnapshotSchema = z.looseObject({
-  type: z.literal("file-history-snapshot"),
+  type: z.literal('file-history-snapshot'),
 });
 
 export const QueueOperationSchema = z.looseObject({
-  type: z.literal("queue-operation"),
+  type: z.literal('queue-operation'),
 });
 
-export const KnownEntrySchema = z.discriminatedUnion("type", [
+export const KnownEntrySchema = z.discriminatedUnion('type', [
   SummaryEntrySchema,
   UserEntrySchema,
   AssistantEntrySchema,
@@ -166,16 +162,16 @@ export type AssistantEntry = z.infer<typeof AssistantEntrySchema>;
 export type SystemEntry = z.infer<typeof SystemEntrySchema>;
 
 const KNOWN_ENTRY_TYPES = [
-  "user",
-  "assistant",
-  "summary",
-  "system",
-  "file-history-snapshot",
-  "queue-operation",
+  'user',
+  'assistant',
+  'summary',
+  'system',
+  'file-history-snapshot',
+  'queue-operation',
 ] as const;
 
 export function isKnownEntryType(type: unknown): type is (typeof KNOWN_ENTRY_TYPES)[number] {
-  return typeof type === "string" && KNOWN_ENTRY_TYPES.includes(type as (typeof KNOWN_ENTRY_TYPES)[number]);
+  return typeof type === 'string' && KNOWN_ENTRY_TYPES.includes(type as (typeof KNOWN_ENTRY_TYPES)[number]);
 }
 
 export type ParseResult = { data: KnownEntry; error?: undefined } | { data: null; error?: string };
@@ -188,7 +184,7 @@ export function parseKnownEntry(data: unknown): ParseResult {
 
   const entryType = (data as { type?: unknown }).type;
   if (isKnownEntryType(entryType)) {
-    const errorDetails = parsed.error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
+    const errorDetails = parsed.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ');
     return { data: null, error: `${entryType}: ${errorDetails}` };
   }
 
@@ -196,7 +192,7 @@ export function parseKnownEntry(data: unknown): ParseResult {
 }
 
 export const HiveMindMetaSchema = z.object({
-  _type: z.literal("hive-mind-meta"),
+  _type: z.literal('hive-mind-meta'),
   version: z.string(),
   sessionId: z.string(),
   checkoutId: z.string(),
