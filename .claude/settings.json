@@ -20,6 +20,8 @@
       "Bash(bun run dev)",
       "Bash(bun run build)",
       "Bash(bun hive-mind/cli/cli.ts:*)",
+      "Bash(hive-mind read:*)",
+      "Bash(hive-mind search:*)",
       "mcp__convex"
     ]
   },
