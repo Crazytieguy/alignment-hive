@@ -25,20 +25,20 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: cd hive-mind && bun install
+        run: bun install
 
       - name: Lint
-        run: cd hive-mind && bun run lint
+        run: bun run --filter '@alignment-hive/hive-mind' lint
 
       - name: Test
-        run: cd hive-mind && bun run test
+        run: bun run --filter '@alignment-hive/hive-mind' test
 
       - name: Build CLI
-        run: cd hive-mind && bun run build
+        run: bun run --filter '@alignment-hive/hive-mind' build
 
       - name: Verify CLI bundle is up to date
         run: |
           if ! git diff --exit-code plugins/hive-mind/cli.js; then
-            echo "::error::CLI bundle is out of date. Run 'cd hive-mind && bun run build' and commit."
+            echo "::error::CLI bundle is out of date. Run 'bun run --filter @alignment-hive/hive-mind build' and commit."
             exit 1
           fi

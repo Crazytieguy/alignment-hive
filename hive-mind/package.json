@@ -8,6 +8,7 @@
     "test": "bun test",
     "lint": "tsc --noEmit -p cli/tsconfig.json && eslint cli --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint cli --fix",
+    "format": "prettier --write cli",
     "build": "bun build cli/cli.ts --outfile=../plugins/hive-mind/cli.js --target=bun"
   },
   "dependencies": {

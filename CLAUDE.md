@@ -19,6 +19,29 @@ This is a **bun monorepo**:
 
 **For CLI**: Read [hive-mind/CLAUDE.md](hive-mind/CLAUDE.md) for development guidelines. Run CLI commands from the project root: `bun hive-mind/cli/cli.ts <command>`
 
+## Running Scripts
+
+Run workspace scripts from the repo root using `bun run --filter`:
+
+```bash
+# All workspaces
+bun run --filter '*' lint
+bun run --filter '*' build
+bun run --filter '*' format
+
+# Specific workspace
+bun run --filter '@alignment-hive/hive-mind' test
+bun run --filter '@alignment-hive/hive-mind' lint
+bun run --filter '@alignment-hive/web' lint
+```
+
+Workspaces without the script are skipped (no error).
+
+For workspace-specific tasks like dev servers:
+```bash
+cd web && bun run dev
+```
+
 ## Plugin Versioning
 
 When updating plugin content (skills, commands, hooks, etc.), you must bump the version in the plugin's `plugin.json` for users to receive the update. The auto-update system compares installed versions with marketplace versions - without a version bump, changes won't propagate to users.

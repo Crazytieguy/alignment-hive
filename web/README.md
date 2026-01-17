@@ -43,11 +43,14 @@ The dev server runs on `http://localhost:3000` and includes both the frontend an
 
 ### Available Scripts
 
+From repo root:
+- `bun run --filter '@alignment-hive/web' lint` - Type check
+- `bun run --filter '@alignment-hive/web' build` - Build for production
+
+From `web/` directory:
 - `bun dev` - Start frontend and backend in parallel
 - `bun run dev:frontend` - Just the Vite dev server
 - `bun run dev:backend` - Just the Convex backend
-- `bun run build` - Build for production
-- `bun run lint` - Type check and lint
 
 ## Architecture
 

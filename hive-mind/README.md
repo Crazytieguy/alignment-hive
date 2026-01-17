@@ -4,11 +4,11 @@ A system for alignment researchers to extract and share session learnings across
 
 ## Development
 
-**Important:** Always run CLI commands from the monorepo root (`alignment-hive/`), not from `hive-mind/`.
+**Important:** Always run commands from the monorepo root (`alignment-hive/`).
 
 When committing changes, always run:
-- `bun test`
-- `bun run lint`
+- `bun run --filter '@alignment-hive/hive-mind' test`
+- `bun run --filter '@alignment-hive/hive-mind' lint`
 
 Both must pass before committing.
 
@@ -34,7 +34,7 @@ bun hive-mind/cli/cli.ts session-start
 
 The format tests use custom snapshot logic. To update snapshots:
 ```bash
-UPDATE_SNAPSHOTS=1 bun test
+UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-mind' test
 ```
 
 ## Skill and CLI Sync
