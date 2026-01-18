@@ -11,6 +11,11 @@
       "name": "hive-mind",
       "source": "./plugins/hive-mind",
       "description": "Share session learnings with the alignment research community"
+    },
+    {
+      "name": "llms-fetch-mcp",
+      "source": "./plugins/llms-fetch-mcp",
+      "description": "MCP server for fetching documentation with llms.txt support"
     }
   ]
 }

@@ -42,6 +42,10 @@ For workspace-specific tasks like dev servers:
 cd web && bun run dev
 ```
 
+## Adding New Plugins
+
+New plugins must be registered in `.claude-plugin/marketplace.json` to appear in the marketplace. Add an entry with `name`, `source`, and `description`.
+
 ## Plugin Versioning
 
 When updating plugin content (skills, commands, hooks, etc.), you must bump the version in the plugin's `plugin.json` for users to receive the update. The auto-update system compares installed versions with marketplace versions - without a version bump, changes won't propagate to users.
