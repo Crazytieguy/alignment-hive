@@ -41,7 +41,6 @@ def main():
     parser.add_argument("--scripts-dir", required=True, help="Directory containing search scripts")
     parser.add_argument("--arxiv-limit", type=int, default=100)
     parser.add_argument("--semantic-scholar-limit", type=int, default=100)
-    parser.add_argument("--lesswrong-limit", type=int, default=50)
     parser.add_argument("--google-scholar-limit", type=int, default=50)
     args = parser.parse_args()
 
@@ -51,10 +50,10 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Note: LessWrong/AF is handled separately via WebSearch + fetch_lesswrong.py
     searches = [
         (scripts_dir / "search_semantic_scholar.py", output_dir / "semantic_scholar.json", args.semantic_scholar_limit),
         (scripts_dir / "search_arxiv.py", output_dir / "arxiv.json", args.arxiv_limit),
-        (scripts_dir / "search_lesswrong.py", output_dir / "lesswrong.json", args.lesswrong_limit),
         (scripts_dir / "search_google_scholar.py", output_dir / "google_scholar.json", args.google_scholar_limit),
     ]
 

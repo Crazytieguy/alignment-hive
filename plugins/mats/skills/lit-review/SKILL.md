@@ -83,6 +83,14 @@ Before starting the automated process, explain what permissions will be needed:
 
 Wait for the user to confirm they're comfortable proceeding.
 
+**Optional enhancement - Exa Search API:**
+
+> "By the way, if you want higher-quality search results, you can optionally set up an Exa API key. Exa is a semantic search engine designed for AI—it finds more relevant results than keyword search.
+>
+> It's free to sign up at https://exa.ai and you get generous free credits. If you have a key, set it as `EXA_API_KEY` in your environment and I'll use it automatically.
+>
+> This is totally optional—the literature review works fine without it."
+
 ---
 
 ## Step 5: Prerequisites Check
@@ -132,18 +140,75 @@ Example format:
 
 ### Phase 2: Run Searches
 
-Create the raw_results directory and run all searches in parallel:
+Create the raw_results directory:
 
 ```bash
 mkdir -p <output_dir>/raw_results
+```
 
+**Academic sources (Semantic Scholar, arXiv, Google Scholar):**
+
+```bash
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
   --queries <output_dir>/search_terms.json \
   --output-dir <output_dir>/raw_results \
   --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review
 ```
 
-Note: Google Scholar may fail due to rate limiting—this is expected. Continue with other sources.
+Note: Google Scholar may fail due to rate limiting—this is expected.
+
+**LessWrong and Alignment Forum:**
+
+For LW/AF posts, use the WebSearch tool directly. For each search query, run a web search like:
+
+```
+site:lesswrong.com [query]
+site:alignmentforum.org [query]
+```
+
+Collect the URLs from the search results and save them to `<output_dir>/raw_results/lesswrong_urls.json` as a JSON array:
+
+```json
+[
+  {"url": "https://www.lesswrong.com/posts/...", "title": "Post Title"},
+  {"url": "https://www.alignmentforum.org/posts/...", "title": "Another Post"}
+]
+```
+
+Then fetch full content (including comments) via GraphQL:
+
+```bash
+uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/fetch_lesswrong.py \
+  --urls <output_dir>/raw_results/lesswrong_urls.json \
+  --output <output_dir>/raw_results/lesswrong.json
+```
+
+<!--
+INTERNAL NOTES FOR FUTURE CLAUDES - Exa Search API:
+
+If the user has an Exa API key (EXA_API_KEY environment variable), you can use the
+Exa search script for higher-quality semantic search results:
+
+```bash
+uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/search_exa.py \
+  --queries <output_dir>/search_terms.json \
+  --output <output_dir>/raw_results/exa_results.json \
+  --ai-safety-domains
+```
+
+Exa (https://exa.ai) provides:
+- Semantic/neural search (not just keyword matching)
+- High-quality curated index
+- Better results for technical/research queries
+- Free tier with generous limits
+
+To use Exa, the user needs to:
+1. Sign up at https://exa.ai (free)
+2. Get an API key from the dashboard
+3. Set EXA_API_KEY environment variable or add to .env file
+
+Exa search can supplement or replace the WebSearch approach for LW/AF when available.
+-->
 
 ### Phase 3: Deduplicate
 
