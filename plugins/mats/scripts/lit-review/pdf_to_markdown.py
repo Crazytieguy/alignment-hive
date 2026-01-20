@@ -12,6 +12,7 @@ Usage:
 import argparse
 import io
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -130,8 +131,19 @@ def convert_pdf_to_markdown(
         return False
 
 
-def convert_all(input_dir: Path, output_dir: Path, ascii_width: int = 60) -> dict:
-    """Convert all PDFs in directory to markdown."""
+def convert_single_pdf(args: tuple) -> tuple[Path, Path, bool, str]:
+    """Convert a single PDF. Returns (pdf_path, output_path, success, status)."""
+    pdf_path, output_path, ascii_width = args
+
+    if output_path.exists():
+        return pdf_path, output_path, True, "skipped"
+
+    success = convert_pdf_to_markdown(pdf_path, output_path, ascii_width)
+    return pdf_path, output_path, success, "converted" if success else "failed"
+
+
+def convert_all(input_dir: Path, output_dir: Path, ascii_width: int = 60, max_workers: int = 8) -> dict:
+    """Convert all PDFs in directory to markdown using multiple threads."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stats = {
@@ -146,24 +158,39 @@ def convert_all(input_dir: Path, output_dir: Path, ascii_width: int = 60) -> dic
     pdf_files = list(input_dir.glob("*.pdf"))
     stats["total"] = len(pdf_files)
 
-    print(f"Converting {len(pdf_files)} PDFs to markdown...", file=sys.stderr)
+    if not pdf_files:
+        print("No PDFs found to convert.", file=sys.stderr)
+        return stats
 
-    for pdf_path in pdf_files:
-        output_path = output_dir / f"{pdf_path.stem}.md"
+    print(f"Converting {len(pdf_files)} PDFs to markdown ({max_workers} threads)...", file=sys.stderr)
 
-        if output_path.exists():
-            stats["skipped"] += 1
-            stats["converted_files"].append(str(output_path))
-            continue
+    # Prepare arguments for each conversion
+    conversion_args = [
+        (pdf_path, output_dir / f"{pdf_path.stem}.md", ascii_width)
+        for pdf_path in pdf_files
+    ]
 
-        print(f"  Converting: {pdf_path.name}", file=sys.stderr)
+    # Process in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(convert_single_pdf, args): args[0]
+            for args in conversion_args
+        }
 
-        if convert_pdf_to_markdown(pdf_path, output_path, ascii_width):
-            stats["converted"] += 1
-            stats["converted_files"].append(str(output_path))
-        else:
-            stats["failed"] += 1
-            stats["failed_files"].append(str(pdf_path))
+        for future in as_completed(futures):
+            pdf_path, output_path, success, status = future.result()
+
+            if status == "skipped":
+                stats["skipped"] += 1
+                stats["converted_files"].append(str(output_path))
+            elif status == "converted":
+                stats["converted"] += 1
+                stats["converted_files"].append(str(output_path))
+                print(f"  ✓ {pdf_path.name}", file=sys.stderr)
+            else:
+                stats["failed"] += 1
+                stats["failed_files"].append(str(pdf_path))
+                print(f"  ✗ {pdf_path.name}", file=sys.stderr)
 
     return stats
 
@@ -187,6 +214,12 @@ def main():
         default=60,
         help="Width of ASCII art figures (default: 60)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel workers (default: 8)",
+    )
     args = parser.parse_args()
 
     if not args.input_dir.exists():
@@ -194,7 +227,7 @@ def main():
         sys.exit(1)
 
     # Convert PDFs
-    stats = convert_all(args.input_dir, args.output_dir, args.ascii_width)
+    stats = convert_all(args.input_dir, args.output_dir, args.ascii_width, args.workers)
 
     # Print summary
     print("", file=sys.stderr)
