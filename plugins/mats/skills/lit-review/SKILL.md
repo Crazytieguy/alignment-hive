@@ -138,7 +138,9 @@ Example format:
 ]
 ```
 
-### Phase 2: Run Searches
+### Phase 2: Run Searches (Stage 1 - Exploratory)
+
+**Stage 1 is intentionally small** - the goal is to quickly understand the terminology and landscape, not to be comprehensive. Limit to ~10 results per source. The refined Stage 2 search will be the thorough one.
 
 Create the raw_results directory:
 
@@ -152,21 +154,23 @@ mkdir -p <output_dir>/raw_results
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
   --queries <output_dir>/search_terms.json \
   --output-dir <output_dir>/raw_results \
-  --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review
+  --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review \
+  --arxiv-limit 10 \
+  --semantic-scholar-limit 10 \
+  --google-scholar-limit 10
 ```
 
 Note: Google Scholar may fail due to rate limiting—this is expected.
 
 **LessWrong and Alignment Forum:**
 
-For LW/AF posts, use the WebSearch tool directly. For each search query, run a web search like:
+For LW/AF posts, use the WebSearch tool directly. Keep it brief for Stage 1—just 1-2 searches to get a sense of the relevant terminology:
 
 ```
-site:lesswrong.com [query]
-site:alignmentforum.org [query]
+site:lesswrong.com [main query]
 ```
 
-Collect the URLs from the search results and save them to `<output_dir>/raw_results/lesswrong_urls.json` as a JSON array:
+Collect the URLs (aim for ~5-10 posts) and save them to `<output_dir>/raw_results/lesswrong_urls.json` as a JSON array:
 
 ```json
 [
@@ -310,9 +314,9 @@ Read the catalog and summaries. Create `<output_dir>/stage1_report.md` with:
 
 ---
 
-## Stage 2: Refined Search
+## Stage 2: Refined Search (Comprehensive)
 
-Stage 2 uses insights from Stage 1 to run a more targeted search. Proceed automatically.
+**This is the main search.** Now that you understand the terminology and landscape from Stage 1, run a comprehensive search with the refined queries. Use full limits (100 per source).
 
 ### Phase 9: Generate Refined Search Terms
 
@@ -328,7 +332,7 @@ Generate 8-12 refined queries and save to `<output_dir>/search_terms_stage2.json
 
 ### Phase 10: Run Stage 2 Searches
 
-Run searches with refined terms:
+Run comprehensive searches with refined terms (full limits):
 
 ```bash
 mkdir -p <output_dir>/raw_results_stage2
@@ -336,8 +340,23 @@ mkdir -p <output_dir>/raw_results_stage2
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
   --queries <output_dir>/search_terms_stage2.json \
   --output-dir <output_dir>/raw_results_stage2 \
-  --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review
+  --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review \
+  --arxiv-limit 100 \
+  --semantic-scholar-limit 100 \
+  --google-scholar-limit 50
 ```
+
+**LessWrong and Alignment Forum (comprehensive):**
+
+Now do thorough LW/AF searches with all refined queries:
+```
+site:lesswrong.com [refined query 1]
+site:lesswrong.com [refined query 2]
+site:alignmentforum.org [refined query 1]
+...
+```
+
+Collect all URLs and fetch via `fetch_lesswrong.py` as in Stage 1.
 
 ### Phase 11: Merge and Deduplicate
 
