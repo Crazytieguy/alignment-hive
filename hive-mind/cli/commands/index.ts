@@ -1,22 +1,22 @@
-/**
- * Index command - list extracted sessions with statistics.
- * Agent sessions excluded - explore via Task tool calls in parent sessions.
- * Statistics are computed on-the-fly (not stored in metadata).
- */
-
-import { readdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { getHiveMindSessionsDir, readExtractedSession } from "../lib/extraction";
-import { printError } from "../lib/output";
-import type { ContentBlock, HiveMindMeta, KnownEntry } from "../lib/schemas";
+import { readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
+import { indexCmd, usage } from '../lib/messages';
+import { colors, printError } from '../lib/output';
+import { parseSession } from '../lib/parse';
+import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
+import type { SessionEligibility } from '../lib/upload-eligibility';
+import type { LogicalBlock, ParsedSession } from '../lib/parse';
+import type { ContentBlock, HiveMindMeta, KnownEntry } from '../lib/schemas';
 
 interface SessionInfo {
   meta: HiveMindMeta;
   entries: Array<KnownEntry>;
+  parsed: ParsedSession;
 }
 
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
   const result = new Map<string, string>();
@@ -39,20 +39,20 @@ export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> 
 function formatRelativeDateTime(
   rawMtime: string,
   prevDate: string,
-  prevYear: string
+  prevYear: string,
 ): { display: string; date: string; year: string } {
   const dateObj = new Date(rawMtime);
   const year = String(dateObj.getFullYear());
   const month = MONTH_NAMES[dateObj.getMonth()];
-  const day = String(dateObj.getDate()).padStart(2, "0");
-  const hours = String(dateObj.getHours()).padStart(2, "0");
-  const minutes = String(dateObj.getMinutes()).padStart(2, "0");
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  const hours = String(dateObj.getHours()).padStart(2, '0');
+  const minutes = String(dateObj.getMinutes()).padStart(2, '0');
 
   const date = `${month}${day}`;
   const time = `T${hours}:${minutes}`;
 
   let display: string;
-  if (year !== prevYear && prevYear !== "") {
+  if (year !== prevYear && prevYear !== '') {
     display = `${year}${date}${time}`;
   } else if (date !== prevDate) {
     display = `${date}${time}`;
@@ -80,81 +80,244 @@ interface FileStats {
 }
 
 function printUsage(): void {
-  console.log("Usage: index");
-  console.log("\nList all extracted sessions with statistics, summary, and commits.");
-  console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
-  console.log("Statistics include work from subagent sessions.");
-  console.log("\nOutput columns:");
-  console.log("  ID                   Session ID prefix (first 16 chars)");
-  console.log("  DATETIME             Session modification time");
-  console.log("  MSGS                 Total message count");
-  console.log("  USER_MESSAGES        User message count");
-  console.log("  BASH_CALLS           Bash commands executed");
-  console.log("  WEB_FETCHES          Web fetches");
-  console.log("  WEB_SEARCHES         Web searches");
-  console.log("  LINES_ADDED          Lines added");
-  console.log("  LINES_REMOVED        Lines removed");
-  console.log("  FILES_TOUCHED        Number of unique files modified");
-  console.log("  SIGNIFICANT_LOCATIONS Paths where >30% of work happened");
-  console.log("  SUMMARY              Session summary or first user prompt");
-  console.log("  COMMITS              Git commit hashes from the session");
+  console.log(usage.indexFull());
 }
 
-export async function index(): Promise<number> {
-  const args = process.argv.slice(3);
+interface PendingSessionInfo {
+  eligibility: SessionEligibility;
+  entries: Array<KnownEntry>;
+  agentCount: number;
+}
 
-  if (args.includes("--help") || args.includes("-h")) {
-    printUsage();
-    return 0;
+function formatPendingSession(
+  info: PendingSessionInfo,
+  idPrefix: string,
+  dateDisplay: string,
+  maxAgentWidth: number,
+  maxMsgWidth: number,
+  maxDateWidth: number,
+): string {
+  const { eligibility, entries, agentCount } = info;
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || '';
+  const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
+
+  const dateCol = dateDisplay.padEnd(maxDateWidth);
+  const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
+  const agentText = agentCount > 0 ? `+${agentCount} agents` : '';
+  const agentCol = agentText.padEnd(maxAgentWidth);
+
+  let statusIcon: string;
+  let statusText: string;
+  if (eligibility.excluded) {
+    statusIcon = colors.yellow('✗');
+    statusText = colors.yellow('excluded'.padEnd(14));
+  } else if (eligibility.eligible) {
+    statusIcon = colors.green('✓');
+    statusText = colors.green('ready'.padEnd(14));
+  } else {
+    statusIcon = colors.blue('○');
+    statusText = colors.blue(eligibility.reason.padEnd(14));
   }
 
-  const cwd = process.cwd();
+  return `  ${statusIcon} ${idPrefix}  ${dateCol}  ${msgCount} msgs  ${agentCol}  ${statusText}  ${truncatedSummary}`;
+}
+
+function countAgentsInBlocks(blocks: Array<LogicalBlock>): number {
+  const agentIds = new Set<string>();
+  for (const block of blocks) {
+    if (block.type === 'tool' && block.agentId) {
+      agentIds.add(block.agentId);
+    }
+  }
+  return agentIds.size;
+}
+
+async function showPendingStatus(cwd: string): Promise<number> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
 
   let files: Array<string>;
   try {
     files = await readdir(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
-    return 1;
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
   if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+
+  const mainSessions: Array<{ meta: HiveMindMeta; entries: Array<KnownEntry>; parsed: ParsedSession }> = [];
+
+  for (const file of jsonlFiles) {
+    const path = join(sessionsDir, file);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
+      }
+      continue;
+    }
+    if (sessionResult.meta.agentId) continue;
+
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    mainSessions.push({ ...sessionResult, parsed });
+  }
+
+  if (mainSessions.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+
+  const authIssuedAt = await getAuthIssuedAt();
+  const pendingInfos: Array<PendingSessionInfo> = [];
+
+  for (const session of mainSessions) {
+    const eligibility = checkSessionEligibility(session.meta, authIssuedAt);
+    const agentCount = countAgentsInBlocks(session.parsed.blocks);
+    pendingInfos.push({
+      eligibility,
+      entries: session.entries,
+      agentCount,
+    });
+  }
+
+  pendingInfos.sort((a, b) => {
+    return b.eligibility.meta.rawMtime.localeCompare(a.eligibility.meta.rawMtime);
+  });
+
+  const sessionIds = pendingInfos.map((p) => p.eligibility.sessionId);
+  const idPrefixes = computeMinimalPrefixes(sessionIds);
+
+  const formatDate = (rawMtime: string): string => {
+    const d = new Date(rawMtime);
+    const month = MONTH_NAMES[d.getMonth()];
+    const day = d.getDate();
+    const year = d.getFullYear();
+    return `${month} ${day}, ${year}`;
+  };
+
+  const dateDisplays = new Map<string, string>();
+  for (const info of pendingInfos) {
+    const display = formatDate(info.eligibility.meta.rawMtime);
+    dateDisplays.set(info.eligibility.sessionId, display);
+  }
+
+  const maxAgentWidth = Math.max(
+    0,
+    ...pendingInfos.map((p) => (p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0)),
+  );
+  const maxMsgWidth = Math.max(...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length));
+  const maxDateWidth = Math.max(...Array.from(dateDisplays.values()).map((d) => d.length));
+
+  console.log(indexCmd.uploadStatus);
+  console.log('');
+
+  for (const info of pendingInfos) {
+    const prefix = idPrefixes.get(info.eligibility.sessionId) || info.eligibility.sessionId.slice(0, 8);
+    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || '';
+    console.log(formatPendingSession(info, prefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth));
+  }
+
+  console.log('');
+
+  const ready = pendingInfos.filter((s) => s.eligibility.eligible).length;
+  const pending = pendingInfos.filter((s) => !s.eligibility.eligible && !s.eligibility.excluded).length;
+  const excluded = pendingInfos.filter((s) => s.eligibility.excluded).length;
+
+  const statusSummary: Array<string> = [];
+  if (ready > 0) statusSummary.push(`${ready} ready`);
+  if (pending > 0) statusSummary.push(`${pending} pending`);
+  if (excluded > 0) statusSummary.push(`${excluded} excluded`);
+  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(', ')));
+
+  if (ready > 0) {
+    console.log('');
+    console.log(indexCmd.runUpload);
+  }
+
+  if (ready > 0 || pending > 0) {
+    console.log('');
+    console.log(indexCmd.excludeSession);
+    console.log(indexCmd.excludeAll);
+  }
+
+  return 0;
+}
+
+export async function index(): Promise<number> {
+  const args = process.argv.slice(3);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printUsage();
+    return 0;
+  }
+
+  const cwd = process.cwd();
+
+  if (args.includes('--pending')) {
+    return await showPendingStatus(cwd);
+  }
+
+  const escapeFileRefs = args.includes('--escape-file-refs');
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+
+  let files: Array<string>;
+  try {
+    files = await readdir(sessionsDir);
+  } catch {
+    printError(indexCmd.noSessionsDir);
     return 1;
   }
 
-  // Load all sessions for subagent lookups
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
+  if (jsonlFiles.length === 0) {
+    printError(indexCmd.noSessionsIn(sessionsDir));
+    return 1;
+  }
+
   const allSessions = new Map<string, SessionInfo>();
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
-    const session = await readExtractedSession(path);
-    if (session) {
-      allSessions.set(session.meta.sessionId, session);
-      // Also index by agentId for agent sessions
-      if (session.meta.agentId) {
-        allSessions.set(session.meta.agentId, session);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
       }
+      continue;
+    }
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const sessionInfo: SessionInfo = { ...sessionResult, parsed };
+    allSessions.set(sessionResult.meta.sessionId, sessionInfo);
+    if (sessionResult.meta.agentId) {
+      allSessions.set(sessionResult.meta.agentId, sessionInfo);
     }
   }
 
-  // Filter to main sessions only
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
 
-  // Compute minimal unique prefixes for session IDs
   const sessionIds = mainSessions.map((s) => s.meta.sessionId);
   const idPrefixes = computeMinimalPrefixes(sessionIds);
 
   console.log(
-    "ID DATETIME MSGS USER_MESSAGES BASH_CALLS WEB_FETCHES WEB_SEARCHES LINES_ADDED LINES_REMOVED FILES_TOUCHED SIGNIFICANT_LOCATIONS SUMMARY COMMITS"
+    'ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS',
   );
-  let prevDate = "";
-  let prevYear = "";
+  let prevDate = '';
+  let prevYear = '';
   for (const session of mainSessions) {
     const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
-    const { line, date, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear);
+    const { line, date, year } = formatSessionLine(
+      session,
+      allSessions,
+      cwd,
+      prefix,
+      prevDate,
+      prevYear,
+      escapeFileRefs,
+    );
     console.log(line);
     prevDate = date;
     prevYear = year;
@@ -169,24 +332,21 @@ function formatSessionLine(
   cwd: string,
   idPrefix: string,
   prevDate: string,
-  prevYear: string
+  prevYear: string,
+  escapeFileRefs: boolean,
 ): { line: string; date: string; year: string } {
   const { meta, entries } = session;
   const msgs = String(meta.messageCount);
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || '';
+  const summary = escapeFileRefs ? rawSummary.replace(/@/g, '\\@') : rawSummary;
 
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits
     .map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message))
-    .join(" ");
+    .join(' ');
 
-  // Compute stats including subagents
-  const stats = computeSessionStats(entries, allSessions, new Set(), cwd);
-
-  // Format numbers, blank for 0
-  const fmt = (n: number) => (n === 0 ? "" : String(n));
-
-  // Format datetime with relative display
+  const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set(), cwd);
+  const fmt = (n: number) => (n === 0 ? '' : String(n));
   const { display: datetime, date, year } = formatRelativeDateTime(meta.rawMtime, prevDate, prevYear);
 
   const line = [
@@ -197,22 +357,22 @@ function formatSessionLine(
     fmt(stats.bashCount),
     fmt(stats.fetchCount),
     fmt(stats.searchCount),
-    stats.linesAdded === 0 ? "" : `+${stats.linesAdded}`,
-    stats.linesRemoved === 0 ? "" : `-${stats.linesRemoved}`,
+    stats.linesAdded === 0 ? '' : `+${stats.linesAdded}`,
+    stats.linesRemoved === 0 ? '' : `-${stats.linesRemoved}`,
     fmt(stats.filesTouched),
-    stats.significantLocations.join(" "),
+    stats.significantLocations.join(','),
     summary,
     commitList,
-  ].join(" ");
+  ].join('|');
 
   return { line, date, year };
 }
 
 function computeSessionStats(
-  entries: Array<KnownEntry>,
+  blocks: Array<LogicalBlock>,
   allSessions: Map<string, SessionInfo>,
   visited: Set<string>,
-  cwd: string
+  cwd: string,
 ): SessionStats {
   const stats: SessionStats = {
     userCount: 0,
@@ -228,70 +388,52 @@ function computeSessionStats(
   const fileStats = new Map<string, FileStats>();
   const subagentIds: Array<string> = [];
 
-  for (const entry of entries) {
-    if (entry.type === "user") {
-      const content = entry.message.content;
-      if (typeof content === "string" || !Array.isArray(content)) {
-        stats.userCount++;
-      } else {
-        const hasUserText = content.some((b) => b.type === "text");
-        if (hasUserText) stats.userCount++;
+  for (const block of blocks) {
+    if (block.type === 'user') {
+      stats.userCount++;
+    } else if (block.type === 'tool') {
+      const { toolName, toolInput, agentId } = block;
+
+      if (agentId) {
+        subagentIds.push(agentId);
       }
 
-      if ("agentId" in entry && typeof entry.agentId === "string") {
-        subagentIds.push(entry.agentId);
-      }
-    }
-
-    if (entry.type === "assistant") {
-      const content = entry.message.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const block of content) {
-        if (block.type !== "tool_use" || !("name" in block)) continue;
-
-        const toolName = block.name;
-        const input = block.input;
-
-        switch (toolName) {
-          case "Edit": {
-            const filePath = input.file_path;
-            const oldString = input.old_string;
-            const newString = input.new_string;
-            if (typeof filePath === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              if (typeof oldString === "string") {
-                current.removed += countLines(oldString);
-              }
-              if (typeof newString === "string") {
-                current.added += countLines(newString);
-              }
-              fileStats.set(filePath, current);
+      switch (toolName) {
+        case 'Edit': {
+          const filePath = toolInput.file_path;
+          const oldString = toolInput.old_string;
+          const newString = toolInput.new_string;
+          if (typeof filePath === 'string') {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            if (typeof oldString === 'string') {
+              current.removed += countLines(oldString);
             }
-            break;
-          }
-          case "Write": {
-            const filePath = input.file_path;
-            const fileContent = input.content;
-            if (typeof filePath === "string" && typeof fileContent === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              current.added += countLines(fileContent);
-              fileStats.set(filePath, current);
+            if (typeof newString === 'string') {
+              current.added += countLines(newString);
             }
-            break;
+            fileStats.set(filePath, current);
           }
-          case "Bash":
-            stats.bashCount++;
-            break;
-          case "WebFetch":
-            stats.fetchCount++;
-            break;
-          case "WebSearch":
-            stats.searchCount++;
-            break;
-          case "Task":
-            break;
+          break;
         }
+        case 'Write': {
+          const filePath = toolInput.file_path;
+          const fileContent = toolInput.content;
+          if (typeof filePath === 'string' && typeof fileContent === 'string') {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            current.added += countLines(fileContent);
+            fileStats.set(filePath, current);
+          }
+          break;
+        }
+        case 'Bash':
+          stats.bashCount++;
+          break;
+        case 'WebFetch':
+          stats.fetchCount++;
+          break;
+        case 'WebSearch':
+          stats.searchCount++;
+          break;
       }
     }
   }
@@ -303,7 +445,7 @@ function computeSessionStats(
     const subSession = allSessions.get(agentId);
     if (!subSession) continue;
 
-    const subStats = computeSessionStats(subSession.entries, allSessions, visited, cwd);
+    const subStats = computeSessionStats(subSession.parsed.blocks, allSessions, visited, cwd);
     stats.linesAdded += subStats.linesAdded;
     stats.linesRemoved += subStats.linesRemoved;
     stats.bashCount += subStats.bashCount;
@@ -325,7 +467,7 @@ function countLines(s: string): number {
   if (!s) return 0;
   let count = 1;
   for (const c of s) {
-    if (c === "\n") count++;
+    if (c === '\n') count++;
   }
   return count;
 }
@@ -340,17 +482,17 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
   if (fileStats.size === 0) return [];
 
   const root: PathNode = { children: new Map(), added: 0, removed: 0 };
-  const cwdPrefix = cwd.replace(/^\//, "").replace(/\/$/, "") + "/";
-  const homePrefix = homedir().replace(/^\//, "") + "/";
+  const cwdPrefix = cwd.replace(/^\//, '').replace(/\/$/, '') + '/';
+  const homePrefix = homedir().replace(/^\//, '') + '/';
 
   for (const [filePath, stats] of fileStats) {
-    let normalizedPath = filePath.replace(/^\//, "");
+    let normalizedPath = filePath.replace(/^\//, '');
     if (normalizedPath.startsWith(cwdPrefix)) {
       normalizedPath = normalizedPath.slice(cwdPrefix.length);
     } else if (normalizedPath.startsWith(homePrefix)) {
-      normalizedPath = "~/" + normalizedPath.slice(homePrefix.length);
+      normalizedPath = '~/' + normalizedPath.slice(homePrefix.length);
     }
-    const parts = normalizedPath.split("/");
+    const parts = normalizedPath.split('/');
     let node = root;
 
     for (const part of parts) {
@@ -418,7 +560,7 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
   return results.slice(0, 3);
 }
 
-const META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
+const META_XML_TAGS = ['<command-name>', '<local-command-', '<system-reminder>'];
 
 function isMetaXml(text: string): boolean {
   const trimmed = text.trim();
@@ -427,7 +569,7 @@ function isMetaXml(text: string): boolean {
 
 function isGarbageSummary(summary: string): boolean {
   const trimmed = summary.trim();
-  return isMetaXml(trimmed) || trimmed.startsWith("Caveat:");
+  return isMetaXml(trimmed) || trimmed.startsWith('Caveat:');
 }
 
 function findSummary(entries: Array<KnownEntry>): string | undefined {
@@ -435,10 +577,10 @@ function findSummary(entries: Array<KnownEntry>): string | undefined {
   const summaries: Array<{ summary: string; leafUuid?: string }> = [];
 
   for (const entry of entries) {
-    if ("uuid" in entry && typeof entry.uuid === "string") {
+    if ('uuid' in entry && typeof entry.uuid === 'string') {
       uuids.add(entry.uuid);
     }
-    if (entry.type === "summary") {
+    if (entry.type === 'summary') {
       summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
     }
   }
@@ -455,18 +597,18 @@ function findSummary(entries: Array<KnownEntry>): string | undefined {
 
 function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
   for (const entry of entries) {
-    if (entry.type !== "user") continue;
-    if ("isMeta" in entry && entry.isMeta === true) continue;
+    if (entry.type !== 'user') continue;
+    if ('isMeta' in entry && entry.isMeta === true) continue;
 
     const content = entry.message.content;
     if (!content) continue;
 
     let text: string | undefined;
-    if (typeof content === "string") {
+    if (typeof content === 'string') {
       text = content;
     } else if (Array.isArray(content)) {
       for (const block of content) {
-        if (block.type === "text" && "text" in block && typeof block.text === "string") {
+        if (block.type === 'text' && 'text' in block && typeof block.text === 'string') {
           text = block.text;
           break;
         }
@@ -477,7 +619,7 @@ function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
       const trimmed = text.trim();
       if (isMetaXml(trimmed)) continue;
 
-      const firstLine = trimmed.split("\n")[0].trim();
+      const firstLine = trimmed.split('\n')[0].trim();
       if (firstLine) {
         return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
       }
@@ -497,33 +639,33 @@ function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
   const pendingCommits = new Map<string, string>();
 
   for (const entry of entries) {
-    if (entry.type === "assistant") {
+    if (entry.type === 'assistant') {
       const content = entry.message.content;
       if (!Array.isArray(content)) continue;
 
       for (const block of content) {
-        if (block.type === "tool_use" && "name" in block && block.name === "Bash") {
+        if (block.type === 'tool_use' && 'name' in block && block.name === 'Bash') {
           const input = block.input;
           const command = input.command;
-          if (typeof command === "string" && command.includes("git commit")) {
+          if (typeof command === 'string' && command.includes('git commit')) {
             const message = extractCommitMessage(command);
-            if (message && "id" in block && typeof block.id === "string") {
+            if (message && 'id' in block && typeof block.id === 'string') {
               pendingCommits.set(block.id, message);
             }
           }
         }
       }
-    } else if (entry.type === "user") {
+    } else if (entry.type === 'user') {
       const content = entry.message.content;
       if (!Array.isArray(content)) continue;
 
       for (const block of content) {
-        if (block.type === "tool_result" && "tool_use_id" in block) {
+        if (block.type === 'tool_result' && 'tool_use_id' in block) {
           const toolUseId = block.tool_use_id;
           const message = pendingCommits.get(toolUseId);
           if (message) {
             const resultContent = getToolResultText(block.content as string | Array<ContentBlock> | undefined);
-            const success = resultContent.includes("[") && !resultContent.includes("error");
+            const success = resultContent.includes('[') && !resultContent.includes('error');
             const hash = extractCommitHash(resultContent);
             commits.push({ hash, message, success });
             pendingCommits.delete(toolUseId);
@@ -550,7 +692,7 @@ function extractCommitMessage(command: string): string | undefined {
   // Heredoc: -m "$(cat <<'EOF'\nmessage\nEOF\n)"
   const heredocMatch = command.match(/<<['"]?EOF['"]?\s*\n([\s\S]*?)\n\s*EOF/);
   if (heredocMatch) {
-    const firstLine = heredocMatch[1].trim().split("\n")[0].trim();
+    const firstLine = heredocMatch[1].trim().split('\n')[0].trim();
     if (firstLine) return firstLine;
   }
 
@@ -568,14 +710,14 @@ function extractCommitMessage(command: string): string | undefined {
 }
 
 function getToolResultText(content: string | Array<ContentBlock> | undefined): string {
-  if (!content) return "";
-  if (typeof content === "string") return content;
+  if (!content) return '';
+  if (typeof content === 'string') return content;
 
   const parts: Array<string> = [];
   for (const block of content) {
-    if (block.type === "text" && "text" in block) {
+    if (block.type === 'text' && 'text' in block) {
       parts.push(block.text);
     }
   }
-  return parts.join("\n");
+  return parts.join('\n');
 }

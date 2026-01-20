@@ -1,16 +1,3 @@
-/**
- * Field filtering for read and grep commands.
- *
- * Field hierarchy:
- *   user, assistant, thinking, system, summary (entry types)
- *   tool (all tools)
- *   tool:<name> (specific tool, e.g., tool:Bash)
- *   tool:<name>:input (tool input parameters)
- *   tool:<name>:result (tool output/result)
- *
- * More specific selectors override less specific ones.
- */
-
 export function parseFieldList(input: string): Array<string> {
   return input
     .split(',')
@@ -42,23 +29,9 @@ interface FieldRule {
   specificity: number;
 }
 
-export const READ_DEFAULT_SHOWN = new Set([
-  'user',
-  'assistant',
-  'thinking',
-  'tool',
-  'system',
-  'summary',
-]);
+export const READ_DEFAULT_SHOWN = new Set(['user', 'assistant', 'thinking', 'tool', 'system', 'summary']);
 
-export const GREP_DEFAULT_SEARCH = new Set([
-  'user',
-  'assistant',
-  'thinking',
-  'tool:input',
-  'system',
-  'summary',
-]);
+export const SEARCH_DEFAULT_FIELDS = new Set(['user', 'assistant', 'thinking', 'tool:input', 'system', 'summary']);
 
 export class ReadFieldFilter {
   private rules: Array<FieldRule>;
@@ -102,12 +75,12 @@ export class ReadFieldFilter {
   }
 }
 
-export class GrepFieldFilter {
+export class SearchFieldFilter {
   private searchFields: Set<string>;
 
   constructor(searchIn: Array<string> | null) {
     if (searchIn === null || searchIn.length === 0) {
-      this.searchFields = new Set(GREP_DEFAULT_SEARCH);
+      this.searchFields = new Set(SEARCH_DEFAULT_FIELDS);
     } else {
       this.searchFields = new Set(searchIn);
     }

@@ -1,0 +1,6 @@
+{
+  "name": "llms-fetch-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for fetching documentation with llms.txt support",
+  "repository": "https://github.com/Crazytieguy/llms-fetch-mcp"
+}

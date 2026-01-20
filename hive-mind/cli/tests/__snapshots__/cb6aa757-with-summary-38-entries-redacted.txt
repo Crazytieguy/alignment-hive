@@ -41,7 +41,7 @@
 
   ## My Pick
 
-  **amber** — it's short, memorable, has the preservation metaphor +38words
+  **amber** — it's short, memorable, has the preservation metaphor...38words
 5|01:34|user|parent=start|"Naming is next! What do you think we should name the memory system and it's plugin?"
 6|01:34|thinking|39words
 7|01:34|assistant|"Let me read the memory system plan to understand the context better."
@@ -75,7 +75,7 @@
   - Simple two-word compound
   - Action implicit: you're taking notes from your sessions
 
-  The system could still be described as "the memory system" or "shared field notes" in docs. +13words
+  The system could still be described as "the memory system" or "shared field notes" in docs....13words
 11|01:37|user|"I think I like hive-memory better, though what if we just went with \"hive\" or maybe \"hive-mind\" (is that too on-the-nose?), or something more direct? A detail I've noticed is that when calling slash commands / managing the plugin you generally only see and use the plugin name, not the marketplace name"
 12|01:38|thinking|329words
 13|01:38|assistant
@@ -211,7 +211,7 @@
       - ~~Session 1 - Privacy & Storage Architecture~~ Done (Stytch + Convex + R2)
       - ~~Session 2 - Hook Behavior & User Prompting~~ Done (Stop + SessionStart, project-scoped plugin)
   -   - Next: Session 3 - Plugin Naming
-  +   - ~~Session 3 +98words
+  +   - ~~Session 3...98words
 53|01:51|thinking|16words
 54|01:51|tool|Bash|description="Commit hive-mind rename"
 [command]

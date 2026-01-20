@@ -1,13 +1,11 @@
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { getHiveMindSessionsDir, parseJsonl } from "../lib/extraction";
-import { ReadFieldFilter, parseFieldList } from "../lib/field-filter";
-import { collectToolResults, formatEntry, formatSession, getLogicalEntries } from "../lib/format";
-import { errors, usage } from "../lib/messages";
-import { printError } from "../lib/output";
-import { formatRangeEntries } from "../lib/range-format";
-import { parseKnownEntry } from "../lib/schemas";
-import type { KnownEntry } from "../lib/schemas";
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
+import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
+import { formatBlocks, formatSession } from '../lib/format';
+import { errors, usage } from '../lib/messages';
+import { printError } from '../lib/output';
+import { parseSession } from '../lib/parse';
 
 function printUsage(): void {
   console.log(usage.read());
@@ -16,7 +14,7 @@ function printUsage(): void {
 export async function read(): Promise<number> {
   const args = process.argv.slice(3);
 
-  if (args.includes("--help") || args.includes("-h")) {
+  if (args.includes('--help') || args.includes('-h')) {
     printUsage();
     return 0;
   }
@@ -41,15 +39,10 @@ export async function read(): Promise<number> {
     return argList[idx + 1] ?? null;
   }
 
-  const fullFlag = args.includes("--full");
-  const targetWords = parseNumericFlag(args, "--target");
-  const skipWords = parseNumericFlag(args, "--skip");
-  const contextC = parseNumericFlag(args, "-C");
-  const contextB = parseNumericFlag(args, "-B");
-  const contextA = parseNumericFlag(args, "-A");
-  const showFields = parseStringFlag(args, "--show");
-  const hideFields = parseStringFlag(args, "--hide");
-  const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
+  const targetWords = parseNumericFlag(args, '--target');
+  const skipWords = parseNumericFlag(args, '--skip');
+  const showFields = parseStringFlag(args, '--show');
+  const hideFields = parseStringFlag(args, '--hide');
 
   let fieldFilter: ReadFieldFilter | undefined;
   if (showFields || hideFields) {
@@ -58,10 +51,9 @@ export async function read(): Promise<number> {
     fieldFilter = new ReadFieldFilter(show, hide);
   }
 
-  const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
-  const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flagsWithValues = new Set(['--skip', '--target', '--show', '--hide']);
   const filteredArgs = args.filter((a, i) => {
-    if (flags.has(a)) return false;
+    if (flagsWithValues.has(a)) return false;
     for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
       if (flagIdx !== -1 && i === flagIdx + 1) return false;
@@ -82,9 +74,9 @@ export async function read(): Promise<number> {
     return 1;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
   const matches = jsonlFiles.filter((f) => {
-    const name = f.replace(".jsonl", "");
+    const name = f.replace('.jsonl', '');
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
 
@@ -96,7 +88,7 @@ export async function read(): Promise<number> {
   if (matches.length > 1) {
     printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches.slice(0, 5)) {
-      console.log(`  ${m.replace(".jsonl", "")}`);
+      console.log(`  ${m.replace('.jsonl', '')}`);
     }
     if (matches.length > 5) {
       console.log(errors.andMore(matches.length - 5));
@@ -128,83 +120,67 @@ export async function read(): Promise<number> {
     }
   }
 
-  if (hasContextFlags && entryNumber === null) {
-    printError(errors.contextRequiresEntry);
+  const sessionResult = await readExtractedSession(sessionFile);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+    } else {
+      printError(errors.emptySession);
+    }
     return 1;
   }
-
-  const content = await readFile(sessionFile, "utf-8");
-  const lines = Array.from(parseJsonl(content));
-  const rawEntries = lines.slice(1);
-
-  if (rawEntries.length === 0) {
+  if (sessionResult.entries.length === 0) {
     printError(errors.emptySession);
     return 1;
   }
 
-  const allEntries: Array<KnownEntry> = [];
-  for (const raw of rawEntries) {
-    const result = parseKnownEntry(raw);
-    if (result.data) {
-      allEntries.push(result.data);
-    }
+  const { meta, entries } = sessionResult;
+
+  if (entryNumber === null && rangeStart === null) {
+    const output = formatSession(entries, {
+      redact: true,
+      targetWords: targetWords ?? undefined,
+      skipWords: skipWords ?? undefined,
+      fieldFilter,
+    });
+    console.log(output);
+    return 0;
   }
 
-  const logicalEntries = getLogicalEntries(allEntries);
-  const toolResults = collectToolResults(allEntries);
+  const parsed = parseSession(meta, entries);
+  const { blocks } = parsed;
+  const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
+  const maxLine = lineNumbers.at(-1) ?? 0;
 
   if (rangeStart !== null && rangeEnd !== null) {
-    const rangeEntries = logicalEntries.filter(
-      (e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd
-    );
+    const rangeBlocks = blocks.filter((b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd);
 
-    if (rangeEntries.length === 0) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
+    if (rangeBlocks.length === 0) {
       printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
       return 1;
     }
 
-    const output = formatRangeEntries(rangeEntries, {
-      redact: !fullFlag,
+    const output = formatBlocks(rangeBlocks, {
+      redact: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
       fieldFilter,
-      allEntries,
+      cwd,
     });
     console.log(output);
-  } else if (entryNumber === null) {
-    const output = formatSession(allEntries, {
-      redact: !fullFlag,
-      targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined,
-      fieldFilter,
-    });
-    console.log(output);
-  } else {
-    const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
-    if (targetIdx === -1) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
+  } else if (entryNumber !== null) {
+    const entryBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
+    if (entryBlocks.length === 0) {
       printError(errors.entryNotFound(entryNumber, maxLine));
       return 1;
     }
 
-    const before = contextB ?? contextC ?? 0;
-    const after = contextA ?? contextC ?? 0;
-    const startIdx = Math.max(0, targetIdx - before);
-    const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
-
-    const output: Array<string> = [];
-    for (let i = startIdx; i <= endIdx; i++) {
-      const { lineNumber, entry } = logicalEntries[i];
-      const formatted = formatEntry(entry, {
-        lineNumber,
-        redact: i !== targetIdx,
-        toolResults,
-        fieldFilter,
-      });
-      if (formatted) output.push(formatted);
-    }
-    console.log(output.join("\n"));
+    const output = formatBlocks(entryBlocks, {
+      redact: false,
+      fieldFilter,
+      cwd,
+    });
+    console.log(output);
   }
 
   return 0;

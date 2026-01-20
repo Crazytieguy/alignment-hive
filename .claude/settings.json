@@ -6,35 +6,25 @@
       "Skill(plugin-dev:create-plugin)",
       "Skill(plugin-dev:hook-development)",
       "Skill(plugin-dev:agent-development)",
+      "Skill(plugin-dev:command-development)",
       "WebSearch",
       "WebFetch(domain:workos.com)",
       "WebFetch(domain:docs.convex.dev)",
       "WebFetch(domain:zod.dev)",
       "Bash(bun install:*)",
-      "Bash(bun run build:*)",
-      "Bash(bun run typecheck:*)",
+      "Bash(bun run --filter:*)",
       "Bash(bun test:*)",
-      "Bash(UPDATE_SNAPSHOTS=1 bun test:*)",
-      "Bash(bun run lint:*)",
-      "Bash(bun run lint:fix:*)",
+      "Bash(UPDATE_SNAPSHOTS=1 bun run --filter:*)",
       "Bash(bun run dev)",
-      "Bash(bun run cli:build)",
-      "Bash(bun hive-mind/cli/cli.ts:*)"
-    ]
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".claude/hooks/session-start.sh"
-          }
-        ]
-      }
+      "Bash(bun hive-mind/cli/cli.ts:*)",
+      "Bash(hive-mind read:*)",
+      "Bash(hive-mind search:*)",
+      "mcp__convex"
     ]
   },
   "enabledPlugins": {
-    "plugin-dev@claude-plugins-official": true
+    "plugin-dev@claude-plugins-official": true,
+    "vercel@claude-plugins-official": true,
+    "playwright@claude-plugins-official": false
   }
 }

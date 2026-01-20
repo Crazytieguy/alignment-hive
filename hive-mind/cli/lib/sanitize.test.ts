@@ -1,88 +1,87 @@
-import { describe, expect, test } from "bun:test";
-import { detectSecrets, sanitizeDeep, sanitizeString } from "./sanitize";
+import { describe, expect, test } from 'bun:test';
+import { detectSecrets, sanitizeDeep, sanitizeString } from './sanitize';
 
 // Use high-entropy test tokens (repeated characters fail entropy checks)
 // GitHub PAT tokens are ghp_ + 36 alphanumeric chars
-const TEST_GITHUB_TOKEN = "ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs";
+const TEST_GITHUB_TOKEN = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
 
-describe("detectSecrets", () => {
-  test("detects GitHub token", () => {
+describe('detectSecrets', () => {
+  test('detects GitHub token', () => {
     // GitHub personal access tokens (classic) start with ghp_
     // When standalone, matches github-pat; with context, may match generic-api-key
     const secrets = detectSecrets(TEST_GITHUB_TOKEN);
     expect(secrets.length).toBeGreaterThan(0);
-    expect(secrets[0].ruleId).toBe("github-pat");
+    expect(secrets[0].ruleId).toBe('github-pat');
   });
 
-  test("detects Slack webhook", async () => {
+  test('detects Slack webhook', async () => {
     // Slack webhooks are reliably detected
-    const content =
-      "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX";
+    const content = 'https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX';
     const secrets = await detectSecrets(content);
     expect(secrets.length).toBeGreaterThan(0);
   });
 
-  test("returns empty for clean content", async () => {
-    const content = "This is just normal text without any secrets.";
+  test('returns empty for clean content', async () => {
+    const content = 'This is just normal text without any secrets.';
     const secrets = await detectSecrets(content);
     expect(secrets).toHaveLength(0);
   });
 });
 
-describe("sanitizeString", () => {
-  test("replaces GitHub token with redaction marker", () => {
+describe('sanitizeString', () => {
+  test('replaces GitHub token with redaction marker', () => {
     const content = `token = ${TEST_GITHUB_TOKEN}`;
     const sanitized = sanitizeString(content);
-    expect(sanitized).not.toContain("ghp_");
-    expect(sanitized).toContain("[REDACTED:");
+    expect(sanitized).not.toContain('ghp_');
+    expect(sanitized).toContain('[REDACTED:');
   });
 
-  test("preserves non-secret content", () => {
-    const content = "Hello, this is a normal message.";
+  test('preserves non-secret content', () => {
+    const content = 'Hello, this is a normal message.';
     const sanitized = sanitizeString(content);
     expect(sanitized).toBe(content);
   });
 
-  test("handles token at end of string", () => {
+  test('handles token at end of string', () => {
     const content = `my token is ${TEST_GITHUB_TOKEN}`;
     const sanitized = sanitizeString(content);
-    expect(sanitized).not.toContain("ghp_");
-    expect(sanitized).toContain("[REDACTED:");
-    expect(sanitized).toContain("my token is");
+    expect(sanitized).not.toContain('ghp_');
+    expect(sanitized).toContain('[REDACTED:');
+    expect(sanitized).toContain('my token is');
   });
 });
 
-const TEST_GITHUB_TOKEN_2 = "ghp_9z8Y7x6W5v4U3t2S1r0Q9p8O7n6M5l4K3jTu";
+const TEST_GITHUB_TOKEN_2 = 'ghp_9z8Y7x6W5v4U3t2S1r0Q9p8O7n6M5l4K3jTu';
 
-describe("sanitizeDeep", () => {
-  test("sanitizes strings in nested objects", async () => {
+describe('sanitizeDeep', () => {
+  test('sanitizes strings in nested objects', async () => {
     const input = {
       level1: {
         level2: {
           secret: TEST_GITHUB_TOKEN,
-          normal: "hello",
+          normal: 'hello',
         },
       },
     };
     const sanitized = await sanitizeDeep(input);
-    expect(sanitized.level1.level2.secret).not.toContain("ghp_");
-    expect(sanitized.level1.level2.secret).toContain("[REDACTED:");
-    expect(sanitized.level1.level2.normal).toBe("hello");
+    expect(sanitized.level1.level2.secret).not.toContain('ghp_');
+    expect(sanitized.level1.level2.secret).toContain('[REDACTED:');
+    expect(sanitized.level1.level2.normal).toBe('hello');
   });
 
-  test("sanitizes strings in arrays", async () => {
-    const input = ["normal", TEST_GITHUB_TOKEN, "also normal"];
+  test('sanitizes strings in arrays', async () => {
+    const input = ['normal', TEST_GITHUB_TOKEN, 'also normal'];
     const sanitized = await sanitizeDeep(input);
-    expect(sanitized[0]).toBe("normal");
-    expect(sanitized[1]).toContain("[REDACTED:");
-    expect(sanitized[2]).toBe("also normal");
+    expect(sanitized[0]).toBe('normal');
+    expect(sanitized[1]).toContain('[REDACTED:');
+    expect(sanitized[2]).toBe('also normal');
   });
 
-  test("handles mixed nested structures", async () => {
+  test('handles mixed nested structures', async () => {
     const input = {
       users: [
-        { name: "Alice", token: TEST_GITHUB_TOKEN },
-        { name: "Bob", token: null },
+        { name: 'Alice', token: TEST_GITHUB_TOKEN },
+        { name: 'Bob', token: null },
       ],
       config: {
         apiKey: TEST_GITHUB_TOKEN_2,
@@ -92,27 +91,27 @@ describe("sanitizeDeep", () => {
     };
     const sanitized = await sanitizeDeep(input);
 
-    expect(sanitized.users[0].name).toBe("Alice");
-    expect(sanitized.users[0].token).toContain("[REDACTED:");
-    expect(sanitized.users[1].name).toBe("Bob");
+    expect(sanitized.users[0].name).toBe('Alice');
+    expect(sanitized.users[0].token).toContain('[REDACTED:');
+    expect(sanitized.users[1].name).toBe('Bob');
     expect(sanitized.users[1].token).toBe(null);
-    expect(sanitized.config.apiKey).toContain("[REDACTED:");
+    expect(sanitized.config.apiKey).toContain('[REDACTED:');
     expect(sanitized.config.enabled).toBe(true);
     expect(sanitized.config.count).toBe(42);
   });
 
-  test("preserves null and undefined", async () => {
+  test('preserves null and undefined', async () => {
     expect(await sanitizeDeep(null)).toBe(null);
     expect(await sanitizeDeep(undefined)).toBe(undefined);
   });
 
-  test("preserves numbers and booleans", async () => {
+  test('preserves numbers and booleans', async () => {
     expect(await sanitizeDeep(42)).toBe(42);
     expect(await sanitizeDeep(true)).toBe(true);
     expect(await sanitizeDeep(false)).toBe(false);
   });
 
-  test("handles deeply nested structures within depth limit", async () => {
+  test('handles deeply nested structures within depth limit', async () => {
     // Create a structure 50 levels deep (well under the 100 limit)
     let nested: Record<string, unknown> = {
       value: TEST_GITHUB_TOKEN,
@@ -129,39 +128,37 @@ describe("sanitizeDeep", () => {
       current = current.child as Record<string, unknown>;
     }
 
-    expect(current.value).toContain("[REDACTED:");
+    expect(current.value).toContain('[REDACTED:');
   });
 });
 
-describe("sanitizeString edge cases", () => {
-  test("handles multiple secrets in one string", async () => {
+describe('sanitizeString edge cases', () => {
+  test('handles multiple secrets in one string', async () => {
     // Use Slack webhooks which are reliably detected
-    const webhook1 =
-      "https://hooks.slack.com/services/T11111111/B11111111/AAAAAAAAAAAAAAAAAAAAAA11";
-    const webhook2 =
-      "https://hooks.slack.com/services/T22222222/B22222222/BBBBBBBBBBBBBBBBBBBBBB22";
+    const webhook1 = 'https://hooks.slack.com/services/T11111111/B11111111/AAAAAAAAAAAAAAAAAAAAAA11';
+    const webhook2 = 'https://hooks.slack.com/services/T22222222/B22222222/BBBBBBBBBBBBBBBBBBBBBB22';
     const content = `webhooks: ${webhook1} and ${webhook2}`;
     const sanitized = await sanitizeString(content);
 
-    expect(sanitized).not.toContain("hooks.slack.com");
+    expect(sanitized).not.toContain('hooks.slack.com');
     expect(sanitized.match(/\[REDACTED:/g)?.length).toBe(2);
   });
 
-  test("handles empty string", async () => {
-    const sanitized = await sanitizeString("");
-    expect(sanitized).toBe("");
+  test('handles empty string', async () => {
+    const sanitized = await sanitizeString('');
+    expect(sanitized).toBe('');
   });
 });
 
-describe("SAFE_KEYS optimization", () => {
-  test("skips sanitization for known-safe string fields", async () => {
+describe('SAFE_KEYS optimization', () => {
+  test('skips sanitization for known-safe string fields', async () => {
     // These fields are in SAFE_KEYS and should not be sanitized even if they
     // look like they might contain secrets
     const input = {
-      uuid: "ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs", // Would match github-pat
-      type: "user",
-      timestamp: "2025-01-01T00:00:00Z",
-      sessionId: "sess-12345",
+      uuid: 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs', // Would match github-pat
+      type: 'user',
+      timestamp: '2025-01-01T00:00:00Z',
+      sessionId: 'sess-12345',
       // This field is NOT in SAFE_KEYS and should be sanitized
       content: TEST_GITHUB_TOKEN,
     };
@@ -175,11 +172,11 @@ describe("SAFE_KEYS optimization", () => {
     expect(sanitized.sessionId).toBe(input.sessionId);
 
     // Non-safe keys should be sanitized
-    expect(sanitized.content).toContain("[REDACTED:");
-    expect(sanitized.content).not.toContain("ghp_");
+    expect(sanitized.content).toContain('[REDACTED:');
+    expect(sanitized.content).not.toContain('ghp_');
   });
 
-  test("sanitizes non-string safe key values", async () => {
+  test('sanitizes non-string safe key values', async () => {
     // If a safe key has a non-string value (like an object), it should still
     // be recursively processed
     const input = {
@@ -193,6 +190,51 @@ describe("SAFE_KEYS optimization", () => {
     };
 
     // The nested string should be sanitized because type's value is an object
-    expect(sanitized.type.nested).toContain("[REDACTED:");
+    expect(sanitized.type.nested).toContain('[REDACTED:');
+  });
+});
+
+describe('high-entropy safety net', () => {
+  test('catches high-entropy secrets without known patterns', () => {
+    // This is a WorkOS-style key that doesn't match any specific pattern
+    const unknownSecret = 'sk_a2V5XzAxS0VXSDRKNVZLODU5M0JTUEQ5NlBOMlFaLGVDQ1dtZkF1d0NhT0xlTHhKRTBsOTROQ3k';
+    const secrets = detectSecrets(unknownSecret);
+    expect(secrets.length).toBeGreaterThan(0);
+    expect(secrets[0].ruleId).toBe('high-entropy-secret');
+  });
+
+  test('excludes hex-only strings (hashes)', () => {
+    const sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const sha1 = 'da39a3ee5e6b4b0d3255bfef95601890afd80709';
+    const gitCommit = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+
+    expect(detectSecrets(sha256)).toHaveLength(0);
+    expect(detectSecrets(sha1)).toHaveLength(0);
+    expect(detectSecrets(gitCommit)).toHaveLength(0);
+  });
+
+  test('excludes short strings', () => {
+    // 19 chars - below threshold
+    const shortString = 'aBcDeFgHiJkLmNoPqRs';
+    expect(detectSecrets(shortString)).toHaveLength(0);
+  });
+
+  test('excludes low-entropy strings', () => {
+    // Long but repetitive/low entropy
+    const lowEntropy = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    expect(detectSecrets(lowEntropy)).toHaveLength(0);
+  });
+
+  test('excludes file paths', () => {
+    const paths = [
+      'hive-mind/cli/lib/format.ts',
+      '~/.claude/plans/squishy-booping-beacon.md',
+      'plugins/hive-mind/skills/retrieval/SKILL.md',
+      'web/src/routes/_authenticated/welcome.tsx',
+      '/Users/yoav/projects/alignment-hive/',
+    ];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
   });
 });

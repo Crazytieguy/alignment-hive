@@ -11,46 +11,44 @@ var __export = (target, all) => {
     });
 };
 
-// cli/commands/grep.ts
-import { readdir as readdir2 } from "fs/promises";
-import { join as join3 } from "path";
+// cli/commands/exclude.ts
+import { readFile as readFile3, readdir as readdir3, writeFile as writeFile3 } from "fs/promises";
+import { join as join5 } from "path";
 
 // cli/lib/extraction.ts
 import { createReadStream } from "fs";
-import { mkdir as mkdir2, readFile as readFile2, readdir, stat, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir3, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
-import { homedir as homedir2 } from "os";
-import { basename, dirname, join as join2 } from "path";
+import { basename as basename2, dirname, join as join3 } from "path";
 
 // cli/lib/config.ts
+import { execSync } from "child_process";
 import { randomUUID } from "crypto";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
-var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CYZ10VVZPJVRQBJESK1A";
+import { basename, join } from "path";
+var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
 var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
 var AUTH_FILE = join(AUTH_DIR, "auth.json");
-async function getCheckoutId(hiveMindDir) {
+async function ensureHiveMindDir(hiveMindDir) {
+  await mkdir(hiveMindDir, { recursive: true });
+  const gitignorePath = join(hiveMindDir, ".gitignore");
+  try {
+    await access(gitignorePath);
+  } catch {
+    await writeFile(gitignorePath, `*
+`);
+  }
+}
+async function getOrCreateCheckoutId(hiveMindDir) {
   const checkoutIdFile = join(hiveMindDir, "checkout-id");
   try {
     const id = await readFile(checkoutIdFile, "utf-8");
     return id.trim();
   } catch {
     const id = randomUUID();
-    await mkdir(hiveMindDir, { recursive: true });
+    await ensureHiveMindDir(hiveMindDir);
     await writeFile(checkoutIdFile, id);
-    const gitignorePath = join(hiveMindDir, ".gitignore");
-    try {
-      const existing = await readFile(gitignorePath, "utf-8");
-      if (!existing.includes("checkout-id")) {
-        await writeFile(gitignorePath, `${existing.trimEnd()}
-checkout-id
-`);
-      }
-    } catch {
-      await writeFile(gitignorePath, `checkout-id
-`);
-    }
     return id;
   }
 }
@@ -70,229 +68,1541 @@ function getShellConfig() {
   }
   return { file: "~/.profile", sourceCmd: "source ~/.profile" };
 }
+function getCanonicalProjectName(cwd) {
+  try {
+    const remoteUrl = execSync("git remote get-url origin", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    }).trim();
+    const canonical = remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
+    return canonical;
+  } catch {
+    return basename(cwd);
+  }
+}
+async function isWorktree(cwd) {
+  try {
+    const gitPath = join(cwd, ".git");
+    const gitStat = await stat(gitPath);
+    return gitStat.isFile();
+  } catch {
+    return false;
+  }
+}
+function getMainWorktreePath(cwd) {
+  try {
+    const output = execSync("git worktree list --porcelain", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const match = output.match(/^worktree (.+)$/m);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+function getTranscriptsDirsFile(hiveMindDir) {
+  return join(hiveMindDir, "transcripts-dirs");
+}
+async function loadTranscriptsDirs(hiveMindDir) {
+  try {
+    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), "utf-8");
+    return content.split(`
+`).map((line) => line.trim()).filter((line) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+async function addTranscriptsDir(hiveMindDir, dir) {
+  await ensureHiveMindDir(hiveMindDir);
+  const existing = await loadTranscriptsDirs(hiveMindDir);
+  if (!existing.includes(dir)) {
+    existing.push(dir);
+    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join(`
+`) + `
+`, "utf-8");
+  }
+}
+
+// cli/lib/messages.ts
+function getCliCommand(hasAlias) {
+  if (hasAlias) {
+    return "hive-mind";
+  }
+  return `bun ${process.argv[1]}`;
+}
+var hook = {
+  notLoggedIn: () => {
+    return "To connect: run /hive-mind:setup";
+  },
+  loggedIn: (displayName) => {
+    return `Connected as ${displayName}`;
+  },
+  extracted: (count) => {
+    return `Extracted ${count} session${count === 1 ? "" : "s"}`;
+  },
+  schemaErrors: (errorCount, sessionCount, errors) => {
+    const unique = [...new Set(errors)];
+    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
+  },
+  extractionFailed: (error) => {
+    return `Extraction failed: ${error}`;
+  },
+  bunNotInstalled: () => {
+    return "To set up hive-mind: run /hive-mind:setup";
+  },
+  pendingSessions: (count, earliestUploadAt, userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    if (earliestUploadAt) {
+      const now = Date.now();
+      const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - now) / (1000 * 60)));
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+      if (count === 1) {
+        return `1 session uploads in ${timeStr}. To review: ${cli} index --pending`;
+      }
+      return `${count} sessions pending, first uploads in ${timeStr}. To review: ${cli} index --pending`;
+    }
+    return `${count} session${count === 1 ? "" : "s"} ready to upload. To review: ${cli} index --pending`;
+  },
+  uploadingSessions: (count, userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    return `Uploading ${count} session${count === 1 ? "" : "s"} in 10 min. To review: ${cli} index --pending`;
+  },
+  aliasUpdated: (sourceCmd) => {
+    return `hive-mind alias updated. To activate: ${sourceCmd}`;
+  },
+  extractionsFailed: (count) => {
+    return `Failed to extract ${count} session${count === 1 ? "" : "s"}`;
+  },
+  sessionCheckFailed: () => {
+    return "Failed to check session upload status";
+  },
+  errorsOccurred: (count) => {
+    return `${count} error${count === 1 ? "" : "s"} occurred. Set HIVE_MIND_VERBOSE=1 for details.`;
+  }
+};
+var errors = {
+  schemaError: (path, error) => `Schema error in ${path}: ${error}`,
+  authSchemaError: (error) => `Auth data schema error: ${error}`,
+  refreshSchemaError: (error) => `Token refresh response schema error: ${error}`,
+  readTranscriptsDirFailed: (dir, error) => `Failed to read transcripts directory ${dir}: ${error}`,
+  statFailed: (path, error) => `Failed to stat ${path}: ${error}`,
+  parseSessionFailed: (sessionId, error) => `Failed to parse session ${sessionId}: ${error}`,
+  aliasUpdateFailed: (error) => `Failed to update alias: ${error}`,
+  eligibilityCheckFailed: (error) => `Failed to check session eligibility: ${error}`,
+  markUploadedFailed: (error) => `Failed to mark session uploaded: ${error}`,
+  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
+  noSessionsIn: (dir) => `No sessions in ${dir}`,
+  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
+  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
+  andMore: (count) => `  ... and ${count} more`,
+  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
+  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
+  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
+  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
+  invalidEntry: (value) => `Invalid entry number: "${value}"`,
+  invalidRange: (value) => `Invalid range: "${value}"`,
+  emptySession: "Session has no entries",
+  noPattern: "No pattern specified",
+  invalidRegex: (error) => `Invalid regex: ${error}`,
+  invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
+  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
+  unexpectedResponse: "Unexpected response from server",
+  bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash",
+  loginStatusYes: (displayName) => `logged in: yes (${displayName})`,
+  loginStatusNo: "logged in: no"
+};
+var usage = {
+  main: (commands) => {
+    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
+    for (const { name, description } of commands) {
+      lines.push(`  ${name.padEnd(15)} ${description}`);
+    }
+    return lines.join(`
+`);
+  },
+  read: () => {
+    return [
+      "Usage: read <session-id> [N | N-M] [options]",
+      "",
+      "Read session entries. Session ID supports prefix matching.",
+      "",
+      "Options:",
+      "  N             Entry number to read (full content)",
+      "  N-M           Entry range to read",
+      "  --target N    Target total words (default 2000)",
+      "  --skip N      Skip first N words per field (for pagination)",
+      "  --show FIELDS Show full content for fields (comma-separated)",
+      "  --hide FIELDS Redact fields to word counts (comma-separated)",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
+      "",
+      "Truncation:",
+      "  Text is adaptively truncated to fit within the target word count.",
+      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
+      "  Use --skip with the shown N value to continue reading.",
+      "",
+      "Examples:",
+      "  read 02ed                          # all entries (~2000 words)",
+      "  read 02ed --target 500             # tighter truncation",
+      "  read 02ed --skip 50                # skip first 50 words per field",
+      "  read 02ed 5                        # entry 5 (full content)",
+      "  read 02ed 10-20                    # entries 10 through 20",
+      "  read 02ed --show thinking          # show full thinking content",
+      "  read 02ed --show tool:Bash:result  # show Bash command results",
+      "  read 02ed --hide user              # redact user messages to word counts"
+    ].join(`
+`);
+  },
+  search: () => {
+    return [
+      "Usage: search <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
+      "                        [--after <time>] [--before <time>]",
+      "",
+      "Search sessions for a pattern (JavaScript regex).",
+      "Use -- to separate options from pattern if needed.",
+      "",
+      "Options:",
+      "  -i              Case insensitive search",
+      "  -c              Count matches per session only",
+      "  -l              List matching session IDs only",
+      "  -m N            Stop after N total matches",
+      "  -C N            Show N words of context around match (default: 10)",
+      "  -s <session>    Search only in specified session (prefix match)",
+      "  --in <fields>   Search only specified fields (comma-separated)",
+      "  --after <time>  Include only results after this time",
+      "  --before <time> Include only results before this time",
+      "",
+      "Time formats:",
+      "  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)",
+      "  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z",
+      "",
+      "Field specifiers:",
+      "  user, assistant, thinking, system, summary",
+      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
+      "",
+      "Default fields: user, assistant, thinking, tool:input, system, summary",
+      "",
+      "Examples:",
+      '  search "TODO"                    # find TODO in sessions',
+      '  search -i "error" -C 20          # case insensitive, 20 words context',
+      '  search -c "function"             # count matches per session',
+      '  search -l "#2597"                # list sessions mentioning issue',
+      '  search -s 02ed "bug"             # search only in session 02ed...',
+      '  search "error|warning|bug"       # find any of these terms (OR)',
+      '  search "TODO|FIXME|XXX"          # find code comments',
+      '  search --in tool:result "error"  # search only in tool results',
+      '  search --in user,assistant "fix" # search only user and assistant',
+      '  search --after 2d "error"        # errors in last 2 days',
+      '  search --after 2025-01-01 "fix"  # fixes since Jan 1'
+    ].join(`
+`);
+  },
+  index: () => {
+    return [
+      "Usage: index",
+      "",
+      "List extracted sessions with statistics and summaries.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Output columns:",
+      "  ID                    Session ID prefix",
+      "  DATETIME              Session modification time",
+      "  MSGS                  Total message count",
+      "  USER_MESSAGES         User message count",
+      "  BASH_CALLS            Bash commands executed",
+      "  WEB_FETCHES           Web fetches",
+      "  WEB_SEARCHES          Web searches",
+      "  LINES_ADDED           Lines added",
+      "  LINES_REMOVED         Lines removed",
+      "  FILES_TOUCHED         Files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY               Session summary or first prompt",
+      "  COMMITS               Git commits from the session"
+    ].join(`
+`);
+  },
+  indexFull: () => {
+    return [
+      "Usage: index [--escape-file-refs] [--pending]",
+      "",
+      "List all extracted sessions with statistics, summary, and commits.",
+      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
+      "Statistics include work from subagent sessions.",
+      "",
+      "Options:",
+      "  --escape-file-refs  Escape @ symbols to prevent file reference interpretation",
+      "  --pending           Show upload eligibility status for each session",
+      "",
+      "Output columns:",
+      "  ID                   Session ID prefix (first 16 chars)",
+      "  DATETIME             Session modification time",
+      "  MSGS                 Total message count",
+      "  USER_MESSAGES        User message count",
+      "  BASH_CALLS           Bash commands executed",
+      "  WEB_FETCHES          Web fetches",
+      "  WEB_SEARCHES         Web searches",
+      "  LINES_ADDED          Lines added",
+      "  LINES_REMOVED        Lines removed",
+      "  FILES_TOUCHED        Number of unique files modified",
+      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
+      "  SUMMARY              Session summary or first user prompt",
+      "  COMMITS              Git commit hashes from the session"
+    ].join(`
+`);
+  },
+  upload: () => {
+    return [
+      "Usage: upload <session-id>... [--delay N]",
+      "",
+      "Upload one or more sessions to the shared knowledge base.",
+      "Use `index --pending` to see upload eligibility status."
+    ].join(`
+`);
+  }
+};
+var setup = {
+  header: "Join the hive-mind shared knowledge base",
+  alreadyLoggedIn: "You're already connected.",
+  confirmRelogin: "Do you want to reconnect?",
+  refreshing: "Refreshing your session...",
+  refreshSuccess: "Session refreshed!",
+  starting: "Starting authentication...",
+  deviceAuth: (url, code) => {
+    return ["Open this URL in your browser:", "", `  ${url}`, "", "Confirm this code matches:", "", `  ${code}`].join(`
+`);
+  },
+  browserOpened: "Browser opened. Confirm the code and approve.",
+  openManually: "Open the URL manually, then confirm the code.",
+  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
+  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
+  success: "You're connected!",
+  welcome: (name, email) => name ? `Welcome, ${name} (${email})!` : `Logged in as: ${email}`,
+  consentInfo: (userHasAlias) => {
+    const cli = getCliCommand(userHasAlias);
+    return `Your sessions will contribute to the shared knowledge base.
+You'll have 24 hours to review sessions before auto-submission.
+Run \`${cli} exclude\` anytime to opt out.`;
+  },
+  consentConfirm: "Continue?",
+  consentDeclined: "Setup cancelled. Run setup again if you change your mind.",
+  timeout: "Authentication timed out. Please try again.",
+  startFailed: (error) => `Couldn't start authentication: ${error}`,
+  authFailed: (error) => `Authentication failed: ${error}`,
+  unexpectedAuthResponse: "Unexpected response from authentication server",
+  aliasPrompt: "Set up a command to run hive-mind more easily?",
+  aliasExplain: "This adds `alias hive-mind=...` to your shell config.",
+  aliasConfirm: "Set up hive-mind command?",
+  aliasSuccess: "Command added!",
+  aliasActivate: (sourceCmd) => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
+  aliasFailed: "Couldn't add command automatically.",
+  alreadySetUp: "hive-mind command already set up"
+};
+var indexCmd = {
+  noSessionsDir: "No sessions found. Run 'extract' first.",
+  noSessionsIn: (dir) => `No sessions found in ${dir}`,
+  uploadStatus: "Upload eligibility status:",
+  noExtractedSessions: "No extracted sessions found.",
+  total: (count, summary) => `Total: ${count} sessions (${summary})`,
+  runUpload: "Run 'hive-mind upload' to upload ready sessions.",
+  excludeSession: "To exclude a session: hive-mind exclude <session-id>",
+  excludeAll: "To exclude all sessions: hive-mind exclude --all"
+};
+var excludeCmd = {
+  noSessionsDir: "No sessions directory found",
+  noSessions: "No sessions found.",
+  allAlreadyExcluded: "All sessions are already excluded.",
+  foundNonExcluded: (count) => `Found ${count} session(s) not yet excluded.`,
+  confirmExcludeAll: "Exclude all sessions from upload?",
+  cancelled: "Cancelled.",
+  excludedCount: (count) => `Excluded ${count} session(s)`,
+  failedCount: (count) => `Failed to exclude ${count} session(s)`,
+  sessionNotFound: (id) => `Session '${id}' not found`,
+  ambiguousSession: (id, count) => `Ambiguous session ID '${id}' matches ${count} sessions`,
+  matches: "Matches:",
+  couldNotRead: (id) => `Could not read session '${id}'`,
+  alreadyExcluded: (id) => `Session ${id} is already excluded`,
+  excluded: (id) => `Excluded session ${id}`,
+  failedToExclude: (id) => `Failed to exclude session ${id}`,
+  cannotExcludeAgent: "Agent sessions cannot be excluded directly. Exclude the parent session instead.",
+  usage: "Usage: hive-mind exclude <session-id> or hive-mind exclude --all",
+  excludedLine: (id) => `  \u2717 ${id} excluded`,
+  failedLine: (id) => `  ! ${id} failed`
+};
+var uploadCmd = {
+  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
+  waitingDelay: (seconds) => `Waiting ${seconds} seconds before upload...`,
+  sessionNotFound: (id) => `Session '${id}' not found`,
+  ambiguousSession: (id, count) => `Multiple sessions match '${id}' (${count} matches):`,
+  sessionExcluded: (id) => `Session ${id} was excluded, skipping`,
+  uploading: (id) => `Uploading ${id}...`,
+  uploaded: (id) => `Uploaded ${id}`,
+  uploadedWithAgents: (id, agentCount) => `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? "" : "s"})`,
+  failedToUpload: (id, error) => `Failed to upload ${id}: ${error}`,
+  checking: "Checking for sessions ready to upload...",
+  noExtractedSessions: "No extracted sessions found.",
+  sessionsHeader: "Sessions:",
+  noSessionsReady: "No sessions ready for upload.",
+  pendingCount: (count) => `${count} session(s) still in review period.`,
+  readyCount: (count) => `${count} session(s) ready for upload.`,
+  confirmUpload: "Upload these sessions?",
+  cancelled: "Cancelled.",
+  uploadedCount: (count) => `Uploaded ${count} session(s)`,
+  failedCount: (count) => `Failed to upload ${count} session(s)`,
+  done: "done",
+  failed: (error) => `failed: ${error}`
+};
 
 // cli/lib/secret-rules.ts
 var SECRET_RULES = [
-  { id: "1password-secret-key", regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"), entropy: 3.8, keywords: ["a3-"] },
-  { id: "1password-service-account-token", regex: new RegExp(`ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}`, "gi"), entropy: 4, keywords: ["ops_"] },
-  { id: "adafruit-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["adafruit"] },
-  { id: "adobe-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["adobe"] },
-  { id: "adobe-client-secret", regex: new RegExp(`\\b(p8e-[a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["p8e-"] },
-  { id: "age-secret-key", regex: new RegExp(`AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}`, "gi"), keywords: ["age-secret-key-1"] },
-  { id: "airtable-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["airtable"] },
-  { id: "airtable-personnal-access-token", regex: new RegExp(`\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b`, "gi"), keywords: ["airtable"] },
-  { id: "algolia-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["algolia"] },
-  { id: "alibaba-access-key-id", regex: new RegExp(`\\b(LTAI[a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["ltai"] },
-  { id: "alibaba-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["alibaba"] },
-  { id: "anthropic-admin-api-key", regex: new RegExp(`\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-admin01"] },
-  { id: "anthropic-api-key", regex: new RegExp(`\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sk-ant-api03"] },
+  {
+    id: "1password-secret-key",
+    regex: new RegExp(`\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b`, "gi"),
+    entropy: 3.8,
+    keywords: ["a3-"]
+  },
+  {
+    id: "1password-service-account-token",
+    regex: new RegExp(`ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}`, "gi"),
+    entropy: 4,
+    keywords: ["ops_"]
+  },
+  {
+    id: "adafruit-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["adafruit"]
+  },
+  {
+    id: "adobe-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["adobe"]
+  },
+  {
+    id: "adobe-client-secret",
+    regex: new RegExp(`\\b(p8e-[a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["p8e-"]
+  },
+  {
+    id: "age-secret-key",
+    regex: new RegExp(`AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}`, "gi"),
+    keywords: ["age-secret-key-1"]
+  },
+  {
+    id: "airtable-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["airtable"]
+  },
+  {
+    id: "airtable-personnal-access-token",
+    regex: new RegExp(`\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b`, "gi"),
+    keywords: ["airtable"]
+  },
+  {
+    id: "algolia-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["algolia"]
+  },
+  {
+    id: "alibaba-access-key-id",
+    regex: new RegExp(`\\b(LTAI[a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["ltai"]
+  },
+  {
+    id: "alibaba-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["alibaba"]
+  },
+  {
+    id: "anthropic-admin-api-key",
+    regex: new RegExp(`\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sk-ant-admin01"]
+  },
+  {
+    id: "anthropic-api-key",
+    regex: new RegExp(`\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sk-ant-api03"]
+  },
   { id: "artifactory-api-key", regex: new RegExp(`\\bAKCp[A-Za-z0-9]{69}\\b`, "gi"), entropy: 4.5, keywords: ["akcp"] },
-  { id: "artifactory-reference-token", regex: new RegExp(`\\bcmVmd[A-Za-z0-9]{59}\\b`, "gi"), entropy: 4.5, keywords: ["cmvmd"] },
-  { id: "asana-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
-  { id: "asana-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["asana"] },
-  { id: "atlassian-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["atlassian", "confluence", "jira", "atatt3"] },
-  { id: "authress-service-client-access-key", regex: new RegExp(`\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sc_", "ext_", "scauth_", "authress_"] },
-  { id: "aws-access-token", regex: new RegExp(`\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b`, "gi"), entropy: 3, keywords: ["a3t", "akia", "asia", "abia", "acca"] },
-  { id: "aws-amazon-bedrock-api-key-long-lived", regex: new RegExp(`\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["absk"] },
-  { id: "aws-amazon-bedrock-api-key-short-lived", regex: new RegExp(`bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t`, "gi"), entropy: 3, keywords: ["bedrock-api-key-"] },
-  { id: "azure-ad-client-secret", regex: new RegExp(`(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`, "gi"), entropy: 3, keywords: ["q~"] },
-  { id: "beamer-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["beamer"] },
-  { id: "bitbucket-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
-  { id: "bitbucket-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bitbucket"] },
-  { id: "bittrex-access-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
-  { id: "bittrex-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bittrex"] },
-  { id: "cisco-meraki-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["meraki"] },
-  { id: "clickhouse-cloud-api-secret-key", regex: new RegExp(`\\b(4b1d[A-Za-z0-9]{38})\\b`, "gi"), entropy: 3, keywords: ["4b1d"] },
+  {
+    id: "artifactory-reference-token",
+    regex: new RegExp(`\\bcmVmd[A-Za-z0-9]{59}\\b`, "gi"),
+    entropy: 4.5,
+    keywords: ["cmvmd"]
+  },
+  {
+    id: "asana-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["asana"]
+  },
+  {
+    id: "asana-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["asana"]
+  },
+  {
+    id: "atlassian-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["atlassian", "confluence", "jira", "atatt3"]
+  },
+  {
+    id: "authress-service-client-access-key",
+    regex: new RegExp(`\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sc_", "ext_", "scauth_", "authress_"]
+  },
+  {
+    id: "aws-access-token",
+    regex: new RegExp(`\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b`, "gi"),
+    entropy: 3,
+    keywords: ["a3t", "akia", "asia", "abia", "acca"]
+  },
+  {
+    id: "aws-amazon-bedrock-api-key-long-lived",
+    regex: new RegExp(`\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["absk"]
+  },
+  {
+    id: "aws-amazon-bedrock-api-key-short-lived",
+    regex: new RegExp(`bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t`, "gi"),
+    entropy: 3,
+    keywords: ["bedrock-api-key-"]
+  },
+  {
+    id: "azure-ad-client-secret",
+    regex: new RegExp(`(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`, "gi"),
+    entropy: 3,
+    keywords: ["q~"]
+  },
+  {
+    id: "beamer-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["beamer"]
+  },
+  {
+    id: "bitbucket-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bitbucket"]
+  },
+  {
+    id: "bitbucket-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bitbucket"]
+  },
+  {
+    id: "bittrex-access-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bittrex"]
+  },
+  {
+    id: "bittrex-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bittrex"]
+  },
+  {
+    id: "cisco-meraki-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["meraki"]
+  },
+  {
+    id: "clickhouse-cloud-api-secret-key",
+    regex: new RegExp(`\\b(4b1d[A-Za-z0-9]{38})\\b`, "gi"),
+    entropy: 3,
+    keywords: ["4b1d"]
+  },
   { id: "clojars-api-token", regex: new RegExp(`CLOJARS_[a-z0-9]{60}`, "gi"), entropy: 2, keywords: ["clojars_"] },
-  { id: "cloudflare-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
-  { id: "cloudflare-global-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare"] },
-  { id: "cloudflare-origin-ca-key", regex: new RegExp(`\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["cloudflare", "v1.0-"] },
-  { id: "codecov-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["codecov"] },
-  { id: "cohere-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["cohere", "co_api_key"] },
-  { id: "coinbase-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["coinbase"] },
-  { id: "confluent-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
-  { id: "confluent-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["confluent"] },
-  { id: "contentful-delivery-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["contentful"] },
-  { id: "curl-auth-header", regex: new RegExp(`\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|$)`, "gi"), entropy: 2.75, keywords: ["curl"] },
-  { id: "curl-auth-user", regex: new RegExp(`\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|$)`, "gi"), entropy: 2, keywords: ["curl"] },
-  { id: "databricks-api-token", regex: new RegExp(`\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dapi"] },
-  { id: "datadog-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["datadog"] },
-  { id: "defined-networking-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dnkey"] },
-  { id: "digitalocean-access-token", regex: new RegExp(`\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["doo_v1_"] },
-  { id: "digitalocean-pat", regex: new RegExp(`\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["dop_v1_"] },
-  { id: "digitalocean-refresh-token", regex: new RegExp(`\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dor_v1_"] },
-  { id: "discord-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["discord"] },
-  { id: "discord-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
-  { id: "discord-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["discord"] },
+  {
+    id: "cloudflare-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["cloudflare"]
+  },
+  {
+    id: "cloudflare-global-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["cloudflare"]
+  },
+  {
+    id: "cloudflare-origin-ca-key",
+    regex: new RegExp(`\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["cloudflare", "v1.0-"]
+  },
+  {
+    id: "codecov-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["codecov"]
+  },
+  {
+    id: "cohere-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["cohere", "co_api_key"]
+  },
+  {
+    id: "coinbase-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["coinbase"]
+  },
+  {
+    id: "confluent-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["confluent"]
+  },
+  {
+    id: "confluent-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["confluent"]
+  },
+  {
+    id: "contentful-delivery-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["contentful"]
+  },
+  {
+    id: "curl-auth-header",
+    regex: new RegExp(`\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|$)`, "gi"),
+    entropy: 2.75,
+    keywords: ["curl"]
+  },
+  {
+    id: "curl-auth-user",
+    regex: new RegExp(`\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|$)`, "gi"),
+    entropy: 2,
+    keywords: ["curl"]
+  },
+  {
+    id: "databricks-api-token",
+    regex: new RegExp(`\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["dapi"]
+  },
+  {
+    id: "datadog-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["datadog"]
+  },
+  {
+    id: "defined-networking-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dnkey"]
+  },
+  {
+    id: "digitalocean-access-token",
+    regex: new RegExp(`\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["doo_v1_"]
+  },
+  {
+    id: "digitalocean-pat",
+    regex: new RegExp(`\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["dop_v1_"]
+  },
+  {
+    id: "digitalocean-refresh-token",
+    regex: new RegExp(`\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dor_v1_"]
+  },
+  {
+    id: "discord-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["discord"]
+  },
+  {
+    id: "discord-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["discord"]
+  },
+  {
+    id: "discord-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["discord"]
+  },
   { id: "doppler-api-token", regex: new RegExp(`dp\\.pt\\.[a-z0-9]{43}`, "gi"), entropy: 2, keywords: ["dp.pt."] },
-  { id: "droneci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["droneci"] },
-  { id: "dropbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "dropbox-long-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "dropbox-short-lived-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["dropbox"] },
-  { id: "duffel-api-token", regex: new RegExp(`duffel_(?:test|live)_[a-z0-9_\\-=]{43}`, "gi"), entropy: 2, keywords: ["duffel_"] },
-  { id: "dynatrace-api-token", regex: new RegExp(`dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}`, "gi"), entropy: 4, keywords: ["dt0c01."] },
+  {
+    id: "droneci-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["droneci"]
+  },
+  {
+    id: "dropbox-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dropbox"]
+  },
+  {
+    id: "dropbox-long-lived-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dropbox"]
+  },
+  {
+    id: "dropbox-short-lived-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["dropbox"]
+  },
+  {
+    id: "duffel-api-token",
+    regex: new RegExp(`duffel_(?:test|live)_[a-z0-9_\\-=]{43}`, "gi"),
+    entropy: 2,
+    keywords: ["duffel_"]
+  },
+  {
+    id: "dynatrace-api-token",
+    regex: new RegExp(`dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}`, "gi"),
+    entropy: 4,
+    keywords: ["dt0c01."]
+  },
   { id: "easypost-api-token", regex: new RegExp(`\\bEZAK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["ezak"] },
   { id: "easypost-test-api-token", regex: new RegExp(`\\bEZTK[a-z0-9]{54}\\b`, "gi"), entropy: 2, keywords: ["eztk"] },
-  { id: "etsy-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["etsy"] },
-  { id: "facebook-access-token", regex: new RegExp(`\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
-  { id: "facebook-page-access-token", regex: new RegExp(`\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["eaam", "eaac"] },
-  { id: "facebook-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["facebook"] },
-  { id: "fastly-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["fastly"] },
-  { id: "finicity-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
-  { id: "finicity-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finicity"] },
-  { id: "finnhub-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["finnhub"] },
-  { id: "flickr-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["flickr"] },
-  { id: "flutterwave-encryption-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{12}`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
-  { id: "flutterwave-public-key", regex: new RegExp(`FLWPUBK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwpubk_test"] },
-  { id: "flutterwave-secret-key", regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{32}-X`, "gi"), entropy: 2, keywords: ["flwseck_test"] },
-  { id: "flyio-access-token", regex: new RegExp(`\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["fo1_", "fm1", "fm2_"] },
+  {
+    id: "etsy-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["etsy"]
+  },
+  {
+    id: "facebook-access-token",
+    regex: new RegExp(`\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["facebook"]
+  },
+  {
+    id: "facebook-page-access-token",
+    regex: new RegExp(`\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["eaam", "eaac"]
+  },
+  {
+    id: "facebook-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["facebook"]
+  },
+  {
+    id: "fastly-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["fastly"]
+  },
+  {
+    id: "finicity-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["finicity"]
+  },
+  {
+    id: "finicity-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["finicity"]
+  },
+  {
+    id: "finnhub-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["finnhub"]
+  },
+  {
+    id: "flickr-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["flickr"]
+  },
+  {
+    id: "flutterwave-encryption-key",
+    regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{12}`, "gi"),
+    entropy: 2,
+    keywords: ["flwseck_test"]
+  },
+  {
+    id: "flutterwave-public-key",
+    regex: new RegExp(`FLWPUBK_TEST-[a-h0-9]{32}-X`, "gi"),
+    entropy: 2,
+    keywords: ["flwpubk_test"]
+  },
+  {
+    id: "flutterwave-secret-key",
+    regex: new RegExp(`FLWSECK_TEST-[a-h0-9]{32}-X`, "gi"),
+    entropy: 2,
+    keywords: ["flwseck_test"]
+  },
+  {
+    id: "flyio-access-token",
+    regex: new RegExp(`\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["fo1_", "fm1", "fm2_"]
+  },
   { id: "frameio-api-token", regex: new RegExp(`fio-u-[a-z0-9\\-_=]{64}`, "gi"), keywords: ["fio-u-"] },
-  { id: "freemius-secret-key", regex: new RegExp(`["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`, "gi"), keywords: ["secret_key"] },
-  { id: "freshbooks-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["freshbooks"] },
-  { id: "gcp-api-key", regex: new RegExp(`\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["aiza"] },
-  { id: "generic-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:access|auth|(?:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"] },
-  { id: "github-app-token", regex: new RegExp(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghu_", "ghs_"] },
-  { id: "github-fine-grained-pat", regex: new RegExp(`github_pat_\\w{82}`, "gi"), entropy: 3, keywords: ["github_pat_"] },
+  {
+    id: "freemius-secret-key",
+    regex: new RegExp(`["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`, "gi"),
+    keywords: ["secret_key"]
+  },
+  {
+    id: "freshbooks-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["freshbooks"]
+  },
+  {
+    id: "gcp-api-key",
+    regex: new RegExp(`\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["aiza"]
+  },
+  {
+    id: "generic-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:access|auth|(?:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"]
+  },
+  {
+    id: "github-app-token",
+    regex: new RegExp(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`, "gi"),
+    entropy: 3,
+    keywords: ["ghu_", "ghs_"]
+  },
+  {
+    id: "github-fine-grained-pat",
+    regex: new RegExp(`github_pat_\\w{82}`, "gi"),
+    entropy: 3,
+    keywords: ["github_pat_"]
+  },
   { id: "github-oauth", regex: new RegExp(`gho_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["gho_"] },
   { id: "github-pat", regex: new RegExp(`ghp_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghp_"] },
   { id: "github-refresh-token", regex: new RegExp(`ghr_[0-9a-zA-Z]{36}`, "gi"), entropy: 3, keywords: ["ghr_"] },
-  { id: "gitlab-cicd-job-token", regex: new RegExp(`glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}`, "gi"), entropy: 3, keywords: ["glcbt-"] },
+  {
+    id: "gitlab-cicd-job-token",
+    regex: new RegExp(`glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}`, "gi"),
+    entropy: 3,
+    keywords: ["glcbt-"]
+  },
   { id: "gitlab-deploy-token", regex: new RegExp(`gldt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["gldt-"] },
-  { id: "gitlab-feature-flag-client-token", regex: new RegExp(`glffct-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glffct-"] },
+  {
+    id: "gitlab-feature-flag-client-token",
+    regex: new RegExp(`glffct-[0-9a-zA-Z_\\-]{20}`, "gi"),
+    entropy: 3,
+    keywords: ["glffct-"]
+  },
   { id: "gitlab-feed-token", regex: new RegExp(`glft-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glft-"] },
-  { id: "gitlab-incoming-mail-token", regex: new RegExp(`glimt-[0-9a-zA-Z_\\-]{25}`, "gi"), entropy: 3, keywords: ["glimt-"] },
-  { id: "gitlab-kubernetes-agent-token", regex: new RegExp(`glagent-[0-9a-zA-Z_\\-]{50}`, "gi"), entropy: 3, keywords: ["glagent-"] },
-  { id: "gitlab-oauth-app-secret", regex: new RegExp(`gloas-[0-9a-zA-Z_\\-]{64}`, "gi"), entropy: 3, keywords: ["gloas-"] },
+  {
+    id: "gitlab-incoming-mail-token",
+    regex: new RegExp(`glimt-[0-9a-zA-Z_\\-]{25}`, "gi"),
+    entropy: 3,
+    keywords: ["glimt-"]
+  },
+  {
+    id: "gitlab-kubernetes-agent-token",
+    regex: new RegExp(`glagent-[0-9a-zA-Z_\\-]{50}`, "gi"),
+    entropy: 3,
+    keywords: ["glagent-"]
+  },
+  {
+    id: "gitlab-oauth-app-secret",
+    regex: new RegExp(`gloas-[0-9a-zA-Z_\\-]{64}`, "gi"),
+    entropy: 3,
+    keywords: ["gloas-"]
+  },
   { id: "gitlab-pat", regex: new RegExp(`glpat-[\\w-]{20}`, "gi"), entropy: 3, keywords: ["glpat-"] },
-  { id: "gitlab-pat-routable", regex: new RegExp(`\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glpat-"] },
+  {
+    id: "gitlab-pat-routable",
+    regex: new RegExp(`\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"),
+    entropy: 4,
+    keywords: ["glpat-"]
+  },
   { id: "gitlab-ptt", regex: new RegExp(`glptt-[0-9a-f]{40}`, "gi"), entropy: 3, keywords: ["glptt-"] },
   { id: "gitlab-rrt", regex: new RegExp(`GR1348941[\\w-]{20}`, "gi"), entropy: 3, keywords: ["gr1348941"] },
-  { id: "gitlab-runner-authentication-token", regex: new RegExp(`glrt-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glrt-"] },
-  { id: "gitlab-runner-authentication-token-routable", regex: new RegExp(`\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"), entropy: 4, keywords: ["glrt-"] },
+  {
+    id: "gitlab-runner-authentication-token",
+    regex: new RegExp(`glrt-[0-9a-zA-Z_\\-]{20}`, "gi"),
+    entropy: 3,
+    keywords: ["glrt-"]
+  },
+  {
+    id: "gitlab-runner-authentication-token-routable",
+    regex: new RegExp(`\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b`, "gi"),
+    entropy: 4,
+    keywords: ["glrt-"]
+  },
   { id: "gitlab-scim-token", regex: new RegExp(`glsoat-[0-9a-zA-Z_\\-]{20}`, "gi"), entropy: 3, keywords: ["glsoat-"] },
-  { id: "gitlab-session-cookie", regex: new RegExp(`_gitlab_session=[0-9a-z]{32}`, "gi"), entropy: 3, keywords: ["_gitlab_session="] },
-  { id: "gitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["gitter"] },
-  { id: "gocardless-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["live_", "gocardless"] },
-  { id: "grafana-api-key", regex: new RegExp(`\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["eyjrijoi"] },
-  { id: "grafana-cloud-api-token", regex: new RegExp(`\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glc_"] },
-  { id: "grafana-service-account-token", regex: new RegExp(`\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["glsa_"] },
-  { id: "harness-api-key", regex: new RegExp(`(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}`, "gi"), keywords: ["pat.", "sat."] },
-  { id: "hashicorp-tf-api-token", regex: new RegExp(`[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}`, "gi"), entropy: 3.5, keywords: ["atlasv1"] },
-  { id: "hashicorp-tf-password", regex: new RegExp(`[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["administrator_login_password", "password"] },
-  { id: "heroku-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["heroku"] },
-  { id: "heroku-api-key-v2", regex: new RegExp(`\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hrku-aa"] },
-  { id: "hubspot-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["hubspot"] },
-  { id: "huggingface-access-token", regex: new RegExp(`\\b(hf_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["hf_"] },
-  { id: "huggingface-organization-api-token", regex: new RegExp(`\\b(api_org_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["api_org_"] },
-  { id: "infracost-api-token", regex: new RegExp(`\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ico-"] },
-  { id: "intercom-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["intercom"] },
-  { id: "intra42-client-secret", regex: new RegExp(`\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["intra", "s-s4t2ud-", "s-s4t2af-"] },
-  { id: "jfrog-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
-  { id: "jfrog-identity-token", regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["jfrog", "artifactory", "bintray", "xray"] },
-  { id: "jwt", regex: new RegExp(`\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["ey"] },
-  { id: "kraken-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kraken"] },
-  { id: "kubernetes-secret-yaml", regex: new RegExp(`(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?[\\s\\S]{0,200}?\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))[\\s\\S]{0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`, "gi"), keywords: ["secret"] },
-  { id: "kucoin-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
-  { id: "kucoin-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["kucoin"] },
-  { id: "launchdarkly-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["launchdarkly"] },
+  {
+    id: "gitlab-session-cookie",
+    regex: new RegExp(`_gitlab_session=[0-9a-z]{32}`, "gi"),
+    entropy: 3,
+    keywords: ["_gitlab_session="]
+  },
+  {
+    id: "gitter-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["gitter"]
+  },
+  {
+    id: "gocardless-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["live_", "gocardless"]
+  },
+  {
+    id: "grafana-api-key",
+    regex: new RegExp(`\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["eyjrijoi"]
+  },
+  {
+    id: "grafana-cloud-api-token",
+    regex: new RegExp(`\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["glc_"]
+  },
+  {
+    id: "grafana-service-account-token",
+    regex: new RegExp(`\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["glsa_"]
+  },
+  {
+    id: "harness-api-key",
+    regex: new RegExp(`(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}`, "gi"),
+    keywords: ["pat.", "sat."]
+  },
+  {
+    id: "hashicorp-tf-api-token",
+    regex: new RegExp(`[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}`, "gi"),
+    entropy: 3.5,
+    keywords: ["atlasv1"]
+  },
+  {
+    id: "hashicorp-tf-password",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["administrator_login_password", "password"]
+  },
+  {
+    id: "heroku-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["heroku"]
+  },
+  {
+    id: "heroku-api-key-v2",
+    regex: new RegExp(`\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["hrku-aa"]
+  },
+  {
+    id: "hubspot-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["hubspot"]
+  },
+  {
+    id: "huggingface-access-token",
+    regex: new RegExp(`\\b(hf_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["hf_"]
+  },
+  {
+    id: "huggingface-organization-api-token",
+    regex: new RegExp(`\\b(api_org_(?:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["api_org_"]
+  },
+  {
+    id: "infracost-api-token",
+    regex: new RegExp(`\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["ico-"]
+  },
+  {
+    id: "intercom-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["intercom"]
+  },
+  {
+    id: "intra42-client-secret",
+    regex: new RegExp(`\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["intra", "s-s4t2ud-", "s-s4t2af-"]
+  },
+  {
+    id: "jfrog-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["jfrog", "artifactory", "bintray", "xray"]
+  },
+  {
+    id: "jfrog-identity-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["jfrog", "artifactory", "bintray", "xray"]
+  },
+  {
+    id: "jwt",
+    regex: new RegExp(`\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["ey"]
+  },
+  {
+    id: "kraken-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["kraken"]
+  },
+  {
+    id: "kubernetes-secret-yaml",
+    regex: new RegExp(`(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?[\\s\\S]{0,200}?\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:[\\s\\S]{0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))[\\s\\S]{0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`, "gi"),
+    keywords: ["secret"]
+  },
+  {
+    id: "kucoin-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["kucoin"]
+  },
+  {
+    id: "kucoin-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["kucoin"]
+  },
+  {
+    id: "launchdarkly-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["launchdarkly"]
+  },
   { id: "linear-api-key", regex: new RegExp(`lin_api_[a-z0-9]{40}`, "gi"), entropy: 2, keywords: ["lin_api_"] },
-  { id: "linear-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linear"] },
-  { id: "linkedin-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
-  { id: "linkedin-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["linkedin", "linked_in", "linked-in"] },
-  { id: "lob-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_", "live_"] },
-  { id: "lob-pub-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["test_pub", "live_pub", "_pub"] },
-  { id: "looker-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
-  { id: "looker-client-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["looker"] },
-  { id: "mailchimp-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailchimp"] },
-  { id: "mailgun-private-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mailgun-pub-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mailgun-signing-key", regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mailgun"] },
-  { id: "mapbox-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mapbox"] },
-  { id: "mattermost-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["mattermost"] },
-  { id: "maxmind-license-key", regex: new RegExp(`\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["_mmk"] },
-  { id: "messagebird-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
-  { id: "messagebird-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["messagebird", "message-bird", "message_bird"] },
-  { id: "microsoft-teams-webhook", regex: new RegExp(`https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}`, "gi"), keywords: ["webhook.office.com", "webhookb2", "incomingwebhook"] },
-  { id: "netlify-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["netlify"] },
-  { id: "new-relic-browser-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrjs-"] },
-  { id: "new-relic-insert-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrii-"] },
-  { id: "new-relic-user-api-id", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["new-relic", "newrelic", "new_relic"] },
-  { id: "new-relic-user-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nrak"] },
-  { id: "notion-api-token", regex: new RegExp(`\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["ntn_"] },
-  { id: "npm-access-token", regex: new RegExp(`\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["npm_"] },
-  { id: "nuget-config-password", regex: new RegExp(`<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>`, "gi"), entropy: 1, keywords: ["<add key="] },
-  { id: "nytimes-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["nytimes", "new-york-times", "newyorktimes"] },
-  { id: "octopus-deploy-api-key", regex: new RegExp(`\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["api-"] },
-  { id: "okta-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["okta"] },
-  { id: "openai-api-key", regex: new RegExp(`\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["t3blbkfj"] },
-  { id: "openshift-user-token", regex: new RegExp(`\\b(sha256~[\\w-]{43})(?:[^\\w-]|$)`, "gi"), entropy: 3.5, keywords: ["sha256~"] },
-  { id: "perplexity-api-key", regex: new RegExp(`\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`, "gi"), entropy: 4, keywords: ["pplx-"] },
-  { id: "plaid-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["plaid"] },
-  { id: "plaid-client-id", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
-  { id: "plaid-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["plaid"] },
-  { id: "planetscale-api-token", regex: new RegExp(`\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_tkn_"] },
-  { id: "planetscale-oauth-token", regex: new RegExp(`\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_oauth_"] },
-  { id: "planetscale-password", regex: new RegExp(`\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pscale_pw_"] },
-  { id: "postman-api-token", regex: new RegExp(`\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["pmak-"] },
-  { id: "prefect-api-token", regex: new RegExp(`\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pnu_"] },
-  { id: "private-key", regex: new RegExp(`-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----`, "gi"), keywords: ["-----begin"] },
-  { id: "privateai-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["privateai", "private_ai", "private-ai"] },
-  { id: "pulumi-api-token", regex: new RegExp(`\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["pul-"] },
-  { id: "pypi-upload-token", regex: new RegExp(`pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}`, "gi"), entropy: 3, keywords: ["pypi-ageichlwas5vcmc"] },
-  { id: "rapidapi-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["rapidapi"] },
-  { id: "readme-api-token", regex: new RegExp(`\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rdme_"] },
-  { id: "rubygems-api-token", regex: new RegExp(`\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["rubygems_"] },
-  { id: "scalingo-api-token", regex: new RegExp(`\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["tk-us-"] },
-  { id: "sendbird-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
-  { id: "sendbird-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sendbird"] },
-  { id: "sendgrid-api-token", regex: new RegExp(`\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sg."] },
-  { id: "sendinblue-api-token", regex: new RegExp(`\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["xkeysib-"] },
-  { id: "sentry-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sentry"] },
-  { id: "sentry-org-token", regex: new RegExp(`\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|$)`, "gi"), entropy: 4.5, keywords: ["sntrys_eyjpyxqio"] },
-  { id: "sentry-user-token", regex: new RegExp(`\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["sntryu_"] },
-  { id: "settlemint-application-access-token", regex: new RegExp(`\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_aat"] },
-  { id: "settlemint-personal-access-token", regex: new RegExp(`\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_pat"] },
-  { id: "settlemint-service-access-token", regex: new RegExp(`\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sm_sat"] },
-  { id: "shippo-api-token", regex: new RegExp(`\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["shippo_"] },
+  {
+    id: "linear-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["linear"]
+  },
+  {
+    id: "linkedin-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["linkedin", "linked_in", "linked-in"]
+  },
+  {
+    id: "linkedin-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["linkedin", "linked_in", "linked-in"]
+  },
+  {
+    id: "lob-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["test_", "live_"]
+  },
+  {
+    id: "lob-pub-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["test_pub", "live_pub", "_pub"]
+  },
+  {
+    id: "looker-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["looker"]
+  },
+  {
+    id: "looker-client-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["looker"]
+  },
+  {
+    id: "mailchimp-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailchimp"]
+  },
+  {
+    id: "mailgun-private-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailgun"]
+  },
+  {
+    id: "mailgun-pub-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailgun"]
+  },
+  {
+    id: "mailgun-signing-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mailgun"]
+  },
+  {
+    id: "mapbox-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mapbox"]
+  },
+  {
+    id: "mattermost-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["mattermost"]
+  },
+  {
+    id: "maxmind-license-key",
+    regex: new RegExp(`\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["_mmk"]
+  },
+  {
+    id: "messagebird-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["messagebird", "message-bird", "message_bird"]
+  },
+  {
+    id: "messagebird-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["messagebird", "message-bird", "message_bird"]
+  },
+  {
+    id: "microsoft-teams-webhook",
+    regex: new RegExp(`https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}`, "gi"),
+    keywords: ["webhook.office.com", "webhookb2", "incomingwebhook"]
+  },
+  {
+    id: "netlify-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["netlify"]
+  },
+  {
+    id: "new-relic-browser-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nrjs-"]
+  },
+  {
+    id: "new-relic-insert-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nrii-"]
+  },
+  {
+    id: "new-relic-user-api-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["new-relic", "newrelic", "new_relic"]
+  },
+  {
+    id: "new-relic-user-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nrak"]
+  },
+  {
+    id: "notion-api-token",
+    regex: new RegExp(`\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["ntn_"]
+  },
+  {
+    id: "npm-access-token",
+    regex: new RegExp(`\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["npm_"]
+  },
+  {
+    id: "nuget-config-password",
+    regex: new RegExp(`<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>`, "gi"),
+    entropy: 1,
+    keywords: ["<add key="]
+  },
+  {
+    id: "nytimes-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["nytimes", "new-york-times", "newyorktimes"]
+  },
+  {
+    id: "octopus-deploy-api-key",
+    regex: new RegExp(`\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["api-"]
+  },
+  {
+    id: "okta-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["okta"]
+  },
+  {
+    id: "openai-api-key",
+    regex: new RegExp(`\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["t3blbkfj"]
+  },
+  {
+    id: "openshift-user-token",
+    regex: new RegExp(`\\b(sha256~[\\w-]{43})(?:[^\\w-]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["sha256~"]
+  },
+  {
+    id: "perplexity-api-key",
+    regex: new RegExp(`\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`, "gi"),
+    entropy: 4,
+    keywords: ["pplx-"]
+  },
+  {
+    id: "plaid-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["plaid"]
+  },
+  {
+    id: "plaid-client-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["plaid"]
+  },
+  {
+    id: "plaid-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["plaid"]
+  },
+  {
+    id: "planetscale-api-token",
+    regex: new RegExp(`\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pscale_tkn_"]
+  },
+  {
+    id: "planetscale-oauth-token",
+    regex: new RegExp(`\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pscale_oauth_"]
+  },
+  {
+    id: "planetscale-password",
+    regex: new RegExp(`\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pscale_pw_"]
+  },
+  {
+    id: "postman-api-token",
+    regex: new RegExp(`\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["pmak-"]
+  },
+  {
+    id: "prefect-api-token",
+    regex: new RegExp(`\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["pnu_"]
+  },
+  {
+    id: "private-key",
+    regex: new RegExp(`-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----`, "gi"),
+    keywords: ["-----begin"]
+  },
+  {
+    id: "privateai-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["privateai", "private_ai", "private-ai"]
+  },
+  {
+    id: "pulumi-api-token",
+    regex: new RegExp(`\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["pul-"]
+  },
+  {
+    id: "pypi-upload-token",
+    regex: new RegExp(`pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}`, "gi"),
+    entropy: 3,
+    keywords: ["pypi-ageichlwas5vcmc"]
+  },
+  {
+    id: "rapidapi-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["rapidapi"]
+  },
+  {
+    id: "readme-api-token",
+    regex: new RegExp(`\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["rdme_"]
+  },
+  {
+    id: "rubygems-api-token",
+    regex: new RegExp(`\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["rubygems_"]
+  },
+  {
+    id: "scalingo-api-token",
+    regex: new RegExp(`\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["tk-us-"]
+  },
+  {
+    id: "sendbird-access-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sendbird"]
+  },
+  {
+    id: "sendbird-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sendbird"]
+  },
+  {
+    id: "sendgrid-api-token",
+    regex: new RegExp(`\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sg."]
+  },
+  {
+    id: "sendinblue-api-token",
+    regex: new RegExp(`\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["xkeysib-"]
+  },
+  {
+    id: "sentry-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sentry"]
+  },
+  {
+    id: "sentry-org-token",
+    regex: new RegExp(`\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|$)`, "gi"),
+    entropy: 4.5,
+    keywords: ["sntrys_eyjpyxqio"]
+  },
+  {
+    id: "sentry-user-token",
+    regex: new RegExp(`\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["sntryu_"]
+  },
+  {
+    id: "settlemint-application-access-token",
+    regex: new RegExp(`\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sm_aat"]
+  },
+  {
+    id: "settlemint-personal-access-token",
+    regex: new RegExp(`\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sm_pat"]
+  },
+  {
+    id: "settlemint-service-access-token",
+    regex: new RegExp(`\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sm_sat"]
+  },
+  {
+    id: "shippo-api-token",
+    regex: new RegExp(`\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["shippo_"]
+  },
   { id: "shopify-access-token", regex: new RegExp(`shpat_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpat_"] },
-  { id: "shopify-custom-access-token", regex: new RegExp(`shpca_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpca_"] },
-  { id: "shopify-private-app-access-token", regex: new RegExp(`shppa_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shppa_"] },
+  {
+    id: "shopify-custom-access-token",
+    regex: new RegExp(`shpca_[a-fA-F0-9]{32}`, "gi"),
+    entropy: 2,
+    keywords: ["shpca_"]
+  },
+  {
+    id: "shopify-private-app-access-token",
+    regex: new RegExp(`shppa_[a-fA-F0-9]{32}`, "gi"),
+    entropy: 2,
+    keywords: ["shppa_"]
+  },
   { id: "shopify-shared-secret", regex: new RegExp(`shpss_[a-fA-F0-9]{32}`, "gi"), entropy: 2, keywords: ["shpss_"] },
-  { id: "sidekiq-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["bundle_enterprise__contribsys__com", "bundle_gems__contribsys__com"] },
-  { id: "sidekiq-sensitive-url", regex: new RegExp(`\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)`, "gi"), keywords: ["gems.contribsys.com", "enterprise.contribsys.com"] },
-  { id: "slack-app-token", regex: new RegExp(`xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+`, "gi"), entropy: 2, keywords: ["xapp"] },
-  { id: "slack-bot-token", regex: new RegExp(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`, "gi"), entropy: 3, keywords: ["xoxb"] },
-  { id: "slack-config-access-token", regex: new RegExp(`xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}`, "gi"), entropy: 2, keywords: ["xoxe.xoxb-", "xoxe.xoxp-"] },
-  { id: "slack-config-refresh-token", regex: new RegExp(`xoxe-\\d-[A-Z0-9]{146}`, "gi"), entropy: 2, keywords: ["xoxe-"] },
-  { id: "slack-legacy-bot-token", regex: new RegExp(`xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}`, "gi"), entropy: 2, keywords: ["xoxb"] },
-  { id: "slack-legacy-token", regex: new RegExp(`xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+`, "gi"), entropy: 2, keywords: ["xoxo", "xoxs"] },
-  { id: "slack-legacy-workspace-token", regex: new RegExp(`xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}`, "gi"), entropy: 2, keywords: ["xoxa", "xoxr"] },
-  { id: "slack-user-token", regex: new RegExp(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`, "gi"), entropy: 2, keywords: ["xoxp-", "xoxe-"] },
-  { id: "slack-webhook-url", regex: new RegExp(`(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}`, "gi"), keywords: ["hooks.slack.com"] },
-  { id: "snyk-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["snyk"] },
-  { id: "sonar-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["sonar"] },
-  { id: "sourcegraph-access-token", regex: new RegExp(`\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sgp_", "sourcegraph"] },
-  { id: "square-access-token", regex: new RegExp(`\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sq0atp-", "eaaa"] },
-  { id: "squarespace-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["squarespace"] },
-  { id: "stripe-access-token", regex: new RegExp(`\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 2, keywords: ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"] },
-  { id: "sumologic-access-id", regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
-  { id: "sumologic-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3, keywords: ["sumo"] },
-  { id: "telegram-bot-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["telegr"] },
-  { id: "travisci-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["travis"] },
+  {
+    id: "sidekiq-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["bundle_enterprise__contribsys__com", "bundle_gems__contribsys__com"]
+  },
+  {
+    id: "sidekiq-sensitive-url",
+    regex: new RegExp(`\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)`, "gi"),
+    keywords: ["gems.contribsys.com", "enterprise.contribsys.com"]
+  },
+  {
+    id: "slack-app-token",
+    regex: new RegExp(`xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+`, "gi"),
+    entropy: 2,
+    keywords: ["xapp"]
+  },
+  {
+    id: "slack-bot-token",
+    regex: new RegExp(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`, "gi"),
+    entropy: 3,
+    keywords: ["xoxb"]
+  },
+  {
+    id: "slack-config-access-token",
+    regex: new RegExp(`xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxe.xoxb-", "xoxe.xoxp-"]
+  },
+  {
+    id: "slack-config-refresh-token",
+    regex: new RegExp(`xoxe-\\d-[A-Z0-9]{146}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxe-"]
+  },
+  {
+    id: "slack-legacy-bot-token",
+    regex: new RegExp(`xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxb"]
+  },
+  {
+    id: "slack-legacy-token",
+    regex: new RegExp(`xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+`, "gi"),
+    entropy: 2,
+    keywords: ["xoxo", "xoxs"]
+  },
+  {
+    id: "slack-legacy-workspace-token",
+    regex: new RegExp(`xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxa", "xoxr"]
+  },
+  {
+    id: "slack-user-token",
+    regex: new RegExp(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`, "gi"),
+    entropy: 2,
+    keywords: ["xoxp-", "xoxe-"]
+  },
+  {
+    id: "slack-webhook-url",
+    regex: new RegExp(`(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}`, "gi"),
+    keywords: ["hooks.slack.com"]
+  },
+  {
+    id: "snyk-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["snyk"]
+  },
+  {
+    id: "sonar-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["sonar"]
+  },
+  {
+    id: "sourcegraph-access-token",
+    regex: new RegExp(`\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sgp_", "sourcegraph"]
+  },
+  {
+    id: "square-access-token",
+    regex: new RegExp(`\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sq0atp-", "eaaa"]
+  },
+  {
+    id: "squarespace-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["squarespace"]
+  },
+  {
+    id: "stripe-access-token",
+    regex: new RegExp(`\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 2,
+    keywords: ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"]
+  },
+  {
+    id: "sumologic-access-id",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sumo"]
+  },
+  {
+    id: "sumologic-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3,
+    keywords: ["sumo"]
+  },
+  {
+    id: "telegram-bot-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["telegr"]
+  },
+  {
+    id: "travisci-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["travis"]
+  },
   { id: "twilio-api-key", regex: new RegExp(`SK[0-9a-fA-F]{32}`, "gi"), entropy: 3, keywords: ["sk"] },
-  { id: "twitch-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitch"] },
-  { id: "twitter-access-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-api-secret", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "twitter-bearer-token", regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["twitter"] },
-  { id: "typeform-api-token", regex: new RegExp(`[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["tfp_"] },
-  { id: "vault-batch-token", regex: new RegExp(`\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 4, keywords: ["hvb."] },
-  { id: "vault-service-token", regex: new RegExp(`\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), entropy: 3.5, keywords: ["hvs.", "s."] },
-  { id: "yandex-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "yandex-api-key", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "yandex-aws-access-token", regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["yandex"] },
-  { id: "zendesk-secret-key", regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"), keywords: ["zendesk"] }
+  {
+    id: "twitch-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitch"]
+  },
+  {
+    id: "twitter-access-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-api-secret",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "twitter-bearer-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["twitter"]
+  },
+  {
+    id: "typeform-api-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["tfp_"]
+  },
+  {
+    id: "vault-batch-token",
+    regex: new RegExp(`\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 4,
+    keywords: ["hvb."]
+  },
+  {
+    id: "vault-service-token",
+    regex: new RegExp(`\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    entropy: 3.5,
+    keywords: ["hvs.", "s."]
+  },
+  {
+    id: "yandex-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["yandex"]
+  },
+  {
+    id: "yandex-api-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["yandex"]
+  },
+  {
+    id: "yandex-aws-access-token",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["yandex"]
+  },
+  {
+    id: "zendesk-secret-key",
+    regex: new RegExp(`[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`, "gi"),
+    keywords: ["zendesk"]
+  },
+  {
+    id: "high-entropy-secret",
+    regex: new RegExp(`(?<![A-Za-z0-9_\\-./+=])([A-Za-z0-9_\\-./+=]{20,200})(?![A-Za-z0-9_\\-./+=])`, "g"),
+    entropy: 4,
+    notHexOnly: true
+  }
 ];
 var ALL_KEYWORDS = new Set([
   "-----begin",
@@ -588,6 +1898,11 @@ function shannonEntropy(data) {
   }
   return entropy;
 }
+function looksLikeFilePath(s) {
+  if (s.endsWith("/"))
+    return true;
+  return s.includes("/") && /\.\w{1,4}$/.test(s);
+}
 var _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
 function getDetectSecretsStats() {
   return _stats;
@@ -623,6 +1938,12 @@ function detectSecrets(content) {
       const end = start + match[0].length;
       const entropy = rule.entropy ? shannonEntropy(secretValue) : undefined;
       if (rule.entropy && entropy !== undefined && entropy < rule.entropy) {
+        continue;
+      }
+      if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
+        continue;
+      }
+      if (rule.id === "high-entropy-secret" && looksLikeFilePath(secretValue)) {
         continue;
       }
       matches.push({
@@ -14248,11 +15569,7 @@ var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
 });
-var ToolResultContentBlockSchema = exports_external.union([
-  TextBlockSchema,
-  ImageBlockSchema,
-  DocumentBlockSchema
-]);
+var ToolResultContentBlockSchema = exports_external.union([TextBlockSchema, ImageBlockSchema, DocumentBlockSchema]);
 var ToolResultBlockSchema = exports_external.looseObject({
   type: exports_external.literal("tool_result"),
   tool_use_id: exports_external.string(),
@@ -14377,12 +15694,182 @@ var HiveMindMetaSchema = exports_external.object({
   rawPath: exports_external.string(),
   agentId: exports_external.string().optional(),
   parentSessionId: exports_external.string().optional(),
-  schemaErrors: exports_external.array(exports_external.string()).optional()
+  schemaErrors: exports_external.array(exports_external.string()).optional(),
+  excluded: exports_external.boolean().optional(),
+  uploadedAt: exports_external.string().optional()
 });
+
+// cli/lib/auth.ts
+import { mkdir as mkdir2, rmdir } from "fs/promises";
+import { join as join2 } from "path";
+var AUTH_LOCK_FILE = join2(AUTH_DIR, "auth.lock");
+var LOCK_TIMEOUT_MS = 1e4;
+var LOCK_RETRY_INTERVAL_MS = 50;
+var WORKOS_API_URL = "https://api.workos.com/user_management";
+async function acquireLock() {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await mkdir2(AUTH_LOCK_FILE);
+      return true;
+    } catch (err) {
+      const isLockHeld = err instanceof Error && "code" in err && err.code === "EEXIST";
+      if (!isLockHeld)
+        return false;
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_INTERVAL_MS));
+    }
+  }
+  return false;
+}
+async function releaseLock() {
+  try {
+    await rmdir(AUTH_LOCK_FILE);
+  } catch {}
+}
+var AuthUserSchema = exports_external.object({
+  id: exports_external.string(),
+  email: exports_external.string(),
+  first_name: exports_external.string().optional(),
+  last_name: exports_external.string().optional()
+});
+var AuthDataSchema = exports_external.object({
+  access_token: exports_external.string(),
+  refresh_token: exports_external.string(),
+  user: AuthUserSchema,
+  authenticated_at: exports_external.number().optional()
+});
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number")
+    return true;
+  return payload.exp <= Math.floor(Date.now() / 1000);
+}
+function isErrorResult(result) {
+  return result !== null && typeof result === "object" && "error" in result;
+}
+var isAuthError = isErrorResult;
+async function loadAuthData() {
+  try {
+    const file2 = Bun.file(AUTH_FILE);
+    if (!await file2.exists())
+      return null;
+    const data = await file2.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    if (!parsed.success) {
+      return { error: errors.authSchemaError(parsed.error.message) };
+    }
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+async function saveAuthData(data) {
+  await mkdir2(AUTH_DIR, { recursive: true });
+  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
+}
+async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
+  try {
+    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshTokenValue,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const data = await response.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    if (!parsed.success) {
+      return { error: errors.refreshSchemaError(parsed.error.message) };
+    }
+    return {
+      ...parsed.data,
+      authenticated_at: existingAuthenticatedAt
+    };
+  } catch {
+    return null;
+  }
+}
+function toOptionalErrors(arr) {
+  return arr.length > 0 ? arr : undefined;
+}
+function notAuthenticated(authErrors) {
+  return { authenticated: false, needsLogin: true, errors: authErrors };
+}
+function authenticated(user, authErrors) {
+  return { authenticated: true, user, needsLogin: false, errors: authErrors };
+}
+async function refreshWithLock(fallbackAuthData) {
+  const collectedErrors = [];
+  const gotLock = await acquireLock();
+  if (!gotLock)
+    return notAuthenticated();
+  try {
+    const freshResult = await loadAuthData();
+    if (isAuthError(freshResult)) {
+      collectedErrors.push(freshResult.error);
+    }
+    const freshAuthData = isAuthError(freshResult) ? null : freshResult;
+    if (freshAuthData?.access_token && !isTokenExpired(freshAuthData.access_token)) {
+      return authenticated(freshAuthData.user, toOptionalErrors(collectedErrors));
+    }
+    const tokenToRefresh = freshAuthData?.refresh_token ?? fallbackAuthData.refresh_token;
+    const authenticatedAt = freshAuthData?.authenticated_at ?? fallbackAuthData.authenticated_at;
+    const refreshResult = await refreshToken(tokenToRefresh, authenticatedAt);
+    if (isErrorResult(refreshResult)) {
+      collectedErrors.push(refreshResult.error);
+      return notAuthenticated(collectedErrors);
+    }
+    if (!refreshResult)
+      return notAuthenticated(toOptionalErrors(collectedErrors));
+    await saveAuthData(refreshResult);
+    return authenticated(refreshResult.user, toOptionalErrors(collectedErrors));
+  } finally {
+    await releaseLock();
+  }
+}
+async function checkAuthStatus(attemptRefresh = true) {
+  const collectedErrors = [];
+  const authResult = await loadAuthData();
+  if (isAuthError(authResult)) {
+    collectedErrors.push(authResult.error);
+  }
+  const authData = isAuthError(authResult) ? null : authResult;
+  if (!authData?.access_token) {
+    return notAuthenticated(toOptionalErrors(collectedErrors));
+  }
+  if (!isTokenExpired(authData.access_token)) {
+    return authenticated(authData.user, toOptionalErrors(collectedErrors));
+  }
+  if (!attemptRefresh || !authData.refresh_token) {
+    return notAuthenticated(toOptionalErrors(collectedErrors));
+  }
+  const refreshStatus = await refreshWithLock(authData);
+  const allErrors = [...collectedErrors, ...refreshStatus.errors ?? []];
+  return { ...refreshStatus, errors: toOptionalErrors(allErrors) };
+}
+function getUserDisplayName(user) {
+  return user.first_name || user.email;
+}
 
 // cli/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
-var INCLUDED_ENTRY_TYPES = ["user", "assistant", "summary", "system"];
 function* parseJsonl(content) {
   for (const line of content.split(`
 `)) {
@@ -14404,19 +15891,35 @@ function transformEntry(rawEntry) {
     return { entry: null, error: result.error };
   if (!result.data)
     return { entry: null };
-  if (INCLUDED_ENTRY_TYPES.includes(result.data.type)) {
+  const type = result.data.type;
+  if (type === "user" || type === "assistant" || type === "summary" || type === "system") {
     return { entry: result.data };
   }
   return { entry: null };
 }
+async function parseSessionForErrors(rawPath) {
+  const content = await readFile2(rawPath, "utf-8");
+  const schemaErrors = [];
+  let hasAssistant = false;
+  for (const rawEntry of parseJsonl(content)) {
+    const { entry, error: error48 } = transformEntry(rawEntry);
+    if (error48)
+      schemaErrors.push(error48);
+    if (entry?.type === "assistant")
+      hasAssistant = true;
+  }
+  return { hasContent: hasAssistant, schemaErrors };
+}
 async function extractSession(options) {
   const { rawPath, outputPath, agentId } = options;
   const hiveMindDir = dirname(dirname(outputPath));
-  const [content, rawStat, checkoutId] = await Promise.all([
+  const [content, rawStat, checkoutId, existingMetaResult] = await Promise.all([
     readFile2(rawPath, "utf-8"),
-    stat(rawPath),
-    getCheckoutId(hiveMindDir)
+    stat2(rawPath),
+    getOrCreateCheckoutId(hiveMindDir),
+    readExtractedMeta(outputPath)
   ]);
+  const existingMeta = isMetaError(existingMetaResult) ? null : existingMetaResult;
   const t0Parse = process.env.DEBUG ? performance.now() : 0;
   const entries = [];
   const schemaErrors = [];
@@ -14436,7 +15939,7 @@ async function extractSession(options) {
   const meta3 = {
     _type: "hive-mind-meta",
     version: HIVE_MIND_VERSION,
-    sessionId: basename(rawPath, ".jsonl"),
+    sessionId: basename2(rawPath, ".jsonl"),
     checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime: rawStat.mtime.toISOString(),
@@ -14444,7 +15947,8 @@ async function extractSession(options) {
     rawPath,
     ...agentId && { agentId },
     ...parentSessionId && { parentSessionId },
-    ...schemaErrors.length > 0 && { schemaErrors }
+    ...schemaErrors.length > 0 && { schemaErrors },
+    ...existingMeta?.excluded && { excluded: true }
   };
   resetDetectSecretsStats();
   const t0 = performance.now();
@@ -14453,7 +15957,7 @@ async function extractSession(options) {
     const stats = getDetectSecretsStats();
     console.log(`[extract] Sanitization: ${(performance.now() - t0).toFixed(2)}ms | ` + `${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs`);
   }
-  await mkdir2(dirname(outputPath), { recursive: true });
+  await mkdir3(dirname(outputPath), { recursive: true });
   const lines = [JSON.stringify(meta3), ...sanitizedEntries.map((e) => JSON.stringify(e))];
   await writeFile2(outputPath, `${lines.join(`
 `)}
@@ -14479,11 +15983,15 @@ async function readExtractedMeta(extractedPath) {
     if (!firstLine)
       return null;
     const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) {
+      return { error: errors.schemaError(extractedPath, parsed.error.message) };
+    }
+    return parsed.data;
   } catch {
     return null;
   }
 }
+var isMetaError = isErrorResult;
 async function readExtractedSession(extractedPath) {
   try {
     const content = await readFile2(extractedPath, "utf-8");
@@ -14492,8 +16000,9 @@ async function readExtractedSession(extractedPath) {
     if (lines.length === 0)
       return null;
     const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
-    if (!metaParsed.success)
-      return null;
+    if (!metaParsed.success) {
+      return { error: errors.schemaError(extractedPath, metaParsed.error.message) };
+    }
     const entries = [];
     for (let i = 1;i < lines.length; i++) {
       const result = parseKnownEntry(JSON.parse(lines[i]));
@@ -14505,79 +16014,381 @@ async function readExtractedSession(extractedPath) {
     return null;
   }
 }
-function getProjectsDir(cwd) {
-  return join2(homedir2(), ".claude", "projects", cwd.replace(/\//g, "-"));
+var isSessionError = isErrorResult;
+async function markSessionUploaded(sessionPath) {
+  try {
+    const content = await readFile2(sessionPath, "utf-8");
+    const newlineIndex = content.indexOf(`
+`);
+    if (newlineIndex === -1)
+      return { success: false };
+    const firstLine = content.slice(0, newlineIndex);
+    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    if (!parsed.success) {
+      return { success: false, error: errors.schemaError(sessionPath, parsed.error.message) };
+    }
+    const meta3 = { ...parsed.data, uploadedAt: new Date().toISOString() };
+    const newContent = JSON.stringify(meta3) + content.slice(newlineIndex);
+    await writeFile2(sessionPath, newContent);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: errors.markUploadedFailed(err instanceof Error ? err.message : String(err)) };
+  }
 }
 function getHiveMindSessionsDir(projectCwd) {
-  return join2(projectCwd, ".claude", "hive-mind", "sessions");
+  return join3(projectCwd, ".claude", "hive-mind", "sessions");
 }
 async function findRawSessions(rawDir) {
-  try {
-    const files = await readdir(rawDir);
-    const sessions = [];
-    for (const f of files) {
-      if (f.endsWith(".jsonl")) {
-        if (f.startsWith("agent-")) {
-          sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
-        } else {
-          sessions.push({ path: join2(rawDir, f) });
-        }
-        continue;
+  const files = await readdir(rawDir);
+  const sessions = [];
+  for (const f of files) {
+    if (f.endsWith(".jsonl")) {
+      if (f.startsWith("agent-")) {
+        sessions.push({ path: join3(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+      } else {
+        sessions.push({ path: join3(rawDir, f) });
       }
-      const subagentsDir = join2(rawDir, f, "subagents");
-      try {
-        const subagentFiles = await readdir(subagentsDir);
-        for (const sf of subagentFiles) {
-          if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
-            sessions.push({
-              path: join2(subagentsDir, sf),
-              agentId: sf.replace("agent-", "").replace(".jsonl", "")
-            });
-          }
-        }
-      } catch {}
+      continue;
     }
-    return sessions;
-  } catch {
-    return [];
+    const subagentsDir = join3(rawDir, f, "subagents");
+    try {
+      const subagentFiles = await readdir(subagentsDir);
+      for (const sf of subagentFiles) {
+        if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
+          sessions.push({
+            path: join3(subagentsDir, sf),
+            agentId: sf.replace("agent-", "").replace(".jsonl", "")
+          });
+        }
+      }
+    } catch {}
   }
+  return sessions;
 }
-async function needsExtraction(rawPath, extractedPath) {
-  try {
-    const rawStat = await stat(rawPath);
-    const meta3 = await readExtractedMeta(extractedPath);
-    if (!meta3)
-      return true;
-    return rawStat.mtime.toISOString() !== meta3.rawMtime;
-  } catch {
-    return true;
-  }
-}
-async function extractAllSessions(cwd, transcriptPath) {
-  const rawDir = transcriptPath ? dirname(transcriptPath) : getProjectsDir(cwd);
+async function checkAllSessions(cwd, transcriptsDirs) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const rawSessions = await findRawSessions(rawDir);
-  let extracted = 0;
-  const schemaErrors = [];
-  for (const session of rawSessions) {
-    const { path: rawPath, agentId } = session;
-    const extractedPath = join2(extractedDir, basename(rawPath));
-    if (await needsExtraction(rawPath, extractedPath)) {
+  const collectedErrors = [];
+  const [rawSessionArrays, extractedResult] = await Promise.all([
+    Promise.all(transcriptsDirs.map(async (dir) => {
       try {
-        const result = await extractSession({ rawPath, outputPath: extractedPath, agentId });
-        if (result) {
-          extracted++;
-          if (result.schemaErrors.length > 0) {
-            schemaErrors.push({ sessionId: basename(rawPath, ".jsonl"), errors: result.schemaErrors });
-          }
-        }
-      } catch (error48) {
-        console.error(`Failed to extract ${basename(rawPath, ".jsonl")}:`, error48);
+        return await findRawSessions(dir);
+      } catch (err) {
+        collectedErrors.push(errors.readTranscriptsDirFailed(dir, err instanceof Error ? err.message : String(err)));
+        return [];
       }
+    })),
+    loadExtractedMetadata(extractedDir)
+  ]);
+  const { metaMap: extractedMetaMap, errors: metadataErrors } = extractedResult;
+  collectedErrors.push(...metadataErrors);
+  const rawSessionMap = new Map;
+  for (const sessions of rawSessionArrays) {
+    for (const session of sessions) {
+      const sessionId = basename2(session.path, ".jsonl");
+      rawSessionMap.set(sessionId, session);
     }
   }
-  return { extracted, schemaErrors };
+  const rawSessions = [...rawSessionMap.values()];
+  const sessionsToExtract = [];
+  const schemaErrors = [];
+  await Promise.all(rawSessions.map(async (session) => {
+    const { path: rawPath, agentId } = session;
+    const sessionId = basename2(rawPath, ".jsonl");
+    const existingMeta = extractedMetaMap.get(sessionId);
+    let needsExtract = false;
+    if (!existingMeta) {
+      needsExtract = true;
+    } else {
+      try {
+        const rawStat = await stat2(rawPath);
+        const storedMtime = new Date(existingMeta.rawMtime).getTime();
+        needsExtract = rawStat.mtime.getTime() > storedMtime;
+      } catch (err) {
+        collectedErrors.push(errors.statFailed(rawPath, err instanceof Error ? err.message : String(err)));
+        needsExtract = true;
+      }
+    }
+    if (needsExtract) {
+      try {
+        const parseResult = await parseSessionForErrors(rawPath);
+        if (parseResult.schemaErrors.length > 0) {
+          schemaErrors.push({ sessionId, errors: parseResult.schemaErrors });
+        }
+        if (parseResult.hasContent) {
+          sessionsToExtract.push({ sessionId, rawPath, agentId });
+        }
+      } catch (err) {
+        collectedErrors.push(errors.parseSessionFailed(sessionId, err instanceof Error ? err.message : String(err)));
+        sessionsToExtract.push({ sessionId, rawPath, agentId });
+      }
+    }
+  }));
+  const extractedSessions = [...extractedMetaMap.entries()].map(([sessionId, meta3]) => ({
+    sessionId,
+    meta: meta3
+  }));
+  return { sessionsToExtract, schemaErrors, extractedSessions, errors: collectedErrors };
 }
+async function loadExtractedMetadata(extractedDir) {
+  const metaMap = new Map;
+  const collectedErrors = [];
+  let files;
+  try {
+    files = await readdir(extractedDir);
+  } catch {
+    return { metaMap, errors: collectedErrors };
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  await Promise.all(jsonlFiles.map(async (file2) => {
+    const result = await readExtractedMeta(join3(extractedDir, file2));
+    if (isMetaError(result)) {
+      collectedErrors.push(result.error);
+    } else if (result) {
+      metaMap.set(result.sessionId, result);
+    }
+  }));
+  return { metaMap, errors: collectedErrors };
+}
+async function extractSingleSession(cwd, sessionId) {
+  const extractedDir = getHiveMindSessionsDir(cwd);
+  const transcriptsDirs = await loadTranscriptsDirs(join3(cwd, ".claude", "hive-mind"));
+  if (transcriptsDirs.length === 0)
+    return false;
+  for (const transcriptsDir of transcriptsDirs) {
+    try {
+      const rawSessions = await findRawSessions(transcriptsDir);
+      const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
+      if (session) {
+        const extractedPath = join3(extractedDir, basename2(session.path));
+        const result = await extractSession({
+          rawPath: session.path,
+          outputPath: extractedPath,
+          agentId: session.agentId
+        });
+        return result !== null;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+// cli/lib/output.ts
+var colors = {
+  red: (s) => `\x1B[31m${s}\x1B[0m`,
+  green: (s) => `\x1B[32m${s}\x1B[0m`,
+  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
+  blue: (s) => `\x1B[34m${s}\x1B[0m`
+};
+function hookOutput(message) {
+  console.log(JSON.stringify({ systemMessage: message }));
+}
+function printError(message) {
+  console.error(`${colors.red("Error:")} ${message}`);
+}
+function printSuccess(message) {
+  console.log(colors.green(message));
+}
+function printInfo(message) {
+  console.log(colors.blue(message));
+}
+function printWarning(message) {
+  console.log(colors.yellow(message));
+}
+
+// cli/lib/utils.ts
+import { createInterface as createInterface2 } from "readline";
+import { readdir as readdir2 } from "fs/promises";
+import { join as join4 } from "path";
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function confirm(message) {
+  const rl = createInterface2({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${message} [y/N] `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === "y");
+    });
+  });
+}
+function formatSessionId(id) {
+  return id.length > 12 ? `${id.slice(0, 8)}...${id.slice(-4)}` : id;
+}
+async function lookupSession(cwd, sessionIdPrefix) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const exactPath = join4(sessionsDir, `${sessionIdPrefix}.jsonl`);
+  const exactMetaResult = await readExtractedMeta(exactPath);
+  if (exactMetaResult && !isMetaError(exactMetaResult)) {
+    return { type: "found", sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMetaResult };
+  }
+  let files;
+  try {
+    files = await readdir2(sessionsDir);
+  } catch {
+    return { type: "not_found" };
+  }
+  const matches = files.filter((f) => f.endsWith(".jsonl") && f.startsWith(sessionIdPrefix));
+  if (matches.length === 0) {
+    return { type: "not_found" };
+  }
+  if (matches.length > 1) {
+    return { type: "ambiguous", matches: matches.map((m) => m.replace(".jsonl", "")) };
+  }
+  const sessionId = matches[0].replace(".jsonl", "");
+  const sessionPath = join4(sessionsDir, matches[0]);
+  const metaResult = await readExtractedMeta(sessionPath);
+  if (!metaResult || isMetaError(metaResult)) {
+    return { type: "not_found" };
+  }
+  return { type: "found", sessionId, sessionPath, meta: metaResult };
+}
+
+// cli/commands/exclude.ts
+async function excludeSession(sessionPath) {
+  try {
+    const content = await readFile3(sessionPath, "utf-8");
+    const lines = content.split(`
+`);
+    if (lines.length === 0)
+      return false;
+    const meta3 = JSON.parse(lines[0]);
+    meta3.excluded = true;
+    lines[0] = JSON.stringify(meta3);
+    await writeFile3(sessionPath, lines.join(`
+`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function excludeAll(cwd) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir3(sessionsDir);
+  } catch {
+    printError(excludeCmd.noSessionsDir);
+    return 1;
+  }
+  const sessionFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (sessionFiles.length === 0) {
+    console.log(excludeCmd.noSessions);
+    return 0;
+  }
+  let nonExcludedCount = 0;
+  for (const file2 of sessionFiles) {
+    const metaResult = await readExtractedMeta(join5(sessionsDir, file2));
+    if (metaResult && !isMetaError(metaResult) && !metaResult.excluded && !metaResult.agentId) {
+      nonExcludedCount++;
+    }
+  }
+  if (nonExcludedCount === 0) {
+    console.log(excludeCmd.allAlreadyExcluded);
+    return 0;
+  }
+  console.log(excludeCmd.foundNonExcluded(nonExcludedCount));
+  console.log("");
+  if (!await confirm(excludeCmd.confirmExcludeAll)) {
+    console.log(excludeCmd.cancelled);
+    return 0;
+  }
+  let succeeded = 0;
+  let failed = 0;
+  for (const file2 of sessionFiles) {
+    const sessionPath = join5(sessionsDir, file2);
+    const metaResult = await readExtractedMeta(sessionPath);
+    if (!metaResult || isMetaError(metaResult) || metaResult.excluded || metaResult.agentId)
+      continue;
+    const sessionId = file2.replace(".jsonl", "");
+    if (await excludeSession(sessionPath)) {
+      console.log(colors.yellow(excludeCmd.excludedLine(formatSessionId(sessionId))));
+      succeeded++;
+    } else {
+      console.log(colors.red(excludeCmd.failedLine(formatSessionId(sessionId))));
+      failed++;
+    }
+  }
+  console.log("");
+  if (succeeded > 0) {
+    printSuccess(excludeCmd.excludedCount(succeeded));
+  }
+  if (failed > 0) {
+    printError(excludeCmd.failedCount(failed));
+  }
+  return failed > 0 ? 1 : 0;
+}
+async function excludeOne(cwd, sessionIdPrefix) {
+  const lookup = await lookupSession(cwd, sessionIdPrefix);
+  if (lookup.type === "not_found") {
+    printError(excludeCmd.sessionNotFound(sessionIdPrefix));
+    return 1;
+  }
+  if (lookup.type === "ambiguous") {
+    printError(excludeCmd.ambiguousSession(sessionIdPrefix, lookup.matches.length));
+    console.log(excludeCmd.matches);
+    for (const m of lookup.matches) {
+      console.log(`  ${m}`);
+    }
+    return 1;
+  }
+  const { sessionPath, meta: meta3 } = lookup;
+  if (meta3.agentId) {
+    printError(excludeCmd.cannotExcludeAgent);
+    return 1;
+  }
+  if (meta3.excluded) {
+    printInfo(excludeCmd.alreadyExcluded(formatSessionId(meta3.sessionId)));
+    return 0;
+  }
+  if (await excludeSession(sessionPath)) {
+    printSuccess(excludeCmd.excluded(formatSessionId(meta3.sessionId)));
+    return 0;
+  }
+  printError(excludeCmd.failedToExclude(formatSessionId(meta3.sessionId)));
+  return 1;
+}
+async function exclude() {
+  const cwd = process.env.CWD || process.cwd();
+  const args = process.argv.slice(3);
+  if (args.includes("--all")) {
+    return await excludeAll(cwd);
+  }
+  const sessionId = args.find((a) => !a.startsWith("-"));
+  if (!sessionId) {
+    printError(excludeCmd.usage);
+    return 1;
+  }
+  return await excludeOne(cwd, sessionId);
+}
+
+// cli/commands/extract.ts
+async function extract() {
+  const cwd = process.env.CWD || process.cwd();
+  const sessionIds = process.argv.slice(3);
+  if (sessionIds.length === 0) {
+    return 1;
+  }
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    try {
+      const success2 = await extractSingleSession(cwd, sessionId);
+      if (!success2)
+        failures++;
+    } catch (error48) {
+      if (process.env.DEBUG) {
+        console.error(`[extract] ${error48 instanceof Error ? error48.message : String(error48)}`);
+      }
+      failures++;
+    }
+  }
+  return failures > 0 ? 1 : 0;
+}
+
+// cli/commands/search.ts
+import { readdir as readdir4 } from "fs/promises";
+import { join as join6 } from "path";
 
 // cli/lib/field-filter.ts
 function parseFieldList(input) {
@@ -14599,22 +16410,8 @@ function matches(pattern, target) {
 function specificity(field) {
   return field.split(":").length;
 }
-var READ_DEFAULT_SHOWN = new Set([
-  "user",
-  "assistant",
-  "thinking",
-  "tool",
-  "system",
-  "summary"
-]);
-var GREP_DEFAULT_SEARCH = new Set([
-  "user",
-  "assistant",
-  "thinking",
-  "tool:input",
-  "system",
-  "summary"
-]);
+var READ_DEFAULT_SHOWN = new Set(["user", "assistant", "thinking", "tool", "system", "summary"]);
+var SEARCH_DEFAULT_FIELDS = new Set(["user", "assistant", "thinking", "tool:input", "system", "summary"]);
 
 class ReadFieldFilter {
   rules;
@@ -14656,11 +16453,11 @@ class ReadFieldFilter {
   }
 }
 
-class GrepFieldFilter {
+class SearchFieldFilter {
   searchFields;
   constructor(searchIn) {
     if (searchIn === null || searchIn.length === 0) {
-      this.searchFields = new Set(GREP_DEFAULT_SEARCH);
+      this.searchFields = new Set(SEARCH_DEFAULT_FIELDS);
     } else {
       this.searchFields = new Set(searchIn);
     }
@@ -14731,6 +16528,232 @@ function computeUniformLimit(wordCounts, targetTotal) {
   return Math.max(MIN_WORD_LIMIT, Math.floor(targetTotal / n));
 }
 
+// cli/lib/parse.ts
+function isNoiseBlock(block) {
+  if (block.type === "tool_result" && "content" in block) {
+    const content = block.content;
+    if (typeof content === "string" && content.startsWith("Todos have been modified successfully")) {
+      return true;
+    }
+  }
+  if (block.type === "text" && "text" in block) {
+    const text = block.text.trim();
+    if (text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>")) {
+      return true;
+    }
+  }
+  return false;
+}
+function isSkippedEntryType(entry) {
+  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
+}
+function isToolResultOnly(entry) {
+  const content = entry.message.content;
+  if (!Array.isArray(content))
+    return false;
+  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
+  if (meaningfulBlocks.length === 0)
+    return true;
+  return meaningfulBlocks.every((b) => b.type === "tool_result");
+}
+function extractUserText(entry) {
+  const content = entry.message.content;
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const textParts = [];
+  for (const block of content) {
+    if (isNoiseBlock(block))
+      continue;
+    if (block.type === "tool_result")
+      continue;
+    if (block.type === "text" && "text" in block) {
+      textParts.push(block.text);
+    }
+  }
+  return textParts.join(`
+`);
+}
+function findToolResult(entries, toolUseId) {
+  for (const entry of entries) {
+    if (entry.type !== "user")
+      continue;
+    const content = entry.message.content;
+    if (!Array.isArray(content))
+      continue;
+    for (const block of content) {
+      if (block.type === "tool_result" && "tool_use_id" in block && block.tool_use_id === toolUseId) {
+        const agentId = "agentId" in entry && typeof entry.agentId === "string" ? entry.agentId : undefined;
+        return {
+          content: formatToolResultContent(block.content),
+          agentId
+        };
+      }
+    }
+  }
+  return;
+}
+function formatToolResultContent(content) {
+  if (!content)
+    return "";
+  if (typeof content === "string")
+    return content;
+  const parts = [];
+  for (const block of content) {
+    if (block.type === "text" && "text" in block) {
+      parts.push(block.text);
+    } else if (block.type === "image" && "source" in block) {
+      parts.push(`[image:${block.source.media_type}]`);
+    } else if (block.type === "document" && "source" in block) {
+      parts.push(`[document:${block.source.media_type}]`);
+    }
+  }
+  return parts.join(`
+`);
+}
+function findLastSummaryIndex(entries) {
+  for (let i = entries.length - 1;i >= 0; i--) {
+    if (entries[i].type === "summary") {
+      return i;
+    }
+  }
+  return -1;
+}
+function parseSession(meta3, entries) {
+  const blocks = [];
+  const uuidToLine = new Map;
+  let lineNumber = 0;
+  const lastSummaryIndex = findLastSummaryIndex(entries);
+  for (let i = 0;i < entries.length; i++) {
+    const entry = entries[i];
+    if (isSkippedEntryType(entry))
+      continue;
+    if (entry.type === "summary" && i !== lastSummaryIndex)
+      continue;
+    if (entry.type === "user") {
+      if (isToolResultOnly(entry))
+        continue;
+      lineNumber++;
+      if (entry.uuid)
+        uuidToLine.set(entry.uuid, lineNumber);
+      blocks.push({
+        type: "user",
+        lineNumber,
+        parentLineNumber: undefined,
+        content: extractUserText(entry),
+        timestamp: entry.timestamp,
+        uuid: entry.uuid,
+        parentUuid: entry.parentUuid,
+        cwd: entry.cwd,
+        gitBranch: entry.gitBranch
+      });
+    } else if (entry.type === "assistant") {
+      const content = entry.message.content;
+      if (typeof content === "string") {
+        if (content) {
+          lineNumber++;
+          if (entry.uuid)
+            uuidToLine.set(entry.uuid, lineNumber);
+          blocks.push({
+            type: "assistant",
+            lineNumber,
+            parentLineNumber: undefined,
+            content,
+            timestamp: entry.timestamp,
+            uuid: entry.uuid,
+            parentUuid: entry.parentUuid,
+            model: entry.message.model
+          });
+        }
+        continue;
+      }
+      if (Array.isArray(content)) {
+        const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b) && b.type !== "tool_result");
+        if (meaningfulBlocks.length === 0)
+          continue;
+        lineNumber++;
+        if (entry.uuid)
+          uuidToLine.set(entry.uuid, lineNumber);
+        const entryLineNumber = lineNumber;
+        for (const contentBlock of content) {
+          if (isNoiseBlock(contentBlock))
+            continue;
+          if (contentBlock.type === "text" && "text" in contentBlock) {
+            blocks.push({
+              type: "assistant",
+              lineNumber: entryLineNumber,
+              parentLineNumber: undefined,
+              content: contentBlock.text,
+              timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid,
+              model: entry.message.model
+            });
+          } else if (contentBlock.type === "thinking" && "thinking" in contentBlock) {
+            blocks.push({
+              type: "thinking",
+              lineNumber: entryLineNumber,
+              parentLineNumber: undefined,
+              content: contentBlock.thinking,
+              timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid
+            });
+          } else if (contentBlock.type === "tool_use" && "input" in contentBlock) {
+            const resultInfo = findToolResult(entries, contentBlock.id);
+            blocks.push({
+              type: "tool",
+              lineNumber: entryLineNumber,
+              parentLineNumber: undefined,
+              toolName: contentBlock.name,
+              toolInput: contentBlock.input,
+              toolResult: resultInfo?.content,
+              toolUseId: contentBlock.id,
+              agentId: resultInfo?.agentId,
+              timestamp: entry.timestamp,
+              uuid: entry.uuid,
+              parentUuid: entry.parentUuid
+            });
+          }
+        }
+      }
+    } else if (entry.type === "system") {
+      lineNumber++;
+      blocks.push({
+        type: "system",
+        lineNumber,
+        parentLineNumber: undefined,
+        content: entry.content ?? "",
+        timestamp: entry.timestamp,
+        subtype: entry.subtype,
+        level: entry.level
+      });
+    } else if (entry.type === "summary") {
+      lineNumber++;
+      blocks.push({
+        type: "summary",
+        lineNumber,
+        parentLineNumber: undefined,
+        content: entry.summary
+      });
+    }
+  }
+  for (const block of blocks) {
+    const parentUuid = block.parentUuid;
+    const uuid3 = block.uuid;
+    if (parentUuid) {
+      block.parentLineNumber = uuidToLine.get(parentUuid);
+    } else if (uuid3) {
+      block.parentLineNumber = null;
+    }
+  }
+  return {
+    meta: meta3,
+    blocks
+  };
+}
+
 // cli/lib/format.ts
 var MAX_CONTENT_SUMMARY_LEN = 300;
 var DEFAULT_TARGET_WORDS = 2000;
@@ -14750,61 +16773,26 @@ function countLines(text) {
   return text.split(`
 `).length;
 }
-function formatQuotedSummary(text, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN) {
-  if (!text)
-    return '""';
-  const lines = text.split(`
-`);
-  const firstLine = truncateFirstLine(lines[0], maxFirstLineLen);
-  const escaped = escapeQuotes(firstLine);
-  if (lines.length === 1) {
-    return `"${escaped}"`;
-  }
-  const totalWords = countWords(text);
-  return `"${escaped}" +${totalWords}words`;
-}
 var MIN_TRUNCATION_THRESHOLD = 3;
 function truncateContent(text, wordLimit, skipWords) {
   if (!text)
-    return { content: "", suffix: "", isEmpty: true };
+    return { content: "", prefix: "", suffix: "", isEmpty: true };
   const result = truncateWords(text, skipWords, wordLimit);
   if (result.wordCount === 0) {
-    return { content: "", suffix: "", isEmpty: true };
+    return { content: "", prefix: "", suffix: "", isEmpty: true };
   }
+  const prefix = skipWords > 0 ? "..." : "";
   if (result.truncated && result.remaining <= MIN_TRUNCATION_THRESHOLD) {
     const fullResult = truncateWords(text, skipWords, wordLimit + result.remaining);
-    return { content: fullResult.text, suffix: "", isEmpty: false };
+    return { content: fullResult.text, prefix, suffix: "", isEmpty: false };
   }
-  const suffix = result.truncated ? ` +${result.remaining}words` : "";
-  return { content: result.text, suffix, isEmpty: false };
+  const suffix = result.truncated ? `...${result.remaining}words` : "";
+  return { content: result.text, prefix, suffix, isEmpty: false };
 }
-function formatTruncatedBlock(content, suffix) {
+function formatTruncatedBlock(content, prefix, suffix) {
   const indented = indent(content, 2);
-  if (!suffix)
-    return indented;
-  return indented + suffix;
-}
-function formatContentBody(header, content, redact, wordLimit, skipWords) {
-  if (redact && wordLimit !== undefined) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
-    if (isEmpty)
-      return null;
-    if (!truncated.includes(`
-`)) {
-      const escaped = escapeQuotes(truncated);
-      return `${header}|"${escaped}"${suffix}`;
-    }
-    return `${header}
-${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    if (!content)
-      return header;
-    return `${header}|${formatQuotedSummary(content)}`;
-  }
-  if (!content)
-    return header;
-  return `${header}
-${indent(content, 2)}`;
+  const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
+  return suffix ? prefixed + suffix : prefixed;
 }
 function formatWordCount(text) {
   const count = countWords(text);
@@ -14836,10 +16824,11 @@ function indent(text, spaces) {
 }
 function formatMultilineParams(params) {
   const lines = [];
-  for (const { name, content, suffix } of params) {
+  for (const { name, content, prefix, suffix } of params) {
     lines.push(`[${name}]`);
     const indented = indent(content, 2);
-    lines.push(suffix ? indented + suffix : indented);
+    const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
+    lines.push(suffix ? prefixed + suffix : prefixed);
   }
   return lines;
 }
@@ -14853,443 +16842,216 @@ function formatTimestamp(timestamp, prevDate, isFirst) {
   }
   return time3;
 }
-function getLogicalEntries(entries) {
-  const result = [];
-  let logicalLine = 0;
-  let lastSummaryIndex = -1;
-  for (let i = entries.length - 1;i >= 0; i--) {
-    if (entries[i].type === "summary") {
-      lastSummaryIndex = i;
-      break;
-    }
+function formatBlock(block, options = {}) {
+  const { sessionPrefix, showTimestamp, prevDate, isFirst, cwd, truncation, fieldFilter, parentIndicator } = options;
+  const parts = [];
+  if (sessionPrefix)
+    parts.push(sessionPrefix);
+  parts.push(String(block.lineNumber));
+  if (showTimestamp && "timestamp" in block && block.timestamp) {
+    const ts = formatTimestamp(block.timestamp, prevDate, isFirst);
+    if (ts)
+      parts.push(ts);
   }
-  for (let i = 0;i < entries.length; i++) {
-    const entry = entries[i];
-    if (entry.type === "summary" && i !== lastSummaryIndex)
-      continue;
-    if (entry.type === "user" && isToolResultOnlyEntry(entry))
-      continue;
-    if (isSkippedEntryType(entry))
-      continue;
-    logicalLine++;
-    result.push({ lineNumber: logicalLine, entry });
-  }
-  return result;
-}
-function formatSession(entries, options = {}) {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
-  const toolResults = collectToolResults(entries);
-  let lastSummaryIndex = -1;
-  for (let i = entries.length - 1;i >= 0; i--) {
-    if (entries[i].type === "summary") {
-      lastSummaryIndex = i;
-      break;
-    }
-  }
-  const filteredEntries = entries.filter((entry, i) => {
-    if (entry.type === "summary")
-      return i === lastSummaryIndex;
-    return true;
-  });
-  let wordLimit;
-  if (redact) {
-    const wordCounts = collectWordCounts(filteredEntries, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-  const uuidToLine = buildUuidMap(filteredEntries);
-  const results = [];
-  if (redact) {
-    const header = buildSessionHeader(entries);
-    if (header)
-      results.push(header);
-  }
-  let prevUuid;
-  let prevDate;
-  let cwd;
-  let logicalLine = 0;
-  for (const entry of filteredEntries) {
-    if (entry.type === "user" && isToolResultOnlyEntry(entry)) {
-      continue;
-    }
-    if (isSkippedEntryType(entry)) {
-      continue;
-    }
-    if (entry.type === "user" && entry.cwd) {
-      cwd = entry.cwd;
-    }
-    logicalLine++;
-    const lineNumber = logicalLine;
-    let parentIndicator;
-    const parentUuid = getParentUuid(entry);
-    if (prevUuid) {
-      if (parentUuid && parentUuid !== prevUuid) {
-        parentIndicator = uuidToLine.get(parentUuid);
-      } else if (!parentUuid && getUuid(entry)) {
-        parentIndicator = "start";
+  switch (block.type) {
+    case "user": {
+      parts.push("user");
+      if (parentIndicator !== undefined)
+        parts.push(`parent=${parentIndicator}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow("user");
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join("|");
       }
+      return formatBlockContent(parts.join("|"), block.content, truncation);
     }
-    const timestamp = getTimestamp(entry);
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = logicalLine === 1;
-    const formatted = formatEntry(entry, {
-      lineNumber,
-      toolResults,
-      parentIndicator,
-      redact,
-      prevDate,
-      isFirst,
-      cwd,
-      wordLimit,
-      skipWords,
-      fieldFilter
-    });
-    if (formatted) {
-      results.push(formatted);
-    }
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-    const uuid3 = getUuid(entry);
-    if (uuid3) {
-      prevUuid = uuid3;
-    }
-  }
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-  const separator = redact ? `
-` : `
-
-`;
-  return results.join(separator);
-}
-function collectWordCounts(entries, skipWords) {
-  const counts = [];
-  function addCount(text) {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-  for (const entry of entries) {
-    if (entry.type === "user" && !isToolResultOnlyEntry(entry)) {
-      const content = getUserMessageContent(entry.message.content);
-      addCount(content);
-    } else if (entry.type === "assistant") {
-      const blocks = entry.message.content;
-      if (typeof blocks === "string") {
-        addCount(blocks);
-      } else if (Array.isArray(blocks)) {
-        for (const block of blocks) {
-          if (block.type === "text" && "text" in block) {
-            addCount(block.text);
-          } else if (block.type === "thinking" && "thinking" in block) {
-            addCount(block.thinking);
-          }
-        }
+    case "assistant": {
+      parts.push("assistant");
+      if (parentIndicator !== undefined)
+        parts.push(`parent=${parentIndicator}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow("assistant");
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join("|");
       }
-    } else if (entry.type === "summary") {
-      addCount(entry.summary);
-    } else if (entry.type === "system") {
-      addCount(entry.content || "");
+      return formatBlockContent(parts.join("|"), block.content, truncation);
     }
-  }
-  return counts;
-}
-function formatEntry(entry, options) {
-  const {
-    lineNumber,
-    toolResults,
-    parentIndicator,
-    redact = false,
-    prevDate,
-    isFirst,
-    cwd,
-    wordLimit,
-    skipWords = 0,
-    fieldFilter
-  } = options;
-  if (fieldFilter && redact && entry.type !== "assistant") {
-    if (!fieldFilter.shouldShow(entry.type)) {
-      return null;
+    case "thinking": {
+      parts.push("thinking");
+      const showFull = fieldFilter?.showFullThinking() ?? false;
+      if (!showFull && truncation?.type !== "full" && truncation?.type !== "matchContext") {
+        parts.push(formatWordCount(block.content));
+        return parts.join("|");
+      }
+      const thinkingTruncation = showFull ? { type: "full" } : truncation ?? { type: "full" };
+      return formatBlockContent(parts.join("|"), block.content, thinkingTruncation);
     }
-  }
-  switch (entry.type) {
-    case "user":
-      if (toolResults && isToolResultOnlyEntry(entry))
-        return null;
-      return formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
-    case "assistant":
-      return formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords, fieldFilter);
-    case "system":
-      return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords);
-    case "summary":
-      return formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords);
+    case "tool":
+      return formatToolBlock(block, parts, { cwd, truncation, fieldFilter });
+    case "system": {
+      parts.push("system");
+      if (block.subtype)
+        parts.push(`subtype=${block.subtype}`);
+      if (block.level && block.level !== "info")
+        parts.push(`level=${block.level}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow("system");
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join("|");
+      }
+      return formatBlockContent(parts.join("|"), block.content, truncation);
+    }
+    case "summary": {
+      parts.push("summary");
+      const hidden = fieldFilter && !fieldFilter.shouldShow("summary");
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join("|");
+      }
+      return formatBlockContent(parts.join("|"), block.content, truncation);
+    }
     default:
       return null;
   }
 }
-function buildSessionHeader(entries) {
-  let model;
-  let gitBranch;
-  for (const entry of entries) {
-    if (!model && entry.type === "assistant" && entry.message.model) {
-      model = entry.message.model;
+function formatBlockContent(header, content, truncation) {
+  if (!content && !truncation)
+    return header;
+  switch (truncation?.type) {
+    case "wordLimit": {
+      const {
+        content: truncated,
+        prefix,
+        suffix,
+        isEmpty
+      } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
+      if (isEmpty)
+        return null;
+      if (!truncated.includes(`
+`)) {
+        const escaped = escapeQuotes(truncated);
+        return `${header}|${prefix}"${escaped}"${suffix}`;
+      }
+      return `${header}
+${formatTruncatedBlock(truncated, prefix, suffix)}`;
     }
-    if (!gitBranch && entry.type === "user" && entry.gitBranch) {
-      gitBranch = entry.gitBranch;
+    case "matchContext": {
+      const matchPositions = findMatchPositions(content, truncation.pattern);
+      const output = formatMatchesWithContext(content, matchPositions, truncation.contextWords);
+      if (!output)
+        return null;
+      if (!output.includes(`
+`))
+        return `${header}|${output}`;
+      return `${header}
+${indent(output, 2)}`;
     }
-    if (model && gitBranch)
+    default:
+      if (!content)
+        return header;
+      return `${header}
+${indent(content, 2)}`;
+  }
+}
+function formatMatchesWithContext(text, matchPositions, contextWords) {
+  if (matchPositions.length === 0)
+    return text;
+  const words = splitIntoWords(text);
+  if (words.length === 0)
+    return text;
+  const matchingWordIndices = new Set;
+  for (const pos of matchPositions) {
+    for (let i = 0;i < words.length; i++) {
+      const word = words[i];
+      if (word.start < pos.end && word.end > pos.start) {
+        matchingWordIndices.add(i);
+      }
+    }
+  }
+  if (matchingWordIndices.size === 0) {
+    if (words.length > contextWords * 2) {
+      return `${words.length}words`;
+    }
+    return text;
+  }
+  const sortedMatchIndices = Array.from(matchingWordIndices).sort((a, b) => a - b);
+  const ranges = [];
+  for (const idx of sortedMatchIndices) {
+    const start = Math.max(0, idx - contextWords);
+    const end = Math.min(words.length - 1, idx + contextWords);
+    if (ranges.length > 0 && ranges[ranges.length - 1].end >= start - 4) {
+      ranges[ranges.length - 1].end = end;
+    } else {
+      ranges.push({ start, end });
+    }
+  }
+  const MIN_TRUNCATION_WORDS = 4;
+  if (ranges.length > 0 && ranges[0].start > 0 && ranges[0].start < MIN_TRUNCATION_WORDS) {
+    ranges[0].start = 0;
+  }
+  if (ranges.length > 0) {
+    const lastRange = ranges[ranges.length - 1];
+    const finalGap = words.length - 1 - lastRange.end;
+    if (finalGap > 0 && finalGap < MIN_TRUNCATION_WORDS) {
+      lastRange.end = words.length - 1;
+    }
+  }
+  const outputParts = [];
+  let lastEnd = -1;
+  for (const range of ranges) {
+    if (range.start > lastEnd + 1) {
+      const skippedCount = range.start - lastEnd - 1;
+      if (skippedCount > 0) {
+        const isInitialGap = lastEnd === -1;
+        outputParts.push(isInitialGap ? `${skippedCount}words...` : `...${skippedCount}words...`);
+      }
+    }
+    const startChar = words[range.start].start;
+    const endChar = words[range.end].end;
+    outputParts.push(text.slice(startChar, endChar));
+    lastEnd = range.end;
+  }
+  if (lastEnd < words.length - 1) {
+    const skippedCount = words.length - 1 - lastEnd;
+    outputParts.push(`...${skippedCount}words`);
+  }
+  return outputParts.join("");
+}
+function splitIntoWords(text) {
+  const words = [];
+  const regex = /\S+/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    words.push({ word: match[0], start: match.index, end: match.index + match[0].length });
+  }
+  return words;
+}
+function findMatchPositions(text, pattern) {
+  const positions = [];
+  const globalPattern = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
+  let match;
+  while ((match = globalPattern.exec(text)) !== null) {
+    positions.push({ start: match.index, end: match.index + match[0].length });
+    if (match[0].length === 0)
       break;
   }
-  const parts = ["#"];
-  if (model)
-    parts.push(`model=${model}`);
-  if (gitBranch)
-    parts.push(`branch=${gitBranch}`);
-  if (parts.length === 1)
-    return null;
-  return parts.join(" ");
+  return positions;
 }
-function buildUuidMap(entries) {
-  const map2 = new Map;
-  let logicalLine = 0;
-  for (const entry of entries) {
-    if (isSkippedEntryType(entry))
-      continue;
-    if (entry.type === "user") {
-      const content = entry.message.content;
-      if (Array.isArray(content)) {
-        const meaningful = content.filter((b) => !isNoiseBlock(b));
-        if (meaningful.length === 0 || meaningful.every((b) => b.type === "tool_result")) {
-          continue;
-        }
-      }
-    }
-    logicalLine++;
-    const uuid3 = getUuid(entry);
-    if (uuid3) {
-      map2.set(uuid3, logicalLine);
-    }
-  }
-  return map2;
-}
-function getUuid(entry) {
-  if ("uuid" in entry && typeof entry.uuid === "string") {
-    return entry.uuid;
-  }
-  return;
-}
-function getParentUuid(entry) {
-  if ("parentUuid" in entry && typeof entry.parentUuid === "string") {
-    return entry.parentUuid;
-  }
-  return;
-}
-function getTimestamp(entry) {
-  if ("timestamp" in entry && typeof entry.timestamp === "string") {
-    return entry.timestamp;
-  }
-  return;
-}
-function collectToolResults(entries) {
-  const results = new Map;
-  for (const entry of entries) {
-    if (entry.type !== "user")
-      continue;
-    const content = entry.message.content;
-    if (!Array.isArray(content))
-      continue;
-    const agentId = "agentId" in entry ? entry.agentId : undefined;
-    for (const block of content) {
-      if (block.type === "tool_result" && "tool_use_id" in block) {
-        const formatted = formatToolResultContent(block.content);
-        if (formatted) {
-          results.set(block.tool_use_id, { content: formatted, agentId });
-        }
-      }
-    }
-  }
-  return results;
-}
-function formatToolResultContent(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const parts = [];
-  for (const block of content) {
-    if (block.type === "text" && "text" in block) {
-      parts.push(block.text);
-    } else if (block.type === "image" && "source" in block) {
-      parts.push(`[image:${block.source.media_type}]`);
-    } else if (block.type === "document" && "source" in block) {
-      parts.push(`[document:${block.source.media_type}]`);
-    }
-  }
-  return parts.join(`
-`);
-}
-function isToolResultOnlyEntry(entry) {
-  const content = entry.message.content;
-  if (!Array.isArray(content))
-    return false;
-  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
-  if (meaningfulBlocks.length === 0)
-    return true;
-  return meaningfulBlocks.every((b) => b.type === "tool_result");
-}
-function isSkippedEntryType(entry) {
-  return entry.type === "file-history-snapshot" || entry.type === "queue-operation";
-}
-function isNoiseBlock(block) {
-  if (block.type === "tool_result" && "content" in block) {
-    const content = block.content;
-    if (typeof content === "string" && content.startsWith("Todos have been modified successfully")) {
-      return true;
-    }
-  }
-  if (block.type === "text" && "text" in block) {
-    const text = block.text.trim();
-    if (text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>")) {
-      return true;
-    }
-  }
-  return false;
-}
-function formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("user");
-  if (parentIndicator !== undefined)
-    parts.push(`parent=${parentIndicator}`);
-  const content = getUserMessageContent(entry.message.content);
-  return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
-}
-function getUserMessageContent(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const textParts = [];
-  for (const block of content) {
-    if (isNoiseBlock(block))
-      continue;
-    if (block.type === "tool_result")
-      continue;
-    if (block.type === "text") {
-      textParts.push(block.text);
-    }
-  }
-  return textParts.join(`
-`);
-}
-function formatAssistantEntry(entry, lineNumber, toolResults, parentIndicator, prevDate, isFirst, cwd, redact, wordLimit, skipWords, fieldFilter) {
-  const blocks = entry.message.content;
-  if (!blocks || typeof blocks === "string") {
-    const text = typeof blocks === "string" ? blocks : "";
-    return formatTextEntry(lineNumber, entry.timestamp, text, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
-  }
-  const lines = [];
-  let blockIndex = 0;
-  const showFullThinking = fieldFilter?.showFullThinking() ?? false;
-  for (const block of blocks) {
-    if (isNoiseBlock(block))
-      continue;
-    if (block.type === "tool_result")
-      continue;
-    const ts = blockIndex === 0 ? entry.timestamp : undefined;
-    const parent = blockIndex === 0 ? parentIndicator : undefined;
-    if (block.type === "thinking") {
-      if (fieldFilter && redact && !fieldFilter.shouldShow("thinking")) {
-        const parts = [String(lineNumber)];
-        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
-        if (formattedTs)
-          parts.push(formattedTs);
-        parts.push("thinking");
-        parts.push(formatWordCount(block.thinking));
-        lines.push(parts.join("|"));
-        blockIndex++;
-        continue;
-      }
-      const formatted = formatThinkingEntry(lineNumber, ts, block.thinking, prevDate, isFirst, redact, wordLimit, skipWords, showFullThinking);
-      if (formatted)
-        lines.push(formatted);
-    } else if (block.type === "text") {
-      if (fieldFilter && redact && !fieldFilter.shouldShow("assistant")) {
-        const parts = [String(lineNumber)];
-        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
-        if (formattedTs)
-          parts.push(formattedTs);
-        parts.push("assistant");
-        parts.push(formatWordCount(block.text));
-        lines.push(parts.join("|"));
-        blockIndex++;
-        continue;
-      }
-      const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
-      if (formatted)
-        lines.push(formatted);
-    } else if (block.type === "tool_use") {
-      const formatted = formatToolEntry(lineNumber, ts, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter);
-      if (formatted)
-        lines.push(formatted);
-    }
-    blockIndex++;
-  }
-  return lines.length > 0 ? lines.join(`
-`) : null;
-}
-function formatThinkingEntry(lineNumber, timestamp, content, prevDate, isFirst, redact, wordLimit, skipWords, showFullThinking) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("thinking");
-  if (redact) {
-    if (showFullThinking && wordLimit !== undefined) {
-      const result = formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
-      return result ?? parts.join("|");
-    }
-    parts.push(formatWordCount(content));
-    return parts.join("|");
-  }
-  const header = parts.join("|");
-  return `${header}
-${indent(content, 2)}`;
-}
-function formatTextEntry(lineNumber, timestamp, content, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("assistant");
-  if (parentIndicator !== undefined)
-    parts.push(`parent=${parentIndicator}`);
-  return formatContentBody(parts.join("|"), content, redact, wordLimit, skipWords);
-}
-function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDate, isFirst, redact, wordLimit, skipWords, fieldFilter) {
-  const resultInfo = toolResults?.get(block.id);
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("tool");
-  parts.push(block.name);
-  const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
-  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
-  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:input`) : false;
-  const toolFormatter = getToolFormatter(block.name);
+function formatToolBlock(block, headerParts, options) {
+  const { cwd, truncation, fieldFilter } = options;
+  const parts = [...headerParts, "tool", block.toolName];
+  const redact = truncation?.type !== "full";
+  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:result`) : false;
+  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:input`) : false;
+  const showFullResult = fieldFilter?.shouldShow(`tool:${block.toolName}:result`) ?? false;
+  const resultInfo = block.toolResult ? { content: block.toolResult, agentId: block.agentId } : undefined;
+  const toolFormatter = getToolFormatter(block.toolName);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
-    input: block.input,
+    input: block.toolInput,
     result: resultInfo,
     cwd,
     redact,
-    wordLimit,
-    skipWords,
+    truncation,
     hideInput,
     hideResult
   });
@@ -15298,12 +17060,18 @@ function formatToolEntry(lineNumber, timestamp, block, toolResults, cwd, prevDat
     if (resultInfo && !suppressResult) {
       if (hideResult) {
         parts.push(`result=${formatFieldValue(resultInfo.content)}`);
-      } else if (showResult && wordLimit !== undefined) {
-        const { content: truncated, suffix, isEmpty } = truncateContent(resultInfo.content, wordLimit, skipWords ?? 0);
-        if (!isEmpty) {
+      } else if (showFullResult && truncation) {
+        const formatted = formatToolText(resultInfo.content, truncation);
+        if (!formatted.isEmpty) {
           const bodyLines2 = formatMultilineParams(multilineParams);
           bodyLines2.push("[result]");
-          bodyLines2.push(suffix ? indent(truncated, 2) + suffix : indent(truncated, 2));
+          if (formatted.isMultiline) {
+            const indentedResult = indent(formatted.blockContent, 2);
+            const prefixed = formatted.blockPrefix ? `  ${formatted.blockPrefix}${indentedResult.slice(2)}` : indentedResult;
+            bodyLines2.push(formatted.blockSuffix ? prefixed + formatted.blockSuffix : prefixed);
+          } else {
+            bodyLines2.push(`  ${formatted.inline}`);
+          }
           const header3 = parts.join("|");
           return bodyLines2.length > 0 ? `${header3}
 ${bodyLines2.join(`
@@ -15334,22 +17102,178 @@ ${bodyLines2.join(`
 ${bodyLines.join(`
 `)}`;
 }
-function formatToolText(text, wordLimit, skipWords) {
-  if (wordLimit !== undefined) {
-    const { content, suffix, isEmpty } = truncateContent(text, wordLimit, skipWords ?? 0);
+function computeParentIndicator(block, prevUuid, prevLineNumber) {
+  if (block.lineNumber === prevLineNumber || !prevUuid) {
+    return;
+  }
+  const parentUuid = "parentUuid" in block ? block.parentUuid : undefined;
+  const parentLineNumber = "parentLineNumber" in block ? block.parentLineNumber : undefined;
+  if (parentLineNumber === null) {
+    return "start";
+  }
+  if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+    return parentLineNumber;
+  }
+  return;
+}
+function formatBlocks(blocks, options = {}) {
+  const {
+    redact = false,
+    targetWords = DEFAULT_TARGET_WORDS,
+    skipWords = 0,
+    getTruncation,
+    shouldOutput,
+    sessionPrefix,
+    showTimestamp = true,
+    fieldFilter
+  } = options;
+  let wordLimit;
+  if (redact && !getTruncation) {
+    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+  }
+  const results = [];
+  let prevUuid;
+  let prevDate;
+  let prevLineNumber = 0;
+  let cwd = options.cwd;
+  let firstOutput = true;
+  for (let i = 0;i < blocks.length; i++) {
+    const block = blocks[i];
+    if (block.type === "user" && "cwd" in block && block.cwd) {
+      cwd = block.cwd;
+    }
+    const parentIndicator = computeParentIndicator(block, prevUuid, prevLineNumber);
+    const truncation = getTruncation ? getTruncation(block, i) : redact && wordLimit !== undefined ? { type: "wordLimit", limit: wordLimit, skip: skipWords } : { type: "full" };
+    const includeInOutput = shouldOutput ? shouldOutput(block, i) : true;
+    if (includeInOutput) {
+      const timestamp = "timestamp" in block ? block.timestamp : undefined;
+      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+      const formatted = formatBlock(block, {
+        sessionPrefix,
+        showTimestamp,
+        prevDate,
+        isFirst: firstOutput,
+        cwd,
+        truncation,
+        fieldFilter,
+        parentIndicator
+      });
+      if (formatted) {
+        results.push(formatted);
+        firstOutput = false;
+      }
+      if (currentDate) {
+        prevDate = currentDate;
+      }
+    }
+    if ("uuid" in block && block.uuid) {
+      prevUuid = block.uuid;
+    }
+    prevLineNumber = block.lineNumber;
+  }
+  if (redact && !getTruncation && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+  const separator = options.separator ?? (redact ? `
+` : `
+
+`);
+  return results.join(separator);
+}
+function formatSession(entries, options = {}) {
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
+  const meta3 = {
+    _type: "hive-mind-meta",
+    version: "0.1",
+    sessionId: "unknown",
+    checkoutId: "unknown",
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: "unknown",
+    messageCount: entries.length
+  };
+  const parsed = parseSession(meta3, entries);
+  let model;
+  let gitBranch;
+  for (const block of parsed.blocks) {
+    if (!model && block.type === "assistant" && "model" in block && block.model) {
+      model = block.model;
+    }
+    if (!gitBranch && block.type === "user" && "gitBranch" in block && block.gitBranch) {
+      gitBranch = block.gitBranch;
+    }
+    if (model && gitBranch)
+      break;
+  }
+  const headerParts = [];
+  if (redact) {
+    const parts = ["#"];
+    if (model)
+      parts.push(`model=${model}`);
+    if (gitBranch)
+      parts.push(`branch=${gitBranch}`);
+    if (parts.length > 1) {
+      headerParts.push(parts.join(" "));
+    }
+  }
+  const blocksOutput = formatBlocks(parsed.blocks, { redact, targetWords, skipWords, fieldFilter });
+  if (headerParts.length > 0) {
+    const separator = redact ? `
+` : `
+
+`;
+    return headerParts.join(separator) + separator + blocksOutput;
+  }
+  return blocksOutput;
+}
+function collectWordCountsFromBlocks(blocks, skipWords) {
+  const counts = [];
+  for (const block of blocks) {
+    if (block.type === "user" || block.type === "assistant" || block.type === "system" || block.type === "thinking" || block.type === "summary") {
+      const words = countWords(block.content);
+      const afterSkip = Math.max(0, words - skipWords);
+      if (afterSkip > 0) {
+        counts.push(afterSkip);
+      }
+    }
+  }
+  return counts;
+}
+function formatToolText(text, truncation) {
+  if (truncation?.type === "wordLimit") {
+    const { content, prefix, suffix, isEmpty } = truncateContent(text, truncation.limit, truncation.skip ?? 0);
     if (isEmpty) {
-      return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockSuffix: "" };
+      return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockPrefix: "", blockSuffix: "" };
     }
     const isMultiline2 = content.includes(`
 `);
     const escaped = escapeQuotes(content);
-    const inline = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
+    const inline = prefix || suffix ? `${prefix}"${escaped}"${suffix}` : `"${escaped}"`;
     return {
       isEmpty: false,
       isMultiline: isMultiline2,
       inline,
       blockContent: content,
+      blockPrefix: prefix,
       blockSuffix: suffix
+    };
+  }
+  if (truncation?.type === "matchContext") {
+    const matchPositions = findMatchPositions(text, truncation.pattern);
+    const contextOutput = formatMatchesWithContext(text, matchPositions, truncation.contextWords);
+    if (!contextOutput) {
+      return { isEmpty: true, isMultiline: false, inline: "", blockContent: "", blockPrefix: "", blockSuffix: "" };
+    }
+    const isMultiline2 = contextOutput.includes(`
+`);
+    return {
+      isEmpty: false,
+      isMultiline: isMultiline2,
+      inline: contextOutput,
+      blockContent: contextOutput,
+      blockPrefix: "",
+      blockSuffix: ""
     };
   }
   const firstLine = truncateFirstLine(text);
@@ -15360,6 +17284,7 @@ function formatToolText(text, wordLimit, skipWords) {
     isMultiline,
     inline: `"${escapeQuotes(firstLine)}"`,
     blockContent: text,
+    blockPrefix: "",
     blockSuffix: ""
   };
 }
@@ -15445,17 +17370,29 @@ function formatWriteTool({ input, cwd, redact }) {
     multilineParams: []
   };
 }
-function addFormattedParam(headerParams, multilineParams, name, text, wordLimit, skipWords) {
-  const formatted = formatToolText(text, wordLimit, skipWords);
+function addFormattedParam(headerParams, multilineParams, name, text, truncation) {
+  const formatted = formatToolText(text, truncation);
   if (formatted.isEmpty)
     return;
   if (formatted.isMultiline) {
-    multilineParams.push({ name, content: formatted.blockContent, suffix: formatted.blockSuffix || undefined });
+    multilineParams.push({
+      name,
+      content: formatted.blockContent,
+      prefix: formatted.blockPrefix || undefined,
+      suffix: formatted.blockSuffix || undefined
+    });
   } else {
     headerParams.push(`${name}=${formatted.inline}`);
   }
 }
-function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput, hideResult }) {
+function formatBashTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideInput,
+  hideResult
+}) {
   const command = String(input.command || "").trim();
   const desc = input.description ? String(input.description) : undefined;
   const headerParams = [];
@@ -15463,27 +17400,27 @@ function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput
   if (hideInput) {
     headerParams.push(`command=${formatFieldValue(command)}`);
   } else {
-    addFormattedParam(headerParams, multilineParams, "command", command, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, "command", command, truncation);
   }
   if (desc) {
-    addFormattedParam(headerParams, multilineParams, "description", desc, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, "description", desc, truncation);
   }
   if (redact && result) {
     if (hideResult) {
       headerParams.push(`result=${formatFieldValue(result.content)}`);
     } else {
-      addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+      addFormattedParam(headerParams, multilineParams, "result", result.content, truncation);
     }
     return { headerParams, multilineParams, suppressResult: true };
   }
   return { headerParams, multilineParams };
 }
-function formatGrepTool({ input, cwd, wordLimit, skipWords }) {
+function formatGrepTool({ input, cwd, truncation }) {
   const pattern = String(input.pattern || "");
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "pattern", pattern, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "pattern", pattern, truncation);
   if (path) {
     headerParams.push(path);
   }
@@ -15491,15 +17428,15 @@ function formatGrepTool({ input, cwd, wordLimit, skipWords }) {
     headerParams.push(`output_mode=${input.output_mode}`);
   }
   if (input.glob) {
-    addFormattedParam(headerParams, multilineParams, "glob", String(input.glob), wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, "glob", String(input.glob), truncation);
   }
   return { headerParams, multilineParams };
 }
-function formatGlobTool({ input, result, wordLimit, skipWords }) {
+function formatGlobTool({ input, result, truncation }) {
   const pattern = String(input.pattern || "");
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "pattern", pattern, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "pattern", pattern, truncation);
   if (result) {
     const files = result.content.split(`
 `).filter((l) => l.trim()).length;
@@ -15507,7 +17444,7 @@ function formatGlobTool({ input, result, wordLimit, skipWords }) {
   }
   return { headerParams, multilineParams, suppressResult: true };
 }
-function formatTaskTool({ input, result, redact, wordLimit, skipWords }) {
+function formatTaskTool({ input, result, redact, truncation }) {
   const desc = String(input.description || "");
   const prompt = String(input.prompt || "");
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
@@ -15519,7 +17456,7 @@ function formatTaskTool({ input, result, redact, wordLimit, skipWords }) {
   if (result?.agentId) {
     headerParams.push(`session=agent-${result.agentId}`);
   }
-  addFormattedParam(headerParams, multilineParams, "description", desc, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "description", desc, truncation);
   if (redact) {
     headerParams.push(`prompt=${formatFieldValue(prompt)}`);
     return { headerParams, multilineParams };
@@ -15551,7 +17488,13 @@ function formatTodoWriteTool({ input, redact }) {
 `) }] : []
   };
 }
-function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords, hideResult }) {
+function formatAskUserQuestionTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideResult
+}) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams = [`questions=${questions.length}`];
   const multilineParams = [];
@@ -15560,7 +17503,7 @@ function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords
       if (hideResult) {
         headerParams.push(`result=${formatWordCount(result.content)}`);
       } else {
-        addFormattedParam(headerParams, multilineParams, "result", result.content, wordLimit, skipWords);
+        addFormattedParam(headerParams, multilineParams, "result", result.content, truncation);
       }
     }
     return { headerParams, multilineParams, suppressResult: true };
@@ -15606,268 +17549,133 @@ function formatWebFetchTool({ input }) {
     multilineParams: []
   };
 }
-function formatWebSearchTool({ input, wordLimit, skipWords }) {
+function formatWebSearchTool({ input, truncation }) {
   const query = String(input.query || "");
   const headerParams = [];
   const multilineParams = [];
-  addFormattedParam(headerParams, multilineParams, "query", query, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, "query", query, truncation);
   return { headerParams, multilineParams };
 }
-function formatGenericTool({ input, redact, wordLimit, skipWords }) {
+function formatGenericTool({ input, redact, truncation }) {
   const headerParams = [];
   const multilineParams = [];
   for (const [key, value] of Object.entries(input)) {
     if (value === null || value === undefined)
       continue;
     const str = typeof value === "string" ? value : JSON.stringify(value);
-    addFormattedParam(headerParams, multilineParams, key, str, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, key, str, truncation);
     if (redact && headerParams.length >= 3)
       break;
   }
   return { headerParams, multilineParams };
 }
-function formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords) {
-  const parts = [String(lineNumber)];
-  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
-  if (ts)
-    parts.push(ts);
-  parts.push("system");
-  if (entry.subtype)
-    parts.push(`subtype=${entry.subtype}`);
-  if (entry.level && entry.level !== "info")
-    parts.push(`level=${entry.level}`);
-  return formatContentBody(parts.join("|"), entry.content || "", redact, wordLimit, skipWords);
+
+// cli/lib/time-filter.ts
+function parseRelativeTime(value) {
+  const match = value.match(/^(\d+)([mhdw])$/);
+  if (!match)
+    return null;
+  const amount = parseInt(match[1], 10);
+  const unit = match[2];
+  const now = Date.now();
+  switch (unit) {
+    case "m":
+      return new Date(now - amount * 60 * 1000);
+    case "h":
+      return new Date(now - amount * 60 * 60 * 1000);
+    case "d":
+      return new Date(now - amount * 24 * 60 * 60 * 1000);
+    case "w":
+      return new Date(now - amount * 7 * 24 * 60 * 60 * 1000);
+    default:
+      return null;
+  }
 }
-function formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords) {
-  return formatContentBody(`${lineNumber}|summary`, entry.summary, redact, wordLimit, skipWords);
+function parseAbsoluteTime(value) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [y, m, d] = value.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  const date5 = new Date(value);
+  if (!isNaN(date5.getTime()))
+    return date5;
+  return null;
+}
+function parseTimeSpec(value) {
+  return parseRelativeTime(value) ?? parseAbsoluteTime(value);
+}
+function isInTimeRange(timestamp, range) {
+  if (!timestamp)
+    return false;
+  const date5 = new Date(timestamp);
+  if (isNaN(date5.getTime()))
+    return false;
+  if (range.after && date5 < range.after)
+    return false;
+  if (range.before && date5 > range.before)
+    return false;
+  return true;
 }
 
-// cli/lib/messages.ts
-function getCliPath() {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return `${pluginRoot}/cli.js`;
-  }
-  return "~/.claude/plugins/hive-mind/cli.js";
-}
-var CONT = "\u2192";
-var hook = {
-  notLoggedIn: () => {
-    const cliPath = getCliPath();
-    const shell = getShellConfig();
-    return [
-      "hive-mind: Join the shared knowledge base",
-      `${CONT} Login: bun ${cliPath} login`,
-      `${CONT} Optional shortcut:`,
-      `  echo "alias hive-mind='bun ${cliPath}'" >> ${shell.file} && ${shell.sourceCmd}`
-    ].join(`
-`);
-  },
-  loggedIn: (displayName) => {
-    return `hive-mind: Connected as ${displayName}`;
-  },
-  extracted: (count) => {
-    return `Extracted ${count} new session${count === 1 ? "" : "s"}`;
-  },
-  schemaErrors: (errorCount, sessionCount, errors3) => {
-    const unique = [...new Set(errors3)];
-    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? "" : "s"} (${errorCount} entries): ${unique.join("; ")}`;
-  },
-  extractionFailed: (error48) => {
-    return `Extraction failed: ${error48}`;
-  },
-  bunNotInstalled: () => {
-    return "hive-mind requires Bun. Install: curl -fsSL https://bun.sh/install | bash";
-  }
-};
-var errors3 = {
-  noSessions: "No sessions found yet. Sessions are extracted automatically when you start Claude Code.",
-  noSessionsIn: (dir) => `No sessions in ${dir}`,
-  sessionNotFound: (prefix) => `No session matching "${prefix}"`,
-  multipleSessions: (prefix) => `Multiple sessions match "${prefix}":`,
-  andMore: (count) => `  ... and ${count} more`,
-  invalidNumber: (flag, value) => `Invalid ${flag} value: "${value}" (expected a positive number)`,
-  invalidNonNegative: (flag) => `Invalid ${flag} value (expected a non-negative number)`,
-  entryNotFound: (requested, max) => `Entry ${requested} not found (session has ${max} entries)`,
-  rangeNotFound: (start, end, max) => `No entries found in range ${start}-${end} (session has ${max} entries)`,
-  invalidEntry: (value) => `Invalid entry number: "${value}"`,
-  invalidRange: (value) => `Invalid range: "${value}"`,
-  contextRequiresEntry: "Context flags (-C, -B, -A) require an entry number",
-  emptySession: "Session has no entries",
-  noPattern: "No pattern specified",
-  invalidRegex: (error48) => `Invalid regex: ${error48}`,
-  unknownCommand: (cmd) => `Unknown command: ${cmd}`,
-  unexpectedResponse: "Unexpected response from server",
-  bunNotInstalled: () => {
-    return [
-      "hive-mind requires Bun to run.",
-      "",
-      "Install Bun:",
-      "  curl -fsSL https://bun.sh/install | bash"
-    ].join(`
-`);
-  }
-};
-var usage = {
-  main: (commands) => {
-    const lines = ["Usage: hive-mind <command>", "", "Commands:"];
-    for (const { name, description } of commands) {
-      lines.push(`  ${name.padEnd(15)} ${description}`);
-    }
-    return lines.join(`
-`);
-  },
-  read: () => {
-    return [
-      "Usage: read <session-id> [N | N-M] [options]",
-      "",
-      "Read session entries. Session ID supports prefix matching.",
-      "",
-      "Options:",
-      "  N             Entry number to read (full content)",
-      "  N-M           Entry range to read (with truncation)",
-      "  --full        Show all entries with full content (no truncation)",
-      "  --target N    Target total words (default 2000)",
-      "  --skip N      Skip first N words per field (for pagination)",
-      "  -C N          Show N entries of context before and after",
-      "  -B N          Show N entries of context before",
-      "  -A N          Show N entries of context after",
-      "  --show FIELDS Show full content for fields (comma-separated)",
-      "  --hide FIELDS Redact fields to word counts (comma-separated)",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool, tool:<name>, tool:<name>:input, tool:<name>:result",
-      "",
-      "Truncation:",
-      "  Text is adaptively truncated to fit within the target word count.",
-      "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
-      "  Use --skip with the shown N value to continue reading.",
-      "",
-      "Examples:",
-      "  read 02ed                          # all entries (~2000 words)",
-      "  read 02ed --target 500             # tighter truncation",
-      "  read 02ed --full                   # all entries (full content)",
-      "  read 02ed --skip 50                # skip first 50 words per field",
-      "  read 02ed 5                        # entry 5 (full content)",
-      "  read 02ed 10-20                    # entries 10 through 20",
-      "  read 02ed 10-20 --full             # range without truncation",
-      "  read 02ed --show thinking          # show full thinking content",
-      "  read 02ed --show tool:Bash:result  # show Bash command results",
-      "  read 02ed --hide user              # redact user messages to word counts"
-    ].join(`
-`);
-  },
-  grep: () => {
-    return [
-      "Usage: grep <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]",
-      "",
-      "Search sessions for a pattern (JavaScript regex).",
-      "Use -- to separate options from pattern if needed.",
-      "",
-      "Options:",
-      "  -i              Case insensitive search",
-      "  -c              Count matches per session only",
-      "  -l              List matching session IDs only",
-      "  -m N            Stop after N total matches",
-      "  -C N            Show N lines of context around match",
-      "  -s <session>    Search only in specified session (prefix match)",
-      "  --in <fields>   Search only specified fields (comma-separated)",
-      "",
-      "Field specifiers:",
-      "  user, assistant, thinking, system, summary",
-      "  tool:input, tool:result, tool:<name>:input, tool:<name>:result",
-      "",
-      "Default fields: user, assistant, thinking, tool:input, system, summary",
-      "",
-      "Examples:",
-      '  grep "TODO"                    # find TODO in sessions',
-      '  grep -i "error" -C 2           # case insensitive with context',
-      '  grep -c "function"             # count matches per session',
-      '  grep -l "#2597"                # list sessions mentioning issue',
-      '  grep -s 02ed "bug"             # search only in session 02ed...',
-      '  grep --in tool:result "error"  # search only in tool results',
-      '  grep --in user,assistant "fix" # search only user and assistant'
-    ].join(`
-`);
-  },
-  index: () => {
-    return [
-      "Usage: index",
-      "",
-      "List extracted sessions with statistics and summaries.",
-      "Agent sessions are excluded (explore via Task tool calls in parent sessions).",
-      "Statistics include work from subagent sessions.",
-      "",
-      "Output columns:",
-      "  ID                    Session ID prefix",
-      "  DATETIME              Session modification time",
-      "  MSGS                  Total message count",
-      "  USER_MESSAGES         User message count",
-      "  BASH_CALLS            Bash commands executed",
-      "  WEB_FETCHES           Web fetches",
-      "  WEB_SEARCHES          Web searches",
-      "  LINES_ADDED           Lines added",
-      "  LINES_REMOVED         Lines removed",
-      "  FILES_TOUCHED         Files modified",
-      "  SIGNIFICANT_LOCATIONS Paths where >30% of work happened",
-      "  SUMMARY               Session summary or first prompt",
-      "  COMMITS               Git commits from the session"
-    ].join(`
-`);
-  }
-};
-var login = {
-  header: "Join the hive-mind shared knowledge base",
-  alreadyLoggedIn: "You're already connected.",
-  confirmRelogin: "Do you want to reconnect?",
-  refreshing: "Refreshing your session...",
-  refreshSuccess: "Session refreshed!",
-  starting: "Starting authentication...",
-  visitUrl: "Visit this URL in your browser:",
-  confirmCode: "Confirm this code matches:",
-  browserOpened: "Browser opened. Confirm the code and approve.",
-  openManually: "Open the URL in your browser, then confirm the code.",
-  waiting: (seconds) => `Waiting for authentication... (expires in ${seconds}s)`,
-  waitingProgress: (elapsed) => `Waiting... (${elapsed}s elapsed)`,
-  success: "You're connected!",
-  welcomeNamed: (name, email3) => `Welcome, ${name} (${email3})!`,
-  welcomeEmail: (email3) => `Logged in as: ${email3}`,
-  contributing: "Your sessions will now contribute to the shared knowledge base.",
-  reviewPeriod: "You'll have 24 hours to review and exclude sessions before submission.",
-  timeout: "Authentication timed out. Please try again.",
-  startFailed: (error48) => `Couldn't start authentication: ${error48}`,
-  authFailed: (error48) => `Authentication failed: ${error48}`
-};
-
-// cli/lib/output.ts
-var colors = {
-  red: (s) => `\x1B[31m${s}\x1B[0m`,
-  green: (s) => `\x1B[32m${s}\x1B[0m`,
-  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
-  blue: (s) => `\x1B[34m${s}\x1B[0m`
-};
-function hookOutput(message) {
-  console.log(JSON.stringify({ systemMessage: message }));
-}
-function printError(message) {
-  console.error(`${colors.red("Error:")} ${message}`);
-}
-function printSuccess(message) {
-  console.log(colors.green(message));
-}
-function printInfo(message) {
-  console.log(colors.blue(message));
-}
-function printWarning(message) {
-  console.log(colors.yellow(message));
-}
-
-// cli/commands/grep.ts
+// cli/commands/search.ts
+var DEFAULT_CONTEXT_WORDS = 10;
 function printUsage() {
-  console.log(usage.grep());
+  console.log(usage.search());
 }
-async function grep() {
+function computeMinimalPrefixes(sessionIds) {
+  const prefixes = new Map;
+  const minLen = 4;
+  for (const id of sessionIds) {
+    let len = minLen;
+    while (len <= id.length) {
+      const prefix = id.slice(0, len);
+      const conflicts = sessionIds.filter((other) => other !== id && other.startsWith(prefix));
+      if (conflicts.length === 0) {
+        prefixes.set(id, prefix);
+        break;
+      }
+      len++;
+    }
+    if (!prefixes.has(id)) {
+      prefixes.set(id, id);
+    }
+  }
+  return prefixes;
+}
+function getSearchableFieldValues(block, filter) {
+  const values = [];
+  if (block.type === "user" && filter.isSearchable("user")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "assistant" && filter.isSearchable("assistant")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "tool") {
+    const toolName = block.toolName;
+    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+      for (const value of Object.values(block.toolInput)) {
+        if (value !== null && value !== undefined) {
+          values.push(String(value));
+        }
+      }
+    }
+    if (filter.isSearchable("tool:result") || filter.isSearchable(`tool:${toolName}:result`)) {
+      if (block.toolResult)
+        values.push(block.toolResult);
+    }
+  } else if (block.type === "system" && filter.isSearchable("system")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "summary" && filter.isSearchable("summary")) {
+    if (block.content)
+      values.push(block.content);
+  }
+  return values;
+}
+async function search() {
   const args = process.argv.slice(3);
   const doubleDashIdx = args.indexOf("--");
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
@@ -15879,21 +17687,21 @@ async function grep() {
     printUsage();
     return 1;
   }
-  const options = parseGrepOptions(args);
+  const options = parseSearchOptions(args);
   if (!options)
     return 1;
   const cwd = process.cwd();
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir2(sessionsDir);
+    files = await readdir4(sessionsDir);
   } catch {
-    printError(errors3.noSessions);
+    printError(errors.noSessions);
     return 1;
   }
   let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(errors3.noSessionsIn(sessionsDir));
+    printError(errors.noSessionsIn(sessionsDir));
     return 1;
   }
   if (options.sessionFilter) {
@@ -15903,60 +17711,79 @@ async function grep() {
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
     if (jsonlFiles.length === 0) {
-      printError(errors3.sessionNotFound(prefix));
+      printError(errors.sessionNotFound(prefix));
       return 1;
     }
   }
+  const allSessionIds = [];
+  for (const file2 of jsonlFiles) {
+    const path = join6(sessionsDir, file2);
+    const sessionResult = await readExtractedSession(path);
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+      continue;
+    }
+    if (sessionResult && !sessionResult.meta.agentId) {
+      allSessionIds.push(sessionResult.meta.sessionId);
+    }
+  }
+  const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
   let totalMatches = 0;
   const sessionCounts = [];
   const matchingSessions = [];
   for (const file2 of jsonlFiles) {
     if (options.maxMatches !== null && totalMatches >= options.maxMatches)
       break;
-    const path = join3(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (!session || session.meta.agentId)
+    const path = join6(sessionsDir, file2);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId)
       continue;
-    const sessionId = session.meta.sessionId.slice(0, 8);
-    const searchesToolResult = options.fieldFilter.isSearchable("tool:result");
-    const entriesToSearch = searchesToolResult ? session.entries.map((entry, i) => ({ lineNumber: i + 1, entry })) : getLogicalEntries(session.entries);
-    let sessionMatchCount = 0;
-    const sessionMatches = [];
-    for (const { lineNumber, entry } of entriesToSearch) {
-      if (options.maxMatches !== null && totalMatches >= options.maxMatches)
-        break;
-      const content = extractEntryContent(entry, options.fieldFilter);
-      const lines = content.split(`
-`);
-      for (let i = 0;i < lines.length; i++) {
-        if (options.maxMatches !== null && totalMatches >= options.maxMatches)
+    const sessionId = sessionResult.meta.sessionId;
+    const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const matchingIndices = new Set;
+    for (let i = 0;i < parsed.blocks.length; i++) {
+      const block = parsed.blocks[i];
+      if (options.afterTime || options.beforeTime) {
+        if (!isInTimeRange(block.timestamp, { after: options.afterTime, before: options.beforeTime })) {
+          continue;
+        }
+      }
+      const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
+      if (fieldValues.length === 0)
+        continue;
+      const hasMatch = fieldValues.some((value) => options.pattern.test(value));
+      if (hasMatch) {
+        matchingIndices.add(i);
+        if (options.maxMatches !== null && totalMatches + matchingIndices.size >= options.maxMatches) {
           break;
-        const line = lines[i];
-        if (options.pattern.test(line)) {
-          totalMatches++;
-          sessionMatchCount++;
-          if (!options.countOnly && !options.listOnly) {
-            const contextBefore = lines.slice(Math.max(0, i - options.contextLines), i);
-            const contextAfter = lines.slice(i + 1, i + 1 + options.contextLines);
-            sessionMatches.push({
-              sessionId,
-              entryNumber: lineNumber,
-              entryType: entry.type,
-              line,
-              contextBefore,
-              contextAfter
-            });
-          }
         }
       }
     }
-    if (sessionMatchCount > 0) {
-      matchingSessions.push(sessionId);
-      sessionCounts.push({ sessionId, count: sessionMatchCount });
-      if (!options.countOnly && !options.listOnly) {
-        for (const match of sessionMatches) {
-          outputMatch(match, options.contextLines > 0);
-        }
+    if (matchingIndices.size === 0)
+      continue;
+    const sessionMatchCount = matchingIndices.size;
+    totalMatches += sessionMatchCount;
+    matchingSessions.push(sessionPrefix);
+    sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
+    if (!options.countOnly && !options.listOnly) {
+      const output = formatBlocks(parsed.blocks, {
+        sessionPrefix,
+        cwd,
+        showTimestamp: false,
+        getTruncation: () => ({
+          type: "matchContext",
+          pattern: options.pattern,
+          contextWords: options.contextWords
+        }),
+        shouldOutput: (_block, i) => matchingIndices.has(i),
+        separator: `
+`
+      });
+      for (const line of output.split(`
+`)) {
+        if (line)
+          console.log(line);
       }
     }
   }
@@ -15971,7 +17798,7 @@ async function grep() {
   }
   return 0;
 }
-function parseGrepOptions(args) {
+function parseSearchOptions(args) {
   function getFlagValue(flag) {
     const idx = args.indexOf(flag);
     return idx !== -1 ? args[idx + 1] : undefined;
@@ -15984,25 +17811,43 @@ function parseGrepOptions(args) {
   if (mValue !== undefined) {
     maxMatches = parseInt(mValue, 10);
     if (isNaN(maxMatches) || maxMatches < 1) {
-      printError(errors3.invalidNumber("-m", mValue));
+      printError(errors.invalidNumber("-m", mValue));
       return null;
     }
   }
-  let contextLines = 0;
+  let contextWords = DEFAULT_CONTEXT_WORDS;
   const cValue = getFlagValue("-C");
   if (cValue !== undefined) {
-    contextLines = parseInt(cValue, 10);
-    if (isNaN(contextLines) || contextLines < 0) {
-      printError(errors3.invalidNonNegative("-C"));
+    contextWords = parseInt(cValue, 10);
+    if (isNaN(contextWords) || contextWords < 0) {
+      printError(errors.invalidNonNegative("-C"));
       return null;
     }
   }
   const sessionFilter = getFlagValue("-s") ?? null;
   const searchInValue = getFlagValue("--in");
   const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
-  const fieldFilter = new GrepFieldFilter(searchIn);
-  const flagsWithValues = new Set(["-m", "-C", "-s", "--in"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in"]);
+  const fieldFilter = new SearchFieldFilter(searchIn);
+  let afterTime = null;
+  const afterValue = getFlagValue("--after");
+  if (afterValue !== undefined) {
+    afterTime = parseTimeSpec(afterValue);
+    if (!afterTime) {
+      printError(errors.invalidTimeSpec("--after", afterValue));
+      return null;
+    }
+  }
+  let beforeTime = null;
+  const beforeValue = getFlagValue("--before");
+  if (beforeValue !== undefined) {
+    beforeTime = parseTimeSpec(beforeValue);
+    if (!beforeTime) {
+      printError(errors.invalidTimeSpec("--before", beforeValue));
+      return null;
+    }
+  }
+  const flagsWithValues = new Set(["-m", "-C", "-s", "--in", "--after", "--before"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in", "--after", "--before"]);
   let patternStr = null;
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
@@ -16015,14 +17860,14 @@ function parseGrepOptions(args) {
     break;
   }
   if (!patternStr) {
-    printError(errors3.noPattern);
+    printError(errors.noPattern);
     return null;
   }
   let pattern;
   try {
     pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
   } catch (e) {
-    printError(errors3.invalidRegex(e instanceof Error ? e.message : String(e)));
+    printError(errors.invalidRegex(e instanceof Error ? e.message : String(e)));
     return null;
   }
   return {
@@ -16030,106 +17875,85 @@ function parseGrepOptions(args) {
     countOnly,
     listOnly,
     maxMatches,
-    contextLines,
+    contextWords,
     fieldFilter,
-    sessionFilter
+    sessionFilter,
+    afterTime,
+    beforeTime
   };
-}
-function extractEntryContent(entry, filter) {
-  const parts = [];
-  if (entry.type === "user") {
-    const content = entry.message.content;
-    if (typeof content === "string") {
-      if (filter.isSearchable("user")) {
-        parts.push(content);
-      }
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === "text" && "text" in block) {
-          if (filter.isSearchable("user")) {
-            parts.push(block.text);
-          }
-        } else if (block.type === "tool_result" && "content" in block) {
-          if (filter.isSearchable("tool:result")) {
-            const resultContent = block.content;
-            if (typeof resultContent === "string") {
-              parts.push(resultContent);
-            } else if (Array.isArray(resultContent)) {
-              for (const item of resultContent) {
-                if (item.type === "text" && "text" in item) {
-                  parts.push(item.text);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  } else if (entry.type === "assistant") {
-    const content = entry.message.content;
-    if (typeof content === "string") {
-      if (filter.isSearchable("assistant")) {
-        parts.push(content);
-      }
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        const text = extractBlockContent(block, filter);
-        if (text)
-          parts.push(text);
-      }
-    }
-  } else if (entry.type === "system") {
-    if (filter.isSearchable("system") && typeof entry.content === "string") {
-      parts.push(entry.content);
-    }
-  } else if (entry.type === "summary") {
-    if (filter.isSearchable("summary")) {
-      parts.push(entry.summary);
-    }
-  }
-  return parts.join(`
-`);
-}
-function extractBlockContent(block, filter) {
-  if (block.type === "text" && "text" in block) {
-    if (filter.isSearchable("assistant")) {
-      return block.text;
-    }
-  }
-  if (block.type === "thinking" && "thinking" in block) {
-    if (filter.isSearchable("thinking")) {
-      return block.thinking;
-    }
-  }
-  if (block.type === "tool_use" && "input" in block) {
-    const toolName = "name" in block ? block.name : "unknown";
-    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
-      return JSON.stringify(block.input);
-    }
-  }
-  return null;
-}
-function outputMatch(match, showContext) {
-  const prefix = `${match.sessionId}:${match.entryNumber}|${match.entryType}|`;
-  if (showContext) {
-    for (const line of match.contextBefore) {
-      console.log(`${prefix} ${line}`);
-    }
-  }
-  console.log(`${prefix} ${match.line}`);
-  if (showContext) {
-    for (const line of match.contextAfter) {
-      console.log(`${prefix} ${line}`);
-    }
-  }
 }
 
 // cli/commands/index.ts
-import { readdir as readdir3 } from "fs/promises";
-import { homedir as homedir3 } from "os";
-import { join as join4 } from "path";
+import { readdir as readdir5 } from "fs/promises";
+import { homedir as homedir2 } from "os";
+import { join as join7 } from "path";
+
+// cli/lib/upload-eligibility.ts
+var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;
+async function getAuthIssuedAt() {
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult))
+    return null;
+  if (authResult.authenticated_at === undefined) {
+    const now = Date.now();
+    await saveAuthData({ ...authResult, authenticated_at: now });
+    return now;
+  }
+  return authResult.authenticated_at;
+}
+function checkSessionEligibility(meta3, authIssuedAt) {
+  const sessionId = meta3.sessionId;
+  if (meta3.excluded) {
+    return {
+      sessionId,
+      meta: meta3,
+      eligible: false,
+      excluded: true,
+      eligibleAt: null,
+      reason: "Excluded by user"
+    };
+  }
+  if (meta3.uploadedAt) {
+    return {
+      sessionId,
+      meta: meta3,
+      eligible: false,
+      excluded: false,
+      eligibleAt: null,
+      reason: "Already uploaded"
+    };
+  }
+  const now = Date.now();
+  const rawMtimeMs = new Date(meta3.rawMtime).getTime();
+  const sessionEligibleAt = rawMtimeMs + SESSION_REVIEW_PERIOD_MS;
+  const authEligibleAt = authIssuedAt ? authIssuedAt + AUTH_REVIEW_PERIOD_MS : 0;
+  const eligibleAt = Math.max(sessionEligibleAt, authEligibleAt);
+  if (now < eligibleAt) {
+    const remainingMs = eligibleAt - now;
+    const remainingHours = Math.ceil(remainingMs / (60 * 60 * 1000));
+    return {
+      sessionId,
+      meta: meta3,
+      eligible: false,
+      excluded: false,
+      eligibleAt,
+      reason: `Eligible in ${remainingHours}h`
+    };
+  }
+  return {
+    sessionId,
+    meta: meta3,
+    eligible: true,
+    excluded: false,
+    eligibleAt,
+    reason: "Ready for upload"
+  };
+}
+
+// cli/commands/index.ts
 var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function computeMinimalPrefixes(ids) {
+function computeMinimalPrefixes2(ids) {
   const result = new Map;
   const minLen = 4;
   for (const id of ids) {
@@ -16165,26 +17989,132 @@ function formatRelativeDateTime(rawMtime, prevDate, prevYear) {
   return { display, date: date5, year };
 }
 function printUsage2() {
-  console.log("Usage: index");
-  console.log(`
-List all extracted sessions with statistics, summary, and commits.`);
-  console.log("Agent sessions are excluded (explore via Task tool calls in parent sessions).");
-  console.log("Statistics include work from subagent sessions.");
-  console.log(`
-Output columns:`);
-  console.log("  ID                   Session ID prefix (first 16 chars)");
-  console.log("  DATETIME             Session modification time");
-  console.log("  MSGS                 Total message count");
-  console.log("  USER_MESSAGES        User message count");
-  console.log("  BASH_CALLS           Bash commands executed");
-  console.log("  WEB_FETCHES          Web fetches");
-  console.log("  WEB_SEARCHES         Web searches");
-  console.log("  LINES_ADDED          Lines added");
-  console.log("  LINES_REMOVED        Lines removed");
-  console.log("  FILES_TOUCHED        Number of unique files modified");
-  console.log("  SIGNIFICANT_LOCATIONS Paths where >30% of work happened");
-  console.log("  SUMMARY              Session summary or first user prompt");
-  console.log("  COMMITS              Git commit hashes from the session");
+  console.log(usage.indexFull());
+}
+function formatPendingSession(info, idPrefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth) {
+  const { eligibility, entries, agentCount } = info;
+  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
+  const dateCol = dateDisplay.padEnd(maxDateWidth);
+  const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
+  const agentText = agentCount > 0 ? `+${agentCount} agents` : "";
+  const agentCol = agentText.padEnd(maxAgentWidth);
+  let statusIcon;
+  let statusText;
+  if (eligibility.excluded) {
+    statusIcon = colors.yellow("\u2717");
+    statusText = colors.yellow("excluded".padEnd(14));
+  } else if (eligibility.eligible) {
+    statusIcon = colors.green("\u2713");
+    statusText = colors.green("ready".padEnd(14));
+  } else {
+    statusIcon = colors.blue("\u25CB");
+    statusText = colors.blue(eligibility.reason.padEnd(14));
+  }
+  return `  ${statusIcon} ${idPrefix}  ${dateCol}  ${msgCount} msgs  ${agentCol}  ${statusText}  ${truncatedSummary}`;
+}
+function countAgentsInBlocks(blocks) {
+  const agentIds = new Set;
+  for (const block of blocks) {
+    if (block.type === "tool" && block.agentId) {
+      agentIds.add(block.agentId);
+    }
+  }
+  return agentIds.size;
+}
+async function showPendingStatus(cwd) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  let files;
+  try {
+    files = await readdir5(sessionsDir);
+  } catch {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+  if (jsonlFiles.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+  const mainSessions = [];
+  for (const file2 of jsonlFiles) {
+    const path = join7(sessionsDir, file2);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
+      }
+      continue;
+    }
+    if (sessionResult.meta.agentId)
+      continue;
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    mainSessions.push({ ...sessionResult, parsed });
+  }
+  if (mainSessions.length === 0) {
+    console.log(indexCmd.noExtractedSessions);
+    return 0;
+  }
+  const authIssuedAt = await getAuthIssuedAt();
+  const pendingInfos = [];
+  for (const session of mainSessions) {
+    const eligibility = checkSessionEligibility(session.meta, authIssuedAt);
+    const agentCount = countAgentsInBlocks(session.parsed.blocks);
+    pendingInfos.push({
+      eligibility,
+      entries: session.entries,
+      agentCount
+    });
+  }
+  pendingInfos.sort((a, b) => {
+    return b.eligibility.meta.rawMtime.localeCompare(a.eligibility.meta.rawMtime);
+  });
+  const sessionIds = pendingInfos.map((p) => p.eligibility.sessionId);
+  const idPrefixes = computeMinimalPrefixes2(sessionIds);
+  const formatDate = (rawMtime) => {
+    const d = new Date(rawMtime);
+    const month = MONTH_NAMES[d.getMonth()];
+    const day = d.getDate();
+    const year = d.getFullYear();
+    return `${month} ${day}, ${year}`;
+  };
+  const dateDisplays = new Map;
+  for (const info of pendingInfos) {
+    const display = formatDate(info.eligibility.meta.rawMtime);
+    dateDisplays.set(info.eligibility.sessionId, display);
+  }
+  const maxAgentWidth = Math.max(0, ...pendingInfos.map((p) => p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0));
+  const maxMsgWidth = Math.max(...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length));
+  const maxDateWidth = Math.max(...Array.from(dateDisplays.values()).map((d) => d.length));
+  console.log(indexCmd.uploadStatus);
+  console.log("");
+  for (const info of pendingInfos) {
+    const prefix = idPrefixes.get(info.eligibility.sessionId) || info.eligibility.sessionId.slice(0, 8);
+    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || "";
+    console.log(formatPendingSession(info, prefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth));
+  }
+  console.log("");
+  const ready = pendingInfos.filter((s) => s.eligibility.eligible).length;
+  const pending = pendingInfos.filter((s) => !s.eligibility.eligible && !s.eligibility.excluded).length;
+  const excluded = pendingInfos.filter((s) => s.eligibility.excluded).length;
+  const statusSummary = [];
+  if (ready > 0)
+    statusSummary.push(`${ready} ready`);
+  if (pending > 0)
+    statusSummary.push(`${pending} pending`);
+  if (excluded > 0)
+    statusSummary.push(`${excluded} excluded`);
+  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(", ")));
+  if (ready > 0) {
+    console.log("");
+    console.log(indexCmd.runUpload);
+  }
+  if (ready > 0 || pending > 0) {
+    console.log("");
+    console.log(indexCmd.excludeSession);
+    console.log(indexCmd.excludeAll);
+  }
+  return 0;
 }
 async function index() {
   const args = process.argv.slice(3);
@@ -16193,53 +18123,64 @@ async function index() {
     return 0;
   }
   const cwd = process.cwd();
+  if (args.includes("--pending")) {
+    return await showPendingStatus(cwd);
+  }
+  const escapeFileRefs = args.includes("--escape-file-refs");
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir3(sessionsDir);
+    files = await readdir5(sessionsDir);
   } catch {
-    printError(`No sessions found. Run 'extract' first.`);
+    printError(indexCmd.noSessionsDir);
     return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   if (jsonlFiles.length === 0) {
-    printError(`No sessions found in ${sessionsDir}`);
+    printError(indexCmd.noSessionsIn(sessionsDir));
     return 1;
   }
   const allSessions = new Map;
   for (const file2 of jsonlFiles) {
-    const path = join4(sessionsDir, file2);
-    const session = await readExtractedSession(path);
-    if (session) {
-      allSessions.set(session.meta.sessionId, session);
-      if (session.meta.agentId) {
-        allSessions.set(session.meta.agentId, session);
+    const path = join7(sessionsDir, file2);
+    const sessionResult = await readExtractedSession(path);
+    if (!sessionResult || isSessionError(sessionResult)) {
+      if (isSessionError(sessionResult)) {
+        printError(sessionResult.error);
       }
+      continue;
+    }
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const sessionInfo = { ...sessionResult, parsed };
+    allSessions.set(sessionResult.meta.sessionId, sessionInfo);
+    if (sessionResult.meta.agentId) {
+      allSessions.set(sessionResult.meta.agentId, sessionInfo);
     }
   }
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
   const sessionIds = mainSessions.map((s) => s.meta.sessionId);
-  const idPrefixes = computeMinimalPrefixes(sessionIds);
-  console.log("ID DATETIME MSGS USER_MESSAGES BASH_CALLS WEB_FETCHES WEB_SEARCHES LINES_ADDED LINES_REMOVED FILES_TOUCHED SIGNIFICANT_LOCATIONS SUMMARY COMMITS");
+  const idPrefixes = computeMinimalPrefixes2(sessionIds);
+  console.log("ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS");
   let prevDate = "";
   let prevYear = "";
   for (const session of mainSessions) {
     const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
-    const { line, date: date5, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear);
+    const { line, date: date5, year } = formatSessionLine(session, allSessions, cwd, prefix, prevDate, prevYear, escapeFileRefs);
     console.log(line);
     prevDate = date5;
     prevYear = year;
   }
   return 0;
 }
-function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYear) {
+function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYear, escapeFileRefs) {
   const { meta: meta3, entries } = session;
   const msgs = String(meta3.messageCount);
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const summary = escapeFileRefs ? rawSummary.replace(/@/g, "\\@") : rawSummary;
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
-  const stats = computeSessionStats(entries, allSessions, new Set, cwd);
+  const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set, cwd);
   const fmt = (n) => n === 0 ? "" : String(n);
   const { display: datetime3, date: date5, year } = formatRelativeDateTime(meta3.rawMtime, prevDate, prevYear);
   const line = [
@@ -16253,13 +18194,13 @@ function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYe
     stats.linesAdded === 0 ? "" : `+${stats.linesAdded}`,
     stats.linesRemoved === 0 ? "" : `-${stats.linesRemoved}`,
     fmt(stats.filesTouched),
-    stats.significantLocations.join(" "),
+    stats.significantLocations.join(","),
     summary,
     commitList
-  ].join(" ");
+  ].join("|");
   return { line, date: date5, year };
 }
-function computeSessionStats(entries, allSessions, visited, cwd) {
+function computeSessionStats(blocks, allSessions, visited, cwd) {
   const stats = {
     userCount: 0,
     linesAdded: 0,
@@ -16272,68 +18213,50 @@ function computeSessionStats(entries, allSessions, visited, cwd) {
   };
   const fileStats = new Map;
   const subagentIds = [];
-  for (const entry of entries) {
-    if (entry.type === "user") {
-      const content = entry.message.content;
-      if (typeof content === "string" || !Array.isArray(content)) {
-        stats.userCount++;
-      } else {
-        const hasUserText = content.some((b) => b.type === "text");
-        if (hasUserText)
-          stats.userCount++;
+  for (const block of blocks) {
+    if (block.type === "user") {
+      stats.userCount++;
+    } else if (block.type === "tool") {
+      const { toolName, toolInput, agentId } = block;
+      if (agentId) {
+        subagentIds.push(agentId);
       }
-      if ("agentId" in entry && typeof entry.agentId === "string") {
-        subagentIds.push(entry.agentId);
-      }
-    }
-    if (entry.type === "assistant") {
-      const content = entry.message.content;
-      if (!Array.isArray(content))
-        continue;
-      for (const block of content) {
-        if (block.type !== "tool_use" || !("name" in block))
-          continue;
-        const toolName = block.name;
-        const input = block.input;
-        switch (toolName) {
-          case "Edit": {
-            const filePath = input.file_path;
-            const oldString = input.old_string;
-            const newString = input.new_string;
-            if (typeof filePath === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              if (typeof oldString === "string") {
-                current.removed += countLines2(oldString);
-              }
-              if (typeof newString === "string") {
-                current.added += countLines2(newString);
-              }
-              fileStats.set(filePath, current);
+      switch (toolName) {
+        case "Edit": {
+          const filePath = toolInput.file_path;
+          const oldString = toolInput.old_string;
+          const newString = toolInput.new_string;
+          if (typeof filePath === "string") {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            if (typeof oldString === "string") {
+              current.removed += countLines2(oldString);
             }
-            break;
-          }
-          case "Write": {
-            const filePath = input.file_path;
-            const fileContent = input.content;
-            if (typeof filePath === "string" && typeof fileContent === "string") {
-              const current = fileStats.get(filePath) || { added: 0, removed: 0 };
-              current.added += countLines2(fileContent);
-              fileStats.set(filePath, current);
+            if (typeof newString === "string") {
+              current.added += countLines2(newString);
             }
-            break;
+            fileStats.set(filePath, current);
           }
-          case "Bash":
-            stats.bashCount++;
-            break;
-          case "WebFetch":
-            stats.fetchCount++;
-            break;
-          case "WebSearch":
-            stats.searchCount++;
-            break;
-          case "Task":
-            break;
+          break;
         }
+        case "Write": {
+          const filePath = toolInput.file_path;
+          const fileContent = toolInput.content;
+          if (typeof filePath === "string" && typeof fileContent === "string") {
+            const current = fileStats.get(filePath) || { added: 0, removed: 0 };
+            current.added += countLines2(fileContent);
+            fileStats.set(filePath, current);
+          }
+          break;
+        }
+        case "Bash":
+          stats.bashCount++;
+          break;
+        case "WebFetch":
+          stats.fetchCount++;
+          break;
+        case "WebSearch":
+          stats.searchCount++;
+          break;
       }
     }
   }
@@ -16344,7 +18267,7 @@ function computeSessionStats(entries, allSessions, visited, cwd) {
     const subSession = allSessions.get(agentId);
     if (!subSession)
       continue;
-    const subStats = computeSessionStats(subSession.entries, allSessions, visited, cwd);
+    const subStats = computeSessionStats(subSession.parsed.blocks, allSessions, visited, cwd);
     stats.linesAdded += subStats.linesAdded;
     stats.linesRemoved += subStats.linesRemoved;
     stats.bashCount += subStats.bashCount;
@@ -16375,7 +18298,7 @@ function computeSignificantLocations(fileStats, cwd) {
     return [];
   const root = { children: new Map, added: 0, removed: 0 };
   const cwdPrefix = cwd.replace(/^\//, "").replace(/\/$/, "") + "/";
-  const homePrefix = homedir3().replace(/^\//, "") + "/";
+  const homePrefix = homedir2().replace(/^\//, "") + "/";
   for (const [filePath, stats] of fileStats) {
     let normalizedPath = filePath.replace(/^\//, "");
     if (normalizedPath.startsWith(cwdPrefix)) {
@@ -16581,375 +18504,9 @@ function getToolResultText(content) {
 `);
 }
 
-// cli/commands/login.ts
-import { createInterface as createInterface2 } from "readline";
-
-// cli/lib/auth.ts
-import { mkdir as mkdir3 } from "fs/promises";
-var WORKOS_API_URL = "https://api.workos.com/user_management";
-var AuthUserSchema = exports_external.object({
-  id: exports_external.string(),
-  email: exports_external.string(),
-  first_name: exports_external.string().optional(),
-  last_name: exports_external.string().optional()
-});
-var AuthDataSchema = exports_external.object({
-  access_token: exports_external.string(),
-  refresh_token: exports_external.string(),
-  user: AuthUserSchema
-});
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
-function isTokenExpired(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number")
-    return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
-}
-async function loadAuthData() {
-  try {
-    const file2 = Bun.file(AUTH_FILE);
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function saveAuthData(data) {
-  await mkdir3(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
-}
-async function refreshToken(refreshTokenValue) {
-  try {
-    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const data = await response.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-async function checkAuthStatus(attemptRefresh = true) {
-  const authData = await loadAuthData();
-  if (!authData?.access_token) {
-    return { authenticated: false, needsLogin: true };
-  }
-  if (isTokenExpired(authData.access_token)) {
-    if (!attemptRefresh || !authData.refresh_token) {
-      return { authenticated: false, needsLogin: true };
-    }
-    const newAuthData = await refreshToken(authData.refresh_token);
-    if (!newAuthData) {
-      return { authenticated: false, needsLogin: true };
-    }
-    await saveAuthData(newAuthData);
-    return { authenticated: true, user: newAuthData.user, needsLogin: false };
-  }
-  return { authenticated: true, user: authData.user, needsLogin: false };
-}
-function getUserDisplayName(user) {
-  return user.first_name || user.email;
-}
-
-// cli/commands/login.ts
-var WORKOS_API_URL2 = "https://api.workos.com/user_management";
-var DeviceAuthResponseSchema = exports_external.object({
-  device_code: exports_external.string(),
-  user_code: exports_external.string(),
-  verification_uri: exports_external.string(),
-  verification_uri_complete: exports_external.string(),
-  interval: exports_external.number(),
-  expires_in: exports_external.number()
-});
-var ErrorResponseSchema = exports_external.object({
-  error: exports_external.string(),
-  error_description: exports_external.string().optional()
-});
-async function confirm(message) {
-  const rl = createInterface2({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
-      rl.close();
-      resolve(answer.toLowerCase() === "y");
-    });
-  });
-}
-async function openBrowser(url2) {
-  try {
-    if (process.platform === "darwin") {
-      await Bun.spawn(["open", url2]).exited;
-      return true;
-    } else if (process.platform === "linux") {
-      try {
-        await Bun.spawn(["xdg-open", url2]).exited;
-        return true;
-      } catch {
-        try {
-          await Bun.spawn(["wslview", url2]).exited;
-          return true;
-        } catch {
-          return false;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function checkExistingAuth() {
-  const status = await checkAuthStatus(false);
-  if (status.authenticated && status.user) {
-    printWarning(login.alreadyLoggedIn);
-    console.log("");
-    return await confirm(login.confirmRelogin);
-  }
-  return true;
-}
-async function tryRefresh() {
-  const authData = await loadAuthData();
-  if (!authData?.refresh_token)
-    return false;
-  printInfo(login.refreshing);
-  const newAuthData = await refreshToken(authData.refresh_token);
-  if (newAuthData) {
-    await saveAuthData(newAuthData);
-    printSuccess(login.refreshSuccess);
-    return true;
-  }
-  return false;
-}
-async function deviceAuthFlow() {
-  printInfo(login.starting);
-  console.log("");
-  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
-  });
-  const data = await response.json();
-  const errorResult = ErrorResponseSchema.safeParse(data);
-  if (errorResult.success && errorResult.data.error) {
-    printError(login.startFailed(errorResult.data.error));
-    if (errorResult.data.error_description) {
-      console.log(errorResult.data.error_description);
-    }
-    return 1;
-  }
-  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
-  if (!deviceAuthResult.success) {
-    printError("Unexpected response from authentication server");
-    return 1;
-  }
-  const deviceAuth = deviceAuthResult.data;
-  console.log("\u2501".repeat(65));
-  console.log("");
-  console.log(`  ${login.visitUrl}`);
-  console.log("");
-  console.log(`    ${deviceAuth.verification_uri}`);
-  console.log("");
-  console.log(`  ${login.confirmCode}`);
-  console.log("");
-  console.log(`    ${colors.green(deviceAuth.user_code)}`);
-  console.log("");
-  console.log("\u2501".repeat(65));
-  console.log("");
-  if (await openBrowser(deviceAuth.verification_uri_complete)) {
-    printInfo(login.browserOpened);
-  } else {
-    printInfo(login.openManually);
-  }
-  console.log("");
-  printInfo(login.waiting(deviceAuth.expires_in));
-  let interval = deviceAuth.interval * 1000;
-  const startTime = Date.now();
-  const expiresAt = startTime + deviceAuth.expires_in * 1000;
-  while (Date.now() < expiresAt) {
-    await sleep(interval);
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: deviceAuth.device_code,
-        client_id: WORKOS_CLIENT_ID
-      })
-    });
-    const tokenData = await tokenResponse.json();
-    const authResult = AuthDataSchema.safeParse(tokenData);
-    if (authResult.success) {
-      await saveAuthData(authResult.data);
-      console.log("");
-      printSuccess(login.success);
-      console.log("");
-      const displayName = getUserDisplayName(authResult.data.user);
-      if (authResult.data.user.first_name) {
-        console.log(login.welcomeNamed(displayName, authResult.data.user.email));
-      } else {
-        console.log(login.welcomeEmail(authResult.data.user.email));
-      }
-      console.log("");
-      console.log(login.contributing);
-      console.log(login.reviewPeriod);
-      return 0;
-    }
-    const errorData = tokenData;
-    if (errorData.error === "authorization_pending") {
-      process.stdout.write(`\r  ${login.waitingProgress(elapsed)}`);
-      continue;
-    }
-    if (errorData.error === "slow_down") {
-      interval += 1000;
-      continue;
-    }
-    console.log("");
-    printError(login.authFailed(errorData.error || "unknown error"));
-    if (errorData.error_description)
-      console.log(errorData.error_description);
-    return 1;
-  }
-  printError(login.timeout);
-  return 1;
-}
-async function login2() {
-  console.log("");
-  console.log(`  ${login.header}`);
-  console.log(`  ${"\u2500".repeat(15)}`);
-  console.log("");
-  if (!await checkExistingAuth())
-    return 0;
-  if (await tryRefresh())
-    return 0;
-  return await deviceAuthFlow();
-}
-
 // cli/commands/read.ts
-import { readFile as readFile3, readdir as readdir4 } from "fs/promises";
-import { join as join5 } from "path";
-
-// cli/lib/range-format.ts
-var DEFAULT_TARGET_WORDS2 = 2000;
-function formatRangeEntries(rangeEntries, options) {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS2, skipWords = 0, fieldFilter, allEntries } = options;
-  const toolResults = collectToolResults(allEntries);
-  let wordLimit;
-  if (redact) {
-    const wordCounts = collectWordCounts2(rangeEntries, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-  const results = [];
-  let prevDate;
-  for (let i = 0;i < rangeEntries.length; i++) {
-    const { lineNumber, entry } = rangeEntries[i];
-    const timestamp = getTimestamp(entry);
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = i === 0;
-    const formatted = formatEntry(entry, {
-      lineNumber,
-      toolResults,
-      redact,
-      prevDate,
-      isFirst,
-      wordLimit,
-      skipWords,
-      fieldFilter
-    });
-    if (formatted) {
-      results.push(formatted);
-    }
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-  }
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-  const separator = redact ? `
-` : `
-
-`;
-  return results.join(separator);
-}
-function collectWordCounts2(entries, skipWords) {
-  const counts = [];
-  function addCount(text) {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-  for (const { entry } of entries) {
-    if (entry.type === "user") {
-      const content = getUserMessageContent2(entry.message.content);
-      addCount(content);
-    } else if (entry.type === "assistant") {
-      const blocks = entry.message.content;
-      if (typeof blocks === "string") {
-        addCount(blocks);
-      } else if (Array.isArray(blocks)) {
-        for (const block of blocks) {
-          if (block.type === "text" && "text" in block) {
-            addCount(block.text);
-          } else if (block.type === "thinking" && "thinking" in block) {
-            addCount(block.thinking);
-          }
-        }
-      }
-    } else if (entry.type === "summary") {
-      addCount(entry.summary);
-    } else if (entry.type === "system") {
-      addCount(entry.content || "");
-    }
-  }
-  return counts;
-}
-function getUserMessageContent2(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const textParts = [];
-  for (const block of content) {
-    if (block.type === "tool_result")
-      continue;
-    if (block.type === "text" && "text" in block && block.text) {
-      textParts.push(block.text);
-    }
-  }
-  return textParts.join(`
-`);
-}
-
-// cli/commands/read.ts
+import { readdir as readdir6 } from "fs/promises";
+import { join as join8 } from "path";
 function printUsage3() {
   console.log(usage.read());
 }
@@ -16979,25 +18536,19 @@ async function read() {
       return null;
     return argList[idx + 1] ?? null;
   }
-  const fullFlag = args.includes("--full");
   const targetWords = parseNumericFlag(args, "--target");
   const skipWords = parseNumericFlag(args, "--skip");
-  const contextC = parseNumericFlag(args, "-C");
-  const contextB = parseNumericFlag(args, "-B");
-  const contextA = parseNumericFlag(args, "-A");
   const showFields = parseStringFlag(args, "--show");
   const hideFields = parseStringFlag(args, "--hide");
-  const hasContextFlags = contextC !== null || contextB !== null || contextA !== null;
   let fieldFilter;
   if (showFields || hideFields) {
     const show = showFields ? parseFieldList(showFields) : [];
     const hide = hideFields ? parseFieldList(hideFields) : [];
     fieldFilter = new ReadFieldFilter(show, hide);
   }
-  const flags = new Set(["--full", "-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
-  const flagsWithValues = new Set(["-C", "-B", "-A", "--skip", "--target", "--show", "--hide"]);
+  const flagsWithValues = new Set(["--skip", "--target", "--show", "--hide"]);
   const filteredArgs = args.filter((a, i) => {
-    if (flags.has(a))
+    if (flagsWithValues.has(a))
       return false;
     for (const flag of flagsWithValues) {
       const flagIdx = args.indexOf(flag);
@@ -17012,9 +18563,9 @@ async function read() {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir4(sessionsDir);
+    files = await readdir6(sessionsDir);
   } catch {
-    printError(errors3.noSessions);
+    printError(errors.noSessions);
     return 1;
   }
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
@@ -17023,20 +18574,20 @@ async function read() {
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
   if (matches2.length === 0) {
-    printError(errors3.sessionNotFound(sessionIdPrefix));
+    printError(errors.sessionNotFound(sessionIdPrefix));
     return 1;
   }
   if (matches2.length > 1) {
-    printError(errors3.multipleSessions(sessionIdPrefix));
+    printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches2.slice(0, 5)) {
       console.log(`  ${m.replace(".jsonl", "")}`);
     }
     if (matches2.length > 5) {
-      console.log(errors3.andMore(matches2.length - 5));
+      console.log(errors.andMore(matches2.length - 5));
     }
     return 1;
   }
-  const sessionFile = join5(sessionsDir, matches2[0]);
+  const sessionFile = join8(sessionsDir, matches2[0]);
   let entryNumber = null;
   let rangeStart = null;
   let rangeEnd = null;
@@ -17046,134 +18597,1784 @@ async function read() {
       rangeStart = parseInt(rangeMatch[1], 10);
       rangeEnd = parseInt(rangeMatch[2], 10);
       if (rangeStart < 1 || rangeEnd < 1 || rangeStart > rangeEnd) {
-        printError(errors3.invalidRange(entryArg));
+        printError(errors.invalidRange(entryArg));
         return 1;
       }
     } else {
       entryNumber = parseInt(entryArg, 10);
       if (isNaN(entryNumber) || entryNumber < 1) {
-        printError(errors3.invalidEntry(entryArg));
+        printError(errors.invalidEntry(entryArg));
         return 1;
       }
     }
   }
-  if (hasContextFlags && entryNumber === null) {
-    printError(errors3.contextRequiresEntry);
+  const sessionResult = await readExtractedSession(sessionFile);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult)) {
+      printError(sessionResult.error);
+    } else {
+      printError(errors.emptySession);
+    }
     return 1;
   }
-  const content = await readFile3(sessionFile, "utf-8");
-  const lines = Array.from(parseJsonl(content));
-  const rawEntries = lines.slice(1);
-  if (rawEntries.length === 0) {
-    printError(errors3.emptySession);
+  if (sessionResult.entries.length === 0) {
+    printError(errors.emptySession);
     return 1;
   }
-  const allEntries = [];
-  for (const raw of rawEntries) {
-    const result = parseKnownEntry(raw);
-    if (result.data) {
-      allEntries.push(result.data);
-    }
-  }
-  const logicalEntries = getLogicalEntries(allEntries);
-  const toolResults = collectToolResults(allEntries);
-  if (rangeStart !== null && rangeEnd !== null) {
-    const rangeEntries = logicalEntries.filter((e) => e.lineNumber >= rangeStart && e.lineNumber <= rangeEnd);
-    if (rangeEntries.length === 0) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(errors3.rangeNotFound(rangeStart, rangeEnd, maxLine));
-      return 1;
-    }
-    const output = formatRangeEntries(rangeEntries, {
-      redact: !fullFlag,
-      targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined,
-      fieldFilter,
-      allEntries
-    });
-    console.log(output);
-  } else if (entryNumber === null) {
-    const output = formatSession(allEntries, {
-      redact: !fullFlag,
+  const { meta: meta3, entries } = sessionResult;
+  if (entryNumber === null && rangeStart === null) {
+    const output = formatSession(entries, {
+      redact: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
       fieldFilter
     });
     console.log(output);
-  } else {
-    const targetIdx = logicalEntries.findIndex((e) => e.lineNumber === entryNumber);
-    if (targetIdx === -1) {
-      const maxLine = logicalEntries.at(-1)?.lineNumber ?? 0;
-      printError(errors3.entryNotFound(entryNumber, maxLine));
+    return 0;
+  }
+  const parsed = parseSession(meta3, entries);
+  const { blocks } = parsed;
+  const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
+  const maxLine = lineNumbers.at(-1) ?? 0;
+  if (rangeStart !== null && rangeEnd !== null) {
+    const rangeBlocks = blocks.filter((b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd);
+    if (rangeBlocks.length === 0) {
+      printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
       return 1;
     }
-    const before = contextB ?? contextC ?? 0;
-    const after = contextA ?? contextC ?? 0;
-    const startIdx = Math.max(0, targetIdx - before);
-    const endIdx = Math.min(logicalEntries.length - 1, targetIdx + after);
-    const output = [];
-    for (let i = startIdx;i <= endIdx; i++) {
-      const { lineNumber, entry } = logicalEntries[i];
-      const formatted = formatEntry(entry, {
-        lineNumber,
-        redact: i !== targetIdx,
-        toolResults,
-        fieldFilter
-      });
-      if (formatted)
-        output.push(formatted);
+    const output = formatBlocks(rangeBlocks, {
+      redact: true,
+      targetWords: targetWords ?? undefined,
+      skipWords: skipWords ?? undefined,
+      fieldFilter,
+      cwd
+    });
+    console.log(output);
+  } else if (entryNumber !== null) {
+    const entryBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
+    if (entryBlocks.length === 0) {
+      printError(errors.entryNotFound(entryNumber, maxLine));
+      return 1;
     }
-    console.log(output.join(`
-`));
+    const output = formatBlocks(entryBlocks, {
+      redact: false,
+      fieldFilter,
+      cwd
+    });
+    console.log(output);
   }
   return 0;
 }
 
 // cli/commands/session-start.ts
+import { existsSync } from "fs";
+import { dirname as dirname2, join as join9 } from "path";
+import { homedir as homedir4 } from "os";
+import { spawn } from "child_process";
+
+// cli/lib/alias.ts
+import { homedir as homedir3 } from "os";
+import { readFile as readFile4, writeFile as writeFile4 } from "fs/promises";
+var ALIAS_NAME = "hive-mind";
+function getExpectedAliasCommand() {
+  return `bun ${process.argv[1]}`;
+}
+function expandPath(path) {
+  if (path.startsWith("~")) {
+    return path.replace("~", homedir3());
+  }
+  return path;
+}
+async function readShellConfig() {
+  const { file: file2 } = getShellConfig();
+  try {
+    return await readFile4(expandPath(file2), "utf-8");
+  } catch {
+    return null;
+  }
+}
+async function writeShellConfig(content) {
+  const { file: file2 } = getShellConfig();
+  try {
+    await writeFile4(expandPath(file2), content, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+var ALIAS_REGEX = /^alias\s+hive-mind\s*=\s*(['"])(.+?)\1\s*$/m;
+async function getExistingAliasCommand() {
+  const config2 = await readShellConfig();
+  if (!config2)
+    return null;
+  const match = config2.match(ALIAS_REGEX);
+  if (!match)
+    return null;
+  return match[2];
+}
+async function setupAlias() {
+  const expected = getExpectedAliasCommand();
+  return setupAliasWithCommand(expected);
+}
+async function setupAliasWithRoot(pluginRoot) {
+  const expected = `bun ${pluginRoot}/cli.js`;
+  return setupAliasWithCommand(expected);
+}
+async function setupAliasWithCommand(expected) {
+  const shell = getShellConfig();
+  const config2 = await readShellConfig();
+  const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
+  if (!config2) {
+    const success3 = await writeShellConfig(`${aliasLine}
+`);
+    return { success: success3, alreadyExists: false, sourceCmd: shell.sourceCmd };
+  }
+  const match = config2.match(ALIAS_REGEX);
+  if (match) {
+    if (match[2] === expected) {
+      return { success: true, alreadyExists: true, sourceCmd: shell.sourceCmd };
+    }
+    const updated2 = config2.replace(ALIAS_REGEX, aliasLine);
+    const success3 = await writeShellConfig(updated2);
+    return { success: success3, alreadyExists: false, sourceCmd: shell.sourceCmd };
+  }
+  const separator = config2.endsWith(`
+`) ? "" : `
+`;
+  const updated = `${config2}${separator}${aliasLine}
+`;
+  const success2 = await writeShellConfig(updated);
+  return { success: success2, alreadyExists: false, sourceCmd: shell.sourceCmd };
+}
+async function updateAliasIfOutdated() {
+  const existing = await getExistingAliasCommand();
+  if (!existing)
+    return { updated: false, hasAlias: false };
+  const expected = getExpectedAliasCommand();
+  if (existing === expected)
+    return { updated: false, hasAlias: true };
+  const { success: success2, sourceCmd } = await setupAlias();
+  return { updated: success2, hasAlias: true, sourceCmd };
+}
+
+// node_modules/convex/dist/esm/index.js
+var version2 = "1.31.2";
+
+// node_modules/convex/dist/esm/values/base64.js
+var lookup = [];
+var revLookup = [];
+var Arr = Uint8Array;
+var code = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+for (i = 0, len = code.length;i < len; ++i) {
+  lookup[i] = code[i];
+  revLookup[code.charCodeAt(i)] = i;
+}
+var i;
+var len;
+revLookup[45] = 62;
+revLookup[95] = 63;
+function getLens(b64) {
+  var len2 = b64.length;
+  if (len2 % 4 > 0) {
+    throw new Error("Invalid string. Length must be a multiple of 4");
+  }
+  var validLen = b64.indexOf("=");
+  if (validLen === -1)
+    validLen = len2;
+  var placeHoldersLen = validLen === len2 ? 0 : 4 - validLen % 4;
+  return [validLen, placeHoldersLen];
+}
+function _byteLength(_b64, validLen, placeHoldersLen) {
+  return (validLen + placeHoldersLen) * 3 / 4 - placeHoldersLen;
+}
+function toByteArray(b64) {
+  var tmp;
+  var lens = getLens(b64);
+  var validLen = lens[0];
+  var placeHoldersLen = lens[1];
+  var arr = new Arr(_byteLength(b64, validLen, placeHoldersLen));
+  var curByte = 0;
+  var len2 = placeHoldersLen > 0 ? validLen - 4 : validLen;
+  var i2;
+  for (i2 = 0;i2 < len2; i2 += 4) {
+    tmp = revLookup[b64.charCodeAt(i2)] << 18 | revLookup[b64.charCodeAt(i2 + 1)] << 12 | revLookup[b64.charCodeAt(i2 + 2)] << 6 | revLookup[b64.charCodeAt(i2 + 3)];
+    arr[curByte++] = tmp >> 16 & 255;
+    arr[curByte++] = tmp >> 8 & 255;
+    arr[curByte++] = tmp & 255;
+  }
+  if (placeHoldersLen === 2) {
+    tmp = revLookup[b64.charCodeAt(i2)] << 2 | revLookup[b64.charCodeAt(i2 + 1)] >> 4;
+    arr[curByte++] = tmp & 255;
+  }
+  if (placeHoldersLen === 1) {
+    tmp = revLookup[b64.charCodeAt(i2)] << 10 | revLookup[b64.charCodeAt(i2 + 1)] << 4 | revLookup[b64.charCodeAt(i2 + 2)] >> 2;
+    arr[curByte++] = tmp >> 8 & 255;
+    arr[curByte++] = tmp & 255;
+  }
+  return arr;
+}
+function tripletToBase64(num) {
+  return lookup[num >> 18 & 63] + lookup[num >> 12 & 63] + lookup[num >> 6 & 63] + lookup[num & 63];
+}
+function encodeChunk(uint8, start, end) {
+  var tmp;
+  var output = [];
+  for (var i2 = start;i2 < end; i2 += 3) {
+    tmp = (uint8[i2] << 16 & 16711680) + (uint8[i2 + 1] << 8 & 65280) + (uint8[i2 + 2] & 255);
+    output.push(tripletToBase64(tmp));
+  }
+  return output.join("");
+}
+function fromByteArray(uint8) {
+  var tmp;
+  var len2 = uint8.length;
+  var extraBytes = len2 % 3;
+  var parts = [];
+  var maxChunkLength = 16383;
+  for (var i2 = 0, len22 = len2 - extraBytes;i2 < len22; i2 += maxChunkLength) {
+    parts.push(encodeChunk(uint8, i2, i2 + maxChunkLength > len22 ? len22 : i2 + maxChunkLength));
+  }
+  if (extraBytes === 1) {
+    tmp = uint8[len2 - 1];
+    parts.push(lookup[tmp >> 2] + lookup[tmp << 4 & 63] + "==");
+  } else if (extraBytes === 2) {
+    tmp = (uint8[len2 - 2] << 8) + uint8[len2 - 1];
+    parts.push(lookup[tmp >> 10] + lookup[tmp >> 4 & 63] + lookup[tmp << 2 & 63] + "=");
+  }
+  return parts.join("");
+}
+
+// node_modules/convex/dist/esm/common/index.js
+function parseArgs(args) {
+  if (args === undefined) {
+    return {};
+  }
+  if (!isSimpleObject(args)) {
+    throw new Error(`The arguments to a Convex function must be an object. Received: ${args}`);
+  }
+  return args;
+}
+function validateDeploymentUrl(deploymentUrl) {
+  if (typeof deploymentUrl === "undefined") {
+    throw new Error(`Client created with undefined deployment address. If you used an environment variable, check that it's set.`);
+  }
+  if (typeof deploymentUrl !== "string") {
+    throw new Error(`Invalid deployment address: found ${deploymentUrl}".`);
+  }
+  if (!(deploymentUrl.startsWith("http:") || deploymentUrl.startsWith("https:"))) {
+    throw new Error(`Invalid deployment address: Must start with "https://" or "http://". Found "${deploymentUrl}".`);
+  }
+  try {
+    new URL(deploymentUrl);
+  } catch {
+    throw new Error(`Invalid deployment address: "${deploymentUrl}" is not a valid URL. If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
+  }
+  if (deploymentUrl.endsWith(".convex.site")) {
+    throw new Error(`Invalid deployment address: "${deploymentUrl}" ends with .convex.site, which is used for HTTP Actions. Convex deployment URLs typically end with .convex.cloud? If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
+  }
+}
+function isSimpleObject(value) {
+  const isObject2 = typeof value === "object";
+  const prototype = Object.getPrototypeOf(value);
+  const isSimple = prototype === null || prototype === Object.prototype || prototype?.constructor?.name === "Object";
+  return isObject2 && isSimple;
+}
+
+// node_modules/convex/dist/esm/values/value.js
+var LITTLE_ENDIAN = true;
+var MIN_INT64 = BigInt("-9223372036854775808");
+var MAX_INT64 = BigInt("9223372036854775807");
+var ZERO = BigInt("0");
+var EIGHT = BigInt("8");
+var TWOFIFTYSIX = BigInt("256");
+function isSpecial(n) {
+  return Number.isNaN(n) || !Number.isFinite(n) || Object.is(n, -0);
+}
+function slowBigIntToBase64(value) {
+  if (value < ZERO) {
+    value -= MIN_INT64 + MIN_INT64;
+  }
+  let hex3 = value.toString(16);
+  if (hex3.length % 2 === 1)
+    hex3 = "0" + hex3;
+  const bytes = new Uint8Array(new ArrayBuffer(8));
+  let i2 = 0;
+  for (const hexByte of hex3.match(/.{2}/g).reverse()) {
+    bytes.set([parseInt(hexByte, 16)], i2++);
+    value >>= EIGHT;
+  }
+  return fromByteArray(bytes);
+}
+function slowBase64ToBigInt(encoded) {
+  const integerBytes = toByteArray(encoded);
+  if (integerBytes.byteLength !== 8) {
+    throw new Error(`Received ${integerBytes.byteLength} bytes, expected 8 for $integer`);
+  }
+  let value = ZERO;
+  let power = ZERO;
+  for (const byte of integerBytes) {
+    value += BigInt(byte) * TWOFIFTYSIX ** power;
+    power++;
+  }
+  if (value > MAX_INT64) {
+    value += MIN_INT64 + MIN_INT64;
+  }
+  return value;
+}
+function modernBigIntToBase64(value) {
+  if (value < MIN_INT64 || MAX_INT64 < value) {
+    throw new Error(`BigInt ${value} does not fit into a 64-bit signed integer.`);
+  }
+  const buffer = new ArrayBuffer(8);
+  new DataView(buffer).setBigInt64(0, value, true);
+  return fromByteArray(new Uint8Array(buffer));
+}
+function modernBase64ToBigInt(encoded) {
+  const integerBytes = toByteArray(encoded);
+  if (integerBytes.byteLength !== 8) {
+    throw new Error(`Received ${integerBytes.byteLength} bytes, expected 8 for $integer`);
+  }
+  const intBytesView = new DataView(integerBytes.buffer);
+  return intBytesView.getBigInt64(0, true);
+}
+var bigIntToBase64 = DataView.prototype.setBigInt64 ? modernBigIntToBase64 : slowBigIntToBase64;
+var base64ToBigInt = DataView.prototype.getBigInt64 ? modernBase64ToBigInt : slowBase64ToBigInt;
+var MAX_IDENTIFIER_LEN = 1024;
+function validateObjectField(k) {
+  if (k.length > MAX_IDENTIFIER_LEN) {
+    throw new Error(`Field name ${k} exceeds maximum field name length ${MAX_IDENTIFIER_LEN}.`);
+  }
+  if (k.startsWith("$")) {
+    throw new Error(`Field name ${k} starts with a '$', which is reserved.`);
+  }
+  for (let i2 = 0;i2 < k.length; i2 += 1) {
+    const charCode = k.charCodeAt(i2);
+    if (charCode < 32 || charCode >= 127) {
+      throw new Error(`Field name ${k} has invalid character '${k[i2]}': Field names can only contain non-control ASCII characters`);
+    }
+  }
+}
+function jsonToConvex(value) {
+  if (value === null) {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((value2) => jsonToConvex(value2));
+  }
+  if (typeof value !== "object") {
+    throw new Error(`Unexpected type of ${value}`);
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 1) {
+    const key = entries[0][0];
+    if (key === "$bytes") {
+      if (typeof value.$bytes !== "string") {
+        throw new Error(`Malformed $bytes field on ${value}`);
+      }
+      return toByteArray(value.$bytes).buffer;
+    }
+    if (key === "$integer") {
+      if (typeof value.$integer !== "string") {
+        throw new Error(`Malformed $integer field on ${value}`);
+      }
+      return base64ToBigInt(value.$integer);
+    }
+    if (key === "$float") {
+      if (typeof value.$float !== "string") {
+        throw new Error(`Malformed $float field on ${value}`);
+      }
+      const floatBytes = toByteArray(value.$float);
+      if (floatBytes.byteLength !== 8) {
+        throw new Error(`Received ${floatBytes.byteLength} bytes, expected 8 for $float`);
+      }
+      const floatBytesView = new DataView(floatBytes.buffer);
+      const float = floatBytesView.getFloat64(0, LITTLE_ENDIAN);
+      if (!isSpecial(float)) {
+        throw new Error(`Float ${float} should be encoded as a number`);
+      }
+      return float;
+    }
+    if (key === "$set") {
+      throw new Error(`Received a Set which is no longer supported as a Convex type.`);
+    }
+    if (key === "$map") {
+      throw new Error(`Received a Map which is no longer supported as a Convex type.`);
+    }
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    validateObjectField(k);
+    out[k] = jsonToConvex(v);
+  }
+  return out;
+}
+var MAX_VALUE_FOR_ERROR_LEN = 16384;
+function stringifyValueForError(value) {
+  const str = JSON.stringify(value, (_key, value2) => {
+    if (value2 === undefined) {
+      return "undefined";
+    }
+    if (typeof value2 === "bigint") {
+      return `${value2.toString()}n`;
+    }
+    return value2;
+  });
+  if (str.length > MAX_VALUE_FOR_ERROR_LEN) {
+    const rest = "[...truncated]";
+    let truncateAt = MAX_VALUE_FOR_ERROR_LEN - rest.length;
+    const codePoint = str.codePointAt(truncateAt - 1);
+    if (codePoint !== undefined && codePoint > 65535) {
+      truncateAt -= 1;
+    }
+    return str.substring(0, truncateAt) + rest;
+  }
+  return str;
+}
+function convexToJsonInternal(value, originalValue, context, includeTopLevelUndefined) {
+  if (value === undefined) {
+    const contextText = context && ` (present at path ${context} in original object ${stringifyValueForError(originalValue)})`;
+    throw new Error(`undefined is not a valid Convex value${contextText}. To learn about Convex's supported types, see https://docs.convex.dev/using/types.`);
+  }
+  if (value === null) {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    if (value < MIN_INT64 || MAX_INT64 < value) {
+      throw new Error(`BigInt ${value} does not fit into a 64-bit signed integer.`);
+    }
+    return { $integer: bigIntToBase64(value) };
+  }
+  if (typeof value === "number") {
+    if (isSpecial(value)) {
+      const buffer = new ArrayBuffer(8);
+      new DataView(buffer).setFloat64(0, value, LITTLE_ENDIAN);
+      return { $float: fromByteArray(new Uint8Array(buffer)) };
+    } else {
+      return value;
+    }
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return { $bytes: fromByteArray(new Uint8Array(value)) };
+  }
+  if (Array.isArray(value)) {
+    return value.map((value2, i2) => convexToJsonInternal(value2, originalValue, context + `[${i2}]`, false));
+  }
+  if (value instanceof Set) {
+    throw new Error(errorMessageForUnsupportedType(context, "Set", [...value], originalValue));
+  }
+  if (value instanceof Map) {
+    throw new Error(errorMessageForUnsupportedType(context, "Map", [...value], originalValue));
+  }
+  if (!isSimpleObject(value)) {
+    const theType = value?.constructor?.name;
+    const typeName = theType ? `${theType} ` : "";
+    throw new Error(errorMessageForUnsupportedType(context, typeName, value, originalValue));
+  }
+  const out = {};
+  const entries = Object.entries(value);
+  entries.sort(([k1, _v1], [k2, _v2]) => k1 === k2 ? 0 : k1 < k2 ? -1 : 1);
+  for (const [k, v] of entries) {
+    if (v !== undefined) {
+      validateObjectField(k);
+      out[k] = convexToJsonInternal(v, originalValue, context + `.${k}`, false);
+    } else if (includeTopLevelUndefined) {
+      validateObjectField(k);
+      out[k] = convexOrUndefinedToJsonInternal(v, originalValue, context + `.${k}`);
+    }
+  }
+  return out;
+}
+function errorMessageForUnsupportedType(context, typeName, value, originalValue) {
+  if (context) {
+    return `${typeName}${stringifyValueForError(value)} is not a supported Convex type (present at path ${context} in original object ${stringifyValueForError(originalValue)}). To learn about Convex's supported types, see https://docs.convex.dev/using/types.`;
+  } else {
+    return `${typeName}${stringifyValueForError(value)} is not a supported Convex type.`;
+  }
+}
+function convexOrUndefinedToJsonInternal(value, originalValue, context) {
+  if (value === undefined) {
+    return { $undefined: null };
+  } else {
+    if (originalValue === undefined) {
+      throw new Error(`Programming error. Current value is ${stringifyValueForError(value)} but original value is undefined`);
+    }
+    return convexToJsonInternal(value, originalValue, context, false);
+  }
+}
+function convexToJson(value) {
+  return convexToJsonInternal(value, value, "", false);
+}
+// node_modules/convex/dist/esm/values/errors.js
+var __defProp2 = Object.defineProperty;
+var __defNormalProp = (obj, key, value) => (key in obj) ? __defProp2(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+var _a2;
+var _b;
+var IDENTIFYING_FIELD = Symbol.for("ConvexError");
+
+class ConvexError extends (_b = Error, _a2 = IDENTIFYING_FIELD, _b) {
+  constructor(data) {
+    super(typeof data === "string" ? data : stringifyValueForError(data));
+    __publicField(this, "name", "ConvexError");
+    __publicField(this, "data");
+    __publicField(this, _a2, true);
+    this.data = data;
+  }
+}
+// node_modules/convex/dist/esm/browser/logging.js
+var __defProp3 = Object.defineProperty;
+var __defNormalProp2 = (obj, key, value) => (key in obj) ? __defProp3(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField2 = (obj, key, value) => __defNormalProp2(obj, typeof key !== "symbol" ? key + "" : key, value);
+var INFO_COLOR = "color:rgb(0, 145, 255)";
+function prefix_for_source(source) {
+  switch (source) {
+    case "query":
+      return "Q";
+    case "mutation":
+      return "M";
+    case "action":
+      return "A";
+    case "any":
+      return "?";
+  }
+}
+
+class DefaultLogger {
+  constructor(options) {
+    __publicField2(this, "_onLogLineFuncs");
+    __publicField2(this, "_verbose");
+    this._onLogLineFuncs = {};
+    this._verbose = options.verbose;
+  }
+  addLogLineListener(func) {
+    let id = Math.random().toString(36).substring(2, 15);
+    for (let i2 = 0;i2 < 10; i2++) {
+      if (this._onLogLineFuncs[id] === undefined) {
+        break;
+      }
+      id = Math.random().toString(36).substring(2, 15);
+    }
+    this._onLogLineFuncs[id] = func;
+    return () => {
+      delete this._onLogLineFuncs[id];
+    };
+  }
+  logVerbose(...args) {
+    if (this._verbose) {
+      for (const func of Object.values(this._onLogLineFuncs)) {
+        func("debug", `${(/* @__PURE__ */ new Date()).toISOString()}`, ...args);
+      }
+    }
+  }
+  log(...args) {
+    for (const func of Object.values(this._onLogLineFuncs)) {
+      func("info", ...args);
+    }
+  }
+  warn(...args) {
+    for (const func of Object.values(this._onLogLineFuncs)) {
+      func("warn", ...args);
+    }
+  }
+  error(...args) {
+    for (const func of Object.values(this._onLogLineFuncs)) {
+      func("error", ...args);
+    }
+  }
+}
+function instantiateDefaultLogger(options) {
+  const logger = new DefaultLogger(options);
+  logger.addLogLineListener((level, ...args) => {
+    switch (level) {
+      case "debug":
+        console.debug(...args);
+        break;
+      case "info":
+        console.log(...args);
+        break;
+      case "warn":
+        console.warn(...args);
+        break;
+      case "error":
+        console.error(...args);
+        break;
+      default: {
+        console.log(...args);
+      }
+    }
+  });
+  return logger;
+}
+function instantiateNoopLogger(options) {
+  return new DefaultLogger(options);
+}
+function logForFunction(logger, type, source, udfPath, message) {
+  const prefix = prefix_for_source(source);
+  if (typeof message === "object") {
+    message = `ConvexError ${JSON.stringify(message.errorData, null, 2)}`;
+  }
+  if (type === "info") {
+    const match = message.match(/^\[.*?\] /);
+    if (match === null) {
+      logger.error(`[CONVEX ${prefix}(${udfPath})] Could not parse console.log`);
+      return;
+    }
+    const level = message.slice(1, match[0].length - 2);
+    const args = message.slice(match[0].length);
+    logger.log(`%c[CONVEX ${prefix}(${udfPath})] [${level}]`, INFO_COLOR, args);
+  } else {
+    logger.error(`[CONVEX ${prefix}(${udfPath})] ${message}`);
+  }
+}
+
+// node_modules/convex/dist/esm/server/functionName.js
+var functionName = Symbol.for("functionName");
+
+// node_modules/convex/dist/esm/server/components/paths.js
+var toReferencePath = Symbol.for("toReferencePath");
+function extractReferencePath(reference) {
+  return reference[toReferencePath] ?? null;
+}
+function isFunctionHandle(s) {
+  return s.startsWith("function://");
+}
+function getFunctionAddress(functionReference) {
+  let functionAddress;
+  if (typeof functionReference === "string") {
+    if (isFunctionHandle(functionReference)) {
+      functionAddress = { functionHandle: functionReference };
+    } else {
+      functionAddress = { name: functionReference };
+    }
+  } else if (functionReference[functionName]) {
+    functionAddress = { name: functionReference[functionName] };
+  } else {
+    const referencePath = extractReferencePath(functionReference);
+    if (!referencePath) {
+      throw new Error(`${functionReference} is not a functionReference`);
+    }
+    functionAddress = { reference: referencePath };
+  }
+  return functionAddress;
+}
+
+// node_modules/convex/dist/esm/server/api.js
+function getFunctionName(functionReference) {
+  const address = getFunctionAddress(functionReference);
+  if (address.name === undefined) {
+    if (address.functionHandle !== undefined) {
+      throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received function handle ${address.functionHandle}`);
+    } else if (address.reference !== undefined) {
+      throw new Error(`Expected function reference in the current component like "api.file.func" or "internal.file.func", but received reference ${address.reference}`);
+    }
+    throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received ${JSON.stringify(address)}`);
+  }
+  if (typeof functionReference === "string")
+    return functionReference;
+  const name = functionReference[functionName];
+  if (!name) {
+    throw new Error(`${functionReference} is not a functionReference`);
+  }
+  return name;
+}
+function createApi(pathParts = []) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createApi(newParts);
+      } else if (prop === functionName) {
+        if (pathParts.length < 2) {
+          const found = ["api", ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`api.moduleName.functionName\`. Found: \`${found}\``);
+        }
+        const path = pathParts.slice(0, -1).join("/");
+        const exportName = pathParts[pathParts.length - 1];
+        if (exportName === "default") {
+          return path;
+        } else {
+          return path + ":" + exportName;
+        }
+      } else if (prop === Symbol.toStringTag) {
+        return "FunctionReference";
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var anyApi = createApi();
+
+// node_modules/convex/dist/esm/browser/http_client.js
+var __defProp4 = Object.defineProperty;
+var __defNormalProp3 = (obj, key, value) => (key in obj) ? __defProp4(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField3 = (obj, key, value) => __defNormalProp3(obj, typeof key !== "symbol" ? key + "" : key, value);
+var STATUS_CODE_UDF_FAILED = 560;
+var specifiedFetch = undefined;
+class ConvexHttpClient {
+  constructor(address, options) {
+    __publicField3(this, "address");
+    __publicField3(this, "auth");
+    __publicField3(this, "adminAuth");
+    __publicField3(this, "encodedTsPromise");
+    __publicField3(this, "debug");
+    __publicField3(this, "fetchOptions");
+    __publicField3(this, "fetch");
+    __publicField3(this, "logger");
+    __publicField3(this, "mutationQueue", []);
+    __publicField3(this, "isProcessingQueue", false);
+    if (typeof options === "boolean") {
+      throw new Error("skipConvexDeploymentUrlCheck as the second argument is no longer supported. Please pass an options object, `{ skipConvexDeploymentUrlCheck: true }`.");
+    }
+    const opts = options ?? {};
+    if (opts.skipConvexDeploymentUrlCheck !== true) {
+      validateDeploymentUrl(address);
+    }
+    this.logger = options?.logger === false ? instantiateNoopLogger({ verbose: false }) : options?.logger !== true && options?.logger ? options.logger : instantiateDefaultLogger({ verbose: false });
+    this.address = address;
+    this.debug = true;
+    this.auth = undefined;
+    this.adminAuth = undefined;
+    this.fetch = options?.fetch;
+    if (options?.auth) {
+      this.setAuth(options.auth);
+    }
+  }
+  backendUrl() {
+    return `${this.address}/api`;
+  }
+  get url() {
+    return this.address;
+  }
+  setAuth(value) {
+    this.clearAuth();
+    this.auth = value;
+  }
+  setAdminAuth(token, actingAsIdentity) {
+    this.clearAuth();
+    if (actingAsIdentity !== undefined) {
+      const bytes = new TextEncoder().encode(JSON.stringify(actingAsIdentity));
+      const actingAsIdentityEncoded = btoa(String.fromCodePoint(...bytes));
+      this.adminAuth = `${token}:${actingAsIdentityEncoded}`;
+    } else {
+      this.adminAuth = token;
+    }
+  }
+  clearAuth() {
+    this.auth = undefined;
+    this.adminAuth = undefined;
+  }
+  setDebug(debug) {
+    this.debug = debug;
+  }
+  setFetchOptions(fetchOptions) {
+    this.fetchOptions = fetchOptions;
+  }
+  async consistentQuery(query, ...args) {
+    const queryArgs = parseArgs(args[0]);
+    const timestampPromise = this.getTimestamp();
+    return await this.queryInner(query, queryArgs, { timestampPromise });
+  }
+  async getTimestamp() {
+    if (this.encodedTsPromise) {
+      return this.encodedTsPromise;
+    }
+    return this.encodedTsPromise = this.getTimestampInner();
+  }
+  async getTimestampInner() {
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    const response = await localFetch(`${this.address}/api/query_ts`, {
+      ...this.fetchOptions,
+      method: "POST",
+      headers
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const { ts } = await response.json();
+    return ts;
+  }
+  async query(query, ...args) {
+    const queryArgs = parseArgs(args[0]);
+    return await this.queryInner(query, queryArgs, {});
+  }
+  async queryInner(query, queryArgs, options) {
+    const name = getFunctionName(query);
+    const args = [convexToJson(queryArgs)];
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const timestamp = options.timestampPromise ? await options.timestampPromise : undefined;
+    const body = JSON.stringify({
+      path: name,
+      format: "convex_encoded_json",
+      args,
+      ...timestamp ? { ts: timestamp } : {}
+    });
+    const endpoint = timestamp ? `${this.address}/api/query_at_ts` : `${this.address}/api/query`;
+    const response = await localFetch(endpoint, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "query", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+  async mutationInner(mutation, mutationArgs) {
+    const name = getFunctionName(mutation);
+    const body = JSON.stringify({
+      path: name,
+      format: "convex_encoded_json",
+      args: [convexToJson(mutationArgs)]
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const response = await localFetch(`${this.address}/api/mutation`, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "mutation", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+  async processMutationQueue() {
+    if (this.isProcessingQueue) {
+      return;
+    }
+    this.isProcessingQueue = true;
+    while (this.mutationQueue.length > 0) {
+      const { mutation, args, resolve, reject } = this.mutationQueue.shift();
+      try {
+        const result = await this.mutationInner(mutation, args);
+        resolve(result);
+      } catch (error48) {
+        reject(error48);
+      }
+    }
+    this.isProcessingQueue = false;
+  }
+  enqueueMutation(mutation, args) {
+    return new Promise((resolve, reject) => {
+      this.mutationQueue.push({ mutation, args, resolve, reject });
+      this.processMutationQueue();
+    });
+  }
+  async mutation(mutation, ...args) {
+    const [fnArgs, options] = args;
+    const mutationArgs = parseArgs(fnArgs);
+    const queued = !options?.skipQueue;
+    if (queued) {
+      return await this.enqueueMutation(mutation, mutationArgs);
+    } else {
+      return await this.mutationInner(mutation, mutationArgs);
+    }
+  }
+  async action(action, ...args) {
+    const actionArgs = parseArgs(args[0]);
+    const name = getFunctionName(action);
+    const body = JSON.stringify({
+      path: name,
+      format: "convex_encoded_json",
+      args: [convexToJson(actionArgs)]
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const response = await localFetch(`${this.address}/api/action`, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "action", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+  async function(anyFunction, componentPath, ...args) {
+    const functionArgs = parseArgs(args[0]);
+    const name = typeof anyFunction === "string" ? anyFunction : getFunctionName(anyFunction);
+    const body = JSON.stringify({
+      componentPath,
+      path: name,
+      format: "convex_encoded_json",
+      args: convexToJson(functionArgs)
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      "Convex-Client": `npm-${version2}`
+    };
+    if (this.adminAuth) {
+      headers["Authorization"] = `Convex ${this.adminAuth}`;
+    } else if (this.auth) {
+      headers["Authorization"] = `Bearer ${this.auth}`;
+    }
+    const localFetch = this.fetch || specifiedFetch || fetch;
+    const response = await localFetch(`${this.address}/api/function`, {
+      ...this.fetchOptions,
+      body,
+      method: "POST",
+      headers
+    });
+    if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+      throw new Error(await response.text());
+    }
+    const respJSON = await response.json();
+    if (this.debug) {
+      for (const line of respJSON.logLines ?? []) {
+        logForFunction(this.logger, "info", "any", name, line);
+      }
+    }
+    switch (respJSON.status) {
+      case "success":
+        return jsonToConvex(respJSON.value);
+      case "error":
+        if (respJSON.errorData !== undefined) {
+          throw forwardErrorData(respJSON.errorData, new ConvexError(respJSON.errorMessage));
+        }
+        throw new Error(respJSON.errorMessage);
+      default:
+        throw new Error(`Invalid response: ${JSON.stringify(respJSON)}`);
+    }
+  }
+}
+function forwardErrorData(errorData, error48) {
+  error48.data = jsonToConvex(errorData);
+  return error48;
+}
+// ../node_modules/convex/dist/esm/server/functionName.js
+var functionName2 = Symbol.for("functionName");
+
+// ../node_modules/convex/dist/esm/server/components/paths.js
+var toReferencePath2 = Symbol.for("toReferencePath");
+// ../node_modules/convex/dist/esm/server/api.js
+function createApi2(pathParts = []) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createApi2(newParts);
+      } else if (prop === functionName2) {
+        if (pathParts.length < 2) {
+          const found = ["api", ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`api.moduleName.functionName\`. Found: \`${found}\``);
+        }
+        const path = pathParts.slice(0, -1).join("/");
+        const exportName = pathParts[pathParts.length - 1];
+        if (exportName === "default") {
+          return path;
+        } else {
+          return path + ":" + exportName;
+        }
+      } else if (prop === Symbol.toStringTag) {
+        return "FunctionReference";
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var anyApi2 = createApi2();
+// ../node_modules/convex/dist/esm/server/components/index.js
+function createChildComponents(root, pathParts) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createChildComponents(root, newParts);
+      } else if (prop === toReferencePath2) {
+        if (pathParts.length < 1) {
+          const found = [root, ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`${root}.childComponent.functionName\`. Found: \`${found}\``);
+        }
+        return `_reference/childComponent/` + pathParts.join("/");
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var componentsGeneric = () => createChildComponents("components", []);
+// ../web/convex/_generated/api.js
+var api2 = anyApi2;
+var components = componentsGeneric();
+
+// cli/lib/convex.ts
+var CONVEX_URL = process.env.CONVEX_URL ?? "https://grateful-warbler-176.convex.cloud";
+function debugLog(message) {
+  if (process.env.DEBUG) {
+    console.error(`[convex] ${message}`);
+  }
+}
+var clientInstance = null;
+function getConvexClient() {
+  if (!clientInstance) {
+    clientInstance = new ConvexHttpClient(CONVEX_URL);
+  }
+  return clientInstance;
+}
+async function getAuthenticatedClient() {
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult)) {
+    return null;
+  }
+  const client = getConvexClient();
+  client.setAuth(authResult.access_token);
+  return client;
+}
+async function pingCheckout(checkoutId) {
+  try {
+    const client = getConvexClient();
+    await client.mutation(api2.sessions.upsertCheckout, { checkoutId });
+    return true;
+  } catch (error48) {
+    debugLog(`pingCheckout failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
+    return false;
+  }
+}
+async function heartbeatSession(session) {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client)
+      return false;
+    await client.mutation(api2.sessions.heartbeatSession, session);
+    return true;
+  } catch (error48) {
+    debugLog(`heartbeatSession failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
+    return false;
+  }
+}
+async function generateUploadUrl(sessionId) {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client)
+      return null;
+    return await client.mutation(api2.sessions.generateUploadUrl, { sessionId });
+  } catch (error48) {
+    debugLog(`generateUploadUrl failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
+    return null;
+  }
+}
+async function saveUpload(sessionId, storageId) {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client)
+      return false;
+    await client.mutation(api2.sessions.saveUpload, {
+      sessionId,
+      storageId
+    });
+    return true;
+  } catch (error48) {
+    debugLog(`saveUpload failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
+    return false;
+  }
+}
+
+// cli/commands/session-start.ts
+async function readStdin() {
+  if (process.stdin.isTTY)
+    return null;
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      resolve(data || null);
+    });
+    process.stdin.on("error", () => {
+      resolve(null);
+    });
+    process.stdin.resume();
+  });
+}
+async function readHookInput() {
+  const input = await readStdin();
+  if (!input)
+    return {};
+  try {
+    const data = JSON.parse(input);
+    return {
+      transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
+      cwd: typeof data.cwd === "string" ? data.cwd : undefined
+    };
+  } catch {
+    return {};
+  }
+}
+var AUTO_UPLOAD_DELAY_MINUTES = 10;
 async function sessionStart() {
   const messages = [];
-  const status = await checkAuthStatus(true);
-  if (status.needsLogin) {
-    messages.push(hook.notLoggedIn());
-  } else if (status.user) {
-    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
-  }
-  const cwd = process.env.CWD || process.cwd();
-  const transcriptPath = process.env.TRANSCRIPT_PATH;
-  try {
-    const { extracted, schemaErrors } = await extractAllSessions(cwd, transcriptPath);
-    if (extracted > 0) {
-      messages.push(hook.extracted(extracted));
+  const collectedErrors = [];
+  const hookInput = await readHookInput();
+  const cwd = hookInput.cwd || process.cwd();
+  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
+  let transcriptsDirs;
+  const inWorktree = await isWorktree(cwd);
+  if (hookInput.transcriptPath) {
+    const transcriptsDir = dirname2(hookInput.transcriptPath);
+    if (inWorktree) {
+      const mainPath = getMainWorktreePath(cwd);
+      if (mainPath) {
+        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
+        await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
+      }
+      transcriptsDirs = [transcriptsDir];
+    } else {
+      await addTranscriptsDir(hiveMindDir, transcriptsDir);
+      transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
     }
+  } else {
+    if (inWorktree) {
+      messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
+      hookOutput(`hive-mind: ${messages[0]}`);
+      return 1;
+    }
+    transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    if (transcriptsDirs.length === 0) {
+      messages.push(hook.extractionFailed("No transcripts directories configured. Run a Claude Code session first."));
+      hookOutput(`hive-mind: ${messages[0]}`);
+      return 1;
+    }
+  }
+  getOrCreateCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
+  const [sessionCheck, status] = await Promise.all([
+    checkAllSessions(cwd, transcriptsDirs).catch((error48) => ({
+      error: error48 instanceof Error ? error48.message : String(error48)
+    })),
+    checkAuthStatus(true)
+  ]);
+  let newSessionIds = [];
+  let extractedSessions = [];
+  if ("error" in sessionCheck) {
+    messages.push(hook.extractionFailed(sessionCheck.error));
+  } else {
+    const { sessionsToExtract, schemaErrors, errors: sessionErrors } = sessionCheck;
+    extractedSessions = sessionCheck.extractedSessions;
+    collectedErrors.push(...sessionErrors);
+    const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
+    if (newNonAgentSessions.length > 0) {
+      messages.push(hook.extracted(newNonAgentSessions.length));
+      newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
+    }
+    scheduleExtractions(sessionsToExtract.map((s) => s.sessionId));
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
       const allErrors = schemaErrors.flatMap((s) => s.errors);
       messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
     }
-  } catch (error48) {
-    const errorMsg = error48 instanceof Error ? error48.message : String(error48);
-    messages.push(hook.extractionFailed(errorMsg));
+  }
+  if (status.errors) {
+    collectedErrors.push(...status.errors);
+  }
+  let userHasAlias = false;
+  if (status.authenticated) {
+    try {
+      const aliasResult = await updateAliasIfOutdated();
+      if (aliasResult.updated && aliasResult.sourceCmd) {
+        messages.push(hook.aliasUpdated(aliasResult.sourceCmd));
+      }
+      userHasAlias = aliasResult.hasAlias;
+    } catch (err) {
+      collectedErrors.push(errors.aliasUpdateFailed(err instanceof Error ? err.message : String(err)));
+    }
+  }
+  if (status.needsLogin) {
+    messages.push(hook.notLoggedIn());
+  } else if (status.user) {
+    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
+  }
+  if (status.authenticated && extractedSessions.length > 0) {
+    try {
+      const authIssuedAt = await getAuthIssuedAt();
+      const nonAgentSessions = extractedSessions.filter((s) => !s.meta.agentId);
+      const eligibilityResults = nonAgentSessions.map((s) => checkSessionEligibility(s.meta, authIssuedAt));
+      const pending = eligibilityResults.filter((s) => !s.eligible && !s.excluded);
+      if (pending.length > 1) {
+        const earliestUploadAt = pending.map((s) => s.eligibleAt).filter((t) => t !== null).sort((a, b) => a - b)[0] ?? null;
+        messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
+      }
+      const eligible = eligibilityResults.filter((s) => s.eligible);
+      const eligibleIds = eligible.map((s) => s.sessionId);
+      const uploadCount = scheduleAutoUploads(eligibleIds) ? eligibleIds.length : 0;
+      if (uploadCount > 0) {
+        messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
+      }
+    } catch (err) {
+      collectedErrors.push(errors.eligibilityCheckFailed(err instanceof Error ? err.message : String(err)));
+    }
+  }
+  if (collectedErrors.length > 0) {
+    if (process.env.HIVE_MIND_VERBOSE === "1") {
+      messages.push(...collectedErrors);
+    } else {
+      messages.push(hook.errorsOccurred(collectedErrors.length));
+    }
   }
   if (messages.length > 0) {
-    hookOutput(messages.join(`
+    const formatted = messages.map((msg, i2) => i2 === 0 ? `hive-mind: ${msg}` : `\u2192 ${msg}`);
+    hookOutput(formatted.join(`
 `));
+  }
+  if (status.authenticated && newSessionIds.length > 0) {
+    scheduleHeartbeats(newSessionIds);
+  }
+  process.exit(0);
+}
+function getBunPath() {
+  const bunInstall = process.env.BUN_INSTALL;
+  const customPath = bunInstall ? join9(bunInstall, "bin", "bun") : null;
+  const standardPath = join9(homedir4(), ".bun", "bin", "bun");
+  if (customPath && existsSync(customPath))
+    return customPath;
+  if (existsSync(standardPath))
+    return standardPath;
+  return "bun";
+}
+function spawnBackground(args) {
+  try {
+    const child = spawn(getBunPath(), [process.argv[1], ...args], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, CWD: process.env.CWD || process.cwd() }
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+function scheduleExtractions(sessionIds) {
+  if (sessionIds.length === 0)
+    return true;
+  return spawnBackground(["extract", ...sessionIds]);
+}
+function scheduleHeartbeats(sessionIds) {
+  if (sessionIds.length === 0)
+    return true;
+  return spawnBackground(["heartbeat", ...sessionIds]);
+}
+function scheduleAutoUploads(sessionIds) {
+  if (sessionIds.length === 0)
+    return true;
+  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
+  return spawnBackground(["upload", "--delay", String(delaySeconds), ...sessionIds]);
+}
+
+// cli/commands/login.ts
+import { createInterface as createInterface3 } from "readline";
+var WORKOS_API_URL2 = "https://api.workos.com/user_management";
+var DeviceAuthResponseSchema = exports_external.object({
+  device_code: exports_external.string(),
+  user_code: exports_external.string(),
+  verification_uri: exports_external.string(),
+  verification_uri_complete: exports_external.string(),
+  interval: exports_external.number(),
+  expires_in: exports_external.number()
+});
+var ErrorResponseSchema = exports_external.object({
+  error: exports_external.string(),
+  error_description: exports_external.string().optional()
+});
+async function confirm2(message, defaultYes = false) {
+  const rl = createInterface3({ input: process.stdin, output: process.stdout });
+  const hint = defaultYes ? "[Y/n]" : "[y/N]";
+  return new Promise((resolve) => {
+    rl.question(`${message} ${hint} `, (answer) => {
+      rl.close();
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === "") {
+        resolve(defaultYes);
+      } else {
+        resolve(trimmed === "y" || trimmed === "yes");
+      }
+    });
+  });
+}
+async function openBrowser(url2) {
+  if (process.platform === "darwin") {
+    try {
+      await Bun.spawn(["open", url2]).exited;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (process.platform === "linux") {
+    for (const cmd of ["xdg-open", "wslview"]) {
+      try {
+        await Bun.spawn([cmd, url2]).exited;
+        return true;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return false;
+}
+function sleep2(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function checkExistingAuth() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    printWarning(setup.alreadyLoggedIn);
+    return await confirm2(setup.confirmRelogin);
+  }
+  return true;
+}
+async function tryRefresh() {
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult))
+    return { success: false };
+  printInfo(setup.refreshing);
+  const refreshResult = await refreshToken(authResult.refresh_token, authResult.authenticated_at);
+  if (refreshResult && !isErrorResult(refreshResult)) {
+    await saveAuthData(refreshResult);
+    printSuccess(setup.refreshSuccess);
+    return { success: true, user: refreshResult.user };
+  }
+  return { success: false };
+}
+async function deviceAuthFlow() {
+  printInfo(setup.starting);
+  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
+  });
+  const data = await response.json();
+  const errorResult = ErrorResponseSchema.safeParse(data);
+  if (errorResult.success && errorResult.data.error) {
+    printError(setup.startFailed(errorResult.data.error));
+    if (errorResult.data.error_description) {
+      printInfo(errorResult.data.error_description);
+    }
+    return 1;
+  }
+  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
+  if (!deviceAuthResult.success) {
+    printError(setup.unexpectedAuthResponse);
+    return 1;
+  }
+  const deviceAuth = deviceAuthResult.data;
+  console.log(setup.deviceAuth(deviceAuth.verification_uri, colors.green(deviceAuth.user_code)));
+  console.log("");
+  if (await openBrowser(deviceAuth.verification_uri_complete)) {
+    printInfo(setup.browserOpened);
+  } else {
+    printInfo(setup.openManually);
+  }
+  printInfo(setup.waiting(deviceAuth.expires_in));
+  console.log("");
+  let interval = deviceAuth.interval * 1000;
+  const startTime = Date.now();
+  const expiresAt = startTime + deviceAuth.expires_in * 1000;
+  while (Date.now() < expiresAt) {
+    await sleep2(interval);
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceAuth.device_code,
+        client_id: WORKOS_CLIENT_ID
+      })
+    });
+    const tokenData = await tokenResponse.json();
+    const authResult = AuthDataSchema.safeParse(tokenData);
+    if (authResult.success) {
+      await saveAuthData({
+        ...authResult.data,
+        authenticated_at: Date.now()
+      });
+      console.log("");
+      printSuccess(setup.success);
+      printSuccess(setup.welcome(authResult.data.user.first_name, authResult.data.user.email));
+      return 0;
+    }
+    const errorData = tokenData;
+    if (errorData.error === "authorization_pending") {
+      process.stdout.write(`\r  ${setup.waitingProgress(elapsed)}`);
+      continue;
+    }
+    if (errorData.error === "slow_down") {
+      interval += 1000;
+      continue;
+    }
+    printError(setup.authFailed(errorData.error || "unknown error"));
+    if (errorData.error_description)
+      printInfo(errorData.error_description);
+    return 1;
+  }
+  printError(setup.timeout);
+  return 1;
+}
+async function showStatus() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    const displayName = getUserDisplayName(status.user);
+    console.log(errors.loginStatusYes(displayName));
+  } else {
+    console.log(errors.loginStatusNo);
+  }
+  return 0;
+}
+async function login() {
+  if (process.argv.includes("--status")) {
+    return showStatus();
+  }
+  printInfo(setup.header);
+  console.log("");
+  if (!await checkExistingAuth()) {
+    return 0;
+  }
+  const refreshResult = await tryRefresh();
+  if (refreshResult.success) {
+    return 0;
+  }
+  return await deviceAuthFlow();
+}
+
+// cli/commands/setup-alias.ts
+import { dirname as dirname3 } from "path";
+async function setupAliasCommand() {
+  const pluginRoot = dirname3(process.argv[1]);
+  const { success: success2, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
+  if (!success2) {
+    printError("Failed to set up alias");
+    return 1;
+  }
+  if (alreadyExists) {
+    printInfo(setup.alreadySetUp);
+  } else {
+    printSuccess("hive-mind command added to shell config");
+    console.log(setup.aliasActivate(sourceCmd));
   }
   return 0;
 }
 
+// cli/commands/upload.ts
+import { readFile as readFile5 } from "fs/promises";
+import { join as join10 } from "path";
+async function uploadSession(cwd, sessionId) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
+  let content;
+  try {
+    content = await readFile5(sessionPath, "utf-8");
+  } catch {
+    return { success: false, error: "Session file not found" };
+  }
+  const metaResult = await readExtractedMeta(sessionPath);
+  if (!metaResult || isMetaError(metaResult)) {
+    return { success: false, error: "Could not read session metadata" };
+  }
+  const heartbeatOk = await heartbeatSession({
+    sessionId: metaResult.sessionId,
+    checkoutId: metaResult.checkoutId,
+    project: getCanonicalProjectName(cwd),
+    lineCount: metaResult.messageCount,
+    parentSessionId: metaResult.parentSessionId
+  });
+  if (!heartbeatOk) {
+    return { success: false, error: "Failed to heartbeat session" };
+  }
+  const uploadUrl = await generateUploadUrl(sessionId);
+  if (!uploadUrl) {
+    return { success: false, error: "Failed to get upload URL" };
+  }
+  try {
+    const response = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-ndjson" },
+      body: content
+    });
+    if (!response.ok) {
+      return { success: false, error: `Upload failed: ${response.status}` };
+    }
+    const result = await response.json();
+    if (!result.storageId) {
+      return { success: false, error: "No storage ID returned" };
+    }
+    const saved = await saveUpload(sessionId, result.storageId);
+    if (!saved) {
+      return { success: false, error: "Failed to save upload metadata" };
+    }
+    const markResult = await markSessionUploaded(sessionPath);
+    if (!markResult.success && markResult.error) {
+      if (process.env.DEBUG) {
+        console.error(`[upload] ${markResult.error}`);
+      }
+    }
+    return { success: true };
+  } catch (error48) {
+    return {
+      success: false,
+      error: error48 instanceof Error ? error48.message : "Unknown upload error"
+    };
+  }
+}
+async function getAgentIds(cwd, sessionId) {
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
+  const sessionResult = await readExtractedSession(sessionPath);
+  if (!sessionResult || isSessionError(sessionResult)) {
+    if (isSessionError(sessionResult) && process.env.DEBUG) {
+      console.error(`[upload] ${sessionResult.error}`);
+    }
+    return [];
+  }
+  const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+  const agentIds = new Set;
+  for (const block of parsed.blocks) {
+    if (block.type === "tool" && block.agentId) {
+      agentIds.add(block.agentId);
+    }
+  }
+  return Array.from(agentIds);
+}
+async function uploadSessionWithAgents(cwd, sessionId) {
+  const mainResult = await uploadSession(cwd, sessionId);
+  if (!mainResult.success) {
+    return { ...mainResult, agentCount: 0 };
+  }
+  const agentIds = await getAgentIds(cwd, sessionId);
+  let agentCount = 0;
+  for (const agentId of agentIds) {
+    const agentResult = await uploadSession(cwd, `agent-${agentId}`);
+    if (agentResult.success) {
+      agentCount++;
+    }
+  }
+  return { success: true, agentCount };
+}
+async function uploadSingleSession(cwd, sessionIdPrefix, delaySeconds) {
+  if (delaySeconds > 0) {
+    printInfo(uploadCmd.waitingDelay(delaySeconds));
+    await sleep(delaySeconds * 1000);
+  }
+  const lookup2 = await lookupSession(cwd, sessionIdPrefix);
+  if (lookup2.type === "not_found") {
+    printError(uploadCmd.sessionNotFound(sessionIdPrefix));
+    return 1;
+  }
+  if (lookup2.type === "ambiguous") {
+    printError(uploadCmd.ambiguousSession(sessionIdPrefix, lookup2.matches.length));
+    for (const m of lookup2.matches.slice(0, 5)) {
+      console.log(`  ${m}`);
+    }
+    if (lookup2.matches.length > 5) {
+      console.log(errors.andMore(lookup2.matches.length - 5));
+    }
+    return 1;
+  }
+  const { sessionId, meta: meta3 } = lookup2;
+  if (meta3.excluded) {
+    printInfo(uploadCmd.sessionExcluded(sessionId));
+    return 0;
+  }
+  printInfo(uploadCmd.uploading(sessionId));
+  const result = await uploadSessionWithAgents(cwd, sessionId);
+  if (result.success) {
+    if (result.agentCount > 0) {
+      printSuccess(uploadCmd.uploadedWithAgents(sessionId, result.agentCount));
+    } else {
+      printSuccess(uploadCmd.uploaded(sessionId));
+    }
+    return 0;
+  } else {
+    printError(uploadCmd.failedToUpload(sessionId, result.error || "Unknown error"));
+    return 1;
+  }
+}
+async function upload() {
+  const args = process.argv.slice(3);
+  const sessionIds = [];
+  let delaySeconds = 0;
+  for (let i2 = 0;i2 < args.length; i2++) {
+    const arg = args[i2];
+    if (arg === "--delay" && args[i2 + 1]) {
+      delaySeconds = parseInt(args[i2 + 1], 10);
+      i2++;
+    } else if (!arg.startsWith("-")) {
+      sessionIds.push(arg);
+    }
+  }
+  if (sessionIds.length === 0) {
+    console.log(usage.upload());
+    return 1;
+  }
+  const cwd = process.env.CWD || process.cwd();
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) {
+    printError(uploadCmd.notAuthenticated);
+    return 1;
+  }
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    const result = await uploadSingleSession(cwd, sessionId, delaySeconds);
+    if (result !== 0)
+      failures++;
+  }
+  return failures > 0 ? 1 : 0;
+}
+
+// cli/commands/heartbeat.ts
+import { join as join11 } from "path";
+async function heartbeat() {
+  const cwd = process.env.CWD || process.cwd();
+  const sessionIds = process.argv.slice(3);
+  if (sessionIds.length === 0) {
+    return 1;
+  }
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) {
+    return 1;
+  }
+  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const project = getCanonicalProjectName(cwd);
+  let failures = 0;
+  for (const sessionId of sessionIds) {
+    const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
+    if (!metaResult || isMetaError(metaResult)) {
+      failures++;
+      continue;
+    }
+    try {
+      await heartbeatSession({
+        sessionId: metaResult.sessionId,
+        checkoutId: metaResult.checkoutId,
+        project,
+        lineCount: metaResult.messageCount,
+        parentSessionId: metaResult.parentSessionId
+      });
+    } catch (error48) {
+      if (process.env.DEBUG) {
+        console.error(`[heartbeat] ${error48 instanceof Error ? error48.message : String(error48)}`);
+      }
+      failures++;
+    }
+  }
+  return failures > 0 ? 1 : 0;
+}
+
 // cli/cli.ts
 var COMMANDS = {
-  grep: { description: "Search sessions for pattern", handler: grep },
+  exclude: { description: "Exclude session from upload", handler: exclude },
+  extract: { description: "Extract session (internal)", handler: extract, hidden: true },
+  search: { description: "Search sessions for pattern", handler: search },
   index: { description: "List extracted sessions", handler: index },
-  login: { description: "Authenticate with hive-mind", handler: login2 },
   read: { description: "Read session entries", handler: read },
-  "session-start": { description: "SessionStart hook (internal)", handler: sessionStart }
+  login: { description: "Log in to hive-mind", handler: login },
+  "setup-alias": { description: "Add hive-mind command to shell config", handler: setupAliasCommand },
+  upload: { description: "Upload eligible sessions", handler: upload },
+  "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
+  heartbeat: { description: "Send heartbeat (internal)", handler: heartbeat, hidden: true }
 };
 function printUsage4() {
-  const commands = Object.entries(COMMANDS).map(([name, { description }]) => ({
-    name,
-    description
-  }));
+  const commands = Object.entries(COMMANDS).filter(([, def]) => !("hidden" in def)).map(([name, { description }]) => ({ name, description }));
   console.log(usage.main(commands));
 }
 async function main() {
@@ -17185,7 +20386,7 @@ async function main() {
     return;
   }
   if (!(command in COMMANDS)) {
-    printError(errors3.unknownCommand(command));
+    printError(errors.unknownCommand(command));
     console.log("");
     printUsage4();
     process.exit(1);

@@ -1,51 +1,51 @@
 ---
 name: retrieval
 description: |
-  Use this agent when historical context would help the current task. This includes:
-  - Past decisions and their rationale
-  - User preferences (communication style, implementation philosophy, dependencies vs DIY)
-  - Previous issues, debugging sessions, and workarounds
-  - Failed approaches and why they didn't work
-  - Outstanding problems or known limitations
-  - Related discussions that might inform current work
+  Use this agent when historical context might help - which is more often than you'd expect. This agent searches past Claude Code sessions and returns relevant quotes about decisions, preferences, issues, failed approaches, and discussions.
 
-  Proactively spawn during planning or when encountering unexpected behavior.
+  **Use when users ask about past sessions**—"do you remember...", "what did we discuss...", "have we tried this before?"
 
-  When spawning, provide context: current situation details, specific errors or behaviors, what you're trying to accomplish, and any hypotheses. Rich context enables better retrieval.
+  **Whenever you're planning anything—spawn it.** New feature, refactor, bug fix, research direction—historical context surfaces failed approaches, user preferences, and prior decisions that prevent planning mistakes.
+
+  **Can be spawned in parallel with the Explore agent** to get both current code and historical context.
+
+  When spawning, include: in-context references (things mentioned in conversation), details of planned activities (the agent finds similar past work), and what you're looking for.
 
   <example>
-  Context: User asks why something is implemented a certain way
-  user: "Why are we using WorkOS for auth?"
-  assistant: "Let me check the session history for authentication discussions."
-  [Spawns retrieval agent: "Looking for discussions about authentication provider choice - WorkOS vs alternatives. Also any debugging sessions with auth issues, user preferences about external dependencies, and related decisions about user management."]
+  Context: Continuing work from a previous session
+  user: "Let's keep working on the slides"
+  assistant: "Let me find the current slides and check what we discussed."
+  [Spawns Explore agent: "Find the slides or presentation files the user is working on."]
+  [Spawns retrieval agent: "User wants to continue work on slides/presentation. Looking for: previous discussions about content, style decisions, feedback given, where we left off, any outstanding items."]
   <commentary>
-  Retrieval can find not just the decision, but debugging context, user preferences, and related decisions that inform the full picture.
+  Parallel spawning for continuation: Explore finds current work, retrieval finds context and decisions. Even vague references ("the slides") can be resolved.
   </commentary>
   </example>
 
   <example>
-  Context: Planning a new feature
-  user: "I want to add response caching to the API"
-  assistant: "Before planning, let me check what relevant history exists."
-  [Spawns retrieval agent: "Planning to add API response caching. Looking for: past discussions about caching or performance, user preferences about adding dependencies vs implementing from scratch, any outstanding issues that might interact with caching, related architectural decisions about the API layer."]
+  Context: Research iteration
+  user: "Please iterate on the evaluation prompts to see if we can better elicit the behavior"
+  assistant: "Let me explore the current prompts and check what we've tried before."
+  [Spawns Explore agent: "Find the evaluation prompts and understand the current approach to eliciting the target behavior."]
+  [Spawns retrieval agent: "Working on evaluation prompts to elicit behavior. Looking for: past iterations and what worked/didn't, hypotheses about why certain approaches failed, user feedback on previous attempts, any insights about the target behavior."]
   <commentary>
-  Proactive retrieval during planning. Provides current intent so retrieval can find dependencies, preferences, and potential blockers.
+  Parallel spawning for research work: Explore finds the current implementation, retrieval finds what's been tried and learned.
   </commentary>
   </example>
 
   <example>
-  Context: Debugging an unexpected issue
-  user: "The tests are failing with a weird timeout error"
-  assistant: "Let me check if we've encountered this before."
-  [Spawns retrieval agent: "Currently seeing test failures with timeout errors in [specific test file]. Error message: [exact error]. Looking for: past debugging sessions with similar symptoms, known flaky tests, any discussions about test infrastructure or timing issues."]
+  Context: Research assistance
+  user: "Help me find papers about reward hacking"
+  assistant: "Let me check what we know about this topic."
+  [Spawns retrieval agent: "User looking for papers on reward hacking. Looking for: papers already discussed or cited, relevant researchers mentioned, related concepts explored, past paper-finding sessions and how they went, user preferences about paper selection or relevance criteria."]
   <commentary>
-  Includes specific details about the current issue so retrieval can find relevant past debugging sessions.
+  Research builds on previous exploration. Retrieval surfaces not just topic-specific discussions, but also how the user likes to find and evaluate papers.
   </commentary>
   </example>
-model: haiku
+model: opus
 color: cyan
 skills: hive-mind:retrieval
-tools: Bash, Read, Glob, Grep
+tools: Bash
 ---
 
 You are a retrieval specialist. Follow the instructions from the loaded skill to search past sessions.

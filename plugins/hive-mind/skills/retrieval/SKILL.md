@@ -1,15 +1,18 @@
 ---
 name: retrieval
 description: Retrieval instructions for searching session history. Auto-loaded by the hive-mind:retrieval agent - prefer spawning that agent rather than invoking this skill directly.
+allowed-tools: Bash(command -v hive-mind:*), Bash(printf:*), Bash(hive-mind:*), Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git:*)
 ---
 
-Memory archaeology: excavate layers of project history to uncover artifacts that explain the current state.
+Approach this as memory archaeology: excavate layers of project history to uncover relevant artifacts.
 
-The task is retrieval, not interpretation. Bring back what is found, with context about when and where. Let the artifacts speak for themselves.
+**Retrieval, not interpretation.** Bring back direct quotes with timestamps. Let the artifacts speak for themselves. Do not analyze, summarize, or explain—just quote the relevant passages.
 
-**Be thorough.** The first result is rarely the best result. Keep digging until confident nothing relevant remains buried.
+**Be thorough.** The first result is rarely the best result. Try different search terms, check multiple sessions, and cross-reference with git history. Read session overviews even when search doesn't match—relevant context often uses different words.
 
 ## What to Look For
+
+**User messages are the richest source.** They contain preferences, insights, decisions, and context—and tend to be concise. Prioritize searching and quoting user messages over other content.
 
 Think broadly about what might be relevant:
 
@@ -20,78 +23,71 @@ Think broadly about what might be relevant:
 - **Failed approaches** - What didn't work and why (often more valuable than what did)
 - **Outstanding issues** - Known problems, limitations, tech debt that might affect current work
 - **Dependencies** - Related decisions that inform or constrain the current question
+- **Temporary work** - One-off scripts, exploratory analysis, or workarounds that solved similar problems (even if later removed)
 
-A question about caching might lead to finding: performance discussions, user preferences about dependencies, architectural decisions about the API layer, and known issues that would interact with caching.
+A question about evaluation prompts might lead to finding: past iterations and results, discussions about the model being evaluated, user preferences about methodology, and even unrelated experiments that revealed something about the target behavior.
 
 **Don't stop at the obvious.** If asked about X, also look for discussions that mention X indirectly, or decisions that would affect X even if X isn't named.
 
 ## Tools
 
-Bash access to the hive-mind CLI (for searching sessions) and git (for project history). Cross-reference between them - commits and sessions often illuminate each other.
+Use Bash to run CLI commands and git. Cross-reference between them—commits and sessions often illuminate each other.
 
-### CLI Reference
+### CLI Commands
 
+Run commands via: !`command -v hive-mind >/dev/null 2>&1 && echo '\x60hive-mind <command>\x60' || echo '\x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60'`
+
+`search --help`:
 ```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js grep --help`
+!`hive-mind search --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js search --help 2>/dev/null || echo "(cli unavailable - install bun: https://bun.sh)"`
 ```
 
+`read --help`:
 ```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help`
+!`hive-mind read --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js read --help 2>/dev/null || echo "(cli unavailable)"`
 ```
-
-Session IDs can be prefix-matched (e.g., `02ed` matches `02ed589a-...`).
 
 ## Project History
 
-### Git Log
+`git log --oneline`:
 ```
-!`git log --oneline`
-```
-
-### Session Index
-```
-!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js index | sed 's/@/\\@/g'`
+!`git log --oneline 2>/dev/null || echo "(no git history available)"`
 ```
 
-## Thoroughness
-
-**Keep searching until certain nothing remotely interesting remains.** Check multiple sessions. Try different search terms. Cross-reference with git history. Read session overviews even if grep didn't find matches - relevant context often uses different words.
-
-Before concluding:
-- Have at least 5+ candidate sessions been checked?
-- Have related terms been searched, not just the exact query?
-- Has git history been cross-referenced with session timestamps?
-- Could there be relevant context hiding in sessions about adjacent topics?
+Session index:
+```
+!`hive-mind index --escape-file-refs 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js index --escape-file-refs 2>/dev/null || echo "(cli unavailable)"`
+```
 
 ## Output Format
 
-Return findings with **direct quotes** and timestamps. Quotes preserve accuracy and richness better than summaries.
+**Return direct quotes, not analysis.** Output should be mostly blockquotes from session history. Do not interpret, explain, or summarize what the quotes mean—the caller will do that.
+
+**Label the source.** Always indicate where a quote comes from: user message, assistant response, thinking block, tool input, etc. This helps the caller understand the context and weight of each quote.
 
 ```
 ## Findings
 
-**[Topic]** (around Jan 3, 2026; commits abc1234, def5678)
+**[Topic]** (session 02ed, around Jan 3; commits abc1234, def5678)
 
-> "Direct quote from the session that captures the key point..."
+> [user] "Direct quote from the session that captures the key point..."
 
-> "Another relevant quote, possibly from a different part of the discussion..."
+> [assistant] "Another relevant quote, possibly from a different part of the discussion..."
 
-Brief context if needed to connect the quotes.
+> [thinking] "Internal reasoning that reveals the decision process..."
 
-**[Related context]** (Dec 30, 2025)
+[One sentence connecting the quotes if needed]
 
-> "Earlier quote that provides background..."
+**[Related context]** (session ec4d, Dec 30)
+
+> [user] "Earlier quote that provides background..."
 
 ## User Preferences Noted
 
-> "I prefer X over Y because..." (Jan 2, 2026)
+> [user] "I prefer X over Y because..." (session 6e85, Jan 2)
 
 ## Gaps
 - [What was looked for but not found]
 ```
 
-Prefer quotes over paraphrasing. Let the original words speak. Add minimal context only when needed to connect quotes or clarify what was being discussed.
-
-Note uncertainty when findings are related but not exact. If the requested information was not found, say so clearly - absence of evidence is also useful information.
-
-**One more search.** Before returning, do one more search with a different angle. The best findings often come from the last dig.
+Note uncertainty when findings are related but not exact. If the requested information was not found, say so clearly—absence of evidence is also useful information.

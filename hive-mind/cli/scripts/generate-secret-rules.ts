@@ -11,15 +11,15 @@
  *   bun cli/scripts/generate-secret-rules.ts main     # latest from main
  */
 
-import { writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { parse } from "smol-toml";
+import { writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'smol-toml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Default to a known working version (main branch as of 2026-01-05)
-const DEFAULT_VERSION = "b66ac75e4fa93d86d78fccd6e2f36d2c0698b2a2";
+const DEFAULT_VERSION = 'b66ac75e4fa93d86d78fccd6e2f36d2c0698b2a2';
 
 interface GitleaksRule {
   id: string;
@@ -59,29 +59,29 @@ function convertRegex(goRegex: string): string {
   // Handle (?s:.) pattern - dot matches newline in Go
   // Convert (?s:.) to [\s\S] which matches any character including newlines in JS
   // This needs to handle nested patterns like (?s:.){0,200}
-  jsRegex = jsRegex.replace(/\(\?s:\.\)/g, "[\\s\\S]");
+  jsRegex = jsRegex.replace(/\(\?s:\.\)/g, '[\\s\\S]');
   // Also handle (?s:...) wrappers more generally - remove the wrapper, dots inside won't match newlines
   // but this is an acceptable limitation (slightly less aggressive matching)
-  jsRegex = jsRegex.replace(/\(\?s:([^)]+)\)/g, "(?:$1)");
+  jsRegex = jsRegex.replace(/\(\?s:([^)]+)\)/g, '(?:$1)');
 
   // Remove (?-i:...) wrappers (case-sensitive in Go) - JS doesn't support inline modifiers
   // This makes matching MORE aggressive (case-insensitive throughout)
-  jsRegex = jsRegex.replace(/\(\?-i:([^)]+)\)/g, "(?:$1)");
+  jsRegex = jsRegex.replace(/\(\?-i:([^)]+)\)/g, '(?:$1)');
 
   // Remove (?i:...) wrappers - we use 'gi' flag instead
-  jsRegex = jsRegex.replace(/\(\?i:([^)]+)\)/g, "(?:$1)");
+  jsRegex = jsRegex.replace(/\(\?i:([^)]+)\)/g, '(?:$1)');
 
   // Remove standalone (?i) flags - we use 'gi' flag instead
-  jsRegex = jsRegex.replace(/\(\?i\)/g, "");
+  jsRegex = jsRegex.replace(/\(\?i\)/g, '');
 
   // Convert \z (Go end of string) to $ (JS equivalent)
-  jsRegex = jsRegex.replace(/\\z/g, "$");
+  jsRegex = jsRegex.replace(/\\z/g, '$');
 
   // Convert POSIX character classes
-  jsRegex = jsRegex.replace(/\[\[:alnum:\]\]/g, "[a-zA-Z0-9]");
-  jsRegex = jsRegex.replace(/\[\[:alpha:\]\]/g, "[a-zA-Z]");
-  jsRegex = jsRegex.replace(/\[\[:digit:\]\]/g, "[0-9]");
-  jsRegex = jsRegex.replace(/\[\[:space:\]\]/g, "\\s");
+  jsRegex = jsRegex.replace(/\[\[:alnum:\]\]/g, '[a-zA-Z0-9]');
+  jsRegex = jsRegex.replace(/\[\[:alpha:\]\]/g, '[a-zA-Z]');
+  jsRegex = jsRegex.replace(/\[\[:digit:\]\]/g, '[0-9]');
+  jsRegex = jsRegex.replace(/\[\[:space:\]\]/g, '\\s');
 
   return jsRegex;
 }
@@ -89,10 +89,7 @@ function convertRegex(goRegex: string): string {
 function escapeForTemplate(str: string): string {
   // Escape backslashes, backticks, and $ for template literal
   // $ must be escaped to prevent ${} interpolation
-  return str
-    .replace(/\\/g, "\\\\")
-    .replace(/`/g, "\\`")
-    .replace(/\$/g, "\\$");
+  return str.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 }
 
 function generateTypeScript(rules: Array<GitleaksRule>, version: string): string {
@@ -129,7 +126,7 @@ function generateTypeScript(rules: Array<GitleaksRule>, version: string): string
     }
 
     // Skip rules with Go-specific features we can't support
-    if (rule.regex.includes("(?P<")) {
+    if (rule.regex.includes('(?P<')) {
       console.log(`  Skipping ${rule.id}: uses Go named groups`);
       skipped++;
       continue;
@@ -141,10 +138,10 @@ function generateTypeScript(rules: Array<GitleaksRule>, version: string): string
     // Determine flags - use 'g' always, add 'i' if the rule seems case-insensitive
     // Most rules with (?i:...) or lowercase patterns need 'gi'
     const needsCaseInsensitive =
-      rule.regex.includes("(?i:") ||
-      rule.regex.includes("(?i)") ||
+      rule.regex.includes('(?i:') ||
+      rule.regex.includes('(?i)') ||
       (rule.keywords && rule.keywords.some((k) => k !== k.toUpperCase()));
-    const flags = needsCaseInsensitive ? "gi" : "g";
+    const flags = needsCaseInsensitive ? 'gi' : 'g';
 
     const parts: Array<string> = [];
     parts.push(`id: "${rule.id}"`);
@@ -155,11 +152,11 @@ function generateTypeScript(rules: Array<GitleaksRule>, version: string): string
     }
 
     if (rule.keywords && rule.keywords.length > 0) {
-      const keywordsStr = rule.keywords.map((k) => `"${k.toLowerCase()}"`).join(", ");
+      const keywordsStr = rule.keywords.map((k) => `"${k.toLowerCase()}"`).join(', ');
       parts.push(`keywords: [${keywordsStr}]`);
     }
 
-    lines.push(`  { ${parts.join(", ")} },`);
+    lines.push(`  { ${parts.join(', ')} },`);
   }
 
   lines.push(`];`);
@@ -189,7 +186,7 @@ function generateTypeScript(rules: Array<GitleaksRule>, version: string): string
   console.log(`Generated ${rules.length - skipped} rules (skipped ${skipped})`);
   console.log(`Total unique keywords: ${allKeywords.size}`);
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 async function main() {
@@ -200,19 +197,19 @@ async function main() {
   const config = parse(tomlContent) as unknown as GitleaksConfig;
 
   if (!config.rules || !Array.isArray(config.rules)) {
-    throw new Error("Invalid gitleaks config: missing rules array");
+    throw new Error('Invalid gitleaks config: missing rules array');
   }
 
   console.log(`Parsed ${config.rules.length} rules from gitleaks config`);
 
   const typescript = generateTypeScript(config.rules, version);
 
-  const outputPath = join(__dirname, "..", "lib", "secret-rules.ts");
+  const outputPath = join(__dirname, '..', 'lib', 'secret-rules.ts');
   await writeFile(outputPath, typescript);
   console.log(`Written to ${outputPath}`);
 }
 
 main().catch((err) => {
-  console.error("Error:", err);
+  console.error('Error:', err);
   process.exit(1);
 });

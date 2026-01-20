@@ -1,18 +1,8 @@
-/**
- * Format module for token-efficient LLM output.
- * Two modes: compact (inline summaries) and full (indented blocks).
- */
-
 import { computeUniformLimit, countWords, truncateWords } from './truncation';
+import { parseSession } from './parse';
+import type { LogicalBlock } from './parse';
 import type { ReadFieldFilter } from './field-filter';
-import type {
-  AssistantEntry,
-  ContentBlock,
-  KnownEntry,
-  SummaryEntry,
-  SystemEntry,
-  UserEntry,
-} from './schemas';
+import type { KnownEntry } from './schemas';
 
 const MAX_CONTENT_SUMMARY_LEN = 300;
 const DEFAULT_TARGET_WORDS = 2000;
@@ -32,69 +22,36 @@ function countLines(text: string): number {
   return text.split('\n').length;
 }
 
-function formatQuotedSummary(text: string, maxFirstLineLen = MAX_CONTENT_SUMMARY_LEN): string {
-  if (!text) return '""';
-  const lines = text.split('\n');
-  const firstLine = truncateFirstLine(lines[0], maxFirstLineLen);
-  const escaped = escapeQuotes(firstLine);
-  if (lines.length === 1) {
-    return `"${escaped}"`;
-  }
-  const totalWords = countWords(text);
-  return `"${escaped}" +${totalWords}words`;
-}
-
 const MIN_TRUNCATION_THRESHOLD = 3;
 
 function truncateContent(
   text: string,
   wordLimit: number,
   skipWords: number,
-): { content: string; suffix: string; isEmpty: boolean } {
-  if (!text) return { content: '', suffix: '', isEmpty: true };
+): { content: string; prefix: string; suffix: string; isEmpty: boolean } {
+  if (!text) return { content: '', prefix: '', suffix: '', isEmpty: true };
 
   const result = truncateWords(text, skipWords, wordLimit);
 
   if (result.wordCount === 0) {
-    return { content: '', suffix: '', isEmpty: true };
+    return { content: '', prefix: '', suffix: '', isEmpty: true };
   }
+
+  const prefix = skipWords > 0 ? '...' : '';
 
   if (result.truncated && result.remaining <= MIN_TRUNCATION_THRESHOLD) {
     const fullResult = truncateWords(text, skipWords, wordLimit + result.remaining);
-    return { content: fullResult.text, suffix: '', isEmpty: false };
+    return { content: fullResult.text, prefix, suffix: '', isEmpty: false };
   }
 
-  const suffix = result.truncated ? ` +${result.remaining}words` : '';
-  return { content: result.text, suffix, isEmpty: false };
+  const suffix = result.truncated ? `...${result.remaining}words` : '';
+  return { content: result.text, prefix, suffix, isEmpty: false };
 }
 
-function formatTruncatedBlock(content: string, suffix: string): string {
+function formatTruncatedBlock(content: string, prefix: string, suffix: string): string {
   const indented = indent(content, 2);
-  if (!suffix) return indented;
-  return indented + suffix;
-}
-
-function formatContentBody(
-  header: string,
-  content: string,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-): string | null {
-  if (redact && wordLimit !== undefined) {
-    const { content: truncated, suffix, isEmpty } = truncateContent(content, wordLimit, skipWords ?? 0);
-    if (isEmpty) return null;
-    if (!truncated.includes('\n')) {
-      const escaped = escapeQuotes(truncated);
-      return `${header}|"${escaped}"${suffix}`;
-    }
-    return `${header}\n${formatTruncatedBlock(truncated, suffix)}`;
-  } else if (redact) {
-    if (!content) return header;
-    return `${header}|${formatQuotedSummary(content)}`;
-  }
-  if (!content) return header;
-  return `${header}\n${indent(content, 2)}`;
+  const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
+  return suffix ? prefixed + suffix : prefixed;
 }
 
 function formatWordCount(text: string): string {
@@ -132,15 +89,17 @@ function indent(text: string, spaces: number): string {
 interface MultilineParam {
   name: string;
   content: string;
+  prefix?: string;
   suffix?: string;
 }
 
 function formatMultilineParams(params: Array<MultilineParam>): Array<string> {
   const lines: Array<string> = [];
-  for (const { name, content, suffix } of params) {
+  for (const { name, content, prefix, suffix } of params) {
     lines.push(`[${name}]`);
     const indented = indent(content, 2);
-    lines.push(suffix ? indented + suffix : indented);
+    const prefixed = prefix ? `  ${prefix}${indented.slice(2)}` : indented;
+    lines.push(suffix ? prefixed + suffix : prefixed);
   }
   return lines;
 }
@@ -155,22 +114,9 @@ function formatTimestamp(timestamp: string | undefined, prevDate: string | undef
   return time;
 }
 
-export interface ToolResultInfo {
+interface ToolResultInfo {
   content: string;
   agentId?: string;
-}
-
-export interface FormatOptions {
-  lineNumber: number;
-  toolResults?: Map<string, ToolResultInfo>;
-  parentIndicator?: number | string;
-  redact?: boolean;
-  prevDate?: string;
-  isFirst?: boolean;
-  cwd?: string;
-  wordLimit?: number;
-  skipWords?: number;
-  fieldFilter?: ReadFieldFilter;
 }
 
 export interface SessionFormatOptions {
@@ -180,571 +126,255 @@ export interface SessionFormatOptions {
   fieldFilter?: ReadFieldFilter;
 }
 
-export interface LogicalEntry {
-  lineNumber: number;
-  entry: KnownEntry;
+export type TruncationStrategy =
+  | { type: 'wordLimit'; limit: number; skip?: number }
+  | { type: 'matchContext'; pattern: RegExp; contextWords: number }
+  | { type: 'full' };
+
+export interface FormatBlockOptions {
+  sessionPrefix?: string;
+  showTimestamp?: boolean;
+  prevDate?: string;
+  isFirst?: boolean;
+  cwd?: string;
+  truncation?: TruncationStrategy;
+  fieldFilter?: ReadFieldFilter;
+  parentIndicator?: number | string;
 }
 
-/** Maps entries to logical line numbers (skipping tool-result-only entries). */
-export function getLogicalEntries(entries: Array<KnownEntry>): Array<LogicalEntry> {
-  const result: Array<LogicalEntry> = [];
-  let logicalLine = 0;
+export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {}): string | null {
+  const { sessionPrefix, showTimestamp, prevDate, isFirst, cwd, truncation, fieldFilter, parentIndicator } = options;
 
-  let lastSummaryIndex = -1;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'summary') {
-      lastSummaryIndex = i;
-      break;
-    }
+  const parts: Array<string> = [];
+  if (sessionPrefix) parts.push(sessionPrefix);
+  parts.push(String(block.lineNumber));
+
+  if (showTimestamp && 'timestamp' in block && block.timestamp) {
+    const ts = formatTimestamp(block.timestamp, prevDate, isFirst);
+    if (ts) parts.push(ts);
   }
 
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-
-    if (entry.type === 'summary' && i !== lastSummaryIndex) continue;
-    if (entry.type === 'user' && isToolResultOnlyEntry(entry)) continue;
-    if (isSkippedEntryType(entry)) continue;
-
-    logicalLine++;
-    result.push({ lineNumber: logicalLine, entry });
-  }
-
-  return result;
-}
-
-export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
-  const toolResults = collectToolResults(entries);
-
-  let lastSummaryIndex = -1;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'summary') {
-      lastSummaryIndex = i;
-      break;
-    }
-  }
-
-  const filteredEntries = entries.filter((entry, i) => {
-    if (entry.type === 'summary') return i === lastSummaryIndex;
-    return true;
-  });
-
-  let wordLimit: number | undefined;
-  if (redact) {
-    const wordCounts = collectWordCounts(filteredEntries, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
-  }
-
-  const uuidToLine = buildUuidMap(filteredEntries);
-
-  const results: Array<string> = [];
-
-  if (redact) {
-    const header = buildSessionHeader(entries);
-    if (header) results.push(header);
-  }
-
-  let prevUuid: string | undefined;
-  let prevDate: string | undefined;
-  let cwd: string | undefined;
-  let logicalLine = 0;
-
-  for (const entry of filteredEntries) {
-    if (entry.type === 'user' && isToolResultOnlyEntry(entry)) {
-      continue;
-    }
-
-    if (isSkippedEntryType(entry)) {
-      continue;
-    }
-
-    if (entry.type === 'user' && entry.cwd) {
-      cwd = entry.cwd;
-    }
-
-    logicalLine++;
-    const lineNumber = logicalLine;
-
-    let parentIndicator: string | number | undefined;
-    const parentUuid = getParentUuid(entry);
-    if (prevUuid) {
-      if (parentUuid && parentUuid !== prevUuid) {
-        parentIndicator = uuidToLine.get(parentUuid);
-      } else if (!parentUuid && getUuid(entry)) {
-        parentIndicator = 'start';
+  switch (block.type) {
+    case 'user': {
+      parts.push('user');
+      if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow('user');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
       }
+      return formatBlockContent(parts.join('|'), block.content, truncation);
     }
 
-    const timestamp = getTimestamp(entry);
-    const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-    const isFirst = logicalLine === 1;
-
-    const formatted = formatEntry(entry, {
-      lineNumber,
-      toolResults,
-      parentIndicator,
-      redact,
-      prevDate,
-      isFirst,
-      cwd,
-      wordLimit,
-      skipWords,
-      fieldFilter,
-    });
-
-    if (formatted) {
-      results.push(formatted);
-    }
-
-    if (currentDate) {
-      prevDate = currentDate;
-    }
-
-    const uuid = getUuid(entry);
-    if (uuid) {
-      prevUuid = uuid;
-    }
-  }
-
-  if (redact && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
-  }
-
-  const separator = redact ? '\n' : '\n\n';
-  return results.join(separator);
-}
-
-function collectWordCounts(entries: Array<KnownEntry>, skipWords: number): Array<number> {
-  const counts: Array<number> = [];
-
-  function addCount(text: string): void {
-    const words = countWords(text);
-    const afterSkip = Math.max(0, words - skipWords);
-    if (afterSkip > 0) {
-      counts.push(afterSkip);
-    }
-  }
-
-  for (const entry of entries) {
-    if (entry.type === 'user' && !isToolResultOnlyEntry(entry)) {
-      const content = getUserMessageContent(entry.message.content);
-      addCount(content);
-    } else if (entry.type === 'assistant') {
-      const blocks = entry.message.content;
-      if (typeof blocks === 'string') {
-        addCount(blocks);
-      } else if (Array.isArray(blocks)) {
-        for (const block of blocks) {
-          if (block.type === 'text' && 'text' in block) {
-            addCount(block.text);
-          } else if (block.type === 'thinking' && 'thinking' in block) {
-            addCount(block.thinking);
-          }
-        }
+    case 'assistant': {
+      parts.push('assistant');
+      if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow('assistant');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
       }
-    } else if (entry.type === 'summary') {
-      addCount(entry.summary);
-    } else if (entry.type === 'system') {
-      addCount(entry.content || '');
+      return formatBlockContent(parts.join('|'), block.content, truncation);
     }
-  }
 
-  return counts;
-}
-
-export function formatEntry(entry: KnownEntry, options: FormatOptions): string | null {
-  const {
-    lineNumber,
-    toolResults,
-    parentIndicator,
-    redact = false,
-    prevDate,
-    isFirst,
-    cwd,
-    wordLimit,
-    skipWords = 0,
-    fieldFilter,
-  } = options;
-
-  if (fieldFilter && redact && entry.type !== 'assistant') {
-    if (!fieldFilter.shouldShow(entry.type)) {
-      return null;
+    case 'thinking': {
+      parts.push('thinking');
+      const showFull = fieldFilter?.showFullThinking() ?? false;
+      if (!showFull && truncation?.type !== 'full' && truncation?.type !== 'matchContext') {
+        parts.push(formatWordCount(block.content));
+        return parts.join('|');
+      }
+      const thinkingTruncation: TruncationStrategy = showFull ? { type: 'full' } : (truncation ?? { type: 'full' });
+      return formatBlockContent(parts.join('|'), block.content, thinkingTruncation);
     }
-  }
 
-  switch (entry.type) {
-    case 'user':
-      if (toolResults && isToolResultOnlyEntry(entry)) return null;
-      return formatUserEntry(entry, lineNumber, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
-    case 'assistant':
-      return formatAssistantEntry(
-        entry,
-        lineNumber,
-        toolResults,
-        parentIndicator,
-        prevDate,
-        isFirst,
-        cwd,
-        redact,
-        wordLimit,
-        skipWords,
-        fieldFilter,
-      );
-    case 'system':
-      return formatSystemEntry(entry, lineNumber, prevDate, isFirst, redact, wordLimit, skipWords);
-    case 'summary':
-      return formatSummaryEntry(entry, lineNumber, redact, wordLimit, skipWords);
+    case 'tool':
+      return formatToolBlock(block, parts, { cwd, truncation, fieldFilter });
+
+    case 'system': {
+      parts.push('system');
+      if (block.subtype) parts.push(`subtype=${block.subtype}`);
+      if (block.level && block.level !== 'info') parts.push(`level=${block.level}`);
+      const hidden = fieldFilter && !fieldFilter.shouldShow('system');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
+      }
+      return formatBlockContent(parts.join('|'), block.content, truncation);
+    }
+
+    case 'summary': {
+      parts.push('summary');
+      const hidden = fieldFilter && !fieldFilter.shouldShow('summary');
+      if (hidden) {
+        parts.push(formatFieldValue(block.content));
+        return parts.join('|');
+      }
+      return formatBlockContent(parts.join('|'), block.content, truncation);
+    }
+
     default:
       return null;
   }
 }
 
-function buildSessionHeader(entries: Array<KnownEntry>): string | null {
-  let model: string | undefined;
-  let gitBranch: string | undefined;
+function formatBlockContent(header: string, content: string, truncation?: TruncationStrategy): string | null {
+  if (!content && !truncation) return header;
 
-  for (const entry of entries) {
-    if (!model && entry.type === 'assistant' && entry.message.model) {
-      model = entry.message.model;
-    }
-    if (!gitBranch && entry.type === 'user' && entry.gitBranch) {
-      gitBranch = entry.gitBranch;
-    }
-    if (model && gitBranch) break;
-  }
-
-  const parts: Array<string> = ['#'];
-  if (model) parts.push(`model=${model}`);
-  if (gitBranch) parts.push(`branch=${gitBranch}`);
-
-  if (parts.length === 1) return null;
-  return parts.join(' ');
-}
-
-function buildUuidMap(entries: Array<KnownEntry>): Map<string, number> {
-  const map = new Map<string, number>();
-  let logicalLine = 0;
-  for (const entry of entries) {
-    if (isSkippedEntryType(entry)) continue;
-    if (entry.type === 'user') {
-      const content = entry.message.content;
-      if (Array.isArray(content)) {
-        const meaningful = content.filter((b) => !isNoiseBlock(b));
-        if (meaningful.length === 0 || meaningful.every((b) => b.type === 'tool_result')) {
-          continue;
-        }
+  switch (truncation?.type) {
+    case 'wordLimit': {
+      const {
+        content: truncated,
+        prefix,
+        suffix,
+        isEmpty,
+      } = truncateContent(content, truncation.limit, truncation.skip ?? 0);
+      if (isEmpty) return null;
+      if (!truncated.includes('\n')) {
+        const escaped = escapeQuotes(truncated);
+        return `${header}|${prefix}"${escaped}"${suffix}`;
       }
-    }
-    logicalLine++;
-    const uuid = getUuid(entry);
-    if (uuid) {
-      map.set(uuid, logicalLine);
-    }
-  }
-  return map;
-}
-
-function getUuid(entry: KnownEntry): string | undefined {
-  if ('uuid' in entry && typeof entry.uuid === 'string') {
-    return entry.uuid;
-  }
-  return undefined;
-}
-
-function getParentUuid(entry: KnownEntry): string | undefined {
-  if ('parentUuid' in entry && typeof entry.parentUuid === 'string') {
-    return entry.parentUuid;
-  }
-  return undefined;
-}
-
-export function getTimestamp(entry: KnownEntry): string | undefined {
-  if ('timestamp' in entry && typeof entry.timestamp === 'string') {
-    return entry.timestamp;
-  }
-  return undefined;
-}
-
-export function collectToolResults(entries: Array<KnownEntry>): Map<string, ToolResultInfo> {
-  const results = new Map<string, ToolResultInfo>();
-
-  for (const entry of entries) {
-    if (entry.type !== 'user') continue;
-    const content = entry.message.content;
-    if (!Array.isArray(content)) continue;
-
-    const agentId = 'agentId' in entry ? entry.agentId : undefined;
-
-    for (const block of content) {
-      if (block.type === 'tool_result' && 'tool_use_id' in block) {
-        const formatted = formatToolResultContent((block as { content?: string | Array<ContentBlock> }).content);
-        if (formatted) {
-          results.set(block.tool_use_id, { content: formatted, agentId });
-        }
-      }
-    }
-  }
-
-  return results;
-}
-
-function formatToolResultContent(content: string | Array<ContentBlock> | undefined): string {
-  if (!content) return '';
-  if (typeof content === 'string') return content;
-
-  const parts: Array<string> = [];
-  for (const block of content) {
-    if (block.type === 'text' && 'text' in block) {
-      parts.push(block.text);
-    } else if (block.type === 'image' && 'source' in block) {
-      parts.push(`[image:${block.source.media_type}]`);
-    } else if (block.type === 'document' && 'source' in block) {
-      parts.push(`[document:${block.source.media_type}]`);
-    }
-  }
-  return parts.join('\n');
-}
-
-function isToolResultOnlyEntry(entry: UserEntry): boolean {
-  const content = entry.message.content;
-  if (!Array.isArray(content)) return false;
-
-  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
-  if (meaningfulBlocks.length === 0) return true;
-
-  return meaningfulBlocks.every((b) => b.type === 'tool_result');
-}
-
-function isSkippedEntryType(entry: KnownEntry): boolean {
-  return entry.type === 'file-history-snapshot' || entry.type === 'queue-operation';
-}
-
-function isNoiseBlock(block: ContentBlock): boolean {
-  if (block.type === 'tool_result' && 'content' in block) {
-    const content = block.content;
-    if (typeof content === 'string' && content.startsWith('Todos have been modified successfully')) {
-      return true;
-    }
-  }
-
-  if (block.type === 'text' && 'text' in block) {
-    const text = block.text.trim();
-    if (text.startsWith('<system-reminder>') && text.endsWith('</system-reminder>')) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function formatUserEntry(
-  entry: UserEntry,
-  lineNumber: number,
-  parentIndicator?: number | string,
-  prevDate?: string,
-  isFirst?: boolean,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-): string | null {
-  const parts: Array<string> = [String(lineNumber)];
-  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
-  parts.push('user');
-  if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
-
-  const content = getUserMessageContent(entry.message.content);
-  return formatContentBody(parts.join('|'), content, redact, wordLimit, skipWords);
-}
-
-function getUserMessageContent(content: string | Array<ContentBlock> | undefined): string {
-  if (!content) return '';
-  if (typeof content === 'string') return content;
-
-  const textParts: Array<string> = [];
-  for (const block of content) {
-    if (isNoiseBlock(block)) continue;
-    if (block.type === 'tool_result') continue;
-    if (block.type === 'text') {
-      textParts.push(block.text);
-    }
-  }
-
-  return textParts.join('\n');
-}
-
-function formatAssistantEntry(
-  entry: AssistantEntry,
-  lineNumber: number,
-  toolResults?: Map<string, ToolResultInfo>,
-  parentIndicator?: number | string,
-  prevDate?: string,
-  isFirst?: boolean,
-  cwd?: string,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-  fieldFilter?: ReadFieldFilter,
-): string | null {
-  const blocks = entry.message.content;
-
-  if (!blocks || typeof blocks === 'string') {
-    const text = typeof blocks === 'string' ? blocks : '';
-    return formatTextEntry(lineNumber, entry.timestamp, text, parentIndicator, prevDate, isFirst, redact, wordLimit, skipWords);
-  }
-
-  const lines: Array<string> = [];
-  let blockIndex = 0;
-  const showFullThinking = fieldFilter?.showFullThinking() ?? false;
-
-  for (const block of blocks) {
-    if (isNoiseBlock(block)) continue;
-    if (block.type === 'tool_result') continue;
-
-    const ts = blockIndex === 0 ? entry.timestamp : undefined;
-    const parent = blockIndex === 0 ? parentIndicator : undefined;
-
-    if (block.type === 'thinking') {
-      if (fieldFilter && redact && !fieldFilter.shouldShow('thinking')) {
-        const parts: Array<string> = [String(lineNumber)];
-        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
-        if (formattedTs) parts.push(formattedTs);
-        parts.push('thinking');
-        parts.push(formatWordCount(block.thinking));
-        lines.push(parts.join('|'));
-        blockIndex++;
-        continue;
-      }
-      const formatted = formatThinkingEntry(
-        lineNumber,
-        ts,
-        block.thinking,
-        prevDate,
-        isFirst,
-        redact,
-        wordLimit,
-        skipWords,
-        showFullThinking,
-      );
-      if (formatted) lines.push(formatted);
-    } else if (block.type === 'text') {
-      if (fieldFilter && redact && !fieldFilter.shouldShow('assistant')) {
-        const parts: Array<string> = [String(lineNumber)];
-        const formattedTs = formatTimestamp(ts, prevDate, isFirst);
-        if (formattedTs) parts.push(formattedTs);
-        parts.push('assistant');
-        parts.push(formatWordCount(block.text));
-        lines.push(parts.join('|'));
-        blockIndex++;
-        continue;
-      }
-      const formatted = formatTextEntry(lineNumber, ts, block.text, parent, prevDate, isFirst, redact, wordLimit, skipWords);
-      if (formatted) lines.push(formatted);
-    } else if (block.type === 'tool_use') {
-      const formatted = formatToolEntry(
-        lineNumber,
-        ts,
-        block,
-        toolResults,
-        cwd,
-        prevDate,
-        isFirst,
-        redact,
-        wordLimit,
-        skipWords,
-        fieldFilter,
-      );
-      if (formatted) lines.push(formatted);
+      return `${header}\n${formatTruncatedBlock(truncated, prefix, suffix)}`;
     }
 
-    blockIndex++;
-  }
+    case 'matchContext': {
+      const matchPositions = findMatchPositions(content, truncation.pattern);
+      const output = formatMatchesWithContext(content, matchPositions, truncation.contextWords);
+      if (!output) return null;
+      if (!output.includes('\n')) return `${header}|${output}`;
+      return `${header}\n${indent(output, 2)}`;
+    }
 
-  return lines.length > 0 ? lines.join('\n') : null;
+    default:
+      if (!content) return header;
+      return `${header}\n${indent(content, 2)}`;
+  }
 }
 
-function formatThinkingEntry(
-  lineNumber: number,
-  timestamp: string | undefined,
-  content: string,
-  prevDate?: string,
-  isFirst?: boolean,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-  showFullThinking?: boolean,
+function formatMatchesWithContext(
+  text: string,
+  matchPositions: Array<{ start: number; end: number }>,
+  contextWords: number,
 ): string {
-  const parts: Array<string> = [String(lineNumber)];
+  if (matchPositions.length === 0) return text;
 
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
+  const words = splitIntoWords(text);
+  if (words.length === 0) return text;
 
-  parts.push('thinking');
-
-  if (redact) {
-    if (showFullThinking && wordLimit !== undefined) {
-      const result = formatContentBody(parts.join('|'), content, redact, wordLimit, skipWords);
-      return result ?? parts.join('|');
+  const matchingWordIndices = new Set<number>();
+  for (const pos of matchPositions) {
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      if (word.start < pos.end && word.end > pos.start) {
+        matchingWordIndices.add(i);
+      }
     }
-    parts.push(formatWordCount(content));
-    return parts.join('|');
   }
-  const header = parts.join('|');
-  return `${header}\n${indent(content, 2)}`;
+
+  if (matchingWordIndices.size === 0) {
+    if (words.length > contextWords * 2) {
+      return `${words.length}words`;
+    }
+    return text;
+  }
+
+  const sortedMatchIndices = Array.from(matchingWordIndices).sort((a, b) => a - b);
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  for (const idx of sortedMatchIndices) {
+    const start = Math.max(0, idx - contextWords);
+    const end = Math.min(words.length - 1, idx + contextWords);
+
+    if (ranges.length > 0 && ranges[ranges.length - 1].end >= start - 4) {
+      ranges[ranges.length - 1].end = end;
+    } else {
+      ranges.push({ start, end });
+    }
+  }
+
+  const MIN_TRUNCATION_WORDS = 4;
+  if (ranges.length > 0 && ranges[0].start > 0 && ranges[0].start < MIN_TRUNCATION_WORDS) {
+    ranges[0].start = 0;
+  }
+  if (ranges.length > 0) {
+    const lastRange = ranges[ranges.length - 1];
+    const finalGap = words.length - 1 - lastRange.end;
+    if (finalGap > 0 && finalGap < MIN_TRUNCATION_WORDS) {
+      lastRange.end = words.length - 1;
+    }
+  }
+
+  const outputParts: Array<string> = [];
+  let lastEnd = -1;
+
+  for (const range of ranges) {
+    if (range.start > lastEnd + 1) {
+      const skippedCount = range.start - lastEnd - 1;
+      if (skippedCount > 0) {
+        const isInitialGap = lastEnd === -1;
+        outputParts.push(isInitialGap ? `${skippedCount}words...` : `...${skippedCount}words...`);
+      }
+    }
+
+    const startChar = words[range.start].start;
+    const endChar = words[range.end].end;
+    outputParts.push(text.slice(startChar, endChar));
+
+    lastEnd = range.end;
+  }
+
+  if (lastEnd < words.length - 1) {
+    const skippedCount = words.length - 1 - lastEnd;
+    outputParts.push(`...${skippedCount}words`);
+  }
+
+  return outputParts.join('');
 }
 
-function formatTextEntry(
-  lineNumber: number,
-  timestamp: string | undefined,
-  content: string,
-  parentIndicator?: number | string,
-  prevDate?: string,
-  isFirst?: boolean,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-): string | null {
-  const parts: Array<string> = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
-  parts.push('assistant');
-  if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
-
-  return formatContentBody(parts.join('|'), content, redact, wordLimit, skipWords);
+function splitIntoWords(text: string): Array<{ word: string; start: number; end: number }> {
+  const words: Array<{ word: string; start: number; end: number }> = [];
+  const regex = /\S+/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    words.push({ word: match[0], start: match.index, end: match.index + match[0].length });
+  }
+  return words;
 }
 
-function formatToolEntry(
-  lineNumber: number,
-  timestamp: string | undefined,
-  block: { id: string; name: string; input: Record<string, unknown> },
-  toolResults?: Map<string, ToolResultInfo>,
-  cwd?: string,
-  prevDate?: string,
-  isFirst?: boolean,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-  fieldFilter?: ReadFieldFilter,
+function findMatchPositions(text: string, pattern: RegExp): Array<{ start: number; end: number }> {
+  const positions: Array<{ start: number; end: number }> = [];
+  const globalPattern = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
+
+  let match;
+  while ((match = globalPattern.exec(text)) !== null) {
+    positions.push({ start: match.index, end: match.index + match[0].length });
+    if (match[0].length === 0) break;
+  }
+
+  return positions;
+}
+
+function formatToolBlock(
+  block: Extract<LogicalBlock, { type: 'tool' }>,
+  headerParts: Array<string>,
+  options: { cwd?: string; truncation?: TruncationStrategy; fieldFilter?: ReadFieldFilter },
 ): string | null {
-  const resultInfo = toolResults?.get(block.id);
-  const parts: Array<string> = [String(lineNumber)];
-  const ts = formatTimestamp(timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
-  parts.push('tool');
-  parts.push(block.name);
+  const { cwd, truncation, fieldFilter } = options;
+  const parts = [...headerParts, 'tool', block.toolName];
 
-  const showResult = fieldFilter?.shouldShow(`tool:${block.name}:result`) ?? false;
-  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:result`) : false;
-  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.name}:input`) : false;
+  const redact = truncation?.type !== 'full';
+  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:result`) : false;
+  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:input`) : false;
+  const showFullResult = fieldFilter?.shouldShow(`tool:${block.toolName}:result`) ?? false;
+  const resultInfo = block.toolResult ? { content: block.toolResult, agentId: block.agentId } : undefined;
 
-  const toolFormatter = getToolFormatter(block.name);
+  const toolFormatter = getToolFormatter(block.toolName);
   const { headerParams, multilineParams, suppressResult } = toolFormatter({
-    input: block.input,
+    input: block.toolInput,
     result: resultInfo,
     cwd,
     redact,
-    wordLimit,
-    skipWords,
+    truncation,
     hideInput,
     hideResult,
   });
@@ -754,16 +384,20 @@ function formatToolEntry(
     if (resultInfo && !suppressResult) {
       if (hideResult) {
         parts.push(`result=${formatFieldValue(resultInfo.content)}`);
-      } else if (showResult && wordLimit !== undefined) {
-        const { content: truncated, suffix, isEmpty } = truncateContent(
-          resultInfo.content,
-          wordLimit,
-          skipWords ?? 0,
-        );
-        if (!isEmpty) {
+      } else if (showFullResult && truncation) {
+        const formatted = formatToolText(resultInfo.content, truncation);
+        if (!formatted.isEmpty) {
           const bodyLines = formatMultilineParams(multilineParams);
           bodyLines.push('[result]');
-          bodyLines.push(suffix ? indent(truncated, 2) + suffix : indent(truncated, 2));
+          if (formatted.isMultiline) {
+            const indentedResult = indent(formatted.blockContent, 2);
+            const prefixed = formatted.blockPrefix
+              ? `  ${formatted.blockPrefix}${indentedResult.slice(2)}`
+              : indentedResult;
+            bodyLines.push(formatted.blockSuffix ? prefixed + formatted.blockSuffix : prefixed);
+          } else {
+            bodyLines.push(`  ${formatted.inline}`);
+          }
           const header = parts.join('|');
           return bodyLines.length > 0 ? `${header}\n${bodyLines.join('\n')}` : header;
         }
@@ -789,6 +423,204 @@ function formatToolEntry(
   return `${header}\n${bodyLines.join('\n')}`;
 }
 
+export interface BlocksFormatOptions {
+  // Truncation mode (existing behavior)
+  redact?: boolean;
+  targetWords?: number;
+  skipWords?: number;
+
+  // Per-block truncation override (when set, overrides redact-based logic)
+  getTruncation?: (block: LogicalBlock, index: number) => TruncationStrategy;
+
+  // Filter which blocks to output (still tracks all for parent indicators)
+  shouldOutput?: (block: LogicalBlock, index: number) => boolean;
+
+  // Session prefix for grep-style output (replaces line number)
+  sessionPrefix?: string;
+
+  // Output customization
+  separator?: string;
+  showTimestamp?: boolean;
+
+  fieldFilter?: ReadFieldFilter;
+  cwd?: string;
+}
+
+function computeParentIndicator(
+  block: LogicalBlock,
+  prevUuid: string | undefined,
+  prevLineNumber: number,
+): string | number | undefined {
+  if (block.lineNumber === prevLineNumber || !prevUuid) {
+    return undefined;
+  }
+  const parentUuid = 'parentUuid' in block ? block.parentUuid : undefined;
+  const parentLineNumber = 'parentLineNumber' in block ? block.parentLineNumber : undefined;
+  if (parentLineNumber === null) {
+    return 'start';
+  }
+  if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+    return parentLineNumber;
+  }
+  return undefined;
+}
+
+export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatOptions = {}): string {
+  const {
+    redact = false,
+    targetWords = DEFAULT_TARGET_WORDS,
+    skipWords = 0,
+    getTruncation,
+    shouldOutput,
+    sessionPrefix,
+    showTimestamp = true,
+    fieldFilter,
+  } = options;
+
+  // Compute word limit for redact mode (only if not using custom getTruncation)
+  let wordLimit: number | undefined;
+  if (redact && !getTruncation) {
+    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+  }
+
+  const results: Array<string> = [];
+  let prevUuid: string | undefined;
+  let prevDate: string | undefined;
+  let prevLineNumber = 0;
+  let cwd = options.cwd;
+  let firstOutput = true;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+
+    if (block.type === 'user' && 'cwd' in block && block.cwd) {
+      cwd = block.cwd;
+    }
+
+    const parentIndicator = computeParentIndicator(block, prevUuid, prevLineNumber);
+
+    // Determine truncation strategy
+    const truncation: TruncationStrategy = getTruncation
+      ? getTruncation(block, i)
+      : redact && wordLimit !== undefined
+        ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
+        : { type: 'full' };
+
+    // Check if we should output this block
+    const includeInOutput = shouldOutput ? shouldOutput(block, i) : true;
+
+    if (includeInOutput) {
+      const timestamp = 'timestamp' in block ? block.timestamp : undefined;
+      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+
+      const formatted = formatBlock(block, {
+        sessionPrefix,
+        showTimestamp,
+        prevDate,
+        isFirst: firstOutput,
+        cwd,
+        truncation,
+        fieldFilter,
+        parentIndicator,
+      });
+
+      if (formatted) {
+        results.push(formatted);
+        firstOutput = false;
+      }
+
+      if (currentDate) {
+        prevDate = currentDate;
+      }
+    }
+
+    // Always track for parent indicator computation
+    if ('uuid' in block && block.uuid) {
+      prevUuid = block.uuid;
+    }
+    prevLineNumber = block.lineNumber;
+  }
+
+  if (redact && !getTruncation && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+
+  const separator = options.separator ?? (redact ? '\n' : '\n\n');
+  return results.join(separator);
+}
+
+export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
+  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
+
+  const meta = {
+    _type: 'hive-mind-meta' as const,
+    version: '0.1' as const,
+    sessionId: 'unknown',
+    checkoutId: 'unknown',
+    extractedAt: new Date().toISOString(),
+    rawMtime: new Date().toISOString(),
+    rawPath: 'unknown',
+    messageCount: entries.length,
+  };
+
+  const parsed = parseSession(meta, entries);
+
+  // Extract header info
+  let model: string | undefined;
+  let gitBranch: string | undefined;
+  for (const block of parsed.blocks) {
+    if (!model && block.type === 'assistant' && 'model' in block && block.model) {
+      model = block.model;
+    }
+    if (!gitBranch && block.type === 'user' && 'gitBranch' in block && block.gitBranch) {
+      gitBranch = block.gitBranch;
+    }
+    if (model && gitBranch) break;
+  }
+
+  const headerParts: Array<string> = [];
+  if (redact) {
+    const parts = ['#'];
+    if (model) parts.push(`model=${model}`);
+    if (gitBranch) parts.push(`branch=${gitBranch}`);
+    if (parts.length > 1) {
+      headerParts.push(parts.join(' '));
+    }
+  }
+
+  const blocksOutput = formatBlocks(parsed.blocks, { redact, targetWords, skipWords, fieldFilter });
+
+  if (headerParts.length > 0) {
+    const separator = redact ? '\n' : '\n\n';
+    return headerParts.join(separator) + separator + blocksOutput;
+  }
+
+  return blocksOutput;
+}
+
+function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {
+  const counts: Array<number> = [];
+
+  for (const block of blocks) {
+    if (
+      block.type === 'user' ||
+      block.type === 'assistant' ||
+      block.type === 'system' ||
+      block.type === 'thinking' ||
+      block.type === 'summary'
+    ) {
+      const words = countWords(block.content);
+      const afterSkip = Math.max(0, words - skipWords);
+      if (afterSkip > 0) {
+        counts.push(afterSkip);
+      }
+    }
+  }
+
+  return counts;
+}
+
 interface ToolFormatResult {
   headerParams: Array<string>;
   multilineParams: Array<MultilineParam>;
@@ -800,8 +632,7 @@ interface ToolFormatterOptions {
   result?: ToolResultInfo;
   cwd?: string;
   redact?: boolean;
-  wordLimit?: number;
-  skipWords?: number;
+  truncation?: TruncationStrategy;
   hideInput?: boolean;
   hideResult?: boolean;
 }
@@ -813,30 +644,46 @@ interface FormattedText {
   isMultiline: boolean;
   inline: string;
   blockContent: string;
+  blockPrefix: string;
   blockSuffix: string;
 }
 
-function formatToolText(
-  text: string,
-  wordLimit?: number,
-  skipWords?: number,
-): FormattedText {
-  if (wordLimit !== undefined) {
-    const { content, suffix, isEmpty } = truncateContent(text, wordLimit, skipWords ?? 0);
+function formatToolText(text: string, truncation?: TruncationStrategy): FormattedText {
+  if (truncation?.type === 'wordLimit') {
+    const { content, prefix, suffix, isEmpty } = truncateContent(text, truncation.limit, truncation.skip ?? 0);
     if (isEmpty) {
-      return { isEmpty: true, isMultiline: false, inline: '', blockContent: '', blockSuffix: '' };
+      return { isEmpty: true, isMultiline: false, inline: '', blockContent: '', blockPrefix: '', blockSuffix: '' };
     }
 
     const isMultiline = content.includes('\n');
     const escaped = escapeQuotes(content);
-    const inline = suffix ? `"${escaped}"${suffix}` : `"${escaped}"`;
+    const inline = prefix || suffix ? `${prefix}"${escaped}"${suffix}` : `"${escaped}"`;
 
     return {
       isEmpty: false,
       isMultiline,
       inline,
       blockContent: content,
+      blockPrefix: prefix,
       blockSuffix: suffix,
+    };
+  }
+
+  if (truncation?.type === 'matchContext') {
+    const matchPositions = findMatchPositions(text, truncation.pattern);
+    const contextOutput = formatMatchesWithContext(text, matchPositions, truncation.contextWords);
+    if (!contextOutput) {
+      return { isEmpty: true, isMultiline: false, inline: '', blockContent: '', blockPrefix: '', blockSuffix: '' };
+    }
+
+    const isMultiline = contextOutput.includes('\n');
+    return {
+      isEmpty: false,
+      isMultiline,
+      inline: contextOutput,
+      blockContent: contextOutput,
+      blockPrefix: '',
+      blockSuffix: '',
     };
   }
 
@@ -847,6 +694,7 @@ function formatToolText(
     isMultiline,
     inline: `"${escapeQuotes(firstLine)}"`,
     blockContent: text,
+    blockPrefix: '',
     blockSuffix: '',
   };
 }
@@ -948,20 +796,31 @@ function addFormattedParam(
   multilineParams: Array<MultilineParam>,
   name: string,
   text: string,
-  wordLimit?: number,
-  skipWords?: number,
-): void {
-  const formatted = formatToolText(text, wordLimit, skipWords);
+  truncation?: TruncationStrategy,
+) {
+  const formatted = formatToolText(text, truncation);
   if (formatted.isEmpty) return;
 
   if (formatted.isMultiline) {
-    multilineParams.push({ name, content: formatted.blockContent, suffix: formatted.blockSuffix || undefined });
+    multilineParams.push({
+      name,
+      content: formatted.blockContent,
+      prefix: formatted.blockPrefix || undefined,
+      suffix: formatted.blockSuffix || undefined,
+    });
   } else {
     headerParams.push(`${name}=${formatted.inline}`);
   }
 }
 
-function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput, hideResult }: ToolFormatterOptions): ToolFormatResult {
+function formatBashTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideInput,
+  hideResult,
+}: ToolFormatterOptions): ToolFormatResult {
   const command = String(input.command || '').trim();
   const desc = input.description ? String(input.description) : undefined;
 
@@ -971,17 +830,17 @@ function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput
   if (hideInput) {
     headerParams.push(`command=${formatFieldValue(command)}`);
   } else {
-    addFormattedParam(headerParams, multilineParams, 'command', command, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, 'command', command, truncation);
   }
   if (desc) {
-    addFormattedParam(headerParams, multilineParams, 'description', desc, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, 'description', desc, truncation);
   }
 
   if (redact && result) {
     if (hideResult) {
       headerParams.push(`result=${formatFieldValue(result.content)}`);
     } else {
-      addFormattedParam(headerParams, multilineParams, 'result', result.content, wordLimit, skipWords);
+      addFormattedParam(headerParams, multilineParams, 'result', result.content, truncation);
     }
     return { headerParams, multilineParams, suppressResult: true };
   }
@@ -989,14 +848,14 @@ function formatBashTool({ input, result, redact, wordLimit, skipWords, hideInput
   return { headerParams, multilineParams };
 }
 
-function formatGrepTool({ input, cwd, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatGrepTool({ input, cwd, truncation }: ToolFormatterOptions): ToolFormatResult {
   const pattern = String(input.pattern || '');
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
 
   const headerParams: Array<string> = [];
   const multilineParams: Array<MultilineParam> = [];
 
-  addFormattedParam(headerParams, multilineParams, 'pattern', pattern, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, 'pattern', pattern, truncation);
   if (path) {
     headerParams.push(path);
   }
@@ -1004,18 +863,18 @@ function formatGrepTool({ input, cwd, wordLimit, skipWords }: ToolFormatterOptio
     headerParams.push(`output_mode=${input.output_mode}`);
   }
   if (input.glob) {
-    addFormattedParam(headerParams, multilineParams, 'glob', String(input.glob), wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, 'glob', String(input.glob), truncation);
   }
 
   return { headerParams, multilineParams };
 }
 
-function formatGlobTool({ input, result, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatGlobTool({ input, result, truncation }: ToolFormatterOptions): ToolFormatResult {
   const pattern = String(input.pattern || '');
   const headerParams: Array<string> = [];
   const multilineParams: Array<MultilineParam> = [];
 
-  addFormattedParam(headerParams, multilineParams, 'pattern', pattern, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, 'pattern', pattern, truncation);
 
   if (result) {
     const files = result.content.split('\n').filter((l) => l.trim()).length;
@@ -1025,7 +884,7 @@ function formatGlobTool({ input, result, wordLimit, skipWords }: ToolFormatterOp
   return { headerParams, multilineParams, suppressResult: true };
 }
 
-function formatTaskTool({ input, result, redact, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatTaskTool({ input, result, redact, truncation }: ToolFormatterOptions): ToolFormatResult {
   const desc = String(input.description || '');
   const prompt = String(input.prompt || '');
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
@@ -1039,7 +898,7 @@ function formatTaskTool({ input, result, redact, wordLimit, skipWords }: ToolFor
   if (result?.agentId) {
     headerParams.push(`session=agent-${result.agentId}`);
   }
-  addFormattedParam(headerParams, multilineParams, 'description', desc, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, 'description', desc, truncation);
 
   if (redact) {
     headerParams.push(`prompt=${formatFieldValue(prompt)}`);
@@ -1077,7 +936,13 @@ function formatTodoWriteTool({ input, redact }: ToolFormatterOptions): ToolForma
   };
 }
 
-function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords, hideResult }: ToolFormatterOptions): ToolFormatResult {
+function formatAskUserQuestionTool({
+  input,
+  result,
+  redact,
+  truncation,
+  hideResult,
+}: ToolFormatterOptions): ToolFormatResult {
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const headerParams: Array<string> = [`questions=${questions.length}`];
   const multilineParams: Array<MultilineParam> = [];
@@ -1087,7 +952,7 @@ function formatAskUserQuestionTool({ input, result, redact, wordLimit, skipWords
       if (hideResult) {
         headerParams.push(`result=${formatWordCount(result.content)}`);
       } else {
-        addFormattedParam(headerParams, multilineParams, 'result', result.content, wordLimit, skipWords);
+        addFormattedParam(headerParams, multilineParams, 'result', result.content, truncation);
       }
     }
     return { headerParams, multilineParams, suppressResult: true };
@@ -1140,54 +1005,25 @@ function formatWebFetchTool({ input }: ToolFormatterOptions): ToolFormatResult {
   };
 }
 
-function formatWebSearchTool({ input, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatWebSearchTool({ input, truncation }: ToolFormatterOptions): ToolFormatResult {
   const query = String(input.query || '');
   const headerParams: Array<string> = [];
   const multilineParams: Array<MultilineParam> = [];
 
-  addFormattedParam(headerParams, multilineParams, 'query', query, wordLimit, skipWords);
+  addFormattedParam(headerParams, multilineParams, 'query', query, truncation);
   return { headerParams, multilineParams };
 }
 
-function formatGenericTool({ input, redact, wordLimit, skipWords }: ToolFormatterOptions): ToolFormatResult {
+function formatGenericTool({ input, redact, truncation }: ToolFormatterOptions): ToolFormatResult {
   const headerParams: Array<string> = [];
   const multilineParams: Array<MultilineParam> = [];
 
   for (const [key, value] of Object.entries(input)) {
     if (value === null || value === undefined) continue;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
-    addFormattedParam(headerParams, multilineParams, key, str, wordLimit, skipWords);
+    addFormattedParam(headerParams, multilineParams, key, str, truncation);
     if (redact && headerParams.length >= 3) break;
   }
 
   return { headerParams, multilineParams };
-}
-
-function formatSystemEntry(
-  entry: SystemEntry,
-  lineNumber: number,
-  prevDate?: string,
-  isFirst?: boolean,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-): string | null {
-  const parts: Array<string> = [String(lineNumber)];
-  const ts = formatTimestamp(entry.timestamp, prevDate, isFirst);
-  if (ts) parts.push(ts);
-  parts.push('system');
-  if (entry.subtype) parts.push(`subtype=${entry.subtype}`);
-  if (entry.level && entry.level !== 'info') parts.push(`level=${entry.level}`);
-
-  return formatContentBody(parts.join('|'), entry.content || '', redact, wordLimit, skipWords);
-}
-
-function formatSummaryEntry(
-  entry: SummaryEntry,
-  lineNumber: number,
-  redact?: boolean,
-  wordLimit?: number,
-  skipWords?: number,
-): string | null {
-  return formatContentBody(`${lineNumber}|summary`, entry.summary, redact, wordLimit, skipWords);
 }

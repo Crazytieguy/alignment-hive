@@ -1,36 +1,27 @@
-/**
- * Secret detection and sanitization using patterns ported from gitleaks.
- * Detected secrets are replaced with [REDACTED:<rule-id>].
- *
- * Based on: https://github.com/gitleaks/gitleaks
- * See: https://lookingatcomputer.substack.com/p/regex-is-almost-all-you-need
- */
-
-import { ALL_KEYWORDS, SECRET_RULES } from "./secret-rules";
+import { ALL_KEYWORDS, SECRET_RULES } from './secret-rules';
 
 const MAX_SANITIZE_DEPTH = 100;
 const MIN_SECRET_LENGTH = 8;
 
-// Keys whose values are structurally safe and never contain secrets
 const SAFE_KEYS = new Set([
-  "uuid",
-  "parentUuid",
-  "sessionId",
-  "tool_use_id",
-  "sourceToolUseID",
-  "id",
-  "type",
-  "role",
-  "subtype",
-  "level",
-  "stop_reason",
-  "timestamp",
-  "version",
-  "model",
-  "media_type",
-  "name",
-  "cwd",
-  "gitBranch",
+  'uuid',
+  'parentUuid',
+  'sessionId',
+  'tool_use_id',
+  'sourceToolUseID',
+  'id',
+  'type',
+  'role',
+  'subtype',
+  'level',
+  'stop_reason',
+  'timestamp',
+  'version',
+  'model',
+  'media_type',
+  'name',
+  'cwd',
+  'gitBranch',
 ]);
 
 function mightContainSecrets(content: string): boolean {
@@ -51,11 +42,6 @@ export interface SecretMatch {
   entropy?: number;
 }
 
-/**
- * Calculate Shannon entropy of a string.
- * Higher entropy = more random = more likely to be a real secret.
- * Typical thresholds: 3.0-4.0 bits per character.
- */
 function shannonEntropy(data: string): number {
   if (!data) return 0;
 
@@ -72,6 +58,11 @@ function shannonEntropy(data: string): number {
   }
 
   return entropy;
+}
+
+function looksLikeFilePath(s: string): boolean {
+  if (s.endsWith('/')) return true;
+  return s.includes('/') && /\.\w{1,4}$/.test(s);
 }
 
 let _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
@@ -116,6 +107,15 @@ export function detectSecrets(content: string): Array<SecretMatch> {
         continue;
       }
 
+      // Skip hex-only strings if the rule requires it (e.g., high-entropy safety net)
+      if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
+        continue;
+      }
+
+      if (rule.id === 'high-entropy-secret' && looksLikeFilePath(secretValue)) {
+        continue;
+      }
+
       matches.push({
         ruleId: rule.id,
         match: match[0],
@@ -125,7 +125,7 @@ export function detectSecrets(content: string): Array<SecretMatch> {
       });
 
       if (match[0].length === 0) {
-        rule.regex.lastIndex++; // Prevent infinite loops on zero-width matches
+        rule.regex.lastIndex++;
       }
     }
   }
@@ -147,9 +147,6 @@ export function detectSecrets(content: string): Array<SecretMatch> {
   return deduped;
 }
 
-/**
- * Sanitize a string by replacing detected secrets with [REDACTED:<rule-id>].
- */
 export function sanitizeString(content: string): string {
   if (content.length < MIN_SECRET_LENGTH) {
     return content;
@@ -170,17 +167,16 @@ export function sanitizeString(content: string): string {
   return result;
 }
 
-/** Recursively sanitize all strings in an object or array. */
 export function sanitizeDeep<T>(value: T, depth = 0): T {
   if (depth > MAX_SANITIZE_DEPTH) return value;
   if (value === null || value === undefined) return value;
-  if (typeof value === "string") return sanitizeString(value) as T;
+  if (typeof value === 'string') return sanitizeString(value) as T;
   if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, depth + 1)) as T;
 
-  if (typeof value === "object") {
+  if (typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      if (SAFE_KEYS.has(key) && typeof val === "string") {
+      if (SAFE_KEYS.has(key) && typeof val === 'string') {
         result[key] = val;
       } else {
         result[key] = sanitizeDeep(val, depth + 1);

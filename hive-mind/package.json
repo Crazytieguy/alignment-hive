@@ -1,52 +1,24 @@
 {
-  "name": "hive-mind",
+  "name": "@alignment-hive/hive-mind",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "npm-run-all --parallel dev:frontend dev:backend",
-    "dev:frontend": "vite dev",
-    "dev:backend": "convex dev",
-    "predev": "convex dev --until-success && convex dashboard",
-    "build": "vite build",
-    "start": "vite start",
-    "format": "prettier --write .",
-    "lint": "tsc && tsc --noEmit -p cli/tsconfig.json && eslint . --report-unused-disable-directives --max-warnings 0",
-    "lint:fix": "eslint . --fix",
     "test": "bun test",
-    "cli:build": "bun build cli/cli.ts --outfile=../plugins/hive-mind/cli.js --target=bun",
-    "cli:dev": "bun cli/cli.ts"
+    "lint": "tsc --noEmit -p cli/tsconfig.json && eslint cli --report-unused-disable-directives --max-warnings 0",
+    "lint:fix": "eslint cli --fix",
+    "format": "prettier --write cli",
+    "build": "bun build cli/cli.ts --outfile=../plugins/hive-mind/cli.js --target=bun"
   },
   "dependencies": {
-    "@convex-dev/react-query": "^0.0.0-alpha.11",
-    "@tanstack/react-query": "^5.89.0",
-    "@tanstack/react-router": "^1.132.41",
-    "@tanstack/react-router-ssr-query": "^1.132.43",
-    "@tanstack/react-start": "^1.132.43",
-    "@workos/authkit-tanstack-react-start": "0.1.0",
-    "convex": "^1.31.0",
-    "react": "^19.2.1",
-    "react-dom": "^19.2.1",
-    "zod": "^4.3.4"
+    "convex": "^1.31.0"
   },
   "devDependencies": {
-    "@convex-dev/eslint-plugin": "^1.1.1",
-    "@tailwindcss/postcss": "^4",
-    "@tanstack/eslint-config": "^0.3.2",
-    "@tanstack/react-router-devtools": "^1.132.41",
     "@types/bun": "latest",
     "@types/node": "^24.10.4",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "@vitejs/plugin-react": "^5.0.4",
-    "dotenv": "^17.2.3",
-    "npm-run-all2": "^8.0.4",
     "prettier": "^3.5.3",
     "smol-toml": "^1.6.0",
-    "tailwindcss": "^4",
-    "typescript": "^5",
-    "vite": "^7.1.8",
-    "vite-tsconfig-paths": "^6.0.1"
+    "typescript": "^5"
   }
 }

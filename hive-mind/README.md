@@ -1,85 +1,59 @@
-# Welcome to your Convex + TanStack Start + WorkOS AuthKit app
+# hive-mind
 
-This is a [Convex](https://convex.dev/) project using WorkOS AuthKit for authentication.
+A system for alignment researchers to extract and share session learnings across the community.
 
-After the initial setup (<2 minutes) you'll have a working full-stack app using:
+## Development
 
-- Convex as your backend (database, server logic)
-- [React](https://react.dev/) as your frontend (web page interactivity)
-- [TanStack Start](https://tanstack.com/start) for modern full-stack React with file-based routing
-- [Tailwind](https://tailwindcss.com/) for building great looking accessible UI
-- [WorkOS AuthKit](https://authkit.com/) for authentication
+**Important:** Always run commands from the monorepo root (`alignment-hive/`).
 
-## Get started
+When committing changes, always run:
+- `bun run --filter '@alignment-hive/hive-mind' test`
+- `bun run --filter '@alignment-hive/hive-mind' lint`
 
-1. Clone this repository and install dependencies:
+Both must pass before committing.
 
-   ```bash
-   npm install
-   ```
+**Important:** Never pipe test output (e.g., `bun test 2>&1 | head`). This causes the process to stall indefinitely. Always run tests without piping.
 
-2. Set up your environment variables:
+## Session Metadata
 
-   ```bash
-   cp .env.local.example .env.local
-   ```
+Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.
 
-3. Configure WorkOS AuthKit:
-   - Create a [WorkOS account](https://workos.com/)
-   - Get your Client ID and API Key from the WorkOS dashboard
-   - In the WorkOS dashboard, add `http://localhost:3000/callback` as a redirect URI
-   - Generate a secure password for cookie encryption (minimum 32 characters)
-   - Update your `.env.local` file with these values
+## User-Facing Messages
 
-4. Configure Convex:
+All user-facing strings (CLI output, error messages, help text) should be defined in `cli/lib/messages.ts`. This centralizes text for consistency and potential i18n.
 
-   ```bash
-   npx convex dev
-   ```
+## Re-extracting Sessions
 
-   This will:
-   - Set up your Convex deployment
-   - Add your Convex URL to `.env.local`
-   - Open the Convex dashboard
+To re-extract all sessions (e.g., after schema changes):
+```bash
+rm -rf .claude/hive-mind/sessions/
+bun hive-mind/cli/cli.ts session-start
+```
 
-   Then set your WorkOS Client ID in Convex:
+## Regenerating Snapshot Tests
 
-   ```bash
-   npx convex env set WORKOS_CLIENT_ID <your_client_id>
-   ```
+The format tests use custom snapshot logic. To update snapshots:
+```bash
+UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-mind' test
+```
 
-   This allows Convex to validate JWT tokens from WorkOS
+## Skill and CLI Sync
 
-5. Run the development server:
+The retrieval skill dynamically includes `--help` output. When CLI behavior changes, update the `--help` text in the command file and bump the plugin version.
 
-   ```bash
-   npm run dev
-   ```
+## Environment Variables
 
-   This starts both the Vite dev server (TanStack Start frontend) and Convex backend in parallel
+| Variable | Description |
+|----------|-------------|
+| `HIVE_MIND_VERBOSE` | Set to `1` to show full error details in session-start hook output. By default, errors are summarized as a count. Only affects the session-start hook. |
+| `HIVE_MIND_CLIENT_ID` | Override WorkOS client ID (for staging/testing). See below. |
+| `DEBUG` | Set to `1` to enable debug logging. |
 
-6. Open [http://localhost:3000](http://localhost:3000) to see your app
+## Local Development with Staging Auth
 
-## WorkOS AuthKit Setup
+To test the CLI against the staging WorkOS environment instead of production, copy the project root `.env.example` to `.env.local`:
+```bash
+cp .env.example .env.local
+```
 
-This app uses WorkOS AuthKit for authentication. Key features:
-
-- **Redirect-based authentication**: Users are redirected to WorkOS for sign-in/sign-up
-- **Session management**: Automatic token refresh and session handling
-- **Route loader protection**: Protected routes use loaders to check authentication
-- **Client and server functions**: `useAuth()` for client components, `getAuth()` for server loaders
-
-## Learn more
-
-To learn more about developing your project with Convex, check out:
-
-- The [Tour of Convex](https://docs.convex.dev/get-started) for a thorough introduction to Convex principles.
-- The rest of [Convex docs](https://docs.convex.dev/) to learn about all Convex features.
-- [Stack](https://stack.convex.dev/) for in-depth articles on advanced topics.
-
-## Join the community
-
-Join thousands of developers building full-stack apps with Convex:
-
-- Join the [Convex Discord community](https://convex.dev/community) to get help in real-time.
-- Follow [Convex on GitHub](https://github.com/get-convex/), star and contribute to the open-source implementation of Convex.
+This sets `HIVE_MIND_CLIENT_ID` to use the staging WorkOS client instead of production.
