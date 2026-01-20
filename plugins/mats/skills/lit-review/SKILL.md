@@ -13,7 +13,11 @@ Check if uv is installed:
 
 !`which uv || echo "UV_NOT_FOUND"`
 
-If uv is not found, ask the user if they'd like to install it before continuing. uv is required to run the search and processing scripts. Installation: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+If the output shows "UV_NOT_FOUND", uv is **mandatory** for this skill—it runs all the search and processing scripts. Tell the user:
+
+> "uv is required for the literature review but isn't installed. Would you like me to install it for you? I'll run: `curl -LsSf https://astral.sh/uv/install.sh | sh`"
+
+If they agree, run the installation command and verify it worked before continuing. If they decline, explain the skill cannot proceed without it.
 
 ## Getting the Research Proposal
 
