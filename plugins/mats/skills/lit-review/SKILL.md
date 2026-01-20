@@ -5,49 +5,112 @@ description: Generate comprehensive literature review from research proposal. Us
 
 # Literature Review Generator
 
-Generate a comprehensive literature review for AI safety research.
+Generate a comprehensive literature review for AI safety research. This skill walks you through the process step by step.
 
-## Prerequisites
+---
+
+## Step 1: Welcome and Overview
+
+Explain to the user what this skill does:
+
+> "I'll help you conduct a comprehensive literature review. Here's what will happen:
+>
+> 1. **Setup** - We'll create a folder for your lit review outputs
+> 2. **Research focus** - You'll tell me about your research topic (or I can help you develop one)
+> 3. **Automated search** - I'll search academic databases, arXiv, and AI safety forums
+> 4. **Processing** - I'll download papers, remove duplicates, and summarize each one
+> 5. **Report** - You'll get a catalog of papers and a curated top-10 report
+>
+> The whole process runs mostly automatically, but I'll check in at key points. Ready to get started?"
+
+Wait for confirmation before proceeding.
+
+---
+
+## Step 2: Create Output Folder
+
+Ask the user where they'd like to save the literature review outputs:
+
+> "Where would you like me to save the literature review? I'll create a folder for all the papers, summaries, and reports.
+>
+> You can give me a path like `./my_project_lit_review` or just a name like `interpretability_review` and I'll create it in your current directory."
+
+Once they provide a location:
+1. Create the directory
+2. If in a git repo, offer to add it to `.gitignore` (the folder can get large with PDFs)
+
+---
+
+## Step 3: Research Proposal
+
+The literature review needs a research focus to guide the search. Ask the user:
+
+> "Do you have a research proposal or project description I should use to guide the search?
+>
+> - **If yes**: Give me the file path and I'll read it
+> - **If no**: I can help you articulate your research focus through a few questions
+>
+> (If you have something in Google Docs or another cloud tool, you can copy-paste it into a local text file—something like `proposal.md` or `proposal.txt` in your project folder—and give me that path.)"
+
+### If they have a proposal file
+Read the file and confirm you understand the research focus.
+
+### If they want help creating one
+Conduct a brief interview:
+
+1. **Research question**: "What question are you trying to answer, or what problem are you trying to solve?"
+2. **Key concepts**: "What are the main technical concepts or methods involved?"
+3. **Related fields**: "Are there adjacent areas that might have relevant work? (e.g., if studying AI interpretability, maybe also cognitive science or software debugging)"
+4. **Known works**: "Are there any specific papers, authors, or research groups you already know are relevant?"
+
+Based on their answers, synthesize a brief research focus document (~1 page). Show it to them and ask if it captures their intent. Save it to their output folder as `research_proposal.md`.
+
+---
+
+## Step 4: Permissions Overview
+
+Before starting the automated process, explain what permissions will be needed:
+
+> "For the literature review, I'll need to:
+>
+> - **Run Python scripts** - These search databases, download papers, and process results
+> - **Read and write files** - To save papers, summaries, and reports to your folder
+> - **Make web requests** - To search Semantic Scholar, arXiv, LessWrong, and optionally Google Scholar
+>
+> The scripts are part of this plugin and run locally on your machine. No data is sent anywhere except the search queries to the academic databases.
+>
+> You may see permission prompts as I work—these are normal. Let me know if you have any questions before we begin."
+
+Wait for the user to confirm they're comfortable proceeding.
+
+---
+
+## Step 5: Prerequisites Check
 
 Check if uv is installed:
 
 !`which uv || echo "UV_NOT_FOUND"`
 
-If the output shows "UV_NOT_FOUND", uv is **mandatory** for this skill—it runs all the search and processing scripts. Tell the user:
+If the output shows "UV_NOT_FOUND", tell the user:
 
-> "uv is required for the literature review but isn't installed. Would you like me to install it for you? I'll run: `curl -LsSf https://astral.sh/uv/install.sh | sh`"
+> "I need a tool called `uv` to run the search scripts, but it's not installed on your system. It's a fast Python package manager.
+>
+> Would you like me to install it? I'll run:
+> ```
+> curl -LsSf https://astral.sh/uv/install.sh | sh
+> ```
+>
+> This is safe and widely used in the Python community."
 
-If they agree, run the installation command and verify it worked before continuing. If they decline, explain the skill cannot proceed without it.
+If they agree, run the installation command and verify it worked. If they decline, explain the skill cannot proceed without it.
 
-## Getting the Research Proposal
-
-The literature review requires a research proposal to guide the search. There are two paths:
-
-### Option A: User has a proposal file
-If the user provides a path to a proposal markdown file, read it directly.
-
-### Option B: Interactive proposal creation
-If the user doesn't have a written proposal, help them create one through a brief interview:
-
-1. **Research question**: What question are you trying to answer?
-2. **Key concepts**: What are the main technical concepts involved?
-3. **Related fields**: What adjacent areas might be relevant?
-4. **Known works**: Are there any specific papers or authors you're already aware of?
-
-Based on their answers, create a brief proposal document and save it to a location they specify (or suggest `./research_proposal.md`).
+---
 
 ## Execution
 
-Once you have the proposal content, execute the phases below. This process is largely autonomous, but you can adapt based on results—for example, stopping after one search stage if coverage is sufficient, or adding a third stage if gaps remain.
+Once setup is complete, execute the phases below. This process is largely autonomous, but you can adapt based on results—for example, adding additional search stages if gaps remain.
 
-### Phase 1: Setup
-
-1. Extract project name from the proposal filename (or ask user for a name if created interactively)
-2. Create output directory: `<proposal_dir>/<project_name>_lit_review/`
-3. Check if in a git repo—if so, add the output directory to `.gitignore`
-4. Save the proposal content for use in later phases
-
-### Phase 2: Generate Search Queries
+### Phase 1: Generate Search Queries
 
 Analyze the proposal and generate 8-12 diverse search queries. Consider:
 - Main research question and hypotheses
@@ -67,7 +130,7 @@ Example format:
 ]
 ```
 
-### Phase 3: Run Searches
+### Phase 2: Run Searches
 
 Create the raw_results directory and run all searches in parallel:
 
@@ -82,7 +145,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
 
 Note: Google Scholar may fail due to rate limiting—this is expected. Continue with other sources.
 
-### Phase 4: Deduplicate
+### Phase 3: Deduplicate
 
 Run the deduplication script to merge results from all sources:
 
@@ -93,7 +156,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
   --threshold 0.85
 ```
 
-### Phase 5: Download and Convert PDFs
+### Phase 4: Download and Convert PDFs
 
 Create the papers directory and run download/conversion:
 
@@ -110,7 +173,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/pdf_to_markdown.py \
   --ascii-width 60
 ```
 
-### Phase 6: Process LessWrong/AF Posts
+### Phase 5: Process LessWrong/AF Posts
 
 Convert LessWrong and Alignment Forum posts to markdown:
 
@@ -120,7 +183,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/html_to_markdown.py \
   --output-dir <output_dir>/papers/
 ```
 
-### Phase 7: Parallel Summarization
+### Phase 6: Parallel Summarization
 
 Create the summaries directory:
 
@@ -151,7 +214,7 @@ Follow the summarizer agent instructions for output format.
 
 Wait for each batch to complete before spawning the next batch. Continue until all papers are summarized.
 
-### Phase 8: Generate Catalog
+### Phase 7: Generate Catalog
 
 Run the catalog generator:
 
@@ -162,7 +225,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/generate_catalog.py \
   --output <output_dir>/catalog.md
 ```
 
-### Phase 9: Generate Report (Stage 1)
+### Phase 8: Generate Report (Stage 1)
 
 Read the catalog and summaries. Create `<output_dir>/stage1_report.md` with:
 
@@ -186,7 +249,7 @@ Read the catalog and summaries. Create `<output_dir>/stage1_report.md` with:
 
 Stage 2 uses insights from Stage 1 to run a more targeted search. Proceed automatically.
 
-### Phase 10: Generate Refined Search Terms
+### Phase 9: Generate Refined Search Terms
 
 Analyze the Stage 1 results to create refined search queries. Consider:
 
@@ -198,7 +261,7 @@ Analyze the Stage 1 results to create refined search queries. Consider:
 
 Generate 8-12 refined queries and save to `<output_dir>/search_terms_stage2.json`.
 
-### Phase 11: Run Stage 2 Searches
+### Phase 10: Run Stage 2 Searches
 
 Run searches with refined terms:
 
@@ -211,7 +274,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
   --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review
 ```
 
-### Phase 12: Merge and Deduplicate
+### Phase 11: Merge and Deduplicate
 
 Combine Stage 1 and Stage 2 results:
 
@@ -223,7 +286,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
   --threshold 0.85
 ```
 
-### Phase 13: Download and Summarize New Papers
+### Phase 12: Download and Summarize New Papers
 
 1. Compare `deduplicated_merged.json` to original `deduplicated.json` to identify NEW papers
 2. Download PDFs for new papers only
@@ -231,7 +294,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
 4. Process any new LessWrong/AF posts with `html_to_markdown.py`
 5. Spawn summarizer agents for new papers (in batches of 5)
 
-### Phase 14: Evaluate and Decide Next Steps
+### Phase 13: Evaluate and Decide Next Steps
 
 After processing Stage 2 results, assess the current state:
 
