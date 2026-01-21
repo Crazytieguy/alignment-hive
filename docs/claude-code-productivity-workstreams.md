@@ -14,6 +14,8 @@ Brainstorming document for improving MATS fellows' productivity with Claude Code
 
 How to configure Claude Code permissions effectively for research workflows.
 
+**Research completed:** See [permissions-research-session-1.md](./permissions-research-session-1.md) for detailed experiment results on sandbox mode, permission modes (acceptEdits vs dontAsk), and -p flag behavior.
+
 ### User Preferences & Decisions
 
 - Likes dontAsk mode because it lets the model work within its permissions rather than waiting for approval
