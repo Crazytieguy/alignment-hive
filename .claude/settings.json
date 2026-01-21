@@ -25,6 +25,7 @@
   "enabledPlugins": {
     "plugin-dev@claude-plugins-official": true,
     "vercel@claude-plugins-official": true,
-    "playwright@claude-plugins-official": false
+    "playwright@claude-plugins-official": false,
+    "typescript-lsp@claude-plugins-official": true
   }
 }
