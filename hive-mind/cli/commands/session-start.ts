@@ -174,20 +174,22 @@ export async function sessionStart(): Promise<number> {
       const eligibilityResults = nonAgentSessions.map((s) => checkSessionEligibility(s.meta, authIssuedAt));
 
       const pending = eligibilityResults.filter((s) => !s.eligible && !s.excluded);
-      if (pending.length > 1) {
-        const earliestUploadAt =
-          pending
-            .map((s) => s.eligibleAt)
-            .filter((t): t is number => t !== null)
-            .sort((a, b) => a - b)[0] ?? null;
-        messages.push(hook.pendingSessions(pending.length, earliestUploadAt, userHasAlias));
+      const eligible = eligibilityResults.filter((s) => s.eligible);
+
+      const showPendingMsg = pending.length > 1;
+      if (showPendingMsg) {
+        const uploadTimes = pending.map((s) => s.eligibleAt).filter((t): t is number => t !== null);
+        const earliestUploadAt = uploadTimes.length > 0 ? Math.min(...uploadTimes) : null;
+        messages.push(hook.pendingSessions(pending.length, earliestUploadAt));
       }
 
-      const eligible = eligibilityResults.filter((s) => s.eligible);
-      const eligibleIds = eligible.map((s) => s.sessionId);
-      const uploadCount = scheduleAutoUploads(eligibleIds) ? eligibleIds.length : 0;
-      if (uploadCount > 0) {
-        messages.push(hook.uploadingSessions(uploadCount, userHasAlias));
+      const showUploadMsg = eligible.length > 0 && scheduleAutoUploads(eligible.map((s) => s.sessionId));
+      if (showUploadMsg) {
+        messages.push(hook.uploadingSessions(eligible.length));
+      }
+
+      if (showPendingMsg || showUploadMsg) {
+        messages.push(hook.toReview(userHasAlias));
       }
     } catch (err) {
       collectedErrors.push(errors.eligibilityCheckFailed(err instanceof Error ? err.message : String(err)));

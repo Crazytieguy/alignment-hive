@@ -25,24 +25,27 @@ export const hook = {
   bunNotInstalled: (): string => {
     return 'To set up hive-mind: run /hive-mind:setup';
   },
-  pendingSessions: (count: number, earliestUploadAt: number | null, userHasAlias: boolean): string => {
-    const cli = getCliCommand(userHasAlias);
-    if (earliestUploadAt) {
-      const now = Date.now();
-      const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - now) / (1000 * 60)));
-      const hours = Math.floor(totalMinutes / 60);
-      const minutes = totalMinutes % 60;
-      const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-      if (count === 1) {
-        return `1 session uploads in ${timeStr}. To review: ${cli} index --pending`;
-      }
-      return `${count} sessions pending, first uploads in ${timeStr}. To review: ${cli} index --pending`;
+  pendingSessions: (count: number, earliestUploadAt: number | null): string => {
+    if (!earliestUploadAt) {
+      return `${count} session${count === 1 ? '' : 's'} ready to upload`;
     }
-    return `${count} session${count === 1 ? '' : 's'} ready to upload. To review: ${cli} index --pending`;
+
+    const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - Date.now()) / (1000 * 60)));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+    if (count === 1) {
+      return `1 session uploads in ${timeStr}`;
+    }
+    return `${count} sessions pending, first uploads in ${timeStr}`;
   },
-  uploadingSessions: (count: number, userHasAlias: boolean): string => {
+  uploadingSessions: (count: number): string => {
+    return `Uploading ${count} session${count === 1 ? '' : 's'} in 10 min`;
+  },
+  toReview: (userHasAlias: boolean): string => {
     const cli = getCliCommand(userHasAlias);
-    return `Uploading ${count} session${count === 1 ? '' : 's'} in 10 min. To review: ${cli} index --pending`;
+    return `To review: ${cli} index --pending`;
   },
   aliasUpdated: (sourceCmd: string): string => {
     return `hive-mind alias updated. To activate: ${sourceCmd}`;
