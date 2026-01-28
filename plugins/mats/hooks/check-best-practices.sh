@@ -25,7 +25,16 @@ fi
 
 CURRENT_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "")
 
-if [ "$CURRENT_VERSION" != "$PLUGIN_VERSION" ]; then
+# Extract major.minor (e.g., "0.1.10" → "0.1")
+get_minor_version() {
+  echo "$1" | cut -d. -f1,2
+}
+
+CURRENT_MINOR=$(get_minor_version "$CURRENT_VERSION")
+PLUGIN_MINOR=$(get_minor_version "$PLUGIN_VERSION")
+
+# Only prompt on minor version bumps, not patch bumps
+if [ "$CURRENT_MINOR" != "$PLUGIN_MINOR" ]; then
   echo '{"systemMessage": "mats: New best practices available. To review: /mats:best-practices"}'
 fi
 

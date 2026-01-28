@@ -55,6 +55,10 @@ Plugin locations:
 - `plugins/mats/.claude-plugin/plugin.json`
 - `plugins/llms-fetch-mcp/.claude-plugin/plugin.json`
 
+For the mats plugin specifically:
+- **Minor version bump** (e.g., 0.1.x → 0.2.0): New best practices content - users will be prompted to review
+- **Patch version bump** (e.g., 0.1.9 → 0.1.10): Bug fixes, typos, or other changes - users won't be re-prompted
+
 **Auto-expanding bash commands fail hard.** If `!`command`` returns non-zero, the entire skill/agent/command fails to load. Use fallbacks like `command 2>/dev/null || echo "fallback"`.
 
 ## Python
