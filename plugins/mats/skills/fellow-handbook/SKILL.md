@@ -1,6 +1,6 @@
 ---
 name: fellow-handbook
-description: This skill should be used when the user asks about MATS policies, procedures, or information - including compute access, housing, illness policy, reimbursements, mentor meetings, program schedule, or any other MATS cohort logistics. Trigger phrases include "MATS handbook", "how do I get compute", "MATS housing", "illness policy", "MATS schedule", or questions about MATS program operations.
+description: This skill should be used when the user asks about MATS policies, procedures, or information - including compute access, housing, illness policy, reimbursements, mentor meetings, program schedule, Lighthaven, or any other MATS cohort logistics. Trigger phrases include "MATS handbook", "how do I get compute", "MATS housing", "illness policy", "MATS schedule", "Lighthaven", "where is Lighthaven", or questions about MATS program operations.
 ---
 
 # MATS Fellow Handbook Lookup
