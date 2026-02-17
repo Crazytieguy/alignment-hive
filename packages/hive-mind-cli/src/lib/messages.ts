@@ -9,9 +9,6 @@ export const hook = {
   notLoggedIn: (): string => {
     return 'To connect: run /hive-mind:setup';
   },
-  notLoggedInWithError: (error: string): string => {
-    return `Not connected (${error}). To re-login: run /hive-mind:setup`;
-  },
   loggedIn: (displayName: string): string => {
     return `Connected as ${displayName}`;
   },

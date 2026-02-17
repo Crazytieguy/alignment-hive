@@ -167,19 +167,14 @@ export async function sessionStart(): Promise<number> {
   }
 
   if (status.needsLogin) {
-    if (status.errors?.length) {
-      messages.push(hook.notLoggedInWithError(status.errors[0]));
-    } else {
-      messages.push(hook.notLoggedIn());
-    }
+    messages.push(hook.notLoggedIn());
   } else if (status.user) {
     messages.push(hook.loggedIn(getUserDisplayName(status.user)));
   }
 
-  // Collect auth errors (exclude first one if already shown in login message)
+  // Collect auth errors
   if (status.errors) {
-    const authErrors = status.needsLogin ? status.errors.slice(1) : status.errors;
-    collectedErrors.push(...authErrors);
+    collectedErrors.push(...status.errors);
   }
 
   // Compute eligibility from already-loaded metadata (no additional file reads)
