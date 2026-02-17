@@ -203,7 +203,7 @@ async function deviceAuthFlow(): Promise<number> {
 }
 
 async function showStatus(): Promise<number> {
-  const status = await checkAuthStatus(false);
+  const status = await checkAuthStatus(true);
   if (status.authenticated && status.user) {
     const displayName = getUserDisplayName(status.user);
     console.log(errors.loginStatusYes(displayName));
