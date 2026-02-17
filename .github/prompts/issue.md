@@ -7,7 +7,7 @@ Read the full issue:
   gh issue view {{NUMBER}} --json title,body,comments,labels
 
 Post a tracking comment immediately (and update it as you work):
-  bash .github/scripts/update-comment.sh "Starting work..."
+  bash .github/hooks/update-comment.sh "Starting work..."
 
 Use checklist format (- [ ] / - [x]) in your tracking comment to show progress.
 Update after each significant step — reading the issue, making each change,

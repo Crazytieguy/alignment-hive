@@ -4,7 +4,7 @@
 # 2. Posts a new comment on first call, edits it on subsequent calls
 # 3. Checks for new human comments and prints them to stdout
 #
-# Usage: bash .github/scripts/update-comment.sh "<body>"
+# Usage: bash .github/hooks/update-comment.sh "<body>"
 #
 # Required env vars:
 #   ISSUE_NUMBER       - issue or PR number
