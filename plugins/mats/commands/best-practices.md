@@ -82,6 +82,14 @@ Consider modern tooling where appropriate:
 
 If a tool would be useful and isn't installed, ask if the user would like to install it.
 
+### GitHub Action (Async Claude)
+
+- [ ] **GitHub Action workflows** - Enable `@claude` mentions on issues and PRs for autonomous work
+
+**Detection:** Check for `.github/workflows/claude-issue.yml`.
+
+**Action:** If the user agrees to set up the GitHub Action, invoke `/mats:github-action`.
+
 ### Permissions (Highly Recommended)
 
 Proper permission configuration lets Claude work autonomously without compromising security. Essential for running Claude asynchronously without `--dangerously-skip-permissions` mode.

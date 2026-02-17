@@ -40,6 +40,7 @@ The mats plugin includes:
 - **fellow-handbook** - Quick lookup of MATS policies, compute access, housing, and program logistics
 - **permissions** - Configure Claude Code permissions to reduce permission prompts
 - **lit-review** - Automated literature review with paper search and summarization
+- **github-action** - Set up the Claude Code GitHub Action for autonomous work on issues and PRs
 
 Also available:
 ```

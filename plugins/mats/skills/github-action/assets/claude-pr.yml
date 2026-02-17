@@ -1,0 +1,93 @@
+name: Claude Code (PR Review)
+
+on:
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: claude-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'pull_request_review' &&
+        github.event.review.state != 'approved' &&
+        (github.event.pull_request.user.login == 'claude[bot]' ||
+         contains(github.event.review.body, '@claude'))) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # CACHE_STEP
+      # INSTALL_STEP
+
+      - name: Check if already handled
+        id: check
+        run: |
+          last=$(gh api "repos/$REPO/issues/$NUMBER/comments" \
+            --jq 'sort_by(.updated_at) | last | .user.login')
+          echo "skip=$( [ "$last" = "claude[bot]" ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+
+      - name: Checkout PR branch
+        if: steps.check.outputs.skip != 'true'
+        run: gh pr checkout ${{ github.event.pull_request.number || github.event.issue.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Initialize comment tracking
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          gh api "repos/$REPO/issues/$NUMBER/comments" \
+            --jq 'if length > 0 then last.id else 0 end' > /tmp/claude-last-comment-id
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+
+      - name: Load prompt
+        if: steps.check.outputs.skip != 'true'
+        id: prompt
+        run: |
+          prompt=$(sed "s|{{NUMBER}}|$NUMBER|g; s|{{REPOSITORY}}|$REPO|g" .github/prompts/pr-review.md)
+          echo "content<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$prompt" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+        env:
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+
+      - name: Run Claude Code
+        if: steps.check.outputs.skip != 'true'
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        env:
+          ISSUE_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          prompt: ${{ steps.prompt.outputs.content }}
+          claude_args: |
+            --model claude-opus-4-6
+            --permission-mode acceptEdits
+            --allowedTools "Bash(gh pr view:*),Bash(bash .github/hooks/update-comment.sh:*),Bash(gh issue view:*),Bash(gh api repos/${{ github.repository }}/pulls/*/comments *),Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD)"
+            --disallowedTools TodoWrite
