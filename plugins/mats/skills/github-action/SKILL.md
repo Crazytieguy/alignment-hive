@@ -81,34 +81,19 @@ List all files created and summarize:
 
 Offer to invoke `/mats:permissions` to configure them.
 
-Remind the user to:
-1. **Clean up** — `/install-github-app` created a branch like `add-claude-github-actions-*`. They can delete it from the GitHub UI or ignore it.
+Tell the user the following:
+
+**Next steps:**
+1. **Clean up** — `/install-github-app` created a branch like `add-claude-github-actions-*`. Delete it from the GitHub UI or ignore it.
 2. **Customize prompts** (optional) — `.github/prompts/issue.md` and `.github/prompts/pr-review.md` control how Claude behaves autonomously. They're short and readable.
-3. **Commit and push** these files to the repo
+3. **Commit and push** these files to the repo.
 4. **Enable branch protection** on `main` as defense in depth (Claude pushes to `claude/issue-N` branches, not `main`). Offer to help configure this — recommended rules: require pull request before merging (with at least 1 review), restrict direct pushes, restrict deletions, and block force pushes.
-5. **Test it** by creating an issue mentioning `@claude` with a simple task
+5. **Test it** by creating an issue mentioning `@claude` with a simple task.
 
-## How to Use the Integration
-
-After setup, explain how the user interacts with Claude on GitHub:
-
-### Triggering Claude
-
-- **Issues:** Mention `@claude` in an issue title, body, or comment. Claude creates a branch, implements the changes, and opens a PR.
-- **PRs:** Submit a review (requesting changes or commenting) on a Claude-authored PR, and Claude responds automatically. On any PR, mention `@claude` in a comment to trigger it.
-
-### While Claude is Working
-
-- Claude posts a **tracking comment** on the issue or PR with a checklist showing progress. Click the "View run" link to see the full GitHub Actions log.
-- **Post follow-up comments** at any time — Claude checks for new comments each time it updates its tracking comment and incorporates your feedback mid-session.
-- Claude typically works for 5–15 minutes depending on task complexity.
-
-### Reviewing Claude's Work
-
-- Claude opens a PR referencing the original issue. Review it like any other PR.
-- **Request changes** via a GitHub review and Claude will address them automatically (no need to `@claude` on its own PRs).
-- Leave **inline review comments** on specific lines for targeted feedback.
-- Once satisfied, approve and merge the PR as usual.
+**Using the integration:**
+- Mention `@claude` in an issue or PR comment to trigger a session. On Claude-authored PRs, submitting a review triggers it automatically.
+- Claude posts a **tracking comment** with progress. You can post follow-up comments at any time — Claude checks for new feedback each time it updates.
+- Review Claude's PRs normally. Request changes via a review and Claude addresses them automatically.
 
 ## Additional Resources
 
