@@ -15,7 +15,7 @@ Read any linked issues referenced in the PR body (look for #N references):
   gh issue view <number> --json title,body,comments,labels
 
 Post a tracking comment immediately (and update it as you work):
-  bash .github/hooks/update-comment.sh "Starting work..."
+  bash .github/scripts/update-comment.sh "Starting work..."
 
 Use checklist format (- [ ] / - [x]) in your tracking comment to show progress.
 Update after each significant step — reading the PR, making each change,

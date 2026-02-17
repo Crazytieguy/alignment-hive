@@ -93,5 +93,5 @@ jobs:
           claude_args: |
             --model claude-opus-4-6
             --permission-mode acceptEdits
-            --allowedTools "Bash(gh issue view:*),Bash(bash .github/hooks/update-comment.sh:*),Bash(gh pr create:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD)"
+            --allowedTools "Bash(gh issue view:*),Bash(bash .github/scripts/update-comment.sh:*),Bash(gh pr create:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD)"
             --disallowedTools TodoWrite

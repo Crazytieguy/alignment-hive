@@ -47,13 +47,13 @@ Read the matching snippet from `references/cache-steps.md`. If no match or multi
 
 ### Write files
 
-Create the destination directories (`.github/workflows`, `.github/hooks`, `.github/prompts`) then copy asset files directly using `cp`. For the two workflow files, after copying, replace the `# CACHE_STEP` and `# INSTALL_STEP` comments with the detected snippets from the reference file. The other three files are copied as-is.
+Create the destination directories (`.github/workflows`, `.github/scripts`, `.github/prompts`) then copy asset files directly using `cp`. For the two workflow files, after copying, replace the `# CACHE_STEP` and `# INSTALL_STEP` comments with the detected snippets from the reference file. The other three files are copied as-is.
 
 | Asset | Destination |
 |---|---|
 | `assets/claude-issue.yml` | `.github/workflows/claude-issue.yml` |
 | `assets/claude-pr.yml` | `.github/workflows/claude-pr.yml` |
-| `assets/update-comment.sh` | `.github/hooks/update-comment.sh` |
+| `assets/update-comment.sh` | `.github/scripts/update-comment.sh` |
 | `assets/issue-prompt.md` | `.github/prompts/issue.md` |
 | `assets/pr-review-prompt.md` | `.github/prompts/pr-review.md` |
 
@@ -72,7 +72,7 @@ List all files created and summarize:
 
 - `.github/workflows/claude-issue.yml` — triggers on `@claude` in issues
 - `.github/workflows/claude-pr.yml` — triggers on PR reviews and `@claude` in PR comments
-- `.github/hooks/update-comment.sh` — tracking comment wrapper with mid-session feedback
+- `.github/scripts/update-comment.sh` — tracking comment wrapper with mid-session feedback
 - `.github/prompts/issue.md` — issue prompt template
 - `.github/prompts/pr-review.md` — PR review prompt template
 
@@ -87,6 +87,28 @@ Remind the user to:
 3. **Commit and push** these files to the repo
 4. **Enable branch protection** on `main` as defense in depth (Claude pushes to `claude/issue-N` branches, not `main`). Offer to help configure this — recommended rules: require pull request before merging (with at least 1 review), restrict direct pushes, restrict deletions, and block force pushes.
 5. **Test it** by creating an issue mentioning `@claude` with a simple task
+
+## How to Use the Integration
+
+After setup, explain how the user interacts with Claude on GitHub:
+
+### Triggering Claude
+
+- **Issues:** Mention `@claude` in an issue title, body, or comment. Claude creates a branch, implements the changes, and opens a PR.
+- **PRs:** Submit a review (requesting changes or commenting) on a Claude-authored PR, and Claude responds automatically. On any PR, mention `@claude` in a comment to trigger it.
+
+### While Claude is Working
+
+- Claude posts a **tracking comment** on the issue or PR with a checklist showing progress. Click the "View run" link to see the full GitHub Actions log.
+- **Post follow-up comments** at any time — Claude checks for new comments each time it updates its tracking comment and incorporates your feedback mid-session.
+- Claude typically works for 5–15 minutes depending on task complexity.
+
+### Reviewing Claude's Work
+
+- Claude opens a PR referencing the original issue. Review it like any other PR.
+- **Request changes** via a GitHub review and Claude will address them automatically (no need to `@claude` on its own PRs).
+- Leave **inline review comments** on specific lines for targeted feedback.
+- Once satisfied, approve and merge the PR as usual.
 
 ## Additional Resources
 
