@@ -43,9 +43,7 @@ Walk through all recommendations as a guided setup. For each category:
 Check `.claude/settings.json` for installed plugins. Propose relevant ones:
 
 - **MATS/Alignment**: `hive-mind@alignment-hive` - **Always ask about this one**
-- **Python**: `pyright-lsp`
-- **TypeScript/JavaScript**: `typescript-lsp`, `frontend-design` (for web projects)
-- **Rust**: `rust-analyzer-lsp`
+- **TypeScript/JavaScript**: `frontend-design` (for web projects)
 - **Agent development**: `agent-sdk-dev`
 
 Install by adding to `./.claude/settings.json` (project root):
@@ -53,7 +51,7 @@ Install by adding to `./.claude/settings.json` (project root):
 ```json
 {
   "enabledPlugins": {
-    "pyright-lsp@claude-plugins-official": true
+    "frontend-design@claude-plugins-official": true
   }
 }
 ```
