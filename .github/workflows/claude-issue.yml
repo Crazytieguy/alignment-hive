@@ -2,7 +2,7 @@ name: Claude Code (Issues)
 
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
   issues:
     types: [opened, assigned]
 
