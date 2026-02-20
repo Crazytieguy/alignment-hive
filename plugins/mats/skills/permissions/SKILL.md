@@ -78,7 +78,7 @@ Bash(npm run *)       # runs arbitrary scripts (allow specific scripts instead)
 
 The general pattern: any command that takes another command or code string as an argument is a bypass vector.
 
-**Deprecated syntax** - Look for rules using `:*` instead of ` *` (space-star). The colon syntax is deprecated. When replacing, use `cmd` + `cmd *` patterns (not `cmd*`).
+**Deprecated syntax** - Look for rules using `:*` instead of ` *` (space-star). The colon syntax is deprecated **except** for commands that use heredoc arguments (e.g., `git commit:*`). The ` *` pattern fails to match heredoc syntax, so `:*` is required there. For all other commands, replace `:*` with `cmd` + `cmd *` patterns (not `cmd*`).
 
 **Redundancy** - Check for duplicate rules, overly broad rules that subsume specific ones, or rules that conflict with the new configuration. Fix each issue individually - the user might have niche permissions they want to keep.
 
@@ -141,7 +141,7 @@ Use AskUserQuestion to ask all five questions in a single batch. Answers drive r
 
 **Edit 1: Universally Safe Commands**
 
-Note the wildcard patterns - always use `cmd` + `cmd *` (never `cmd*`):
+Note the wildcard patterns - always use `cmd` + `cmd *` (never `cmd*`). Exception: use `cmd:*` for commands that receive heredoc arguments (e.g., `git commit:*`), since ` *` fails to match heredoc syntax.
 
 If hive-mind plugin is detected, also include:
 - `Bash(hive-mind)`
@@ -813,6 +813,8 @@ Ask these questions in a single batch, then make a single edit.
 ### Edit for All
 
 **Git permissions (if user allows commits):**
+
+Note: `git commit` uses `:*` instead of ` *` because commit messages use heredoc syntax, which ` *` fails to match.
 
 ```json
 {
