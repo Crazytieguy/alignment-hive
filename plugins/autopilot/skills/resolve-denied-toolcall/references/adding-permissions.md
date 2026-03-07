@@ -1,23 +1,22 @@
----
-name: add-permission
-description: Use when a tool call is denied and you cannot proceed without it. Helps propose a specific permission rule to add to the project's allow list.
----
+# Adding Permissions
 
-# Add Permission
-
-Propose a specific permission rule when a tool call is denied in autonomous mode.
-
-## First Step: Check Existing Permissions
-
-Before proposing a new rule, read `.claude/settings.json` and `.claude/settings.local.json` to check if there's an already-permitted way to accomplish the same objective.
+How to propose a well-scoped permission rule after confirming no permitted alternative exists.
 
 ## Permission Syntax
+
+### Bash
 
 - `Bash(command)` — exact match (no arguments)
 - `Bash(command *)` — command with any arguments
 - `Bash(command specific-arg *)` — command with specific prefix
 
 Always use `cmd` + `cmd *` pairs (never `cmd*`). Exception: `cmd:*` for heredoc commands (e.g., `git commit:*`).
+
+### Other tools
+
+- `mcp__server__*` — all tools from an MCP server
+- `mcp__server__tool_name` — specific MCP tool
+- `Skill(plugin:skill-name)` — specific skill
 
 ## Security Principles
 
