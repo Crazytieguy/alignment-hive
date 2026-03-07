@@ -1,5 +1,5 @@
 ---
-name: github-action
+name: setup
 description: This skill should be used when the user asks to "set up the github action", "configure async claude", "enable @claude on issues", "set up claude code action", "github action integration", "autonomous claude on github", or wants Claude to work on issues and PRs autonomously via GitHub Actions.
 ---
 
@@ -100,7 +100,7 @@ If no plugins need secrets, remove the `# PLUGIN_ENV` comment line from both wor
 
 ## Step 4: Check Permissions
 
-Read `.claude/settings.json` and `.claude/settings.local.json`. Claude in the GitHub Action uses these for bash permissions. Check if permissions are properly configured using the same heuristic as best-practices:
+Read `.claude/settings.json` and `.claude/settings.local.json`. Claude in the GitHub Action uses these for bash permissions. Check if permissions are properly configured:
 - At least 15 allow rules total
 - At least 3 deny rules
 - Has project-specific commands

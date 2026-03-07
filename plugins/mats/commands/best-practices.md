@@ -43,6 +43,7 @@ Walk through all recommendations as a guided setup. For each category:
 Check `.claude/settings.json` for installed plugins. Propose relevant ones:
 
 - **Autopilot** (permissions + autonomous mode): `autopilot@alignment-hive` — **Always recommend this one**
+- **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
 - **MATS/Alignment**: `hive-mind@alignment-hive` — **Always ask about this one**
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — cloud GPU instances with Jupyter kernels (RunPod)
 - **TypeScript/JavaScript**: `frontend-design` (for web projects)
@@ -98,7 +99,7 @@ Each plugin's SessionStart hook will also nudge about its own setup when the ses
 
 **Detection:** Check for `.github/workflows/claude-issue.yml`.
 
-**Action:** If the user agrees to set up the GitHub Action, invoke `/mats:github-action`.
+**Action:** If the user agrees to set up the GitHub Action, invoke `/github-action:setup`. If the `github-action` plugin is not installed, tell the user to install it first: `/plugin install github-action@alignment-hive`.
 
 ## Guidance by Project Type
 

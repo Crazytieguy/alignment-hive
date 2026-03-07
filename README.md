@@ -31,7 +31,8 @@ Then open Claude Code in your project and run `/hive:recommendations`.
 | Plugin | Description | Install |
 |--------|-------------|---------|
 | hive | Tooling recommendations + session sharing | Included in install script |
-| mats | Best practices, fellow handbook, lit review, GitHub Action | `/plugin install mats@alignment-hive` |
+| mats | Best practices, fellow handbook, lit review | `/plugin install mats@alignment-hive` |
+| github-action | GitHub Action for autonomous `@claude` on issues and PRs | `/plugin install github-action@alignment-hive` |
 | autopilot | Autonomous operation + permission management | `/plugin install autopilot@alignment-hive` |
 | llms-fetch-mcp | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `/plugin install llms-fetch-mcp@alignment-hive` |
 | remote-kernels | Cloud GPU instances with Jupyter kernels ([RunPod](https://runpod.io)) | `/plugin install remote-kernels@alignment-hive` |

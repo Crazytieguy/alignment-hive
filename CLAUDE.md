@@ -53,6 +53,7 @@ When updating plugin content (skills, commands, hooks, etc.), you must bump the 
 
 Plugin locations:
 - `plugins/autopilot/.claude-plugin/plugin.json`
+- `plugins/github-action/.claude-plugin/plugin.json`
 - `plugins/hive-mind/.claude-plugin/plugin.json`
 - `plugins/mats/.claude-plugin/plugin.json`
 - `plugins/llms-fetch-mcp/.claude-plugin/plugin.json`
