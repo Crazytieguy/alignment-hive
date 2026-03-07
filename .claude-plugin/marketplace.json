@@ -23,6 +23,11 @@
       "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads"
     },
     {
+      "name": "hive",
+      "source": "./plugins/hive",
+      "description": "Tooling recommendations and session sharing for alignment researchers"
+    },
+    {
       "name": "autopilot",
       "source": "./plugins/autopilot",
       "description": "Autonomous operation with permission management for Claude Code"

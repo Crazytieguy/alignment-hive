@@ -37,73 +37,31 @@ function WelcomePage() {
         <h2 className="text-xl font-medium">Getting Started</h2>
         <ol className="list-decimal list-inside space-y-3 text-sm">
           <li>
-            Install Claude Code (
+            Install{" "}
             <a
               href="https://code.claude.com/docs/en/overview"
               className="text-blue-600 dark:text-blue-400 underline hover:text-blue-700 dark:hover:text-blue-300"
               target="_blank"
               rel="noopener noreferrer"
             >
-              official docs
-            </a>
-            ) if you haven't already:
+              Claude Code
+            </a>{" "}
+            if you haven't already:
             <pre className="p-2 bg-muted rounded text-xs overflow-x-auto">
               curl -fsSL https://claude.ai/install.sh | bash
             </pre>
           </li>
           <li>
-            Run Claude Code (the remaining steps happen inside it):
-            <pre className="p-2 bg-muted rounded text-xs">claude</pre>
-          </li>
-          <li>
-            Add the alignment-hive marketplace:
-            <pre className="p-2 bg-muted rounded text-xs">
-              /plugin marketplace add Crazytieguy/alignment-hive
+            Install alignment-hive:
+            <pre className="p-2 bg-muted rounded text-xs overflow-x-auto">
+              curl -fsSL https://alignment-hive.com/install.sh | bash
             </pre>
           </li>
           <li>
-            Enable auto-update:
-            <ol className="list-decimal list-inside ml-4 space-y-1">
-              <li>
-                Run{" "}
-                <code className="bg-muted px-1 rounded text-xs">/plugin</code>
-              </li>
-              <li>
-                Go to the <strong>Marketplaces</strong> tab
-              </li>
-              <li>
-                Select <strong>alignment-hive</strong>
-              </li>
-              <li>
-                Select <strong>Enable auto-update</strong>
-              </li>
-              <li>
-                Press <strong>Esc</strong> twice to exit the menu
-              </li>
-            </ol>
-          </li>
-          <li>
-            Install the mats plugin:
+            Open Claude Code in your project and run:
             <pre className="p-2 bg-muted rounded text-xs">
-              /plugin install mats@alignment-hive
+              /hive:recommendations
             </pre>
-          </li>
-          <li>
-            Exit Claude Code and navigate to your project:
-            <pre className="p-2 bg-muted rounded text-xs">/exit</pre>
-            <pre className="p-2 bg-muted rounded text-xs">
-              cd ~/my-project && claude
-            </pre>
-          </li>
-          <li>
-            Run best practices setup:
-            <pre className="p-2 bg-muted rounded text-xs">
-              /mats:best-practices
-            </pre>
-            <p className="mt-1 text-muted-foreground">
-              Walks you through documentation, plugins, tooling, and permissions
-              — works for both new and existing projects.
-            </p>
           </li>
         </ol>
 

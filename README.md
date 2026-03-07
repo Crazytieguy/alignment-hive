@@ -16,47 +16,21 @@ Install [Claude Code](https://code.claude.com/docs/en/overview) if you haven't a
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-### 1. Add the marketplace
+### Install
 
-Run the following commands from within Claude Code (the `/` prefix indicates a Claude Code command):
-```
-/plugin marketplace add Crazytieguy/alignment-hive
-```
-
-Enable auto-update to get new plugins and updates automatically:
-1. Run `/plugin`
-2. Go to the **Marketplaces** tab
-3. Select **alignment-hive**
-4. Select **Enable auto-update**
-5. Press **Esc** twice to exit the menu
-
-### 2. Install the mats plugin
-
-```
-/plugin install mats@alignment-hive
-```
-
-### 3. Set up your project
-
-Exit Claude Code and navigate to your project directory:
-```
-/exit
-```
 ```bash
-cd ~/my-project && claude
+curl -fsSL https://alignment-hive.com/install.sh | bash
 ```
 
-Then run best practices setup:
-```
-/mats:best-practices
-```
+This adds the marketplace, installs the hive plugin with auto-update, and optionally authenticates for session sharing.
 
-This walks you through documentation, plugins, tooling, and permissions — works for both new and existing projects.
+Then open Claude Code in your project and run `/hive:recommendations`.
 
 ## Available Plugins
 
 | Plugin | Description | Install |
 |--------|-------------|---------|
+| hive | Tooling recommendations + session sharing | Included in install script |
 | mats | Best practices, fellow handbook, lit review, GitHub Action | `/plugin install mats@alignment-hive` |
 | autopilot | Autonomous operation + permission management | `/plugin install autopilot@alignment-hive` |
 | llms-fetch-mcp | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `/plugin install llms-fetch-mcp@alignment-hive` |
