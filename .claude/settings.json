@@ -126,10 +126,6 @@
       "mcp__convex__*",
       "mcp__remote-kernels__*"
     ],
-    "ask": [
-      "Bash(find * -exec *)",
-      "Bash(find * -execdir *)"
-    ],
     "deny": [
       "Bash(for *)",
       "Bash(while *)",
@@ -155,11 +151,16 @@
       "Bash(pnpm *)",
       "Bash(yarn *)",
       "Bash(git -C *)"
+    ],
+    "ask": [
+      "Bash(find * -exec *)",
+      "Bash(find * -execdir *)"
     ]
   },
   "enabledPlugins": {
     "plugin-dev@claude-plugins-official": true,
     "vercel@claude-plugins-official": true,
-    "playwright@claude-plugins-official": false
+    "playwright@claude-plugins-official": false,
+    "autopilot@alignment-hive": true
   }
 }
