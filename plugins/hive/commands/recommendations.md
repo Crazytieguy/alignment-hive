@@ -1,5 +1,5 @@
 ---
-description: Get tooling recommendations for your project. Use when the user asks about "best practices", "how should I set up", "what's the right way to", "help me get started", "start a project", "set up my environment", "which plugins should I install", "how to configure Claude Code", "optimize for Claude", "make my project work better with Claude", "project structure", "what tools should I use", "improve my tooling", "improve my dev workflow", or mentions project architecture, tooling choices, or Claude Code configuration. Also use when the working directory appears empty or newly created.
+description: Get tooling recommendations for your project — plugins, documentation patterns, and dev environment setup. This command should also be used when the user asks about setting up their project, which plugins to install, or when the working directory appears empty or newly created.
 allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:*), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/recommendations-status.sh:*), Read, Write
 ---
 
@@ -40,7 +40,7 @@ Walk through all recommendations as a guided setup. For each category:
 
 ### Plugins (based on project type)
 
-Check `.claude/settings.json` for installed plugins. Propose relevant ones:
+Check `.claude/settings.json` and `.claude/settings.local.json` for installed plugins. Propose relevant ones:
 
 - **Autopilot** (permissions + autonomous mode): `autopilot@alignment-hive` — **Always recommend**
 - **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
@@ -49,8 +49,9 @@ Check `.claude/settings.json` for installed plugins. Propose relevant ones:
 - **Documentation fetching**: `llms-fetch-mcp@alignment-hive` — Fetch docs with [llms.txt](https://llmstxt.org/) support
 - **TypeScript/JavaScript**: `frontend-design` (for web projects)
 
-Install by adding to `./.claude/settings.json` (project root):
+Ask the user whether to install plugins just for themselves (`.claude/settings.local.json`, gitignored) or also for collaborators (`.claude/settings.json`, committed). Use the chosen file for all plugin installations.
 
+For non-alignment-hive plugins:
 ```json
 {
   "enabledPlugins": {
@@ -71,13 +72,6 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 }
 ```
 
-If `pluginMarketplaces` doesn't include `alignment-hive`, tell the user to run the install script:
-```
-curl -fsSL https://alignment-hive.com/install.sh | bash
-```
-
-Do NOT invoke setup skills directly during this flow — just recommend installing the plugins. Setup flows will be triggered after reload.
-
 ### Tooling (varies by project)
 
 Consider modern tooling where appropriate:
@@ -91,36 +85,7 @@ If a tool would be useful and isn't installed, ask if the user would like to ins
 
 After all plugins are installed, tell the user to exit and restart Claude (`/exit` then `claude -c`).
 
-Tell the user which of the installed plugins have setup flows they should run after reloading. Mention by plugin name, not exact skill command:
-- **autopilot** has a setup flow for permissions and autonomous mode
-- **remote-kernels** has a setup flow for RunPod configuration
-
-Each plugin's SessionStart hook will also nudge about its own setup when the session starts.
-
-### GitHub Action (Async Claude)
-
-- [ ] **GitHub Action workflows** — Enable `@claude` mentions on issues and PRs for autonomous work
-
-**Detection:** Check for `.github/workflows/claude-issue.yml`.
-
-**Action:** If the user agrees to set up the GitHub Action, invoke `/github-action:setup`. If the `github-action` plugin is not installed, tell the user to install it first: `/plugin install github-action@alignment-hive`.
-
-## Guidance by Project Type
-
-### New Projects
-
-Spend the first session on architecture, research, and tooling:
-- Make high-level architecture decisions
-- Research existing solutions before building from scratch
-- Set up the development environment
-
-### Existing Projects
-
-Focus on understanding and helping:
-- Understand the current structure
-- Suggest relevant plugins
-- Help with whatever task brought them here
-- Don't push architecture changes unless requested
+Mention that some plugins have setup skills that will be available after reloading — each plugin's SessionStart hook will nudge about its own setup when the session starts.
 
 ## Completion
 
@@ -133,10 +98,10 @@ Once all recommendations have been either implemented or explicitly rejected:
    # Rejected Recommendations
 
    - User prefers pip over uv for Python dependency management
-   - No GPU compute needed — working on theory
-   - Declined pyright-lsp — already using mypy
+   - No GPU compute needed
+   - Declined GitHub Action
    ```
 
    This captures any rejection in flexible natural language, including tooling suggestions not explicitly listed here.
 
-3. If nothing was rejected, either leave the file empty or don't create it.
+3. If nothing was rejected, don't create the file.

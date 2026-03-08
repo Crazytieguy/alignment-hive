@@ -72,8 +72,6 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 }
 ```
 
-Do NOT invoke setup skills directly during this flow — just recommend installing the plugins. Setup flows will be triggered after reload.
-
 ### Tooling (varies by project)
 
 Consider modern tooling where appropriate:
@@ -87,19 +85,7 @@ If a tool would be useful and isn't installed, ask if the user would like to ins
 
 After all plugins are installed, tell the user to exit and restart Claude (`/exit` then `claude -c`).
 
-Tell the user which of the installed plugins have setup flows they should run after reloading. Mention by plugin name, not exact skill command:
-- **autopilot** has a setup flow for permissions and autonomous mode
-- **remote-kernels** has a setup flow for RunPod configuration
-
-Each plugin's SessionStart hook will also nudge about its own setup when the session starts.
-
-### GitHub Action (Async Claude)
-
-- [ ] **GitHub Action workflows** - Enable `@claude` mentions on issues and PRs for autonomous work
-
-**Detection:** Check for `.github/workflows/claude-issue.yml`.
-
-**Action:** If the user agrees to set up the GitHub Action, invoke `/github-action:setup`. If the `github-action` plugin is not installed, tell the user to install it first: `/plugin install github-action@alignment-hive`.
+Mention that some plugins have setup skills that will be available after reloading — each plugin's SessionStart hook will nudge about its own setup when the session starts.
 
 ## Guidance by Project Type
 
