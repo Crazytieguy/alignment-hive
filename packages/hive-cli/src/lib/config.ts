@@ -4,21 +4,69 @@ import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
-export const WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? 'client_01KE10CZ6FFQB9TR2NVBQJ4AKV';
+export interface CliConfig {
+  authDir: string;
+  authFile: string;
+  clientId: string;
+  getStateDir: (cwd: string) => string;
+}
 
-export const AUTH_DIR = join(homedir(), '.claude', 'hive-mind');
+let _config: CliConfig | null = null;
 
-function resolveAuthFile(): string {
-  const envPath = process.env.HIVE_MIND_AUTH_FILE;
-  if (!envPath) return join(AUTH_DIR, 'auth.json');
+export function initConfig(config: CliConfig): void {
+  _config = config;
+}
+
+export function getConfig(): CliConfig {
+  if (!_config) {
+    throw new Error('CLI config not initialized. Call initConfig() before using config.');
+  }
+  return _config;
+}
+
+function resolveAuthFile(envPath: string | undefined, defaultPath: string): string {
+  if (!envPath) return defaultPath;
   return envPath.startsWith('~/') ? join(homedir(), envPath.slice(2)) : envPath;
 }
 
-export const AUTH_FILE = resolveAuthFile();
+export function createHiveConfig(): CliConfig {
+  const authDir = join(homedir(), '.alignment-hive');
+  return {
+    authDir,
+    authFile: resolveAuthFile(process.env.ALIGNMENT_HIVE_AUTH_FILE, join(authDir, 'auth.json')),
+    clientId: process.env.ALIGNMENT_HIVE_CLIENT_ID ?? 'client_01KE10CZ6FFQB9TR2NVBQJ4AKV',
+    getStateDir: (cwd: string) => {
+      const mainPath = getMainWorktreePath(cwd);
+      return join(mainPath ?? cwd, '.claude', 'hive');
+    },
+  };
+}
 
-export async function ensureHiveMindDir(hiveMindDir: string) {
-  await mkdir(hiveMindDir, { recursive: true });
-  const gitignorePath = join(hiveMindDir, '.gitignore');
+export function createHiveMindConfig(): CliConfig {
+  const authDir = join(homedir(), '.claude', 'hive-mind');
+  return {
+    authDir,
+    authFile: resolveAuthFile(process.env.HIVE_MIND_AUTH_FILE, join(authDir, 'auth.json')),
+    clientId: process.env.HIVE_MIND_CLIENT_ID ?? 'client_01KE10CZ6FFQB9TR2NVBQJ4AKV',
+    getStateDir: (cwd: string) => join(cwd, '.claude', 'hive-mind'),
+  };
+}
+
+export function getAuthDir(): string {
+  return getConfig().authDir;
+}
+
+export function getAuthFile(): string {
+  return getConfig().authFile;
+}
+
+export function getClientId(): string {
+  return getConfig().clientId;
+}
+
+export async function ensureStateDir(stateDir: string): Promise<void> {
+  await mkdir(stateDir, { recursive: true });
+  const gitignorePath = join(stateDir, '.gitignore');
   try {
     await access(gitignorePath);
   } catch {
@@ -26,14 +74,14 @@ export async function ensureHiveMindDir(hiveMindDir: string) {
   }
 }
 
-export async function getOrCreateCheckoutId(hiveMindDir: string) {
-  const checkoutIdFile = join(hiveMindDir, 'checkout-id');
+export async function getOrCreateCheckoutId(stateDir: string): Promise<string> {
+  const checkoutIdFile = join(stateDir, 'checkout-id');
   try {
     const id = await readFile(checkoutIdFile, 'utf-8');
     return id.trim();
   } catch {
     const id = randomUUID();
-    await ensureHiveMindDir(hiveMindDir);
+    await ensureStateDir(stateDir);
     await writeFile(checkoutIdFile, id);
     return id;
   }
@@ -68,13 +116,11 @@ export function getCanonicalProjectName(cwd: string): string {
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
 
-    const canonical = remoteUrl
+    return remoteUrl
       .replace(/^git@/, '')
       .replace(/^https?:\/\//, '')
       .replace(':', '/')
       .replace(/\.git$/, '');
-
-    return canonical;
   } catch {
     return basename(cwd);
   }
@@ -115,37 +161,23 @@ export function getMainWorktreePath(cwd: string): string | null {
   }
 }
 
-function getTranscriptsDirsFile(hiveMindDir: string): string {
-  return join(hiveMindDir, 'transcripts-dirs');
+function getTranscriptsDirsFile(stateDir: string): string {
+  return join(stateDir, 'transcripts-dirs');
 }
 
 /**
  * Load all transcripts directories from the transcripts-dirs file.
- * Returns empty array if file doesn't exist.
+ * Returns deduplicated list. Does not check if directories exist —
+ * callers handle missing directories gracefully via findRawSessions().catch().
  */
-export async function loadTranscriptsDirs(hiveMindDir: string): Promise<Array<string>> {
+export async function loadTranscriptsDirs(stateDir: string): Promise<Array<string>> {
   try {
-    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), 'utf-8');
+    const content = await readFile(getTranscriptsDirsFile(stateDir), 'utf-8');
     const dirs = content
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
-
-    // Prune directories that no longer exist
-    const exists = await Promise.all(
-      dirs.map((dir) =>
-        access(dir).then(
-          () => true,
-          () => false,
-        ),
-      ),
-    );
-    const valid = dirs.filter((_, i) => exists[i]);
-    if (valid.length < dirs.length) {
-      const file = getTranscriptsDirsFile(hiveMindDir);
-      await writeFile(file, valid.join('\n') + '\n', 'utf-8').catch(() => {});
-    }
-    return valid;
+    return [...new Set(dirs)];
   } catch {
     return [];
   }
@@ -155,11 +187,11 @@ export async function loadTranscriptsDirs(hiveMindDir: string): Promise<Array<st
  * Add a transcripts directory to the transcripts-dirs file.
  * Deduplicates entries.
  */
-export async function addTranscriptsDir(hiveMindDir: string, dir: string): Promise<void> {
-  await ensureHiveMindDir(hiveMindDir);
-  const existing = await loadTranscriptsDirs(hiveMindDir);
+export async function addTranscriptsDir(stateDir: string, dir: string): Promise<void> {
+  await ensureStateDir(stateDir);
+  const existing = await loadTranscriptsDirs(stateDir);
   if (!existing.includes(dir)) {
     existing.push(dir);
-    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join('\n') + '\n', 'utf-8');
+    await writeFile(getTranscriptsDirsFile(stateDir), existing.join('\n') + '\n', 'utf-8');
   }
 }

@@ -4,12 +4,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'hive-mind/**'
+      - 'packages/hive-cli/**'
+      - 'packages/shared/**'
       - 'plugins/hive-mind/cli.js'
   pull_request:
     branches: [main]
     paths:
-      - 'hive-mind/**'
+      - 'packages/hive-cli/**'
+      - 'packages/shared/**'
       - 'plugins/hive-mind/cli.js'
 
 jobs:
@@ -28,17 +30,17 @@ jobs:
         run: bun install
 
       - name: Lint
-        run: bun run --filter '@alignment-hive/hive-mind' lint
+        run: bun run --filter '@alignment-hive/hive-cli' lint
 
       - name: Test
-        run: bun run --filter '@alignment-hive/hive-mind' test
+        run: bun run --filter '@alignment-hive/hive-cli' test
 
       - name: Build CLI
-        run: bun run --filter '@alignment-hive/hive-mind' build
+        run: bun run --filter '@alignment-hive/hive-cli' build
 
       - name: Verify CLI bundle is up to date
         run: |
           if ! git diff --exit-code plugins/hive-mind/cli.js; then
-            echo "::error::CLI bundle is out of date. Run 'bun run --filter @alignment-hive/hive-mind build' and commit."
+            echo "::error::CLI bundle is out of date. Run 'bun run --filter @alignment-hive/hive-cli build' and commit."
             exit 1
           fi

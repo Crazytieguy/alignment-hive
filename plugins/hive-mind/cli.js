@@ -13942,18 +13942,42 @@ import { randomUUID } from "crypto";
 import { access, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { basename, join } from "path";
-var WORKOS_CLIENT_ID = process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV";
-var AUTH_DIR = join(homedir(), ".claude", "hive-mind");
-function resolveAuthFile() {
-  const envPath = process.env.HIVE_MIND_AUTH_FILE;
+var _config = null;
+function initConfig(config2) {
+  _config = config2;
+}
+function getConfig() {
+  if (!_config) {
+    throw new Error("CLI config not initialized. Call initConfig() before using config.");
+  }
+  return _config;
+}
+function resolveAuthFile(envPath, defaultPath) {
   if (!envPath)
-    return join(AUTH_DIR, "auth.json");
+    return defaultPath;
   return envPath.startsWith("~/") ? join(homedir(), envPath.slice(2)) : envPath;
 }
-var AUTH_FILE = resolveAuthFile();
-async function ensureHiveMindDir(hiveMindDir) {
-  await mkdir(hiveMindDir, { recursive: true });
-  const gitignorePath = join(hiveMindDir, ".gitignore");
+function createHiveMindConfig() {
+  const authDir = join(homedir(), ".claude", "hive-mind");
+  return {
+    authDir,
+    authFile: resolveAuthFile(process.env.HIVE_MIND_AUTH_FILE, join(authDir, "auth.json")),
+    clientId: process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV",
+    getStateDir: (cwd) => join(cwd, ".claude", "hive-mind")
+  };
+}
+function getAuthDir() {
+  return getConfig().authDir;
+}
+function getAuthFile() {
+  return getConfig().authFile;
+}
+function getClientId() {
+  return getConfig().clientId;
+}
+async function ensureStateDir(stateDir) {
+  await mkdir(stateDir, { recursive: true });
+  const gitignorePath = join(stateDir, ".gitignore");
   try {
     await access(gitignorePath);
   } catch {
@@ -13961,14 +13985,14 @@ async function ensureHiveMindDir(hiveMindDir) {
 `);
   }
 }
-async function getOrCreateCheckoutId(hiveMindDir) {
-  const checkoutIdFile = join(hiveMindDir, "checkout-id");
+async function getOrCreateCheckoutId(stateDir) {
+  const checkoutIdFile = join(stateDir, "checkout-id");
   try {
     const id = await readFile(checkoutIdFile, "utf-8");
     return id.trim();
   } catch {
     const id = randomUUID();
-    await ensureHiveMindDir(hiveMindDir);
+    await ensureStateDir(stateDir);
     await writeFile(checkoutIdFile, id);
     return id;
   }
@@ -13996,8 +14020,7 @@ function getCanonicalProjectName(cwd) {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     }).trim();
-    const canonical = remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
-    return canonical;
+    return remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
   } catch {
     return basename(cwd);
   }
@@ -14024,33 +14047,25 @@ function getMainWorktreePath(cwd) {
     return null;
   }
 }
-function getTranscriptsDirsFile(hiveMindDir) {
-  return join(hiveMindDir, "transcripts-dirs");
+function getTranscriptsDirsFile(stateDir) {
+  return join(stateDir, "transcripts-dirs");
 }
-async function loadTranscriptsDirs(hiveMindDir) {
+async function loadTranscriptsDirs(stateDir) {
   try {
-    const content = await readFile(getTranscriptsDirsFile(hiveMindDir), "utf-8");
+    const content = await readFile(getTranscriptsDirsFile(stateDir), "utf-8");
     const dirs = content.split(`
 `).map((line) => line.trim()).filter((line) => line.length > 0);
-    const exists = await Promise.all(dirs.map((dir) => access(dir).then(() => true, () => false)));
-    const valid = dirs.filter((_, i) => exists[i]);
-    if (valid.length < dirs.length) {
-      const file2 = getTranscriptsDirsFile(hiveMindDir);
-      await writeFile(file2, valid.join(`
-`) + `
-`, "utf-8").catch(() => {});
-    }
-    return valid;
+    return [...new Set(dirs)];
   } catch {
     return [];
   }
 }
-async function addTranscriptsDir(hiveMindDir, dir) {
-  await ensureHiveMindDir(hiveMindDir);
-  const existing = await loadTranscriptsDirs(hiveMindDir);
+async function addTranscriptsDir(stateDir, dir) {
+  await ensureStateDir(stateDir);
+  const existing = await loadTranscriptsDirs(stateDir);
   if (!existing.includes(dir)) {
     existing.push(dir);
-    await writeFile(getTranscriptsDirsFile(hiveMindDir), existing.join(`
+    await writeFile(getTranscriptsDirsFile(stateDir), existing.join(`
 `) + `
 `, "utf-8");
   }
@@ -15982,7 +15997,7 @@ function isErrorResult(result) {
 var isAuthError = isErrorResult;
 async function loadAuthData() {
   try {
-    const file2 = Bun.file(AUTH_FILE);
+    const file2 = Bun.file(getAuthFile());
     if (!await file2.exists())
       return null;
     const data = await file2.json();
@@ -15996,8 +16011,8 @@ async function loadAuthData() {
   }
 }
 async function saveAuthData(data) {
-  await mkdir2(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 384 });
+  await mkdir2(getAuthDir(), { recursive: true });
+  await Bun.write(getAuthFile(), JSON.stringify(data, null, 2), { mode: 384 });
 }
 async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
   try {
@@ -16007,7 +16022,7 @@ async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
       body: new URLSearchParams({
         grant_type: "refresh_token",
         refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID
+        client_id: getClientId()
       })
     });
     if (!response.ok) {
@@ -17908,6 +17923,70 @@ import { readdir as readdir5 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join6 } from "path";
 
+// src/lib/summary.ts
+var META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
+function isMetaXml(text) {
+  const trimmed = text.trim();
+  return META_XML_TAGS.some((tag) => trimmed.startsWith(tag));
+}
+function isGarbageSummary(summary) {
+  const trimmed = summary.trim();
+  return isMetaXml(trimmed) || trimmed.startsWith("Caveat:");
+}
+function findSummaryEntry(entries) {
+  const uuids = new Set;
+  const summaries = [];
+  for (const entry of entries) {
+    if ("uuid" in entry && typeof entry.uuid === "string") {
+      uuids.add(entry.uuid);
+    }
+    if (entry.type === "summary") {
+      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
+    }
+  }
+  for (const s of summaries) {
+    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary(s.summary)) {
+      return s.summary;
+    }
+  }
+  const lastSummary = summaries.at(-1)?.summary;
+  return lastSummary && !isGarbageSummary(lastSummary) ? lastSummary : undefined;
+}
+function findFirstUserPrompt(entries) {
+  for (const entry of entries) {
+    if (entry.type !== "user")
+      continue;
+    const content = entry.message.content;
+    if (!content)
+      continue;
+    let text;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === "text" && "text" in block && typeof block.text === "string") {
+          text = block.text;
+          break;
+        }
+      }
+    }
+    if (text) {
+      const trimmed = text.trim();
+      if (isMetaXml(trimmed))
+        continue;
+      const firstLine = trimmed.split(`
+`)[0].trim();
+      if (firstLine) {
+        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
+      }
+    }
+  }
+  return;
+}
+function extractSessionSummary(entries) {
+  return findSummaryEntry(entries) || findFirstUserPrompt(entries);
+}
+
 // src/lib/upload-eligibility.ts
 var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
 var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;
@@ -17985,7 +18064,7 @@ function printUsage2() {
 }
 function formatPendingSession(info, idPrefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth) {
   const { eligibility, entries, agentCount } = info;
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const summary = extractSessionSummary(entries) || "";
   const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
   const dateCol = dateDisplay.padEnd(maxDateWidth);
   const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
@@ -18171,7 +18250,7 @@ async function index() {
 function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYear, escapeFileRefs) {
   const { meta: meta3, entries } = session;
   const msgs = String(meta3.messageCount);
-  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || "";
+  const rawSummary = extractSessionSummary(entries) || "";
   const summary = escapeFileRefs ? rawSummary.replace(/@/g, "\\@") : rawSummary;
   const commits = findGitCommits(entries).filter((c) => c.success);
   const commitList = commits.map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message)).join(" ");
@@ -18357,67 +18436,6 @@ function computeSignificantLocations(fileStats, cwd) {
     findSignificant(child, name);
   }
   return results.slice(0, 3);
-}
-var META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
-function isMetaXml(text) {
-  const trimmed = text.trim();
-  return META_XML_TAGS.some((tag) => trimmed.startsWith(tag));
-}
-function isGarbageSummary(summary) {
-  const trimmed = summary.trim();
-  return isMetaXml(trimmed) || trimmed.startsWith("Caveat:");
-}
-function findSummary(entries) {
-  const uuids = new Set;
-  const summaries = [];
-  for (const entry of entries) {
-    if ("uuid" in entry && typeof entry.uuid === "string") {
-      uuids.add(entry.uuid);
-    }
-    if (entry.type === "summary") {
-      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
-    }
-  }
-  for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary(s.summary)) {
-      return s.summary;
-    }
-  }
-  const lastSummary = summaries.at(-1)?.summary;
-  return lastSummary && !isGarbageSummary(lastSummary) ? lastSummary : undefined;
-}
-function findFirstUserPrompt(entries) {
-  for (const entry of entries) {
-    if (entry.type !== "user")
-      continue;
-    if ("isMeta" in entry && entry.isMeta === true)
-      continue;
-    const content = entry.message.content;
-    if (!content)
-      continue;
-    let text;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === "text" && "text" in block && typeof block.text === "string") {
-          text = block.text;
-          break;
-        }
-      }
-    }
-    if (text) {
-      const trimmed = text.trim();
-      if (isMetaXml(trimmed))
-        continue;
-      const firstLine = trimmed.split(`
-`)[0].trim();
-      if (firstLine) {
-        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
-      }
-    }
-  }
-  return;
 }
 function findGitCommits(entries) {
   const commits = [];
@@ -19732,7 +19750,7 @@ async function saveUpload(sessionId, storageId, summary) {
   }
 }
 
-// src/commands/session-start.ts
+// src/lib/hook-input.ts
 async function readStdin() {
   if (process.stdin.isTTY)
     return null;
@@ -19765,6 +19783,8 @@ async function readHookInput() {
     return {};
   }
 }
+
+// src/commands/session-start.ts
 var AUTO_UPLOAD_DELAY_MINUTES = 10;
 var verbose2 = () => process.env.HIVE_MIND_VERBOSE === "1";
 async function sessionStart() {
@@ -20049,7 +20069,7 @@ async function deviceAuthFlow() {
   const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID })
+    body: new URLSearchParams({ client_id: getClientId() })
   });
   const data = await response.json();
   const errorResult = ErrorResponseSchema.safeParse(data);
@@ -20087,7 +20107,7 @@ async function deviceAuthFlow() {
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: deviceAuth.device_code,
-        client_id: WORKOS_CLIENT_ID
+        client_id: getClientId()
       })
     });
     const tokenData = await tokenResponse.json();
@@ -20353,68 +20373,6 @@ async function upload() {
   await cleanup();
   return failures > 0 ? 1 : 0;
 }
-var META_XML_TAGS2 = ["<command-name>", "<local-command-", "<system-reminder>"];
-function isMetaXml2(text) {
-  const trimmed = text.trim();
-  return META_XML_TAGS2.some((tag) => trimmed.startsWith(tag));
-}
-function isGarbageSummary2(summary) {
-  const trimmed = summary.trim();
-  return isMetaXml2(trimmed) || trimmed.startsWith("Caveat:");
-}
-function findSummaryEntry(entries) {
-  const uuids = new Set;
-  const summaries = [];
-  for (const entry of entries) {
-    if ("uuid" in entry && typeof entry.uuid === "string") {
-      uuids.add(entry.uuid);
-    }
-    if (entry.type === "summary") {
-      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
-    }
-  }
-  for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary2(s.summary)) {
-      return s.summary;
-    }
-  }
-  const lastSummary = summaries.at(-1)?.summary;
-  return lastSummary && !isGarbageSummary2(lastSummary) ? lastSummary : undefined;
-}
-function findFirstUserPrompt2(entries) {
-  for (const entry of entries) {
-    if (entry.type !== "user")
-      continue;
-    const content = entry.message.content;
-    if (!content)
-      continue;
-    let text;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === "text" && "text" in block && typeof block.text === "string") {
-          text = block.text;
-          break;
-        }
-      }
-    }
-    if (text) {
-      const trimmed = text.trim();
-      if (isMetaXml2(trimmed))
-        continue;
-      const firstLine = trimmed.split(`
-`)[0].trim();
-      if (firstLine) {
-        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
-      }
-    }
-  }
-  return;
-}
-function extractSessionSummary(entries) {
-  return findSummaryEntry(entries) || findFirstUserPrompt2(entries);
-}
 
 // src/commands/heartbeat.ts
 import { join as join10 } from "path";
@@ -20456,6 +20414,7 @@ async function heartbeat() {
 }
 
 // src/cli.ts
+initConfig(createHiveMindConfig());
 var COMMANDS = {
   exclude: { description: "Exclude session from upload", handler: exclude },
   extract: { description: "Extract session (internal)", handler: extract, hidden: true },

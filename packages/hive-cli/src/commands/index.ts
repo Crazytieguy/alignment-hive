@@ -5,6 +5,7 @@ import { parseSession } from '@alignment-hive/shared';
 import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { indexCmd, usage } from '../lib/messages';
 import { colors, printError } from '../lib/output';
+import { extractSessionSummary } from '../lib/summary';
 import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
 import type { SessionEligibility } from '../lib/upload-eligibility';
 import type { ContentBlock, HiveMindMeta, KnownEntry, LogicalBlock, ParsedSession } from '@alignment-hive/shared';
@@ -97,7 +98,7 @@ function formatPendingSession(
   maxDateWidth: number,
 ): string {
   const { eligibility, entries, agentCount } = info;
-  const summary = findSummary(entries) || findFirstUserPrompt(entries) || '';
+  const summary = extractSessionSummary(entries) || '';
   const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
 
   const dateCol = dateDisplay.padEnd(maxDateWidth);
@@ -338,7 +339,7 @@ function formatSessionLine(
 ): { line: string; date: string; year: string } {
   const { meta, entries } = session;
   const msgs = String(meta.messageCount);
-  const rawSummary = findSummary(entries) || findFirstUserPrompt(entries) || '';
+  const rawSummary = extractSessionSummary(entries) || '';
   const summary = escapeFileRefs ? rawSummary.replace(/@/g, '\\@') : rawSummary;
 
   const commits = findGitCommits(entries).filter((c) => c.success);
@@ -559,74 +560,6 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
   }
 
   return results.slice(0, 3);
-}
-
-const META_XML_TAGS = ['<command-name>', '<local-command-', '<system-reminder>'];
-
-function isMetaXml(text: string): boolean {
-  const trimmed = text.trim();
-  return META_XML_TAGS.some((tag) => trimmed.startsWith(tag));
-}
-
-function isGarbageSummary(summary: string): boolean {
-  const trimmed = summary.trim();
-  return isMetaXml(trimmed) || trimmed.startsWith('Caveat:');
-}
-
-function findSummary(entries: Array<KnownEntry>): string | undefined {
-  const uuids = new Set<string>();
-  const summaries: Array<{ summary: string; leafUuid?: string }> = [];
-
-  for (const entry of entries) {
-    if ('uuid' in entry && typeof entry.uuid === 'string') {
-      uuids.add(entry.uuid);
-    }
-    if (entry.type === 'summary') {
-      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
-    }
-  }
-
-  for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary(s.summary)) {
-      return s.summary;
-    }
-  }
-
-  const lastSummary = summaries.at(-1)?.summary;
-  return lastSummary && !isGarbageSummary(lastSummary) ? lastSummary : undefined;
-}
-
-function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
-  for (const entry of entries) {
-    if (entry.type !== 'user') continue;
-    if ('isMeta' in entry && entry.isMeta === true) continue;
-
-    const content = entry.message.content;
-    if (!content) continue;
-
-    let text: string | undefined;
-    if (typeof content === 'string') {
-      text = content;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === 'text' && 'text' in block && typeof block.text === 'string') {
-          text = block.text;
-          break;
-        }
-      }
-    }
-
-    if (text) {
-      const trimmed = text.trim();
-      if (isMetaXml(trimmed)) continue;
-
-      const firstLine = trimmed.split('\n')[0].trim();
-      if (firstLine) {
-        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
-      }
-    }
-  }
-  return undefined;
 }
 
 interface GitCommit {

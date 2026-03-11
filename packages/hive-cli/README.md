@@ -1,14 +1,14 @@
-# hive-mind
+# hive-cli
 
-A system for alignment researchers to extract and share session learnings across the community.
+CLI for alignment-hive session extraction, sharing, and management. Powers both the `hive` and `hive-mind` plugins.
 
 ## Development
 
 **Important:** Always run commands from the monorepo root (`alignment-hive/`).
 
 When committing changes, always run:
-- `bun run --filter '@alignment-hive/hive-mind' test`
-- `bun run --filter '@alignment-hive/hive-mind' lint`
+- `bun run --filter '@alignment-hive/hive-cli' test`
+- `bun run --filter '@alignment-hive/hive-cli' lint`
 
 Both must pass before committing.
 
@@ -27,14 +27,14 @@ All user-facing strings (CLI output, error messages, help text) should be define
 To re-extract all sessions (e.g., after schema changes):
 ```bash
 rm -rf .claude/hive-mind/sessions/
-bun hive-mind/cli/cli.ts session-start
+bun packages/hive-cli/src/cli.ts session-start
 ```
 
 ## Regenerating Snapshot Tests
 
 The format tests use custom snapshot logic. To update snapshots:
 ```bash
-UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-mind' test
+UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-cli' test
 ```
 
 ## Skill and CLI Sync
@@ -46,7 +46,8 @@ The retrieval skill dynamically includes `--help` output. When CLI behavior chan
 | Variable | Description |
 |----------|-------------|
 | `HIVE_MIND_VERBOSE` | Set to `1` to show full error details in session-start hook output. By default, errors are summarized as a count. Only affects the session-start hook. |
-| `HIVE_MIND_CLIENT_ID` | Override WorkOS client ID (for staging/testing). See below. |
+| `HIVE_MIND_CLIENT_ID` | Override WorkOS client ID for hive-mind (for staging/testing). |
+| `ALIGNMENT_HIVE_CLIENT_ID` | Override WorkOS client ID for hive (for staging/testing). |
 | `DEBUG` | Set to `1` to enable debug logging. |
 
 ## Local Development with Staging Auth

@@ -10,7 +10,7 @@ Claude Code infrastructure for AI safety researchers.
 
 This is a **bun monorepo**:
 - `packages/web/` - TanStack Start web app (alignment-hive.com)
-- `packages/hive-mind-cli/` - CLI for session extraction
+- `packages/hive-cli/` - CLI for session extraction and sharing
 - `packages/shared/` - Shared code (schemas, parsing)
 - `plugins/` - Plugin distributions
 
@@ -18,7 +18,7 @@ This is a **bun monorepo**:
 
 **For web app**: Read [packages/web/README.md](packages/web/README.md) for local development setup
 
-**For CLI**: Read [packages/hive-mind-cli/CLAUDE.md](packages/hive-mind-cli/CLAUDE.md) for development guidelines. Run CLI commands from the project root: `bun packages/hive-mind-cli/src/cli.ts <command>`
+**For CLI**: Read [packages/hive-cli/CLAUDE.md](packages/hive-cli/CLAUDE.md) for development guidelines. Run CLI commands from the project root: `bun packages/hive-cli/src/cli.ts <command>`
 
 ## Running Scripts
 
@@ -31,8 +31,8 @@ bun run --filter '*' build
 bun run --filter '*' format
 
 # Specific workspace
-bun run --filter '@alignment-hive/hive-mind-cli' test
-bun run --filter '@alignment-hive/hive-mind-cli' lint
+bun run --filter '@alignment-hive/hive-cli' test
+bun run --filter '@alignment-hive/hive-cli' lint
 bun run --filter '@alignment-hive/web' lint
 ```
 
@@ -54,6 +54,7 @@ When updating plugin content (skills, commands, hooks, etc.), you must bump the 
 Plugin locations:
 - `plugins/autopilot/.claude-plugin/plugin.json`
 - `plugins/github-action/.claude-plugin/plugin.json`
+- `plugins/hive/.claude-plugin/plugin.json`
 - `plugins/hive-mind/.claude-plugin/plugin.json`
 - `plugins/mats/.claude-plugin/plugin.json`
 - `plugins/llms-fetch-mcp/.claude-plugin/plugin.json`

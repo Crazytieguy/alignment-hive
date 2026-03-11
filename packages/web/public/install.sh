@@ -319,7 +319,7 @@ main() {
   echo ""
   info "Next steps:"
   echo "    1. Open Claude Code in a project directory"
-  echo "    2. Run /hive:recommendations"
+  echo "    2. Run /hive:align"
   echo ""
 }
 

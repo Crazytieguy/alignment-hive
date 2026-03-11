@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { z } from 'zod';
-import { AUTH_DIR, AUTH_FILE, WORKOS_CLIENT_ID } from './config';
+import { getAuthDir, getAuthFile, getClientId } from './config';
 import { errors } from './messages';
 
 const WORKOS_API_URL = 'https://api.workos.com/user_management';
@@ -57,7 +57,7 @@ export const isAuthError = isErrorResult<AuthData>;
 
 export async function loadAuthData(): Promise<LoadAuthResult> {
   try {
-    const file = Bun.file(AUTH_FILE);
+    const file = Bun.file(getAuthFile());
     if (!(await file.exists())) return null;
     const data = await file.json();
     const parsed = AuthDataSchema.safeParse(data);
@@ -71,8 +71,8 @@ export async function loadAuthData(): Promise<LoadAuthResult> {
 }
 
 export async function saveAuthData(data: AuthData): Promise<void> {
-  await mkdir(AUTH_DIR, { recursive: true });
-  await Bun.write(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
+  await mkdir(getAuthDir(), { recursive: true });
+  await Bun.write(getAuthFile(), JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
 export type RefreshResult = AuthData | ErrorResult | null;
@@ -88,7 +88,7 @@ export async function refreshToken(
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: refreshTokenValue,
-        client_id: WORKOS_CLIENT_ID,
+        client_id: getClientId(),
       }),
     });
 

@@ -28,7 +28,7 @@ export function* parseJsonl(content: string) {
 
 type ExtractedEntry = Exclude<ReturnType<typeof parseKnownEntry>['data'], null>;
 
-function transformEntry(rawEntry: unknown): { entry: ExtractedEntry | null; error?: string } {
+export function transformEntry(rawEntry: unknown): { entry: ExtractedEntry | null; error?: string } {
   const result = parseKnownEntry(rawEntry);
   if (result.error) return { entry: null, error: result.error };
   if (!result.data) return { entry: null };
@@ -231,7 +231,7 @@ export function getHiveMindSessionsDir(projectCwd: string): string {
 }
 
 /** Count non-empty lines in a file by streaming (no parsing) */
-async function countRawLines(filePath: string): Promise<number> {
+export async function countRawLines(filePath: string): Promise<number> {
   const stream = createReadStream(filePath, { encoding: 'utf-8' });
   const rl = createInterface({ input: stream, crlfDelay: Infinity });
   let count = 0;
@@ -241,7 +241,7 @@ async function countRawLines(filePath: string): Promise<number> {
   return count;
 }
 
-async function findRawSessions(rawDir: string) {
+export async function findRawSessions(rawDir: string) {
   const files = await readdir(rawDir);
   const sessions: Array<{ path: string; agentId?: string }> = [];
 

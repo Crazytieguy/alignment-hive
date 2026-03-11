@@ -12,8 +12,8 @@ import {
 } from '../lib/extraction.js';
 import { errors, uploadCmd, usage } from '../lib/messages.js';
 import { printError, printInfo, printSuccess } from '../lib/output.js';
+import { extractSessionSummary } from '../lib/summary.js';
 import { lookupSession, sleep } from '../lib/utils.js';
-import type { KnownEntry } from '@alignment-hive/shared';
 
 async function uploadSession(cwd: string, sessionId: string): Promise<{ success: boolean; error?: string }> {
   const sessionsDir = getHiveMindSessionsDir(cwd);
@@ -248,76 +248,4 @@ export async function upload(): Promise<number> {
 
   await cleanup();
   return failures > 0 ? 1 : 0;
-}
-
-// Summary extraction for upload metadata
-const META_XML_TAGS = ['<command-name>', '<local-command-', '<system-reminder>'];
-
-function isMetaXml(text: string): boolean {
-  const trimmed = text.trim();
-  return META_XML_TAGS.some((tag) => trimmed.startsWith(tag));
-}
-
-function isGarbageSummary(summary: string): boolean {
-  const trimmed = summary.trim();
-  return isMetaXml(trimmed) || trimmed.startsWith('Caveat:');
-}
-
-function findSummaryEntry(entries: Array<KnownEntry>): string | undefined {
-  const uuids = new Set<string>();
-  const summaries: Array<{ summary: string; leafUuid?: string }> = [];
-
-  for (const entry of entries) {
-    if ('uuid' in entry && typeof entry.uuid === 'string') {
-      uuids.add(entry.uuid);
-    }
-    if (entry.type === 'summary') {
-      summaries.push({ summary: entry.summary, leafUuid: entry.leafUuid });
-    }
-  }
-
-  for (const s of summaries) {
-    if (s.leafUuid && uuids.has(s.leafUuid) && !isGarbageSummary(s.summary)) {
-      return s.summary;
-    }
-  }
-
-  const lastSummary = summaries.at(-1)?.summary;
-  return lastSummary && !isGarbageSummary(lastSummary) ? lastSummary : undefined;
-}
-
-function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
-  for (const entry of entries) {
-    if (entry.type !== 'user') continue;
-
-    const content = entry.message.content;
-    if (!content) continue;
-
-    let text: string | undefined;
-    if (typeof content === 'string') {
-      text = content;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === 'text' && 'text' in block && typeof block.text === 'string') {
-          text = block.text;
-          break;
-        }
-      }
-    }
-
-    if (text) {
-      const trimmed = text.trim();
-      if (isMetaXml(trimmed)) continue;
-
-      const firstLine = trimmed.split('\n')[0].trim();
-      if (firstLine) {
-        return firstLine.length > 100 ? `${firstLine.slice(0, 97)}...` : firstLine;
-      }
-    }
-  }
-  return undefined;
-}
-
-function extractSessionSummary(entries: Array<KnownEntry>): string | undefined {
-  return findSummaryEntry(entries) || findFirstUserPrompt(entries);
 }

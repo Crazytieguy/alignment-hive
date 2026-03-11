@@ -24,7 +24,7 @@ curl -fsSL https://alignment-hive.com/install.sh | bash
 
 This adds the marketplace, installs the hive plugin with auto-update, and optionally authenticates for session sharing.
 
-Then open Claude Code in your project and run `/hive:recommendations`.
+Then open Claude Code in your project and run `/hive:align`.
 
 ## Available Plugins
 

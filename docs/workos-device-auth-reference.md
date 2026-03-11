@@ -75,7 +75,7 @@ Returns same format as success response above. Refresh tokens are single-use (ro
 
 ## Client ID
 
-Stored in `packages/hive-mind-cli/src/lib/config.ts` as `WORKOS_CLIENT_ID`. This is a public value (no secret needed for device flow).
+Public value (no secret needed for device flow). Configurable via `ALIGNMENT_HIVE_CLIENT_ID` or `HIVE_MIND_CLIENT_ID` environment variables.
 
 ## Bash implementation sketch
 

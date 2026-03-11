@@ -1,5 +1,5 @@
 {
-  "name": "@alignment-hive/hive-mind-cli",
+  "name": "@alignment-hive/hive-cli",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,8 @@
     "lint": "tsc --noEmit -p src/tsconfig.json && eslint src --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write src",
-    "build": "bun build src/cli.ts --outfile=../../plugins/hive-mind/cli.js --target=bun"
+    "build": "bun build src/cli.ts --outfile=../../plugins/hive-mind/cli.js --target=bun",
+    "build:hive": "bun build --compile src/hive-cli.ts --outfile dist/hive-cli"
   },
   "dependencies": {
     "@alignment-hive/shared": "workspace:*",

@@ -60,7 +60,7 @@ function WelcomePage() {
           <li>
             Open Claude Code in your project and run:
             <pre className="p-2 bg-muted rounded text-xs">
-              /hive:recommendations
+              /hive:align
             </pre>
           </li>
         </ol>

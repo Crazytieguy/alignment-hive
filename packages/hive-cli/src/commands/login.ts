@@ -10,7 +10,7 @@ import {
   refreshToken,
   saveAuthData,
 } from '../lib/auth';
-import { WORKOS_CLIENT_ID } from '../lib/config';
+import { getClientId } from '../lib/config';
 import { errors, setup as msg } from '../lib/messages';
 import { colors, printError, printInfo, printSuccess, printWarning } from '../lib/output';
 import type { AuthUser } from '../lib/auth';
@@ -109,7 +109,7 @@ async function deviceAuthFlow(): Promise<number> {
   const response = await fetch(`${WORKOS_API_URL}/authorize/device`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: WORKOS_CLIENT_ID }),
+    body: new URLSearchParams({ client_id: getClientId() }),
   });
 
   const data = await response.json();
@@ -156,7 +156,7 @@ async function deviceAuthFlow(): Promise<number> {
       body: new URLSearchParams({
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
         device_code: deviceAuth.device_code,
-        client_id: WORKOS_CLIENT_ID,
+        client_id: getClientId(),
       }),
     });
 

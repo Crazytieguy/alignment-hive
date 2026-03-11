@@ -10,8 +10,11 @@ import { login } from './commands/login';
 import { setupAliasCommand } from './commands/setup-alias';
 import { upload } from './commands/upload';
 import { heartbeat } from './commands/heartbeat';
+import { createHiveMindConfig, initConfig } from './lib/config';
 import { errors, usage } from './lib/messages';
 import { printError } from './lib/output';
+
+initConfig(createHiveMindConfig());
 
 const COMMANDS = {
   'exclude': { description: 'Exclude session from upload', handler: exclude },
