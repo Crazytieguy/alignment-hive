@@ -52,9 +52,6 @@ The retrieval skill dynamically includes `--help` output. When CLI behavior chan
 
 ## Local Development with Staging Auth
 
-To test the CLI against the staging WorkOS environment instead of production, copy the project root `.env.example` to `.env.local`:
-```bash
-cp .env.example .env.local
-```
+Staging defaults (`HIVE_MIND_CLIENT_ID`, `HIVE_MIND_AUTH_FILE`) are in the checked-in root `.env` file — no setup needed.
 
-This sets `HIVE_MIND_CLIENT_ID` to use the staging WorkOS client instead of production.
+The CLI loads `.env` and `.env.local` from CWD on startup (via `loadEnvFiles()`), so this works both when running with bun and as a compiled binary. Per-dev overrides (e.g. `ALIGNMENT_HIVE_CONVEX_URL`) go in root `.env.local`, which is created by `bash scripts/setup-web.sh`.

@@ -1,6 +1,22 @@
 #!/usr/bin/env bun
 // @bun
+var __create = Object.create;
+var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __toESM = (mod, isNodeMode, target) => {
+  target = mod != null ? __create(__getProtoOf(mod)) : {};
+  const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
+  for (let key of __getOwnPropNames(mod))
+    if (!__hasOwnProp.call(to, key))
+      __defProp(to, key, {
+        get: () => mod[key],
+        enumerable: true
+      });
+  return to;
+};
+var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
@@ -10,16 +26,417 @@ var __export = (target, all) => {
       set: (newValue) => all[name] = () => newValue
     });
 };
+var __require = import.meta.require;
+
+// ../../node_modules/dotenv/package.json
+var require_package = __commonJS((exports, module) => {
+  module.exports = {
+    name: "dotenv",
+    version: "17.3.1",
+    description: "Loads environment variables from .env file",
+    main: "lib/main.js",
+    types: "lib/main.d.ts",
+    exports: {
+      ".": {
+        types: "./lib/main.d.ts",
+        require: "./lib/main.js",
+        default: "./lib/main.js"
+      },
+      "./config": "./config.js",
+      "./config.js": "./config.js",
+      "./lib/env-options": "./lib/env-options.js",
+      "./lib/env-options.js": "./lib/env-options.js",
+      "./lib/cli-options": "./lib/cli-options.js",
+      "./lib/cli-options.js": "./lib/cli-options.js",
+      "./package.json": "./package.json"
+    },
+    scripts: {
+      "dts-check": "tsc --project tests/types/tsconfig.json",
+      lint: "standard",
+      pretest: "npm run lint && npm run dts-check",
+      test: "tap run tests/**/*.js --allow-empty-coverage --disable-coverage --timeout=60000",
+      "test:coverage": "tap run tests/**/*.js --show-full-coverage --timeout=60000 --coverage-report=text --coverage-report=lcov",
+      prerelease: "npm test",
+      release: "standard-version"
+    },
+    repository: {
+      type: "git",
+      url: "git://github.com/motdotla/dotenv.git"
+    },
+    homepage: "https://github.com/motdotla/dotenv#readme",
+    funding: "https://dotenvx.com",
+    keywords: [
+      "dotenv",
+      "env",
+      ".env",
+      "environment",
+      "variables",
+      "config",
+      "settings"
+    ],
+    readmeFilename: "README.md",
+    license: "BSD-2-Clause",
+    devDependencies: {
+      "@types/node": "^18.11.3",
+      decache: "^4.6.2",
+      sinon: "^14.0.1",
+      standard: "^17.0.0",
+      "standard-version": "^9.5.0",
+      tap: "^19.2.0",
+      typescript: "^4.8.4"
+    },
+    engines: {
+      node: ">=12"
+    },
+    browser: {
+      fs: false
+    }
+  };
+});
+
+// ../../node_modules/dotenv/lib/main.js
+var require_main = __commonJS((exports, module) => {
+  var fs = __require("fs");
+  var path = __require("path");
+  var os = __require("os");
+  var crypto = __require("crypto");
+  var packageJson = require_package();
+  var version = packageJson.version;
+  var TIPS = [
+    "\uD83D\uDD10 encrypt with Dotenvx: https://dotenvx.com",
+    "\uD83D\uDD10 prevent committing .env to code: https://dotenvx.com/precommit",
+    "\uD83D\uDD10 prevent building .env in docker: https://dotenvx.com/prebuild",
+    "\uD83E\uDD16 agentic secret storage: https://dotenvx.com/as2",
+    "\u26A1\uFE0F secrets for agents: https://dotenvx.com/as2",
+    "\uD83D\uDEE1\uFE0F auth for agents: https://vestauth.com",
+    "\uD83D\uDEE0\uFE0F  run anywhere with `dotenvx run -- yourcommand`",
+    "\u2699\uFE0F  specify custom .env file path with { path: '/custom/path/.env' }",
+    "\u2699\uFE0F  enable debug logging with { debug: true }",
+    "\u2699\uFE0F  override existing env vars with { override: true }",
+    "\u2699\uFE0F  suppress all logs with { quiet: true }",
+    "\u2699\uFE0F  write to custom object with { processEnv: myObject }",
+    "\u2699\uFE0F  load multiple .env files with { path: ['.env.local', '.env'] }"
+  ];
+  function _getRandomTip() {
+    return TIPS[Math.floor(Math.random() * TIPS.length)];
+  }
+  function parseBoolean(value) {
+    if (typeof value === "string") {
+      return !["false", "0", "no", "off", ""].includes(value.toLowerCase());
+    }
+    return Boolean(value);
+  }
+  function supportsAnsi() {
+    return process.stdout.isTTY;
+  }
+  function dim(text) {
+    return supportsAnsi() ? `\x1B[2m${text}\x1B[0m` : text;
+  }
+  var LINE = /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/mg;
+  function parse(src) {
+    const obj = {};
+    let lines = src.toString();
+    lines = lines.replace(/\r\n?/mg, `
+`);
+    let match;
+    while ((match = LINE.exec(lines)) != null) {
+      const key = match[1];
+      let value = match[2] || "";
+      value = value.trim();
+      const maybeQuote = value[0];
+      value = value.replace(/^(['"`])([\s\S]*)\1$/mg, "$2");
+      if (maybeQuote === '"') {
+        value = value.replace(/\\n/g, `
+`);
+        value = value.replace(/\\r/g, "\r");
+      }
+      obj[key] = value;
+    }
+    return obj;
+  }
+  function _parseVault(options) {
+    options = options || {};
+    const vaultPath = _vaultPath(options);
+    options.path = vaultPath;
+    const result = DotenvModule.configDotenv(options);
+    if (!result.parsed) {
+      const err = new Error(`MISSING_DATA: Cannot parse ${vaultPath} for an unknown reason`);
+      err.code = "MISSING_DATA";
+      throw err;
+    }
+    const keys = _dotenvKey(options).split(",");
+    const length = keys.length;
+    let decrypted;
+    for (let i = 0;i < length; i++) {
+      try {
+        const key = keys[i].trim();
+        const attrs = _instructions(result, key);
+        decrypted = DotenvModule.decrypt(attrs.ciphertext, attrs.key);
+        break;
+      } catch (error) {
+        if (i + 1 >= length) {
+          throw error;
+        }
+      }
+    }
+    return DotenvModule.parse(decrypted);
+  }
+  function _warn(message) {
+    console.error(`[dotenv@${version}][WARN] ${message}`);
+  }
+  function _debug(message) {
+    console.log(`[dotenv@${version}][DEBUG] ${message}`);
+  }
+  function _log(message) {
+    console.log(`[dotenv@${version}] ${message}`);
+  }
+  function _dotenvKey(options) {
+    if (options && options.DOTENV_KEY && options.DOTENV_KEY.length > 0) {
+      return options.DOTENV_KEY;
+    }
+    if (process.env.DOTENV_KEY && process.env.DOTENV_KEY.length > 0) {
+      return process.env.DOTENV_KEY;
+    }
+    return "";
+  }
+  function _instructions(result, dotenvKey) {
+    let uri;
+    try {
+      uri = new URL(dotenvKey);
+    } catch (error) {
+      if (error.code === "ERR_INVALID_URL") {
+        const err = new Error("INVALID_DOTENV_KEY: Wrong format. Must be in valid uri format like dotenv://:key_1234@dotenvx.com/vault/.env.vault?environment=development");
+        err.code = "INVALID_DOTENV_KEY";
+        throw err;
+      }
+      throw error;
+    }
+    const key = uri.password;
+    if (!key) {
+      const err = new Error("INVALID_DOTENV_KEY: Missing key part");
+      err.code = "INVALID_DOTENV_KEY";
+      throw err;
+    }
+    const environment = uri.searchParams.get("environment");
+    if (!environment) {
+      const err = new Error("INVALID_DOTENV_KEY: Missing environment part");
+      err.code = "INVALID_DOTENV_KEY";
+      throw err;
+    }
+    const environmentKey = `DOTENV_VAULT_${environment.toUpperCase()}`;
+    const ciphertext = result.parsed[environmentKey];
+    if (!ciphertext) {
+      const err = new Error(`NOT_FOUND_DOTENV_ENVIRONMENT: Cannot locate environment ${environmentKey} in your .env.vault file.`);
+      err.code = "NOT_FOUND_DOTENV_ENVIRONMENT";
+      throw err;
+    }
+    return { ciphertext, key };
+  }
+  function _vaultPath(options) {
+    let possibleVaultPath = null;
+    if (options && options.path && options.path.length > 0) {
+      if (Array.isArray(options.path)) {
+        for (const filepath of options.path) {
+          if (fs.existsSync(filepath)) {
+            possibleVaultPath = filepath.endsWith(".vault") ? filepath : `${filepath}.vault`;
+          }
+        }
+      } else {
+        possibleVaultPath = options.path.endsWith(".vault") ? options.path : `${options.path}.vault`;
+      }
+    } else {
+      possibleVaultPath = path.resolve(process.cwd(), ".env.vault");
+    }
+    if (fs.existsSync(possibleVaultPath)) {
+      return possibleVaultPath;
+    }
+    return null;
+  }
+  function _resolveHome(envPath) {
+    return envPath[0] === "~" ? path.join(os.homedir(), envPath.slice(1)) : envPath;
+  }
+  function _configVault(options) {
+    const debug = parseBoolean(process.env.DOTENV_CONFIG_DEBUG || options && options.debug);
+    const quiet = parseBoolean(process.env.DOTENV_CONFIG_QUIET || options && options.quiet);
+    if (debug || !quiet) {
+      _log("Loading env from encrypted .env.vault");
+    }
+    const parsed = DotenvModule._parseVault(options);
+    let processEnv = process.env;
+    if (options && options.processEnv != null) {
+      processEnv = options.processEnv;
+    }
+    DotenvModule.populate(processEnv, parsed, options);
+    return { parsed };
+  }
+  function configDotenv(options) {
+    const dotenvPath = path.resolve(process.cwd(), ".env");
+    let encoding = "utf8";
+    let processEnv = process.env;
+    if (options && options.processEnv != null) {
+      processEnv = options.processEnv;
+    }
+    let debug = parseBoolean(processEnv.DOTENV_CONFIG_DEBUG || options && options.debug);
+    let quiet = parseBoolean(processEnv.DOTENV_CONFIG_QUIET || options && options.quiet);
+    if (options && options.encoding) {
+      encoding = options.encoding;
+    } else {
+      if (debug) {
+        _debug("No encoding is specified. UTF-8 is used by default");
+      }
+    }
+    let optionPaths = [dotenvPath];
+    if (options && options.path) {
+      if (!Array.isArray(options.path)) {
+        optionPaths = [_resolveHome(options.path)];
+      } else {
+        optionPaths = [];
+        for (const filepath of options.path) {
+          optionPaths.push(_resolveHome(filepath));
+        }
+      }
+    }
+    let lastError;
+    const parsedAll = {};
+    for (const path2 of optionPaths) {
+      try {
+        const parsed = DotenvModule.parse(fs.readFileSync(path2, { encoding }));
+        DotenvModule.populate(parsedAll, parsed, options);
+      } catch (e) {
+        if (debug) {
+          _debug(`Failed to load ${path2} ${e.message}`);
+        }
+        lastError = e;
+      }
+    }
+    const populated = DotenvModule.populate(processEnv, parsedAll, options);
+    debug = parseBoolean(processEnv.DOTENV_CONFIG_DEBUG || debug);
+    quiet = parseBoolean(processEnv.DOTENV_CONFIG_QUIET || quiet);
+    if (debug || !quiet) {
+      const keysCount = Object.keys(populated).length;
+      const shortPaths = [];
+      for (const filePath of optionPaths) {
+        try {
+          const relative = path.relative(process.cwd(), filePath);
+          shortPaths.push(relative);
+        } catch (e) {
+          if (debug) {
+            _debug(`Failed to load ${filePath} ${e.message}`);
+          }
+          lastError = e;
+        }
+      }
+      _log(`injecting env (${keysCount}) from ${shortPaths.join(",")} ${dim(`-- tip: ${_getRandomTip()}`)}`);
+    }
+    if (lastError) {
+      return { parsed: parsedAll, error: lastError };
+    } else {
+      return { parsed: parsedAll };
+    }
+  }
+  function config(options) {
+    if (_dotenvKey(options).length === 0) {
+      return DotenvModule.configDotenv(options);
+    }
+    const vaultPath = _vaultPath(options);
+    if (!vaultPath) {
+      _warn(`You set DOTENV_KEY but you are missing a .env.vault file at ${vaultPath}. Did you forget to build it?`);
+      return DotenvModule.configDotenv(options);
+    }
+    return DotenvModule._configVault(options);
+  }
+  function decrypt(encrypted, keyStr) {
+    const key = Buffer.from(keyStr.slice(-64), "hex");
+    let ciphertext = Buffer.from(encrypted, "base64");
+    const nonce = ciphertext.subarray(0, 12);
+    const authTag = ciphertext.subarray(-16);
+    ciphertext = ciphertext.subarray(12, -16);
+    try {
+      const aesgcm = crypto.createDecipheriv("aes-256-gcm", key, nonce);
+      aesgcm.setAuthTag(authTag);
+      return `${aesgcm.update(ciphertext)}${aesgcm.final()}`;
+    } catch (error) {
+      const isRange = error instanceof RangeError;
+      const invalidKeyLength = error.message === "Invalid key length";
+      const decryptionFailed = error.message === "Unsupported state or unable to authenticate data";
+      if (isRange || invalidKeyLength) {
+        const err = new Error("INVALID_DOTENV_KEY: It must be 64 characters long (or more)");
+        err.code = "INVALID_DOTENV_KEY";
+        throw err;
+      } else if (decryptionFailed) {
+        const err = new Error("DECRYPTION_FAILED: Please check your DOTENV_KEY");
+        err.code = "DECRYPTION_FAILED";
+        throw err;
+      } else {
+        throw error;
+      }
+    }
+  }
+  function populate(processEnv, parsed, options = {}) {
+    const debug = Boolean(options && options.debug);
+    const override = Boolean(options && options.override);
+    const populated = {};
+    if (typeof parsed !== "object") {
+      const err = new Error("OBJECT_REQUIRED: Please check the processEnv argument being passed to populate");
+      err.code = "OBJECT_REQUIRED";
+      throw err;
+    }
+    for (const key of Object.keys(parsed)) {
+      if (Object.prototype.hasOwnProperty.call(processEnv, key)) {
+        if (override === true) {
+          processEnv[key] = parsed[key];
+          populated[key] = parsed[key];
+        }
+        if (debug) {
+          if (override === true) {
+            _debug(`"${key}" is already defined and WAS overwritten`);
+          } else {
+            _debug(`"${key}" is already defined and was NOT overwritten`);
+          }
+        }
+      } else {
+        processEnv[key] = parsed[key];
+        populated[key] = parsed[key];
+      }
+    }
+    return populated;
+  }
+  var DotenvModule = {
+    configDotenv,
+    _configVault,
+    _parseVault,
+    config,
+    decrypt,
+    parse,
+    populate
+  };
+  exports.configDotenv = DotenvModule.configDotenv;
+  exports._configVault = DotenvModule._configVault;
+  exports._parseVault = DotenvModule._parseVault;
+  exports.config = DotenvModule.config;
+  exports.decrypt = DotenvModule.decrypt;
+  exports.parse = DotenvModule.parse;
+  exports.populate = DotenvModule.populate;
+  module.exports = DotenvModule;
+});
+
+// src/lib/load-env.ts
+var import_dotenv = __toESM(require_main(), 1);
+import { join } from "path";
+function loadEnvFiles() {
+  const cwd = process.cwd();
+  import_dotenv.config({ path: [join(cwd, ".env.local"), join(cwd, ".env")], quiet: true });
+}
 
 // src/commands/exclude.ts
 import { readFile as readFile3, readdir as readdir3, writeFile as writeFile3 } from "fs/promises";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 
 // src/lib/extraction.ts
 import { createReadStream } from "fs";
 import { mkdir as mkdir3, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
-import { basename as basename2, dirname, join as join2 } from "path";
+import { basename as basename2, dirname, join as join3 } from "path";
 
 // ../../node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -162,7 +579,7 @@ __export(exports_external, {
   cuid2: () => cuid22,
   cuid: () => cuid3,
   core: () => exports_core2,
-  config: () => config,
+  config: () => config2,
   coerce: () => exports_coerce,
   codec: () => codec,
   clone: () => clone,
@@ -301,7 +718,7 @@ __export(exports_core2, {
   decode: () => decode,
   createToJSONSchemaMethod: () => createToJSONSchemaMethod,
   createStandardJSONSchemaMethod: () => createStandardJSONSchemaMethod,
-  config: () => config,
+  config: () => config2,
   clone: () => clone,
   _xor: () => _xor,
   _xid: () => _xid,
@@ -611,7 +1028,7 @@ class $ZodEncodeError extends Error {
   }
 }
 var globalConfig = {};
-function config(newConfig) {
+function config2(newConfig) {
   if (newConfig)
     Object.assign(globalConfig, newConfig);
   return globalConfig;
@@ -1181,10 +1598,10 @@ function prefixIssues(path, issues) {
 function unwrapMessage(message) {
   return typeof message === "string" ? message : message?.message;
 }
-function finalizeIssue(iss, ctx, config2) {
+function finalizeIssue(iss, ctx, config3) {
   const full = { ...iss, path: iss.path ?? [] };
   if (!iss.message) {
-    const message = unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config2.customError?.(iss)) ?? unwrapMessage(config2.localeError?.(iss)) ?? "Invalid input";
+    const message = unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config3.customError?.(iss)) ?? unwrapMessage(config3.localeError?.(iss)) ?? "Invalid input";
     full.message = message;
   }
   delete full.inst;
@@ -1435,7 +1852,7 @@ var _parse = (_Err) => (schema, value, _ctx, _params) => {
     throw new $ZodAsyncError;
   }
   if (result.issues.length) {
-    const e = new (_params?.Err ?? _Err)(result.issues.map((iss) => finalizeIssue(iss, ctx, config())));
+    const e = new (_params?.Err ?? _Err)(result.issues.map((iss) => finalizeIssue(iss, ctx, config2())));
     captureStackTrace(e, _params?.callee);
     throw e;
   }
@@ -1448,7 +1865,7 @@ var _parseAsync = (_Err) => async (schema, value, _ctx, params) => {
   if (result instanceof Promise)
     result = await result;
   if (result.issues.length) {
-    const e = new (params?.Err ?? _Err)(result.issues.map((iss) => finalizeIssue(iss, ctx, config())));
+    const e = new (params?.Err ?? _Err)(result.issues.map((iss) => finalizeIssue(iss, ctx, config2())));
     captureStackTrace(e, params?.callee);
     throw e;
   }
@@ -1463,7 +1880,7 @@ var _safeParse = (_Err) => (schema, value, _ctx) => {
   }
   return result.issues.length ? {
     success: false,
-    error: new (_Err ?? $ZodError)(result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+    error: new (_Err ?? $ZodError)(result.issues.map((iss) => finalizeIssue(iss, ctx, config2())))
   } : { success: true, data: result.value };
 };
 var safeParse = /* @__PURE__ */ _safeParse($ZodRealError);
@@ -1474,7 +1891,7 @@ var _safeParseAsync = (_Err) => async (schema, value, _ctx) => {
     result = await result;
   return result.issues.length ? {
     success: false,
-    error: new _Err(result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+    error: new _Err(result.issues.map((iss) => finalizeIssue(iss, ctx, config2())))
   } : { success: true, data: result.value };
 };
 var safeParseAsync = /* @__PURE__ */ _safeParseAsync($ZodRealError);
@@ -3143,7 +3560,7 @@ function handleUnionResults(results, final, inst, ctx) {
     code: "invalid_union",
     input: final.value,
     inst,
-    errors: results.map((result) => result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+    errors: results.map((result) => result.issues.map((iss) => finalizeIssue(iss, ctx, config2())))
   });
   return final;
 }
@@ -3204,7 +3621,7 @@ function handleExclusiveUnionResults(results, final, inst, ctx) {
       code: "invalid_union",
       input: final.value,
       inst,
-      errors: results.map((result) => result.issues.map((iss) => finalizeIssue(iss, ctx, config())))
+      errors: results.map((result) => result.issues.map((iss) => finalizeIssue(iss, ctx, config2())))
     });
   } else {
     final.issues.push({
@@ -3563,7 +3980,7 @@ var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def) => {
             payload.issues.push({
               code: "invalid_key",
               origin: "record",
-              issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+              issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config2())),
               input: key,
               path: [key],
               inst
@@ -3634,7 +4051,7 @@ function handleMapResult(keyResult, valueResult, final, key, input, inst, ctx) {
         origin: "map",
         input,
         inst,
-        issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config()))
+        issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config2()))
       });
     }
   }
@@ -3648,7 +4065,7 @@ function handleMapResult(keyResult, valueResult, final, key, input, inst, ctx) {
         input,
         inst,
         key,
-        issues: valueResult.issues.map((iss) => finalizeIssue(iss, ctx, config()))
+        issues: valueResult.issues.map((iss) => finalizeIssue(iss, ctx, config2()))
       });
     }
   }
@@ -3918,7 +4335,7 @@ var $ZodCatch = /* @__PURE__ */ $constructor("$ZodCatch", (inst, def) => {
           payload.value = def.catchValue({
             ...payload,
             error: {
-              issues: result2.issues.map((iss) => finalizeIssue(iss, ctx, config()))
+              issues: result2.issues.map((iss) => finalizeIssue(iss, ctx, config2()))
             },
             input: payload.value
           });
@@ -3932,7 +4349,7 @@ var $ZodCatch = /* @__PURE__ */ $constructor("$ZodCatch", (inst, def) => {
       payload.value = def.catchValue({
         ...payload,
         error: {
-          issues: result.issues.map((iss) => finalizeIssue(iss, ctx, config()))
+          issues: result.issues.map((iss) => finalizeIssue(iss, ctx, config2()))
         },
         input: payload.value
       });
@@ -13056,12 +13473,12 @@ var ZodIssueCode = {
   custom: "custom"
 };
 function setErrorMap(map2) {
-  config({
+  config2({
     customError: map2
   });
 }
 function getErrorMap() {
-  return config().customError;
+  return config2().customError;
 }
 var ZodFirstPartyTypeKind;
 (function(ZodFirstPartyTypeKind2) {})(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
@@ -13552,7 +13969,7 @@ function date4(params) {
 }
 
 // ../../node_modules/zod/v4/classic/external.js
-config(en_default());
+config2(en_default());
 // ../shared/src/schemas.ts
 var TextBlockSchema = exports_external.looseObject({
   type: exports_external.literal("text"),
@@ -13941,10 +14358,10 @@ import { execSync } from "child_process";
 import { randomUUID } from "crypto";
 import { access, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { basename, join } from "path";
+import { basename, join as join2 } from "path";
 var _config = null;
-function initConfig(config2) {
-  _config = config2;
+function initConfig(config3) {
+  _config = config3;
 }
 function getConfig() {
   if (!_config) {
@@ -13955,15 +14372,15 @@ function getConfig() {
 function resolveAuthFile(envPath, defaultPath) {
   if (!envPath)
     return defaultPath;
-  return envPath.startsWith("~/") ? join(homedir(), envPath.slice(2)) : envPath;
+  return envPath.startsWith("~/") ? join2(homedir(), envPath.slice(2)) : envPath;
 }
 function createHiveMindConfig() {
-  const authDir = join(homedir(), ".claude", "hive-mind");
+  const authDir = join2(homedir(), ".claude", "hive-mind");
   return {
     authDir,
-    authFile: resolveAuthFile(process.env.HIVE_MIND_AUTH_FILE, join(authDir, "auth.json")),
+    authFile: resolveAuthFile(process.env.HIVE_MIND_AUTH_FILE, join2(authDir, "auth.json")),
     clientId: process.env.HIVE_MIND_CLIENT_ID ?? "client_01KE10CZ6FFQB9TR2NVBQJ4AKV",
-    getStateDir: (cwd) => join(cwd, ".claude", "hive-mind")
+    getStateDir: (cwd) => join2(cwd, ".claude", "hive-mind")
   };
 }
 function getAuthDir() {
@@ -13977,7 +14394,7 @@ function getClientId() {
 }
 async function ensureStateDir(stateDir) {
   await mkdir(stateDir, { recursive: true });
-  const gitignorePath = join(stateDir, ".gitignore");
+  const gitignorePath = join2(stateDir, ".gitignore");
   try {
     await access(gitignorePath);
   } catch {
@@ -13986,7 +14403,7 @@ async function ensureStateDir(stateDir) {
   }
 }
 async function getOrCreateCheckoutId(stateDir) {
-  const checkoutIdFile = join(stateDir, "checkout-id");
+  const checkoutIdFile = join2(stateDir, "checkout-id");
   try {
     const id = await readFile(checkoutIdFile, "utf-8");
     return id.trim();
@@ -14027,7 +14444,7 @@ function getCanonicalProjectName(cwd) {
 }
 async function isWorktree(cwd) {
   try {
-    const gitPath = join(cwd, ".git");
+    const gitPath = join2(cwd, ".git");
     const gitStat = await stat(gitPath);
     return gitStat.isFile();
   } catch {
@@ -14048,7 +14465,7 @@ function getMainWorktreePath(cwd) {
   }
 }
 function getTranscriptsDirsFile(stateDir) {
-  return join(stateDir, "transcripts-dirs");
+  return join2(stateDir, "transcripts-dirs");
 }
 async function loadTranscriptsDirs(stateDir) {
   try {
@@ -16266,7 +16683,7 @@ async function markSessionUploaded(sessionPath) {
   }
 }
 function getHiveMindSessionsDir(projectCwd) {
-  return join2(projectCwd, ".claude", "hive-mind", "sessions");
+  return join3(projectCwd, ".claude", "hive-mind", "sessions");
 }
 async function countRawLines(filePath) {
   const stream = createReadStream(filePath, { encoding: "utf-8" });
@@ -16284,19 +16701,19 @@ async function findRawSessions(rawDir) {
   for (const f of files) {
     if (f.endsWith(".jsonl")) {
       if (f.startsWith("agent-")) {
-        sessions.push({ path: join2(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+        sessions.push({ path: join3(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
       } else {
-        sessions.push({ path: join2(rawDir, f) });
+        sessions.push({ path: join3(rawDir, f) });
       }
       continue;
     }
-    const subagentsDir = join2(rawDir, f, "subagents");
+    const subagentsDir = join3(rawDir, f, "subagents");
     try {
       const subagentFiles = await readdir(subagentsDir);
       for (const sf of subagentFiles) {
         if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
           sessions.push({
-            path: join2(subagentsDir, sf),
+            path: join3(subagentsDir, sf),
             agentId: sf.replace("agent-", "").replace(".jsonl", "")
           });
         }
@@ -16398,7 +16815,7 @@ async function loadExtractedMetadata(extractedDir) {
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   const tAfterReaddir = performance.now();
   await Promise.all(jsonlFiles.map(async (file2) => {
-    const result = await readExtractedMeta(join2(extractedDir, file2));
+    const result = await readExtractedMeta(join3(extractedDir, file2));
     if (isMetaError(result)) {
       collectedErrors.push(result.error);
     } else if (result) {
@@ -16412,7 +16829,7 @@ async function loadExtractedMetadata(extractedDir) {
 }
 async function extractSingleSession(cwd, sessionId) {
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const transcriptsDirs = await loadTranscriptsDirs(join2(cwd, ".claude", "hive-mind"));
+  const transcriptsDirs = await loadTranscriptsDirs(join3(cwd, ".claude", "hive-mind"));
   if (transcriptsDirs.length === 0)
     return false;
   for (const transcriptsDir of transcriptsDirs) {
@@ -16420,7 +16837,7 @@ async function extractSingleSession(cwd, sessionId) {
       const rawSessions = await findRawSessions(transcriptsDir);
       const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
       if (session) {
-        const extractedPath = join2(extractedDir, basename2(session.path));
+        const extractedPath = join3(extractedDir, basename2(session.path));
         const result = await extractSession({
           rawPath: session.path,
           outputPath: extractedPath,
@@ -16461,7 +16878,7 @@ function printWarning(message) {
 // src/lib/utils.ts
 import { createInterface as createInterface2 } from "readline";
 import { readdir as readdir2 } from "fs/promises";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -16479,7 +16896,7 @@ function formatSessionId(id) {
 }
 async function lookupSession(cwd, sessionIdPrefix) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const exactPath = join3(sessionsDir, `${sessionIdPrefix}.jsonl`);
+  const exactPath = join4(sessionsDir, `${sessionIdPrefix}.jsonl`);
   const exactMetaResult = await readExtractedMeta(exactPath);
   if (exactMetaResult && !isMetaError(exactMetaResult)) {
     return { type: "found", sessionId: sessionIdPrefix, sessionPath: exactPath, meta: exactMetaResult };
@@ -16498,7 +16915,7 @@ async function lookupSession(cwd, sessionIdPrefix) {
     return { type: "ambiguous", matches: matches.map((m) => m.replace(".jsonl", "")) };
   }
   const sessionId = matches[0].replace(".jsonl", "");
-  const sessionPath = join3(sessionsDir, matches[0]);
+  const sessionPath = join4(sessionsDir, matches[0]);
   const metaResult = await readExtractedMeta(sessionPath);
   if (!metaResult || isMetaError(metaResult)) {
     return { type: "not_found" };
@@ -16540,7 +16957,7 @@ async function excludeAll(cwd) {
   }
   let nonExcludedCount = 0;
   for (const file2 of sessionFiles) {
-    const metaResult = await readExtractedMeta(join4(sessionsDir, file2));
+    const metaResult = await readExtractedMeta(join5(sessionsDir, file2));
     if (metaResult && !isMetaError(metaResult) && !metaResult.excluded && !metaResult.agentId) {
       nonExcludedCount++;
     }
@@ -16558,7 +16975,7 @@ async function excludeAll(cwd) {
   let succeeded = 0;
   let failed = 0;
   for (const file2 of sessionFiles) {
-    const sessionPath = join4(sessionsDir, file2);
+    const sessionPath = join5(sessionsDir, file2);
     const metaResult = await readExtractedMeta(sessionPath);
     if (!metaResult || isMetaError(metaResult) || metaResult.excluded || metaResult.agentId)
       continue;
@@ -16649,7 +17066,7 @@ async function extract() {
 
 // src/commands/search.ts
 import { readdir as readdir4 } from "fs/promises";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 
 // src/lib/field-filter.ts
 function parseFieldList(input) {
@@ -17752,7 +18169,7 @@ async function search() {
   }
   const allSessionIds = [];
   for (const file2 of jsonlFiles) {
-    const path = join5(sessionsDir, file2);
+    const path = join6(sessionsDir, file2);
     const sessionResult = await readExtractedSession(path);
     if (isSessionError(sessionResult)) {
       printError(sessionResult.error);
@@ -17769,7 +18186,7 @@ async function search() {
   for (const file2 of jsonlFiles) {
     if (options.maxMatches !== null && totalMatches >= options.maxMatches)
       break;
-    const path = join5(sessionsDir, file2);
+    const path = join6(sessionsDir, file2);
     const sessionResult = await readExtractedSession(path);
     if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId)
       continue;
@@ -17921,7 +18338,7 @@ function parseSearchOptions(args) {
 // src/commands/index.ts
 import { readdir as readdir5 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 
 // src/lib/summary.ts
 var META_XML_TAGS = ["<command-name>", "<local-command-", "<system-reminder>"];
@@ -18109,7 +18526,7 @@ async function showPendingStatus(cwd) {
   }
   const mainSessions = [];
   for (const file2 of jsonlFiles) {
-    const path = join6(sessionsDir, file2);
+    const path = join7(sessionsDir, file2);
     const sessionResult = await readExtractedSession(path);
     if (!sessionResult || isSessionError(sessionResult)) {
       if (isSessionError(sessionResult)) {
@@ -18216,7 +18633,7 @@ async function index() {
   }
   const allSessions = new Map;
   for (const file2 of jsonlFiles) {
-    const path = join6(sessionsDir, file2);
+    const path = join7(sessionsDir, file2);
     const sessionResult = await readExtractedSession(path);
     if (!sessionResult || isSessionError(sessionResult)) {
       if (isSessionError(sessionResult)) {
@@ -18519,7 +18936,7 @@ function getToolResultText(content) {
 
 // src/commands/read.ts
 import { readdir as readdir6 } from "fs/promises";
-import { join as join7 } from "path";
+import { join as join8 } from "path";
 function printUsage3() {
   console.log(usage.read());
 }
@@ -18600,7 +19017,7 @@ async function read() {
     }
     return 1;
   }
-  const sessionFile = join7(sessionsDir, matches2[0]);
+  const sessionFile = join8(sessionsDir, matches2[0]);
   let entryNumber = null;
   let rangeStart = null;
   let rangeEnd = null;
@@ -18682,7 +19099,7 @@ async function read() {
 // src/commands/session-start.ts
 import { closeSync, existsSync, openSync } from "fs";
 import { readFile as readFile5 } from "fs/promises";
-import { dirname as dirname2, join as join8 } from "path";
+import { dirname as dirname2, join as join9 } from "path";
 import { homedir as homedir4 } from "os";
 import { spawn } from "child_process";
 
@@ -18718,10 +19135,10 @@ async function writeShellConfig(content) {
 }
 var ALIAS_REGEX = /^alias\s+hive-mind\s*=\s*(['"])(.+?)\1\s*$/m;
 async function getExistingAliasCommand() {
-  const config2 = await readShellConfig();
-  if (!config2)
+  const config3 = await readShellConfig();
+  if (!config3)
     return null;
-  const match = config2.match(ALIAS_REGEX);
+  const match = config3.match(ALIAS_REGEX);
   if (!match)
     return null;
   return match[2];
@@ -18736,26 +19153,26 @@ async function setupAliasWithRoot(pluginRoot) {
 }
 async function setupAliasWithCommand(expected) {
   const shell = getShellConfig();
-  const config2 = await readShellConfig();
+  const config3 = await readShellConfig();
   const aliasLine = `alias ${ALIAS_NAME}='${expected}'`;
-  if (!config2) {
+  if (!config3) {
     const success3 = await writeShellConfig(`${aliasLine}
 `);
     return { success: success3, alreadyExists: false, sourceCmd: shell.sourceCmd };
   }
-  const match = config2.match(ALIAS_REGEX);
+  const match = config3.match(ALIAS_REGEX);
   if (match) {
     if (match[2] === expected) {
       return { success: true, alreadyExists: true, sourceCmd: shell.sourceCmd };
     }
-    const updated2 = config2.replace(ALIAS_REGEX, aliasLine);
+    const updated2 = config3.replace(ALIAS_REGEX, aliasLine);
     const success3 = await writeShellConfig(updated2);
     return { success: success3, alreadyExists: false, sourceCmd: shell.sourceCmd };
   }
-  const separator = config2.endsWith(`
+  const separator = config3.endsWith(`
 `) ? "" : `
 `;
-  const updated = `${config2}${separator}${aliasLine}
+  const updated = `${config3}${separator}${aliasLine}
 `;
   const success2 = await writeShellConfig(updated);
   return { success: success2, alreadyExists: false, sourceCmd: shell.sourceCmd };
@@ -19678,7 +20095,7 @@ var api2 = anyApi;
 var components = componentsGeneric();
 
 // src/lib/convex.ts
-var CONVEX_URL = process.env.CONVEX_URL ?? "https://grateful-warbler-176.convex.cloud";
+var CONVEX_URL = process.env.ALIGNMENT_HIVE_CONVEX_URL ?? "https://grateful-warbler-176.convex.cloud";
 function debugLog(message) {
   if (process.env.DEBUG) {
     console.error(`[convex] ${message}`);
@@ -19793,7 +20210,7 @@ async function sessionStart() {
   const collectedErrors = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
-  const hiveMindDir = join8(cwd, ".claude", "hive-mind");
+  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
   let transcriptsDirs;
   const inWorktree = await isWorktree(cwd);
   if (hookInput.transcriptPath) {
@@ -19801,7 +20218,7 @@ async function sessionStart() {
     if (inWorktree) {
       const mainPath = getMainWorktreePath(cwd);
       if (mainPath) {
-        const mainHiveMindDir = join8(mainPath, ".claude", "hive-mind");
+        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
         await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
       }
       transcriptsDirs = [transcriptsDir];
@@ -19926,8 +20343,8 @@ async function sessionStart() {
 }
 function getBunPath() {
   const bunInstall = process.env.BUN_INSTALL;
-  const customPath = bunInstall ? join8(bunInstall, "bin", "bun") : null;
-  const standardPath = join8(homedir4(), ".bun", "bin", "bun");
+  const customPath = bunInstall ? join9(bunInstall, "bin", "bun") : null;
+  const standardPath = join9(homedir4(), ".bun", "bin", "bun");
   if (customPath && existsSync(customPath))
     return customPath;
   if (existsSync(standardPath))
@@ -19937,7 +20354,7 @@ function getBunPath() {
 function spawnBackground(args) {
   try {
     const cwd = process.env.CWD || process.cwd();
-    const errorLogPath = join8(cwd, ".claude", "hive-mind", "error.log");
+    const errorLogPath = join9(cwd, ".claude", "hive-mind", "error.log");
     let stderrFd;
     try {
       stderrFd = openSync(errorLogPath, "a");
@@ -19966,7 +20383,7 @@ function scheduleHeartbeats(sessionIds) {
   return spawnBackground(["heartbeat", ...sessionIds]);
 }
 function getUploadPidPath(cwd) {
-  return join8(cwd, ".claude", "hive-mind", "upload.pid");
+  return join9(cwd, ".claude", "hive-mind", "upload.pid");
 }
 async function isUploadRunning(cwd) {
   const pidPath = getUploadPidPath(cwd);
@@ -20185,10 +20602,10 @@ async function setupAliasCommand() {
 
 // src/commands/upload.ts
 import { readFile as readFile6, unlink, writeFile as writeFile5 } from "fs/promises";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 async function uploadSession(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join9(sessionsDir, `${sessionId}.jsonl`);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
   let content;
   try {
     content = await readFile6(sessionPath, "utf-8");
@@ -20248,7 +20665,7 @@ async function uploadSession(cwd, sessionId) {
 }
 async function getAgentIds(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join9(sessionsDir, `${sessionId}.jsonl`);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
   const sessionResult = await readExtractedSession(sessionPath);
   if (!sessionResult || isSessionError(sessionResult)) {
     if (isSessionError(sessionResult) && process.env.DEBUG) {
@@ -20375,7 +20792,7 @@ async function upload() {
 }
 
 // src/commands/heartbeat.ts
-import { join as join10 } from "path";
+import { join as join11 } from "path";
 async function heartbeat() {
   const cwd = process.env.CWD || process.cwd();
   const sessionIds = process.argv.slice(3);
@@ -20390,7 +20807,7 @@ async function heartbeat() {
   const project = getCanonicalProjectName(cwd);
   let failures = 0;
   for (const sessionId of sessionIds) {
-    const metaResult = await readExtractedMeta(join10(sessionsDir, `${sessionId}.jsonl`));
+    const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
     if (!metaResult || isMetaError(metaResult)) {
       failures++;
       continue;
@@ -20414,6 +20831,7 @@ async function heartbeat() {
 }
 
 // src/cli.ts
+loadEnvFiles();
 initConfig(createHiveMindConfig());
 var COMMANDS = {
   exclude: { description: "Exclude session from upload", handler: exclude },

@@ -8,258 +8,258 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from "./routes/__root";
-import { Route as CallbackRouteImport } from "./routes/callback";
-import { Route as AdminRouteImport } from "./routes/admin";
-import { Route as AuthenticatedRouteImport } from "./routes/_authenticated";
-import { Route as IndexRouteImport } from "./routes/index";
-import { Route as AdminIndexRouteImport } from "./routes/admin/index";
-import { Route as AuthSignOutRouteImport } from "./routes/auth/sign-out";
-import { Route as AuthenticatedWelcomeRouteImport } from "./routes/_authenticated/welcome";
-import { Route as AdminUsersIndexRouteImport } from "./routes/admin/users/index";
-import { Route as AdminSessionsIndexRouteImport } from "./routes/admin/sessions/index";
-import { Route as AdminUsersUserIdRouteImport } from "./routes/admin/users/$userId";
-import { Route as AdminSessionsSessionIdRouteImport } from "./routes/admin/sessions/$sessionId";
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as CallbackRouteImport } from './routes/callback'
+import { Route as AdminRouteImport } from './routes/admin'
+import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as AdminIndexRouteImport } from './routes/admin/index'
+import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
+import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
+import { Route as AdminUsersIndexRouteImport } from './routes/admin/users/index'
+import { Route as AdminSessionsIndexRouteImport } from './routes/admin/sessions/index'
+import { Route as AdminUsersUserIdRouteImport } from './routes/admin/users/$userId'
+import { Route as AdminSessionsSessionIdRouteImport } from './routes/admin/sessions/$sessionId'
 
 const CallbackRoute = CallbackRouteImport.update({
-  id: "/callback",
-  path: "/callback",
+  id: '/callback',
+  path: '/callback',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AdminRoute = AdminRouteImport.update({
-  id: "/admin",
-  path: "/admin",
+  id: '/admin',
+  path: '/admin',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
-  id: "/_authenticated",
+  id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AdminIndexRoute = AdminIndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => AdminRoute,
-} as any);
+} as any)
 const AuthSignOutRoute = AuthSignOutRouteImport.update({
-  id: "/auth/sign-out",
-  path: "/auth/sign-out",
+  id: '/auth/sign-out',
+  path: '/auth/sign-out',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
-  id: "/welcome",
-  path: "/welcome",
+  id: '/welcome',
+  path: '/welcome',
   getParentRoute: () => AuthenticatedRoute,
-} as any);
+} as any)
 const AdminUsersIndexRoute = AdminUsersIndexRouteImport.update({
-  id: "/users/",
-  path: "/users/",
+  id: '/users/',
+  path: '/users/',
   getParentRoute: () => AdminRoute,
-} as any);
+} as any)
 const AdminSessionsIndexRoute = AdminSessionsIndexRouteImport.update({
-  id: "/sessions/",
-  path: "/sessions/",
+  id: '/sessions/',
+  path: '/sessions/',
   getParentRoute: () => AdminRoute,
-} as any);
+} as any)
 const AdminUsersUserIdRoute = AdminUsersUserIdRouteImport.update({
-  id: "/users/$userId",
-  path: "/users/$userId",
+  id: '/users/$userId',
+  path: '/users/$userId',
   getParentRoute: () => AdminRoute,
-} as any);
+} as any)
 const AdminSessionsSessionIdRoute = AdminSessionsSessionIdRouteImport.update({
-  id: "/sessions/$sessionId",
-  path: "/sessions/$sessionId",
+  id: '/sessions/$sessionId',
+  path: '/sessions/$sessionId',
   getParentRoute: () => AdminRoute,
-} as any);
+} as any)
 
 export interface FileRoutesByFullPath {
-  "/": typeof IndexRoute;
-  "/admin": typeof AdminRouteWithChildren;
-  "/callback": typeof CallbackRoute;
-  "/welcome": typeof AuthenticatedWelcomeRoute;
-  "/auth/sign-out": typeof AuthSignOutRoute;
-  "/admin/": typeof AdminIndexRoute;
-  "/admin/sessions/$sessionId": typeof AdminSessionsSessionIdRoute;
-  "/admin/users/$userId": typeof AdminUsersUserIdRoute;
-  "/admin/sessions": typeof AdminSessionsIndexRoute;
-  "/admin/users": typeof AdminUsersIndexRoute;
+  '/': typeof IndexRoute
+  '/admin': typeof AdminRouteWithChildren
+  '/callback': typeof CallbackRoute
+  '/welcome': typeof AuthenticatedWelcomeRoute
+  '/auth/sign-out': typeof AuthSignOutRoute
+  '/admin/': typeof AdminIndexRoute
+  '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
+  '/admin/users/$userId': typeof AdminUsersUserIdRoute
+  '/admin/sessions': typeof AdminSessionsIndexRoute
+  '/admin/users': typeof AdminUsersIndexRoute
 }
 export interface FileRoutesByTo {
-  "/": typeof IndexRoute;
-  "/callback": typeof CallbackRoute;
-  "/welcome": typeof AuthenticatedWelcomeRoute;
-  "/auth/sign-out": typeof AuthSignOutRoute;
-  "/admin": typeof AdminIndexRoute;
-  "/admin/sessions/$sessionId": typeof AdminSessionsSessionIdRoute;
-  "/admin/users/$userId": typeof AdminUsersUserIdRoute;
-  "/admin/sessions": typeof AdminSessionsIndexRoute;
-  "/admin/users": typeof AdminUsersIndexRoute;
+  '/': typeof IndexRoute
+  '/callback': typeof CallbackRoute
+  '/welcome': typeof AuthenticatedWelcomeRoute
+  '/auth/sign-out': typeof AuthSignOutRoute
+  '/admin': typeof AdminIndexRoute
+  '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
+  '/admin/users/$userId': typeof AdminUsersUserIdRoute
+  '/admin/sessions': typeof AdminSessionsIndexRoute
+  '/admin/users': typeof AdminUsersIndexRoute
 }
 export interface FileRoutesById {
-  __root__: typeof rootRouteImport;
-  "/": typeof IndexRoute;
-  "/_authenticated": typeof AuthenticatedRouteWithChildren;
-  "/admin": typeof AdminRouteWithChildren;
-  "/callback": typeof CallbackRoute;
-  "/_authenticated/welcome": typeof AuthenticatedWelcomeRoute;
-  "/auth/sign-out": typeof AuthSignOutRoute;
-  "/admin/": typeof AdminIndexRoute;
-  "/admin/sessions/$sessionId": typeof AdminSessionsSessionIdRoute;
-  "/admin/users/$userId": typeof AdminUsersUserIdRoute;
-  "/admin/sessions/": typeof AdminSessionsIndexRoute;
-  "/admin/users/": typeof AdminUsersIndexRoute;
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/_authenticated': typeof AuthenticatedRouteWithChildren
+  '/admin': typeof AdminRouteWithChildren
+  '/callback': typeof CallbackRoute
+  '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
+  '/auth/sign-out': typeof AuthSignOutRoute
+  '/admin/': typeof AdminIndexRoute
+  '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
+  '/admin/users/$userId': typeof AdminUsersUserIdRoute
+  '/admin/sessions/': typeof AdminSessionsIndexRoute
+  '/admin/users/': typeof AdminUsersIndexRoute
 }
 export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath;
+  fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | "/"
-    | "/admin"
-    | "/callback"
-    | "/welcome"
-    | "/auth/sign-out"
-    | "/admin/"
-    | "/admin/sessions/$sessionId"
-    | "/admin/users/$userId"
-    | "/admin/sessions"
-    | "/admin/users";
-  fileRoutesByTo: FileRoutesByTo;
+    | '/'
+    | '/admin'
+    | '/callback'
+    | '/welcome'
+    | '/auth/sign-out'
+    | '/admin/'
+    | '/admin/sessions/$sessionId'
+    | '/admin/users/$userId'
+    | '/admin/sessions'
+    | '/admin/users'
+  fileRoutesByTo: FileRoutesByTo
   to:
-    | "/"
-    | "/callback"
-    | "/welcome"
-    | "/auth/sign-out"
-    | "/admin"
-    | "/admin/sessions/$sessionId"
-    | "/admin/users/$userId"
-    | "/admin/sessions"
-    | "/admin/users";
+    | '/'
+    | '/callback'
+    | '/welcome'
+    | '/auth/sign-out'
+    | '/admin'
+    | '/admin/sessions/$sessionId'
+    | '/admin/users/$userId'
+    | '/admin/sessions'
+    | '/admin/users'
   id:
-    | "__root__"
-    | "/"
-    | "/_authenticated"
-    | "/admin"
-    | "/callback"
-    | "/_authenticated/welcome"
-    | "/auth/sign-out"
-    | "/admin/"
-    | "/admin/sessions/$sessionId"
-    | "/admin/users/$userId"
-    | "/admin/sessions/"
-    | "/admin/users/";
-  fileRoutesById: FileRoutesById;
+    | '__root__'
+    | '/'
+    | '/_authenticated'
+    | '/admin'
+    | '/callback'
+    | '/_authenticated/welcome'
+    | '/auth/sign-out'
+    | '/admin/'
+    | '/admin/sessions/$sessionId'
+    | '/admin/users/$userId'
+    | '/admin/sessions/'
+    | '/admin/users/'
+  fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute;
-  AuthenticatedRoute: typeof AuthenticatedRouteWithChildren;
-  AdminRoute: typeof AdminRouteWithChildren;
-  CallbackRoute: typeof CallbackRoute;
-  AuthSignOutRoute: typeof AuthSignOutRoute;
+  IndexRoute: typeof IndexRoute
+  AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
+  AdminRoute: typeof AdminRouteWithChildren
+  CallbackRoute: typeof CallbackRoute
+  AuthSignOutRoute: typeof AuthSignOutRoute
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    "/callback": {
-      id: "/callback";
-      path: "/callback";
-      fullPath: "/callback";
-      preLoaderRoute: typeof CallbackRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/admin": {
-      id: "/admin";
-      path: "/admin";
-      fullPath: "/admin";
-      preLoaderRoute: typeof AdminRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/_authenticated": {
-      id: "/_authenticated";
-      path: "";
-      fullPath: "";
-      preLoaderRoute: typeof AuthenticatedRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/": {
-      id: "/";
-      path: "/";
-      fullPath: "/";
-      preLoaderRoute: typeof IndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/admin/": {
-      id: "/admin/";
-      path: "/";
-      fullPath: "/admin/";
-      preLoaderRoute: typeof AdminIndexRouteImport;
-      parentRoute: typeof AdminRoute;
-    };
-    "/auth/sign-out": {
-      id: "/auth/sign-out";
-      path: "/auth/sign-out";
-      fullPath: "/auth/sign-out";
-      preLoaderRoute: typeof AuthSignOutRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/_authenticated/welcome": {
-      id: "/_authenticated/welcome";
-      path: "/welcome";
-      fullPath: "/welcome";
-      preLoaderRoute: typeof AuthenticatedWelcomeRouteImport;
-      parentRoute: typeof AuthenticatedRoute;
-    };
-    "/admin/users/": {
-      id: "/admin/users/";
-      path: "/users";
-      fullPath: "/admin/users";
-      preLoaderRoute: typeof AdminUsersIndexRouteImport;
-      parentRoute: typeof AdminRoute;
-    };
-    "/admin/sessions/": {
-      id: "/admin/sessions/";
-      path: "/sessions";
-      fullPath: "/admin/sessions";
-      preLoaderRoute: typeof AdminSessionsIndexRouteImport;
-      parentRoute: typeof AdminRoute;
-    };
-    "/admin/users/$userId": {
-      id: "/admin/users/$userId";
-      path: "/users/$userId";
-      fullPath: "/admin/users/$userId";
-      preLoaderRoute: typeof AdminUsersUserIdRouteImport;
-      parentRoute: typeof AdminRoute;
-    };
-    "/admin/sessions/$sessionId": {
-      id: "/admin/sessions/$sessionId";
-      path: "/sessions/$sessionId";
-      fullPath: "/admin/sessions/$sessionId";
-      preLoaderRoute: typeof AdminSessionsSessionIdRouteImport;
-      parentRoute: typeof AdminRoute;
-    };
+    '/callback': {
+      id: '/callback'
+      path: '/callback'
+      fullPath: '/callback'
+      preLoaderRoute: typeof CallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin': {
+      id: '/admin'
+      path: '/admin'
+      fullPath: '/admin'
+      preLoaderRoute: typeof AdminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated': {
+      id: '/_authenticated'
+      path: ''
+      fullPath: ''
+      preLoaderRoute: typeof AuthenticatedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/': {
+      id: '/admin/'
+      path: '/'
+      fullPath: '/admin/'
+      preLoaderRoute: typeof AdminIndexRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/auth/sign-out': {
+      id: '/auth/sign-out'
+      path: '/auth/sign-out'
+      fullPath: '/auth/sign-out'
+      preLoaderRoute: typeof AuthSignOutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/welcome': {
+      id: '/_authenticated/welcome'
+      path: '/welcome'
+      fullPath: '/welcome'
+      preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/admin/users/': {
+      id: '/admin/users/'
+      path: '/users'
+      fullPath: '/admin/users'
+      preLoaderRoute: typeof AdminUsersIndexRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/sessions/': {
+      id: '/admin/sessions/'
+      path: '/sessions'
+      fullPath: '/admin/sessions'
+      preLoaderRoute: typeof AdminSessionsIndexRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/users/$userId': {
+      id: '/admin/users/$userId'
+      path: '/users/$userId'
+      fullPath: '/admin/users/$userId'
+      preLoaderRoute: typeof AdminUsersUserIdRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/sessions/$sessionId': {
+      id: '/admin/sessions/$sessionId'
+      path: '/sessions/$sessionId'
+      fullPath: '/admin/sessions/$sessionId'
+      preLoaderRoute: typeof AdminSessionsSessionIdRouteImport
+      parentRoute: typeof AdminRoute
+    }
   }
 }
 
 interface AuthenticatedRouteChildren {
-  AuthenticatedWelcomeRoute: typeof AuthenticatedWelcomeRoute;
+  AuthenticatedWelcomeRoute: typeof AuthenticatedWelcomeRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedWelcomeRoute: AuthenticatedWelcomeRoute,
-};
+}
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
   AuthenticatedRouteChildren,
-);
+)
 
 interface AdminRouteChildren {
-  AdminIndexRoute: typeof AdminIndexRoute;
-  AdminSessionsSessionIdRoute: typeof AdminSessionsSessionIdRoute;
-  AdminUsersUserIdRoute: typeof AdminUsersUserIdRoute;
-  AdminSessionsIndexRoute: typeof AdminSessionsIndexRoute;
-  AdminUsersIndexRoute: typeof AdminUsersIndexRoute;
+  AdminIndexRoute: typeof AdminIndexRoute
+  AdminSessionsSessionIdRoute: typeof AdminSessionsSessionIdRoute
+  AdminUsersUserIdRoute: typeof AdminUsersUserIdRoute
+  AdminSessionsIndexRoute: typeof AdminSessionsIndexRoute
+  AdminUsersIndexRoute: typeof AdminUsersIndexRoute
 }
 
 const AdminRouteChildren: AdminRouteChildren = {
@@ -268,9 +268,9 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminUsersUserIdRoute: AdminUsersUserIdRoute,
   AdminSessionsIndexRoute: AdminSessionsIndexRoute,
   AdminUsersIndexRoute: AdminUsersIndexRoute,
-};
+}
 
-const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren);
+const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -278,17 +278,17 @@ const rootRouteChildren: RootRouteChildren = {
   AdminRoute: AdminRouteWithChildren,
   CallbackRoute: CallbackRoute,
   AuthSignOutRoute: AuthSignOutRoute,
-};
+}
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>();
+  ._addFileTypes<FileRouteTypes>()
 
-import type { getRouter } from "./router.tsx";
-import type { startInstance } from "./start.ts";
-declare module "@tanstack/react-start" {
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
   interface Register {
-    ssr: true;
-    router: Awaited<ReturnType<typeof getRouter>>;
-    config: Awaited<ReturnType<typeof startInstance.getOptions>>;
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
   }
 }

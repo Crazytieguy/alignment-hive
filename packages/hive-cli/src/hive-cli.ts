@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 
+import { loadEnvFiles } from './lib/load-env';
 import { createHiveConfig, initConfig } from './lib/config';
 import { printError } from './lib/output';
 
+loadEnvFiles();
 initConfig(createHiveConfig());
 
 const COMMANDS = new Map<string, () => Promise<number>>([

@@ -13,30 +13,26 @@ A TanStack Start + React web application for alignment researchers to share sess
 ### Setup
 
 ```bash
-# Copy environment template
-cp .env.local.example .env.local
-
-# Update with staging credentials (check .env.local.example for defaults)
-
 # Install dependencies (from repo root)
 bun install
 
-# Start dev server
-cd web
-bun dev
+# Configure Convex + WorkOS (interactive, one-time)
+bash scripts/setup-web.sh
+
+# Start dev server (from repo root)
+bun run --filter '@alignment-hive/web' dev
 ```
 
 The dev server runs on `http://localhost:3000` and includes both the frontend and Convex backend.
 
 ### Environment Variables
 
-**For local development** (staging credentials in `.env.local`):
+Non-secret defaults (`WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI`) live in the checked-in `.env` file. Secrets and per-dev config go in `.env.local` (gitignored), created by the setup script:
 
-- `WORKOS_CLIENT_ID`: Staging WorkOS client ID
-- `WORKOS_API_KEY`: Staging WorkOS API key
-- `WORKOS_COOKIE_PASSWORD`: Secure 32+ char string for session cookies
-- `WORKOS_REDIRECT_URI`: Should be `http://localhost:3000/callback`
-- `VITE_CONVEX_URL`: Convex dev deployment URL
+- `CONVEX_DEPLOYMENT`: Dev deployment name (written by `convex dev`)
+- `VITE_CONVEX_URL`: Dev deployment URL (written by `convex dev`)
+- `WORKOS_API_KEY`: Staging WorkOS API key (ask a team member)
+- `WORKOS_COOKIE_PASSWORD`: Auto-generated during setup
 
 **For production** (configured in Vercel):
 

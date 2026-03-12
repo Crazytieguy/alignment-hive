@@ -2,7 +2,7 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { isAuthError, loadAuthData } from './auth';
 
-const CONVEX_URL = process.env.CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
+const CONVEX_URL = process.env.ALIGNMENT_HIVE_CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
 function debugLog(message: string): void {
   if (process.env.DEBUG) {

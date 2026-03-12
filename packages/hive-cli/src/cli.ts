@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { loadEnvFiles } from './lib/load-env';
 import { exclude } from './commands/exclude';
 import { extract } from './commands/extract';
 import { search } from './commands/search';
@@ -14,6 +15,7 @@ import { createHiveMindConfig, initConfig } from './lib/config';
 import { errors, usage } from './lib/messages';
 import { printError } from './lib/output';
 
+loadEnvFiles();
 initConfig(createHiveMindConfig());
 
 const COMMANDS = {
