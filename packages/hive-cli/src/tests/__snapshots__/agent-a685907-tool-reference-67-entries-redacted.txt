@@ -1,0 +1,1350 @@
+# model=claude-opus-4-6 branch=main
+1|2026-03-07T07:57|user
+  I need to find out if WorkOS has documentation or guides for implementing the device authorization flow in a bash/shell script context, or if the device flow API is simple enough to implement with just curl and basic shell tools.
+
+  The device flow endpoints are:
+  1. `POST https:[REDACTED:high-entropy-secret]` - initiate, get device_code and user_code
+  2. `POST https:[REDACTED:high-entropy-secret]` - poll with device_code
+
+  Research:
+  1. Does WorkOS have any CLI/bash examples or guides for the device flow?
+  2. What are the exact request/response formats for both endpoints? Are they simple enough for curl + jq?
+  3. What does the polling response look like (authorization_pending, slow_down errors)?
+  4. What does the success response look like (access_token, refresh_token, user object)?
+
+  Try fetching:
+  - https:[REDACTED:high-entropy-secret]
+  - https:[REDACTED:high-entropy-secret]
+  - https:[REDACTED:high-entropy-secret]
+  - Any CLI or device flow guides
+
+  This is research only.
+2|07:57|assistant
+
+
+  I'll research WorkOS's device authorization flow documentation. Let me fetch multiple sources in parallel.
+3|07:57|tool|ToolSearch|query="select:WebFetch"|max_results="1"
+4|07:57|assistant
+
+
+  Now let me fetch the WorkOS documentation pages in parallel.
+5|07:57|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  # Device Authorization Flow Details
+
+  Based on the provided AuthKit documentation, I cannot extract the requested information about device authorization flow because **the content does not contain any details about it**.
+
+  The webpage focuses exclusively on:
+  - Basic AuthKit integration setup
+  - Hosted authentication flow configuration
+  - Redirect URI and sign-in endpoint setup
+  - Dashboard user validation
+
+  ## What's Missing
+
+  The documentation provided does not include:
+  - API endpoints for device authorization
+  - Request/response parameters and JSON structures
+  - Polling behavior, intervals, or error codes
+  - Authorization codes like `authorization_pending`, `slow_down`, or `expired_token`
+  - Access token and refresh token response formats
+  - curl or CLI/bash examples for device flow
+
+  ## Recommendation
+
+  To find device authorization flow specifications, you would need to consult:
+  1. Additional WorkOS documentation pages (not included in this excerpt)
+  2. The complete AuthKit API reference guide
+  3. WorkOS developer documentation on OAuth 2.0 device authorization grant flows
+
+  The excerpt provided covers initial setup but omits technical implementation details for device authorization workflows.
+6|07:57|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  Based on the provided web page content, I cannot extract details about the device authorization flow API reference because **that information is not included in the source material**.
+
+  The page only describes AuthKit as a general user management platform and mentions that users should "use the corresponding [events](https://workos.com/docs/events)" for responding to activities. It does not contain:
+
+  - API endpoints
+  - Request parameters
+  - Response formats or JSON fields
+  - Polling behavior specifications
+  - Error codes
+  - Success response details
+  - curl examples
+
+  To find the device authorization flow API documentation, you would need to access additional pages from the WorkOS documentation, likely a dedicated API reference section not shown here.
+7|07:57|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  # AuthKit Authentication Methods - Search Results
+
+  Based on the provided documentation, there is **no mention** of device authorization flow, device code flow, CLI authentication, or bash/shell script examples in the AuthKit guide content.
+
+  The documentation focuses exclusively on:
+
+  - **Hosted authentication flow** - The primary integration method described
+  - **Redirect URI configuration** - For post-authentication callbacks
+  - **Sign-in endpoint setup** - Application-defined endpoint for initiating authentication
+
+  The only CLI-related reference is a brief note about a separate tool: "The CLI Installer detects your framework, installs the SDK, configures your dashboard, and writes the integration code — all with a single command."
+
+  However, this CLI tool is mentioned only as an optional alternative to manual setup and is not detailed within this documentation page.
+
+  **Conclusion:** The AuthKit guide provided does not contain information about device-based authentication flows or shell script authentication examples. If you need those implementation details, you would need to consult additional WorkOS documentation or the referenced example apps.
+8|07:58|assistant
+  Those pages redirected to the general AuthKit docs. Let me try more specific URLs and the API reference.
+9|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  # Device Code Authentication in AuthKit
+
+  Based on the provided web page content, I cannot extract details about device code authentication because **the source material does not contain any information about this topic**.
+
+  The page describes AuthKit as a general user management platform with authentication features and event handling capabilities, but it doesn't specify:
+
+  - API endpoints for device code flow
+  - Request parameters or response formats
+  - Polling behavior or mechanisms
+  - Error codes or status responses
+  - Success response structures
+  - curl examples
+
+  To find comprehensive device code authentication documentation, you would need to access AuthKit's full API reference or developer documentation at workos.com/docs, which isn't included in the excerpt provided.
+10|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  Based on the provided content, I cannot extract details about creating a device authorization because that information is not included in the webpage excerpt.
+
+  The provided text only describes AuthKit as "a user management platform that provides a set of user authentication and organization security features" and mentions using events to respond to AuthKit activities. There is no mention of device authorization endpoints, request parameters (client_id, device_code, user_code, verification_uri, interval, expires_in), response formats, or curl examples.
+
+  To obtain this information, you would need to access the complete AuthKit API documentation on the WorkOS website.
+11|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  # Device Authorization Flow Guide - Not Found
+
+  The provided AuthKit documentation does not contain information about a device authorization flow guide. The content focuses exclusively on integrating hosted authentication into applications and covers:
+
+  - General AuthKit setup and installation
+  - Redirect URI configuration
+  - Sign-in endpoint setup
+  - User validation through the WorkOS Dashboard
+
+  **No details are present regarding:**
+  - Device authorization flow steps
+  - Polling mechanisms
+  - Device-specific endpoints
+  - Request/response formats for device flows
+  - Error handling for device authentication
+  - CLI or curl examples for device authorization
+
+  To locate device authorization flow documentation, you would need to consult other sections of the WorkOS documentation or contact WorkOS support directly, as this particular guide focuses on standard hosted authentication integration rather than device authorization patterns.
+12|07:58|assistant
+  All those URLs seem to redirect to the generic AuthKit page. Let me try the llms.txt approach and the actual API reference section.
+13|07:58|tool|WebFetch|url="https://workos.com/llms.txt"
+[result]
+  Request failed with status code 500
+14|07:58|tool|WebFetch|url="https://workos.com/docs/reference"
+[result]
+  <tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>
+15|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  <tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>
+16|07:58|assistant
+  Let me try a few more approaches - the MCP fetch tool and direct WorkOS API docs.
+17|07:58|tool|ToolSearch|query="select:mcp__llms-fetch__fetch"|max_results="1"
+18|07:58|tool|mcp__llms-fetch__fetch|url="https://workos.com/docs"
+[result]
+  ## https://workos.com/docs
+  Saved to: [REDACTED:high-entropy-secret]
+  Type: html-converted (103 lines, 159 words, 2324 chars)
+
+  ### Content
+  Additional Products
+  ----------
+
+  [
+
+  ![](https://images.workoscdn.com/docs/icons/sso-20220915.png)
+
+  Single Sign-On
+  ----------
+
+  Integrate your existing auth stack with any SAML or OIDC identity provider.
+
+  ](https://workos.com/docs/sso)[
+
+  ![](https://images.workoscdn.com/docs/icons/directory-sync-20220915.png)
+
+  Directory Sync
+  ----------
+
+  Add user lifecycle management for SCIM and HRIS providers to your existing stack.
+
+  ](https://workos.com/docs/directory-sync)[
+
+  ![](https://images.workoscdn.com/docs/icons/admin-portal-20220915.png)
+
+  Admin Portal
+  ----------
+
+  Enable IT admins to have a self-serve onboarding experience.
+
+  ](https://workos.com/docs/admin-portal)[
+
+  ![](https://images.workoscdn.com/docs/icons/audit-logs-20220915.png)
+
+  Audit Logs
+  ----------
+
+  Ingest and export audit log events from your applications.
+
+  ](https://workos.com/docs/audit-logs)[
+
+  ![](https://images.workoscdn.com/images/a98eae2c-11de-4f68-870d-e59d8c43b0ae.png)
+
+  Role-Based Access Control
+  ----------
+
+  Manage user access using flexible roles and permissions.
+
+  ](https://workos.com/docs/rbac)[
+
+  ![](https://images.workoscdn.com/images/b2dfe55a-71c0-4cde-822b-008661184d83.png)
+
+  Fine-Grained Authorization
+  ----------
+
+  Implement fine grained authorization in your application.
+
+  ](https://workos.com/docs/fga)[
+
+  ![](https://images.workoscdn.com/images/0a039188-a43b-4977-ac70-5297c59aef88.png)
+
+  Vault
+  ----------
+
+  Encrypt, store, and control access to sensitive data.
+
+  ](https://workos.com/docs/vault)[
+
+  ![](https://images.workoscdn.com/images/ecec2848-7878-4d16-bd3b-e8f8fb2e87b6.png)
+
+  Pipes
+  ----------
+
+  Enable your customers to connect their third-party accounts to your application.
+
+  ](https://workos.com/docs/pipes)[
+
+  ![](https://images.workoscdn.com/images/21e06a1f-2a0e-4421-acda-2505254088fb.png)
+
+  Feature Flags
+  ----------
+
+  Control rollout of new features in your application.
+
+  ](https://workos.com/docs/feature-flags)[
+
+  ![](https://images.workoscdn.com/images/97226f05-2516-40c5-a583-f67bc2192227.png)
+
+  Widgets
+  ----------
+
+  Complete functionality for common enterprise app workflows.
+
+  ](https://workos.com/docs/widgets)[
+
+  ![](https://images.workoscdn.com/images/e7d34bcd-09a5-457c-b894-c77e7164b4d2.png)
+
+  Domain Verification
+  ----------
+
+  Allow your customers to securely claim ownership of a domain.
+
+  ](https://workos.com/docs/domain-verification)
+19|07:58|tool|WebFetch|url="https://workos.com/docs/reference/user-management"
+[result]
+  # AuthKit API Endpoints Analysis
+
+  Based on the provided content, **no specific API endpoints are listed**. The page does not include:
+
+  - Device authorization endpoints
+  - Device code endpoints
+  - Authentication endpoints
+  - Full URL structures for API reference sections
+
+  ## What is mentioned:
+
+  The document references that users should "use the corresponding [events](https://workos.com/docs/events)" to respond to platform activities, but this is a general reference rather than an enumerated list of endpoints.
+
+  The content describes AuthKit as offering "user authentication and organization security features" but provides no technical endpoint documentation or URL patterns for developers to implement integration.
+
+  **Recommendation:** Consult the complete AuthKit API documentation on WorkOS's developer portal for specific endpoint specifications.
+20|07:58|assistant
+  The WorkOS docs site seems to use heavy client-side rendering. Let me try the API reference directly and also search for their OpenAPI spec or developer blog posts about device flow.
+21|07:58|tool|mcp__llms-fetch__fetch|url="https://workos.com/docs/reference"
+[result]
+  ## https://workos.com/docs/reference
+  Saved to: [REDACTED:high-entropy-secret]
+  Type: markdown (13 lines, 112 words, 814 chars)
+
+  ### Content
+  # Getting started
+
+  The WorkOS API gives you everything you need to make your app enterprise-ready. Authenticate users, sync directories, enforce access controls, stream audit logs, and more -- all through a single integration.
+
+  The API is organized around REST. It accepts JSON-encoded request bodies, returns JSON-encoded responses, and uses standard HTTP response codes, authentication, and verbs.
+
+  [Sign in](https://dashboard.workos.com/) to see code examples customized with your API keys and data.
+
+  ```url title="API Base URL"
+  https://api_workos_com
+  ```
+
+  **Not a developer?** You can explore most of WorkOS without writing any code. The [WorkOS Dashboard](https://dashboard.workos.com/) lets you configure SSO connections, manage directories, set up audit log streams, and more -- all from a visual interface.
+
+  ## https://workos.com/docs/reference/index.md
+  Saved to: /Users/yoav/projects/alignment-hive/.llms-fetch-mcp/workos.com/docs/reference/index.md
+  Type: markdown (13 lines, 112 words, 815 chars)
+
+  ### Content
+  # Getting started
+
+  The WorkOS API gives you everything you need to make your app enterprise-ready. Authenticate users, sync directories, enforce access controls, stream audit logs, and more -- all through a single integration.
+
+  The API is organized around REST. It accepts JSON-encoded request bodies, returns JSON-encoded responses, and uses standard HTTP response codes, authentication, and verbs.
+
+  [Sign in](https://dashboard.workos.com/) to see code examples customized with your API keys and data.
+
+  ```url title="API Base URL"
+  https://api_workos_com
+  ```
+
+  **Not a developer?** You can explore most of WorkOS without writing any code. The [WorkOS Dashboard](https://dashboard.workos.com/) lets you configure SSO connections, manage directories, set up audit log streams, and more -- all from a visual interface.
+22|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  Request failed with status code 404
+23|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]?q=device"
+[result]
+  <tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>
+24|07:58|assistant
+  Let me look at the WorkOS Node SDK source code on GitHub and search for device flow documentation more specifically.
+25|07:58|tool|ToolSearch|query="select:Bash,WebSearch"|max_results="2"
+26|07:58|tool|WebSearch|query="WorkOS device authorization flow API endpoint device_code user_code"
+[result]
+  Web search results for query: "WorkOS device authorization flow API endpoint device_code user_code"
+
+  Links: [{"title":"How to add auth to your Go CLI using WorkOS — WorkOS","url":"https:[REDACTED:high-entropy-secret]"},{"title":"CLI Auth – AuthKit – WorkOS Docs","url":"https://workos.com/docs/authkit/cli-auth"},{"title":"API Reference – WorkOS Docs","url":"https://workos.com/docs/reference"},{"title":"AuthKit – WorkOS Docs","url":"https:[REDACTED:high-entropy-secret]"},{"title":"Single Sign-On – WorkOS Docs","url":"https://workos.com/docs/sso"},{"title":"User Management – WorkOS Docs","url":"https://workos.com/docs/user-management"},{"title":"Glossary – WorkOS Docs","url":"https://workos.com/docs/glossary"},{"title":"The complete guide to OAuth 2.0 — WorkOS Guides","url":"https:[REDACTED:high-entropy-secret]"},{"title":"Call Your API Using the Device Authorization Flow - Auth0 Docs","url":"https:[REDACTED:high-entropy-secret]"},{"title":"Best practices for CLI authentication: A technical guide — WorkOS Guides","url":"https:[REDACTED:high-entropy-secret]"}]
+
+  Based on the search results, I found relevant information about the WorkOS device authorization flow API endpoint. Here's what I found:
+
+  ## Device Authorization Flow Endpoint
+
+  To begin the authentication flow, your CLI application makes a request to the /authorize/device endpoint to obtain the necessary codes and URLs for user authentication.
+
+  ## Endpoint Details
+
+  The specific endpoint URL is: `https:[REDACTED:high-entropy-secret]`
+
+  When you hit the WorkOS Device Authorization endpoint, it retrieves a response containing: device_code, user_code, verification_uri, verification_uri_complete, expires_in, and interval.
+
+  ## Response Example
+
+  The response includes fields like "device_code": "[REDACTED:high-entropy-secret]", "user_code": "RRGQ-BJVS", "verification_uri": "https:[REDACTED:high-entropy-secret]", and an expiration time of 300 seconds with a polling interval of 5 seconds.
+
+  ## Token Exchange
+
+  After getting a response, your app can make requests to the token endpoint using device_code from the authorization response. The token endpoint is `https:[REDACTED:high-entropy-secret]` with the grant type `urn:ietf:params:oauth:grant-type:device_code`.
+
+  This device authorization flow is particularly useful for CLI authentication where users cannot interact with a browser directly on the machine running the CLI.
+
+
+  REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+27|07:58|tool|WebSearch|query="WorkOS CLI authentication device flow bash curl example"
+[result]
+  Web search results for query: "WorkOS CLI authentication device flow bash curl example"
+
+  Links: [{"title":"Authenticate CLI tools seamlessly with OAuth Device Flow — WorkOS","url":"https://workos.com/blog/cli-auth"},{"title":"CLI Auth – AuthKit – WorkOS Docs","url":"https://workos.com/docs/authkit/cli-auth"},{"title":"Best practices for CLI authentication: A technical guide — WorkOS Guides","url":"https:[REDACTED:high-entropy-secret]"},{"title":"GitHub - workos/cli: AI-powered CLI wizard that automatically integrates WorkOS AuthKit into your app · GitHub","url":"https://github.com/workos/cli"},{"title":"GitHub - [REDACTED:high-entropy-secret]: A runnable demo of browser-based authentication in a command line context that demonstrates retrieving and storing an access token.","url":"https:[REDACTED:high-entropy-secret]"},{"title":"CLI Installer – AuthKit – WorkOS Docs","url":"https:[REDACTED:high-entropy-secret]"},{"title":"AuthKit – WorkOS Docs","url":"https:[REDACTED:high-entropy-secret]"},{"title":"Hosted UI – AuthKit – WorkOS Docs","url":"https:[REDACTED:high-entropy-secret]"},{"title":"OAuth Applications – AuthKit – WorkOS Docs","url":"https://workos.com/docs/authkit/connect/oauth"},{"title":"API Reference – WorkOS Docs","url":"https://workos.com/docs/reference/authkit/authentication"}]
+
+  I found information about WorkOS CLI authentication using the device flow. Here's what the search results show:
+
+  ## WorkOS CLI Authentication Device Flow
+
+  WorkOS offers CLI Authentication for AuthKit, bringing OAuth 2.0 Device Authorization Grant Flow to hosted AuthKit customers, enabling users to securely authenticate command-line applications using the same trusted AuthKit experience from web apps.
+
+  ### How It Works
+
+  From a user's perspective, CLI Auth works by running a command in their terminal (like `mycli login`), seeing a short code and URL, visiting that URL in their browser to authenticate, and having their CLI tool instantly authorized.
+
+  To begin the authentication flow, your CLI application makes a request to the `/authorize/device` endpoint to obtain the necessary codes and URLs for user authentication. While the user is completing authentication in their browser, your CLI application should poll the token endpoint to check for authorization completion.
+
+  ### Implementation Example
+
+  While the search results don't provide a specific bash curl example, a common pattern used by tools like GitHub's CLI involves initiating an OAuth flow by starting a local server, launching the user's browser to the WorkOS AuthKit authentication page, exchanging the authorization code for an access token, and securely storing the token in the system keychain for future use.
+
+  For specific bash curl examples, you can refer to the runnable demo of browser-based OAuth authentication flows in command-line applications powered by WorkOS AuthKit available on GitHub at `[REDACTED:high-entropy-secret]`, or check the official WorkOS documentation for detailed API endpoint specifications.
+
+
+  REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+28|07:58|tool|Bash|command="curl -s https://raw.githubusercontent.com/workos/workos-node/main/src/user-management/user-management.ts 2>/dev/null | head -500"|description="Fetch WorkOS Node SDK source to find device flow methods"
+[result]
+  Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user said:
+  use llms fetch
+29|07:59|assistant
+  Excellent, found key documentation pages. Let me now fetch the actual docs and blog posts with detailed API information.
+30|07:59|tool|mcp__llms-fetch__fetch|url="https://workos.com/docs/authkit/cli-auth"
+[result]
+  ## https://workos.com/docs/authkit/cli-auth
+  Saved to: [REDACTED:high-entropy-secret]
+  Type: markdown (188 lines, 734 words, 6937 chars)
+
+  ### Content
+  # CLI Auth
+
+  ## Introduction
+
+  CLI Auth enables your command-line applications to authenticate users through the web via your WorkOS app. Based on the [OAuth 2.0 Device Authorization Flow](https:[REDACTED:high-entropy-secret]), this flow is optimized for devices that lack a web browser or have limited input capabilities.
+
+  With CLI Auth, your command-line app requests a device authorization from WorkOS, which includes a code for the user and a code for your app. After the user confirms the code, your app can exchanges its device code for tokens.
+
+  ## (1) Request device authorization
+
+  To begin the authentication flow, your CLI application makes a request to the `/authorize/device` endpoint to obtain the necessary codes and URLs for user authentication.
+
+  #### Request
+
+  ```js
+  const response = await fetch(
+    'https:[REDACTED:high-entropy-secret]',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': '[REDACTED:high-entropy-secret]',
+      },
+      body: new URLSearchParams({
+        client_id: 'client_123456789',
+      }),
+    },
+  );
+
+  const data = await response.json();
+  ```
+
+  #### Response
+
+  ```json
+  {
+    "device_code": "[REDACTED:high-entropy-secret]",
+    "user_code": "RRGQ-BJVS",
+    "verification_uri": "https://authkit_domain/device",
+    "verification_uri_complete": "https://authkit_domain/device?user_code=ABCD-EFGH",
+    "expires_in": 300,
+    "interval": 5
+  }
+  ```
+
+  After you get a response, your app can provide next steps to the user.
+
+  ![Screenshot of a command-line application showing login information](https://images.workoscdn.com/images/89680848-5c40-4ba1-860f-a7212cfbb47b.png?auto=format\&fit=clip\&q=50)
+
+  Your application should display the `user_code` from the response, along with the `verification_uri` in the terminal. If you offer the ability to open in a browser easily like in this screenshot, we suggest using the `verification_uri_complete` for that.
+
+  Never display the `device_code` to the user. That is only for the device to poll the token endpoint.
+
+  ## (2) User confirms the code
+
+  Next the user needs to confirm the code in their browser.
+
+  ### (A) Manual code entry
+
+  If the user navigates to the `verification_uri`, they'll be presented with a form to enter the code manually. If they are not logged in they'll be prompted to do that first and then returned to the code entry screen.
+
+  ![Screenshot of the manual-code-entry form in AuthKit](https://images.workoscdn.com/images/03c1961a-547a-4886-bb9a-2f080dd31ca9.png?auto=format\&fit=clip\&q=50)
+
+  ### (B) One-click confirmation
+
+  If the user goes to the `verification_uri_complete`, (for example, `https://<authkit_domain>/device?user_code=ABCD-EFGH`, they'll instead need to confirm that the code matches what is displayed in the terminal.
+
+  ![Screenshot of the pre-filled code-confirmation form in AuthKit](https://images.workoscdn.com/images/3e02f36c-0dea-4ff4-9dc5-a2f2fa964114.png?auto=format\&fit=clip\&q=50)
+
+  ## (3) Request tokens
+
+  While the user is completing authentication in their browser, your CLI application should poll the token endpoint to check for authorization completion.
+
+  Make requests to the token endpoint using `device_code` from the authorization response from step 1:
+
+  #### Request
+
+  ```js
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function pollForTokens({
+    clientId,
+    deviceCode,
+    expiresIn = 300,
+    interval = 5,
+  }) {
+    const timeout = AbortSignal.timeout(expiresIn * 1000);
+
+    while (true) {
+      const response = await (async () => {
+        try {
+          return await fetch(
+            'https:[REDACTED:high-entropy-secret]',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': '[REDACTED:high-entropy-secret]',
+              },
+              body: new URLSearchParams({
+                grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+                device_code: deviceCode,
+                client_id: clientId,
+              }),
+              signal: timeout,
+            },
+          );
+        } catch (error) {
+          if (error.name === 'TimeoutError') {
+            throw new Error('Authorization timed out');
+          }
+          throw error;
+        }
+      })();
+
+      const data = await response.json();
+
+      if (response.ok) {
+        // Success! Return tokens for further processing.
+        return data;
+      }
+
+      switch (data.error) {
+        case 'authorization_pending':
+          // Wait before polling again
+          await sleep(interval * 1000);
+          break;
+
+        case 'slow_down':
+          // You shouldn't see this if you're only polling every 5 seconds.
+          // In this example, we're increasing the interval by 1 second when this happens.
+          interval += 1;
+          await sleep(interval * 1000);
+          break;
+
+        // Terminal cases
+        case 'access_denied':
+        case 'expired_token':
+          throw new Error('Authorization failed');
+
+        default:
+          throw new Error('Authorization failed');
+      }
+    }
+  }
+  ```
+
+  #### Response
+
+  ```json
+  {
+    "user": {
+      "object": "user",
+      "id": "[REDACTED:high-entropy-secret]",
+      "email": "grant.mccode@workos.com",
+      "email_verified": true,
+      "first_name": "Grant",
+      "last_name": "McCode",
+      "profile_picture_url": null,
+      "last_sign_in_at": "2025-06-25T19:16:35.647Z",
+      "created_at": "2025-06-25T01:20:21.355Z",
+      "updated_at": "2025-06-25T19:16:35.647Z",
+      "external_id": null
+    },
+    "organization_id": "[REDACTED:high-entropy-secret]",
+    "access_token": "[REDACTED:jwt],
+    "[REDACTED:generic-api-key],
+    "authentication_method": "GoogleOAuth"
+  }
+  ```
+
+  ### Polling best practices
+
+  - Poll at the interval specified in the authorization response (every 5 seconds)
+  - Respect `slow_down` errors by increasing your polling interval
+  - Stop polling when you receive `access_denied` or `expired_token` errors
+  - Implement a reasonable timeout to avoid infinite polling
+
+  ## Connect
+
+  CLI Auth is available for [Connect](https://workos.com/docs/authkit/connect/oauth) applications, allowing you and third-party developers to build CLI tools that integrate with your app's credentials.
+
+  The flow is the same but uses Connect endpoints:
+
+  - **Authorization**: `https://<authkit_domain>/oauth2/device_authorization`
+  - **Token**: `https://<authkit_domain>/oauth2/token`
+
+  Since command-line applications are distributed to end users, you should avoid embedding the client secret in the app. To make this work, set up your Connect app as a [*Public* application](https:[REDACTED:high-entropy-secret]).
+
+  Third-party Connect applications will require users to [grant consent](https:[REDACTED:high-entropy-secret]) to the third-party app.
+
+
+  ## https://workos.com/docs/authkit/cli-auth.md
+  Saved to: /Users/yoav/projects/alignment-hive/.llms-fetch-mcp/workos.com/docs/authkit/cli-auth.md
+  Type: markdown (58 lines, 400 words, 3301 chars)
+
+  ### Content
+  # AuthKit
+
+  ## Introduction
+
+  Integrating AuthKit into your app can be done in less than ten minutes. In this guide, we'll walk you through adding a hosted authentication flow to your application using AuthKit.
+
+  > **Want to skip the manual setup?** The [CLI Installer](https:[REDACTED:high-entropy-secret]) detects your framework, installs the SDK, configures your dashboard, and writes the integration code — all with a single command.
+
+  In addition to this guide, there are a variety of [example apps](https:[REDACTED:high-entropy-secret]) available to help with your integration.
+
+  ## Before getting started
+
+  To get the most out of this guide, you'll need:
+
+  - A [WorkOS account](https://dashboard.workos.com/)
+  - Your WorkOS [API Key](https://workos.com/docs/glossary/api-key) and [Client ID](https://workos.com/docs/glossary/client-id)
+
+  ***
+
+  ## (1) Configure your project
+
+  Let's add the necessary dependencies and configuration in your WorkOS Dashboard.
+
+  ### Install dependencies
+
+  ### Configure a redirect URI
+
+  A redirect URI is a callback endpoint that WorkOS will redirect to after a user has authenticated. This endpoint will exchange the authorization code returned by WorkOS for an authenticated [User object](https://workos.com/docs/reference/authkit/user). We'll create this endpoint in the next step.
+
+  You can set a redirect URI in the **Redirects** section of the [WorkOS Dashboard](https://dashboard.workos.com). We recommend using `http://localhost:3000/callback` as the default here.
+
+  WorkOS supports using wildcard characters in Redirect URIs, but not for the default Redirect URI. More information about wildcard characters support can be found in the [Redirect URIs](https://workos.com/docs/sso/redirect-uris/wildcard-characters) guide.
+
+  When users sign out of their application, they will be redirected to your app's [Sign-out redirect](https://workos.com/docs/authkit/sessions/configuring-sessions/sign-out-redirect) location which is configured in the same dashboard area.
+
+  ### Configure sign-in endpoint
+
+  In these cases, AuthKit will detect when a sign-in request did not originate at your application and redirect to your application's sign-in endpoint. This is an endpoint that you define at your application that redirects users to sign in using AuthKit. We'll create this endpoint in the next step.
+
+  You can configure the sign-in endpoint from the **Redirects** section of the WorkOS dashboard.
+
+  ![Sign-in endpoint](https://images.workoscdn.com/images/25b53ea7-95ba-48cc-b6e7-ccd1b1bc35eb.png?auto=format\&fit=clip\&q=80)
+
+  > The code examples use your staging API keys when [signed in](https://dashboard.workos.com)
+
+  ***
+
+  ## (2) Add AuthKit to your app
+
+  Let's integrate the hosted authentication flow into your app.
+
+  > If you haven't configured a [Sign-out redirect](https://workos.com/docs/authkit/sessions/configuring-sessions/sign-out-redirect) in the WorkOS dashboard, users will see an error when logging out.
+
+  ## Validate the authentication flow
+
+  You can then sign in with the newly created credentials and see the user listed in the **Users** section of the [WorkOS Dashboard](https://dashboard.workos.com).
+
+  ![Dashboard showing newly created user](https://images.workoscdn.com/images/54fa6e6c-4c6f-4959-9301-344aeb4eeac8.png?auto=format\&fit=clip\&q=80)
+31|07:59|tool|mcp__llms-fetch__fetch|url="https:[REDACTED:high-entropy-secret]"
+[result]
+  ## https:[REDACTED:high-entropy-secret]
+  Saved to: [REDACTED:high-entropy-secret]
+  Type: html-converted (239 lines, 895 words, 9338 chars)
+
+  ### Table of Contents
+    29→**What we will build**
+    43→**Prerequisites**
+    53→**Step 1: Start the auth flow from the CLI**
+    97→**Step 2: Prompt the user to authenticate**
+   120→**Step 3: Poll for access tokens**
+   201→**Putting it all together**
+32|07:59|tool|mcp__llms-fetch__fetch|url="https://workos.com/blog/cli-auth"
+[result]
+  ## https://workos.com/blog/cli-auth
+  Saved to: [REDACTED:high-entropy-secret]
+  Type: html-converted (78 lines, 590 words, 5811 chars)
+
+  ### Content
+  June 27, 2025
+
+  June 27, 2025
+
+  Allow users to sign in via CLIs and on TVs and other non-traditional devices
+
+  <img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]%20Roberts%202.png" alt="" sizes="24px" srcset="https:[REDACTED:high-entropy-secret]%20Roberts%202-p-500.png 500w, https:[REDACTED:high-entropy-secret]%20Roberts%202.png 800w">
+
+  Eric Roberts
+
+  <img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]%20Roberts%202.png" alt="" sizes="100vw" srcset="https:[REDACTED:high-entropy-secret]%20Roberts%202-p-500.png 500w, https:[REDACTED:high-entropy-secret]%20Roberts%202.png 800w">
+
+  <img height="24" loading="eager" width="24" src="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/65c395d147bdaa9a88c52dd9_fernando.png" alt="" sizes="100vw" srcset="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/65c395d147bdaa9a88c52dd9_fernando-p-500.png 500w, https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/65c395d147bdaa9a88c52dd9_fernando.png 512w">
+
+  <img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]%20Dorman.png" alt="" sizes="100vw" srcset="https:[REDACTED:high-entropy-secret]%20Dorman-p-500.png 500w, https:[REDACTED:high-entropy-secret]%20Dorman.png 512w">
+
+  <img height="24" loading="eager" width="24" src="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/668db047e569985bec529cbd_Chance.png" alt="" sizes="100vw" srcset="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/668db047e569985bec529cbd_Chance-p-500.png 500w, https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/668db047e569985bec529cbd_Chance.png 512w">
+
+  <img height="24" loading="eager" width="24" src="https://workos.com/blog/cli-auth" alt="">
+
+  June 27, 2025
+
+  Today, we're launching CLI Authentication for AuthKit, bringing [OAuth 2.0 Device Authorization Grant Flow](https:[REDACTED:high-entropy-secret]) to hosted AuthKit customers.
+
+  This feature enables your users to securely authenticate command-line applications using the same trusted AuthKit experience they are familiar with from your web app, now available to all hosted AuthKit customers at no additional cost.
+
+  In this article, we'll explore how CLI Auth works and how you can implement it to provide your users with a seamless authentication experience for non-traditional devices like TVs and terminal-based tools.
+
+  What is CLI Authentication?
+  ----------
+
+  Anyone who's built a CLI tool knows the authentication challenge: how do you securely authenticate users without a browser?
+
+  Traditional approaches, such as storing API keys in configuration files or environment variables, pose security risks and lead to poor user experiences.
+
+  The OAuth 2.0 Device Authorization Grant Flow, which we refer to as CLI Auth, elegantly solves this issue.
+
+  You've probably used this flow before when logging into streaming apps on your TV—you see a code on screen, visit a URL on your phone, and magically you're logged in.
+
+  From a user's perspective, CLI Auth works like this: they run a command in their terminal (like `mycli login`), see a short code and URL, visit that URL in their browser to authenticate, and their CLI tool is instantly authorized.
+
+  No copying long API keys, no insecure credential storage—just a secure and easy-to-complete flow.From a technical perspective, CLI Auth implements the OAuth 2.0 Device Authorization Grant Flow specification.
+
+  When a user initiates authentication, the CLI requests a device code from your AuthKit instance. This code is displayed to the user along with a verification URL. Once the user completes authentication in their browser, the CLI tool receives the authorization tokens it needs to act on the user's behalf.
+
+  Implement CLI Auth with WorkOS
+  ----------
+
+  To start using CLI Auth, ensure you're using hosted AuthKit (this feature is not available for headless AuthKit implementations). The feature is automatically available—no configuration needed.
+
+  Your CLI application initiates the device authorization flow by making a request to the device authorization endpoint. [See the docs ](https:[REDACTED:high-entropy-secret])to get started.
+
+  ```
+  # Your CLI displays:
+  # Please visit: https://your-app.com/device
+  # And enter code: WDJB-MJHT
+
+  Or visit: https://your-app.com/device?user_code=WDJB-MJHT
+  ```
+
+  The user visits the URL, sees your familiar AuthKit login screen, and enters the code (or it's pre-filled if they used the direct URL). After authenticating, they see a confirmation screen, and your CLI receives the access tokens.
+
+  Security benefits
+  ----------
+
+  CLI Auth provides significant security advantages over traditional CLI authentication methods:
+
+  * No long-lived credentials are stored on disk
+  * Users can revoke access through your standard AuthKit session management
+  * Authentication happens in the browser, where users can verify your domain
+  * Supports all AuthKit security features, including MFA and SSO
+
+  Get started
+  ----------
+
+  CLI Auth is available now for all hosted AuthKit customers. To implement it in your CLI tools, check out our documentation.
+
+  ‍[Get started with AuthKit](https:[REDACTED:high-entropy-secret]) or [read the docs](https:[REDACTED:high-entropy-secret]) to add CLI Auth to your existing implementation today.
+33|07:59|assistant
+  That first fetch gave me the complete documentation. Now let me also get the Go blog post for additional implementation details, and check the API reference for the authenticate endpoint.
+34|07:59|tool|ToolSearch|query="select:Read"|max_results="1"
+35|07:59|assistant
+
+
+  Let me read the full Go blog post for additional implementation details.
+36|07:59|tool|Read|file_path=[REDACTED:high-entropy-secret]
+[result]
+       1→July 30, 2025
+       2→
+       3→July 30, 2025
+       4→
+       5→Authenticate users in your Go command-line tool with a secure OAuth 2.0 Device Code flow using WorkOS. This tutorial shows how to implement login via the terminal, step by step.
+       6→
+       7→<img height="24" loading="eager" width="24" src="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/671f94f562311089fcaad4fb_66e854bdb169b1ca742715c4_Maria.webp" alt="" sizes="24px" srcset="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/671f94f562311089fcaad4fb_66e854bdb169b1ca742715c4_Maria-p-500.webp 500w, https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/671f94f562311089fcaad4fb_66e854bdb169b1ca742715c4_Maria.webp 512w">
+       8→
+       9→Maria Paktiti
+      10→
+      11→<img height="24" loading="eager" width="24" src="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/671f94f562311089fcaad4fb_66e854bdb169b1ca742715c4_Maria.webp" alt="" sizes="100vw" srcset="https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/671f94f562311089fcaad4fb_66e854bdb169b1ca742715c4_Maria-p-500.webp 500w, https://cdn.prod.website-files.com/621f84dc15b5ed16dc85a18a/671f94f562311089fcaad4fb_66e854bdb169b1ca742715c4_Maria.webp 512w">
+      12→
+      13→<img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]" alt="">
+      14→
+      15→<img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]" alt="">
+      16→
+      17→<img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]" alt="">
+      18→
+      19→<img height="24" loading="eager" width="24" src="https:[REDACTED:high-entropy-secret]" alt="">
+      20→
+      21→July 30, 2025
+      22→
+      23→Modern CLI apps often need to authenticate users, and using a simple web-based[ OAuth](https:[REDACTED:high-entropy-secret]) flow is the cleanest way to do it.
+      24→
+      25→In this tutorial, we’ll implement a CLI login flow using[ WorkOS CLI Auth](https://workos.com/blog/cli-auth) to authenticate users from the command line by using a web browser. Based on the[ OAuth 2.0 Device Authorization Grant](https:[REDACTED:high-entropy-secret]), this method is perfect for CLIs where embedding a browser isn't feasible.
+      26→
+      27→In this guide, we’ll walk through how to add auth to your Go CLI using WorkOS, step by step.
+      28→
+      29→**What we will build**
+      30→----------
+      31→
+      32→You’ll create a Go CLI that:
+      33→
+      34→1. **Requests a device code from WorkOS:** The CLI starts the login flow by contacting WorkOS to get a device\_code (for itself) and a user\_code (for the user), along with a URL the user should visit.
+      35→2. **Displays a user-friendly prompt**: The CLI prints the user\_code and verification URL in the terminal, and optionally opens the browser automatically for the user to log in and approve.
+      36→3. **Polls WorkOS while the user logs in**: As the user completes authentication in the browser, the CLI quietly checks in with WorkOS every few seconds to see if the user has completed the login.
+      37→4. **Exchanges the device code for tokens**: Once authorized, the CLI receives an access token ready to make authenticated API calls.
+      38→
+      39→This flow is ideal for tools running in environments that can’t easily embed a browser window (like the terminal), and it avoids the need to paste auth tokens manually.
+      40→
+      41→Let’s dive in.
+      42→
+      43→**Prerequisites**
+      44→----------
+      45→
+      46→Before starting, make sure you have:
+      47→
+      48→* A[ WorkOS account](https://workos.com/signup).
+      49→* A CLI app registered as a[ public app](https:[REDACTED:high-entropy-secret]). You can configure one in the[ WorkOS dashboard \> Applications](https:[REDACTED:high-entropy-secret]). Note down the Client ID.
+      50→* Go 1.21+ installed.
+      51→* You must use[ AuthKit](https://www.authkit.com/) for your authentication UI (for info on how to customize the look-and-feel see our[ docs](https:[REDACTED:high-entropy-secret])).
+      52→
+      53→**Step 1: Start the auth flow from the CLI**
+      54→----------
+      55→
+      56→Start by initiating the device authorization flow from your CLI tool. This will generate a user-facing code and a verification URL.
+      57→
+      58→```
+      59→
+      60→func requestDeviceCode() (map[string]interface{}, error) {
+      61→    resp, err := http.PostForm(
+      62→        "https:[REDACTED:high-entropy-secret]",
+      63→        url.Values{"client_id": {"APP_CLIENT_ID"}},
+      64→    )
+      65→    if err != nil {
+      66→        return nil, err
+      67→    }
+      68→    defer resp.Body.Close()
+      69→
+      70→    var data map[string]interface{}
+      71→    json.NewDecoder(resp.Body).Decode(&data)
+      72→    return data, nil
+      73→}
+      74→
+      75→```
+      76→
+      77→This function hits the WorkOS Device Authorization endpoint and retrieves:
+      78→
+      79→* device\_code: For your CLI only.
+      80→* user\_code: To show the user.
+      81→* verification\_uri\_complete: A URL users can click to authorize.
+      82→* interval: How often to poll for the token.
+      83→
+      84→```
+      85→
+      86→{
+      87→  "device_code": "[REDACTED:high-entropy-secret]",
+      88→  "user_code": "RRGQ-BJVS",
+      89→  "verification_uri": "https:[REDACTED:high-entropy-secret]",
+      90→  "verification_uri_complete": "https:[REDACTED:high-entropy-secret]?user_code=ABCD-EFGH",
+      91→  "expires_in": 300,
+      92→  "interval": 5
+      93→}
+      94→
+      95→```
+      96→
+      97→**Step 2: Prompt the user to authenticate**
+      98→----------
+      99→
+     100→Display the user code and link in the terminal. Optionally, open the browser automatically.
+     101→
+     102→```
+     103→
+     104→func promptUserToAuthenticate(data map[string]interface{}) {
+     105→    fmt.Println("\nTo sign in")
+     106→    fmt.Printf("\nVisit: %s\n", data["verification_uri"])
+     107→    fmt.Printf("Enter code: %s\n\n", data["user_code"])
+     108→    fmt.Printf("Or open: %s\n", data["verification_uri_complete"])
+     109→
+     110→    exec.Command("open", data["verification_uri_complete"].(string)).Start()
+     111→}
+     112→
+     113→```
+     114→
+     115→Note the following:
+     116→
+     117→* Always display the user\_code and verification\_uri to the user.
+     118→* Never show the device\_code, it’s only used internally for polling.
+     119→
+     120→**Step 3: Poll for access tokens**
+     121→----------
+     122→
+     123→While the user authenticates in their browser, your app should poll the token endpoint.
+     124→
+     125→```
+     126→
+     127→func pollForTokens(clientID, deviceCode string, expiresIn, interval int) (map[string]interface{}, error) {
+     128→    deadline := time.Now().Add(time.Duration(expiresIn) * time.Second)
+     129→
+     130→    for time.Now().Before(deadline) {
+     131→        resp, err := http.PostForm(
+     132→            "https:[REDACTED:high-entropy-secret]",
+     133→            url.Values{
+     134→                "grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
+     135→                "device_code": {deviceCode},
+     136→                "client_id": {clientID},
+     137→            },
+     138→        )
+     139→        if err != nil {
+     140→            return nil, err
+     141→        }
+     142→        defer resp.Body.Close()
+     143→
+     144→        var data map[string]interface{}
+     145→        json.NewDecoder(resp.Body).Decode(&data)
+     146→
+     147→        if resp.StatusCode == http.StatusOK {
+     148→            return data, nil
+     149→        }
+     150→
+     151→        switch data["error"] {
+     152→        case "authorization_pending":
+     153→            time.Sleep(time.Duration(interval) * time.Second)
+     154→        case "slow_down":
+     155→            interval++
+     156→            time.Sleep(time.Duration(interval) * time.Second)
+     157→        case "access_denied", "expired_token":
+     158→            return nil, fmt.Errorf("authorization failed")
+     159→        default:
+     160→            return nil, fmt.Errorf("authorization failed")
+     161→        }
+     162→    }
+     163→    return nil, fmt.Errorf("authorization timed out")
+     164→}
+     165→
+     166→```
+     167→
+     168→Note the following:
+     169→
+     170→* Poll at the interval specified in the authorization response (every 5 seconds).
+     171→* Respect slow\_down errors by increasing your polling interval.
+     172→* Stop polling when you receive access\_denied or expired\_token errors.
+     173→* Implement a reasonable timeout to avoid infinite polling.
+     174→
+     175→The response looks like this:
+     176→
+     177→```
+     178→
+     179→{
+     180→  "user": {
+     181→    "object": "user",
+     182→    "id": "[REDACTED:high-entropy-secret]",
+     183→    "email": "grant.mccode@workos.com",
+     184→    "email_verified": true,
+     185→    "first_name": "Grant",
+     186→    "last_name": "McCode",
+     187→    "profile_picture_url": null,
+     188→    "last_sign_in_at": "2025-06-25T19:16:35.647Z",
+     189→    "created_at": "2025-06-25T01:20:21.355Z",
+     190→    "updated_at": "2025-06-25T19:16:35.647Z",
+     191→    "external_id": null
+     192→  },
+     193→  "organization_id": "[REDACTED:high-entropy-secret]",
+     194→  "access_token": "[REDACTED:jwt],
+     195→  "[REDACTED:generic-api-key],
+     196→  "authentication_method": "GoogleOAuth"
+     197→}
+     198→
+     199→```
+     200→
+     201→**Putting it all together**
+     202→----------
+     203→
+     204→```
+     205→
+     206→func main() {
+     207→    requestData, err := requestDeviceCode()
+     208→    if err != nil {
+     209→        log.Fatal("Failed to start device authorization:", err)
+     210→    }
+     211→
+     212→    promptUserToAuthenticate(requestData)
+     213→
+     214→    // Run the poll in a separate goroutine for async behavior
+     215→    done := make(chan map[string]interface{})
+     216→    go func() {
+     217→        responseData, err := pollForTokens(
+     218→            "APP_CLIENT_ID",
+     219→            requestData["device_code"].(string),
+     220→            int(requestData["expires_in"].(float64)),
+     221→            int(requestData["interval"].(float64)),
+     222→        )
+     223→        if err != nil {
+     224→            log.Fatal("Login failed:", err)
+     225→        }
+     226→        done <- responseData
+     227→    }()
+     228→
+     229→    // Wait for the goroutine to finish
+     230→    responseData := <-done
+     231→    fmt.Println("\nAuthentication successful!")
+     232→    fmt.Println("Access Token:", responseData["access_token"])
+     233→}
+     234→
+     235→```
+     236→
+     237→That’s it! You’ve just added OAuth-powered login to your CLI.
+     238→
+     239→Your users can now authenticate securely through the browser, without ever pasting tokens by hand.
+37|07:59|tool|mcp__llms-fetch__fetch|url="https://workos.com/docs/reference/authkit/authentication"
+[result]
+  ## https://workos.com/docs/reference/authkit/authentication
+  Saved to: [REDACTED:high-entropy-secret]
+  Type: markdown (1333 lines, 5286 words, 49698 chars)
+
+  ### Table of Contents
+      1→# Authentication
+      5→## Authenticate with code
+     11→#### Request
+    129→#### Response
+    154→## Authenticate with an email verification code
+    162→#### Request
+    287→#### Response
+    306→## Authenticate with Magic Auth
+    310→#### Request
+    436→#### Response
+    455→## Authenticate with organization selection
+    463→#### Request
+    589→#### Response
+    608→## Authenticate a user with password
+    612→#### Request
+    737→#### Response
+    758→## Refresh and seal session data
+    762→#### Request
+    797→#### Success response
+    806→#### Failure response
+    815→## Authenticate with refresh token
+    819→#### Request
+    938→#### Response
+    947→## Authenticate with session cookie
+    951→#### Request
+    987→#### Success response
+   1000→#### Failure response
+   1009→## Authenticate with a time-based one-time password
+   1019→#### Request
+   1151→#### Response
+   1170→### POST /user_management/authenticate
+   1172→#### Parameters
+   1185→#### Returns
+   1197→### POST /user_management/authenticate
+   1199→#### Parameters
+   1211→#### Returns
+   1219→### POST /user_management/authenticate
+   1221→#### Parameters
+   1234→#### Returns
+   1242→### POST /user_management/authenticate
+   1244→#### Parameters
+   1256→#### Returns
+   1264→### POST /user_management/authenticate
+   1266→#### Parameters
+   1279→#### Returns
+   1287→### POST /user_management/authenticate
+   1289→#### Parameters
+   1301→#### Returns
+   1312→### POST /user_management/authenticate
+   1314→#### Parameters
+   1327→#### Returns
+
+  ## https://workos.com/docs/reference/authkit/authentication.md
+  Saved to: /Users/yoav/projects/alignment-hive/.llms-fetch-mcp/workos.com/docs/reference/authkit/authentication.md
+  Type: markdown (5 lines, 59 words, 440 chars)
+
+  ### Content
+  # AuthKit
+
+  AuthKit is a user management platform that provides a set of user authentication and organization security features designed to provide a fast, scalable integration while handling all of the user management complexity that comes with advanced B2B customer needs.
+
+  To automatically respond to AuthKit activities, like authentication and changes related to the users, use the corresponding [events](https://workos.com/docs/events).
+38|07:59|assistant
+  Let me read the authentication reference to see if it documents the device code grant type specifically.
+39|07:59|tool|Read|file_path=[REDACTED:high-entropy-secret]|offset=1170|limit=163
+[result]
+    1170→### POST /user_management/authenticate
+    1171→
+    1172→#### Parameters
+    1173→
+    1174→| Parameter | Type | Required | Description |
+    1175→| --- | --- | --- | --- |
+    1176→| `client_id` | string | Yes | client_id |
+    1177→| `client_secret` | string | No | client_secret |
+    1178→| `code_verifier` | string | No | The randomly generated string used to derive the code challenge that was passed to the [authorization url](/reference/authkit/authentication/get-authorization-url) as part of the PKCE flow. This parameter is **required** when the client secret is not present. |
+    1179→| `grant_type` | "authorization_code" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1180→| `code` | string | Yes | The authorization value which was passed back as a query parameter in the callback to the [redirect URI](/reference/authkit/authentication/get-authorization-url/redirect-uri). |
+    1181→| `invitation_token` | string | No | The token of an [invitation](/reference/authkit/invitation). The invitation should be in the pending state. When a valid invitation token is specified, the user is able to sign up even if it is disabled in the environment. Additionally, if the invitation was for a specific organization, attaching the token to a user's authenticate call automatically provisions their membership to the organization. |
+    1182→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1183→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1184→
+    1185→#### Returns
+    1186→
+    1187→| Field | Type | Description |
+    1188→| --- | --- | --- |
+    1189→| `user` | user | user.self |
+    1190→| `organization_id` | string | The ID of the [organization](/reference/organization) the user selected to sign in to. If the user is a member of multiple organizations, this is the ID of the organization the user [selected](/reference/authkit/authentication/organization-selection) as part of the authentication flow. If the user is a member of only one organization, this is the ID of that organization. If the user is not a member of any organizations, this is omitted from the response. |
+    1191→| `access_token` | String | A JWT containing information about the session. |
+    1192→| `refresh_token` | String | [Exchange this token](/reference/authkit/authentication/refresh-token) for a new access token. |
+    1193→| `authentication_method` | "SSO" | "Password" | "AppleOAuth" | "GitHubOAuth" | "GoogleOAuth" | "MicrosoftOAuth" | "MagicAuth" | "Impersonation" | The authentication method used to initiate the session. |
+    1194→| `impersonator` | object |  |
+    1195→| `oauth_tokens` | object |  |
+    1196→
+    1197→### POST /user_management/authenticate
+    1198→
+    1199→#### Parameters
+    1200→
+    1201→| Parameter | Type | Required | Description |
+    1202→| --- | --- | --- | --- |
+    1203→| `client_id` | string | Yes | client_id |
+    1204→| `client_secret` | string | Yes | client_secret |
+    1205→| `grant_type` | "urn:workos:oauth:grant-type:email-verification:code" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1206→| `code` | string | Yes | The one-time email verification code received by the user. |
+    1207→| `pending_authentication_token` | string | Yes | The authentication token returned from a failed authentication attempt due to the corresponding error. |
+    1208→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1209→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1210→
+    1211→#### Returns
+    1212→
+    1213→| Field | Type | Description |
+    1214→| --- | --- | --- |
+    1215→| `user` | user | user.self |
+    1216→| `authentication_method` | "SSO" | "Password" | "AppleOAuth" | "GitHubOAuth" | "GoogleOAuth" | "MicrosoftOAuth" | "MagicAuth" | "Impersonation" | The authentication method used to initiate the session. |
+    1217→| `organization_id` | string | The ID of the [organization](/reference/organization) the user selected to sign in to. If the user is a member of multiple organizations, this is the ID of the organization the user [selected](/reference/authkit/authentication/organization-selection) as part of the authentication flow. If the user is a member of only one organization, this is the ID of that organization. If the user is not a member of any organizations, this is omitted from the response. |
+    1218→
+    1219→### POST /user_management/authenticate
+    1220→
+    1221→#### Parameters
+    1222→
+    1223→| Parameter | Type | Required | Description |
+    1224→| --- | --- | --- | --- |
+    1225→| `client_id` | string | Yes | client_id |
+    1226→| `client_secret` | string | Yes | client_secret |
+    1227→| `grant_type` | "urn:workos:oauth:grant-type:magic-auth:code" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1228→| `code` | string | Yes | The one-time code that was emailed to the user. |
+    1229→| `invitation_token` | string | No | The token of an [invitation](/reference/authkit/invitation). The invitation should be in the pending state. When a valid invitation token is specified, the user is able to sign up even if it is disabled in the environment. Additionally, if the invitation was for a specific organization, attaching the token to a user's authenticate call automatically provisions their membership to the organization. |
+    1230→| `email` | string | Yes | user.email |
+    1231→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1232→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1233→
+    1234→#### Returns
+    1235→
+    1236→| Field | Type | Description |
+    1237→| --- | --- | --- |
+    1238→| `user` | user | user.self |
+    1239→| `organization_id` | string | The ID of the [organization](/reference/organization) the user selected to sign in to. If the user is a member of multiple organizations, this is the ID of the organization the user [selected](/reference/authkit/authentication/organization-selection) as part of the authentication flow. If the user is a member of only one organization, this is the ID of that organization. If the user is not a member of any organizations, this is omitted from the response. |
+    1240→| `authentication_method` | "MagicAuth" | The authentication method used to initiate the session. |
+    1241→
+    1242→### POST /user_management/authenticate
+    1243→
+    1244→#### Parameters
+    1245→
+    1246→| Parameter | Type | Required | Description |
+    1247→| --- | --- | --- | --- |
+    1248→| `client_id` | string | Yes | client_id |
+    1249→| `client_secret` | string | Yes | client_secret |
+    1250→| `grant_type` | "urn:workos:oauth:grant-type:organization-selection" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1251→| `pending_authentication_token` | string | Yes | The authentication token returned from a failed authentication attempt due to the corresponding error. |
+    1252→| `organization_id` | string | Yes | The [organization](/reference/organization) the user selected to sign in to. |
+    1253→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1254→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1255→
+    1256→#### Returns
+    1257→
+    1258→| Field | Type | Description |
+    1259→| --- | --- | --- |
+    1260→| `user` | user | user.self |
+    1261→| `organization_id` | string | The ID of the [organization](/reference/organization) the user selected to sign in to. If the user is a member of multiple organizations, this is the ID of the organization the user [selected](/reference/authkit/authentication/organization-selection) as part of the authentication flow. If the user is a member of only one organization, this is the ID of that organization. If the user is not a member of any organizations, this is omitted from the response. |
+    1262→| `authentication_method` | "SSO" | "Password" | "AppleOAuth" | "GitHubOAuth" | "GoogleOAuth" | "MicrosoftOAuth" | "MagicAuth" | "Impersonation" | The authentication method used to initiate the session. |
+    1263→
+    1264→### POST /user_management/authenticate
+    1265→
+    1266→#### Parameters
+    1267→
+    1268→| Parameter | Type | Required | Description |
+    1269→| --- | --- | --- | --- |
+    1270→| `client_id` | string | Yes | client_id |
+    1271→| `client_secret` | string | Yes | client_secret |
+    1272→| `grant_type` | "password" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1273→| `email` | string | Yes | user.email |
+    1274→| `password` | string | Yes | user.password |
+    1275→| `invitation_token` | string | No | The token of an [invitation](/reference/authkit/invitation). The invitation should be in the pending state. When a valid invitation token is specified, the user is able to sign up even if it is disabled in the environment. Additionally, if the invitation was for a specific organization, attaching the token to a user's authenticate call automatically provisions their membership to the organization. |
+    1276→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1277→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1278→
+    1279→#### Returns
+    1280→
+    1281→| Field | Type | Description |
+    1282→| --- | --- | --- |
+    1283→| `user` | user | user.self |
+    1284→| `organization_id` | string | The ID of the [organization](/reference/organization) the user selected to sign in to. If the user is a member of multiple organizations, this is the ID of the organization the user [selected](/reference/authkit/authentication/organization-selection) as part of the authentication flow. If the user is a member of only one organization, this is the ID of that organization. If the user is not a member of any organizations, this is omitted from the response. |
+    1285→| `authentication_method` | "Password" | The authentication method used to initiate the session. |
+    1286→
+    1287→### POST /user_management/authenticate
+    1288→
+    1289→#### Parameters
+    1290→
+    1291→| Parameter | Type | Required | Description |
+    1292→| --- | --- | --- | --- |
+    1293→| `client_id` | string | Yes | client_id |
+    1294→| `client_secret` | string | Yes | client_secret |
+    1295→| `grant_type` | "refresh_token" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1296→| `refresh_token` | string | Yes | The `refresh_token` received from a successful authentication response. |
+    1297→| `organization_id` | string | No | The organization to authorize in the new access token. If the current session is not authorized for the organization, an appropriate [authentication error](/reference/authkit/authentication-errors) will be returned. If no organization ID is provided, then the access token will default to the original organization selected. |
+    1298→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1299→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1300→
+    1301→#### Returns
+    1302→
+    1303→| Field | Type | Description |
+    1304→| --- | --- | --- |
+    1305→| `user` | user | user.self |
+    1306→| `organization_id` | string | The ID of the [organization](/reference/organization) the user is signed in to. If the request specified a valid `organization_id`, this is that value. Otherwise, this is the ID for the organization the session most recently used. If the session never used an organization, it is omitted from the response. |
+    1307→| `access_token` | String | A JWT containing information about the session. |
+    1308→| `refresh_token` | String | [Exchange this token](/reference/authkit/authentication/refresh-token) for a new access token. |
+    1309→| `authentication_method` | "SSO" | "Password" | "AppleOAuth" | "GitHubOAuth" | "GoogleOAuth" | "MicrosoftOAuth" | "MagicAuth" | "Impersonation" | The authentication method used to initiate the session. |
+    1310→| `impersonator` | object |  |
+    1311→
+    1312→### POST /user_management/authenticate
+    1313→
+    1314→#### Parameters
+    1315→
+    1316→| Parameter | Type | Required | Description |
+    1317→| --- | --- | --- | --- |
+    1318→| `client_id` | string | Yes | client_id |
+    1319→| `client_secret` | string | Yes | client_secret |
+    1320→| `grant_type` | "urn:workos:oauth:grant-type:mfa-totp" | Yes | A string constant that distinguishes the method by which your application will receive an access token. |
+    1321→| `code` | string | Yes | The time-based one-time password generated by the factor that was challenged. |
+    1322→| `authentication_challenge_id` | string | Yes | The unique ID of the authentication challenge created for the TOTP factor for which the user is enrolled. |
+    1323→| `pending_authentication_token` | string | Yes | The authentication token returned from a failed authentication attempt due to the corresponding error. |
+    1324→| `ip_address` | string | No | The IP address of the request from the user who is attempting to authenticate. Refer to your web framework or server documentation for the correct way to obtain the user’s actual IP address. If your application receives requests from a reverse proxy, you may need to retrieve this from a special header like `X-Forward-For`. |
+    1325→| `user_agent` | string | No | The user agent of the request from the user who is attempting to authenticate. This should be the value of the `User-Agent` header. |
+    1326→
+    1327→#### Returns
+    1328→
+    1329→| Field | Type | Description |
+    1330→| --- | --- | --- |
+    1331→| `user` | user | user.self |
+    1332→| `organizationId` | string | The ID of the [organization](/reference/organization) the user selected to sign in to. If the user is a member of multiple organizations, this is the ID of the organization the user [selected](/reference/authkit/authentication/organization-selection) as part of the authentication flow. If the user is a member of only one organization, this is the ID of that organization. If the user is not a member of any organizations, this is omitted from the response. |
+40|08:00|assistant
+  I now have all the information needed. Here is the complete research summary.
+
+  ---
+
+  ## Research Results: WorkOS Device Authorization Flow
+
+  ### 1. Does WorkOS have CLI/bash examples or guides for the device flow?
+
+  Yes, WorkOS has solid documentation, though no bash/curl-specific examples. The key resources are:
+
+  - **Official docs page**: [CLI Auth -- AuthKit -- WorkOS Docs](https://workos.com/docs/authkit/cli-auth) -- complete guide with JavaScript (fetch API) examples
+  - **Go tutorial**: [How to add auth to your Go CLI using WorkOS](https:[REDACTED:high-entropy-secret]) -- step-by-step with Go's `http.PostForm`
+  - **Announcement blog post**: [CLI Auth launch blog](https://workos.com/blog/cli-auth) -- overview and context
+
+  No bash/curl examples exist, but the API is trivially implementable with curl + jq (see below).
+
+  ### 2. Exact request/response formats for both endpoints
+
+  **Endpoint 1: Initiate device authorization**
+
+  - **URL**: `POST https:[REDACTED:high-entropy-secret]`
+  - **Content-Type**: `[REDACTED:high-entropy-secret]`
+  - **Parameters**: Only `client_id` (required)
+  - **No authentication header needed** (it's a public client flow)
+
+  Response:
+  ```json
+  {
+    "device_code": "[REDACTED:high-entropy-secret]",
+    "user_code": "RRGQ-BJVS",
+    "verification_uri": "https://<authkit_domain>/device",
+    "verification_uri_complete": "https://<authkit_domain>/device?user_code=ABCD-EFGH",
+    "expires_in": 300,
+    "interval": 5
+  }
+  ```
+
+  **Endpoint 2: Poll for tokens**
+
+  - **URL**: `POST https:[REDACTED:high-entropy-secret]`
+  - **Content-Type**: `[REDACTED:high-entropy-secret]`
+  - **Parameters**:
+    - `grant_type`: `urn:ietf:params:oauth:grant-type:device_code` (required)
+    - `device_code`: the device_code from step 1 (required)
+    - `client_id`: your client ID (required)
+  - **No client_secret needed** (public client / device flow)
+
+  ### 3. Polling error responses
+
+  The polling endpoint returns non-200 status codes with a JSON body containing an `error` field:
+
+  | Error value | Meaning | Action |
+  |---|---|---|
+  | `authorization_pending` | User hasn't completed auth yet | Wait `interval` seconds, poll again |
+  | `slow_down` | You're polling too fast | Increase interval by 1 second, then wait |
+  | `access_denied` | User denied the request | **Terminal** -- stop polling |
+  | `expired_token` | The device_code expired (300s) | **Terminal** -- stop polling |
+
+  ### 4. Success response format
+
+  On HTTP 200, the authenticate endpoint returns:
+  ```json
+  {
+    "user": {
+      "object": "user",
+      "id": "[REDACTED:high-entropy-secret]",
+      "email": "grant.mccode@workos.com",
+      "email_verified": true,
+      "first_name": "Grant",
+      "last_name": "McCode",
+      "profile_picture_url": null,
+      "last_sign_in_at": "2025-06-25T19:16:35.647Z",
+      "created_at": "2025-06-25T01:20:21.355Z",
+      "updated_at": "2025-06-25T19:16:35.647Z",
+      "external_id": null
+    },
+    "organization_id": "[REDACTED:high-entropy-secret]",
+    "access_token": "eyJhbGci...<JWT>",
+    "[REDACTED:generic-api-key],
+    "authentication_method": "GoogleOAuth"
+  }
+  ```
+
+  ### 5. Feasibility assessment: curl + jq in bash
+
+  This is straightforward to implement in bash. Both endpoints use `[REDACTED:high-entropy-secret]` (not JSON), return JSON, and require no authentication headers. The equivalent curl commands would be:
+
+  **Step 1 -- Initiate:**
+  ```bash
+  curl -s -X POST https:[REDACTED:high-entropy-secret] \
+    -d "[REDACTED:high-entropy-secret]"
+  ```
+
+  **Step 2 -- Poll:**
+  ```bash
+  curl -s -X POST https:[REDACTED:high-entropy-secret] \
+    -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+    -d "device_code=DEVICE_CODE_HERE" \
+    -d "[REDACTED:high-entropy-secret]"
+  ```
+
+  The entire flow (initiate, display code, poll in a loop, handle errors) can be built with `curl`, `jq`, `sleep`, and a `while` loop. No SDK needed, no complex auth headers, no JSON request bodies -- just form-encoded POSTs.
+
+  ### 6. Additional note: Connect (third-party) variant
+
+  For third-party/Connect applications, there are alternative endpoints on your AuthKit domain directly:
+  - Authorization: `https://<authkit_domain>/oauth2/device_authorization`
+  - Token: `https://<authkit_domain>/oauth2/token`
+
+  The first-party flow (using `api.workos.com` endpoints) is the simpler path and doesn't require client_secret since CLIs are treated as public clients.
+
+  ### Key sources:
+  - [WorkOS CLI Auth docs](https://workos.com/docs/authkit/cli-auth)
+  - [Go CLI auth tutorial](https:[REDACTED:high-entropy-secret])
+  - [CLI Auth announcement](https://workos.com/blog/cli-auth)
+  - [WorkOS API Reference - Authentication](https://workos.com/docs/reference/authkit/authentication)

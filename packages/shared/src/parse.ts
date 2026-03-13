@@ -1,6 +1,9 @@
-import type { ContentBlock, HiveMindMeta, KnownEntry, UserEntry } from './schemas';
+import type { ContentBlock, HiveMindMeta, KnownContentBlock, KnownEntry, UserEntry } from './schemas';
+import { isKnownContentBlock } from './schemas';
 
 function isNoiseBlock(block: ContentBlock): boolean {
+  if (!isKnownContentBlock(block)) return false;
+
   if (block.type === 'tool_result' && 'content' in block) {
     const content = block.content;
     if (typeof content === 'string' && content.startsWith('Todos have been modified successfully')) {
@@ -26,7 +29,7 @@ function isToolResultOnly(entry: UserEntry): boolean {
   const content = entry.message.content;
   if (!Array.isArray(content)) return false;
 
-  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
+  const meaningfulBlocks = content.filter((b) => isKnownContentBlock(b) && !isNoiseBlock(b));
   if (meaningfulBlocks.length === 0) return true;
 
   return meaningfulBlocks.every((b) => b.type === 'tool_result');
@@ -39,6 +42,7 @@ function extractUserText(entry: UserEntry): string {
 
   const textParts: Array<string> = [];
   for (const block of content) {
+    if (!isKnownContentBlock(block)) continue;
     if (isNoiseBlock(block)) continue;
     if (block.type === 'tool_result') continue;
     if (block.type === 'text' && 'text' in block) {
@@ -61,6 +65,7 @@ function findToolResult(entries: Array<KnownEntry>, toolUseId: string): ToolResu
     if (!Array.isArray(content)) continue;
 
     for (const block of content) {
+      if (!isKnownContentBlock(block)) continue;
       if (block.type === 'tool_result' && 'tool_use_id' in block && block.tool_use_id === toolUseId) {
         const agentId = 'agentId' in entry && typeof entry.agentId === 'string' ? entry.agentId : undefined;
         return {
@@ -79,6 +84,7 @@ function formatToolResultContent(content: string | Array<ContentBlock> | undefin
 
   const parts: Array<string> = [];
   for (const block of content) {
+    if (!isKnownContentBlock(block)) continue;
     if (block.type === 'text' && 'text' in block) {
       parts.push(block.text);
     } else if (block.type === 'image' && 'source' in block) {
@@ -150,7 +156,9 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
       }
 
       if (Array.isArray(content)) {
-        const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b) && b.type !== 'tool_result');
+        const meaningfulBlocks = content.filter(
+          (b) => isKnownContentBlock(b) && !isNoiseBlock(b) && b.type !== 'tool_result',
+        );
         if (meaningfulBlocks.length === 0) continue;
 
         lineNumber++;
@@ -158,6 +166,7 @@ export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
         const entryLineNumber = lineNumber;
 
         for (const contentBlock of content) {
+          if (!isKnownContentBlock(contentBlock)) continue;
           if (isNoiseBlock(contentBlock)) continue;
 
           if (contentBlock.type === 'text' && 'text' in contentBlock) {

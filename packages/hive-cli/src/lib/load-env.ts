@@ -1,5 +1,5 @@
-import { config } from 'dotenv';
 import { join } from 'node:path';
+import { config } from 'dotenv';
 
 /**
  * Load .env and .env.local from CWD into process.env.

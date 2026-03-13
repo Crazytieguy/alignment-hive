@@ -1,6 +1,6 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { parseKnownEntry, type KnownEntry } from "@alignment-hive/shared";
+import { isKnownContentBlock, parseKnownEntry, type KnownEntry } from "@alignment-hive/shared";
 import type { Id } from "./_generated/dataModel";
 import {
   query,
@@ -285,6 +285,7 @@ function extractSummaryFromEntries(entries: KnownEntry[]): string | undefined {
       text = content;
     } else if (Array.isArray(content)) {
       for (const block of content) {
+        if (!isKnownContentBlock(block)) continue;
         if (block.type === "text" && "text" in block) {
           text = block.text;
           break;

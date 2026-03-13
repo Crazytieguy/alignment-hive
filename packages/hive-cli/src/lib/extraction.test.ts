@@ -644,6 +644,177 @@ describe('edge cases', () => {
   });
 });
 
+describe('unknown content block passthrough', () => {
+  test('tool_reference blocks inside tool_result pass through extraction', async () => {
+    const { extractSession } = await import('./extraction');
+    const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+
+    const tempDir = await mkdtemp(join(tmpdir(), 'hive-test-'));
+    const rawPath = join(tempDir, 'test-session.jsonl');
+    const outPath = join(tempDir, 'out', 'test-session.jsonl');
+
+    try {
+      const userEntry = {
+        type: 'user',
+        uuid: '1',
+        parentUuid: null,
+        timestamp: '2025-01-01',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_123',
+              content: [
+                { type: 'tool_reference', tool_name: 'WebSearch' },
+                { type: 'tool_reference', tool_name: 'WebFetch' },
+              ],
+            },
+          ],
+        },
+      };
+
+      const assistantEntry = {
+        type: 'assistant',
+        uuid: '2',
+        parentUuid: '1',
+        timestamp: '2025-01-01',
+        message: { role: 'assistant', content: 'I found those tools' },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
+      const result = await extractSession({ rawPath, outputPath: outPath });
+      expect(result).not.toBeNull();
+      expect(result!.messageCount).toBe(2);
+
+      const output = await readFile(outPath, 'utf-8');
+      const lines = output.trim().split('\n');
+      const extracted = JSON.parse(lines[1]);
+
+      const toolResult = extracted.message.content[0];
+      expect(toolResult.type).toBe('tool_result');
+      expect(toolResult.content).toHaveLength(2);
+      expect(toolResult.content[0].type).toBe('tool_reference');
+      expect(toolResult.content[0].tool_name).toBe('WebSearch');
+      expect(toolResult.content[1].type).toBe('tool_reference');
+      expect(toolResult.content[1].tool_name).toBe('WebFetch');
+    } finally {
+      await rm(tempDir, { recursive: true });
+    }
+  });
+
+  test('unknown top-level content blocks in assistant messages pass through', async () => {
+    const { extractSession } = await import('./extraction');
+    const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+
+    const tempDir = await mkdtemp(join(tmpdir(), 'hive-test-'));
+    const rawPath = join(tempDir, 'test-session.jsonl');
+    const outPath = join(tempDir, 'out', 'test-session.jsonl');
+
+    try {
+      const userEntry = {
+        type: 'user',
+        uuid: '1',
+        parentUuid: null,
+        timestamp: '2025-01-01',
+        message: { role: 'user', content: 'hello' },
+      };
+
+      const assistantEntry = {
+        type: 'assistant',
+        uuid: '2',
+        parentUuid: '1',
+        timestamp: '2025-01-01',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Here are results' },
+            { type: 'future_block_type', data: 'some new feature', metadata: { key: 'value' } },
+          ],
+        },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
+      const result = await extractSession({ rawPath, outputPath: outPath });
+      expect(result).not.toBeNull();
+
+      const output = await readFile(outPath, 'utf-8');
+      const lines = output.trim().split('\n');
+      const extracted = JSON.parse(lines[2]); // assistant is line 3
+
+      expect(extracted.message.content).toHaveLength(2);
+      expect(extracted.message.content[0].type).toBe('text');
+      expect(extracted.message.content[1].type).toBe('future_block_type');
+      expect(extracted.message.content[1].data).toBe('some new feature');
+    } finally {
+      await rm(tempDir, { recursive: true });
+    }
+  });
+
+  test('unknown blocks with base64 source get data stripped', async () => {
+    const { extractSession } = await import('./extraction');
+    const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+
+    const tempDir = await mkdtemp(join(tmpdir(), 'hive-test-'));
+    const rawPath = join(tempDir, 'test-session.jsonl');
+    const outPath = join(tempDir, 'out', 'test-session.jsonl');
+
+    try {
+      const fakeBase64 = 'A'.repeat(100);
+      const userEntry = {
+        type: 'user',
+        uuid: '1',
+        parentUuid: null,
+        timestamp: '2025-01-01',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content: [
+                {
+                  type: 'future_media_type',
+                  source: { type: 'base64', media_type: 'audio/wav', data: fakeBase64 },
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      const assistantEntry = {
+        type: 'assistant',
+        uuid: '2',
+        parentUuid: '1',
+        timestamp: '2025-01-01',
+        message: { role: 'assistant', content: 'Got it' },
+      };
+
+      await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
+      await extractSession({ rawPath, outputPath: outPath });
+
+      const output = await readFile(outPath, 'utf-8');
+      const lines = output.trim().split('\n');
+      const extracted = JSON.parse(lines[1]);
+
+      const unknownBlock = extracted.message.content[0].content[0];
+      expect(unknownBlock.type).toBe('future_media_type');
+      expect(unknownBlock.source.type).toBe('base64');
+      expect(unknownBlock.source.media_type).toBe('audio/wav');
+      expect(unknownBlock.source.data).toBeUndefined();
+    } finally {
+      await rm(tempDir, { recursive: true });
+    }
+  });
+});
+
 describe('schema completeness', () => {
   test('all entries in raw session fixtures are parseable', async () => {
     const { readdir, readFile } = await import('node:fs/promises');

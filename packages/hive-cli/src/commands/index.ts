@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { parseSession } from '@alignment-hive/shared';
+import { isKnownContentBlock, parseSession } from '@alignment-hive/shared';
 import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { indexCmd, usage } from '../lib/messages';
 import { colors, printError } from '../lib/output';
@@ -578,6 +578,7 @@ function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
       if (!Array.isArray(content)) continue;
 
       for (const block of content) {
+        if (!isKnownContentBlock(block)) continue;
         if (block.type === 'tool_use' && 'name' in block && block.name === 'Bash') {
           const input = block.input;
           const command = input.command;
@@ -594,6 +595,7 @@ function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
       if (!Array.isArray(content)) continue;
 
       for (const block of content) {
+        if (!isKnownContentBlock(block)) continue;
         if (block.type === 'tool_result' && 'tool_use_id' in block) {
           const toolUseId = block.tool_use_id;
           const message = pendingCommits.get(toolUseId);
@@ -649,6 +651,7 @@ function getToolResultText(content: string | Array<ContentBlock> | undefined): s
 
   const parts: Array<string> = [];
   for (const block of content) {
+    if (!isKnownContentBlock(block)) continue;
     if (block.type === 'text' && 'text' in block) {
       parts.push(block.text);
     }

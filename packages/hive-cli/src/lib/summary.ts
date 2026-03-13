@@ -1,3 +1,4 @@
+import { isKnownContentBlock } from '@alignment-hive/shared';
 import type { KnownEntry } from '@alignment-hive/shared';
 
 const META_XML_TAGS = ['<command-name>', '<local-command-', '<system-reminder>'];
@@ -46,6 +47,7 @@ function findFirstUserPrompt(entries: Array<KnownEntry>): string | undefined {
       text = content;
     } else if (Array.isArray(content)) {
       for (const block of content) {
+        if (!isKnownContentBlock(block)) continue;
         if (block.type === 'text' && 'text' in block && typeof block.text === 'string') {
           text = block.text;
           break;

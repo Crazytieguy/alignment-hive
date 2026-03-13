@@ -13998,7 +13998,28 @@ var DocumentBlockSchema = exports_external.looseObject({
   type: exports_external.literal("document"),
   source: Base64SourceSchema
 });
-var ToolResultContentBlockSchema = exports_external.union([TextBlockSchema, ImageBlockSchema, DocumentBlockSchema]);
+var ToolReferenceBlockSchema = exports_external.looseObject({
+  type: exports_external.literal("tool_reference"),
+  tool_name: exports_external.string()
+});
+var SearchResultBlockSchema = exports_external.looseObject({
+  type: exports_external.literal("search_result")
+});
+var UnknownBlockSchema = exports_external.looseObject({ type: exports_external.string() }).transform((obj) => {
+  const source = obj.source;
+  if (source && typeof source === "object" && !Array.isArray(source) && source.type === "base64") {
+    const { data, ...rest } = source;
+    return { ...obj, source: rest };
+  }
+  return obj;
+});
+var ToolResultContentBlockSchema = exports_external.discriminatedUnion("type", [
+  TextBlockSchema,
+  ImageBlockSchema,
+  DocumentBlockSchema,
+  ToolReferenceBlockSchema,
+  SearchResultBlockSchema
+]).or(UnknownBlockSchema);
 var ToolResultBlockSchema = exports_external.looseObject({
   type: exports_external.literal("tool_result"),
   tool_use_id: exports_external.string(),
@@ -14010,9 +14031,15 @@ var KnownContentBlockSchema = exports_external.discriminatedUnion("type", [
   ToolUseBlockSchema,
   ToolResultBlockSchema,
   ImageBlockSchema,
-  DocumentBlockSchema
+  DocumentBlockSchema,
+  ToolReferenceBlockSchema,
+  SearchResultBlockSchema
 ]);
-var ContentBlockSchema = KnownContentBlockSchema;
+var ContentBlockSchema = KnownContentBlockSchema.or(UnknownBlockSchema);
+var KNOWN_CONTENT_BLOCK_TYPES = new Set(KnownContentBlockSchema.options.map((s) => s.shape.type.value));
+function isKnownContentBlock(block) {
+  return KNOWN_CONTENT_BLOCK_TYPES.has(block.type);
+}
 var MessageContentSchema = exports_external.union([exports_external.string(), exports_external.array(ContentBlockSchema)]);
 var UserMessageObjectSchema = exports_external.looseObject({
   role: exports_external.string(),
@@ -14130,6 +14157,8 @@ var HiveMindMetaSchema = exports_external.object({
 });
 // ../shared/src/parse.ts
 function isNoiseBlock(block) {
+  if (!isKnownContentBlock(block))
+    return false;
   if (block.type === "tool_result" && "content" in block) {
     const content = block.content;
     if (typeof content === "string" && content.startsWith("Todos have been modified successfully")) {
@@ -14151,7 +14180,7 @@ function isToolResultOnly(entry) {
   const content = entry.message.content;
   if (!Array.isArray(content))
     return false;
-  const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b));
+  const meaningfulBlocks = content.filter((b) => isKnownContentBlock(b) && !isNoiseBlock(b));
   if (meaningfulBlocks.length === 0)
     return true;
   return meaningfulBlocks.every((b) => b.type === "tool_result");
@@ -14164,6 +14193,8 @@ function extractUserText(entry) {
     return content;
   const textParts = [];
   for (const block of content) {
+    if (!isKnownContentBlock(block))
+      continue;
     if (isNoiseBlock(block))
       continue;
     if (block.type === "tool_result")
@@ -14183,6 +14214,8 @@ function findToolResult(entries, toolUseId) {
     if (!Array.isArray(content))
       continue;
     for (const block of content) {
+      if (!isKnownContentBlock(block))
+        continue;
       if (block.type === "tool_result" && "tool_use_id" in block && block.tool_use_id === toolUseId) {
         const agentId = "agentId" in entry && typeof entry.agentId === "string" ? entry.agentId : undefined;
         return {
@@ -14201,6 +14234,8 @@ function formatToolResultContent(content) {
     return content;
   const parts = [];
   for (const block of content) {
+    if (!isKnownContentBlock(block))
+      continue;
     if (block.type === "text" && "text" in block) {
       parts.push(block.text);
     } else if (block.type === "image" && "source" in block) {
@@ -14269,7 +14304,7 @@ function parseSession(meta3, entries) {
         continue;
       }
       if (Array.isArray(content)) {
-        const meaningfulBlocks = content.filter((b) => !isNoiseBlock(b) && b.type !== "tool_result");
+        const meaningfulBlocks = content.filter((b) => isKnownContentBlock(b) && !isNoiseBlock(b) && b.type !== "tool_result");
         if (meaningfulBlocks.length === 0)
           continue;
         lineNumber++;
@@ -14277,6 +14312,8 @@ function parseSession(meta3, entries) {
           uuidToLine.set(entry.uuid, lineNumber);
         const entryLineNumber = lineNumber;
         for (const contentBlock of content) {
+          if (!isKnownContentBlock(contentBlock))
+            continue;
           if (isNoiseBlock(contentBlock))
             continue;
           if (contentBlock.type === "text" && "text" in contentBlock) {
@@ -18381,6 +18418,8 @@ function findFirstUserPrompt(entries) {
       text = content;
     } else if (Array.isArray(content)) {
       for (const block of content) {
+        if (!isKnownContentBlock(block))
+          continue;
         if (block.type === "text" && "text" in block && typeof block.text === "string") {
           text = block.text;
           break;
@@ -18863,6 +18902,8 @@ function findGitCommits(entries) {
       if (!Array.isArray(content))
         continue;
       for (const block of content) {
+        if (!isKnownContentBlock(block))
+          continue;
         if (block.type === "tool_use" && "name" in block && block.name === "Bash") {
           const input = block.input;
           const command = input.command;
@@ -18879,6 +18920,8 @@ function findGitCommits(entries) {
       if (!Array.isArray(content))
         continue;
       for (const block of content) {
+        if (!isKnownContentBlock(block))
+          continue;
         if (block.type === "tool_result" && "tool_use_id" in block) {
           const toolUseId = block.tool_use_id;
           const message = pendingCommits.get(toolUseId);
@@ -18926,6 +18969,8 @@ function getToolResultText(content) {
     return content;
   const parts = [];
   for (const block of content) {
+    if (!isKnownContentBlock(block))
+      continue;
     if (block.type === "text" && "text" in block) {
       parts.push(block.text);
     }

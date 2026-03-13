@@ -35,7 +35,41 @@ export const DocumentBlockSchema = z.looseObject({
   source: Base64SourceSchema,
 });
 
-const ToolResultContentBlockSchema = z.union([TextBlockSchema, ImageBlockSchema, DocumentBlockSchema]);
+export const ToolReferenceBlockSchema = z.looseObject({
+  type: z.literal('tool_reference'),
+  tool_name: z.string(),
+});
+
+export const SearchResultBlockSchema = z.looseObject({
+  type: z.literal('search_result'),
+});
+
+/** Catch-all for unknown content block types. Strips base64 source data to prevent uploading binary blobs. */
+const UnknownBlockSchema = z
+  .looseObject({ type: z.string() })
+  .transform((obj) => {
+    const source = obj.source;
+    if (
+      source &&
+      typeof source === 'object' &&
+      !Array.isArray(source) &&
+      (source as Record<string, unknown>).type === 'base64'
+    ) {
+      const { data, ...rest } = source as Record<string, unknown>;
+      return { ...obj, source: rest };
+    }
+    return obj;
+  });
+
+const ToolResultContentBlockSchema = z
+  .discriminatedUnion('type', [
+    TextBlockSchema,
+    ImageBlockSchema,
+    DocumentBlockSchema,
+    ToolReferenceBlockSchema,
+    SearchResultBlockSchema,
+  ])
+  .or(UnknownBlockSchema);
 
 export type ToolResultContentBlock = z.infer<typeof ToolResultContentBlockSchema>;
 
@@ -52,11 +86,25 @@ export const KnownContentBlockSchema = z.discriminatedUnion('type', [
   ToolResultBlockSchema,
   ImageBlockSchema,
   DocumentBlockSchema,
+  ToolReferenceBlockSchema,
+  SearchResultBlockSchema,
 ]);
 
-export const ContentBlockSchema = KnownContentBlockSchema;
+export const ContentBlockSchema = KnownContentBlockSchema.or(UnknownBlockSchema);
 
+// Derived from KnownContentBlockSchema's options tuple via distributive z.infer, rather than
+// z.infer<typeof KnownContentBlockSchema> directly, because Zod v4's discriminatedUnion wrapper
+// type prevents TypeScript from narrowing after a type guard.
+export type KnownContentBlock = z.infer<(typeof KnownContentBlockSchema)['options'][number]>;
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
+
+const KNOWN_CONTENT_BLOCK_TYPES: ReadonlySet<string> = new Set(
+  KnownContentBlockSchema.options.map((s) => s.shape.type.value),
+);
+
+export function isKnownContentBlock(block: ContentBlock): block is KnownContentBlock {
+  return KNOWN_CONTENT_BLOCK_TYPES.has(block.type);
+}
 
 export const MessageContentSchema = z.union([z.string(), z.array(ContentBlockSchema)]);
 
