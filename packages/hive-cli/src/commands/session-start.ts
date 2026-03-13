@@ -1,8 +1,5 @@
-import { closeSync, existsSync, openSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
-import { spawn } from 'node:child_process';
 import { updateAliasIfOutdated } from '../lib/alias';
 import { checkAuthStatus, getUserDisplayName } from '../lib/auth';
 import {
@@ -17,6 +14,7 @@ import { checkAllSessions } from '../lib/extraction';
 import { readHookInput } from '../lib/hook-input';
 import { errors, hook } from '../lib/messages';
 import { hookOutput } from '../lib/output';
+import { getBunPath, spawnBackground } from '../lib/spawn';
 import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
 import type { SessionMeta } from '@alignment-hive/shared';
 
@@ -204,49 +202,24 @@ export async function sessionStart(): Promise<number> {
   process.exit(0);
 }
 
-/** Find bun executable - check standard install locations first since hooks
- * run in non-interactive shells that don't have ~/.bun/bin in PATH */
-function getBunPath(): string {
-  const bunInstall = process.env.BUN_INSTALL;
-  const customPath = bunInstall ? join(bunInstall, 'bin', 'bun') : null;
-  const standardPath = join(homedir(), '.bun', 'bin', 'bun');
-
-  if (customPath && existsSync(customPath)) return customPath;
-  if (existsSync(standardPath)) return standardPath;
-  return 'bun';
-}
-
-function spawnBackground(args: Array<string>): boolean {
-  try {
-    const cwd = process.env.CWD || process.cwd();
-    const errorLogPath = join(cwd, '.claude', 'hive-mind', 'error.log');
-    let stderrFd: number | undefined;
-    try {
-      stderrFd = openSync(errorLogPath, 'a');
-    } catch {
-      // If we can't open the log file, fall back to ignoring stderr
-    }
-    const child = spawn(getBunPath(), [process.argv[1], ...args], {
-      detached: true,
-      stdio: ['ignore', 'ignore', stderrFd ?? 'ignore'],
-      env: { ...process.env, CWD: cwd },
-    });
-    child.unref();
-    if (stderrFd !== undefined) closeSync(stderrFd);
-    return true;
-  } catch {
-    return false;
-  }
+function spawnBackgroundProcess(args: Array<string>): boolean {
+  const cwd = process.env.CWD || process.cwd();
+  return spawnBackground({
+    executable: getBunPath(),
+    args: [process.argv[1], ...args],
+    errorLogPath: join(cwd, '.claude', 'hive-mind', 'error.log'),
+    env: { CWD: cwd },
+  });
 }
 
 function scheduleExtractions(sessionIds: Array<string>): boolean {
   if (sessionIds.length === 0) return true;
-  return spawnBackground(['extract', ...sessionIds]);
+  return spawnBackgroundProcess(['extract', ...sessionIds]);
 }
 
 function scheduleHeartbeats(sessionIds: Array<string>): boolean {
   if (sessionIds.length === 0) return true;
-  return spawnBackground(['heartbeat', ...sessionIds]);
+  return spawnBackgroundProcess(['heartbeat', ...sessionIds]);
 }
 
 function getUploadPidPath(cwd: string): string {
@@ -270,5 +243,5 @@ function scheduleAutoUploads(cwd: string, sessionIds: Array<string>): boolean {
   if (sessionIds.length === 0) return true;
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
   const pidPath = getUploadPidPath(cwd);
-  return spawnBackground(['upload', '--pid-file', pidPath, '--delay', String(delaySeconds), ...sessionIds]);
+  return spawnBackgroundProcess(['upload', '--pid-file', pidPath, '--delay', String(delaySeconds), ...sessionIds]);
 }

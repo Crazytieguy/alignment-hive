@@ -237,4 +237,92 @@ describe('high-entropy safety net', () => {
       expect(detectSecrets(path)).toHaveLength(0);
     }
   });
+
+  test('excludes absolute paths without extensions', () => {
+    const paths = [
+      '/Users/yoav/projects/alignment-hive',
+      '/Users/yoav/worktrees/alignment-hive/agile-glow-5',
+      '/private/var/folders/21/3gpj27c974j5vc436plct78w0000gn/T/coven-vcr',
+    ];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
+  });
+
+  test('excludes paths with long extensions', () => {
+    const paths = [
+      'cli/lib/fixtures/02ed589a-8b41-4004-a7aa-d15cb62f24d3.jsonl',
+      'web/.env.local.example',
+    ];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
+  });
+
+  test('excludes URLs and domain paths', () => {
+    const urls = [
+      '//github.com/BerriAI/litellm/issues/new',
+      '//img.shields.io/badge/status-active-green',
+      'github.com/jesseduffield/lazygit/pkg/gui/types',
+      '//www.convex.dev/components/cloudflare-r2',
+    ];
+    for (const url of urls) {
+      expect(detectSecrets(url)).toHaveLength(0);
+    }
+  });
+
+  test('excludes dot-separated code identifiers', () => {
+    const identifiers = [
+      'block.source.media_type',
+      'process.env.BUN_INSTALL',
+      'import.meta.env.VITE_CONVEX_URL',
+      'convexQueryClient.hashFn',
+    ];
+    for (const id of identifiers) {
+      expect(detectSecrets(id)).toHaveLength(0);
+    }
+  });
+
+  test('excludes Anthropic API IDs', () => {
+    const ids = [
+      'toolu_01VvYAgQKN4qngQwybRp6S6E',
+      'msg_01QSWm3cMnqs7nQLQtsnQuYU',
+      'req_011CXCDYvAUswJ9fhTQbwhd6',
+      'agent_msg_01WRNsKYxa9VL4PKMVz41SqE',
+    ];
+    for (const id of ids) {
+      expect(detectSecrets(id)).toHaveLength(0);
+    }
+  });
+
+  test('excludes hyphenated word sequences', () => {
+    const names = [
+      'snappy-questing-clover',
+      'robust-skipping-meadow',
+    ];
+    for (const name of names) {
+      expect(detectSecrets(name)).toHaveLength(0);
+    }
+  });
+
+  test('excludes MIME types and model paths', () => {
+    const values = [
+      'application/x-www-form-urlencoded',
+      'anthropic/claude-sonnet-4-5-20250929',
+    ];
+    for (const val of values) {
+      expect(detectSecrets(val)).toHaveLength(0);
+    }
+  });
+
+  test('still catches base64 secrets containing slashes', () => {
+    // AWS secret access key format — base64 with slashes must NOT be excluded
+    const secrets = [
+      'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      'aB3cD4eF5/gH6iJ7kL8/mN9oP0qR1sT2uV3wX4y',
+    ];
+    for (const secret of secrets) {
+      expect(detectSecrets(secret).length).toBeGreaterThan(0);
+    }
+  });
 });

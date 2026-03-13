@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parseSession } from '@alignment-hive/shared';
 import { checkAuthStatus } from '../lib/auth.js';
 import { getCanonicalProjectName } from '../lib/config.js';
-import { generateUploadUrl, heartbeatSession, saveUpload } from '../lib/convex.js';
+import { generateUploadUrl, saveUpload } from '../lib/convex.js';
 import {
   getHiveMindSessionsDir,
   isSessionError,
@@ -33,19 +33,13 @@ async function uploadSession(cwd: string, sessionId: string): Promise<{ success:
 
   const { meta, entries } = sessionResult;
 
-  const heartbeatOk = await heartbeatSession({
-    sessionId: meta.sessionId,
+  // Combined heartbeat + generateUploadUrl in a single round trip
+  const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId: meta.checkoutId,
     project: getCanonicalProjectName(cwd),
     lineCount: meta.messageCount,
     parentSessionId: meta.parentSessionId,
   });
-
-  if (!heartbeatOk) {
-    return { success: false, error: 'Failed to heartbeat session' };
-  }
-
-  const uploadUrl = await generateUploadUrl(sessionId);
   if (!uploadUrl) {
     return { success: false, error: 'Failed to get upload URL' };
   }

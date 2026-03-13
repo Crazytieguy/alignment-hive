@@ -1,6 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { spawn } from 'node:child_process';
 import { checkAuthStatus, getUserDisplayName } from '../lib/auth';
 import {
   addTranscriptsDir,
@@ -12,6 +11,7 @@ import {
 import { pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
 import { hookOutput } from '../lib/output';
+import { spawnBackground } from '../lib/spawn';
 import {
   CONSENT_REVIEW_PERIOD_MS,
   SESSION_REVIEW_PERIOD_MS,
@@ -36,17 +36,12 @@ async function checkUploadScheduled(stateDir: string): Promise<boolean> {
   }
 }
 
-function spawnBackgroundCommand(command: string): boolean {
-  try {
-    const child = spawn(process.argv[0], [process.argv[1], command], {
-      detached: true,
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
+function spawnBackgroundCommand(command: string, stateDir: string): boolean {
+  return spawnBackground({
+    executable: process.argv[0],
+    args: [process.argv[1], command],
+    errorLogPath: join(stateDir, 'error.log'),
+  });
 }
 
 function formatHookMessages(messages: Array<string>): string {
@@ -140,7 +135,7 @@ export async function hiveSessionStart(): Promise<number> {
       messages.push(`${eligibleCount} session${eligibleCount === 1 ? '' : 's'} eligible (upload in progress)`);
     } else {
       await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
-      const spawned = spawnBackgroundCommand('upload');
+      const spawned = spawnBackgroundCommand('upload', stateDir);
       if (spawned) {
         messages.push(`Uploading ${eligibleCount} session${eligibleCount === 1 ? '' : 's'} in ${UPLOAD_DELAY_MINUTES}m`);
       }
@@ -152,7 +147,7 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   if (status.authenticated && allSessions.length > 0) {
-    spawnBackgroundCommand('heartbeat');
+    spawnBackgroundCommand('heartbeat', stateDir);
   }
 
   return 0;

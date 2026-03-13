@@ -60,12 +60,23 @@ export async function heartbeatSession(session: {
   }
 }
 
-export async function generateUploadUrl(sessionId: string): Promise<string | null> {
+export async function generateUploadUrl(
+  sessionId: string,
+  heartbeat?: {
+    checkoutId: string;
+    project: string;
+    lineCount: number;
+    parentSessionId?: string;
+  },
+): Promise<string | null> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return null;
 
-    return await client.mutation(api.sessions.generateUploadUrl, { sessionId });
+    return await client.mutation(api.sessions.generateUploadUrl, {
+      sessionId,
+      ...heartbeat,
+    });
   } catch (error) {
     debugLog(`generateUploadUrl failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;

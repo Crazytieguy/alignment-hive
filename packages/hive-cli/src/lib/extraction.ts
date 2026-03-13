@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/shared';
 import { getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
 import { errors } from './messages';
@@ -43,6 +43,7 @@ export function transformEntry(rawEntry: unknown): { entry: ExtractedEntry | nul
 interface ExtractSessionOptions {
   rawPath: string;
   outputPath: string;
+  checkoutId: string;
   agentId?: string;
 }
 
@@ -67,13 +68,11 @@ export async function parseSessionForErrors(rawPath: string): Promise<ParseResul
 }
 
 export async function extractSession(options: ExtractSessionOptions) {
-  const { rawPath, outputPath, agentId } = options;
-  const hiveMindDir = dirname(dirname(outputPath));
+  const { rawPath, outputPath, checkoutId, agentId } = options;
 
-  const [content, rawStat, checkoutId, existingMetaResult] = await Promise.all([
+  const [content, rawStat, existingMetaResult] = await Promise.all([
     readFile(rawPath, 'utf-8'),
     stat(rawPath),
-    getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath),
   ]);
 
@@ -135,7 +134,6 @@ export async function extractSession(options: ExtractSessionOptions) {
     );
   }
 
-  await mkdir(dirname(outputPath), { recursive: true });
   const lines = [JSON.stringify(meta), ...sanitizedEntries.map((e) => JSON.stringify(e))];
   await writeFile(outputPath, `${lines.join('\n')}\n`);
 
@@ -450,9 +448,16 @@ async function loadExtractedMetadata(extractedDir: string): Promise<LoadMetadata
 
 /** Full extraction for a single session (used by background process) */
 export async function extractSingleSession(cwd: string, sessionId: string): Promise<boolean> {
+  const hiveMindDir = join(cwd, '.claude', 'hive-mind');
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const transcriptsDirs = await loadTranscriptsDirs(join(cwd, '.claude', 'hive-mind'));
+  const [transcriptsDirs, checkoutId] = await Promise.all([
+    loadTranscriptsDirs(hiveMindDir),
+    getOrCreateCheckoutId(hiveMindDir),
+  ]);
   if (transcriptsDirs.length === 0) return false;
+
+  // Ensure output directory exists
+  await mkdir(extractedDir, { recursive: true });
 
   // Search all transcript directories for the session
   for (const transcriptsDir of transcriptsDirs) {
@@ -464,6 +469,7 @@ export async function extractSingleSession(cwd: string, sessionId: string): Prom
         const result = await extractSession({
           rawPath: session.path,
           outputPath: extractedPath,
+          checkoutId,
           agentId: session.agentId,
         });
         return result !== null;

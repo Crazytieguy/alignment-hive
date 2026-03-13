@@ -1,5 +1,19 @@
+import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { parseJsonl } from './extraction';
+import type { extractSession as extractSessionFn } from './extraction';
+
+const TEST_CHECKOUT_ID = 'test-checkout-id';
+
+/** Wrapper that ensures output directory exists before calling extractSession */
+async function callExtractSession(
+  extractSession: typeof extractSessionFn,
+  options: { rawPath: string; outputPath: string; agentId?: string },
+) {
+  await mkdir(dirname(options.outputPath), { recursive: true });
+  return extractSession({ ...options, checkoutId: TEST_CHECKOUT_ID });
+}
 
 describe('parseJsonl', () => {
   test('parses valid JSONL lines', () => {
@@ -66,7 +80,7 @@ describe('transformEntry', () => {
         ].join('\n'),
       );
 
-      const result = await extractSession({ rawPath, outputPath: outPath });
+      const result = await callExtractSession(extractSession, { rawPath, outputPath: outPath });
       expect(result).not.toBeNull();
       expect(result!.messageCount).toBe(2); // user + assistant, not file-history-snapshot
     } finally {
@@ -110,7 +124,7 @@ describe('transformEntry', () => {
         ].join('\n'),
       );
 
-      const result = await extractSession({ rawPath, outputPath: outPath });
+      const result = await callExtractSession(extractSession, { rawPath, outputPath: outPath });
       expect(result).not.toBeNull();
       expect(result!.messageCount).toBe(2); // user + assistant, not queue-operation
     } finally {
@@ -163,7 +177,7 @@ describe('content block transformation', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -226,7 +240,7 @@ describe('content block transformation', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -284,7 +298,7 @@ describe('metadata stripping', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -344,7 +358,7 @@ describe('metadata line', () => {
         ].join('\n'),
       );
 
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -407,7 +421,7 @@ describe('system entries', () => {
         ].join('\n'),
       );
 
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -437,7 +451,7 @@ describe('edge cases', () => {
 
     try {
       await writeFile(rawPath, '');
-      const result = await extractSession({ rawPath, outputPath: outPath });
+      const result = await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       // Empty file has no assistant messages, so should return null
       expect(result).toBeNull();
@@ -475,7 +489,7 @@ describe('edge cases', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -516,7 +530,7 @@ describe('edge cases', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -576,7 +590,7 @@ describe('edge cases', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');
@@ -630,7 +644,7 @@ describe('edge cases', () => {
         ].join('\n'),
       );
 
-      const result = await extractSession({ rawPath, outputPath: outPath });
+      const result = await callExtractSession(extractSession, { rawPath, outputPath: outPath });
       expect(result).not.toBeNull();
       // user + assistant entries should be extracted, unknown types skipped
       expect(result!.messageCount).toBe(2);
@@ -685,7 +699,7 @@ describe('unknown content block passthrough', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      const result = await extractSession({ rawPath, outputPath: outPath });
+      const result = await callExtractSession(extractSession, { rawPath, outputPath: outPath });
       expect(result).not.toBeNull();
       expect(result!.messageCount).toBe(2);
 
@@ -739,7 +753,7 @@ describe('unknown content block passthrough', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      const result = await extractSession({ rawPath, outputPath: outPath });
+      const result = await callExtractSession(extractSession, { rawPath, outputPath: outPath });
       expect(result).not.toBeNull();
 
       const output = await readFile(outPath, 'utf-8');
@@ -798,7 +812,7 @@ describe('unknown content block passthrough', () => {
       };
 
       await writeFile(rawPath, [JSON.stringify(userEntry), JSON.stringify(assistantEntry)].join('\n'));
-      await extractSession({ rawPath, outputPath: outPath });
+      await callExtractSession(extractSession, { rawPath, outputPath: outPath });
 
       const output = await readFile(outPath, 'utf-8');
       const lines = output.trim().split('\n');

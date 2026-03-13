@@ -436,7 +436,7 @@ import { join as join5 } from "path";
 import { createReadStream } from "fs";
 import { mkdir as mkdir3, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
-import { basename as basename2, dirname, join as join3 } from "path";
+import { basename as basename2, join as join3 } from "path";
 
 // ../../node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -16299,10 +16299,44 @@ function shannonEntropy(data) {
   }
   return entropy;
 }
-function looksLikeFilePath(s) {
+function looksLikeNonSecret(s) {
   if (s.endsWith("/"))
     return true;
-  return s.includes("/") && /\.\w{1,4}$/.test(s);
+  let slashCount = 0;
+  for (const c of s) {
+    if (c === "/")
+      slashCount++;
+  }
+  if (slashCount >= 2) {
+    if (s.startsWith("/"))
+      return true;
+    if (s.split("/").some((seg) => seg.includes(".")))
+      return true;
+  }
+  if (slashCount === 1 && /\.\w+$/.test(s))
+    return true;
+  if (slashCount === 1) {
+    const parts = s.split("/");
+    if (parts.length === 2 && parts.every((p) => /^[a-zA-Z0-9][\w.-]*$/.test(p)))
+      return true;
+  }
+  if (slashCount > 0)
+    return false;
+  if (s.includes(".")) {
+    const dotParts = s.split(".");
+    if (dotParts.length >= 2 && dotParts.every((p) => /^[a-zA-Z_$][\w$]*$/.test(p)))
+      return true;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s))
+    return true;
+  if (/^(msg|req|toolu|chatcmpl|resp|agent_msg)_[A-Za-z0-9]+$/.test(s))
+    return true;
+  if (s.includes("-") && !s.includes(".") && !s.includes("_")) {
+    const parts = s.split("-");
+    if (parts.length >= 2 && parts.every((p) => /^[a-z]{2,}$/.test(p)))
+      return true;
+  }
+  return false;
 }
 var _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
 function getDetectSecretsStats() {
@@ -16344,7 +16378,7 @@ function detectSecrets(content) {
       if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
         continue;
       }
-      if (rule.id === "high-entropy-secret" && looksLikeFilePath(secretValue)) {
+      if (rule.id === "high-entropy-secret" && looksLikeNonSecret(secretValue)) {
         continue;
       }
       matches.push({
@@ -16592,12 +16626,10 @@ async function parseSessionForErrors(rawPath) {
   return { hasContent: hasAssistant, schemaErrors };
 }
 async function extractSession(options) {
-  const { rawPath, outputPath, agentId } = options;
-  const hiveMindDir = dirname(dirname(outputPath));
-  const [content, rawStat, checkoutId, existingMetaResult] = await Promise.all([
+  const { rawPath, outputPath, checkoutId, agentId } = options;
+  const [content, rawStat, existingMetaResult] = await Promise.all([
     readFile2(rawPath, "utf-8"),
     stat2(rawPath),
-    getOrCreateCheckoutId(hiveMindDir),
     readExtractedMeta(outputPath)
   ]);
   const existingMeta = isMetaError(existingMetaResult) ? null : existingMetaResult;
@@ -16642,7 +16674,6 @@ async function extractSession(options) {
     const stats = getDetectSecretsStats();
     console.log(`[extract] Sanitization: ${(performance.now() - t0).toFixed(2)}ms | ` + `${stats.calls} calls, ${stats.keywordHits} keyword hits, ${stats.regexRuns} regex runs`);
   }
-  await mkdir3(dirname(outputPath), { recursive: true });
   const lines = [JSON.stringify(meta3), ...sanitizedEntries.map((e) => JSON.stringify(e))];
   await writeFile2(outputPath, `${lines.join(`
 `)}
@@ -16869,10 +16900,15 @@ async function loadExtractedMetadata(extractedDir) {
   return { metaMap, errors: collectedErrors };
 }
 async function extractSingleSession(cwd, sessionId) {
+  const hiveMindDir = join3(cwd, ".claude", "hive-mind");
   const extractedDir = getHiveMindSessionsDir(cwd);
-  const transcriptsDirs = await loadTranscriptsDirs(join3(cwd, ".claude", "hive-mind"));
+  const [transcriptsDirs, checkoutId] = await Promise.all([
+    loadTranscriptsDirs(hiveMindDir),
+    getOrCreateCheckoutId(hiveMindDir)
+  ]);
   if (transcriptsDirs.length === 0)
     return false;
+  await mkdir3(extractedDir, { recursive: true });
   for (const transcriptsDir of transcriptsDirs) {
     try {
       const rawSessions = await findRawSessions(transcriptsDir);
@@ -16882,6 +16918,7 @@ async function extractSingleSession(cwd, sessionId) {
         const result = await extractSession({
           rawPath: session.path,
           outputPath: extractedPath,
+          checkoutId,
           agentId: session.agentId
         });
         return result !== null;
@@ -19141,11 +19178,8 @@ async function read() {
 }
 
 // src/commands/session-start.ts
-import { closeSync, existsSync, openSync } from "fs";
 import { readFile as readFile5 } from "fs/promises";
-import { dirname as dirname2, join as join8 } from "path";
-import { homedir as homedir4 } from "os";
-import { spawn } from "child_process";
+import { dirname, join as join9 } from "path";
 
 // src/lib/alias.ts
 import { homedir as homedir3 } from "os";
@@ -20183,12 +20217,15 @@ async function heartbeatSession(session) {
     return false;
   }
 }
-async function generateUploadUrl(sessionId) {
+async function generateUploadUrl(sessionId, heartbeat) {
   try {
     const client = await getAuthenticatedClient();
     if (!client)
       return null;
-    return await client.mutation(api2.sessions.generateUploadUrl, { sessionId });
+    return await client.mutation(api2.sessions.generateUploadUrl, {
+      sessionId,
+      ...heartbeat
+    });
   } catch (error48) {
     debugLog(`generateUploadUrl failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
     return null;
@@ -20245,6 +20282,41 @@ async function readHookInput() {
   }
 }
 
+// src/lib/spawn.ts
+import { closeSync, existsSync, openSync } from "fs";
+import { join as join8 } from "path";
+import { homedir as homedir4 } from "os";
+import { spawn } from "child_process";
+function getBunPath() {
+  const bunInstall = process.env.BUN_INSTALL;
+  const customPath = bunInstall ? join8(bunInstall, "bin", "bun") : null;
+  const standardPath = join8(homedir4(), ".bun", "bin", "bun");
+  if (customPath && existsSync(customPath))
+    return customPath;
+  if (existsSync(standardPath))
+    return standardPath;
+  return "bun";
+}
+function spawnBackground(options) {
+  try {
+    let stderrFd;
+    try {
+      stderrFd = openSync(options.errorLogPath, "a");
+    } catch {}
+    const child = spawn(options.executable, options.args, {
+      detached: true,
+      stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
+      ...options.env && { env: { ...process.env, ...options.env } }
+    });
+    child.unref();
+    if (stderrFd !== undefined)
+      closeSync(stderrFd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // src/commands/session-start.ts
 var AUTO_UPLOAD_DELAY_MINUTES = 10;
 var verbose2 = () => process.env.HIVE_MIND_VERBOSE === "1";
@@ -20254,15 +20326,15 @@ async function sessionStart() {
   const collectedErrors = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
-  const hiveMindDir = join8(cwd, ".claude", "hive-mind");
+  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
   let transcriptsDirs;
   const inWorktree = await isWorktree(cwd);
   if (hookInput.transcriptPath) {
-    const transcriptsDir = dirname2(hookInput.transcriptPath);
+    const transcriptsDir = dirname(hookInput.transcriptPath);
     if (inWorktree) {
       const mainPath = getMainWorktreePath(cwd);
       if (mainPath) {
-        const mainHiveMindDir = join8(mainPath, ".claude", "hive-mind");
+        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
         await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
       }
       transcriptsDirs = [transcriptsDir];
@@ -20385,49 +20457,27 @@ async function sessionStart() {
   }
   process.exit(0);
 }
-function getBunPath() {
-  const bunInstall = process.env.BUN_INSTALL;
-  const customPath = bunInstall ? join8(bunInstall, "bin", "bun") : null;
-  const standardPath = join8(homedir4(), ".bun", "bin", "bun");
-  if (customPath && existsSync(customPath))
-    return customPath;
-  if (existsSync(standardPath))
-    return standardPath;
-  return "bun";
-}
-function spawnBackground(args) {
-  try {
-    const cwd = process.env.CWD || process.cwd();
-    const errorLogPath = join8(cwd, ".claude", "hive-mind", "error.log");
-    let stderrFd;
-    try {
-      stderrFd = openSync(errorLogPath, "a");
-    } catch {}
-    const child = spawn(getBunPath(), [process.argv[1], ...args], {
-      detached: true,
-      stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
-      env: { ...process.env, CWD: cwd }
-    });
-    child.unref();
-    if (stderrFd !== undefined)
-      closeSync(stderrFd);
-    return true;
-  } catch {
-    return false;
-  }
+function spawnBackgroundProcess(args) {
+  const cwd = process.env.CWD || process.cwd();
+  return spawnBackground({
+    executable: getBunPath(),
+    args: [process.argv[1], ...args],
+    errorLogPath: join9(cwd, ".claude", "hive-mind", "error.log"),
+    env: { CWD: cwd }
+  });
 }
 function scheduleExtractions(sessionIds) {
   if (sessionIds.length === 0)
     return true;
-  return spawnBackground(["extract", ...sessionIds]);
+  return spawnBackgroundProcess(["extract", ...sessionIds]);
 }
 function scheduleHeartbeats(sessionIds) {
   if (sessionIds.length === 0)
     return true;
-  return spawnBackground(["heartbeat", ...sessionIds]);
+  return spawnBackgroundProcess(["heartbeat", ...sessionIds]);
 }
 function getUploadPidPath(cwd) {
-  return join8(cwd, ".claude", "hive-mind", "upload.pid");
+  return join9(cwd, ".claude", "hive-mind", "upload.pid");
 }
 async function isUploadRunning(cwd) {
   const pidPath = getUploadPidPath(cwd);
@@ -20447,7 +20497,7 @@ function scheduleAutoUploads(cwd, sessionIds) {
     return true;
   const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
   const pidPath = getUploadPidPath(cwd);
-  return spawnBackground(["upload", "--pid-file", pidPath, "--delay", String(delaySeconds), ...sessionIds]);
+  return spawnBackgroundProcess(["upload", "--pid-file", pidPath, "--delay", String(delaySeconds), ...sessionIds]);
 }
 
 // src/commands/login.ts
@@ -20627,9 +20677,9 @@ async function login() {
 }
 
 // src/commands/setup-alias.ts
-import { dirname as dirname3 } from "path";
+import { dirname as dirname2 } from "path";
 async function setupAliasCommand() {
-  const pluginRoot = dirname3(process.argv[1]);
+  const pluginRoot = dirname2(process.argv[1]);
   const { success: success2, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
   if (!success2) {
     printError("Failed to set up alias");
@@ -20646,10 +20696,10 @@ async function setupAliasCommand() {
 
 // src/commands/upload.ts
 import { readFile as readFile6, unlink, writeFile as writeFile5 } from "fs/promises";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 async function uploadSession(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join9(sessionsDir, `${sessionId}.jsonl`);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
   let content;
   try {
     content = await readFile6(sessionPath, "utf-8");
@@ -20661,17 +20711,12 @@ async function uploadSession(cwd, sessionId) {
     return { success: false, error: "Could not read session data" };
   }
   const { meta: meta3, entries } = sessionResult;
-  const heartbeatOk = await heartbeatSession({
-    sessionId: meta3.sessionId,
+  const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId: meta3.checkoutId,
     project: getCanonicalProjectName(cwd),
     lineCount: meta3.messageCount,
     parentSessionId: meta3.parentSessionId
   });
-  if (!heartbeatOk) {
-    return { success: false, error: "Failed to heartbeat session" };
-  }
-  const uploadUrl = await generateUploadUrl(sessionId);
   if (!uploadUrl) {
     return { success: false, error: "Failed to get upload URL" };
   }
@@ -20709,7 +20754,7 @@ async function uploadSession(cwd, sessionId) {
 }
 async function getAgentIds(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join9(sessionsDir, `${sessionId}.jsonl`);
+  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
   const sessionResult = await readExtractedSession(sessionPath);
   if (!sessionResult || isSessionError(sessionResult)) {
     if (isSessionError(sessionResult) && process.env.DEBUG) {
@@ -20836,7 +20881,7 @@ async function upload() {
 }
 
 // src/commands/heartbeat.ts
-import { join as join10 } from "path";
+import { join as join11 } from "path";
 async function heartbeat() {
   const cwd = process.env.CWD || process.cwd();
   const sessionIds = process.argv.slice(3);
@@ -20851,7 +20896,7 @@ async function heartbeat() {
   const project = getCanonicalProjectName(cwd);
   let failures = 0;
   for (const sessionId of sessionIds) {
-    const metaResult = await readExtractedMeta(join10(sessionsDir, `${sessionId}.jsonl`));
+    const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
     if (!metaResult || isMetaError(metaResult)) {
       failures++;
       continue;

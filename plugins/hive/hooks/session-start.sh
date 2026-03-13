@@ -74,7 +74,9 @@ CONSENT_FILE="$STATE_DIR/sharing-enabled"
 if [ -f "$CONSENT_FILE" ]; then
   # Invoke bootstrap.sh which downloads binary if needed, then runs session-start
   # Pipe stdin through so the binary gets hook input
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh" session-start || true
+  # Errors go to log file; hook must not fail even if bootstrap/binary fails
+  ERROR_LOG="$STATE_DIR/error.log"
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh" session-start 2>>"$ERROR_LOG" || true
 fi
 
 exit 0
