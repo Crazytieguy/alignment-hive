@@ -239,12 +239,12 @@ export function parseKnownEntry(data: unknown): ParseResult {
   return { data: null };
 }
 
-export const HiveMindMetaSchema = z.object({
-  _type: z.literal('hive-mind-meta'),
+export const SessionMetaSchema = z.object({
+  _type: z.enum(['session-meta', 'hive-mind-meta']),
   version: z.string(),
   sessionId: z.string(),
   checkoutId: z.string(),
-  extractedAt: z.string(),
+  extractedAt: z.string().optional(),
   rawMtime: z.string(),
   messageCount: z.number(),
   rawPath: z.string(),
@@ -256,7 +256,7 @@ export const HiveMindMetaSchema = z.object({
   uploadedAt: z.string().optional(),
 });
 
-export type HiveMindMeta = z.infer<typeof HiveMindMetaSchema>;
+export type SessionMeta = z.infer<typeof SessionMetaSchema>;
 
 /**
  * SELF-COMPATIBILITY: Schemas with transforms must accept both original AND transformed data.

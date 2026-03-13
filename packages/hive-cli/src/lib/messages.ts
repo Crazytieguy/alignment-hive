@@ -91,6 +91,7 @@ export const errors = {
   invalidTimeSpec: (flag: string, value: string): string =>
     `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd: string): string => `Unknown command: ${cmd}`,
+  unknownFlag: (flag: string): string => `Unknown flag: ${flag}`,
   unexpectedResponse: 'Unexpected response from server',
   bunNotInstalled: 'To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash',
   loginStatusYes: (displayName: string): string => `logged in: yes (${displayName})`,

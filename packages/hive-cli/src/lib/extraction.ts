@@ -2,15 +2,15 @@ import { createReadStream } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { basename, dirname, join } from 'node:path';
-import { HiveMindMetaSchema, parseKnownEntry } from '@alignment-hive/shared';
+import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/shared';
 import { getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
 import { errors } from './messages';
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from './sanitize';
 import { isErrorResult } from './auth';
 import type { ErrorResult } from './auth';
-import type { HiveMindMeta, KnownEntry } from '@alignment-hive/shared';
+import type { KnownEntry, SessionMeta } from '@alignment-hive/shared';
 
-const HIVE_MIND_VERSION = '0.1' as const;
+export const HIVE_MIND_VERSION = '0.1' as const;
 
 export function* parseJsonl(content: string) {
   for (const line of content.split('\n')) {
@@ -106,8 +106,8 @@ export async function extractSession(options: ExtractSessionOptions) {
       )?.sessionId
     : undefined;
 
-  const meta: HiveMindMeta = {
-    _type: 'hive-mind-meta',
+  const meta: SessionMeta = {
+    _type: 'session-meta',
     version: HIVE_MIND_VERSION,
     sessionId: basename(rawPath, '.jsonl'),
     checkoutId,
@@ -157,13 +157,13 @@ async function readFirstLine(filePath: string): Promise<string | null> {
   }
 }
 
-export type ReadMetaResult = HiveMindMeta | ErrorResult | null;
+export type ReadMetaResult = SessionMeta | ErrorResult | null;
 
 export async function readExtractedMeta(extractedPath: string): Promise<ReadMetaResult> {
   try {
     const firstLine = await readFirstLine(extractedPath);
     if (!firstLine) return null;
-    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    const parsed = SessionMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
       return { error: errors.schemaError(extractedPath, parsed.error.message) };
     }
@@ -173,34 +173,37 @@ export async function readExtractedMeta(extractedPath: string): Promise<ReadMeta
   }
 }
 
-export const isMetaError = isErrorResult<HiveMindMeta>;
+export const isMetaError = isErrorResult<SessionMeta>;
 
-export type ReadSessionResult = { meta: HiveMindMeta; entries: Array<KnownEntry> } | { error: string } | null;
+export type ReadSessionResult = { meta: SessionMeta; entries: Array<KnownEntry> } | { error: string } | null;
 
 export async function readExtractedSession(extractedPath: string): Promise<ReadSessionResult> {
+  let content: string;
   try {
-    const content = await readFile(extractedPath, 'utf-8');
-    const lines = content.split('\n').filter((l) => l.trim());
-    if (lines.length === 0) return null;
-
-    const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
-    if (!metaParsed.success) {
-      return { error: errors.schemaError(extractedPath, metaParsed.error.message) };
-    }
-
-    const entries: Array<KnownEntry> = [];
-    for (let i = 1; i < lines.length; i++) {
-      const result = parseKnownEntry(JSON.parse(lines[i]));
-      if (result.data) entries.push(result.data);
-    }
-
-    return { meta: metaParsed.data, entries };
-  } catch {
-    return null;
+    content = await readFile(extractedPath, 'utf-8');
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return { error: `Failed to read ${extractedPath}: ${err instanceof Error ? err.message : String(err)}` };
   }
+
+  const lines = content.split('\n').filter((l) => l.trim());
+  if (lines.length === 0) return null;
+
+  const metaParsed = SessionMetaSchema.safeParse(JSON.parse(lines[0]));
+  if (!metaParsed.success) {
+    return { error: errors.schemaError(extractedPath, metaParsed.error.message) };
+  }
+
+  const entries: Array<KnownEntry> = [];
+  for (let i = 1; i < lines.length; i++) {
+    const result = parseKnownEntry(JSON.parse(lines[i]));
+    if (result.data) entries.push(result.data);
+  }
+
+  return { meta: metaParsed.data, entries };
 }
 
-export const isSessionError = isErrorResult<{ meta: HiveMindMeta; entries: Array<KnownEntry> }>;
+export const isSessionError = isErrorResult<{ meta: SessionMeta; entries: Array<KnownEntry> }>;
 
 export type MarkUploadedResult = { success: true } | { success: false; error?: string };
 
@@ -211,7 +214,7 @@ export async function markSessionUploaded(sessionPath: string): Promise<MarkUplo
     if (newlineIndex === -1) return { success: false };
 
     const firstLine = content.slice(0, newlineIndex);
-    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    const parsed = SessionMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
       return { success: false, error: errors.schemaError(sessionPath, parsed.error.message) };
     }
@@ -285,7 +288,7 @@ export interface SessionCheckResult {
   /** Schema errors found during parsing */
   schemaErrors: Array<{ sessionId: string; errors: Array<string> }>;
   /** All extracted sessions with their metadata (for eligibility checks) */
-  extractedSessions: Array<{ sessionId: string; meta: HiveMindMeta }>;
+  extractedSessions: Array<{ sessionId: string; meta: SessionMeta }>;
   /** All errors encountered during session checking */
   errors: Array<string>;
 }
@@ -402,14 +405,14 @@ export async function checkAllSessions(cwd: string, transcriptsDirs: Array<strin
 }
 
 interface LoadMetadataResult {
-  metaMap: Map<string, HiveMindMeta>;
+  metaMap: Map<string, SessionMeta>;
   errors: Array<string>;
 }
 
 /** Load all extracted session metadata into a map */
 async function loadExtractedMetadata(extractedDir: string): Promise<LoadMetadataResult> {
   const t0 = performance.now();
-  const metaMap = new Map<string, HiveMindMeta>();
+  const metaMap = new Map<string, SessionMeta>();
   const collectedErrors: Array<string> = [];
 
   let files: Array<string>;

@@ -12,14 +12,24 @@ const COMMANDS = new Map<string, () => Promise<number>>([
   ['upload', async () => (await import('./commands/hive-upload')).hiveUpload()],
   ['heartbeat', async () => (await import('./commands/hive-heartbeat')).hiveHeartbeat()],
   ['login', async () => (await import('./commands/login')).login()],
+  ['local', async () => (await import('./commands/local')).local()],
 ]);
+
+function printUsage(): void {
+  console.log('Usage: hive <session-start|upload|heartbeat|login|local>');
+}
 
 async function main(): Promise<void> {
   const command = process.argv[2];
 
   if (!command) {
-    console.log('Usage: hive-cli <session-start|upload|heartbeat|login>');
+    printUsage();
     process.exit(1);
+  }
+
+  if (command === 'help' || command === '--help' || command === '-h') {
+    printUsage();
+    return;
   }
 
   const handler = COMMANDS.get(command);

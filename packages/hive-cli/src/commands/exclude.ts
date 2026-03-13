@@ -4,7 +4,7 @@ import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from '../lib/e
 import { excludeCmd } from '../lib/messages.js';
 import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
 import { confirm, formatSessionId, lookupSession } from '../lib/utils.js';
-import type { HiveMindMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/shared';
 
 async function excludeSession(sessionPath: string): Promise<boolean> {
   try {
@@ -12,7 +12,7 @@ async function excludeSession(sessionPath: string): Promise<boolean> {
     const lines = content.split('\n');
     if (lines.length === 0) return false;
 
-    const meta = JSON.parse(lines[0]) as HiveMindMeta;
+    const meta = JSON.parse(lines[0]) as SessionMeta;
     meta.excluded = true;
     lines[0] = JSON.stringify(meta);
 

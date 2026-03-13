@@ -14139,12 +14139,12 @@ function parseKnownEntry(data) {
   }
   return { data: null };
 }
-var HiveMindMetaSchema = exports_external.object({
-  _type: exports_external.literal("hive-mind-meta"),
+var SessionMetaSchema = exports_external.object({
+  _type: exports_external.enum(["session-meta", "hive-mind-meta"]),
   version: exports_external.string(),
   sessionId: exports_external.string(),
   checkoutId: exports_external.string(),
-  extractedAt: exports_external.string(),
+  extractedAt: exports_external.string().optional(),
   rawMtime: exports_external.string(),
   messageCount: exports_external.number(),
   rawPath: exports_external.string(),
@@ -14611,6 +14611,7 @@ var errors3 = {
   invalidRegex: (error48) => `Invalid regex: ${error48}`,
   invalidTimeSpec: (flag, value) => `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd) => `Unknown command: ${cmd}`,
+  unknownFlag: (flag) => `Unknown flag: ${flag}`,
   unexpectedResponse: "Unexpected response from server",
   bunNotInstalled: "To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash",
   loginStatusYes: (displayName) => `logged in: yes (${displayName})`,
@@ -16619,7 +16620,7 @@ async function extractSession(options) {
     return null;
   const parentSessionId = agentId ? entries.find((e) => ("sessionId" in e) && typeof e.sessionId === "string")?.sessionId : undefined;
   const meta3 = {
-    _type: "hive-mind-meta",
+    _type: "session-meta",
     version: HIVE_MIND_VERSION,
     sessionId: basename2(rawPath, ".jsonl"),
     checkoutId,
@@ -16666,7 +16667,7 @@ async function readExtractedMeta(extractedPath) {
     const firstLine = await readFirstLine(extractedPath);
     if (!firstLine)
       return null;
-    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    const parsed = SessionMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
       return { error: errors3.schemaError(extractedPath, parsed.error.message) };
     }
@@ -16677,26 +16678,29 @@ async function readExtractedMeta(extractedPath) {
 }
 var isMetaError = isErrorResult;
 async function readExtractedSession(extractedPath) {
+  let content;
   try {
-    const content = await readFile2(extractedPath, "utf-8");
-    const lines = content.split(`
-`).filter((l) => l.trim());
-    if (lines.length === 0)
+    content = await readFile2(extractedPath, "utf-8");
+  } catch (err) {
+    if (err.code === "ENOENT")
       return null;
-    const metaParsed = HiveMindMetaSchema.safeParse(JSON.parse(lines[0]));
-    if (!metaParsed.success) {
-      return { error: errors3.schemaError(extractedPath, metaParsed.error.message) };
-    }
-    const entries = [];
-    for (let i = 1;i < lines.length; i++) {
-      const result = parseKnownEntry(JSON.parse(lines[i]));
-      if (result.data)
-        entries.push(result.data);
-    }
-    return { meta: metaParsed.data, entries };
-  } catch {
-    return null;
+    return { error: `Failed to read ${extractedPath}: ${err instanceof Error ? err.message : String(err)}` };
   }
+  const lines = content.split(`
+`).filter((l) => l.trim());
+  if (lines.length === 0)
+    return null;
+  const metaParsed = SessionMetaSchema.safeParse(JSON.parse(lines[0]));
+  if (!metaParsed.success) {
+    return { error: errors3.schemaError(extractedPath, metaParsed.error.message) };
+  }
+  const entries = [];
+  for (let i = 1;i < lines.length; i++) {
+    const result = parseKnownEntry(JSON.parse(lines[i]));
+    if (result.data)
+      entries.push(result.data);
+  }
+  return { meta: metaParsed.data, entries };
 }
 var isSessionError = isErrorResult;
 async function markSessionUploaded(sessionPath) {
@@ -16707,7 +16711,7 @@ async function markSessionUploaded(sessionPath) {
     if (newlineIndex === -1)
       return { success: false };
     const firstLine = content.slice(0, newlineIndex);
-    const parsed = HiveMindMetaSchema.safeParse(JSON.parse(firstLine));
+    const parsed = SessionMetaSchema.safeParse(JSON.parse(firstLine));
     if (!parsed.success) {
       return { success: false, error: errors3.schemaError(sessionPath, parsed.error.message) };
     }
@@ -17102,8 +17106,7 @@ async function extract() {
 }
 
 // src/commands/search.ts
-import { readdir as readdir4 } from "fs/promises";
-import { join as join6 } from "path";
+import { basename as basename3 } from "path";
 
 // src/lib/field-filter.ts
 function parseFieldList(input) {
@@ -17673,7 +17676,7 @@ function formatBlocks(blocks, options = {}) {
 function formatSession(entries, options = {}) {
   const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
   const meta3 = {
-    _type: "hive-mind-meta",
+    _type: "session-meta",
     version: "0.1",
     sessionId: "unknown",
     checkoutId: "unknown",
@@ -18059,6 +18062,18 @@ function formatGenericTool({ input, redact, truncation }) {
   return { headerParams, multilineParams };
 }
 
+// src/lib/session-source.ts
+import { readdir as readdir4 } from "fs/promises";
+import { join as join6 } from "path";
+var extractedSessionSource = {
+  async listSessionFiles(cwd) {
+    const sessionsDir = getHiveMindSessionsDir(cwd);
+    const files = await readdir4(sessionsDir);
+    return files.filter((f) => f.endsWith(".jsonl")).map((f) => join6(sessionsDir, f));
+  },
+  readSession: readExtractedSession
+};
+
 // src/lib/time-filter.ts
 function parseRelativeTime(value) {
   const match = value.match(/^(\d+)([mhdw])$/);
@@ -18104,272 +18119,6 @@ function isInTimeRange(timestamp, range) {
   if (range.before && date5 > range.before)
     return false;
   return true;
-}
-
-// src/commands/search.ts
-var DEFAULT_CONTEXT_WORDS = 10;
-function printUsage() {
-  console.log(usage.search());
-}
-function computeMinimalPrefixes(sessionIds) {
-  const prefixes = new Map;
-  const minLen = 4;
-  for (const id of sessionIds) {
-    let len = minLen;
-    while (len <= id.length) {
-      const prefix = id.slice(0, len);
-      const conflicts = sessionIds.filter((other) => other !== id && other.startsWith(prefix));
-      if (conflicts.length === 0) {
-        prefixes.set(id, prefix);
-        break;
-      }
-      len++;
-    }
-    if (!prefixes.has(id)) {
-      prefixes.set(id, id);
-    }
-  }
-  return prefixes;
-}
-function getSearchableFieldValues(block, filter) {
-  const values = [];
-  if (block.type === "user" && filter.isSearchable("user")) {
-    if (block.content)
-      values.push(block.content);
-  } else if (block.type === "assistant" && filter.isSearchable("assistant")) {
-    if (block.content)
-      values.push(block.content);
-  } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
-    if (block.content)
-      values.push(block.content);
-  } else if (block.type === "tool") {
-    const toolName = block.toolName;
-    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
-      for (const value of Object.values(block.toolInput)) {
-        if (value !== null && value !== undefined) {
-          values.push(String(value));
-        }
-      }
-    }
-    if (filter.isSearchable("tool:result") || filter.isSearchable(`tool:${toolName}:result`)) {
-      if (block.toolResult)
-        values.push(block.toolResult);
-    }
-  } else if (block.type === "system" && filter.isSearchable("system")) {
-    if (block.content)
-      values.push(block.content);
-  } else if (block.type === "summary" && filter.isSearchable("summary")) {
-    if (block.content)
-      values.push(block.content);
-  }
-  return values;
-}
-async function search() {
-  const args = process.argv.slice(3);
-  const doubleDashIdx = args.indexOf("--");
-  const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
-  if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
-    printUsage();
-    return 0;
-  }
-  if (args.length === 0) {
-    printUsage();
-    return 1;
-  }
-  const options = parseSearchOptions(args);
-  if (!options)
-    return 1;
-  const cwd = process.cwd();
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-  let files;
-  try {
-    files = await readdir4(sessionsDir);
-  } catch {
-    printError(errors3.noSessions);
-    return 1;
-  }
-  let jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  if (jsonlFiles.length === 0) {
-    printError(errors3.noSessionsIn(sessionsDir));
-    return 1;
-  }
-  if (options.sessionFilter) {
-    const prefix = options.sessionFilter;
-    jsonlFiles = jsonlFiles.filter((f) => {
-      const name = f.replace(".jsonl", "");
-      return name.startsWith(prefix) || name === `agent-${prefix}`;
-    });
-    if (jsonlFiles.length === 0) {
-      printError(errors3.sessionNotFound(prefix));
-      return 1;
-    }
-  }
-  const allSessionIds = [];
-  for (const file2 of jsonlFiles) {
-    const path = join6(sessionsDir, file2);
-    const sessionResult = await readExtractedSession(path);
-    if (isSessionError(sessionResult)) {
-      printError(sessionResult.error);
-      continue;
-    }
-    if (sessionResult && !sessionResult.meta.agentId) {
-      allSessionIds.push(sessionResult.meta.sessionId);
-    }
-  }
-  const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
-  let totalMatches = 0;
-  const sessionCounts = [];
-  const matchingSessions = [];
-  for (const file2 of jsonlFiles) {
-    if (options.maxMatches !== null && totalMatches >= options.maxMatches)
-      break;
-    const path = join6(sessionsDir, file2);
-    const sessionResult = await readExtractedSession(path);
-    if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId)
-      continue;
-    const sessionId = sessionResult.meta.sessionId;
-    const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
-    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
-    const matchingIndices = new Set;
-    for (let i = 0;i < parsed.blocks.length; i++) {
-      const block = parsed.blocks[i];
-      if (options.afterTime || options.beforeTime) {
-        if (!isInTimeRange(block.timestamp, { after: options.afterTime, before: options.beforeTime })) {
-          continue;
-        }
-      }
-      const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
-      if (fieldValues.length === 0)
-        continue;
-      const hasMatch = fieldValues.some((value) => options.pattern.test(value));
-      if (hasMatch) {
-        matchingIndices.add(i);
-        if (options.maxMatches !== null && totalMatches + matchingIndices.size >= options.maxMatches) {
-          break;
-        }
-      }
-    }
-    if (matchingIndices.size === 0)
-      continue;
-    const sessionMatchCount = matchingIndices.size;
-    totalMatches += sessionMatchCount;
-    matchingSessions.push(sessionPrefix);
-    sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
-    if (!options.countOnly && !options.listOnly) {
-      const output = formatBlocks(parsed.blocks, {
-        sessionPrefix,
-        cwd,
-        showTimestamp: false,
-        getTruncation: () => ({
-          type: "matchContext",
-          pattern: options.pattern,
-          contextWords: options.contextWords
-        }),
-        shouldOutput: (_block, i) => matchingIndices.has(i),
-        separator: `
-`
-      });
-      for (const line of output.split(`
-`)) {
-        if (line)
-          console.log(line);
-      }
-    }
-  }
-  if (options.countOnly) {
-    for (const { sessionId, count } of sessionCounts) {
-      console.log(`${sessionId}:${count}`);
-    }
-  } else if (options.listOnly) {
-    for (const sessionId of matchingSessions) {
-      console.log(sessionId);
-    }
-  }
-  return 0;
-}
-function parseSearchOptions(args) {
-  function getFlagValue(flag) {
-    const idx = args.indexOf(flag);
-    return idx !== -1 ? args[idx + 1] : undefined;
-  }
-  const caseInsensitive = args.includes("-i");
-  const countOnly = args.includes("-c");
-  const listOnly = args.includes("-l");
-  let maxMatches = null;
-  const mValue = getFlagValue("-m");
-  if (mValue !== undefined) {
-    maxMatches = parseInt(mValue, 10);
-    if (isNaN(maxMatches) || maxMatches < 1) {
-      printError(errors3.invalidNumber("-m", mValue));
-      return null;
-    }
-  }
-  let contextWords = DEFAULT_CONTEXT_WORDS;
-  const cValue = getFlagValue("-C");
-  if (cValue !== undefined) {
-    contextWords = parseInt(cValue, 10);
-    if (isNaN(contextWords) || contextWords < 0) {
-      printError(errors3.invalidNonNegative("-C"));
-      return null;
-    }
-  }
-  const sessionFilter = getFlagValue("-s") ?? null;
-  const searchInValue = getFlagValue("--in");
-  const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
-  const fieldFilter = new SearchFieldFilter(searchIn);
-  let afterTime = null;
-  const afterValue = getFlagValue("--after");
-  if (afterValue !== undefined) {
-    afterTime = parseTimeSpec(afterValue);
-    if (!afterTime) {
-      printError(errors3.invalidTimeSpec("--after", afterValue));
-      return null;
-    }
-  }
-  let beforeTime = null;
-  const beforeValue = getFlagValue("--before");
-  if (beforeValue !== undefined) {
-    beforeTime = parseTimeSpec(beforeValue);
-    if (!beforeTime) {
-      printError(errors3.invalidTimeSpec("--before", beforeValue));
-      return null;
-    }
-  }
-  const flagsWithValues = new Set(["-m", "-C", "-s", "--in", "--after", "--before"]);
-  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in", "--after", "--before"]);
-  let patternStr = null;
-  for (let i = 0;i < args.length; i++) {
-    const arg = args[i];
-    if (flags.has(arg)) {
-      if (flagsWithValues.has(arg))
-        i++;
-      continue;
-    }
-    patternStr = arg;
-    break;
-  }
-  if (!patternStr) {
-    printError(errors3.noPattern);
-    return null;
-  }
-  let pattern;
-  try {
-    pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
-  } catch (e) {
-    printError(errors3.invalidRegex(e instanceof Error ? e.message : String(e)));
-    return null;
-  }
-  return {
-    pattern,
-    countOnly,
-    listOnly,
-    maxMatches,
-    contextWords,
-    fieldFilter,
-    sessionFilter,
-    afterTime,
-    beforeTime
-  };
 }
 
 // src/commands/index.ts
@@ -18462,7 +18211,7 @@ function checkSessionEligibility(meta3, authIssuedAt) {
   if (meta3.excluded) {
     return { sessionId, meta: meta3, status: "excluded", eligibleAt: null, reason: "Excluded by user" };
   }
-  if (meta3.uploadedAt && meta3.extractedAt <= meta3.uploadedAt) {
+  if (meta3.uploadedAt && meta3.extractedAt && meta3.extractedAt <= meta3.uploadedAt) {
     return { sessionId, meta: meta3, status: "uploaded", eligibleAt: null, reason: "Already uploaded" };
   }
   const now = Date.now();
@@ -18480,7 +18229,7 @@ function checkSessionEligibility(meta3, authIssuedAt) {
 
 // src/commands/index.ts
 var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function computeMinimalPrefixes2(ids) {
+function computeMinimalPrefixes(ids) {
   const result = new Map;
   const minLen = 4;
   for (const id of ids) {
@@ -18515,7 +18264,7 @@ function formatRelativeDateTime(rawMtime, prevDate, prevYear) {
   }
   return { display, date: date5, year };
 }
-function printUsage2() {
+function printUsage() {
   console.log(usage.indexFull());
 }
 function formatPendingSession(info, idPrefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth) {
@@ -18597,7 +18346,7 @@ async function showPendingStatus(cwd) {
     return b.eligibility.meta.rawMtime.localeCompare(a.eligibility.meta.rawMtime);
   });
   const sessionIds = pendingInfos.map((p) => p.eligibility.sessionId);
-  const idPrefixes = computeMinimalPrefixes2(sessionIds);
+  const idPrefixes = computeMinimalPrefixes(sessionIds);
   const formatDate = (rawMtime) => {
     const d = new Date(rawMtime);
     const month = MONTH_NAMES[d.getMonth()];
@@ -18646,34 +18395,33 @@ async function showPendingStatus(cwd) {
   }
   return 0;
 }
-async function index() {
-  const args = process.argv.slice(3);
+var READ_BATCH_SIZE = 10;
+async function indexCore(source, args) {
   if (args.includes("--help") || args.includes("-h")) {
-    printUsage2();
+    printUsage();
     return 0;
   }
-  const cwd = process.cwd();
-  if (args.includes("--pending")) {
-    return await showPendingStatus(cwd);
-  }
   const escapeFileRefs = args.includes("--escape-file-refs");
-  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const cwd = process.cwd();
   let files;
   try {
-    files = await readdir5(sessionsDir);
+    files = await source.listSessionFiles(cwd);
   } catch {
     printError(indexCmd.noSessionsDir);
     return 1;
   }
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  if (jsonlFiles.length === 0) {
-    printError(indexCmd.noSessionsIn(sessionsDir));
+  if (files.length === 0) {
+    printError(indexCmd.noSessionsDir);
     return 1;
   }
+  const results = [];
+  for (let i = 0;i < files.length; i += READ_BATCH_SIZE) {
+    const batch = files.slice(i, i + READ_BATCH_SIZE);
+    const batchResults = await Promise.all(batch.map((file2) => source.readSession(file2)));
+    results.push(...batchResults);
+  }
   const allSessions = new Map;
-  for (const file2 of jsonlFiles) {
-    const path = join7(sessionsDir, file2);
-    const sessionResult = await readExtractedSession(path);
+  for (const sessionResult of results) {
     if (!sessionResult || isSessionError(sessionResult)) {
       if (isSessionError(sessionResult)) {
         printError(sessionResult.error);
@@ -18690,7 +18438,7 @@ async function index() {
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
   const sessionIds = mainSessions.map((s) => s.meta.sessionId);
-  const idPrefixes = computeMinimalPrefixes2(sessionIds);
+  const idPrefixes = computeMinimalPrefixes(sessionIds);
   console.log("ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS");
   let prevDate = "";
   let prevYear = "";
@@ -18702,6 +18450,19 @@ async function index() {
     prevYear = year;
   }
   return 0;
+}
+var KNOWN_EXTRACTED_FLAGS = new Set(["--help", "-h", "--escape-file-refs", "--pending"]);
+async function index() {
+  const args = process.argv.slice(3);
+  const unknownFlag = args.find((a) => a.startsWith("-") && !KNOWN_EXTRACTED_FLAGS.has(a));
+  if (unknownFlag) {
+    printError(errors3.unknownFlag(unknownFlag));
+    return 1;
+  }
+  if (args.includes("--pending")) {
+    return await showPendingStatus(process.cwd());
+  }
+  return indexCore(extractedSessionSource, args);
 }
 function formatSessionLine(session, allSessions, cwd, idPrefix, prevDate, prevYear, escapeFileRefs) {
   const { meta: meta3, entries } = session;
@@ -18979,14 +18740,247 @@ function getToolResultText(content) {
 `);
 }
 
+// src/commands/search.ts
+var DEFAULT_CONTEXT_WORDS = 10;
+function printUsage2() {
+  console.log(usage.search());
+}
+function getSearchableFieldValues(block, filter) {
+  const values = [];
+  if (block.type === "user" && filter.isSearchable("user")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "assistant" && filter.isSearchable("assistant")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "thinking" && filter.isSearchable("thinking")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "tool") {
+    const toolName = block.toolName;
+    if (filter.isSearchable("tool:input") || filter.isSearchable(`tool:${toolName}:input`)) {
+      for (const value of Object.values(block.toolInput)) {
+        if (value !== null && value !== undefined) {
+          values.push(String(value));
+        }
+      }
+    }
+    if (filter.isSearchable("tool:result") || filter.isSearchable(`tool:${toolName}:result`)) {
+      if (block.toolResult)
+        values.push(block.toolResult);
+    }
+  } else if (block.type === "system" && filter.isSearchable("system")) {
+    if (block.content)
+      values.push(block.content);
+  } else if (block.type === "summary" && filter.isSearchable("summary")) {
+    if (block.content)
+      values.push(block.content);
+  }
+  return values;
+}
+async function searchCore(source, args) {
+  const doubleDashIdx = args.indexOf("--");
+  const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
+  if (argsBeforeDoubleDash.includes("--help") || argsBeforeDoubleDash.includes("-h")) {
+    printUsage2();
+    return 0;
+  }
+  if (args.length === 0) {
+    printUsage2();
+    return 1;
+  }
+  const options = parseSearchOptions(args);
+  if (!options)
+    return 1;
+  const cwd = process.cwd();
+  let files;
+  try {
+    files = await source.listSessionFiles(cwd);
+  } catch {
+    printError(errors3.noSessions);
+    return 1;
+  }
+  if (files.length === 0) {
+    printError(errors3.noSessions);
+    return 1;
+  }
+  if (options.sessionFilter) {
+    const prefix = options.sessionFilter;
+    files = files.filter((f) => {
+      const name = basename3(f, ".jsonl");
+      return name.startsWith(prefix) || name === `agent-${prefix}`;
+    });
+    if (files.length === 0) {
+      printError(errors3.sessionNotFound(prefix));
+      return 1;
+    }
+  }
+  const mainFiles = files.filter((f) => !basename3(f, ".jsonl").startsWith("agent-"));
+  const allSessionIds = mainFiles.map((f) => basename3(f, ".jsonl"));
+  const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
+  let totalMatches = 0;
+  const sessionCounts = [];
+  const matchingSessions = [];
+  for (const file2 of files) {
+    if (options.maxMatches !== null && totalMatches >= options.maxMatches)
+      break;
+    const sessionResult = await source.readSession(file2);
+    if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId)
+      continue;
+    const sessionId = sessionResult.meta.sessionId;
+    const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
+    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const matchingIndices = new Set;
+    for (let i = 0;i < parsed.blocks.length; i++) {
+      const block = parsed.blocks[i];
+      if (options.afterTime || options.beforeTime) {
+        if (!isInTimeRange(block.timestamp, { after: options.afterTime, before: options.beforeTime })) {
+          continue;
+        }
+      }
+      const fieldValues = getSearchableFieldValues(block, options.fieldFilter);
+      if (fieldValues.length === 0)
+        continue;
+      const hasMatch = fieldValues.some((value) => options.pattern.test(value));
+      if (hasMatch) {
+        matchingIndices.add(i);
+        if (options.maxMatches !== null && totalMatches + matchingIndices.size >= options.maxMatches) {
+          break;
+        }
+      }
+    }
+    if (matchingIndices.size === 0)
+      continue;
+    const sessionMatchCount = matchingIndices.size;
+    totalMatches += sessionMatchCount;
+    matchingSessions.push(sessionPrefix);
+    sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
+    if (!options.countOnly && !options.listOnly) {
+      const output = formatBlocks(parsed.blocks, {
+        sessionPrefix,
+        cwd,
+        showTimestamp: false,
+        getTruncation: () => ({
+          type: "matchContext",
+          pattern: options.pattern,
+          contextWords: options.contextWords
+        }),
+        shouldOutput: (_block, i) => matchingIndices.has(i),
+        separator: `
+`
+      });
+      for (const line of output.split(`
+`)) {
+        if (line)
+          console.log(line);
+      }
+    }
+  }
+  if (options.countOnly) {
+    for (const { sessionId, count } of sessionCounts) {
+      console.log(`${sessionId}:${count}`);
+    }
+  } else if (options.listOnly) {
+    for (const sessionId of matchingSessions) {
+      console.log(sessionId);
+    }
+  }
+  return 0;
+}
+async function search() {
+  return searchCore(extractedSessionSource, process.argv.slice(3));
+}
+function parseSearchOptions(args) {
+  function getFlagValue(flag) {
+    const idx = args.indexOf(flag);
+    return idx !== -1 ? args[idx + 1] : undefined;
+  }
+  const caseInsensitive = args.includes("-i");
+  const countOnly = args.includes("-c");
+  const listOnly = args.includes("-l");
+  let maxMatches = null;
+  const mValue = getFlagValue("-m");
+  if (mValue !== undefined) {
+    maxMatches = parseInt(mValue, 10);
+    if (isNaN(maxMatches) || maxMatches < 1) {
+      printError(errors3.invalidNumber("-m", mValue));
+      return null;
+    }
+  }
+  let contextWords = DEFAULT_CONTEXT_WORDS;
+  const cValue = getFlagValue("-C");
+  if (cValue !== undefined) {
+    contextWords = parseInt(cValue, 10);
+    if (isNaN(contextWords) || contextWords < 0) {
+      printError(errors3.invalidNonNegative("-C"));
+      return null;
+    }
+  }
+  const sessionFilter = getFlagValue("-s") ?? null;
+  const searchInValue = getFlagValue("--in");
+  const searchIn = searchInValue ? parseFieldList(searchInValue) : null;
+  const fieldFilter = new SearchFieldFilter(searchIn);
+  let afterTime = null;
+  const afterValue = getFlagValue("--after");
+  if (afterValue !== undefined) {
+    afterTime = parseTimeSpec(afterValue);
+    if (!afterTime) {
+      printError(errors3.invalidTimeSpec("--after", afterValue));
+      return null;
+    }
+  }
+  let beforeTime = null;
+  const beforeValue = getFlagValue("--before");
+  if (beforeValue !== undefined) {
+    beforeTime = parseTimeSpec(beforeValue);
+    if (!beforeTime) {
+      printError(errors3.invalidTimeSpec("--before", beforeValue));
+      return null;
+    }
+  }
+  const flagsWithValues = new Set(["-m", "-C", "-s", "--in", "--after", "--before"]);
+  const flags = new Set(["-i", "-c", "-l", "-m", "-C", "-s", "--in", "--after", "--before"]);
+  let patternStr = null;
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (flags.has(arg)) {
+      if (flagsWithValues.has(arg))
+        i++;
+      continue;
+    }
+    patternStr = arg;
+    break;
+  }
+  if (!patternStr) {
+    printError(errors3.noPattern);
+    return null;
+  }
+  let pattern;
+  try {
+    pattern = new RegExp(patternStr, caseInsensitive ? "i" : "");
+  } catch (e) {
+    printError(errors3.invalidRegex(e instanceof Error ? e.message : String(e)));
+    return null;
+  }
+  return {
+    pattern,
+    countOnly,
+    listOnly,
+    maxMatches,
+    contextWords,
+    fieldFilter,
+    sessionFilter,
+    afterTime,
+    beforeTime
+  };
+}
+
 // src/commands/read.ts
-import { readdir as readdir6 } from "fs/promises";
-import { join as join8 } from "path";
+import { basename as basename4 } from "path";
 function printUsage3() {
   console.log(usage.read());
 }
-async function read() {
-  const args = process.argv.slice(3);
+async function readCore(source, args) {
   if (args.includes("--help") || args.includes("-h")) {
     printUsage3();
     return 0;
@@ -19035,17 +19029,19 @@ async function read() {
   const sessionIdPrefix = filteredArgs[0];
   const entryArg = filteredArgs[1];
   const cwd = process.cwd();
-  const sessionsDir = getHiveMindSessionsDir(cwd);
   let files;
   try {
-    files = await readdir6(sessionsDir);
+    files = await source.listSessionFiles(cwd);
   } catch {
     printError(errors3.noSessions);
     return 1;
   }
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  const matches2 = jsonlFiles.filter((f) => {
-    const name = f.replace(".jsonl", "");
+  if (files.length === 0) {
+    printError(errors3.noSessions);
+    return 1;
+  }
+  const matches2 = files.filter((f) => {
+    const name = basename4(f, ".jsonl");
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
   if (matches2.length === 0) {
@@ -19055,14 +19051,14 @@ async function read() {
   if (matches2.length > 1) {
     printError(errors3.multipleSessions(sessionIdPrefix));
     for (const m of matches2.slice(0, 5)) {
-      console.log(`  ${m.replace(".jsonl", "")}`);
+      console.log(`  ${basename4(m, ".jsonl")}`);
     }
     if (matches2.length > 5) {
       console.log(errors3.andMore(matches2.length - 5));
     }
     return 1;
   }
-  const sessionFile = join8(sessionsDir, matches2[0]);
+  const sessionFile = matches2[0];
   let entryNumber = null;
   let rangeStart = null;
   let rangeEnd = null;
@@ -19083,7 +19079,7 @@ async function read() {
       }
     }
   }
-  const sessionResult = await readExtractedSession(sessionFile);
+  const sessionResult = await source.readSession(sessionFile);
   if (!sessionResult || isSessionError(sessionResult)) {
     if (isSessionError(sessionResult)) {
       printError(sessionResult.error);
@@ -19140,11 +19136,14 @@ async function read() {
   }
   return 0;
 }
+async function read() {
+  return readCore(extractedSessionSource, process.argv.slice(3));
+}
 
 // src/commands/session-start.ts
 import { closeSync, existsSync, openSync } from "fs";
 import { readFile as readFile5 } from "fs/promises";
-import { dirname as dirname2, join as join9 } from "path";
+import { dirname as dirname2, join as join8 } from "path";
 import { homedir as homedir4 } from "os";
 import { spawn } from "child_process";
 
@@ -20255,7 +20254,7 @@ async function sessionStart() {
   const collectedErrors = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
-  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
+  const hiveMindDir = join8(cwd, ".claude", "hive-mind");
   let transcriptsDirs;
   const inWorktree = await isWorktree(cwd);
   if (hookInput.transcriptPath) {
@@ -20263,7 +20262,7 @@ async function sessionStart() {
     if (inWorktree) {
       const mainPath = getMainWorktreePath(cwd);
       if (mainPath) {
-        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
+        const mainHiveMindDir = join8(mainPath, ".claude", "hive-mind");
         await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
       }
       transcriptsDirs = [transcriptsDir];
@@ -20388,8 +20387,8 @@ async function sessionStart() {
 }
 function getBunPath() {
   const bunInstall = process.env.BUN_INSTALL;
-  const customPath = bunInstall ? join9(bunInstall, "bin", "bun") : null;
-  const standardPath = join9(homedir4(), ".bun", "bin", "bun");
+  const customPath = bunInstall ? join8(bunInstall, "bin", "bun") : null;
+  const standardPath = join8(homedir4(), ".bun", "bin", "bun");
   if (customPath && existsSync(customPath))
     return customPath;
   if (existsSync(standardPath))
@@ -20399,7 +20398,7 @@ function getBunPath() {
 function spawnBackground(args) {
   try {
     const cwd = process.env.CWD || process.cwd();
-    const errorLogPath = join9(cwd, ".claude", "hive-mind", "error.log");
+    const errorLogPath = join8(cwd, ".claude", "hive-mind", "error.log");
     let stderrFd;
     try {
       stderrFd = openSync(errorLogPath, "a");
@@ -20428,7 +20427,7 @@ function scheduleHeartbeats(sessionIds) {
   return spawnBackground(["heartbeat", ...sessionIds]);
 }
 function getUploadPidPath(cwd) {
-  return join9(cwd, ".claude", "hive-mind", "upload.pid");
+  return join8(cwd, ".claude", "hive-mind", "upload.pid");
 }
 async function isUploadRunning(cwd) {
   const pidPath = getUploadPidPath(cwd);
@@ -20647,10 +20646,10 @@ async function setupAliasCommand() {
 
 // src/commands/upload.ts
 import { readFile as readFile6, unlink, writeFile as writeFile5 } from "fs/promises";
-import { join as join10 } from "path";
+import { join as join9 } from "path";
 async function uploadSession(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
+  const sessionPath = join9(sessionsDir, `${sessionId}.jsonl`);
   let content;
   try {
     content = await readFile6(sessionPath, "utf-8");
@@ -20710,7 +20709,7 @@ async function uploadSession(cwd, sessionId) {
 }
 async function getAgentIds(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
+  const sessionPath = join9(sessionsDir, `${sessionId}.jsonl`);
   const sessionResult = await readExtractedSession(sessionPath);
   if (!sessionResult || isSessionError(sessionResult)) {
     if (isSessionError(sessionResult) && process.env.DEBUG) {
@@ -20837,7 +20836,7 @@ async function upload() {
 }
 
 // src/commands/heartbeat.ts
-import { join as join11 } from "path";
+import { join as join10 } from "path";
 async function heartbeat() {
   const cwd = process.env.CWD || process.cwd();
   const sessionIds = process.argv.slice(3);
@@ -20852,7 +20851,7 @@ async function heartbeat() {
   const project = getCanonicalProjectName(cwd);
   let failures = 0;
   for (const sessionId of sessionIds) {
-    const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
+    const metaResult = await readExtractedMeta(join10(sessionsDir, `${sessionId}.jsonl`));
     if (!metaResult || isMetaError(metaResult)) {
       failures++;
       continue;

@@ -553,7 +553,7 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
   const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
 
   const meta = {
-    _type: 'hive-mind-meta' as const,
+    _type: 'session-meta' as const,
     version: '0.1' as const,
     sessionId: 'unknown',
     checkoutId: 'unknown',

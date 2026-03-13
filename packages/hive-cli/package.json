@@ -10,7 +10,7 @@
     "lint:fix": "eslint src --fix",
     "format": "prettier --write src",
     "build": "bun build src/cli.ts --outfile=../../plugins/hive-mind/cli.js --target=bun",
-    "build:hive": "bun build --compile src/hive-cli.ts --outfile dist/hive-cli"
+    "build:dev": "bun build --compile src/hive-cli.ts --outfile ../../.dev/hive"
   },
   "dependencies": {
     "@alignment-hive/shared": "workspace:*",

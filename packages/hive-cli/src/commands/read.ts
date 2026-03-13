@@ -1,19 +1,18 @@
-import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename } from 'node:path';
 import { parseSession } from '@alignment-hive/shared';
-import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
+import { isSessionError } from '../lib/extraction';
 import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
+import { extractedSessionSource } from '../lib/session-source';
+import type { SessionSource } from '../lib/session-source';
 
 function printUsage(): void {
   console.log(usage.read());
 }
 
-export async function read(): Promise<number> {
-  const args = process.argv.slice(3);
-
+export async function readCore(source: SessionSource, args: Array<string>): Promise<number> {
   if (args.includes('--help') || args.includes('-h')) {
     printUsage();
     return 0;
@@ -64,19 +63,22 @@ export async function read(): Promise<number> {
   const entryArg = filteredArgs[1];
 
   const cwd = process.cwd();
-  const sessionsDir = getHiveMindSessionsDir(cwd);
 
   let files: Array<string>;
   try {
-    files = await readdir(sessionsDir);
+    files = await source.listSessionFiles(cwd);
   } catch {
     printError(errors.noSessions);
     return 1;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
-  const matches = jsonlFiles.filter((f) => {
-    const name = f.replace('.jsonl', '');
+  if (files.length === 0) {
+    printError(errors.noSessions);
+    return 1;
+  }
+
+  const matches = files.filter((f) => {
+    const name = basename(f, '.jsonl');
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
 
@@ -88,7 +90,7 @@ export async function read(): Promise<number> {
   if (matches.length > 1) {
     printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches.slice(0, 5)) {
-      console.log(`  ${m.replace('.jsonl', '')}`);
+      console.log(`  ${basename(m, '.jsonl')}`);
     }
     if (matches.length > 5) {
       console.log(errors.andMore(matches.length - 5));
@@ -96,7 +98,7 @@ export async function read(): Promise<number> {
     return 1;
   }
 
-  const sessionFile = join(sessionsDir, matches[0]);
+  const sessionFile = matches[0];
 
   let entryNumber: number | null = null;
   let rangeStart: number | null = null;
@@ -120,7 +122,7 @@ export async function read(): Promise<number> {
     }
   }
 
-  const sessionResult = await readExtractedSession(sessionFile);
+  const sessionResult = await source.readSession(sessionFile);
   if (!sessionResult || isSessionError(sessionResult)) {
     if (isSessionError(sessionResult)) {
       printError(sessionResult.error);
@@ -184,4 +186,8 @@ export async function read(): Promise<number> {
   }
 
   return 0;
+}
+
+export async function read(): Promise<number> {
+  return readCore(extractedSessionSource, process.argv.slice(3));
 }

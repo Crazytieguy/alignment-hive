@@ -350,7 +350,7 @@ describe('metadata line', () => {
       const lines = output.trim().split('\n');
       const meta = JSON.parse(lines[0]);
 
-      expect(meta._type).toBe('hive-mind-meta');
+      expect(meta._type).toBe('session-meta');
       expect(meta.version).toBe('0.1');
       expect(meta.sessionId).toBe('test-session');
       expect(meta.checkoutId).toBeDefined();

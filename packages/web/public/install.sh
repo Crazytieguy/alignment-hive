@@ -169,6 +169,118 @@ install_hive_plugin() {
   success "hive plugin installed"
 }
 
+# --- Step 6: Install hive binary globally ---
+
+install_hive_binary() {
+  # Dev mode: build from source
+  if [ "${ALIGNMENT_HIVE_DEV:-}" = "1" ]; then
+    # Derive repo root from script location
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local repo_root
+    repo_root="$(cd "$script_dir/../../.." && pwd)"
+
+    info "Building hive binary from source..."
+    mkdir -p "$repo_root/.dev"
+    if bun build --compile "$repo_root/packages/hive-cli/src/hive-cli.ts" --outfile "$repo_root/.dev/hive"; then
+      success "Dev binary built at $repo_root/.dev/hive"
+    else
+      error "Failed to build hive binary from source."
+      exit 1
+    fi
+    return 0
+  fi
+
+  # Find plugin install path to read cli-version
+  if [ ! -f "$INSTALLED_PLUGINS" ]; then
+    warn "Cannot find installed plugins. Skipping binary install."
+    return 0
+  fi
+
+  local plugin_path
+  plugin_path=$($JQ -r '.plugins."hive@alignment-hive".installPath // empty' "$INSTALLED_PLUGINS" 2>/dev/null)
+  if [ -z "$plugin_path" ]; then
+    warn "hive plugin path not found. Skipping binary install."
+    return 0
+  fi
+
+  local version_file="$plugin_path/cli-version"
+  if [ ! -f "$version_file" ]; then
+    warn "cli-version not found. Skipping binary install."
+    return 0
+  fi
+
+  local version
+  version=$(cat "$version_file" | tr -d '[:space:]')
+  if [ -z "$version" ]; then
+    warn "cli-version is empty. Skipping binary install."
+    return 0
+  fi
+
+  # Detect platform
+  local os arch os_name arch_name
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m)
+
+  case "$os" in
+    linux)  os_name="linux" ;;
+    darwin) os_name="darwin" ;;
+    *)      error "Unsupported OS: $os"; exit 1 ;;
+  esac
+
+  case "$arch" in
+    x86_64)        arch_name="x64" ;;
+    aarch64|arm64) arch_name="arm64" ;;
+    *)             error "Unsupported architecture: $arch"; exit 1 ;;
+  esac
+
+  local cache_dir="$HOME/.cache/hive/v${version}"
+  local binary="$cache_dir/hive"
+  local target="${os_name}-${arch_name}"
+
+  # Download if not already cached
+  if [ ! -x "$binary" ]; then
+    local binary_name="hive-cli-${target}"
+    local download_url="https://github.com/Crazytieguy/alignment-hive/releases/download/hive-cli-v${version}/${binary_name}"
+
+    info "Downloading hive binary v${version}..."
+    mkdir -p "$cache_dir"
+
+    if ! curl -fSL "$download_url" -o "$binary" 2>/dev/null; then
+      rm -f "$binary"
+      error "Failed to download hive binary v${version}."
+      exit 1
+    fi
+
+    chmod +x "$binary"
+  fi
+
+  # Install to ~/.local/bin
+  mkdir -p "$HOME/.local/bin"
+  cp "$binary" "$HOME/.local/bin/hive"
+
+  # Ensure ~/.local/bin is in PATH
+  if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+    local shell_config=""
+    case "${SHELL:-/bin/bash}" in
+      */zsh)  shell_config="$HOME/.zshrc" ;;
+      */bash) shell_config="$HOME/.bashrc" ;;
+      */fish) shell_config="$HOME/.config/fish/config.fish" ;;
+      *)      shell_config="$HOME/.profile" ;;
+    esac
+
+    if [ -n "$shell_config" ]; then
+      local path_line='export PATH="$HOME/.local/bin:$PATH"'
+      if ! grep -qF '.local/bin' "$shell_config" 2>/dev/null; then
+        echo "$path_line" >> "$shell_config"
+        warn "Added ~/.local/bin to PATH in $shell_config (restart your shell to activate)"
+      fi
+    fi
+  fi
+
+  success "hive binary installed to ~/.local/bin/hive"
+}
+
 # --- Auth helpers ---
 
 save_auth() {
@@ -297,6 +409,7 @@ main() {
   add_marketplace
   enable_auto_update
   install_hive_plugin
+  install_hive_binary
 
   echo ""
 

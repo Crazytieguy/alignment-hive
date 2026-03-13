@@ -2,7 +2,7 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isAuthError, loadAuthData, saveAuthData } from './auth';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction';
-import type { HiveMindMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/shared';
 
 const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h for session age
 const AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h for auth age
@@ -23,20 +23,20 @@ export async function getAuthIssuedAt(): Promise<number | null> {
 
 export interface SessionEligibility {
   sessionId: string;
-  meta: HiveMindMeta;
+  meta: SessionMeta;
   status: 'ready' | 'pending' | 'excluded' | 'uploaded';
   eligibleAt: number | null;
   reason: string;
 }
 
-export function checkSessionEligibility(meta: HiveMindMeta, authIssuedAt: number | null): SessionEligibility {
+export function checkSessionEligibility(meta: SessionMeta, authIssuedAt: number | null): SessionEligibility {
   const sessionId = meta.sessionId;
 
   if (meta.excluded) {
     return { sessionId, meta, status: 'excluded' as const, eligibleAt: null, reason: 'Excluded by user' };
   }
 
-  if (meta.uploadedAt && meta.extractedAt <= meta.uploadedAt) {
+  if (meta.uploadedAt && meta.extractedAt && meta.extractedAt <= meta.uploadedAt) {
     return { sessionId, meta, status: 'uploaded' as const, eligibleAt: null, reason: 'Already uploaded' };
   }
 

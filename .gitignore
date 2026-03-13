@@ -6,6 +6,9 @@ node_modules
 .claude/autopilot/
 docs/data/
 
+# Dev binary
+.dev/
+
 # Rust
 target/
 

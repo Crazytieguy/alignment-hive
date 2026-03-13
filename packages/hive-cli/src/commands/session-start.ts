@@ -18,7 +18,7 @@ import { readHookInput } from '../lib/hook-input';
 import { errors, hook } from '../lib/messages';
 import { hookOutput } from '../lib/output';
 import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
-import type { HiveMindMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/shared';
 
 const AUTO_UPLOAD_DELAY_MINUTES = 10;
 
@@ -91,7 +91,7 @@ export async function sessionStart(): Promise<number> {
   }
 
   let newSessionIds: Array<string> = [];
-  let extractedSessions: Array<{ sessionId: string; meta: HiveMindMeta }> = [];
+  let extractedSessions: Array<{ sessionId: string; meta: SessionMeta }> = [];
 
   if ('error' in sessionCheck) {
     messages.push(hook.extractionFailed(sessionCheck.error));

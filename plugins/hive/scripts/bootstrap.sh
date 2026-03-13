@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
-CACHE_BASE="$HOME/.cache/hive-cli"
+CACHE_BASE="$HOME/.cache/hive"
 LAST_USED_FILE="$CACHE_BASE/last-used"
 
 # Read version from cli-version file
@@ -23,9 +23,9 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-# Dev mode: use locally-built binary if HIVE_CLI_DEV is set
-if [ -n "${HIVE_CLI_DEV:-}" ] && [ -x "$HIVE_CLI_DEV" ]; then
-  exec "$HIVE_CLI_DEV" "$@"
+# Dev mode: use locally-built binary if ALIGNMENT_HIVE_DEV is set
+if [ "${ALIGNMENT_HIVE_DEV:-}" = "1" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
+  exec "$CLAUDE_PROJECT_DIR/.dev/hive" "$@"
 fi
 
 # Detect platform
@@ -48,7 +48,7 @@ TARGET="${OS}-${ARCH_NAME}"
 
 # Cache directory for this version
 CACHE_DIR="$CACHE_BASE/v${VERSION}"
-BINARY="$CACHE_DIR/hive-cli"
+BINARY="$CACHE_DIR/hive"
 
 # Try to fall back to last successfully used binary
 fallback_or_exit() {
@@ -78,6 +78,10 @@ if [ ! -x "$BINARY" ]; then
 
   chmod +x "$BINARY"
   echo "Installed hive-cli v${VERSION}" >&2
+
+  # Also install globally
+  mkdir -p "$HOME/.local/bin"
+  cp "$BINARY" "$HOME/.local/bin/hive"
 fi
 
 # Record this as the last known good binary

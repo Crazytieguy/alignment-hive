@@ -1,4 +1,4 @@
-import type { ContentBlock, HiveMindMeta, KnownContentBlock, KnownEntry, UserEntry } from './schemas';
+import type { ContentBlock, SessionMeta, KnownContentBlock, KnownEntry, UserEntry } from './schemas';
 import { isKnownContentBlock } from './schemas';
 
 function isNoiseBlock(block: ContentBlock): boolean {
@@ -105,7 +105,7 @@ function findLastSummaryIndex(entries: Array<KnownEntry>): number {
   return -1;
 }
 
-export function parseSession(meta: HiveMindMeta, entries: Array<KnownEntry>) {
+export function parseSession(meta: SessionMeta, entries: Array<KnownEntry>) {
   const blocks = [];
   const uuidToLine = new Map<string, number>();
   let lineNumber = 0;

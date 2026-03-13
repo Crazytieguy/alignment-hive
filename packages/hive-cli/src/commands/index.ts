@@ -3,15 +3,18 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isKnownContentBlock, parseSession } from '@alignment-hive/shared';
 import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
-import { indexCmd, usage } from '../lib/messages';
+import { errors, indexCmd, usage } from '../lib/messages';
 import { colors, printError } from '../lib/output';
+import { extractedSessionSource } from '../lib/session-source';
 import { extractSessionSummary } from '../lib/summary';
 import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
+import type { ReadSessionResult } from '../lib/extraction';
+import type { SessionSource } from '../lib/session-source';
 import type { SessionEligibility } from '../lib/upload-eligibility';
-import type { ContentBlock, HiveMindMeta, KnownEntry, LogicalBlock, ParsedSession } from '@alignment-hive/shared';
+import type { ContentBlock, KnownEntry, LogicalBlock, ParsedSession, SessionMeta } from '@alignment-hive/shared';
 
 interface SessionInfo {
-  meta: HiveMindMeta;
+  meta: SessionMeta;
   entries: Array<KnownEntry>;
   parsed: ParsedSession;
 }
@@ -149,7 +152,7 @@ async function showPendingStatus(cwd: string): Promise<number> {
     return 0;
   }
 
-  const mainSessions: Array<{ meta: HiveMindMeta; entries: Array<KnownEntry>; parsed: ParsedSession }> = [];
+  const mainSessions: Array<{ meta: SessionMeta; entries: Array<KnownEntry>; parsed: ParsedSession }> = [];
 
   for (const file of jsonlFiles) {
     const path = join(sessionsDir, file);
@@ -249,41 +252,40 @@ async function showPendingStatus(cwd: string): Promise<number> {
   return 0;
 }
 
-export async function index(): Promise<number> {
-  const args = process.argv.slice(3);
+const READ_BATCH_SIZE = 10;
 
+export async function indexCore(source: SessionSource, args: Array<string>): Promise<number> {
   if (args.includes('--help') || args.includes('-h')) {
     printUsage();
     return 0;
   }
 
-  const cwd = process.cwd();
-
-  if (args.includes('--pending')) {
-    return await showPendingStatus(cwd);
-  }
-
   const escapeFileRefs = args.includes('--escape-file-refs');
-  const sessionsDir = getHiveMindSessionsDir(cwd);
+  const cwd = process.cwd();
 
   let files: Array<string>;
   try {
-    files = await readdir(sessionsDir);
+    files = await source.listSessionFiles(cwd);
   } catch {
     printError(indexCmd.noSessionsDir);
     return 1;
   }
 
-  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
-  if (jsonlFiles.length === 0) {
-    printError(indexCmd.noSessionsIn(sessionsDir));
+  if (files.length === 0) {
+    printError(indexCmd.noSessionsDir);
     return 1;
   }
 
+  // Read sessions in batches to bound memory for large session counts
+  const results: Array<ReadSessionResult> = [];
+  for (let i = 0; i < files.length; i += READ_BATCH_SIZE) {
+    const batch = files.slice(i, i + READ_BATCH_SIZE);
+    const batchResults = await Promise.all(batch.map((file) => source.readSession(file)));
+    results.push(...batchResults);
+  }
+
   const allSessions = new Map<string, SessionInfo>();
-  for (const file of jsonlFiles) {
-    const path = join(sessionsDir, file);
-    const sessionResult = await readExtractedSession(path);
+  for (const sessionResult of results) {
     if (!sessionResult || isSessionError(sessionResult)) {
       if (isSessionError(sessionResult)) {
         printError(sessionResult.error);
@@ -326,6 +328,24 @@ export async function index(): Promise<number> {
   }
 
   return 0;
+}
+
+const KNOWN_EXTRACTED_FLAGS = new Set(['--help', '-h', '--escape-file-refs', '--pending']);
+
+export async function index(): Promise<number> {
+  const args = process.argv.slice(3);
+
+  const unknownFlag = args.find((a) => a.startsWith('-') && !KNOWN_EXTRACTED_FLAGS.has(a));
+  if (unknownFlag) {
+    printError(errors.unknownFlag(unknownFlag));
+    return 1;
+  }
+
+  if (args.includes('--pending')) {
+    return await showPendingStatus(process.cwd());
+  }
+
+  return indexCore(extractedSessionSource, args);
 }
 
 function formatSessionLine(

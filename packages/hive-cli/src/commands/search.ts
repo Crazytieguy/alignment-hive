@@ -1,13 +1,15 @@
-import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename } from 'node:path';
 import { parseSession } from '@alignment-hive/shared';
-import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
+import { isSessionError } from '../lib/extraction';
 import { SearchFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks } from '../lib/format';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
+import { extractedSessionSource } from '../lib/session-source';
 import { isInTimeRange, parseTimeSpec } from '../lib/time-filter';
+import { computeMinimalPrefixes } from './index';
 import type { LogicalBlock } from '@alignment-hive/shared';
+import type { SessionSource } from '../lib/session-source';
 
 const DEFAULT_CONTEXT_WORDS = 10;
 
@@ -25,29 +27,6 @@ interface SearchOptions {
 
 function printUsage(): void {
   console.log(usage.search());
-}
-
-function computeMinimalPrefixes(sessionIds: Array<string>): Map<string, string> {
-  const prefixes = new Map<string, string>();
-  const minLen = 4;
-
-  for (const id of sessionIds) {
-    let len = minLen;
-    while (len <= id.length) {
-      const prefix = id.slice(0, len);
-      const conflicts = sessionIds.filter((other) => other !== id && other.startsWith(prefix));
-      if (conflicts.length === 0) {
-        prefixes.set(id, prefix);
-        break;
-      }
-      len++;
-    }
-    if (!prefixes.has(id)) {
-      prefixes.set(id, id);
-    }
-  }
-
-  return prefixes;
 }
 
 function getSearchableFieldValues(block: LogicalBlock, filter: SearchFieldFilter): Array<string> {
@@ -80,9 +59,7 @@ function getSearchableFieldValues(block: LogicalBlock, filter: SearchFieldFilter
   return values;
 }
 
-export async function search(): Promise<number> {
-  const args = process.argv.slice(3);
-
+export async function searchCore(source: SessionSource, args: Array<string>): Promise<number> {
   const doubleDashIdx = args.indexOf('--');
   const argsBeforeDoubleDash = doubleDashIdx === -1 ? args : args.slice(0, doubleDashIdx);
   if (argsBeforeDoubleDash.includes('--help') || argsBeforeDoubleDash.includes('-h')) {
@@ -99,59 +76,46 @@ export async function search(): Promise<number> {
   if (!options) return 1;
 
   const cwd = process.cwd();
-  const sessionsDir = getHiveMindSessionsDir(cwd);
 
   let files: Array<string>;
   try {
-    files = await readdir(sessionsDir);
+    files = await source.listSessionFiles(cwd);
   } catch {
     printError(errors.noSessions);
     return 1;
   }
 
-  let jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
-  if (jsonlFiles.length === 0) {
-    printError(errors.noSessionsIn(sessionsDir));
+  if (files.length === 0) {
+    printError(errors.noSessions);
     return 1;
   }
 
   // Filter to specific session if -s flag provided
   if (options.sessionFilter) {
     const prefix = options.sessionFilter;
-    jsonlFiles = jsonlFiles.filter((f) => {
-      const name = f.replace('.jsonl', '');
+    files = files.filter((f) => {
+      const name = basename(f, '.jsonl');
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
-    if (jsonlFiles.length === 0) {
+    if (files.length === 0) {
       printError(errors.sessionNotFound(prefix));
       return 1;
     }
   }
 
-  const allSessionIds: Array<string> = [];
-  for (const file of jsonlFiles) {
-    const path = join(sessionsDir, file);
-    const sessionResult = await readExtractedSession(path);
-    if (isSessionError(sessionResult)) {
-      printError(sessionResult.error);
-      continue;
-    }
-    if (sessionResult && !sessionResult.meta.agentId) {
-      allSessionIds.push(sessionResult.meta.sessionId);
-    }
-  }
+  // Compute prefixes from filenames (no I/O needed — session ID = filename)
+  const mainFiles = files.filter((f) => !basename(f, '.jsonl').startsWith('agent-'));
+  const allSessionIds = mainFiles.map((f) => basename(f, '.jsonl'));
   const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
 
   let totalMatches = 0;
   const sessionCounts: Array<{ sessionId: string; count: number }> = [];
   const matchingSessions: Array<string> = [];
 
-  for (const file of jsonlFiles) {
+  for (const file of files) {
     if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
-    const path = join(sessionsDir, file);
-    const sessionResult = await readExtractedSession(path);
-
+    const sessionResult = await source.readSession(file);
     if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId) continue;
 
     const sessionId = sessionResult.meta.sessionId;
@@ -222,6 +186,10 @@ export async function search(): Promise<number> {
   }
 
   return 0;
+}
+
+export async function search(): Promise<number> {
+  return searchCore(extractedSessionSource, process.argv.slice(3));
 }
 
 function parseSearchOptions(args: Array<string>): SearchOptions | null {

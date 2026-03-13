@@ -62,7 +62,7 @@ async function uploadSingleSession(
   }
 
   const meta = {
-    _type: 'hive-mind-meta',
+    _type: 'session-meta',
     version: '0.1',
     sessionId,
     checkoutId,

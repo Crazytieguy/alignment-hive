@@ -2,10 +2,10 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   parseSession,
-  HiveMindMetaSchema,
+  SessionMetaSchema,
   parseKnownEntry,
   type LogicalBlock,
-  type HiveMindMeta,
+  type SessionMeta,
   type KnownEntry,
 } from "@alignment-hive/shared";
 import { Link } from "@tanstack/react-router";
@@ -17,7 +17,7 @@ interface SessionViewerProps {
 
 export function SessionViewer({ url }: SessionViewerProps) {
   const [data, setData] = useState<{
-    meta: HiveMindMeta;
+    meta: SessionMeta;
     blocks: LogicalBlock[];
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +43,7 @@ export function SessionViewer({ url }: SessionViewerProps) {
 
         // Parse metadata from first line
         const metaLine = JSON.parse(lines[0]);
-        const metaResult = HiveMindMetaSchema.safeParse(metaLine);
+        const metaResult = SessionMetaSchema.safeParse(metaLine);
         if (!metaResult.success) {
           throw new Error("Invalid session metadata");
         }

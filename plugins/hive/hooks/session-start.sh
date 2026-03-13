@@ -48,7 +48,26 @@ if [ -f "$PLUGIN_JSON" ]; then
   fi
 fi
 
-# --- Part 2: Session sharing (only if consent file exists) ---
+# --- Part 1.5: Dev environment setup via CLAUDE_ENV_FILE ---
+
+if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/dev-env.sh" ]; then
+  # Resolve paths at hook time — CLAUDE_PROJECT_DIR and BASH_SOURCE won't be
+  # available when Claude Code sources the env file later
+  echo "export ALIGNMENT_HIVE_DEV=1" >> "$CLAUDE_ENV_FILE"
+  echo "export PATH=\"$CLAUDE_PROJECT_DIR/.dev:\$PATH\"" >> "$CLAUDE_ENV_FILE"
+fi
+
+# --- Part 2: Register transcript directory for local retrieval (always) ---
+
+TRANSCRIPT_DIR="$HOME/.claude/projects/$(echo "$CLAUDE_PROJECT_DIR" | tr '/' '-')"
+if [ -d "$TRANSCRIPT_DIR" ]; then
+  TRANSCRIPTS_FILE="$STATE_DIR/transcripts-dirs"
+  if ! grep -qxF "$TRANSCRIPT_DIR" "$TRANSCRIPTS_FILE" 2>/dev/null; then
+    echo "$TRANSCRIPT_DIR" >> "$TRANSCRIPTS_FILE"
+  fi
+fi
+
+# --- Part 3: Session sharing (only if consent file exists) ---
 
 CONSENT_FILE="$STATE_DIR/sharing-enabled"
 

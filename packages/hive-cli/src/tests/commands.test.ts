@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 // Test session data
 function createTestSession(sessionId: string, entries: Array<object>, options?: { agentId?: string }): string {
   const meta = {
-    _type: 'hive-mind-meta',
+    _type: 'session-meta',
     version: '0.1',
     sessionId,
     checkoutId: 'test-checkout-id',

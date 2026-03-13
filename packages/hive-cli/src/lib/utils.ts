@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction.js';
-import type { HiveMindMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/shared';
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -23,7 +23,7 @@ export function formatSessionId(id: string): string {
 }
 
 export type SessionLookupResult =
-  | { type: 'found'; sessionId: string; sessionPath: string; meta: HiveMindMeta }
+  | { type: 'found'; sessionId: string; sessionPath: string; meta: SessionMeta }
   | { type: 'not_found' }
   | { type: 'ambiguous'; matches: Array<string> };
 
