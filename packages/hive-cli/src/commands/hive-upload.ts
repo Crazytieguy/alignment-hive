@@ -2,14 +2,12 @@ import { appendFile, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName, getConfig, getOrCreateCheckoutId, loadTranscriptsDirs } from '../lib/config';
-import { generateUploadUrl, saveUpload } from '../lib/convex';
+import { generateUploadUrl, getConsentStatus, getEnabledProjects, saveUpload } from '../lib/convex';
 import { parseJsonl, transformEntry } from '../lib/extraction';
 import { sanitizeDeep } from '../lib/sanitize';
 import {
-  CONSENT_REVIEW_PERIOD_MS,
-  SESSION_REVIEW_PERIOD_MS,
+  checkSessionEligibility,
   discoverSessions,
-  getConsentFileMtime,
   loadExcludedSessions,
   loadUploadedSessions,
 } from '../lib/session-state';
@@ -114,29 +112,39 @@ export async function hiveUpload(): Promise<number> {
     return 1;
   }
 
+  // Check global + project consent via Convex
+  const [consent, activeProjects] = await Promise.all([
+    getConsentStatus(),
+    getEnabledProjects(),
+  ]);
+
+  if (!consent?.hasConsent || !consent.sessionSharing) {
+    if (process.env.DEBUG) console.error('[hive-upload] No web consent');
+    await cleanup(stateDir);
+    return 0;
+  }
+
+  const canonicalProject = getCanonicalProjectName(cwd);
+  const projectConsent = activeProjects.find((p) => p.project === canonicalProject);
+  if (!projectConsent) {
+    if (process.env.DEBUG) console.error('[hive-upload] No project consent');
+    await cleanup(stateDir);
+    return 0;
+  }
+
+  const consentMtime = projectConsent.consentedAt;
+
   const [uploadedMap, excludedSet, transcriptsDirs] = await Promise.all([
     loadUploadedSessions(stateDir),
     loadExcludedSessions(stateDir),
     loadTranscriptsDirs(stateDir),
   ]);
 
-  const consentMtime = await getConsentFileMtime(stateDir);
-  if (!consentMtime) {
-    await cleanup(stateDir);
-    return 0;
-  }
-
   const allSessions = await discoverSessions(transcriptsDirs);
 
-  const now = Date.now();
-  const sessionsToUpload = allSessions.filter((session) => {
-    if (excludedSet.has(session.sessionId)) return false;
-    const uploaded = uploadedMap.get(session.sessionId);
-    if (uploaded && uploaded.rawMtime === session.mtime.toISOString()) return false;
-    if (now < session.mtime.getTime() + SESSION_REVIEW_PERIOD_MS) return false;
-    if (now < consentMtime + CONSENT_REVIEW_PERIOD_MS) return false;
-    return true;
-  });
+  const sessionsToUpload = allSessions.filter((session) =>
+    checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime).eligible,
+  );
 
   if (sessionsToUpload.length === 0) {
     await cleanup(stateDir);

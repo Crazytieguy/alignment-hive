@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 export interface CliConfig {
   authDir: string;
@@ -105,8 +105,8 @@ export function getShellConfig(): { file: string; sourceCmd: string } {
 }
 
 /**
- * Get a canonical project identifier from git remote.
- * Returns a normalized identifier like "github.com/user/repo" or falls back to directory basename.
+ * Get a canonical project identifier.
+ * Priority: git remote URL (normalized) > git repo root path > cwd path.
  */
 export function getCanonicalProjectName(cwd: string): string {
   try {
@@ -122,8 +122,20 @@ export function getCanonicalProjectName(cwd: string): string {
       .replace(':', '/')
       .replace(/\.git$/, '');
   } catch {
-    return basename(cwd);
+    // No remote — try git repo root
   }
+
+  try {
+    return execSync('git rev-parse --show-toplevel', {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    // Not a git repo — use full path
+  }
+
+  return cwd;
 }
 
 /**

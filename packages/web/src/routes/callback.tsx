@@ -9,7 +9,7 @@ export const Route = createFileRoute("/callback")({
 
         if (response.status === 307 || response.status === 302) {
           const headers = new Headers(response.headers);
-          headers.set("Location", "/welcome");
+          headers.set("Location", "/consent");
           return new Response(response.body, {
             status: response.status,
             headers,

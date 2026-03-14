@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import { findRawSessions } from './extraction';
 
 export const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
-export const CONSENT_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h
+export const CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
 
 export interface UploadedEntry {
   sessionId: string;
@@ -104,11 +104,3 @@ export function checkSessionEligibility(
   return { eligible: true };
 }
 
-export async function getConsentFileMtime(stateDir: string): Promise<number | null> {
-  try {
-    const s = await stat(join(stateDir, 'sharing-enabled'));
-    return s.mtime.getTime();
-  } catch {
-    return null;
-  }
-}

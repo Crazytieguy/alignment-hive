@@ -41,9 +41,14 @@ function Home() {
 
           <div className="flex flex-col gap-4">
             {user ? (
-              <Button asChild size="lg" className="w-full">
-                <a href="/welcome">Setup instructions</a>
-              </Button>
+              <div className="flex flex-col gap-3">
+                <Button asChild size="lg" className="w-full">
+                  <a href="/consent">Data sharing preferences</a>
+                </Button>
+                <Button asChild variant="outline" size="lg" className="w-full">
+                  <a href="/install">Installation</a>
+                </Button>
+              </div>
             ) : (
               <>
                 <Button asChild size="lg" className="w-full">

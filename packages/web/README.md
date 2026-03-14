@@ -5,8 +5,9 @@ A TanStack Start + React web application for alignment researchers to share sess
 ## What it does
 
 - **Authentication**: Sign in via WorkOS (invite-only)
-- **Dashboard**: Access your profile and session history
-- **Integration**: Connect with the hive-mind CLI for session extraction and submission
+- **Consent**: Data sharing preferences wizard and management
+- **Dashboard**: Admin dashboard for sessions and users
+- **Integration**: Backend for the hive CLI (session uploads, consent, heartbeats)
 
 ## Local Development
 
@@ -59,13 +60,6 @@ From `web/` directory:
 - **Backend**: Convex (serverless)
 - **Auth**: WorkOS AuthKit
 - **Database**: Convex Cloud
-
-## Pages
-
-- `/` - Homepage with login for invited users
-- `/welcome` - Post-signup welcome with installation instructions
-- `/callback` - OAuth callback handler (redirects to welcome)
-- `/authenticated/*` - Protected routes (TODO)
 
 ## Deployment
 

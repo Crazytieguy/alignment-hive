@@ -100,4 +100,50 @@ export async function saveUpload(sessionId: string, storageId: string, summary?:
   }
 }
 
+export async function getConsentStatus(): Promise<{ hasConsent: boolean; sessionSharing: boolean } | null> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return null;
+    return await client.query(api.consent.getConsentStatus, {});
+  } catch (error) {
+    debugLog(`getConsentStatus failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+export async function getEnabledProjects(): Promise<Array<{ project: string; sessionSharing: boolean; consentedAt: number }>> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return [];
+    return await client.query(api.consent.getEnabledProjects, {});
+  } catch (error) {
+    debugLog(`getEnabledProjects failed: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+}
+
+export async function enableProject(project: string): Promise<boolean> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return false;
+    await client.mutation(api.consent.enableProject, { project });
+    return true;
+  } catch (error) {
+    debugLog(`enableProject failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+export async function disableProject(project: string): Promise<boolean> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return false;
+    await client.mutation(api.consent.disableProject, { project });
+    return true;
+  } catch (error) {
+    debugLog(`disableProject failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
 export { api };

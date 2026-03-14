@@ -1,6 +1,6 @@
 ---
 description: Set up session sharing and get tooling recommendations — plugins, documentation patterns, and dev environment setup. This command should also be used when the user asks about setting up their project, which plugins to install, or when the working directory appears empty or newly created.
-allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:*), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh:*), Read, Write
+allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:*), Bash(hive consent status:*), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh:*), Read, Write
 ---
 
 # Align
@@ -8,6 +8,12 @@ allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:
 ## Status
 
 !`${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh`
+
+## Consent Status
+
+```
+!`hive consent status 2>/dev/null || echo 'error: binary not found'`
+```
 
 ## Previously Rejected
 
@@ -17,24 +23,35 @@ allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:
 
 ### Session Sharing (ask first, before recommendations)
 
-Check if `.claude/hive/sharing-enabled` exists.
+Read the consent status output above to determine the user's state.
 
-**If it doesn't exist** (sharing not yet enabled):
+**If "error: binary not found"**:
+The hive binary is not installed. Direct the user to run the install script:
+`curl -fsSL https://alignment-hive.com/install.sh | bash`
+Then restart Claude Code and run /hive:align again.
 
-Explain what session sharing does:
-- Your extracted sessions are shared with the alignment research community
-- Sessions are sanitized (secrets removed) and you have a 24-hour review period before upload
-- You can exclude individual sessions or disable sharing anytime
+**If "Not authenticated"**:
+Direct the user to run the install script to authenticate:
+`curl -fsSL https://alignment-hive.com/install.sh | bash`
 
-Then ask if they'd like to opt in.
+**If "Web consent: not completed"**:
+Direct the user to: `https://alignment-hive.com/consent`
+Do not offer per-project sharing until web consent is complete. Move on to recommendations.
 
-- **If they accept**: Create the file `.claude/hive/sharing-enabled` (empty file)
-- **If they decline**: Record "Declined session sharing" in `.claude/hive/align-rejected.md`
-  - Tell them they can undo this by deleting that line from the rejections file and running /hive:align again
+**If "Session sharing: disabled"**:
+Note: "Session sharing: declined on web. You can change this at https://alignment-hive.com/consent"
+Do not offer per-project sharing. Move on to recommendations.
 
-**If sharing-enabled exists**: Don't ask again — just note "Session sharing: enabled" and move on.
+**If "Session sharing: enabled"**:
+Check the current project line.
 
-Check if authenticated (`~/.alignment-hive/auth.json` exists). If not authenticated but sharing is enabled, mention they can authenticate by running the install script: `curl -fsSL https://alignment-hive.com/install.sh | bash`
+- **If current project is "enabled"**: Note "Session sharing: enabled" and move on.
+- **If current project is "not enabled" and `.claude/hive/sharing-disabled` exists**: The user previously declined sharing for this project. Note this and move on. Mention they can re-enable with /hive:align (delete the sharing-disabled file first).
+- **If current project is "not enabled" and no sharing-disabled file**: Offer to enable sharing:
+  - Explain this will share sessions from this project after a 24-hour review period
+  - If they accept: run `hive consent enable` (user will see and approve via Claude Code permission prompt)
+  - If they decline: record "Declined session sharing" in `.claude/hive/align-rejected.md`
+  - Repo linking for private repos is coming soon — mention this briefly if the project has a git remote
 
 ### First-Time Setup (recommendations)
 

@@ -9,6 +9,8 @@ Large orgs benefit from shared tooling and accumulated knowledge across their ag
 
 ## Getting Started
 
+> **Alignment community members:** Check your email for an alignment-hive invite before installing. The invite lets you sign up and set your data sharing preferences. If you didn't receive one, contact yoav.tzfati@gmail.com.
+
 ### Prerequisites
 
 Install [Claude Code](https://code.claude.com/docs/en/overview) if you haven't already:
@@ -22,7 +24,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 curl -fsSL https://alignment-hive.com/install.sh | bash
 ```
 
-This adds the marketplace, installs the hive plugin with auto-update, and optionally authenticates for session sharing.
+This adds the marketplace, installs the hive plugin with auto-update, authenticates for session sharing, and lets you choose which projects to share.
 
 Then open Claude Code in your project and run `/hive:align`.
 
@@ -46,7 +48,7 @@ Feedback and suggestions welcome—open an issue, send a Slack DM, or reach out 
 
 ## Web App
 
-A web interface for hive-mind is in development at [alignment-hive.com](https://alignment-hive.com).
+The web interface at [alignment-hive.com](https://alignment-hive.com) handles user signup, data sharing consent, and session management.
 
 ## Roadmap
 

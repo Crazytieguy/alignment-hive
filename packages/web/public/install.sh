@@ -159,6 +159,12 @@ enable_auto_update() {
 # --- Step 5: Install hive plugin ---
 
 install_hive_plugin() {
+  # Dev mode: plugin is loaded from the local repo, skip marketplace install
+  if [ "${ALIGNMENT_HIVE_DEV:-}" = "1" ]; then
+    info "Dev mode: skipping plugin install (using local plugin)"
+    return 0
+  fi
+
   if [ -f "$INSTALLED_PLUGINS" ] && $JQ -e '.plugins."hive@alignment-hive"' "$INSTALLED_PLUGINS" >/dev/null 2>&1; then
     info "hive plugin already installed"
     return 0
@@ -183,6 +189,7 @@ install_hive_binary() {
     info "Building hive binary from source..."
     mkdir -p "$repo_root/.dev"
     if bun build --compile "$repo_root/packages/hive-cli/src/hive-cli.ts" --outfile "$repo_root/.dev/hive"; then
+      export PATH="$repo_root/.dev:$PATH"
       success "Dev binary built at $repo_root/.dev/hive"
     else
       error "Failed to build hive binary from source."
@@ -347,19 +354,13 @@ device_auth_flow() {
     return 1
   fi
 
-  echo ""
-  info "Open this URL in your browser:"
-  echo ""
+  info "Opening browser to confirm authentication..."
   echo "    $verification_uri"
-  echo ""
-  info "And enter code: ${BOLD}${GREEN}$user_code${RESET}"
-  echo ""
 
   # Try to open browser
   open "$verification_uri" 2>/dev/null || xdg-open "$verification_uri" 2>/dev/null || wslview "$verification_uri" 2>/dev/null || true
 
-  info "Waiting for authentication (${expires_in}s timeout)..."
-  echo ""
+  info "Confirm code ${BOLD}${GREEN}$user_code${RESET} in your browser, then wait..."
 
   # Poll for token
   local deadline=$((SECONDS + expires_in))
@@ -382,7 +383,6 @@ device_auth_flow() {
       email=$(echo "$token_response" | $JQ -r '.user.email // "unknown"')
       first_name=$(echo "$token_response" | $JQ -r '.user.first_name // empty')
 
-      echo ""
       success "Authenticated as ${first_name:-$email} ($email)"
       return 0
     elif [ "$err" = "slow_down" ]; then
@@ -424,12 +424,28 @@ main() {
         ;;
       *)
         echo ""
-        device_auth_flow || warn "Authentication failed. You can try again by re-running this script."
+        if ! device_auth_flow; then
+          warn "Authentication failed. Check your email for an alignment-hive invite,"
+          warn "or contact yoav.tzfati@gmail.com to request one."
+          echo ""
+          info "Next steps:"
+          echo "    1. Open Claude Code in a project directory"
+          echo "    2. Run /hive:align"
+          echo ""
+          exit 0
+        fi
         ;;
     esac
   fi
 
   echo ""
+
+  # Consent + project setup (handled entirely by the CLI)
+  if command -v hive >/dev/null 2>&1 && [ -f "$AUTH_FILE" ]; then
+    hive consent setup || exit 0
+    echo ""
+  fi
+
   info "Next steps:"
   echo "    1. Open Claude Code in a project directory"
   echo "    2. Run /hive:align"

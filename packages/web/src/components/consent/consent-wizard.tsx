@@ -1,0 +1,497 @@
+import { useState, useCallback, useMemo, useEffect } from "react";
+import {
+  policySections,
+  policyFooter,
+  sectionQuestions,
+  creditQuestionAfter,
+  questionConfigs,
+  type ConsentQuestion,
+  type QuestionConfig,
+} from "@/components/consent/policy-content";
+import type { ConsentChoices } from "@/routes/_authenticated/consent";
+import { PolicyParagraph } from "@/components/consent/policy-paragraph";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+
+const STORAGE_KEY = "alignment-hive-consent-step";
+
+interface ConsentWizardProps {
+  choices: ConsentChoices;
+  onChoice: (question: ConsentQuestion, value: boolean) => void;
+  onSubmit: (selectedProjects?: Set<string>) => void;
+  isSubmitting: boolean;
+  submitError: string | null;
+  accessList: Array<{ name: string | null; email: string }>;
+  existingProjects: Array<{ project: string; count: number }>;
+}
+
+export default function ConsentWizard({
+  choices,
+  onChoice,
+  onSubmit,
+  isSubmitting,
+  submitError,
+  accessList,
+  existingProjects,
+}: ConsentWizardProps) {
+  const [selectedProjects, setSelectedProjects] = useState<Set<string>>(
+    () => new Set(existingProjects.map((p) => p.project)),
+  );
+
+  const toggleProject = (project: string) => {
+    setSelectedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(project)) {
+        next.delete(project);
+      } else {
+        next.add(project);
+      }
+      return next;
+    });
+  };
+
+  type Step =
+    | {
+        kind: "section";
+        section: (typeof policySections)[number];
+        question: QuestionConfig | null;
+        creditQuestion: QuestionConfig | null;
+      }
+    | { kind: "existing-projects" };
+
+  const sectionSteps = useMemo(() => {
+    const result: Array<Step> = [];
+    for (const section of policySections) {
+      const qId = sectionQuestions[section.id];
+      const question = qId
+        ? questionConfigs.find((q) => q.id === qId) ?? null
+        : null;
+      const creditQuestion =
+        section.id === creditQuestionAfter
+          ? questionConfigs.find((q) => q.id === "creditByName") ?? null
+          : null;
+      result.push({ kind: "section", section, question, creditQuestion });
+    }
+    return result;
+  }, []);
+
+  const sessionSharingStepIndex = sectionSteps.findIndex(
+    (s) => s.kind === "section" && s.question?.id === "sessionSharing",
+  );
+
+  const declinedSharing = choices.sessionSharing === false;
+  const showExistingProjects =
+    choices.sessionSharing === true && existingProjects.length > 0;
+
+  const effectiveSteps = useMemo(() => {
+    if (declinedSharing) {
+      return sectionSteps.slice(0, sessionSharingStepIndex + 1);
+    }
+    const result: Array<Step> = [];
+    for (let i = 0; i < sectionSteps.length; i++) {
+      result.push(sectionSteps[i]);
+      if (i === sessionSharingStepIndex && showExistingProjects) {
+        result.push({ kind: "existing-projects" });
+      }
+    }
+    return result;
+  }, [
+    declinedSharing,
+    sectionSteps,
+    sessionSharingStepIndex,
+    showExistingProjects,
+  ]);
+
+  const [currentStep, setCurrentStep] = useState(() => {
+    if (typeof window === "undefined") return 0;
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+      if (saved && typeof saved === "object" && typeof saved.step === "number") {
+        // Restore choices from localStorage
+        if (saved.choices) {
+          for (const [key, value] of Object.entries(saved.choices)) {
+            if (value !== null && typeof value === "boolean") {
+              onChoice(key as ConsentQuestion, value);
+            }
+          }
+        }
+        return Math.max(0, saved.step);
+      }
+    } catch {
+      // invalid localStorage data
+    }
+    return 0;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ step: currentStep, choices }),
+    );
+  }, [currentStep, choices]);
+
+  const handleSubmit = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    onSubmit(showExistingProjects ? selectedProjects : undefined);
+  };
+
+  // Clamp step to valid range when effectiveSteps changes (e.g., after declining sharing)
+  useEffect(() => {
+    const maxStep = effectiveSteps.length - 1;
+    if (currentStep > maxStep) {
+      setCurrentStep(maxStep);
+    }
+  }, [effectiveSteps.length, currentStep]);
+
+  const clampedStep = Math.min(currentStep, effectiveSteps.length - 1);
+
+  const totalSteps = effectiveSteps.length;
+  const step = effectiveSteps[clampedStep] ?? effectiveSteps[0];
+  const isLastStep = clampedStep === totalSteps - 1;
+
+  const canAdvance = useCallback(() => {
+    if (!step) return false;
+    if (step.kind === "existing-projects") return true;
+    const q = step.question;
+    const cq = step.creditQuestion;
+    if (q && choices[q.id] === null) return false;
+    if (cq && choices.sessionSharing && choices[cq.id] === null) return false;
+    return true;
+  }, [step, choices]);
+
+  const allAnswered =
+    choices.sessionSharing !== null &&
+    (!choices.sessionSharing ||
+      (choices.communityFeatures !== null &&
+        choices.publicationExcerpts !== null &&
+        choices.creditByName !== null));
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-start pt-16 pb-24 px-4">
+      {/* Step indicator */}
+      <div className="w-full max-w-xl mb-10">
+        <div className="flex items-center gap-1">
+          {effectiveSteps.map((_, i) => (
+            <div
+              key={i}
+              className={cn(
+                "h-1 flex-1 rounded-full transition-colors duration-500",
+                i < clampedStep
+                  ? "bg-primary"
+                  : i === clampedStep
+                    ? "bg-primary/60"
+                    : "bg-border",
+              )}
+            />
+          ))}
+        </div>
+        <div className="flex justify-between mt-2">
+          <span className="text-xs text-muted-foreground">
+            Step {clampedStep + 1} of {totalSteps}
+          </span>
+          {step.kind === "section" && step.section.title && (
+            <span className="text-xs text-muted-foreground font-medium">
+              {step.section.title}
+            </span>
+          )}
+          {step.kind === "existing-projects" && (
+            <span className="text-xs text-muted-foreground font-medium">
+              Existing sessions
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="w-full max-w-xl">
+        <div
+          key={clampedStep}
+          className="animate-in fade-in slide-in-from-right-4 duration-300"
+        >
+          {step.kind === "existing-projects" ? (
+            <ExistingProjectsStep
+              existingProjects={existingProjects}
+              selectedProjects={selectedProjects}
+              toggleProject={toggleProject}
+              setSelectedProjects={setSelectedProjects}
+            />
+          ) : (
+            <SectionStep
+              step={step}
+              currentStep={clampedStep}
+              isLastStep={isLastStep}
+              choices={choices}
+              onChoice={onChoice}
+              accessList={accessList}
+            />
+          )}
+        </div>
+
+        {/* Navigation */}
+        <div className="flex items-center justify-between mt-8 pt-6 border-t">
+          <Button
+            variant="ghost"
+            onClick={() => setCurrentStep((s) => Math.max(0, s - 1))}
+            disabled={clampedStep === 0}
+            className="text-muted-foreground"
+          >
+            Back
+          </Button>
+
+          <div className="flex flex-col items-end gap-2">
+            {isLastStep ? (
+              <Button
+                size="lg"
+                onClick={handleSubmit}
+                disabled={!allAnswered || isSubmitting}
+                className="min-w-[180px]"
+              >
+                {isSubmitting ? "Saving..." : "Save preferences"}
+              </Button>
+            ) : (
+              <Button
+                onClick={() =>
+                  setCurrentStep((s) => Math.min(totalSteps - 1, s + 1))
+                }
+                disabled={!canAdvance()}
+              >
+                Continue
+              </Button>
+            )}
+            {submitError && isLastStep && (
+              <p className="text-sm text-destructive">{submitError}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function SectionStep({
+  step,
+  currentStep,
+  isLastStep,
+  choices,
+  onChoice,
+  accessList,
+}: {
+  step: {
+    kind: "section";
+    section: (typeof policySections)[number];
+    question: QuestionConfig | null;
+    creditQuestion: QuestionConfig | null;
+  };
+  currentStep: number;
+  isLastStep: boolean;
+  choices: ConsentChoices;
+  onChoice: (q: ConsentQuestion, v: boolean) => void;
+  accessList: Array<{ name: string | null; email: string }>;
+}) {
+  return (
+    <>
+      {step.section.title && (
+        <h2 className="text-2xl font-semibold mb-6 tracking-tight">
+          {step.section.title}
+        </h2>
+      )}
+      {!step.section.title && currentStep === 0 && (
+        <h1 className="text-3xl font-semibold mb-6 tracking-tight">
+          Data sharing preferences
+        </h1>
+      )}
+
+      <div className="space-y-4 text-[0.938rem] leading-relaxed text-foreground/90">
+        {step.section.paragraphs.map((p, i) => (
+          <PolicyParagraph key={i} text={p} />
+        ))}
+      </div>
+
+      {step.section.id === "access" && accessList.length > 0 && (
+        <div className="mt-6 rounded-lg border px-5 py-4">
+          <p className="text-sm font-medium mb-3">
+            People with access to shared data
+          </p>
+          <ul className="space-y-1.5">
+            {accessList.map((person, i) => (
+              <li
+                key={i}
+                className="text-sm text-muted-foreground flex items-baseline gap-2"
+              >
+                <span className="size-1.5 rounded-full bg-primary/40 shrink-0 mt-1.5" />
+                {person.name ? (
+                  <span>
+                    {person.name}{" "}
+                    <span className="text-muted-foreground/60">
+                      ({person.email})
+                    </span>
+                  </span>
+                ) : (
+                  <span>{person.email}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {step.question && (
+        <QuestionBlock
+          config={step.question}
+          value={choices[step.question.id]}
+          onChoice={onChoice}
+        />
+      )}
+
+      {step.creditQuestion && choices.sessionSharing && (
+        <QuestionBlock
+          config={step.creditQuestion}
+          value={choices[step.creditQuestion.id]}
+          onChoice={onChoice}
+        />
+      )}
+
+      {isLastStep && (
+        <p className="mt-8 text-sm text-muted-foreground">{policyFooter}</p>
+      )}
+    </>
+  );
+}
+
+function ExistingProjectsStep({
+  existingProjects,
+  selectedProjects,
+  toggleProject,
+  setSelectedProjects,
+}: {
+  existingProjects: Array<{ project: string; count: number }>;
+  selectedProjects: Set<string>;
+  toggleProject: (project: string) => void;
+  setSelectedProjects: (s: Set<string>) => void;
+}) {
+  return (
+    <>
+      <h2 className="text-2xl font-semibold mb-6 tracking-tight">
+        Existing sessions
+      </h2>
+      <p className="text-[0.938rem] leading-relaxed text-foreground/90 mb-6">
+        The following projects already have sessions. Choose which to include
+        under these consent terms.
+      </p>
+      <div className="space-y-2">
+        {existingProjects.map((proj) => {
+          const isSelected = selectedProjects.has(proj.project);
+          return (
+            <button
+              key={proj.project}
+              type="button"
+              onClick={() => toggleProject(proj.project)}
+              className={cn(
+                "w-full flex items-center justify-between rounded-lg border-2 px-5 py-3 text-left transition-all duration-200",
+                isSelected
+                  ? "border-primary/40 bg-primary/[0.04]"
+                  : "border-border hover:border-foreground/20",
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <div
+                  className={cn(
+                    "size-5 rounded border-2 flex items-center justify-center transition-all duration-200",
+                    isSelected
+                      ? "border-primary bg-primary"
+                      : "border-border",
+                  )}
+                >
+                  {isSelected && (
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      stroke="white"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M2.5 6l2.5 2.5 4.5-5" />
+                    </svg>
+                  )}
+                </div>
+                <span className="font-mono text-sm">{proj.project}</span>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {proj.count} session{proj.count !== 1 ? "s" : ""}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-4 flex gap-3">
+        <button
+          type="button"
+          onClick={() =>
+            setSelectedProjects(
+              new Set(existingProjects.map((p) => p.project)),
+            )
+          }
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Select all
+        </button>
+        <button
+          type="button"
+          onClick={() => setSelectedProjects(new Set())}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Select none
+        </button>
+      </div>
+    </>
+  );
+}
+
+function QuestionBlock({
+  config,
+  value,
+  onChoice,
+}: {
+  config: QuestionConfig;
+  value: boolean | null;
+  onChoice: (q: ConsentQuestion, v: boolean) => void;
+}) {
+  return (
+    <div className="mt-6 rounded-lg border-2 border-primary/15 bg-primary/[0.03] px-5 py-4">
+      <p className="font-medium text-sm mb-3">{config.label}</p>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={() => onChoice(config.id, true)}
+          className={cn(
+            "rounded-md border-2 px-3 py-2 text-sm font-medium transition-all duration-200 cursor-pointer",
+            value === true
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border hover:border-primary/40 hover:bg-primary/5",
+          )}
+        >
+          {config.yesLabel}
+        </button>
+        <button
+          type="button"
+          onClick={() => onChoice(config.id, false)}
+          className={cn(
+            "rounded-md border-2 px-3 py-2 text-sm font-medium transition-all duration-200 cursor-pointer",
+            value === false
+              ? "border-foreground/80 bg-foreground/10 text-foreground"
+              : "border-border hover:border-foreground/30 hover:bg-foreground/5",
+          )}
+        >
+          {config.noLabel}
+        </button>
+      </div>
+    </div>
+  );
+}

@@ -436,7 +436,7 @@ import { join as join5 } from "path";
 import { createReadStream } from "fs";
 import { mkdir as mkdir3, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
-import { basename as basename2, join as join3 } from "path";
+import { basename, join as join3 } from "path";
 
 // ../../node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -14395,7 +14395,7 @@ import { execSync } from "child_process";
 import { randomUUID } from "crypto";
 import { access, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { basename, join as join2 } from "path";
+import { join as join2 } from "path";
 var _config = null;
 function initConfig(config3) {
   _config = config3;
@@ -14475,9 +14475,15 @@ function getCanonicalProjectName(cwd) {
       stdio: ["pipe", "pipe", "pipe"]
     }).trim();
     return remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
-  } catch {
-    return basename(cwd);
-  }
+  } catch {}
+  try {
+    return execSync("git rev-parse --show-toplevel", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    }).trim();
+  } catch {}
+  return cwd;
 }
 async function isWorktree(cwd) {
   try {
@@ -16654,7 +16660,7 @@ async function extractSession(options) {
   const meta3 = {
     _type: "session-meta",
     version: HIVE_MIND_VERSION,
-    sessionId: basename2(rawPath, ".jsonl"),
+    sessionId: basename(rawPath, ".jsonl"),
     checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime: rawStat.mtime.toISOString(),
@@ -16816,7 +16822,7 @@ async function checkAllSessions(cwd, transcriptsDirs) {
   const rawSessionMap = new Map;
   for (const sessions of rawSessionArrays) {
     for (const session of sessions) {
-      const sessionId = basename2(session.path, ".jsonl");
+      const sessionId = basename(session.path, ".jsonl");
       rawSessionMap.set(sessionId, session);
     }
   }
@@ -16826,7 +16832,7 @@ async function checkAllSessions(cwd, transcriptsDirs) {
   let parseCount = 0;
   await Promise.all(rawSessions.map(async (session) => {
     const { path: rawPath, agentId } = session;
-    const sessionId = basename2(rawPath, ".jsonl");
+    const sessionId = basename(rawPath, ".jsonl");
     const existingMeta = extractedMetaMap.get(sessionId);
     let needsExtract = false;
     if (!existingMeta) {
@@ -16912,9 +16918,9 @@ async function extractSingleSession(cwd, sessionId) {
   for (const transcriptsDir of transcriptsDirs) {
     try {
       const rawSessions = await findRawSessions(transcriptsDir);
-      const session = rawSessions.find((s) => basename2(s.path, ".jsonl") === sessionId);
+      const session = rawSessions.find((s) => basename(s.path, ".jsonl") === sessionId);
       if (session) {
-        const extractedPath = join3(extractedDir, basename2(session.path));
+        const extractedPath = join3(extractedDir, basename(session.path));
         const result = await extractSession({
           rawPath: session.path,
           outputPath: extractedPath,
@@ -17143,7 +17149,7 @@ async function extract() {
 }
 
 // src/commands/search.ts
-import { basename as basename3 } from "path";
+import { basename as basename2 } from "path";
 
 // src/lib/field-filter.ts
 function parseFieldList(input) {
@@ -18844,7 +18850,7 @@ async function searchCore(source, args) {
   if (options.sessionFilter) {
     const prefix = options.sessionFilter;
     files = files.filter((f) => {
-      const name = basename3(f, ".jsonl");
+      const name = basename2(f, ".jsonl");
       return name.startsWith(prefix) || name === `agent-${prefix}`;
     });
     if (files.length === 0) {
@@ -18852,8 +18858,8 @@ async function searchCore(source, args) {
       return 1;
     }
   }
-  const mainFiles = files.filter((f) => !basename3(f, ".jsonl").startsWith("agent-"));
-  const allSessionIds = mainFiles.map((f) => basename3(f, ".jsonl"));
+  const mainFiles = files.filter((f) => !basename2(f, ".jsonl").startsWith("agent-"));
+  const allSessionIds = mainFiles.map((f) => basename2(f, ".jsonl"));
   const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
   let totalMatches = 0;
   const sessionCounts = [];
@@ -19013,7 +19019,7 @@ function parseSearchOptions(args) {
 }
 
 // src/commands/read.ts
-import { basename as basename4 } from "path";
+import { basename as basename3 } from "path";
 function printUsage3() {
   console.log(usage.read());
 }
@@ -19078,7 +19084,7 @@ async function readCore(source, args) {
     return 1;
   }
   const matches2 = files.filter((f) => {
-    const name = basename4(f, ".jsonl");
+    const name = basename3(f, ".jsonl");
     return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
   });
   if (matches2.length === 0) {
@@ -19088,7 +19094,7 @@ async function readCore(source, args) {
   if (matches2.length > 1) {
     printError(errors3.multipleSessions(sessionIdPrefix));
     for (const m of matches2.slice(0, 5)) {
-      console.log(`  ${basename4(m, ".jsonl")}`);
+      console.log(`  ${basename3(m, ".jsonl")}`);
     }
     if (matches2.length > 5) {
       console.log(errors3.andMore(matches2.length - 5));

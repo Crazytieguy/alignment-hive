@@ -37,13 +37,6 @@ else
   RUN_TYPE="first-time"
 fi
 
-# Check sharing status
-SHARING_STATUS="not enabled"
-if [ -f "$STATE_DIR/sharing-enabled" ]; then
-  SHARING_STATUS="enabled"
-fi
-
 echo "**Plugin version**: $PLUGIN_VERSION"
 echo "**Last run version**: $LAST_VERSION"
 echo "**Run type**: $RUN_TYPE"
-echo "**Session sharing**: $SHARING_STATUS"

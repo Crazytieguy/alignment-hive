@@ -15,7 +15,9 @@ import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
-import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
+import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
+import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
+import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticated/consent'
 import { Route as AdminUsersIndexRouteImport } from './routes/admin/users/index'
 import { Route as AdminSessionsIndexRouteImport } from './routes/admin/sessions/index'
 import { Route as AdminUsersUserIdRouteImport } from './routes/admin/users/$userId'
@@ -50,9 +52,19 @@ const AuthSignOutRoute = AuthSignOutRouteImport.update({
   path: '/auth/sign-out',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
-  id: '/welcome',
-  path: '/welcome',
+const AuthenticatedPolicyRoute = AuthenticatedPolicyRouteImport.update({
+  id: '/policy',
+  path: '/policy',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedInstallRoute = AuthenticatedInstallRouteImport.update({
+  id: '/install',
+  path: '/install',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedConsentRoute = AuthenticatedConsentRouteImport.update({
+  id: '/consent',
+  path: '/consent',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AdminUsersIndexRoute = AdminUsersIndexRouteImport.update({
@@ -80,7 +92,9 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRouteWithChildren
   '/callback': typeof CallbackRoute
-  '/welcome': typeof AuthenticatedWelcomeRoute
+  '/consent': typeof AuthenticatedConsentRoute
+  '/install': typeof AuthenticatedInstallRoute
+  '/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/admin/': typeof AdminIndexRoute
   '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
@@ -91,7 +105,9 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/callback': typeof CallbackRoute
-  '/welcome': typeof AuthenticatedWelcomeRoute
+  '/consent': typeof AuthenticatedConsentRoute
+  '/install': typeof AuthenticatedInstallRoute
+  '/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/admin': typeof AdminIndexRoute
   '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
@@ -105,7 +121,9 @@ export interface FileRoutesById {
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/admin': typeof AdminRouteWithChildren
   '/callback': typeof CallbackRoute
-  '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
+  '/_authenticated/consent': typeof AuthenticatedConsentRoute
+  '/_authenticated/install': typeof AuthenticatedInstallRoute
+  '/_authenticated/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/admin/': typeof AdminIndexRoute
   '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
@@ -119,7 +137,9 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/callback'
-    | '/welcome'
+    | '/consent'
+    | '/install'
+    | '/policy'
     | '/auth/sign-out'
     | '/admin/'
     | '/admin/sessions/$sessionId'
@@ -130,7 +150,9 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/callback'
-    | '/welcome'
+    | '/consent'
+    | '/install'
+    | '/policy'
     | '/auth/sign-out'
     | '/admin'
     | '/admin/sessions/$sessionId'
@@ -143,7 +165,9 @@ export interface FileRouteTypes {
     | '/_authenticated'
     | '/admin'
     | '/callback'
-    | '/_authenticated/welcome'
+    | '/_authenticated/consent'
+    | '/_authenticated/install'
+    | '/_authenticated/policy'
     | '/auth/sign-out'
     | '/admin/'
     | '/admin/sessions/$sessionId'
@@ -204,11 +228,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthSignOutRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/_authenticated/welcome': {
-      id: '/_authenticated/welcome'
-      path: '/welcome'
-      fullPath: '/welcome'
-      preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
+    '/_authenticated/policy': {
+      id: '/_authenticated/policy'
+      path: '/policy'
+      fullPath: '/policy'
+      preLoaderRoute: typeof AuthenticatedPolicyRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/install': {
+      id: '/_authenticated/install'
+      path: '/install'
+      fullPath: '/install'
+      preLoaderRoute: typeof AuthenticatedInstallRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/consent': {
+      id: '/_authenticated/consent'
+      path: '/consent'
+      fullPath: '/consent'
+      preLoaderRoute: typeof AuthenticatedConsentRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/admin/users/': {
@@ -243,11 +281,15 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedRouteChildren {
-  AuthenticatedWelcomeRoute: typeof AuthenticatedWelcomeRoute
+  AuthenticatedConsentRoute: typeof AuthenticatedConsentRoute
+  AuthenticatedInstallRoute: typeof AuthenticatedInstallRoute
+  AuthenticatedPolicyRoute: typeof AuthenticatedPolicyRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
-  AuthenticatedWelcomeRoute: AuthenticatedWelcomeRoute,
+  AuthenticatedConsentRoute: AuthenticatedConsentRoute,
+  AuthenticatedInstallRoute: AuthenticatedInstallRoute,
+  AuthenticatedPolicyRoute: AuthenticatedPolicyRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(

@@ -1,3 +1,4 @@
+import { resolve } from "path";
 import { defineConfig } from "vite";
 import tsConfigPaths from "vite-tsconfig-paths";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -17,7 +18,14 @@ export default defineConfig({
       projects: ["./tsconfig.json"],
     }),
     tanstackStart(),
-    nitro(),
+    // Nitro's SSR environment doesn't pick up vite-tsconfig-paths aliases.
+    // Pass them explicitly here. Remove when upgrading to Vite 8 (resolve.tsconfigPaths).
+    nitro({
+      alias: {
+        "@/": resolve(__dirname, "./src") + "/",
+        "~/": resolve(__dirname, "./src") + "/",
+      },
+    }),
     viteReact(),
   ],
 });

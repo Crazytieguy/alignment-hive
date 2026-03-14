@@ -1,14 +1,15 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { checkAuthStatus, getUserDisplayName } from '../lib/auth';
+import { checkAuthStatus } from '../lib/auth';
 import {
   addTranscriptsDir,
   ensureStateDir,
+  getCanonicalProjectName,
   getConfig,
   getOrCreateCheckoutId,
   loadTranscriptsDirs,
 } from '../lib/config';
-import { pingCheckout } from '../lib/convex';
+import { getConsentStatus, getEnabledProjects, pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
 import { hookOutput } from '../lib/output';
 import { spawnBackground } from '../lib/spawn';
@@ -17,7 +18,6 @@ import {
   SESSION_REVIEW_PERIOD_MS,
   checkSessionEligibility,
   discoverSessions,
-  getConsentFileMtime,
   loadExcludedSessions,
   loadUploadedSessions,
 } from '../lib/session-state';
@@ -48,6 +48,25 @@ function formatHookMessages(messages: Array<string>): string {
   return messages.map((msg, i) => (i === 0 ? `hive: ${msg}` : `→ ${msg}`)).join('\n');
 }
 
+/** Check if /hive:align should be nudged based on plugin version. */
+async function checkAlignVersion(stateDir: string): Promise<string | null> {
+  const pluginVersion = process.env.HIVE_PLUGIN_VERSION;
+  if (!pluginVersion) return null;
+
+  const versionFile = join(stateDir, 'align-version');
+  try {
+    const currentVersion = await readFile(versionFile, 'utf-8');
+    const currentMinor = currentVersion.trim().split('.').slice(0, 2).join('.');
+    const pluginMinor = pluginVersion.split('.').slice(0, 2).join('.');
+    if (currentMinor !== pluginMinor) {
+      return 'New recommendations available. To review: /hive:align';
+    }
+    return null;
+  } catch {
+    return 'Recommendations available: run /hive:align';
+  }
+}
+
 export async function hiveSessionStart(): Promise<number> {
   const messages: Array<string> = [];
   const hookInput = await readHookInput();
@@ -57,9 +76,10 @@ export async function hiveSessionStart(): Promise<number> {
 
   await ensureStateDir(stateDir);
 
-  const consentMtime = await getConsentFileMtime(stateDir);
-  if (!consentMtime) {
-    return 0;
+  // Version check for /hive:align nudge
+  const alignNudge = await checkAlignVersion(stateDir);
+  if (alignNudge) {
+    messages.push(alignNudge);
   }
 
   if (hookInput.transcriptPath) {
@@ -71,20 +91,47 @@ export async function hiveSessionStart(): Promise<number> {
     .then((checkoutId) => pingCheckout(checkoutId))
     .catch(() => {});
 
+  // Auth must complete before Convex queries (refresh may update the token)
   const [status, transcriptsDirs] = await Promise.all([
     checkAuthStatus(true),
     loadTranscriptsDirs(stateDir),
   ]);
 
   if (status.needsLogin) {
-    messages.push('Not authenticated. Run the install script to authenticate.');
-    hookOutput(`hive: ${messages[0]}`);
+    // Don't mention auth — /hive:align handles the full setup flow
+    if (messages.length > 0) {
+      hookOutput(formatHookMessages(messages));
+    }
     return 0;
   }
 
-  if (status.user) {
-    messages.push(`Connected as ${getUserDisplayName(status.user)}`);
+  // Now that auth is fresh, check consent in parallel
+  const [consent, activeProjects] = await Promise.all([
+    getConsentStatus(),
+    getEnabledProjects(),
+  ]);
+
+
+  // No consent or sharing disabled — just show align nudge if present
+  if (!consent?.hasConsent || !consent.sessionSharing) {
+    if (messages.length > 0) {
+      hookOutput(formatHookMessages(messages));
+    }
+    return 0;
   }
+
+  // Check per-project consent (use canonical name to match heartbeat/upload)
+  const canonicalProject = getCanonicalProjectName(cwd);
+  const projectConsent = activeProjects.find((p) => p.project === canonicalProject);
+  if (!projectConsent) {
+    // No consent for this project — don't offer sharing, just note it
+    if (messages.length > 0) {
+      hookOutput(formatHookMessages(messages));
+    }
+    return 0;
+  }
+
+  const consentTimestamp = projectConsent.consentedAt;
 
   if (transcriptsDirs.length === 0) {
     if (messages.length > 0) {
@@ -105,14 +152,14 @@ export async function hiveSessionStart(): Promise<number> {
   let earliestEligibleAt = Infinity;
 
   for (const session of allSessions) {
-    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime);
+    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentTimestamp);
     if (result.eligible) {
       eligibleCount++;
     } else if (result.reason === 'pending review' || result.reason === 'consent review period') {
       pendingCount++;
       const mtimeMs = session.mtime.getTime();
       const sessionEligibleAt = mtimeMs + SESSION_REVIEW_PERIOD_MS;
-      const consentEligibleAt = consentMtime + CONSENT_REVIEW_PERIOD_MS;
+      const consentEligibleAt = consentTimestamp + CONSENT_REVIEW_PERIOD_MS;
       earliestEligibleAt = Math.min(earliestEligibleAt, Math.max(sessionEligibleAt, consentEligibleAt));
     }
   }
