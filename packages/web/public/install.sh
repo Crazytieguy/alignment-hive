@@ -444,7 +444,9 @@ main() {
 
   # Consent + project setup (handled entirely by the CLI)
   if command -v hive >/dev/null 2>&1 && [ -f "$AUTH_FILE" ]; then
-    hive consent setup || exit 0
+    if ! hive consent setup; then
+      warn "Consent setup failed. You can retry later with: hive consent setup"
+    fi
     echo ""
     echo "  Sessions are uploaded after a 24-hour review period."
     echo "  Run 'hive upload --help' to learn about reviewing, excluding, and snoozing uploads."

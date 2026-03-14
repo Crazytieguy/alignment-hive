@@ -1,10 +1,19 @@
 import { execSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readSync, readdirSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, openSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName, isWorktree } from '../lib/config';
 import { disableProject, enableProject, getConsentStatus, getEnabledProjects } from '../lib/convex';
+
+/** Get a TTY input stream for interactive prompts. Works in both `bash script.sh` and `curl | bash`. */
+function getTtyInput(): NodeJS.ReadableStream | undefined {
+  try {
+    return createReadStream('/dev/tty');
+  } catch {
+    return undefined;
+  }
+}
 
 const CONSENT_POLL_INTERVAL_MS = 5000;
 
@@ -129,7 +138,7 @@ export async function consentSetup(): Promise<number> {
     const shouldOpen = await confirm({
       message: `Open ${consentUrl} to set data sharing preferences?`,
       default: true,
-    });
+    }, { input: getTtyInput() });
 
     if (!shouldOpen) {
       console.log(`  Visit ${consentUrl} when ready.`);
@@ -194,7 +203,7 @@ export async function consentSetup(): Promise<number> {
       value: p.canonical,
       checked: enabledSet.has(p.canonical),
     })),
-  });
+  }, { input: getTtyInput() });
 
   const selectedSet = new Set(selected);
   const toEnable = selected.filter((p) => !enabledSet.has(p));
