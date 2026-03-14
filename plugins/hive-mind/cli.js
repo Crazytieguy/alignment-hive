@@ -16474,8 +16474,8 @@ var WORKOS_API_URL = "https://api.workos.com/user_management";
 var AuthUserSchema = exports_external.object({
   id: exports_external.string(),
   email: exports_external.string(),
-  first_name: exports_external.string().optional(),
-  last_name: exports_external.string().optional()
+  first_name: exports_external.string().nullish(),
+  last_name: exports_external.string().nullish()
 });
 var AuthDataSchema = exports_external.object({
   access_token: exports_external.string(),

@@ -8,8 +8,8 @@ const WORKOS_API_URL = 'https://api.workos.com/user_management';
 const AuthUserSchema = z.object({
   id: z.string(),
   email: z.string(),
-  first_name: z.string().optional(),
-  last_name: z.string().optional(),
+  first_name: z.string().nullish(),
+  last_name: z.string().nullish(),
 });
 
 export const AuthDataSchema = z.object({
