@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+trap 'error "Install failed at line $LINENO. Re-run with: bash -x <(curl -fsSL https://alignment-hive.com/install.sh)"' ERR
+
 # alignment-hive installer
 # Usage: curl -fsSL https://alignment-hive.com/install.sh | bash
 
@@ -205,7 +207,7 @@ install_hive_binary() {
   fi
 
   local plugin_path
-  plugin_path=$($JQ -r '.plugins."hive@alignment-hive".installPath // empty' "$INSTALLED_PLUGINS" 2>/dev/null)
+  plugin_path=$($JQ -r '.plugins."hive@alignment-hive"[0].installPath // empty' "$INSTALLED_PLUGINS" 2>/dev/null)
   if [ -z "$plugin_path" ]; then
     warn "hive plugin path not found. Skipping binary install."
     return 0
