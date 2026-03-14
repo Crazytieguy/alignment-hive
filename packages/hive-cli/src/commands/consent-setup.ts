@@ -229,8 +229,10 @@ async function consentSetupInner(): Promise<number> {
   }, { input: getInput() });
 
   const selectedSet = new Set(selected);
+  const localSet = new Set(projects.map((p) => p.canonical));
   const toEnable = selected.filter((p) => !enabledSet.has(p));
-  const toDisable = [...enabledSet].filter((p) => !selectedSet.has(p));
+  // Only disable projects that exist locally — don't touch projects from other machines
+  const toDisable = [...enabledSet].filter((p) => localSet.has(p) && !selectedSet.has(p));
 
   if (toEnable.length === 0 && toDisable.length === 0) {
     console.log('  No changes.');

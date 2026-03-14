@@ -1,8 +1,27 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/_authenticated/install")({
   component: InstallPage,
 });
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+      className="absolute top-2 right-2 px-2 py-1 text-xs rounded bg-background/80 border border-border text-muted-foreground hover:text-foreground transition-colors"
+    >
+      {copied ? "Copied!" : "Copy"}
+    </button>
+  );
+}
 
 function InstallPage() {
   return (
@@ -23,15 +42,17 @@ function InstallPage() {
           <p className="text-sm text-muted-foreground">
             Skip this if you already have Claude Code installed.
           </p>
-          <pre className="p-3 bg-muted rounded-lg text-sm overflow-x-auto">
+          <pre className="relative p-3 bg-muted rounded-lg text-sm overflow-x-auto">
             curl -fsSL https://claude.ai/install.sh | bash
+            <CopyButton text="curl -fsSL https://claude.ai/install.sh | bash" />
           </pre>
         </div>
 
         <div className="space-y-4">
           <h2 className="text-lg font-medium">2. Run the install script</h2>
-          <pre className="p-3 bg-muted rounded-lg text-sm overflow-x-auto">
+          <pre className="relative p-3 bg-muted rounded-lg text-sm overflow-x-auto">
             curl -fsSL https://alignment-hive.com/install.sh | bash
+            <CopyButton text="curl -fsSL https://alignment-hive.com/install.sh | bash" />
           </pre>
           <p className="text-sm text-muted-foreground">
             This will authenticate you and let you select which projects to
@@ -44,8 +65,9 @@ function InstallPage() {
           <p className="text-sm text-muted-foreground">
             Open Claude Code in a project directory and run:
           </p>
-          <pre className="p-3 bg-muted rounded-lg text-sm overflow-x-auto">
+          <pre className="relative p-3 bg-muted rounded-lg text-sm overflow-x-auto">
             /hive:align
+            <CopyButton text="/hive:align" />
           </pre>
           <p className="text-sm text-muted-foreground">
             This walks you through tooling recommendations and enables

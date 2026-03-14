@@ -168,13 +168,15 @@ install_hive_plugin() {
   fi
 
   if [ -f "$INSTALLED_PLUGINS" ] && $JQ -e '.plugins."hive@alignment-hive"' "$INSTALLED_PLUGINS" >/dev/null 2>&1; then
-    info "hive plugin already installed"
-    return 0
+    info "Updating hive plugin..."
+    claude plugin marketplace update alignment-hive 2>/dev/null || true
+    claude plugin update hive@alignment-hive 2>/dev/null || true
+    success "hive plugin up to date"
+  else
+    info "Installing hive plugin..."
+    claude plugin install hive@alignment-hive
+    success "hive plugin installed"
   fi
-
-  info "Installing hive plugin..."
-  claude plugin install hive@alignment-hive
-  success "hive plugin installed"
 }
 
 # --- Step 6: Install hive binary globally ---

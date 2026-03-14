@@ -411,10 +411,11 @@ function ExistingProjectsStep({
                       height="12"
                       viewBox="0 0 12 12"
                       fill="none"
-                      stroke="white"
+                      stroke="currentColor"
                       strokeWidth="2"
                       strokeLinecap="round"
                       strokeLinejoin="round"
+                      className="text-primary-foreground"
                     >
                       <path d="M2.5 6l2.5 2.5 4.5-5" />
                     </svg>

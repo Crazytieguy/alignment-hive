@@ -109,6 +109,7 @@ function ConsentPage() {
       // First-time users go to install page; returning users stay on consent
       if (isReturning) {
         // Force re-render with updated Convex data
+        setIsSubmitting(false);
         setChoices({
           sessionSharing: null,
           communityFeatures: null,
@@ -116,13 +117,13 @@ function ConsentPage() {
           creditByName: null,
         });
       } else {
+        // Navigate before clearing isSubmitting to avoid flash of consent page
         navigate({ to: "/install" });
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error("Failed to submit consent:", msg);
       setSubmitError(msg);
-    } finally {
       setIsSubmitting(false);
     }
   };
