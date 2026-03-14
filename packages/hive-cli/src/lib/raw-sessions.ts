@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { HIVE_MIND_VERSION, findRawSessions, parseJsonl, transformEntry } from './extraction';
 import { getConfig, loadTranscriptsDirs } from './config';
-import type { KnownEntry, SessionMeta } from '@alignment-hive/shared';
+import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
 import type { ReadSessionResult } from './extraction';
 
 export async function readRawSession(rawPath: string, checkoutId?: string): Promise<ReadSessionResult> {

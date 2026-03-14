@@ -2,9 +2,9 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isAuthError, loadAuthData, saveAuthData } from './auth';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction';
-import type { SessionMeta } from '@alignment-hive/shared';
+import { SESSION_REVIEW_PERIOD_MS } from './session-state';
+import type { SessionMeta } from '@alignment-hive/session-data';
 
-const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h for session age
 const AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h for auth age
 
 export async function getAuthIssuedAt(): Promise<number | null> {

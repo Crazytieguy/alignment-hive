@@ -3,7 +3,7 @@ import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { api } from "../../../../convex/_generated/api";
 import { SessionsTable } from "~/components/sessions-table";
-import { formatProject } from "~/lib/format";
+import { formatProject } from "@alignment-hive/ui";
 
 type UploadFilter = "all" | "uploaded" | "not-uploaded";
 

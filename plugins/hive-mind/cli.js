@@ -13970,7 +13970,7 @@ function date4(params) {
 
 // ../../node_modules/zod/v4/classic/external.js
 config2(en_default());
-// ../shared/src/schemas.ts
+// ../session-data/src/schemas.ts
 var TextBlockSchema = exports_external.looseObject({
   type: exports_external.literal("text"),
   text: exports_external.string()
@@ -14155,7 +14155,7 @@ var SessionMetaSchema = exports_external.object({
   excluded: exports_external.boolean().optional(),
   uploadedAt: exports_external.string().optional()
 });
-// ../shared/src/parse.ts
+// ../session-data/src/parse.ts
 function isNoiseBlock(block) {
   if (!isKnownContentBlock(block))
     return false;
@@ -18235,8 +18235,11 @@ function extractSessionSummary(entries) {
   return findSummaryEntry(entries) || findFirstUserPrompt(entries);
 }
 
-// src/lib/upload-eligibility.ts
+// src/lib/session-state.ts
 var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+var CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+
+// src/lib/upload-eligibility.ts
 var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;
 async function getAuthIssuedAt() {
   const authResult = await loadAuthData();

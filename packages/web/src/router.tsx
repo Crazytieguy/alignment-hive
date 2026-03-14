@@ -11,7 +11,7 @@ import {
 } from "@workos/authkit-tanstack-react-start/client";
 import { useCallback, useMemo } from "react";
 import { routeTree } from "./routeTree.gen";
-import { Button } from "@/components/ui/button";
+import { Button } from "@alignment-hive/ui";
 
 function DefaultErrorComponent({
   error,

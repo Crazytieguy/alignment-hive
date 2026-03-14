@@ -3,11 +3,13 @@ import { unlink } from 'node:fs/promises';
 import { enableProject } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName, getConfig } from '../lib/config';
+import { hive } from '../lib/messages';
+import { printError, printSuccess } from '../lib/output';
 
 export async function consentEnable(projectPath?: string): Promise<number> {
   const authStatus = await checkAuthStatus(true);
   if (authStatus.needsLogin) {
-    console.error('Not authenticated. Run the install script to authenticate.');
+    printError(hive.consent.notAuthenticated);
     return 1;
   }
 
@@ -16,7 +18,7 @@ export async function consentEnable(projectPath?: string): Promise<number> {
 
   const success = await enableProject(project);
   if (!success) {
-    console.error('Failed to enable sharing for project.');
+    printError(hive.consent.enableFailed);
     return 1;
   }
 
@@ -29,6 +31,6 @@ export async function consentEnable(projectPath?: string): Promise<number> {
     // File doesn't exist, that's fine
   }
 
-  console.log(`Sharing enabled for ${project}`);
+  printSuccess(hive.consent.enableSuccess(project));
   return 0;
 }

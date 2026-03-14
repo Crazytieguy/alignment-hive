@@ -1,6 +1,6 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { isKnownContentBlock, parseKnownEntry, type KnownEntry } from "@alignment-hive/shared";
+import { isKnownContentBlock, parseKnownEntry, type KnownEntry } from "@alignment-hive/session-data";
 import type { Id } from "./_generated/dataModel";
 import {
   query,

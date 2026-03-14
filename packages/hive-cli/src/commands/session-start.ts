@@ -16,7 +16,7 @@ import { errors, hook } from '../lib/messages';
 import { hookOutput } from '../lib/output';
 import { getBunPath, spawnBackground } from '../lib/spawn';
 import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
-import type { SessionMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/session-data';
 
 const AUTO_UPLOAD_DELAY_MINUTES = 10;
 

@@ -1,5 +1,5 @@
-import { isKnownContentBlock } from '@alignment-hive/shared';
-import type { KnownEntry } from '@alignment-hive/shared';
+import { isKnownContentBlock } from '@alignment-hive/session-data';
+import type { KnownEntry } from '@alignment-hive/session-data';
 
 const META_XML_TAGS = ['<command-name>', '<local-command-', '<system-reminder>'];
 

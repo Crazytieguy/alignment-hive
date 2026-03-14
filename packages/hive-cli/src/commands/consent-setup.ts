@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { checkAuthStatus } from '../lib/auth';
@@ -8,25 +8,36 @@ import { disableProject, enableProject, getConsentStatus, getEnabledProjects } f
 
 const CONSENT_POLL_INTERVAL_MS = 5000;
 
+const CWD_READ_BYTES = 8192;
+
 /** Extract the cwd from the first session file in a project directory
- *  that has a "cwd" field. Returns null if none found. */
+ *  that has a "cwd" field. Only reads the first 8KB of each file since
+ *  cwd appears in early entries. Returns null if none found. */
 function extractCwd(projectDir: string): string | null {
   try {
     const entries = readdirSync(projectDir);
     for (const entry of entries) {
       if (!entry.endsWith('.jsonl')) continue;
       try {
-        const content = readFileSync(join(projectDir, entry), 'utf-8');
-        for (const line of content.split('\n')) {
-          if (!line.includes('"cwd"')) continue;
-          try {
-            const parsed = JSON.parse(line) as Record<string, unknown>;
-            if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
-              return parsed.cwd;
+        const filePath = join(projectDir, entry);
+        const fd = openSync(filePath, 'r');
+        try {
+          const buf = Buffer.alloc(CWD_READ_BYTES);
+          const bytesRead = readSync(fd, buf, 0, CWD_READ_BYTES, 0);
+          const content = buf.toString('utf-8', 0, bytesRead);
+          for (const line of content.split('\n')) {
+            if (!line.includes('"cwd"')) continue;
+            try {
+              const parsed = JSON.parse(line) as Record<string, unknown>;
+              if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
+                return parsed.cwd;
+              }
+            } catch {
+              // skip unparseable lines (last line may be truncated)
             }
-          } catch {
-            // skip unparseable lines
           }
+        } finally {
+          closeSync(fd);
         }
       } catch {
         // skip unreadable files

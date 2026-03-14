@@ -1,7 +1,7 @@
 import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { getAuth, getSignInUrl } from "@workos/authkit-tanstack-react-start";
 import { z } from "zod";
-import { Button } from "@/components/ui/button";
+import { Button } from "@alignment-hive/ui";
 
 const searchSchema = z.object({
   error: z.string().optional().catch(undefined),

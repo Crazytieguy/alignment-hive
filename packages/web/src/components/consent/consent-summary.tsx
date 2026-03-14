@@ -6,8 +6,7 @@ import {
   type ConsentQuestion,
 } from "@/components/consent/policy-content";
 import type { ConsentChoices } from "@/routes/_authenticated/consent";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button, cn } from "@alignment-hive/ui";
 
 interface ConsentSummaryProps {
   choices: ConsentChoices;

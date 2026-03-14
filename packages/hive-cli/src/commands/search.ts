@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import { parseSession } from '@alignment-hive/shared';
+import { parseSession } from '@alignment-hive/session-data';
 import { isSessionError } from '../lib/extraction';
 import { SearchFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks } from '../lib/format';
@@ -8,7 +8,7 @@ import { printError } from '../lib/output';
 import { extractedSessionSource } from '../lib/session-source';
 import { isInTimeRange, parseTimeSpec } from '../lib/time-filter';
 import { computeMinimalPrefixes } from './index';
-import type { LogicalBlock } from '@alignment-hive/shared';
+import type { LogicalBlock } from '@alignment-hive/session-data';
 import type { SessionSource } from '../lib/session-source';
 
 const DEFAULT_CONTEXT_WORDS = 10;

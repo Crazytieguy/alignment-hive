@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { isKnownContentBlock, parseSession } from '@alignment-hive/shared';
+import { isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
 import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { errors, indexCmd, usage } from '../lib/messages';
 import { colors, printError } from '../lib/output';
@@ -11,7 +11,7 @@ import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibil
 import type { ReadSessionResult } from '../lib/extraction';
 import type { SessionSource } from '../lib/session-source';
 import type { SessionEligibility } from '../lib/upload-eligibility';
-import type { ContentBlock, KnownEntry, LogicalBlock, ParsedSession, SessionMeta } from '@alignment-hive/shared';
+import type { ContentBlock, KnownEntry, LogicalBlock, ParsedSession, SessionMeta } from '@alignment-hive/session-data';
 
 interface SessionInfo {
   meta: SessionMeta;

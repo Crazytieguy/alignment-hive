@@ -347,3 +347,70 @@ export const uploadCmd = {
   done: 'done',
   failed: (error: string): string => `failed: ${error}`,
 };
+
+// ── Hive plugin messages ──
+
+const NOT_AUTHENTICATED = 'Not authenticated. Run the install script to authenticate.';
+
+export const hive = {
+  consent: {
+    notAuthenticated: NOT_AUTHENTICATED,
+    enableSuccess: (project: string): string => `Sharing enabled for ${project}`,
+    enableFailed: 'Failed to enable sharing for project.',
+    disableSuccess: (project: string): string => `Sharing disabled for ${project}`,
+    disableServerWarning: 'Warning: local marker created but failed to update server.',
+    statusNotAuthenticated: 'Not authenticated',
+    statusFetchFailed: 'Failed to fetch consent status',
+    statusNotCompleted: 'Web consent: not completed',
+    statusCompleted: 'Web consent: completed',
+    statusSharing: (enabled: boolean): string => `Session sharing: ${enabled ? 'enabled' : 'disabled'}`,
+    statusProject: (canonical: string, enabled: boolean): string =>
+      `Current project (${canonical}): ${enabled ? 'enabled' : 'not enabled'}`,
+  },
+  upload: {
+    notAuthenticated: NOT_AUTHENTICATED,
+    noConsent: 'Session sharing not enabled. Complete consent at https://alignment-hive.com/consent',
+    noProjectConsent: 'Session sharing not enabled for this project. Run: hive consent enable',
+    noSessions: 'No sessions found.',
+    noSessionsToUpload: 'No sessions to upload.',
+    uploading: (count: number): string =>
+      `Uploading ${count} session${count === 1 ? '' : 's'}...`,
+    uploadingSession: (id: string): string => `Uploading ${id}...`,
+    uploaded: (count: number): string =>
+      `Uploaded ${count} session${count === 1 ? '' : 's'}`,
+    uploadedSession: (id: string): string => `Uploaded ${id}`,
+    uploadFailed: (error: string): string => `Failed to upload: ${error}`,
+    uploadsFailed: (count: number): string =>
+      `Failed to upload ${count} session${count === 1 ? '' : 's'}`,
+    alreadyUploaded: (id: string): string => `Session ${id} is already uploaded.`,
+    alreadyExcluded: (id: string): string => `Session ${id} is already excluded.`,
+    cannotExcludeUploaded: (id: string): string =>
+      `Session ${id} is already uploaded and cannot be excluded.`,
+    excluded: (id: string): string => `Excluded session ${id}`,
+    excludedCount: (count: number): string =>
+      `Excluded ${count} session${count === 1 ? '' : 's'}`,
+    allExcludedOrUploaded: 'All sessions are already excluded or uploaded.',
+    excludeUsage: 'Usage: hive upload exclude <session-id> or hive upload exclude --all',
+    sessionExcluded: (id: string): string => `Session ${id} is excluded.`,
+    snoozeClearedMsg: 'Snooze cleared. Uploads will resume on next session start.',
+    noActiveSnooze: 'No active snooze.',
+    snoozedUntil: (dateStr: string): string => `Uploads paused until ${dateStr}`,
+    snoozeInProgressNote: 'Any in-progress uploads will also check snooze before uploading.',
+    invalidDuration: (duration: string): string =>
+      `Invalid duration: "${duration}". Use format like 30m, 2h, 1d, 7d.`,
+    consentUnknown: 'Consent status unknown (offline or not authenticated). Eligibility may be inaccurate.',
+  },
+  sessionStart: {
+    alignNudgeNew: 'Recommendations available: run /hive:align',
+    alignNudgeUpdate: 'New recommendations available. To review: /hive:align',
+    pendingSingle: (timeStr: string): string => `1 session uploads in ${timeStr}`,
+    pendingMultiple: (count: number, timeStr: string): string =>
+      `${count} sessions pending, first uploads in ${timeStr}`,
+    eligibleSnoozed: (count: number): string =>
+      `${count} session${count === 1 ? '' : 's'} eligible (uploads snoozed)`,
+    eligibleInProgress: (count: number): string =>
+      `${count} session${count === 1 ? '' : 's'} eligible (upload in progress)`,
+    uploading: (count: number, delayMin: number): string =>
+      `Uploading ${count} session${count === 1 ? '' : 's'} in ${delayMin}m`,
+  },
+};

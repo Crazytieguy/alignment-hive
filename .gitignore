@@ -9,6 +9,9 @@ docs/data/
 # Dev binary
 .dev/
 
+# Review app build output
+packages/review-app/dist/
+
 # Rust
 target/
 

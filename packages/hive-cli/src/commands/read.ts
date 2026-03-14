@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import { parseSession } from '@alignment-hive/shared';
+import { parseSession } from '@alignment-hive/session-data';
 import { isSessionError } from '../lib/extraction';
 import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';

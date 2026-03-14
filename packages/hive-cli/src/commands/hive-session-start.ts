@@ -11,6 +11,7 @@ import {
 } from '../lib/config';
 import { getConsentStatus, getEnabledProjects, pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
+import { hive } from '../lib/messages';
 import { hookOutput } from '../lib/output';
 import { spawnBackground } from '../lib/spawn';
 import {
@@ -21,6 +22,7 @@ import {
   loadExcludedSessions,
   loadUploadedSessions,
 } from '../lib/session-state';
+import { isSnoozed } from '../lib/snooze';
 
 const UPLOAD_SCHEDULE_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
 const UPLOAD_DELAY_MINUTES = 10;
@@ -59,11 +61,11 @@ async function checkAlignVersion(stateDir: string): Promise<string | null> {
     const currentMinor = currentVersion.trim().split('.').slice(0, 2).join('.');
     const pluginMinor = pluginVersion.split('.').slice(0, 2).join('.');
     if (currentMinor !== pluginMinor) {
-      return 'New recommendations available. To review: /hive:align';
+      return hive.sessionStart.alignNudgeUpdate;
     }
     return null;
   } catch {
-    return 'Recommendations available: run /hive:align';
+    return hive.sessionStart.alignNudgeNew;
   }
 }
 
@@ -170,21 +172,25 @@ export async function hiveSessionStart(): Promise<number> {
     const minutes = totalMinutes % 60;
     const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
     if (pendingCount === 1) {
-      messages.push(`1 session uploads in ${timeStr}`);
+      messages.push(hive.sessionStart.pendingSingle(timeStr));
     } else {
-      messages.push(`${pendingCount} sessions pending, first uploads in ${timeStr}`);
+      messages.push(hive.sessionStart.pendingMultiple(pendingCount, timeStr));
     }
   }
 
   if (eligibleCount > 0) {
-    const alreadyScheduled = await checkUploadScheduled(stateDir);
-    if (alreadyScheduled) {
-      messages.push(`${eligibleCount} session${eligibleCount === 1 ? '' : 's'} eligible (upload in progress)`);
+    if (await isSnoozed(stateDir)) {
+      messages.push(hive.sessionStart.eligibleSnoozed(eligibleCount));
     } else {
-      await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
-      const spawned = spawnBackgroundCommand('upload', stateDir);
-      if (spawned) {
-        messages.push(`Uploading ${eligibleCount} session${eligibleCount === 1 ? '' : 's'} in ${UPLOAD_DELAY_MINUTES}m`);
+      const alreadyScheduled = await checkUploadScheduled(stateDir);
+      if (alreadyScheduled) {
+        messages.push(hive.sessionStart.eligibleInProgress(eligibleCount));
+      } else {
+        await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
+        const spawned = spawnBackgroundCommand('upload', stateDir);
+        if (spawned) {
+          messages.push(hive.sessionStart.uploading(eligibleCount, UPLOAD_DELAY_MINUTES));
+        }
       }
     }
   }

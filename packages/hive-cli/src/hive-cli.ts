@@ -9,7 +9,43 @@ initConfig(createHiveConfig());
 
 const COMMANDS = new Map<string, () => Promise<number>>([
   ['session-start', async () => (await import('./commands/hive-session-start')).hiveSessionStart()],
-  ['upload', async () => (await import('./commands/hive-upload')).hiveUpload()],
+  ['upload', async () => {
+    const sub = process.argv[3];
+    switch (sub) {
+      case 'list':
+        return (await import('./commands/upload-list')).uploadList();
+      case 'review':
+        return (await import('./commands/upload-review')).uploadReview();
+      case 'exclude':
+        return (await import('./commands/upload-exclude')).uploadExclude(process.argv.slice(4));
+      case 'snooze':
+        return (await import('./commands/upload-snooze')).uploadSnooze(process.argv.slice(4));
+      case 'now':
+        return (await import('./commands/upload-now')).uploadNow(process.argv[4]);
+      case 'help':
+      case '--help':
+      case '-h':
+        console.log([
+          'Usage: hive upload <subcommand>',
+          '',
+          'Subcommands:',
+          '  list                List sessions with upload status',
+          '  review              Open local web UI to review sessions',
+          '  exclude <id|--all>  Exclude a session from upload',
+          '  snooze [duration]   Pause all uploads (default: 24h, max: 7d)',
+          '  snooze --clear      Cancel active snooze',
+          '  now [session-id]    Upload immediately (skip review period)',
+          '',
+          'Without a subcommand, runs the background upload process.',
+        ].join('\n'));
+        return 0;
+      default:
+        // CRITICAL: no subcommand = background upload from session-start hook.
+        // The hook spawns `hive upload` with no args. This MUST run the existing
+        // background upload logic, not print an error.
+        return (await import('./commands/hive-upload')).hiveUpload();
+    }
+  }],
   ['heartbeat', async () => (await import('./commands/hive-heartbeat')).hiveHeartbeat()],
   ['login', async () => (await import('./commands/login')).login()],
   ['local', async () => (await import('./commands/local')).local()],

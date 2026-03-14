@@ -1,0 +1,30 @@
+{
+  "name": "@alignment-hive/review-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && cp dist/index.html dist/review.bundle",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@alignment-hive/session-data": "workspace:*",
+    "@alignment-hive/ui": "workspace:*",
+    "@tanstack/react-query": "^5.89.0",
+    "@trpc/client": "^11",
+    "@trpc/server": "^11",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4",
+    "@tailwindcss/postcss": "^4",
+    "typescript": "^5",
+    "vite": "^7.1.8",
+    "vite-plugin-singlefile": "^2"
+  }
+}

@@ -833,7 +833,7 @@ describe('schema completeness', () => {
   test('all entries in raw session fixtures are parseable', async () => {
     const { readdir, readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
-    const { parseKnownEntry } = await import('@alignment-hive/shared');
+    const { parseKnownEntry } = await import('@alignment-hive/session-data');
 
     const fixturesDir = join(import.meta.dir, 'fixtures');
     const files = await readdir(fixturesDir);
@@ -849,7 +849,7 @@ describe('schema completeness', () => {
   });
 
   test('parseKnownEntry returns error for known type with invalid schema', async () => {
-    const { parseKnownEntry } = await import('@alignment-hive/shared');
+    const { parseKnownEntry } = await import('@alignment-hive/session-data');
     const invalidUserEntry = { type: 'user', uuid: 'test-uuid' };
     const result = parseKnownEntry(invalidUserEntry);
     expect(result.data).toBeNull();
@@ -857,7 +857,7 @@ describe('schema completeness', () => {
   });
 
   test('parseKnownEntry returns null data for unknown types', async () => {
-    const { parseKnownEntry } = await import('@alignment-hive/shared');
+    const { parseKnownEntry } = await import('@alignment-hive/session-data');
     const unknownEntry = { type: 'future-unknown-type', data: 'whatever' };
     const result = parseKnownEntry(unknownEntry);
     expect(result.data).toBeNull();

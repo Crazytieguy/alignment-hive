@@ -4,7 +4,7 @@ import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from '../lib/e
 import { excludeCmd } from '../lib/messages.js';
 import { colors, printError, printInfo, printSuccess } from '../lib/output.js';
 import { confirm, formatSessionId, lookupSession } from '../lib/utils.js';
-import type { SessionMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/session-data';
 
 async function excludeSession(sessionPath: string): Promise<boolean> {
   try {

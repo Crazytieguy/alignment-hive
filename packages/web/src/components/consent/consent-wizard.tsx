@@ -10,8 +10,7 @@ import {
 } from "@/components/consent/policy-content";
 import type { ConsentChoices } from "@/routes/_authenticated/consent";
 import { PolicyParagraph } from "@/components/consent/policy-paragraph";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button, cn } from "@alignment-hive/ui";
 
 const STORAGE_KEY = "alignment-hive-consent-step";
 

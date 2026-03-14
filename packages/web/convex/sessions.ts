@@ -51,11 +51,11 @@ async function verifyConsent(
   }
 }
 
-/** Upsert user record with latest identity info from JWT */
+/** Upsert user record with latest identity info from JWT. Returns the user's document ID. */
 async function upsertUser(
   ctx: MutationCtx,
   identity: UserIdentity,
-): Promise<void> {
+): Promise<Id<"users">> {
   const userId = identity.subject;
   const givenName = (identity as Record<string, unknown>)["given_name"] as
     | string
@@ -81,14 +81,19 @@ async function upsertUser(
         lastName: familyName ?? existingUser.lastName,
       });
     }
-  } else if (identity.email) {
-    await ctx.db.insert("users", {
-      workosId: userId,
-      email: identity.email,
-      firstName: givenName,
-      lastName: familyName,
-    });
+    return existingUser._id;
   }
+
+  if (!identity.email) {
+    throw new ConvexError("User has no email — cannot create account");
+  }
+
+  return await ctx.db.insert("users", {
+    workosId: userId,
+    email: identity.email,
+    firstName: givenName,
+    lastName: familyName,
+  });
 }
 
 /** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing */
@@ -144,16 +149,8 @@ export const heartbeatSession = mutation({
       throw new ConvexError("Not authenticated");
     }
 
-    await upsertUser(ctx, identity);
-
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
-      .first();
-    if (!user) {
-      throw new ConvexError("User record not found — complete signup at alignment-hive.com");
-    }
-    await verifyConsent(ctx, user._id, args.project);
+    const userId = await upsertUser(ctx, identity);
+    await verifyConsent(ctx, userId, args.project);
 
     await upsertSession(ctx, identity.subject, args);
   },
@@ -178,16 +175,8 @@ export const generateUploadUrl = mutation({
 
     if (args.checkoutId && args.project && args.lineCount !== undefined) {
       // Inline heartbeat: upsert user + session in the same round trip
-      await upsertUser(ctx, identity);
-
-      const user = await ctx.db
-        .query("users")
-        .withIndex("by_workos_id", (q) => q.eq("workosId", userId))
-        .first();
-      if (!user) {
-        throw new ConvexError("User record not found");
-      }
-      await verifyConsent(ctx, user._id, args.project);
+      const userDocId = await upsertUser(ctx, identity);
+      await verifyConsent(ctx, userDocId, args.project);
 
       await upsertSession(ctx, userId, {
         sessionId: args.sessionId,
@@ -211,14 +200,8 @@ export const generateUploadUrl = mutation({
       }
 
       // Verify consent using existing session's project
-      const user = await ctx.db
-        .query("users")
-        .withIndex("by_workos_id", (q) => q.eq("workosId", userId))
-        .first();
-      if (!user) {
-        throw new ConvexError("User record not found");
-      }
-      await verifyConsent(ctx, user._id, session.project);
+      const userDocId = await upsertUser(ctx, identity);
+      await verifyConsent(ctx, userDocId, session.project);
     }
 
     return await ctx.storage.generateUploadUrl();
@@ -250,14 +233,8 @@ export const saveUpload = mutation({
     }
 
     // Verify consent using the session's project
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
-      .first();
-    if (!user) {
-      throw new ConvexError("User record not found");
-    }
-    await verifyConsent(ctx, user._id, session.project);
+    const userDocId = await upsertUser(ctx, identity);
+    await verifyConsent(ctx, userDocId, session.project);
 
     await ctx.db.patch(session._id, {
       ...(summary && { summary }),

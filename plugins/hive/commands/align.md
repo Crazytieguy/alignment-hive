@@ -46,12 +46,20 @@ Do not offer per-project sharing. Move on to recommendations.
 Check the current project line.
 
 - **If current project is "enabled"**: Note "Session sharing: enabled" and move on.
-- **If current project is "not enabled" and `.claude/hive/sharing-disabled` exists**: The user previously declined sharing for this project. Note this and move on. Mention they can re-enable with /hive:align (delete the sharing-disabled file first).
+- **If current project is "not enabled" and `.claude/hive/sharing-disabled` exists**: The user previously declined sharing for this project. Note this and move on. Mention they can re-enable anytime with /hive:align.
 - **If current project is "not enabled" and no sharing-disabled file**: Offer to enable sharing:
   - Explain this will share sessions from this project after a 24-hour review period
-  - If they accept: run `hive consent enable` (user will see and approve via Claude Code permission prompt)
+  - If they accept: run `hive consent enable` (user will see and approve via Claude Code permission prompt). The command handles everything including clearing any previous opt-out markers.
+  - After enabling, briefly explain:
+    - Sessions have a 24h review period before upload
+    - `hive upload --help` shows all available commands for managing uploads
+    - `hive upload review` opens a local web UI to preview what will be uploaded
   - If they decline: record "Declined session sharing" in `.claude/hive/align-rejected.md`
   - Repo linking for private repos is coming soon — mention this briefly if the project has a git remote
+
+### hive-mind Migration
+
+If `hive-mind@alignment-hive` is in `.claude/settings.json` or `.claude/settings.local.json`, offer to remove it — hive handles session sharing now.
 
 ### First-Time Setup (recommendations)
 
@@ -63,7 +71,7 @@ Walk through all recommendations as a guided setup. For each category:
 
 ### Follow-Up Runs
 
-1. Load the rejected items from the file above — respect previous decisions
+1. Read the rejected items from the file above — respect previous decisions
 2. Check what's currently implemented
 3. Only show new or missing recommendations (skip rejected ones)
 4. If plugin version changed, mention what's new
@@ -78,7 +86,9 @@ Walk through all recommendations as a guided setup. For each category:
 
 ### Plugins (based on project type)
 
-Check `.claude/settings.json` and `.claude/settings.local.json` for installed plugins. Propose relevant ones:
+Check `.claude/settings.json` and `.claude/settings.local.json` for installed plugins. Infer from existing settings whether the user prefers local-only (`.claude/settings.local.json`) or shared (`.claude/settings.json`) — if unclear, ask once and use that for all installations.
+
+Propose relevant plugins:
 
 - **Autopilot** (permissions + autonomous mode): `autopilot@alignment-hive` — **Always recommend**
 - **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
@@ -86,8 +96,6 @@ Check `.claude/settings.json` and `.claude/settings.local.json` for installed pl
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
 - **Documentation fetching**: `llms-fetch-mcp@alignment-hive` — Fetch docs with [llms.txt](https://llmstxt.org/) support
 - **TypeScript/JavaScript**: `frontend-design` (for web projects)
-
-Ask the user whether to install plugins just for themselves (`.claude/settings.local.json`, gitignored) or also for collaborators (`.claude/settings.json`, committed). Use the chosen file for all plugin installations.
 
 For non-alignment-hive plugins:
 ```json
@@ -112,18 +120,15 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 
 ### Tooling (varies by project)
 
-Consider modern tooling where appropriate:
-- **Python**: `uv` for dependency management
-- **JavaScript/TypeScript**: `vite`, `bun`
-- **General**: linters, typecheckers, formatters
+Use your judgement to recommend modern, well-maintained tooling appropriate for the project. Consider dependency management, build tools, linters, typecheckers, formatters, and anything else that would improve the development workflow.
 
 If a tool would be useful and isn't installed, ask if the user would like to install it.
 
 ### Reload + Setup
 
-After all plugins are installed, tell the user to exit and restart Claude (`/exit` then `claude -c`).
-
 Mention that some plugins have setup skills that will be available after reloading — each plugin's SessionStart hook will nudge about its own setup when the session starts.
+
+After all plugins are installed, tell the user to exit and restart Claude (`/exit` then `claude -c`).
 
 ## Completion
 

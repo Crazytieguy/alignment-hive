@@ -1,6 +1,9 @@
-import { readFile, stat } from 'node:fs/promises';
+import { appendFile, readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { findRawSessions } from './extraction';
+
+const UPLOADED_SESSIONS_FILE = 'uploaded-sessions';
+const EXCLUDED_SESSIONS_FILE = 'excluded-sessions';
 
 export const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
 export const CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
@@ -43,7 +46,7 @@ export async function discoverSessions(transcriptsDirs: Array<string>): Promise<
 export async function loadUploadedSessions(stateDir: string): Promise<Map<string, UploadedEntry>> {
   const map = new Map<string, UploadedEntry>();
   try {
-    const content = await readFile(join(stateDir, 'uploaded-sessions'), 'utf-8');
+    const content = await readFile(join(stateDir, UPLOADED_SESSIONS_FILE), 'utf-8');
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -62,7 +65,7 @@ export async function loadUploadedSessions(stateDir: string): Promise<Map<string
 export async function loadExcludedSessions(stateDir: string): Promise<Set<string>> {
   const set = new Set<string>();
   try {
-    const content = await readFile(join(stateDir, 'excluded-sessions'), 'utf-8');
+    const content = await readFile(join(stateDir, EXCLUDED_SESSIONS_FILE), 'utf-8');
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
       if (trimmed) set.add(trimmed);
@@ -102,5 +105,46 @@ export function checkSessionEligibility(
   }
 
   return { eligible: true };
+}
+
+/** Check if a session has been uploaded with its current mtime. */
+export function isSessionUploaded(
+  session: DiscoveredSession,
+  uploadedMap: Map<string, UploadedEntry>,
+): boolean {
+  const uploaded = uploadedMap.get(session.sessionId);
+  return !!uploaded && uploaded.rawMtime === session.mtime.toISOString();
+}
+
+/** Record a session as uploaded. Appends to the uploaded-sessions file. */
+export async function recordUploadedSession(
+  stateDir: string,
+  sessionId: string,
+  rawMtime: string,
+): Promise<void> {
+  const entry: UploadedEntry = { sessionId, rawMtime, uploadedAt: new Date().toISOString() };
+  await appendFile(join(stateDir, UPLOADED_SESSIONS_FILE), JSON.stringify(entry) + '\n');
+}
+
+/** Record a session as excluded. Appends to the excluded-sessions file. */
+export async function recordExcludedSession(stateDir: string, sessionId: string): Promise<void> {
+  await appendFile(join(stateDir, EXCLUDED_SESSIONS_FILE), sessionId + '\n');
+}
+
+/** Load all session state in parallel. */
+export async function loadSessionState(
+  stateDir: string,
+  transcriptsDirs: Array<string>,
+): Promise<{
+  sessions: Array<DiscoveredSession>;
+  uploadedMap: Map<string, UploadedEntry>;
+  excludedSet: Set<string>;
+}> {
+  const [sessions, uploadedMap, excludedSet] = await Promise.all([
+    discoverSessions(transcriptsDirs),
+    loadUploadedSessions(stateDir),
+    loadExcludedSessions(stateDir),
+  ]);
+  return { sessions, uploadedMap, excludedSet };
 }
 

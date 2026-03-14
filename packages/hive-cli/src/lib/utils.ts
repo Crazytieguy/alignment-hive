@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction.js';
-import type { SessionMeta } from '@alignment-hive/shared';
+import type { SessionMeta } from '@alignment-hive/session-data';
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

@@ -1,6 +1,6 @@
-import { parseSession } from '@alignment-hive/shared';
+import { parseSession } from '@alignment-hive/session-data';
 import { computeUniformLimit, countWords, truncateWords } from './truncation';
-import type { KnownEntry, LogicalBlock } from '@alignment-hive/shared';
+import type { KnownEntry, LogicalBlock } from '@alignment-hive/session-data';
 import type { ReadFieldFilter } from './field-filter';
 
 const MAX_CONTENT_SUMMARY_LEN = 300;

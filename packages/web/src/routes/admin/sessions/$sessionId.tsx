@@ -3,7 +3,7 @@ import { useQuery } from "convex-helpers/react/cache";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { api } from "../../../../convex/_generated/api";
 import { SessionViewer } from "~/components/session-viewer";
-import { formatProject, formatSessionId } from "~/lib/format";
+import { formatProject, formatSessionId } from "@alignment-hive/ui";
 
 export const Route = createFileRoute("/admin/sessions/$sessionId")({
   component: SessionDetail,

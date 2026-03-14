@@ -1,5 +1,5 @@
 {
-  "name": "@alignment-hive/shared",
+  "name": "@alignment-hive/session-data",
   "version": "0.1.0",
   "private": true,
   "type": "module",

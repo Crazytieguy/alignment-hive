@@ -2,13 +2,13 @@ import { createReadStream } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { basename, join } from 'node:path';
-import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/shared';
+import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/session-data';
 import { getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
 import { errors } from './messages';
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from './sanitize';
 import { isErrorResult } from './auth';
 import type { ErrorResult } from './auth';
-import type { KnownEntry, SessionMeta } from '@alignment-hive/shared';
+import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
 
 export const HIVE_MIND_VERSION = '0.1' as const;
 

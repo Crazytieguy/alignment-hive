@@ -1,7 +1,7 @@
 import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { api } from "../../../../convex/_generated/api";
-import { formatRelativeTime } from "~/lib/format";
+import { formatRelativeTime } from "@alignment-hive/ui";
 
 export const Route = createFileRoute("/admin/users/")({
   component: UsersList,

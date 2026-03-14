@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { formatProject, formatRelativeTime } from "~/lib/format";
+import { formatProject, formatRelativeTime } from "@alignment-hive/ui";
 
 interface Session {
   _id: string;

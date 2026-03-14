@@ -1,6 +1,7 @@
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { isAuthError, loadAuthData } from './auth';
+import type { Id } from '../../../web/convex/_generated/dataModel';
 
 const CONVEX_URL = process.env.ALIGNMENT_HIVE_CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
@@ -88,9 +89,10 @@ export async function saveUpload(sessionId: string, storageId: string, summary?:
     const client = await getAuthenticatedClient();
     if (!client) return false;
 
+    // storageId is returned by Convex storage upload as a string but the mutation expects Id<"_storage">
     await client.mutation(api.sessions.saveUpload, {
       sessionId,
-      storageId: storageId as any,
+      storageId: storageId as unknown as Id<"_storage">,
       summary,
     });
     return true;

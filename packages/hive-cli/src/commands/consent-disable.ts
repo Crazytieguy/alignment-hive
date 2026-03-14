@@ -3,11 +3,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { disableProject, getEnabledProjects } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName, getConfig } from '../lib/config';
+import { hive } from '../lib/messages';
+import { printError, printSuccess, printWarning } from '../lib/output';
 
 export async function consentDisable(projectPath?: string): Promise<number> {
   const authStatus = await checkAuthStatus(true);
   if (authStatus.needsLogin) {
-    console.error('Not authenticated. Run the install script to authenticate.');
+    printError(hive.consent.notAuthenticated);
     return 1;
   }
 
@@ -27,10 +29,10 @@ export async function consentDisable(projectPath?: string): Promise<number> {
   if (wasEnabled) {
     const success = await disableProject(project);
     if (!success) {
-      console.error('Warning: local marker created but failed to update server.');
+      printWarning(hive.consent.disableServerWarning);
     }
   }
 
-  console.log(`Sharing disabled for ${project}`);
+  printSuccess(hive.consent.disableSuccess(project));
   return 0;
 }

@@ -1,11 +1,11 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { parseKnownEntry } from '@alignment-hive/shared';
+import { parseKnownEntry } from '@alignment-hive/session-data';
 import { parseJsonl } from '../lib/extraction';
 import { ReadFieldFilter } from '../lib/field-filter';
 import { formatSession } from '../lib/format';
-import type { KnownEntry } from '@alignment-hive/shared';
+import type { KnownEntry } from '@alignment-hive/session-data';
 
 const fixturesDir = join(dirname(import.meta.dir), 'lib', 'fixtures');
 const snapshotsDir = join(import.meta.dir, '__snapshots__');

@@ -1,11 +1,15 @@
 # alignment-hive
 
-Shared infrastructure for alignment researchers. [MATS](https://www.matsprogram.org/) fellows are the first intended users, but this is built for the broader AI safety community.
+A shared tooling and knowledge layer for the AI alignment community.
 
-Large orgs benefit from shared tooling and accumulated knowledge across their agents. This project aims to bring some of those advantages to independent researchers:
+As AI capabilities accelerate, the alignment community needs to keep pace. Large labs benefit from shared tooling and accumulated knowledge across their researchers and agents, but the broader alignment community doesn't have that. Each person starts from scratch, sifting through noise to find good tools, repeating mistakes others have already solved.
 
-- **Plugin marketplace** - Curated Claude Code plugins with skills for common research workflows
-- **hive-mind** - A system for sharing session learnings across the community (in development)
+Alignment Hive provides curation, discoverability, and shared knowledge for everyone working on alignment. The best way to scale is for the community to build this together, and contributions are actively encouraged.
+
+**Currently available:**
+
+- **Claude Code plugin marketplace.** Curated plugins for common research workflows.
+- **Session sharing.** Opt-in system for sharing Claude Code session learnings across the community, building a collective knowledge base.
 
 ## Getting Started
 
@@ -24,7 +28,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 curl -fsSL https://alignment-hive.com/install.sh | bash
 ```
 
-This adds the marketplace, installs the hive plugin with auto-update, authenticates for session sharing, and lets you choose which projects to share.
+This adds the plugin marketplace, installs the hive plugin, authenticates you, and walks you through data sharing preferences and project selection.
 
 Then open Claude Code in your project and run `/hive:align`.
 
@@ -33,23 +37,18 @@ Then open Claude Code in your project and run `/hive:align`.
 | Plugin | Description | Install |
 |--------|-------------|---------|
 | hive | Tooling recommendations + session sharing | Included in install script |
-| mats | Best practices, fellow handbook, lit review | `/plugin install mats@alignment-hive` |
+| mats | MATS fellow handbook, lit review, best practices | `/plugin install mats@alignment-hive` |
 | github-action | GitHub Action for autonomous `@claude` on issues and PRs | `/plugin install github-action@alignment-hive` |
 | autopilot | Autonomous operation + permission management | `/plugin install autopilot@alignment-hive` |
 | llms-fetch-mcp | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `/plugin install llms-fetch-mcp@alignment-hive` |
 | remote-kernels | Cloud GPU instances with Jupyter kernels ([RunPod](https://runpod.io)) | `/plugin install remote-kernels@alignment-hive` |
-| hive-mind | Session sharing (in development) | `/plugin install hive-mind@alignment-hive` |
 
 ## Contributing
 
 The [plugin-dev](https://github.com/anthropics/claude-code-plugins) plugin auto-installs when you clone this repo, so Claude can help with plugin development.
 
-Feedback and suggestions welcome—open an issue, send a Slack DM, or reach out however works for you. All changes go through PR review.
+Feedback and suggestions welcome. Open an [issue](https://github.com/Crazytieguy/alignment-hive/issues) or email yoav.tzfati@gmail.com.
 
 ## Web App
 
-The web interface at [alignment-hive.com](https://alignment-hive.com) handles user signup, data sharing consent, and session management.
-
-## Roadmap
-
-See [docs/roadmap.md](docs/roadmap.md) for what's planned.
+The web interface at [alignment-hive.com](https://alignment-hive.com) handles user signup and data sharing consent.

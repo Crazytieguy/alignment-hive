@@ -1,6 +1,6 @@
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { parseSession } from '@alignment-hive/shared';
+import { parseSession } from '@alignment-hive/session-data';
 import { checkAuthStatus } from '../lib/auth.js';
 import { getCanonicalProjectName } from '../lib/config.js';
 import { generateUploadUrl, saveUpload } from '../lib/convex.js';

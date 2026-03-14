@@ -444,6 +444,9 @@ main() {
   if command -v hive >/dev/null 2>&1 && [ -f "$AUTH_FILE" ]; then
     hive consent setup || exit 0
     echo ""
+    echo "  Sessions are uploaded after a 24-hour review period."
+    echo "  Run 'hive upload --help' to learn about reviewing, excluding, and snoozing uploads."
+    echo ""
   fi
 
   info "Next steps:"

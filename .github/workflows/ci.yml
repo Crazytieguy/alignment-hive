@@ -5,13 +5,17 @@ on:
     branches: [main]
     paths:
       - 'packages/hive-cli/**'
-      - 'packages/shared/**'
+      - 'packages/session-data/**'
+      - 'packages/ui/**'
+      - 'packages/review-app/**'
       - 'plugins/hive-mind/cli.js'
   pull_request:
     branches: [main]
     paths:
       - 'packages/hive-cli/**'
-      - 'packages/shared/**'
+      - 'packages/session-data/**'
+      - 'packages/ui/**'
+      - 'packages/review-app/**'
       - 'plugins/hive-mind/cli.js'
 
 jobs:

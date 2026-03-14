@@ -50,6 +50,23 @@ The retrieval skill dynamically includes `--help` output. When CLI behavior chan
 | `ALIGNMENT_HIVE_CLIENT_ID` | Override WorkOS client ID for hive (for staging/testing). |
 | `DEBUG` | Set to `1` to enable debug logging. |
 
+## Dev Binary
+
+Build the hive binary for local testing:
+```bash
+bun run --filter '@alignment-hive/review-app' build && bun build --compile packages/hive-cli/src/hive-cli.ts --outfile .dev/hive
+```
+
+The dev environment (set up by `dev-env.sh`) puts `.dev/` on PATH, so `hive` runs the dev binary. Test commands:
+```bash
+hive upload list          # List sessions with status
+hive upload review        # Open local review UI
+hive upload exclude <id>  # Exclude a session
+hive upload snooze 24h    # Pause uploads
+hive upload now           # Upload immediately
+hive consent status       # Check consent status
+```
+
 ## Local Development with Staging Auth
 
 Staging defaults (`HIVE_MIND_CLIENT_ID`, `HIVE_MIND_AUTH_FILE`) are in the checked-in root `.env` file — no setup needed.

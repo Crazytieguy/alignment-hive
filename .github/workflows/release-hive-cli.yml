@@ -5,7 +5,10 @@ on:
     branches: [main]
     paths:
       - 'packages/hive-cli/src/**'
-      - 'packages/shared/src/**'
+      - 'packages/session-data/src/**'
+      - 'packages/ui/src/**'
+      - 'packages/review-app/src/**'
+      - 'packages/review-app/index.html'
       - 'packages/hive-cli/package.json'
 
 jobs:
@@ -64,6 +67,9 @@ jobs:
 
       - name: Install dependencies
         run: bun install
+
+      - name: Build review app
+        run: bun run --filter '@alignment-hive/review-app' build
 
       - name: Build binary
         run: |

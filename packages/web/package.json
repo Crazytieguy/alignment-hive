@@ -14,7 +14,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@alignment-hive/shared": "workspace:*",
+    "@alignment-hive/session-data": "workspace:*",
+    "@alignment-hive/ui": "workspace:*",
     "@convex-dev/react-query": "^0.0.0-alpha.11",
     "@radix-ui/react-slot": "^1.2.4",
     "@tanstack/react-query": "^5.89.0",
