@@ -63,11 +63,7 @@ If `hive-mind@alignment-hive` is in `.claude/settings.json` or `.claude/settings
 
 ### First-Time Setup (recommendations)
 
-Walk through all recommendations as a guided setup. For each category:
-1. Check what's already implemented
-2. Explain the recommendation
-3. Offer to implement it
-4. If rejected, note the reason for the rejected file
+Walk through recommendations one at a time. For each item, check if it's already implemented. If not, use AskUserQuestion to offer it. Implement if accepted, note the reason in the rejected file if declined.
 
 ### Follow-Up Runs
 
@@ -112,8 +108,13 @@ For alignment-hive plugins (requires alignment-hive marketplace):
   "enabledPlugins": {
     "autopilot@alignment-hive": true
   },
-  "pluginMarketplaces": {
-    "alignment-hive": "Crazytieguy/alignment-hive"
+  "extraKnownMarketplaces": {
+    "alignment-hive": {
+      "source": {
+        "source": "github",
+        "repo": "Crazytieguy/alignment-hive"
+      }
+    }
   }
 }
 ```
