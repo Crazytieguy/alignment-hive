@@ -9,7 +9,7 @@ Claude Code infrastructure for AI safety researchers.
 This is a **bun monorepo**:
 - `packages/web/` - TanStack Start web app (alignment-hive.com)
 - `packages/hive-cli/` - CLI for session extraction and sharing
-- `packages/shared/` - Shared code (schemas, parsing)
+- `packages/session-data/` - Shared code (schemas, parsing)
 - `plugins/` - Plugin distributions
 
 ## Working on the Code

@@ -1,34 +1,24 @@
-import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { updateAliasIfOutdated } from '../lib/alias';
-import { checkAuthStatus, getUserDisplayName } from '../lib/auth';
 import {
   addTranscriptsDir,
   getMainWorktreePath,
-  getOrCreateCheckoutId,
   isWorktree,
   loadTranscriptsDirs,
 } from '../lib/config';
-import { pingCheckout } from '../lib/convex';
 import { checkAllSessions } from '../lib/extraction';
 import { readHookInput } from '../lib/hook-input';
-import { errors, hook } from '../lib/messages';
+import { hook } from '../lib/messages';
 import { hookOutput } from '../lib/output';
 import { getBunPath, spawnBackground } from '../lib/spawn';
-import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
-import type { SessionMeta } from '@alignment-hive/session-data';
-
-const AUTO_UPLOAD_DELAY_MINUTES = 10;
-
-const verbose = () => process.env.HIVE_MIND_VERBOSE === '1';
 
 export async function sessionStart(): Promise<number> {
-  const t0 = performance.now();
   const messages: Array<string> = [];
-  const collectedErrors: Array<string> = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
   const hiveMindDir = join(cwd, '.claude', 'hive-mind');
+
+  // hive-mind is deprecated — show migration message, skip uploads/heartbeats
+  messages.push('hive-mind is deprecated. Run: curl -fsSL https://alignment-hive.com/install.sh | bash');
 
   // Determine transcripts directory and directories to check
   let transcriptsDirs: Array<string>;
@@ -38,75 +28,41 @@ export async function sessionStart(): Promise<number> {
     const transcriptsDir = dirname(hookInput.transcriptPath);
 
     if (inWorktree) {
-      // Register with main worktree's transcripts-dirs
       const mainPath = getMainWorktreePath(cwd);
       if (mainPath) {
         const mainHiveMindDir = join(mainPath, '.claude', 'hive-mind');
         await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
       }
-      // Worktree only checks its own transcripts
       transcriptsDirs = [transcriptsDir];
     } else {
-      // Main worktree: register itself and check all directories
       await addTranscriptsDir(hiveMindDir, transcriptsDir);
       transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
     }
   } else {
-    // No transcript path provided - load from saved directories
     if (inWorktree) {
-      messages.push(hook.extractionFailed('No transcripts directory configured. Run a Claude Code session first.'));
-      hookOutput(`hive-mind: ${messages[0]}`);
-      return 1;
+      hookOutput(formatMessages(messages));
+      return 0;
     }
     transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
     if (transcriptsDirs.length === 0) {
-      messages.push(hook.extractionFailed('No transcripts directories configured. Run a Claude Code session first.'));
-      hookOutput(`hive-mind: ${messages[0]}`);
-      return 1;
+      hookOutput(formatMessages(messages));
+      return 0;
     }
   }
 
-  // Fire-and-forget checkout ping for analytics
-  getOrCreateCheckoutId(hiveMindDir)
-    .then((checkoutId) => pingCheckout(checkoutId))
-    .catch(() => {});
+  // Extraction still runs (useful for local retrieval via hive-mind search/read/index)
+  const sessionCheck = await checkAllSessions(cwd, transcriptsDirs).catch(() => null);
 
-  const tBeforeParallel = performance.now();
+  if (sessionCheck && !('error' in sessionCheck)) {
+    const { sessionsToExtract, schemaErrors } = sessionCheck;
 
-  // Run session check and auth in parallel - reads metadata once for both extraction and eligibility
-  const [sessionCheck, status] = await Promise.all([
-    checkAllSessions(cwd, transcriptsDirs).catch((error) => ({
-      error: error instanceof Error ? error.message : String(error),
-    })),
-    checkAuthStatus(true),
-  ]);
-
-  const tAfterParallel = performance.now();
-  if (verbose()) {
-    console.error(
-      `[session-start] parallel block (checkAllSessions+auth): ${(tAfterParallel - tBeforeParallel).toFixed(0)}ms`,
-    );
-  }
-
-  let newSessionIds: Array<string> = [];
-  let extractedSessions: Array<{ sessionId: string; meta: SessionMeta }> = [];
-
-  if ('error' in sessionCheck) {
-    messages.push(hook.extractionFailed(sessionCheck.error));
-  } else {
-    const { sessionsToExtract, schemaErrors, errors: sessionErrors } = sessionCheck;
-    extractedSessions = sessionCheck.extractedSessions;
-
-    // Collect all session check errors
-    collectedErrors.push(...sessionErrors);
-
-    const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
-    if (newNonAgentSessions.length > 0) {
-      messages.push(hook.extracted(newNonAgentSessions.length));
-      newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
+    if (sessionsToExtract.length > 0) {
+      const newNonAgentCount = sessionsToExtract.filter((s) => !s.agentId).length;
+      if (newNonAgentCount > 0) {
+        messages.push(hook.extracted(newNonAgentCount));
+      }
+      scheduleExtractions(cwd, sessionsToExtract.map((s) => s.sessionId));
     }
-
-    scheduleExtractions(sessionsToExtract.map((s) => s.sessionId));
 
     if (schemaErrors.length > 0) {
       const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
@@ -115,133 +71,19 @@ export async function sessionStart(): Promise<number> {
     }
   }
 
-  let userHasAlias = false;
-  if (status.authenticated) {
-    try {
-      const aliasResult = await updateAliasIfOutdated();
-      if (aliasResult.updated) {
-        messages.push(hook.aliasUpdated());
-      }
-      userHasAlias = aliasResult.hasAlias;
-    } catch (err) {
-      collectedErrors.push(errors.aliasUpdateFailed(err instanceof Error ? err.message : String(err)));
-    }
-  }
-
-  if (status.needsLogin) {
-    messages.push(hook.notLoggedIn());
-  } else if (status.user) {
-    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
-  }
-
-  // Collect auth errors
-  if (status.errors) {
-    collectedErrors.push(...status.errors);
-  }
-
-  // Compute eligibility from already-loaded metadata (no additional file reads)
-  if (status.authenticated && extractedSessions.length > 0) {
-    try {
-      const authIssuedAt = await getAuthIssuedAt();
-      const nonAgentSessions = extractedSessions.filter((s) => !s.meta.agentId);
-      const eligibilityResults = nonAgentSessions.map((s) => checkSessionEligibility(s.meta, authIssuedAt));
-
-      const pending = eligibilityResults.filter((s) => s.status === 'pending');
-      const eligible = eligibilityResults.filter((s) => s.status === 'ready');
-
-      const showPendingMsg = pending.length > 1;
-      if (showPendingMsg) {
-        const earliestUploadAt = Math.min(...pending.map((s) => s.eligibleAt!));
-        messages.push(hook.pendingSessions(pending.length, earliestUploadAt));
-      }
-
-      if (eligible.length > 0) {
-        const alreadyRunning = await isUploadRunning(cwd);
-        if (alreadyRunning) {
-          messages.push(hook.uploadInProgress(eligible.length));
-        } else {
-          const spawned = scheduleAutoUploads(
-            cwd,
-            eligible.map((s) => s.sessionId),
-          );
-          if (spawned) {
-            messages.push(hook.uploadingSessions(eligible.length, AUTO_UPLOAD_DELAY_MINUTES));
-          }
-        }
-      }
-
-      if (showPendingMsg || eligible.length > 0) {
-        messages.push(hook.toReview(userHasAlias));
-      }
-    } catch (err) {
-      collectedErrors.push(errors.eligibilityCheckFailed(err instanceof Error ? err.message : String(err)));
-    }
-  }
-
-  // Add collected errors to messages
-  if (collectedErrors.length > 0) {
-    if (process.env.HIVE_MIND_VERBOSE === '1') {
-      messages.push(...collectedErrors);
-    } else {
-      messages.push(hook.errorsOccurred(collectedErrors.length));
-    }
-  }
-
-  if (messages.length > 0) {
-    const formatted = messages.map((msg, i) => (i === 0 ? `hive-mind: ${msg}` : `→ ${msg}`));
-    hookOutput(formatted.join('\n'));
-  }
-
-  if (status.authenticated && newSessionIds.length > 0) {
-    scheduleHeartbeats(newSessionIds);
-  }
-
-  if (verbose()) {
-    console.error(`[session-start] total: ${(performance.now() - t0).toFixed(0)}ms`);
-  }
-  process.exit(0);
+  hookOutput(formatMessages(messages));
+  return 0;
 }
 
-function spawnBackgroundProcess(args: Array<string>): boolean {
-  const cwd = process.env.CWD || process.cwd();
+function formatMessages(messages: Array<string>): string {
+  return messages.map((msg, i) => (i === 0 ? `hive-mind: ${msg}` : `→ ${msg}`)).join('\n');
+}
+
+function scheduleExtractions(cwd: string, sessionIds: Array<string>): boolean {
   return spawnBackground({
     executable: getBunPath(),
-    args: [process.argv[1], ...args],
+    args: [process.argv[1], 'extract', ...sessionIds],
     errorLogPath: join(cwd, '.claude', 'hive-mind', 'error.log'),
     env: { CWD: cwd },
   });
-}
-
-function scheduleExtractions(sessionIds: Array<string>): boolean {
-  if (sessionIds.length === 0) return true;
-  return spawnBackgroundProcess(['extract', ...sessionIds]);
-}
-
-function scheduleHeartbeats(sessionIds: Array<string>): boolean {
-  if (sessionIds.length === 0) return true;
-  return spawnBackgroundProcess(['heartbeat', ...sessionIds]);
-}
-
-function getUploadPidPath(cwd: string): string {
-  return join(cwd, '.claude', 'hive-mind', 'upload.pid');
-}
-
-async function isUploadRunning(cwd: string): Promise<boolean> {
-  const pidPath = getUploadPidPath(cwd);
-  try {
-    const pidStr = await readFile(pidPath, 'utf-8');
-    const pid = parseInt(pidStr.trim(), 10);
-    if (isNaN(pid)) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function scheduleAutoUploads(cwd: string, sessionIds: Array<string>): boolean {
-  if (sessionIds.length === 0) return true;
-  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  const pidPath = getUploadPidPath(cwd);
-  return spawnBackgroundProcess(['upload', '--pid-file', pidPath, '--delay', String(delaySeconds), ...sessionIds]);
 }

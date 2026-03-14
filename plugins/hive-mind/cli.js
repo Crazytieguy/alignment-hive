@@ -19187,19 +19187,328 @@ async function read() {
 }
 
 // src/commands/session-start.ts
-import { readFile as readFile5 } from "fs/promises";
 import { dirname, join as join9 } from "path";
 
-// src/lib/alias.ts
+// src/lib/hook-input.ts
+async function readStdin() {
+  if (process.stdin.isTTY)
+    return null;
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      resolve(data || null);
+    });
+    process.stdin.on("error", () => {
+      resolve(null);
+    });
+    process.stdin.resume();
+  });
+}
+async function readHookInput() {
+  const input = await readStdin();
+  if (!input)
+    return {};
+  try {
+    const data = JSON.parse(input);
+    return {
+      transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
+      cwd: typeof data.cwd === "string" ? data.cwd : undefined
+    };
+  } catch {
+    return {};
+  }
+}
+
+// src/lib/spawn.ts
+import { closeSync, existsSync, openSync } from "fs";
+import { join as join8 } from "path";
 import { homedir as homedir3 } from "os";
+import { spawn } from "child_process";
+function getBunPath() {
+  const bunInstall = process.env.BUN_INSTALL;
+  const customPath = bunInstall ? join8(bunInstall, "bin", "bun") : null;
+  const standardPath = join8(homedir3(), ".bun", "bin", "bun");
+  if (customPath && existsSync(customPath))
+    return customPath;
+  if (existsSync(standardPath))
+    return standardPath;
+  return "bun";
+}
+function spawnBackground(options) {
+  try {
+    let stderrFd;
+    try {
+      stderrFd = openSync(options.errorLogPath, "a");
+    } catch {}
+    const child = spawn(options.executable, options.args, {
+      detached: true,
+      stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
+      ...options.env && { env: { ...process.env, ...options.env } }
+    });
+    child.unref();
+    if (stderrFd !== undefined)
+      closeSync(stderrFd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// src/commands/session-start.ts
+async function sessionStart() {
+  const messages = [];
+  const hookInput = await readHookInput();
+  const cwd = hookInput.cwd || process.cwd();
+  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
+  messages.push("hive-mind is deprecated. Run: curl -fsSL https://alignment-hive.com/install.sh | bash");
+  let transcriptsDirs;
+  const inWorktree = await isWorktree(cwd);
+  if (hookInput.transcriptPath) {
+    const transcriptsDir = dirname(hookInput.transcriptPath);
+    if (inWorktree) {
+      const mainPath = getMainWorktreePath(cwd);
+      if (mainPath) {
+        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
+        await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
+      }
+      transcriptsDirs = [transcriptsDir];
+    } else {
+      await addTranscriptsDir(hiveMindDir, transcriptsDir);
+      transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    }
+  } else {
+    if (inWorktree) {
+      hookOutput(formatMessages(messages));
+      return 0;
+    }
+    transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
+    if (transcriptsDirs.length === 0) {
+      hookOutput(formatMessages(messages));
+      return 0;
+    }
+  }
+  const sessionCheck = await checkAllSessions(cwd, transcriptsDirs).catch(() => null);
+  if (sessionCheck && !("error" in sessionCheck)) {
+    const { sessionsToExtract, schemaErrors } = sessionCheck;
+    if (sessionsToExtract.length > 0) {
+      const newNonAgentCount = sessionsToExtract.filter((s) => !s.agentId).length;
+      if (newNonAgentCount > 0) {
+        messages.push(hook.extracted(newNonAgentCount));
+      }
+      scheduleExtractions(cwd, sessionsToExtract.map((s) => s.sessionId));
+    }
+    if (schemaErrors.length > 0) {
+      const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
+      const allErrors = schemaErrors.flatMap((s) => s.errors);
+      messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
+    }
+  }
+  hookOutput(formatMessages(messages));
+  return 0;
+}
+function formatMessages(messages) {
+  return messages.map((msg, i) => i === 0 ? `hive-mind: ${msg}` : `\u2192 ${msg}`).join(`
+`);
+}
+function scheduleExtractions(cwd, sessionIds) {
+  return spawnBackground({
+    executable: getBunPath(),
+    args: [process.argv[1], "extract", ...sessionIds],
+    errorLogPath: join9(cwd, ".claude", "hive-mind", "error.log"),
+    env: { CWD: cwd }
+  });
+}
+
+// src/commands/login.ts
+import { createInterface as createInterface3 } from "readline";
+var WORKOS_API_URL2 = "https://api.workos.com/user_management";
+var DeviceAuthResponseSchema = exports_external.object({
+  device_code: exports_external.string(),
+  user_code: exports_external.string(),
+  verification_uri: exports_external.string(),
+  verification_uri_complete: exports_external.string(),
+  interval: exports_external.number(),
+  expires_in: exports_external.number()
+});
+var ErrorResponseSchema = exports_external.object({
+  error: exports_external.string(),
+  error_description: exports_external.string().optional()
+});
+async function confirm2(message, defaultYes = false) {
+  const rl = createInterface3({ input: process.stdin, output: process.stdout });
+  const hint = defaultYes ? "[Y/n]" : "[y/N]";
+  return new Promise((resolve) => {
+    rl.question(`${message} ${hint} `, (answer) => {
+      rl.close();
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === "") {
+        resolve(defaultYes);
+      } else {
+        resolve(trimmed === "y" || trimmed === "yes");
+      }
+    });
+  });
+}
+async function openBrowser(url2) {
+  if (process.platform === "darwin") {
+    try {
+      await Bun.spawn(["open", url2]).exited;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (process.platform === "linux") {
+    for (const cmd of ["xdg-open", "wslview"]) {
+      try {
+        await Bun.spawn([cmd, url2]).exited;
+        return true;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return false;
+}
+function sleep2(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function checkExistingAuth() {
+  const status = await checkAuthStatus(false);
+  if (status.authenticated && status.user) {
+    printWarning(setup.alreadyLoggedIn);
+    return await confirm2(setup.confirmRelogin);
+  }
+  return true;
+}
+async function tryRefresh2() {
+  const authResult = await loadAuthData();
+  if (!authResult || isAuthError(authResult))
+    return { success: false };
+  printInfo(setup.refreshing);
+  const refreshResult = await refreshToken(authResult.refresh_token, authResult.authenticated_at);
+  if (refreshResult && !isErrorResult(refreshResult)) {
+    await saveAuthData(refreshResult);
+    printSuccess(setup.refreshSuccess);
+    return { success: true, user: refreshResult.user };
+  }
+  return { success: false };
+}
+async function deviceAuthFlow() {
+  printInfo(setup.starting);
+  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: getClientId() })
+  });
+  const data = await response.json();
+  const errorResult = ErrorResponseSchema.safeParse(data);
+  if (errorResult.success && errorResult.data.error) {
+    printError(setup.startFailed(errorResult.data.error));
+    if (errorResult.data.error_description) {
+      printInfo(errorResult.data.error_description);
+    }
+    return 1;
+  }
+  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
+  if (!deviceAuthResult.success) {
+    printError(setup.unexpectedAuthResponse);
+    return 1;
+  }
+  const deviceAuth = deviceAuthResult.data;
+  console.log(setup.deviceAuth(deviceAuth.verification_uri, colors.green(deviceAuth.user_code)));
+  console.log("");
+  if (await openBrowser(deviceAuth.verification_uri_complete)) {
+    printInfo(setup.browserOpened);
+  } else {
+    printInfo(setup.openManually);
+  }
+  printInfo(setup.waiting(deviceAuth.expires_in));
+  console.log("");
+  let interval = deviceAuth.interval * 1000;
+  const startTime = Date.now();
+  const expiresAt = startTime + deviceAuth.expires_in * 1000;
+  while (Date.now() < expiresAt) {
+    await sleep2(interval);
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceAuth.device_code,
+        client_id: getClientId()
+      })
+    });
+    const tokenData = await tokenResponse.json();
+    const authResult = AuthDataSchema.safeParse(tokenData);
+    if (authResult.success) {
+      await saveAuthData({
+        ...authResult.data,
+        authenticated_at: Date.now()
+      });
+      console.log("");
+      printSuccess(setup.success);
+      printSuccess(setup.welcome(authResult.data.user.first_name, authResult.data.user.email));
+      return 0;
+    }
+    const errorData = tokenData;
+    if (errorData.error === "authorization_pending") {
+      process.stdout.write(`\r  ${setup.waitingProgress(elapsed)}`);
+      continue;
+    }
+    if (errorData.error === "slow_down") {
+      interval += 1000;
+      continue;
+    }
+    printError(setup.authFailed(errorData.error || "unknown error"));
+    if (errorData.error_description)
+      printInfo(errorData.error_description);
+    return 1;
+  }
+  printError(setup.timeout);
+  return 1;
+}
+async function showStatus() {
+  const status = await checkAuthStatus(true);
+  if (status.authenticated && status.user) {
+    const displayName = getUserDisplayName(status.user);
+    console.log(errors3.loginStatusYes(displayName));
+  } else {
+    console.log(errors3.loginStatusNo);
+  }
+  return 0;
+}
+async function login() {
+  if (process.argv.includes("--status")) {
+    return showStatus();
+  }
+  printInfo(setup.header);
+  console.log("");
+  if (!await checkExistingAuth()) {
+    return 0;
+  }
+  const refreshResult = await tryRefresh2();
+  if (refreshResult.success) {
+    return 0;
+  }
+  return await deviceAuthFlow();
+}
+
+// src/commands/setup-alias.ts
+import { dirname as dirname2 } from "path";
+
+// src/lib/alias.ts
+import { homedir as homedir4 } from "os";
 import { readFile as readFile4, writeFile as writeFile4 } from "fs/promises";
 var ALIAS_NAME = "hive-mind";
-function getExpectedAliasCommand() {
-  return `bun ${process.argv[1]}`;
-}
 function expandPath(path) {
   if (path.startsWith("~")) {
-    return path.replace("~", homedir3());
+    return path.replace("~", homedir4());
   }
   return path;
 }
@@ -19221,19 +19530,6 @@ async function writeShellConfig(content) {
   }
 }
 var ALIAS_REGEX = /^alias\s+hive-mind\s*=\s*(['"])(.+?)\1\s*$/m;
-async function getExistingAliasCommand() {
-  const config3 = await readShellConfig();
-  if (!config3)
-    return null;
-  const match = config3.match(ALIAS_REGEX);
-  if (!match)
-    return null;
-  return match[2];
-}
-async function setupAlias() {
-  const expected = getExpectedAliasCommand();
-  return setupAliasWithCommand(expected);
-}
 async function setupAliasWithRoot(pluginRoot) {
   const expected = `bun ${pluginRoot}/cli.js`;
   return setupAliasWithCommand(expected);
@@ -19264,16 +19560,27 @@ async function setupAliasWithCommand(expected) {
   const success2 = await writeShellConfig(updated);
   return { success: success2, alreadyExists: false, sourceCmd: shell.sourceCmd };
 }
-async function updateAliasIfOutdated() {
-  const existing = await getExistingAliasCommand();
-  if (!existing)
-    return { updated: false, hasAlias: false };
-  const expected = getExpectedAliasCommand();
-  if (existing === expected)
-    return { updated: false, hasAlias: true };
-  const { success: success2, sourceCmd } = await setupAlias();
-  return { updated: success2, hasAlias: true, sourceCmd };
+
+// src/commands/setup-alias.ts
+async function setupAliasCommand() {
+  const pluginRoot = dirname2(process.argv[1]);
+  const { success: success2, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
+  if (!success2) {
+    printError("Failed to set up alias");
+    return 1;
+  }
+  if (alreadyExists) {
+    printInfo(setup.alreadySetUp);
+  } else {
+    printSuccess("hive-mind command added to shell config");
+    console.log(setup.aliasActivate(sourceCmd));
+  }
+  return 0;
 }
+
+// src/commands/upload.ts
+import { readFile as readFile5, unlink, writeFile as writeFile5 } from "fs/promises";
+import { join as join10 } from "path";
 
 // ../../node_modules/convex/dist/esm/index.js
 var version2 = "1.31.4";
@@ -20204,16 +20511,6 @@ async function getAuthenticatedClient() {
   client.setAuth(authResult.access_token);
   return client;
 }
-async function pingCheckout(checkoutId) {
-  try {
-    const client = getConvexClient();
-    await client.mutation(api2.sessions.upsertCheckout, { checkoutId });
-    return true;
-  } catch (error48) {
-    debugLog(`pingCheckout failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
-    return false;
-  }
-}
 async function heartbeatSession(session) {
   try {
     const client = await getAuthenticatedClient();
@@ -20257,461 +20554,13 @@ async function saveUpload(sessionId, storageId, summary) {
   }
 }
 
-// src/lib/hook-input.ts
-async function readStdin() {
-  if (process.stdin.isTTY)
-    return null;
-  return new Promise((resolve) => {
-    let data = "";
-    process.stdin.setEncoding("utf-8");
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on("end", () => {
-      resolve(data || null);
-    });
-    process.stdin.on("error", () => {
-      resolve(null);
-    });
-    process.stdin.resume();
-  });
-}
-async function readHookInput() {
-  const input = await readStdin();
-  if (!input)
-    return {};
-  try {
-    const data = JSON.parse(input);
-    return {
-      transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
-      cwd: typeof data.cwd === "string" ? data.cwd : undefined
-    };
-  } catch {
-    return {};
-  }
-}
-
-// src/lib/spawn.ts
-import { closeSync, existsSync, openSync } from "fs";
-import { join as join8 } from "path";
-import { homedir as homedir4 } from "os";
-import { spawn } from "child_process";
-function getBunPath() {
-  const bunInstall = process.env.BUN_INSTALL;
-  const customPath = bunInstall ? join8(bunInstall, "bin", "bun") : null;
-  const standardPath = join8(homedir4(), ".bun", "bin", "bun");
-  if (customPath && existsSync(customPath))
-    return customPath;
-  if (existsSync(standardPath))
-    return standardPath;
-  return "bun";
-}
-function spawnBackground(options) {
-  try {
-    let stderrFd;
-    try {
-      stderrFd = openSync(options.errorLogPath, "a");
-    } catch {}
-    const child = spawn(options.executable, options.args, {
-      detached: true,
-      stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
-      ...options.env && { env: { ...process.env, ...options.env } }
-    });
-    child.unref();
-    if (stderrFd !== undefined)
-      closeSync(stderrFd);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// src/commands/session-start.ts
-var AUTO_UPLOAD_DELAY_MINUTES = 10;
-var verbose2 = () => process.env.HIVE_MIND_VERBOSE === "1";
-async function sessionStart() {
-  const t0 = performance.now();
-  const messages = [];
-  const collectedErrors = [];
-  const hookInput = await readHookInput();
-  const cwd = hookInput.cwd || process.cwd();
-  const hiveMindDir = join9(cwd, ".claude", "hive-mind");
-  let transcriptsDirs;
-  const inWorktree = await isWorktree(cwd);
-  if (hookInput.transcriptPath) {
-    const transcriptsDir = dirname(hookInput.transcriptPath);
-    if (inWorktree) {
-      const mainPath = getMainWorktreePath(cwd);
-      if (mainPath) {
-        const mainHiveMindDir = join9(mainPath, ".claude", "hive-mind");
-        await addTranscriptsDir(mainHiveMindDir, transcriptsDir);
-      }
-      transcriptsDirs = [transcriptsDir];
-    } else {
-      await addTranscriptsDir(hiveMindDir, transcriptsDir);
-      transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
-    }
-  } else {
-    if (inWorktree) {
-      messages.push(hook.extractionFailed("No transcripts directory configured. Run a Claude Code session first."));
-      hookOutput(`hive-mind: ${messages[0]}`);
-      return 1;
-    }
-    transcriptsDirs = await loadTranscriptsDirs(hiveMindDir);
-    if (transcriptsDirs.length === 0) {
-      messages.push(hook.extractionFailed("No transcripts directories configured. Run a Claude Code session first."));
-      hookOutput(`hive-mind: ${messages[0]}`);
-      return 1;
-    }
-  }
-  getOrCreateCheckoutId(hiveMindDir).then((checkoutId) => pingCheckout(checkoutId)).catch(() => {});
-  const tBeforeParallel = performance.now();
-  const [sessionCheck, status] = await Promise.all([
-    checkAllSessions(cwd, transcriptsDirs).catch((error48) => ({
-      error: error48 instanceof Error ? error48.message : String(error48)
-    })),
-    checkAuthStatus(true)
-  ]);
-  const tAfterParallel = performance.now();
-  if (verbose2()) {
-    console.error(`[session-start] parallel block (checkAllSessions+auth): ${(tAfterParallel - tBeforeParallel).toFixed(0)}ms`);
-  }
-  let newSessionIds = [];
-  let extractedSessions = [];
-  if ("error" in sessionCheck) {
-    messages.push(hook.extractionFailed(sessionCheck.error));
-  } else {
-    const { sessionsToExtract, schemaErrors, errors: sessionErrors } = sessionCheck;
-    extractedSessions = sessionCheck.extractedSessions;
-    collectedErrors.push(...sessionErrors);
-    const newNonAgentSessions = sessionsToExtract.filter((s) => !s.agentId);
-    if (newNonAgentSessions.length > 0) {
-      messages.push(hook.extracted(newNonAgentSessions.length));
-      newSessionIds = newNonAgentSessions.map((s) => s.sessionId);
-    }
-    scheduleExtractions(sessionsToExtract.map((s) => s.sessionId));
-    if (schemaErrors.length > 0) {
-      const errorCount = schemaErrors.reduce((sum, s) => sum + s.errors.length, 0);
-      const allErrors = schemaErrors.flatMap((s) => s.errors);
-      messages.push(hook.schemaErrors(errorCount, schemaErrors.length, allErrors));
-    }
-  }
-  let userHasAlias = false;
-  if (status.authenticated) {
-    try {
-      const aliasResult = await updateAliasIfOutdated();
-      if (aliasResult.updated) {
-        messages.push(hook.aliasUpdated());
-      }
-      userHasAlias = aliasResult.hasAlias;
-    } catch (err) {
-      collectedErrors.push(errors3.aliasUpdateFailed(err instanceof Error ? err.message : String(err)));
-    }
-  }
-  if (status.needsLogin) {
-    messages.push(hook.notLoggedIn());
-  } else if (status.user) {
-    messages.push(hook.loggedIn(getUserDisplayName(status.user)));
-  }
-  if (status.errors) {
-    collectedErrors.push(...status.errors);
-  }
-  if (status.authenticated && extractedSessions.length > 0) {
-    try {
-      const authIssuedAt = await getAuthIssuedAt();
-      const nonAgentSessions = extractedSessions.filter((s) => !s.meta.agentId);
-      const eligibilityResults = nonAgentSessions.map((s) => checkSessionEligibility(s.meta, authIssuedAt));
-      const pending = eligibilityResults.filter((s) => s.status === "pending");
-      const eligible = eligibilityResults.filter((s) => s.status === "ready");
-      const showPendingMsg = pending.length > 1;
-      if (showPendingMsg) {
-        const earliestUploadAt = Math.min(...pending.map((s) => s.eligibleAt));
-        messages.push(hook.pendingSessions(pending.length, earliestUploadAt));
-      }
-      if (eligible.length > 0) {
-        const alreadyRunning = await isUploadRunning(cwd);
-        if (alreadyRunning) {
-          messages.push(hook.uploadInProgress(eligible.length));
-        } else {
-          const spawned = scheduleAutoUploads(cwd, eligible.map((s) => s.sessionId));
-          if (spawned) {
-            messages.push(hook.uploadingSessions(eligible.length, AUTO_UPLOAD_DELAY_MINUTES));
-          }
-        }
-      }
-      if (showPendingMsg || eligible.length > 0) {
-        messages.push(hook.toReview(userHasAlias));
-      }
-    } catch (err) {
-      collectedErrors.push(errors3.eligibilityCheckFailed(err instanceof Error ? err.message : String(err)));
-    }
-  }
-  if (collectedErrors.length > 0) {
-    if (process.env.HIVE_MIND_VERBOSE === "1") {
-      messages.push(...collectedErrors);
-    } else {
-      messages.push(hook.errorsOccurred(collectedErrors.length));
-    }
-  }
-  if (messages.length > 0) {
-    const formatted = messages.map((msg, i2) => i2 === 0 ? `hive-mind: ${msg}` : `\u2192 ${msg}`);
-    hookOutput(formatted.join(`
-`));
-  }
-  if (status.authenticated && newSessionIds.length > 0) {
-    scheduleHeartbeats(newSessionIds);
-  }
-  if (verbose2()) {
-    console.error(`[session-start] total: ${(performance.now() - t0).toFixed(0)}ms`);
-  }
-  process.exit(0);
-}
-function spawnBackgroundProcess(args) {
-  const cwd = process.env.CWD || process.cwd();
-  return spawnBackground({
-    executable: getBunPath(),
-    args: [process.argv[1], ...args],
-    errorLogPath: join9(cwd, ".claude", "hive-mind", "error.log"),
-    env: { CWD: cwd }
-  });
-}
-function scheduleExtractions(sessionIds) {
-  if (sessionIds.length === 0)
-    return true;
-  return spawnBackgroundProcess(["extract", ...sessionIds]);
-}
-function scheduleHeartbeats(sessionIds) {
-  if (sessionIds.length === 0)
-    return true;
-  return spawnBackgroundProcess(["heartbeat", ...sessionIds]);
-}
-function getUploadPidPath(cwd) {
-  return join9(cwd, ".claude", "hive-mind", "upload.pid");
-}
-async function isUploadRunning(cwd) {
-  const pidPath = getUploadPidPath(cwd);
-  try {
-    const pidStr = await readFile5(pidPath, "utf-8");
-    const pid = parseInt(pidStr.trim(), 10);
-    if (isNaN(pid))
-      return false;
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function scheduleAutoUploads(cwd, sessionIds) {
-  if (sessionIds.length === 0)
-    return true;
-  const delaySeconds = AUTO_UPLOAD_DELAY_MINUTES * 60;
-  const pidPath = getUploadPidPath(cwd);
-  return spawnBackgroundProcess(["upload", "--pid-file", pidPath, "--delay", String(delaySeconds), ...sessionIds]);
-}
-
-// src/commands/login.ts
-import { createInterface as createInterface3 } from "readline";
-var WORKOS_API_URL2 = "https://api.workos.com/user_management";
-var DeviceAuthResponseSchema = exports_external.object({
-  device_code: exports_external.string(),
-  user_code: exports_external.string(),
-  verification_uri: exports_external.string(),
-  verification_uri_complete: exports_external.string(),
-  interval: exports_external.number(),
-  expires_in: exports_external.number()
-});
-var ErrorResponseSchema = exports_external.object({
-  error: exports_external.string(),
-  error_description: exports_external.string().optional()
-});
-async function confirm2(message, defaultYes = false) {
-  const rl = createInterface3({ input: process.stdin, output: process.stdout });
-  const hint = defaultYes ? "[Y/n]" : "[y/N]";
-  return new Promise((resolve) => {
-    rl.question(`${message} ${hint} `, (answer) => {
-      rl.close();
-      const trimmed = answer.trim().toLowerCase();
-      if (trimmed === "") {
-        resolve(defaultYes);
-      } else {
-        resolve(trimmed === "y" || trimmed === "yes");
-      }
-    });
-  });
-}
-async function openBrowser(url2) {
-  if (process.platform === "darwin") {
-    try {
-      await Bun.spawn(["open", url2]).exited;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (process.platform === "linux") {
-    for (const cmd of ["xdg-open", "wslview"]) {
-      try {
-        await Bun.spawn([cmd, url2]).exited;
-        return true;
-      } catch {
-        continue;
-      }
-    }
-  }
-  return false;
-}
-function sleep2(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function checkExistingAuth() {
-  const status = await checkAuthStatus(false);
-  if (status.authenticated && status.user) {
-    printWarning(setup.alreadyLoggedIn);
-    return await confirm2(setup.confirmRelogin);
-  }
-  return true;
-}
-async function tryRefresh2() {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult))
-    return { success: false };
-  printInfo(setup.refreshing);
-  const refreshResult = await refreshToken(authResult.refresh_token, authResult.authenticated_at);
-  if (refreshResult && !isErrorResult(refreshResult)) {
-    await saveAuthData(refreshResult);
-    printSuccess(setup.refreshSuccess);
-    return { success: true, user: refreshResult.user };
-  }
-  return { success: false };
-}
-async function deviceAuthFlow() {
-  printInfo(setup.starting);
-  const response = await fetch(`${WORKOS_API_URL2}/authorize/device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: getClientId() })
-  });
-  const data = await response.json();
-  const errorResult = ErrorResponseSchema.safeParse(data);
-  if (errorResult.success && errorResult.data.error) {
-    printError(setup.startFailed(errorResult.data.error));
-    if (errorResult.data.error_description) {
-      printInfo(errorResult.data.error_description);
-    }
-    return 1;
-  }
-  const deviceAuthResult = DeviceAuthResponseSchema.safeParse(data);
-  if (!deviceAuthResult.success) {
-    printError(setup.unexpectedAuthResponse);
-    return 1;
-  }
-  const deviceAuth = deviceAuthResult.data;
-  console.log(setup.deviceAuth(deviceAuth.verification_uri, colors.green(deviceAuth.user_code)));
-  console.log("");
-  if (await openBrowser(deviceAuth.verification_uri_complete)) {
-    printInfo(setup.browserOpened);
-  } else {
-    printInfo(setup.openManually);
-  }
-  printInfo(setup.waiting(deviceAuth.expires_in));
-  console.log("");
-  let interval = deviceAuth.interval * 1000;
-  const startTime = Date.now();
-  const expiresAt = startTime + deviceAuth.expires_in * 1000;
-  while (Date.now() < expiresAt) {
-    await sleep2(interval);
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: deviceAuth.device_code,
-        client_id: getClientId()
-      })
-    });
-    const tokenData = await tokenResponse.json();
-    const authResult = AuthDataSchema.safeParse(tokenData);
-    if (authResult.success) {
-      await saveAuthData({
-        ...authResult.data,
-        authenticated_at: Date.now()
-      });
-      console.log("");
-      printSuccess(setup.success);
-      printSuccess(setup.welcome(authResult.data.user.first_name, authResult.data.user.email));
-      return 0;
-    }
-    const errorData = tokenData;
-    if (errorData.error === "authorization_pending") {
-      process.stdout.write(`\r  ${setup.waitingProgress(elapsed)}`);
-      continue;
-    }
-    if (errorData.error === "slow_down") {
-      interval += 1000;
-      continue;
-    }
-    printError(setup.authFailed(errorData.error || "unknown error"));
-    if (errorData.error_description)
-      printInfo(errorData.error_description);
-    return 1;
-  }
-  printError(setup.timeout);
-  return 1;
-}
-async function showStatus() {
-  const status = await checkAuthStatus(true);
-  if (status.authenticated && status.user) {
-    const displayName = getUserDisplayName(status.user);
-    console.log(errors3.loginStatusYes(displayName));
-  } else {
-    console.log(errors3.loginStatusNo);
-  }
-  return 0;
-}
-async function login() {
-  if (process.argv.includes("--status")) {
-    return showStatus();
-  }
-  printInfo(setup.header);
-  console.log("");
-  if (!await checkExistingAuth()) {
-    return 0;
-  }
-  const refreshResult = await tryRefresh2();
-  if (refreshResult.success) {
-    return 0;
-  }
-  return await deviceAuthFlow();
-}
-
-// src/commands/setup-alias.ts
-import { dirname as dirname2 } from "path";
-async function setupAliasCommand() {
-  const pluginRoot = dirname2(process.argv[1]);
-  const { success: success2, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
-  if (!success2) {
-    printError("Failed to set up alias");
-    return 1;
-  }
-  if (alreadyExists) {
-    printInfo(setup.alreadySetUp);
-  } else {
-    printSuccess("hive-mind command added to shell config");
-    console.log(setup.aliasActivate(sourceCmd));
-  }
-  return 0;
-}
-
 // src/commands/upload.ts
-import { readFile as readFile6, unlink, writeFile as writeFile5 } from "fs/promises";
-import { join as join10 } from "path";
 async function uploadSession(cwd, sessionId) {
   const sessionsDir = getHiveMindSessionsDir(cwd);
   const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
   let content;
   try {
-    content = await readFile6(sessionPath, "utf-8");
+    content = await readFile5(sessionPath, "utf-8");
   } catch {
     return { success: false, error: "Session file not found" };
   }

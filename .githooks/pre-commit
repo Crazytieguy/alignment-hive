@@ -3,7 +3,7 @@ set -e
 
 # Rebuild CLI bundle if source changed
 if git diff --cached --name-only | grep -q "^packages/hive-cli/src/"; then
-    echo "hive-mind CLI source changed, rebuilding..."
+    echo "hive-cli source changed, rebuilding..."
     ROOT="$(git rev-parse --show-toplevel)"
     bun run --filter '@alignment-hive/hive-cli' build
     if ! git diff --quiet plugins/hive-mind/cli.js 2>/dev/null; then

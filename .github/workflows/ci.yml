@@ -20,7 +20,7 @@ on:
 
 jobs:
   check:
-    name: Check hive-mind
+    name: Check hive-cli
     runs-on: ubuntu-latest
 
     steps:
