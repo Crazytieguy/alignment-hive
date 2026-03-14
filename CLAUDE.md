@@ -38,7 +38,7 @@ Workspaces without the script are skipped (no error).
 
 For workspace-specific tasks like dev servers:
 ```bash
-cd packages/web && bun run dev
+bun run --filter '@alignment-hive/web' dev
 ```
 
 ## Adding New Plugins

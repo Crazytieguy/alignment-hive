@@ -1,17 +1,32 @@
 import { execSync } from 'node:child_process';
-import { closeSync, createReadStream, existsSync, openSync, readSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { ReadStream } from 'node:tty';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName, isWorktree } from '../lib/config';
 import { disableProject, enableProject, getConsentStatus, getEnabledProjects } from '../lib/convex';
 
-/** Get a TTY input stream for interactive prompts. Works in both `bash script.sh` and `curl | bash`. */
-function getTtyInput(): NodeJS.ReadableStream | undefined {
-  try {
-    return createReadStream('/dev/tty');
-  } catch {
-    return undefined;
+/**
+ * Get a working TTY input stream. Works around a Bun bug where process.stdin
+ * doesn't receive data when fd 0 is redirected from /dev/tty (e.g. curl | bash
+ * with exec < /dev/tty). Creating a fresh ReadStream from fd 0 fixes it.
+ * Call destroyInput() when done to allow the process to exit.
+ */
+let _input: ReadStream | null = null;
+
+function getInput(): NodeJS.ReadableStream {
+  if (process.stdin.isTTY) {
+    if (!_input) _input = new ReadStream(0);
+    return _input;
+  }
+  return process.stdin;
+}
+
+function destroyInput(): void {
+  if (_input) {
+    _input.destroy();
+    _input = null;
   }
 }
 
@@ -114,6 +129,14 @@ async function waitForConsent(): Promise<{ sessionSharing: boolean } | null> {
 }
 
 export async function consentSetup(): Promise<number> {
+  try {
+    return await consentSetupInner();
+  } finally {
+    destroyInput();
+  }
+}
+
+async function consentSetupInner(): Promise<number> {
   const authStatus = await checkAuthStatus(true);
   if (authStatus.needsLogin) {
     console.error('Not authenticated. Run the install script to authenticate.');
@@ -138,7 +161,7 @@ export async function consentSetup(): Promise<number> {
     const shouldOpen = await confirm({
       message: `Open ${consentUrl} to set data sharing preferences?`,
       default: true,
-    }, { input: getTtyInput() });
+    }, { input: getInput() });
 
     if (!shouldOpen) {
       console.log(`  Visit ${consentUrl} when ready.`);
@@ -203,7 +226,7 @@ export async function consentSetup(): Promise<number> {
       value: p.canonical,
       checked: enabledSet.has(p.canonical),
     })),
-  }, { input: getTtyInput() });
+  }, { input: getInput() });
 
   const selectedSet = new Set(selected);
   const toEnable = selected.filter((p) => !enabledSet.has(p));

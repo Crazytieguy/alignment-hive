@@ -180,22 +180,14 @@ install_hive_plugin() {
 # --- Step 6: Install hive binary globally ---
 
 install_hive_binary() {
-  # Dev mode: build from source
+  # Dev mode: use pre-built dev binary
   if [ "${ALIGNMENT_HIVE_DEV:-}" = "1" ]; then
-    # Derive repo root from script location
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local repo_root
-    repo_root="$(cd "$script_dir/../../.." && pwd)"
-
-    info "Building hive binary from source..."
-    mkdir -p "$repo_root/.dev"
-    if bun build --compile "$repo_root/packages/hive-cli/src/hive-cli.ts" --outfile "$repo_root/.dev/hive"; then
+    local repo_root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+    if [ -x "$repo_root/.dev/hive" ]; then
       export PATH="$repo_root/.dev:$PATH"
-      success "Dev binary built at $repo_root/.dev/hive"
+      success "Using dev binary at $repo_root/.dev/hive"
     else
-      error "Failed to build hive binary from source."
-      exit 1
+      info "Dev binary not found. Build with: bun run --filter '@alignment-hive/hive-cli' build:dev"
     fi
     return 0
   fi
@@ -415,18 +407,24 @@ main() {
 
   echo ""
 
+  # Reclaim stdin from pipe (curl | bash) so interactive prompts work
+  exec < /dev/tty
+
+  AUTHED=false
   if check_auth; then
-    : # Already authenticated
+    AUTHED=true
   else
     printf "  Authenticate to enable session sharing? (Requires an alignment-hive invite) [Y/n] "
-    read -r REPLY < /dev/tty 2>/dev/null || REPLY="n"
+    read -r REPLY
     case "$REPLY" in
       [Nn]*)
         info "You can authenticate later by re-running this script."
         ;;
       *)
         echo ""
-        if ! device_auth_flow; then
+        if device_auth_flow; then
+          AUTHED=true
+        else
           warn "Authentication failed. Check your email for an alignment-hive invite,"
           warn "or contact yoav.tzfati@gmail.com to request one."
           echo ""
@@ -443,7 +441,7 @@ main() {
   echo ""
 
   # Consent + project setup (handled entirely by the CLI)
-  if command -v hive >/dev/null 2>&1 && [ -f "$AUTH_FILE" ]; then
+  if [ "$AUTHED" = true ] && command -v hive >/dev/null 2>&1; then
     if ! hive consent setup; then
       warn "Consent setup failed. You can retry later with: hive consent setup"
     fi
@@ -457,6 +455,9 @@ main() {
   echo "    1. Open Claude Code in a project directory"
   echo "    2. Run /hive:align"
   echo ""
+
+  # Point stdin to /dev/null so bash exits cleanly (not /dev/tty which blocks)
+  exec < /dev/null
 }
 
 main "$@"

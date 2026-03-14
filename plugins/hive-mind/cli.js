@@ -5,25 +5,43 @@ var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+function __accessProp(key) {
+  return this[key];
+}
+var __toESMCache_node;
+var __toESMCache_esm;
 var __toESM = (mod, isNodeMode, target) => {
+  var canCache = mod != null && typeof mod === "object";
+  if (canCache) {
+    var cache = isNodeMode ? __toESMCache_node ??= new WeakMap : __toESMCache_esm ??= new WeakMap;
+    var cached = cache.get(mod);
+    if (cached)
+      return cached;
+  }
   target = mod != null ? __create(__getProtoOf(mod)) : {};
   const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
   for (let key of __getOwnPropNames(mod))
     if (!__hasOwnProp.call(to, key))
       __defProp(to, key, {
-        get: () => mod[key],
+        get: __accessProp.bind(mod, key),
         enumerable: true
       });
+  if (canCache)
+    cache.set(mod, to);
   return to;
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: (newValue) => all[name] = () => newValue
+      set: __exportSetter.bind(all, name)
     });
 };
 var __require = import.meta.require;
@@ -19581,6 +19599,120 @@ async function setupAliasCommand() {
 // src/commands/upload.ts
 import { readFile as readFile5, unlink, writeFile as writeFile5 } from "fs/promises";
 import { join as join10 } from "path";
+// ../../node_modules/convex/dist/esm/server/functionName.js
+var functionName = Symbol.for("functionName");
+
+// ../../node_modules/convex/dist/esm/server/components/paths.js
+var toReferencePath = Symbol.for("toReferencePath");
+function extractReferencePath(reference) {
+  return reference[toReferencePath] ?? null;
+}
+function isFunctionHandle(s) {
+  return s.startsWith("function://");
+}
+function getFunctionAddress(functionReference) {
+  let functionAddress;
+  if (typeof functionReference === "string") {
+    if (isFunctionHandle(functionReference)) {
+      functionAddress = { functionHandle: functionReference };
+    } else {
+      functionAddress = { name: functionReference };
+    }
+  } else if (functionReference[functionName]) {
+    functionAddress = { name: functionReference[functionName] };
+  } else {
+    const referencePath = extractReferencePath(functionReference);
+    if (!referencePath) {
+      throw new Error(`${functionReference} is not a functionReference`);
+    }
+    functionAddress = { reference: referencePath };
+  }
+  return functionAddress;
+}
+
+// ../../node_modules/convex/dist/esm/server/api.js
+function getFunctionName(functionReference) {
+  const address = getFunctionAddress(functionReference);
+  if (address.name === undefined) {
+    if (address.functionHandle !== undefined) {
+      throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received function handle ${address.functionHandle}`);
+    } else if (address.reference !== undefined) {
+      throw new Error(`Expected function reference in the current component like "api.file.func" or "internal.file.func", but received reference ${address.reference}`);
+    }
+    throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received ${JSON.stringify(address)}`);
+  }
+  if (typeof functionReference === "string")
+    return functionReference;
+  const name = functionReference[functionName];
+  if (!name) {
+    throw new Error(`${functionReference} is not a functionReference`);
+  }
+  return name;
+}
+function createApi(pathParts = []) {
+  const handler = {
+    get(_, prop) {
+      if (typeof prop === "string") {
+        const newParts = [...pathParts, prop];
+        return createApi(newParts);
+      } else if (prop === functionName) {
+        if (pathParts.length < 2) {
+          const found = ["api", ...pathParts].join(".");
+          throw new Error(`API path is expected to be of the form \`api.moduleName.functionName\`. Found: \`${found}\``);
+        }
+        const path = pathParts.slice(0, -1).join("/");
+        const exportName = pathParts[pathParts.length - 1];
+        if (exportName === "default") {
+          return path;
+        } else {
+          return path + ":" + exportName;
+        }
+      } else if (prop === Symbol.toStringTag) {
+        return "FunctionReference";
+      } else {
+        return;
+      }
+    }
+  };
+  return new Proxy({}, handler);
+}
+var anyApi = createApi();
+
+// ../../node_modules/convex/dist/esm/common/index.js
+function parseArgs(args) {
+  if (args === undefined) {
+    return {};
+  }
+  if (!isSimpleObject(args)) {
+    throw new Error(`The arguments to a Convex function must be an object. Received: ${args}`);
+  }
+  return args;
+}
+function validateDeploymentUrl(deploymentUrl) {
+  if (typeof deploymentUrl === "undefined") {
+    throw new Error(`Client created with undefined deployment address. If you used an environment variable, check that it's set.`);
+  }
+  if (typeof deploymentUrl !== "string") {
+    throw new Error(`Invalid deployment address: found ${deploymentUrl}".`);
+  }
+  if (!(deploymentUrl.startsWith("http:") || deploymentUrl.startsWith("https:"))) {
+    throw new Error(`Invalid deployment address: Must start with "https://" or "http://". Found "${deploymentUrl}".`);
+  }
+  try {
+    new URL(deploymentUrl);
+  } catch {
+    throw new Error(`Invalid deployment address: "${deploymentUrl}" is not a valid URL. If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
+  }
+  if (deploymentUrl.endsWith(".convex.site")) {
+    throw new Error(`Invalid deployment address: "${deploymentUrl}" ends with .convex.site, which is used for HTTP Actions. Convex deployment URLs typically end with .convex.cloud? If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
+  }
+}
+function isSimpleObject(value) {
+  const isObject2 = typeof value === "object";
+  const prototype = Object.getPrototypeOf(value);
+  const isSimple = prototype === null || prototype === Object.prototype || prototype?.constructor?.name === "Object";
+  return isObject2 && isSimple;
+}
 
 // ../../node_modules/convex/dist/esm/index.js
 var version2 = "1.31.4";
@@ -19667,42 +19799,6 @@ function fromByteArray(uint8) {
     parts.push(lookup[tmp >> 10] + lookup[tmp >> 4 & 63] + lookup[tmp << 2 & 63] + "=");
   }
   return parts.join("");
-}
-
-// ../../node_modules/convex/dist/esm/common/index.js
-function parseArgs(args) {
-  if (args === undefined) {
-    return {};
-  }
-  if (!isSimpleObject(args)) {
-    throw new Error(`The arguments to a Convex function must be an object. Received: ${args}`);
-  }
-  return args;
-}
-function validateDeploymentUrl(deploymentUrl) {
-  if (typeof deploymentUrl === "undefined") {
-    throw new Error(`Client created with undefined deployment address. If you used an environment variable, check that it's set.`);
-  }
-  if (typeof deploymentUrl !== "string") {
-    throw new Error(`Invalid deployment address: found ${deploymentUrl}".`);
-  }
-  if (!(deploymentUrl.startsWith("http:") || deploymentUrl.startsWith("https:"))) {
-    throw new Error(`Invalid deployment address: Must start with "https://" or "http://". Found "${deploymentUrl}".`);
-  }
-  try {
-    new URL(deploymentUrl);
-  } catch {
-    throw new Error(`Invalid deployment address: "${deploymentUrl}" is not a valid URL. If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
-  }
-  if (deploymentUrl.endsWith(".convex.site")) {
-    throw new Error(`Invalid deployment address: "${deploymentUrl}" ends with .convex.site, which is used for HTTP Actions. Convex deployment URLs typically end with .convex.cloud? If you believe this URL is correct, use the \`skipConvexDeploymentUrlCheck\` option to bypass this.`);
-  }
-}
-function isSimpleObject(value) {
-  const isObject2 = typeof value === "object";
-  const prototype = Object.getPrototypeOf(value);
-  const isSimple = prototype === null || prototype === Object.prototype || prototype?.constructor?.name === "Object";
-  return isObject2 && isSimple;
 }
 
 // ../../node_modules/convex/dist/esm/values/value.js
@@ -20066,85 +20162,6 @@ function logForFunction(logger, type, source, udfPath, message) {
     logger.error(`[CONVEX ${prefix}(${udfPath})] ${message}`);
   }
 }
-
-// ../../node_modules/convex/dist/esm/server/functionName.js
-var functionName = Symbol.for("functionName");
-
-// ../../node_modules/convex/dist/esm/server/components/paths.js
-var toReferencePath = Symbol.for("toReferencePath");
-function extractReferencePath(reference) {
-  return reference[toReferencePath] ?? null;
-}
-function isFunctionHandle(s) {
-  return s.startsWith("function://");
-}
-function getFunctionAddress(functionReference) {
-  let functionAddress;
-  if (typeof functionReference === "string") {
-    if (isFunctionHandle(functionReference)) {
-      functionAddress = { functionHandle: functionReference };
-    } else {
-      functionAddress = { name: functionReference };
-    }
-  } else if (functionReference[functionName]) {
-    functionAddress = { name: functionReference[functionName] };
-  } else {
-    const referencePath = extractReferencePath(functionReference);
-    if (!referencePath) {
-      throw new Error(`${functionReference} is not a functionReference`);
-    }
-    functionAddress = { reference: referencePath };
-  }
-  return functionAddress;
-}
-
-// ../../node_modules/convex/dist/esm/server/api.js
-function getFunctionName(functionReference) {
-  const address = getFunctionAddress(functionReference);
-  if (address.name === undefined) {
-    if (address.functionHandle !== undefined) {
-      throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received function handle ${address.functionHandle}`);
-    } else if (address.reference !== undefined) {
-      throw new Error(`Expected function reference in the current component like "api.file.func" or "internal.file.func", but received reference ${address.reference}`);
-    }
-    throw new Error(`Expected function reference like "api.file.func" or "internal.file.func", but received ${JSON.stringify(address)}`);
-  }
-  if (typeof functionReference === "string")
-    return functionReference;
-  const name = functionReference[functionName];
-  if (!name) {
-    throw new Error(`${functionReference} is not a functionReference`);
-  }
-  return name;
-}
-function createApi(pathParts = []) {
-  const handler = {
-    get(_, prop) {
-      if (typeof prop === "string") {
-        const newParts = [...pathParts, prop];
-        return createApi(newParts);
-      } else if (prop === functionName) {
-        if (pathParts.length < 2) {
-          const found = ["api", ...pathParts].join(".");
-          throw new Error(`API path is expected to be of the form \`api.moduleName.functionName\`. Found: \`${found}\``);
-        }
-        const path = pathParts.slice(0, -1).join("/");
-        const exportName = pathParts[pathParts.length - 1];
-        if (exportName === "default") {
-          return path;
-        } else {
-          return path + ":" + exportName;
-        }
-      } else if (prop === Symbol.toStringTag) {
-        return "FunctionReference";
-      } else {
-        return;
-      }
-    }
-  };
-  return new Proxy({}, handler);
-}
-var anyApi = createApi();
 
 // ../../node_modules/convex/dist/esm/browser/http_client.js
 var __defProp4 = Object.defineProperty;
