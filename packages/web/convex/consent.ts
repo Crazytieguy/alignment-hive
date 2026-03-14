@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { upsertUser } from "./lib/users";
 
 /** Append a new global data sharing consent row (never upserts). */
 export const submitConsent = mutation({
@@ -20,18 +21,11 @@ export const submitConsent = mutation({
       throw new ConvexError("Not authenticated");
     }
 
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
-      .first();
-
-    if (!user) {
-      throw new ConvexError("User not found");
-    }
+    const userId = await upsertUser(ctx, identity);
 
     if (consent.sessionSharing) {
       await ctx.db.insert("dataSharingConsent", {
-        userId: user._id,
+        userId,
         sessionSharing: true,
         communityFeatures: consent.communityFeatures,
         publicationExcerpts: consent.publicationExcerpts,
@@ -40,7 +34,7 @@ export const submitConsent = mutation({
       });
     } else {
       await ctx.db.insert("dataSharingConsent", {
-        userId: user._id,
+        userId,
         sessionSharing: false,
         consentedAt: Date.now(),
       });
@@ -116,17 +110,10 @@ export const enableProject = mutation({
       throw new ConvexError("Not authenticated");
     }
 
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
-      .first();
-
-    if (!user) {
-      throw new ConvexError("User not found");
-    }
+    const userId = await upsertUser(ctx, identity);
 
     await ctx.db.insert("projectConsent", {
-      userId: user._id,
+      userId,
       project,
       sessionSharing: true,
       consentedAt: Date.now(),
@@ -143,17 +130,10 @@ export const disableProject = mutation({
       throw new ConvexError("Not authenticated");
     }
 
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
-      .first();
-
-    if (!user) {
-      throw new ConvexError("User not found");
-    }
+    const userId = await upsertUser(ctx, identity);
 
     await ctx.db.insert("projectConsent", {
-      userId: user._id,
+      userId,
       project,
       sessionSharing: false,
       consentedAt: Date.now(),

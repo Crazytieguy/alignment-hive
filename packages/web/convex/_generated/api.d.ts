@@ -11,6 +11,7 @@
 import type * as admin from "../admin.js";
 import type * as consent from "../consent.js";
 import type * as lib_admin from "../lib/admin.js";
+import type * as lib_users from "../lib/users.js";
 import type * as myFunctions from "../myFunctions.js";
 import type * as sessions from "../sessions.js";
 
@@ -24,6 +25,7 @@ declare const fullApi: ApiFromModules<{
   admin: typeof admin;
   consent: typeof consent;
   "lib/admin": typeof lib_admin;
+  "lib/users": typeof lib_users;
   myFunctions: typeof myFunctions;
   sessions: typeof sessions;
 }>;
