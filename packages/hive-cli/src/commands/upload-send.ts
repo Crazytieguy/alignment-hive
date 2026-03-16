@@ -1,5 +1,6 @@
 import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { computeConsentWindows, isInConsentWindow } from '@alignment-hive/session-data';
 import { checkAuthStatus } from '../lib/auth';
 import {
   ensureStateDir,
@@ -8,7 +9,7 @@ import {
   getOrCreateCheckoutId,
   loadTranscriptsDirs,
 } from '../lib/config';
-import { getConsentStatus, getEnabledProjects } from '../lib/convex';
+import { getConsentHistory, getConsentStatus, getEnabledProjects } from '../lib/convex';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
@@ -121,7 +122,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
 
   // Batch mode: with --delay (background), respect review periods; without, skip them
   const consentMtime = projectConsent.consentedAt;
-  const sessionsToUpload = isBackground
+  let candidates = isBackground
     ? allSessions.filter((session) =>
         checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime).eligible,
       )
@@ -129,6 +130,19 @@ export async function uploadSend(args: Array<string>): Promise<number> {
         if (excludedSet.has(session.sessionId)) return false;
         return !isSessionUploaded(session, uploadedMap);
       });
+
+  // Filter by consent windows to prevent uploading sessions from revocation gaps
+  const consentHistory = await getConsentHistory(project);
+  if (consentHistory) {
+    const globalWindows = computeConsentWindows(consentHistory.global);
+    const projectWindows = computeConsentWindows(consentHistory.project);
+    candidates = candidates.filter((session) => {
+      const mtime = session.mtime.getTime();
+      return isInConsentWindow(mtime, globalWindows) && isInConsentWindow(mtime, projectWindows);
+    });
+  }
+
+  const sessionsToUpload = candidates;
 
   if (sessionsToUpload.length === 0) {
     printInfo(hive.upload.noSessionsToUpload);
