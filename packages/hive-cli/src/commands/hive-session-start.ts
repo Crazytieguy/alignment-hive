@@ -38,13 +38,13 @@ async function checkUploadScheduled(stateDir: string): Promise<boolean> {
   }
 }
 
-function spawnBackgroundCommand(command: string, stateDir: string): boolean {
+function spawnBackgroundCommand(args: Array<string>, stateDir: string): boolean {
   // Compiled bun binaries set argv[1] to a virtual /$bunfs/root/... path.
   // Spawning with that path causes "Module not found". Use execPath instead.
   const isCompiled = process.argv[1]?.startsWith('/$bunfs/');
   return spawnBackground({
     executable: isCompiled ? process.execPath : process.argv[0],
-    args: isCompiled ? [command] : [process.argv[1], command],
+    args: isCompiled ? args : [process.argv[1], ...args],
     errorLogPath: join(stateDir, 'error.log'),
   });
 }
@@ -190,7 +190,7 @@ export async function hiveSessionStart(): Promise<number> {
         messages.push(hive.sessionStart.eligibleInProgress(eligibleCount));
       } else {
         await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
-        const spawned = spawnBackgroundCommand('upload', stateDir);
+        const spawned = spawnBackgroundCommand(['upload', 'send', '--delay', '600'], stateDir);
         if (spawned) {
           messages.push(hive.sessionStart.uploading(eligibleCount, UPLOAD_DELAY_MINUTES));
         }
@@ -203,7 +203,7 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   if (status.authenticated && allSessions.length > 0) {
-    spawnBackgroundCommand('heartbeat', stateDir);
+    spawnBackgroundCommand(['heartbeat'], stateDir);
   }
 
   return 0;

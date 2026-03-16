@@ -63,7 +63,8 @@ hive upload list          # List sessions with status
 hive upload review        # Open local review UI
 hive upload exclude <id>  # Exclude a session
 hive upload snooze 24h    # Pause uploads
-hive upload now           # Upload immediately
+hive upload send          # Upload all eligible sessions
+hive upload send <id>     # Upload a specific session
 hive consent status       # Check consent status
 ```
 

@@ -20,30 +20,22 @@ const COMMANDS = new Map<string, () => Promise<number>>([
         return (await import('./commands/upload-exclude')).uploadExclude(process.argv.slice(4));
       case 'snooze':
         return (await import('./commands/upload-snooze')).uploadSnooze(process.argv.slice(4));
-      case 'now':
-        return (await import('./commands/upload-now')).uploadNow(process.argv[4]);
-      case 'help':
-      case '--help':
-      case '-h':
+      case 'send':
+        return (await import('./commands/upload-send')).uploadSend(process.argv.slice(4));
+      default: {
         console.log([
           'Usage: hive upload <subcommand>',
           '',
           'Subcommands:',
+          '  send [session-id]   Upload sessions (all eligible, or a specific one)',
           '  list                List sessions with upload status',
           '  review              Open local web UI to review sessions',
           '  exclude <id|--all>  Exclude a session from upload',
           '  snooze [duration]   Pause all uploads (default: 24h, max: 7d)',
           '  snooze --clear      Cancel active snooze',
-          '  now [session-id]    Upload immediately (skip review period)',
-          '',
-          'Without a subcommand, runs the background upload process.',
         ].join('\n'));
-        return 0;
-      default:
-        // CRITICAL: no subcommand = background upload from session-start hook.
-        // The hook spawns `hive upload` with no args. This MUST run the existing
-        // background upload logic, not print an error.
-        return (await import('./commands/hive-upload')).hiveUpload();
+        return sub === 'help' || sub === '--help' || sub === '-h' ? 0 : 1;
+      }
     }
   }],
   ['heartbeat', async () => (await import('./commands/hive-heartbeat')).hiveHeartbeat()],

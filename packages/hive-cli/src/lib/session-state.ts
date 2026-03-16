@@ -158,6 +158,17 @@ export async function recordUploadedSession(
   await appendFile(join(stateDir, UPLOADED_SESSIONS_FILE), JSON.stringify(entry) + '\n');
 }
 
+/** Record multiple sessions as uploaded in a single write. */
+export async function recordUploadedSessions(
+  stateDir: string,
+  sessions: Array<{ sessionId: string; rawMtime: string }>,
+): Promise<void> {
+  if (sessions.length === 0) return;
+  const now = new Date().toISOString();
+  const lines = sessions.map((s) => JSON.stringify({ sessionId: s.sessionId, rawMtime: s.rawMtime, uploadedAt: now } satisfies UploadedEntry) + '\n');
+  await appendFile(join(stateDir, UPLOADED_SESSIONS_FILE), lines.join(''));
+}
+
 /** Record a session as excluded. Appends to the excluded-sessions file. */
 export async function recordExcludedSession(stateDir: string, sessionId: string): Promise<void> {
   await appendFile(join(stateDir, EXCLUDED_SESSIONS_FILE), sessionId + '\n');

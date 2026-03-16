@@ -1,4 +1,4 @@
-import { appendFile } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth';
 import {
@@ -13,24 +13,49 @@ import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
 import {
+  checkSessionEligibility,
   isSessionUploaded,
   loadSessionState,
   recordUploadedSession,
+  recordUploadedSessions,
 } from '../lib/session-state';
+import { isSnoozed } from '../lib/snooze';
 import { uploadSingleSession } from '../lib/upload-session';
-import type { UploadedEntry } from '../lib/session-state';
 
 const UPLOAD_CONCURRENCY = 5;
 
-export async function uploadNow(sessionPrefix?: string): Promise<number> {
+export async function uploadSend(args: Array<string>): Promise<number> {
+  let delaySeconds = 0;
+  let sessionPrefix: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--delay' && args[i + 1]) {
+      delaySeconds = parseInt(args[i + 1], 10);
+      i++;
+    } else if (!args[i].startsWith('-')) {
+      sessionPrefix = args[i];
+    }
+  }
+
+  const isBackground = delaySeconds > 0;
   const config = getConfig();
   const cwd = process.cwd();
   const stateDir = config.getStateDir(cwd);
   await ensureStateDir(stateDir);
 
+  if (isBackground) {
+    await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+
+    if (await isSnoozed(stateDir)) {
+      await cleanupScheduled(stateDir);
+      return 0;
+    }
+  }
+
   const status = await checkAuthStatus(true);
   if (!status.authenticated) {
     printError(hive.upload.notAuthenticated);
+    if (isBackground) await cleanupScheduled(stateDir);
     return 1;
   }
 
@@ -40,6 +65,7 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
   ]);
   if (!consent?.hasConsent || !consent.sessionSharing) {
     printError(hive.upload.noConsent);
+    if (isBackground) await cleanupScheduled(stateDir);
     return 1;
   }
 
@@ -47,6 +73,7 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
   const projectConsent = activeProjects.find((p) => p.project === project);
   if (!projectConsent) {
     printError(hive.upload.noProjectConsent);
+    if (isBackground) await cleanupScheduled(stateDir);
     return 1;
   }
 
@@ -54,6 +81,7 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
   const { sessions: allSessions, uploadedMap, excludedSet } = await loadSessionState(stateDir, transcriptsDirs);
   const checkoutId = await getOrCreateCheckoutId(stateDir);
 
+  // Single session mode
   if (sessionPrefix) {
     const result = lookupRawSession(allSessions, sessionPrefix);
     if (!result.found) {
@@ -91,14 +119,20 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
     }
   }
 
-  // Upload all non-excluded, non-uploaded sessions (skip review periods for on-demand)
-  const sessionsToUpload = allSessions.filter((session) => {
-    if (excludedSet.has(session.sessionId)) return false;
-    return !isSessionUploaded(session, uploadedMap);
-  });
+  // Batch mode: with --delay (background), respect review periods; without, skip them
+  const consentMtime = projectConsent.consentedAt;
+  const sessionsToUpload = isBackground
+    ? allSessions.filter((session) =>
+        checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime).eligible,
+      )
+    : allSessions.filter((session) => {
+        if (excludedSet.has(session.sessionId)) return false;
+        return !isSessionUploaded(session, uploadedMap);
+      });
 
   if (sessionsToUpload.length === 0) {
     printInfo(hive.upload.noSessionsToUpload);
+    if (isBackground) await cleanupScheduled(stateDir);
     return 0;
   }
 
@@ -107,6 +141,14 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
   let failures = 0;
 
   for (let i = 0; i < sessionsToUpload.length; i += UPLOAD_CONCURRENCY) {
+    if (i > 0) {
+      const refreshStatus = await checkAuthStatus(true);
+      if (!refreshStatus.authenticated) {
+        printError(hive.upload.notAuthenticated);
+        break;
+      }
+    }
+
     const batch = sessionsToUpload.slice(i, i + UPLOAD_CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map(async (session) => {
@@ -116,36 +158,33 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
       }),
     );
 
-    // Batch-write successful uploads to avoid concurrent appendFile race
-    const uploadedLines: Array<string> = [];
+    const batchUploaded: Array<{ sessionId: string; rawMtime: string }> = [];
     for (const r of results) {
       if (r.status === 'rejected') {
         failures++;
-        if (process.env.DEBUG) {
-          console.error(`Failed to upload: ${r.reason}`);
-        }
+        console.error(`Failed to upload: ${r.reason}`);
       } else if (r.value.success) {
-        const entry: UploadedEntry = {
-          sessionId: r.value.sessionId,
-          rawMtime: r.value.rawMtime,
-          uploadedAt: new Date().toISOString(),
-        };
-        uploadedLines.push(JSON.stringify(entry) + '\n');
+        batchUploaded.push({ sessionId: r.value.sessionId, rawMtime: r.value.rawMtime });
         successes++;
       } else {
         failures++;
-        if (process.env.DEBUG) {
-          console.error(`Failed to upload ${r.value.sessionId.slice(0, 8)}: ${r.value.error}`);
-        }
+        console.error(`Failed to upload ${r.value.sessionId.slice(0, 8)}: ${r.value.error}`);
       }
     }
-    if (uploadedLines.length > 0) {
-      await appendFile(join(stateDir, 'uploaded-sessions'), uploadedLines.join(''));
-    }
+    await recordUploadedSessions(stateDir, batchUploaded);
   }
 
   if (successes > 0) printSuccess(hive.upload.uploaded(successes));
   if (failures > 0) printError(hive.upload.uploadsFailed(failures));
 
+  if (isBackground) await cleanupScheduled(stateDir);
   return failures > 0 ? 1 : 0;
+}
+
+async function cleanupScheduled(stateDir: string): Promise<void> {
+  try {
+    await unlink(join(stateDir, 'upload-scheduled'));
+  } catch {
+    // Already gone
+  }
 }
