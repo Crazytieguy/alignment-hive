@@ -25,6 +25,7 @@ export async function uploadSingleSession(
     if (entry) entries.push(entry as KnownEntry);
   }
 
+  // Discovery filters via fast string search; verify after full parse
   if (!entries.some((e) => e.type === 'assistant')) {
     return { success: false, error: 'No assistant messages' };
   }

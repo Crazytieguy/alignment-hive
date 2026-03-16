@@ -18128,6 +18128,12 @@ function formatGenericTool({ input, redact, truncation }) {
 // src/lib/session-source.ts
 import { readdir as readdir4 } from "fs/promises";
 import { join as join6 } from "path";
+
+// src/lib/session-state.ts
+var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+var CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
+
+// src/lib/session-source.ts
 var extractedSessionSource = {
   async listSessionFiles(cwd) {
     const sessionsDir = getHiveMindSessionsDir(cwd);
@@ -18254,10 +18260,6 @@ function findFirstUserPrompt(entries) {
 function extractSessionSummary(entries) {
   return findSummaryEntry(entries) || findFirstUserPrompt(entries);
 }
-
-// src/lib/session-state.ts
-var SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
-var CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
 
 // src/lib/upload-eligibility.ts
 var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;

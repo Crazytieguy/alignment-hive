@@ -1,5 +1,7 @@
+import { createReadStream } from 'node:fs';
 import { appendFile, readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { findRawSessions } from './extraction';
 
 const UPLOADED_SESSIONS_FILE = 'uploaded-sessions';
@@ -20,26 +22,56 @@ export interface DiscoveredSession {
   mtime: Date;
 }
 
-/** Discover non-agent sessions from transcript directories, with parallel stat() calls. */
-export async function discoverSessions(transcriptsDirs: Array<string>): Promise<Array<DiscoveredSession>> {
+export interface DiscoverOptions {
+  includeAgents?: boolean;
+}
+
+/** Check if a session file contains at least one assistant message. Streams line-by-line to avoid reading large files fully. */
+async function hasAssistantContent(path: string): Promise<boolean> {
+  const stream = createReadStream(path, { encoding: 'utf-8' });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (line.includes('"type":"assistant"') || line.includes('"type": "assistant"')) {
+        return true;
+      }
+    }
+    return false;
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
+/**
+ * Discover sessions from transcript directories.
+ * Filters out sessions with no assistant messages (abandoned/empty sessions).
+ * By default excludes agent sessions; pass includeAgents to include them.
+ */
+export async function discoverSessions(
+  transcriptsDirs: Array<string>,
+  options?: DiscoverOptions,
+): Promise<Array<DiscoveredSession>> {
   const dirResults = await Promise.all(
     transcriptsDirs.map((dir) => findRawSessions(dir).catch(() => [])),
   );
 
-  const statPromises: Array<Promise<DiscoveredSession | null>> = [];
+  const promises: Array<Promise<DiscoveredSession | null>> = [];
   for (const rawSessions of dirResults) {
     for (const s of rawSessions) {
-      if (s.agentId) continue;
+      if (!options?.includeAgents && s.agentId) continue;
       const sessionId = basename(s.path, '.jsonl');
-      statPromises.push(
-        stat(s.path)
-          .then((fileStat) => ({ sessionId, path: s.path, mtime: fileStat.mtime }))
+      promises.push(
+        Promise.all([stat(s.path), hasAssistantContent(s.path)])
+          .then(([fileStat, hasContent]) =>
+            hasContent ? { sessionId, path: s.path, mtime: fileStat.mtime } : null,
+          )
           .catch(() => null),
       );
     }
   }
 
-  const results = await Promise.all(statPromises);
+  const results = await Promise.all(promises);
   return results.filter((r): r is DiscoveredSession => r !== null);
 }
 

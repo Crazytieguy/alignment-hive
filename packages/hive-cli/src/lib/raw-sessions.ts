@@ -1,8 +1,9 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
-import { HIVE_MIND_VERSION, findRawSessions, parseJsonl, transformEntry } from './extraction';
+import { HIVE_MIND_VERSION, parseJsonl, transformEntry } from './extraction';
 import { getConfig, loadTranscriptsDirs } from './config';
+import { discoverSessions } from './session-state';
 import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
 import type { ReadSessionResult } from './extraction';
 
@@ -52,16 +53,6 @@ export async function discoverRawSessionPaths(cwd: string): Promise<Array<string
     dirs = [defaultDir];
   }
 
-  const results = await Promise.all(
-    dirs.map(async (dir) => {
-      try {
-        const sessions = await findRawSessions(dir);
-        return sessions.map((s) => s.path);
-      } catch {
-        return [];
-      }
-    }),
-  );
-
-  return results.flat();
+  const sessions = await discoverSessions(dirs, { includeAgents: true });
+  return sessions.map((s) => s.path);
 }
