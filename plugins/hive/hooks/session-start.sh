@@ -3,7 +3,7 @@ set -euo pipefail
 
 # SessionStart hook for the hive plugin.
 # Minimal bash: sets up env, registers transcript dir, delegates to binary.
-# IMPORTANT: This hook must NEVER exit non-zero — that would disrupt the session.
+# Prefer exiting 0 — a non-zero exit just shows a small warning message to the user.
 
 PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
 
@@ -25,7 +25,7 @@ mkdir -p "$STATE_DIR"
 
 ERROR_LOG="$STATE_DIR/error.log"
 
-# Ensure hook always exits 0 — log unexpected errors for debugging
+# Exit 0 on unexpected errors — log them for debugging
 trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error at line $LINENO" >> "$ERROR_LOG" 2>/dev/null; exit 0' ERR
 
 # --- Dev environment setup via CLAUDE_ENV_FILE ---
