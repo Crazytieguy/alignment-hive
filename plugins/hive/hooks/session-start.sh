@@ -52,14 +52,14 @@ if [ -f "$DISABLE_FILE" ]; then
   exit 0
 fi
 
-# Find hive binary: PATH, ~/.local/bin, or .dev/ (dev mode)
+# Find hive binary: .dev/ (dev mode) first, then PATH, then ~/.local/bin
 HIVE_BIN=""
-if command -v hive >/dev/null 2>&1; then
+if [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
+  HIVE_BIN="$CLAUDE_PROJECT_DIR/.dev/hive"
+elif command -v hive >/dev/null 2>&1; then
   HIVE_BIN="hive"
 elif [ -x "$HOME/.local/bin/hive" ]; then
   HIVE_BIN="$HOME/.local/bin/hive"
-elif [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
-  HIVE_BIN="$CLAUDE_PROJECT_DIR/.dev/hive"
 fi
 
 if [ -n "$HIVE_BIN" ]; then

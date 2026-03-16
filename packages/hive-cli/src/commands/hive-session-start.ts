@@ -39,9 +39,12 @@ async function checkUploadScheduled(stateDir: string): Promise<boolean> {
 }
 
 function spawnBackgroundCommand(command: string, stateDir: string): boolean {
+  // Compiled bun binaries set argv[1] to a virtual /$bunfs/root/... path.
+  // Spawning with that path causes "Module not found". Use execPath instead.
+  const isCompiled = process.argv[1]?.startsWith('/$bunfs/');
   return spawnBackground({
-    executable: process.argv[0],
-    args: [process.argv[1], command],
+    executable: isCompiled ? process.execPath : process.argv[0],
+    args: isCompiled ? [command] : [process.argv[1], command],
     errorLogPath: join(stateDir, 'error.log'),
   });
 }
