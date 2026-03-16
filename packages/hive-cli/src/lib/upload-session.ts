@@ -32,10 +32,12 @@ export async function uploadSingleSession(
 
   const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
 
+  const lastModified = new Date(rawMtime).getTime();
   const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId,
     project,
     lineCount: entries.length,
+    lastModified: isFinite(lastModified) ? lastModified : undefined,
   });
   if (!uploadUrl) {
     return { success: false, error: 'Failed to get upload URL' };

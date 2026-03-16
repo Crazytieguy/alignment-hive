@@ -5,13 +5,13 @@ import { api } from "../../../../convex/_generated/api";
 import { SessionViewer } from "~/components/session-viewer";
 import { formatProject, formatSessionId } from "@alignment-hive/ui";
 
-export const Route = createFileRoute("/admin/sessions/$sessionId")({
+export const Route = createFileRoute("/authorized/sessions/$sessionId")({
   component: SessionDetail,
 });
 
 function SessionDetail() {
   const { sessionId } = Route.useParams();
-  const data = useQuery(api.admin.getSession, { sessionId });
+  const data = useQuery(api.authorized.getSession, { sessionId });
   const model = useSessionModel(data?.contentUrl ?? null);
 
   if (data === undefined) {
@@ -35,7 +35,7 @@ function SessionDetail() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Link to="/admin/sessions" className="hover:text-foreground">
+        <Link to="/authorized/sessions" className="hover:text-foreground">
           Sessions
         </Link>
         <span>/</span>
@@ -102,7 +102,7 @@ function SessionDetail() {
                   <dt className="text-muted-foreground">Name</dt>
                   <dd>
                     <Link
-                      to="/admin/users/$userId"
+                      to="/authorized/users/$userId"
                       params={{ userId: session.userId }}
                       className="text-primary hover:underline"
                     >
@@ -132,7 +132,7 @@ function SessionDetail() {
                 Parent Session
               </h2>
               <Link
-                to="/admin/sessions/$sessionId"
+                to="/authorized/sessions/$sessionId"
                 params={{ sessionId: parentSession.sessionId }}
                 className="font-mono text-sm text-primary hover:underline"
               >
@@ -147,10 +147,10 @@ function SessionDetail() {
                 Agent Sessions ({childSessions.length})
               </h2>
               <ul className="space-y-1">
-                {childSessions.map((child) => (
+                {childSessions.map((child: { _id: string; sessionId: string }) => (
                   <li key={child._id}>
                     <Link
-                      to="/admin/sessions/$sessionId"
+                      to="/authorized/sessions/$sessionId"
                       params={{ sessionId: child.sessionId }}
                       className="font-mono text-sm text-primary hover:underline"
                     >

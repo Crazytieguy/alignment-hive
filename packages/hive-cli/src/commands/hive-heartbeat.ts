@@ -36,6 +36,7 @@ export async function hiveHeartbeat(): Promise<number> {
         checkoutId,
         project,
         lineCount: messageCount,
+        lastModified: s.mtime.getTime(),
       });
     } catch (error) {
       if (process.env.DEBUG) {

@@ -214,6 +214,50 @@ export const getUserSessionProjects = query({
   },
 });
 
+/** Get consent event history for the authenticated user (for consent window computation).
+ *  Returns global and project-level events so the CLI can check consent windows locally. */
+export const getConsentHistory = query({
+  args: { project: v.string() },
+  handler: async (ctx, { project }) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return null;
+    }
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
+      .first();
+
+    if (!user) {
+      return { global: [], project: [] };
+    }
+
+    const globalEvents = await ctx.db
+      .query("dataSharingConsent")
+      .withIndex("by_user_id", (q) => q.eq("userId", user._id))
+      .collect();
+
+    const projectEvents = await ctx.db
+      .query("projectConsent")
+      .withIndex("by_user_project", (q) =>
+        q.eq("userId", user._id).eq("project", project),
+      )
+      .collect();
+
+    return {
+      global: globalEvents.map((e) => ({
+        sessionSharing: e.sessionSharing,
+        consentedAt: e.consentedAt,
+      })),
+      project: projectEvents.map((e) => ({
+        sessionSharing: e.sessionSharing,
+        consentedAt: e.consentedAt,
+      })),
+    };
+  },
+});
+
 /** Get the list of users with data access (for the consent page access list). */
 export const getAccessList = query({
   args: {},

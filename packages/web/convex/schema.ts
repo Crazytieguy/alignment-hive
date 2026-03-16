@@ -19,6 +19,7 @@ export default defineSchema({
     project: v.string(),
     lineCount: v.number(),
     lastHeartbeat: v.number(),
+    lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
     summary: v.optional(v.string()),
     upload: v.optional(

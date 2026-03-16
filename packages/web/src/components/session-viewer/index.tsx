@@ -11,7 +11,7 @@ export function SessionViewer({ url }: SessionViewerProps) {
       url={url}
       renderAgentLink={(agentId) => (
         <Link
-          to="/admin/sessions/$sessionId"
+          to="/authorized/sessions/$sessionId"
           params={{
             sessionId: agentId.startsWith("agent-")
               ? agentId

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useConvex } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import { SessionsTable } from "~/components/sessions-table";
 import { formatProject } from "@alignment-hive/ui";
@@ -13,7 +14,7 @@ interface SessionsSearch {
   excludeProjects?: string[];
 }
 
-export const Route = createFileRoute("/admin/sessions/")({
+export const Route = createFileRoute("/authorized/sessions/")({
   validateSearch: (search: Record<string, unknown>): SessionsSearch => ({
     upload: (search.upload as UploadFilter) || undefined,
     excludeUsers: (search.excludeUsers as string[]) || undefined,
@@ -27,6 +28,9 @@ const UNKNOWN_USERS_KEY = "__unknown__";
 function SessionsList() {
   const search = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
+  const convex = useConvex();
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [downloading, setDownloading] = useState(false);
 
   const uploadFilter = search.upload ?? "all";
   const excludedUserIds = new Set(search.excludeUsers ?? []);
@@ -61,7 +65,7 @@ function SessionsList() {
 
   // Get users for filter dropdown
   const usersData = usePaginatedQuery(
-    api.admin.listUsers,
+    api.authorized.listUsers,
     {},
     { initialNumItems: 100 },
   );
@@ -85,7 +89,7 @@ function SessionsList() {
   };
 
   const { results, status, loadMore } = usePaginatedQuery(
-    api.admin.listSessions,
+    api.authorized.listSessions,
     queryArgs,
     { initialNumItems: 50 },
   );
@@ -93,10 +97,97 @@ function SessionsList() {
   // Collect unique projects from loaded results
   const allProjects = [...new Set(results.map((s) => s.project))].sort();
 
+  // Only uploaded sessions can be selected
+  const selectableIds = results
+    .filter((s) => s.upload)
+    .map((s) => s.sessionId);
+
+  const toggleSession = useCallback((sessionId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleAll = useCallback(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === selectableIds.length) {
+        return new Set();
+      }
+      return new Set(selectableIds);
+    });
+  }, [selectableIds]);
+
+  const handleDownload = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    setDownloading(true);
+    try {
+      // Single bulk query for all content URLs (runs consent filter once)
+      const sessionUrls = await convex.query(
+        api.authorized.getSessionContentUrls,
+        { sessionIds: [...selectedIds] },
+      );
+
+      // Fetch content from each URL in parallel
+      const contents = (
+        await Promise.all(
+          sessionUrls.map(async ({ sessionId, contentUrl }) => {
+            try {
+              const res = await fetch(contentUrl);
+              if (!res.ok) return null;
+              const content = await res.text();
+              return { sessionId, content };
+            } catch {
+              return null;
+            }
+          }),
+        )
+      ).filter((c): c is NonNullable<typeof c> => c !== null);
+
+      if (contents.length > 0) {
+        const { zipSync, strToU8 } = await import("fflate");
+        const files: Record<string, Uint8Array> = {};
+        for (const item of contents) {
+          files[`${item.sessionId}.jsonl`] = strToU8(item.content);
+        }
+        const zipped = zipSync(files);
+        const blob = new Blob([zipped.buffer as ArrayBuffer], {
+          type: "application/zip",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `sessions-${new Date().toISOString().slice(0, 10)}.zip`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    } finally {
+      setDownloading(false);
+    }
+  }, [selectedIds, convex]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-foreground">Sessions</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-semibold text-foreground">Sessions</h1>
+          {selectedIds.size > 0 && (
+            <button
+              onClick={handleDownload}
+              disabled={downloading}
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              {downloading
+                ? "Downloading..."
+                : `Download ${selectedIds.size} session${selectedIds.size !== 1 ? "s" : ""}`}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-4">
           <MultiSelectFilter
             label="User"
@@ -138,6 +229,11 @@ function SessionsList() {
       <SessionsTable
         sessions={results}
         loading={status === "LoadingFirstPage"}
+        selectable={{
+          selectedIds,
+          onToggle: toggleSession,
+          onToggleAll: toggleAll,
+        }}
       />
 
       {status === "CanLoadMore" && (
@@ -225,13 +321,13 @@ function MultiSelectFilter({
         <div className="absolute right-0 top-full z-10 mt-1 max-h-80 w-64 overflow-y-auto rounded-md border border-border bg-card shadow-lg">
           <div className="flex gap-2 border-b border-border px-3 py-2">
             <button
-              onClick={() => onChange(new Set())}
+              onClick={() => onChange(new Set<string>())}
               className="text-xs text-primary hover:underline"
             >
               Select all
             </button>
             <button
-              onClick={() => onChange(new Set(allOptionIds))}
+              onClick={() => onChange(new Set<string>(allOptionIds))}
               className="text-xs text-primary hover:underline"
             >
               Deselect all

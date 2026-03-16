@@ -23,11 +23,12 @@ function getAdminEmails(): string[] {
 const fetchWorkosAuth = createServerFn({ method: "GET" }).handler(async () => {
   const auth = await getAuth();
   const email = auth.user?.email;
+  const isAdmin = email ? getAdminEmails().includes(email) : false;
 
   return {
     userId: auth.user?.id ?? null,
     token: auth.user ? auth.accessToken : null,
-    isAdmin: email ? getAdminEmails().includes(email) : false,
+    isAdmin,
   };
 });
 

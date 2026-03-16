@@ -47,6 +47,7 @@ export async function heartbeatSession(session: {
   checkoutId: string;
   project: string;
   lineCount: number;
+  lastModified?: number;
   parentSessionId?: string;
 }): Promise<boolean> {
   try {
@@ -67,6 +68,7 @@ export async function generateUploadUrl(
     checkoutId: string;
     project: string;
     lineCount: number;
+    lastModified?: number;
     parentSessionId?: string;
   },
 ): Promise<string | null> {
@@ -121,6 +123,20 @@ export async function getEnabledProjects(): Promise<Array<{ project: string; ses
   } catch (error) {
     debugLog(`getEnabledProjects failed: ${error instanceof Error ? error.message : String(error)}`);
     return [];
+  }
+}
+
+export async function getConsentHistory(project: string): Promise<{
+  global: Array<{ sessionSharing: boolean; consentedAt: number }>;
+  project: Array<{ sessionSharing: boolean; consentedAt: number }>;
+} | null> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return null;
+    return await client.query(api.consent.getConsentHistory, { project });
+  } catch (error) {
+    debugLog(`getConsentHistory failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
 }
 

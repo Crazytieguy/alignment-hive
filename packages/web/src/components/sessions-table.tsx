@@ -21,16 +21,24 @@ interface Session {
   } | null;
 }
 
+interface SelectableConfig {
+  selectedIds: Set<string>;
+  onToggle: (sessionId: string) => void;
+  onToggleAll: () => void;
+}
+
 interface SessionsTableProps {
   sessions: Session[];
   showUserColumn?: boolean;
   loading?: boolean;
+  selectable?: SelectableConfig;
 }
 
 export function SessionsTable({
   sessions,
   showUserColumn = true,
   loading,
+  selectable,
 }: SessionsTableProps) {
   if (loading) {
     return (
@@ -45,6 +53,21 @@ export function SessionsTable({
       <table className="w-full">
         <thead>
           <tr className="border-b border-border text-left text-sm text-muted-foreground">
+            {selectable && (
+              <th className="w-10 px-4 py-3">
+                <input
+                  type="checkbox"
+                  checked={
+                    selectable.selectedIds.size > 0 &&
+                    sessions.filter((s) => s.upload).every((s) =>
+                      selectable.selectedIds.has(s.sessionId),
+                    )
+                  }
+                  onChange={selectable.onToggleAll}
+                  className="rounded"
+                />
+              </th>
+            )}
             <th className="px-4 py-3 font-medium">Session</th>
             {showUserColumn && <th className="px-4 py-3 font-medium">User</th>}
             <th className="px-4 py-3 font-medium">Project</th>
@@ -60,10 +83,22 @@ export function SessionsTable({
               key={session._id}
               className={`relative ${session.upload ? "hover:bg-muted/50" : "opacity-50"}`}
             >
+              {selectable && (
+                <td className="relative z-10 w-10 px-4 py-3">
+                  {session.upload && (
+                    <input
+                      type="checkbox"
+                      checked={selectable.selectedIds.has(session.sessionId)}
+                      onChange={() => selectable.onToggle(session.sessionId)}
+                      className="rounded"
+                    />
+                  )}
+                </td>
+              )}
               <td className="px-4 py-3 font-mono text-sm">
                 {session.upload ? (
                   <Link
-                    to="/admin/sessions/$sessionId"
+                    to="/authorized/sessions/$sessionId"
                     params={{ sessionId: session.sessionId }}
                     className="after:absolute after:inset-0"
                   >
@@ -77,7 +112,7 @@ export function SessionsTable({
                 <td className="relative z-10 px-4 py-3 text-sm">
                   {session.user ? (
                     <Link
-                      to="/admin/users/$userId"
+                      to="/authorized/users/$userId"
                       params={{ userId: session.userId }}
                       className="text-primary hover:underline"
                     >

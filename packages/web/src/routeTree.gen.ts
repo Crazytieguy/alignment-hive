@@ -10,27 +10,27 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as CallbackRouteImport } from './routes/callback'
-import { Route as AdminRouteImport } from './routes/admin'
+import { Route as AuthorizedRouteImport } from './routes/authorized'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as AdminIndexRouteImport } from './routes/admin/index'
+import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
 import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
 import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
 import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticated/consent'
-import { Route as AdminUsersIndexRouteImport } from './routes/admin/users/index'
-import { Route as AdminSessionsIndexRouteImport } from './routes/admin/sessions/index'
-import { Route as AdminUsersUserIdRouteImport } from './routes/admin/users/$userId'
-import { Route as AdminSessionsSessionIdRouteImport } from './routes/admin/sessions/$sessionId'
+import { Route as AuthorizedUsersIndexRouteImport } from './routes/authorized/users/index'
+import { Route as AuthorizedSessionsIndexRouteImport } from './routes/authorized/sessions/index'
+import { Route as AuthorizedUsersUserIdRouteImport } from './routes/authorized/users/$userId'
+import { Route as AuthorizedSessionsSessionIdRouteImport } from './routes/authorized/sessions/$sessionId'
 
 const CallbackRoute = CallbackRouteImport.update({
   id: '/callback',
   path: '/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AdminRoute = AdminRouteImport.update({
-  id: '/admin',
-  path: '/admin',
+const AuthorizedRoute = AuthorizedRouteImport.update({
+  id: '/authorized',
+  path: '/authorized',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
@@ -42,10 +42,10 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AdminIndexRoute = AdminIndexRouteImport.update({
+const AuthorizedIndexRoute = AuthorizedIndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => AdminRoute,
+  getParentRoute: () => AuthorizedRoute,
 } as any)
 const AuthSignOutRoute = AuthSignOutRouteImport.update({
   id: '/auth/sign-out',
@@ -67,40 +67,41 @@ const AuthenticatedConsentRoute = AuthenticatedConsentRouteImport.update({
   path: '/consent',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AdminUsersIndexRoute = AdminUsersIndexRouteImport.update({
+const AuthorizedUsersIndexRoute = AuthorizedUsersIndexRouteImport.update({
   id: '/users/',
   path: '/users/',
-  getParentRoute: () => AdminRoute,
+  getParentRoute: () => AuthorizedRoute,
 } as any)
-const AdminSessionsIndexRoute = AdminSessionsIndexRouteImport.update({
+const AuthorizedSessionsIndexRoute = AuthorizedSessionsIndexRouteImport.update({
   id: '/sessions/',
   path: '/sessions/',
-  getParentRoute: () => AdminRoute,
+  getParentRoute: () => AuthorizedRoute,
 } as any)
-const AdminUsersUserIdRoute = AdminUsersUserIdRouteImport.update({
+const AuthorizedUsersUserIdRoute = AuthorizedUsersUserIdRouteImport.update({
   id: '/users/$userId',
   path: '/users/$userId',
-  getParentRoute: () => AdminRoute,
+  getParentRoute: () => AuthorizedRoute,
 } as any)
-const AdminSessionsSessionIdRoute = AdminSessionsSessionIdRouteImport.update({
-  id: '/sessions/$sessionId',
-  path: '/sessions/$sessionId',
-  getParentRoute: () => AdminRoute,
-} as any)
+const AuthorizedSessionsSessionIdRoute =
+  AuthorizedSessionsSessionIdRouteImport.update({
+    id: '/sessions/$sessionId',
+    path: '/sessions/$sessionId',
+    getParentRoute: () => AuthorizedRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/admin': typeof AdminRouteWithChildren
+  '/authorized': typeof AuthorizedRouteWithChildren
   '/callback': typeof CallbackRoute
   '/consent': typeof AuthenticatedConsentRoute
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
-  '/admin/': typeof AdminIndexRoute
-  '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
-  '/admin/users/$userId': typeof AdminUsersUserIdRoute
-  '/admin/sessions': typeof AdminSessionsIndexRoute
-  '/admin/users': typeof AdminUsersIndexRoute
+  '/authorized/': typeof AuthorizedIndexRoute
+  '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
+  '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
+  '/authorized/sessions': typeof AuthorizedSessionsIndexRoute
+  '/authorized/users': typeof AuthorizedUsersIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -109,43 +110,43 @@ export interface FileRoutesByTo {
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
-  '/admin': typeof AdminIndexRoute
-  '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
-  '/admin/users/$userId': typeof AdminUsersUserIdRoute
-  '/admin/sessions': typeof AdminSessionsIndexRoute
-  '/admin/users': typeof AdminUsersIndexRoute
+  '/authorized': typeof AuthorizedIndexRoute
+  '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
+  '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
+  '/authorized/sessions': typeof AuthorizedSessionsIndexRoute
+  '/authorized/users': typeof AuthorizedUsersIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_authenticated': typeof AuthenticatedRouteWithChildren
-  '/admin': typeof AdminRouteWithChildren
+  '/authorized': typeof AuthorizedRouteWithChildren
   '/callback': typeof CallbackRoute
   '/_authenticated/consent': typeof AuthenticatedConsentRoute
   '/_authenticated/install': typeof AuthenticatedInstallRoute
   '/_authenticated/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
-  '/admin/': typeof AdminIndexRoute
-  '/admin/sessions/$sessionId': typeof AdminSessionsSessionIdRoute
-  '/admin/users/$userId': typeof AdminUsersUserIdRoute
-  '/admin/sessions/': typeof AdminSessionsIndexRoute
-  '/admin/users/': typeof AdminUsersIndexRoute
+  '/authorized/': typeof AuthorizedIndexRoute
+  '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
+  '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
+  '/authorized/sessions/': typeof AuthorizedSessionsIndexRoute
+  '/authorized/users/': typeof AuthorizedUsersIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/admin'
+    | '/authorized'
     | '/callback'
     | '/consent'
     | '/install'
     | '/policy'
     | '/auth/sign-out'
-    | '/admin/'
-    | '/admin/sessions/$sessionId'
-    | '/admin/users/$userId'
-    | '/admin/sessions'
-    | '/admin/users'
+    | '/authorized/'
+    | '/authorized/sessions/$sessionId'
+    | '/authorized/users/$userId'
+    | '/authorized/sessions'
+    | '/authorized/users'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -154,32 +155,32 @@ export interface FileRouteTypes {
     | '/install'
     | '/policy'
     | '/auth/sign-out'
-    | '/admin'
-    | '/admin/sessions/$sessionId'
-    | '/admin/users/$userId'
-    | '/admin/sessions'
-    | '/admin/users'
+    | '/authorized'
+    | '/authorized/sessions/$sessionId'
+    | '/authorized/users/$userId'
+    | '/authorized/sessions'
+    | '/authorized/users'
   id:
     | '__root__'
     | '/'
     | '/_authenticated'
-    | '/admin'
+    | '/authorized'
     | '/callback'
     | '/_authenticated/consent'
     | '/_authenticated/install'
     | '/_authenticated/policy'
     | '/auth/sign-out'
-    | '/admin/'
-    | '/admin/sessions/$sessionId'
-    | '/admin/users/$userId'
-    | '/admin/sessions/'
-    | '/admin/users/'
+    | '/authorized/'
+    | '/authorized/sessions/$sessionId'
+    | '/authorized/users/$userId'
+    | '/authorized/sessions/'
+    | '/authorized/users/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
-  AdminRoute: typeof AdminRouteWithChildren
+  AuthorizedRoute: typeof AuthorizedRouteWithChildren
   CallbackRoute: typeof CallbackRoute
   AuthSignOutRoute: typeof AuthSignOutRoute
 }
@@ -193,11 +194,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/admin': {
-      id: '/admin'
-      path: '/admin'
-      fullPath: '/admin'
-      preLoaderRoute: typeof AdminRouteImport
+    '/authorized': {
+      id: '/authorized'
+      path: '/authorized'
+      fullPath: '/authorized'
+      preLoaderRoute: typeof AuthorizedRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated': {
@@ -214,12 +215,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/admin/': {
-      id: '/admin/'
+    '/authorized/': {
+      id: '/authorized/'
       path: '/'
-      fullPath: '/admin/'
-      preLoaderRoute: typeof AdminIndexRouteImport
-      parentRoute: typeof AdminRoute
+      fullPath: '/authorized/'
+      preLoaderRoute: typeof AuthorizedIndexRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
     '/auth/sign-out': {
       id: '/auth/sign-out'
@@ -249,33 +250,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedConsentRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/admin/users/': {
-      id: '/admin/users/'
+    '/authorized/users/': {
+      id: '/authorized/users/'
       path: '/users'
-      fullPath: '/admin/users'
-      preLoaderRoute: typeof AdminUsersIndexRouteImport
-      parentRoute: typeof AdminRoute
+      fullPath: '/authorized/users'
+      preLoaderRoute: typeof AuthorizedUsersIndexRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
-    '/admin/sessions/': {
-      id: '/admin/sessions/'
+    '/authorized/sessions/': {
+      id: '/authorized/sessions/'
       path: '/sessions'
-      fullPath: '/admin/sessions'
-      preLoaderRoute: typeof AdminSessionsIndexRouteImport
-      parentRoute: typeof AdminRoute
+      fullPath: '/authorized/sessions'
+      preLoaderRoute: typeof AuthorizedSessionsIndexRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
-    '/admin/users/$userId': {
-      id: '/admin/users/$userId'
+    '/authorized/users/$userId': {
+      id: '/authorized/users/$userId'
       path: '/users/$userId'
-      fullPath: '/admin/users/$userId'
-      preLoaderRoute: typeof AdminUsersUserIdRouteImport
-      parentRoute: typeof AdminRoute
+      fullPath: '/authorized/users/$userId'
+      preLoaderRoute: typeof AuthorizedUsersUserIdRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
-    '/admin/sessions/$sessionId': {
-      id: '/admin/sessions/$sessionId'
+    '/authorized/sessions/$sessionId': {
+      id: '/authorized/sessions/$sessionId'
       path: '/sessions/$sessionId'
-      fullPath: '/admin/sessions/$sessionId'
-      preLoaderRoute: typeof AdminSessionsSessionIdRouteImport
-      parentRoute: typeof AdminRoute
+      fullPath: '/authorized/sessions/$sessionId'
+      preLoaderRoute: typeof AuthorizedSessionsSessionIdRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
   }
 }
@@ -296,28 +297,30 @@ const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
   AuthenticatedRouteChildren,
 )
 
-interface AdminRouteChildren {
-  AdminIndexRoute: typeof AdminIndexRoute
-  AdminSessionsSessionIdRoute: typeof AdminSessionsSessionIdRoute
-  AdminUsersUserIdRoute: typeof AdminUsersUserIdRoute
-  AdminSessionsIndexRoute: typeof AdminSessionsIndexRoute
-  AdminUsersIndexRoute: typeof AdminUsersIndexRoute
+interface AuthorizedRouteChildren {
+  AuthorizedIndexRoute: typeof AuthorizedIndexRoute
+  AuthorizedSessionsSessionIdRoute: typeof AuthorizedSessionsSessionIdRoute
+  AuthorizedUsersUserIdRoute: typeof AuthorizedUsersUserIdRoute
+  AuthorizedSessionsIndexRoute: typeof AuthorizedSessionsIndexRoute
+  AuthorizedUsersIndexRoute: typeof AuthorizedUsersIndexRoute
 }
 
-const AdminRouteChildren: AdminRouteChildren = {
-  AdminIndexRoute: AdminIndexRoute,
-  AdminSessionsSessionIdRoute: AdminSessionsSessionIdRoute,
-  AdminUsersUserIdRoute: AdminUsersUserIdRoute,
-  AdminSessionsIndexRoute: AdminSessionsIndexRoute,
-  AdminUsersIndexRoute: AdminUsersIndexRoute,
+const AuthorizedRouteChildren: AuthorizedRouteChildren = {
+  AuthorizedIndexRoute: AuthorizedIndexRoute,
+  AuthorizedSessionsSessionIdRoute: AuthorizedSessionsSessionIdRoute,
+  AuthorizedUsersUserIdRoute: AuthorizedUsersUserIdRoute,
+  AuthorizedSessionsIndexRoute: AuthorizedSessionsIndexRoute,
+  AuthorizedUsersIndexRoute: AuthorizedUsersIndexRoute,
 }
 
-const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
+const AuthorizedRouteWithChildren = AuthorizedRoute._addFileChildren(
+  AuthorizedRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
-  AdminRoute: AdminRouteWithChildren,
+  AuthorizedRoute: AuthorizedRouteWithChildren,
   CallbackRoute: CallbackRoute,
   AuthSignOutRoute: AuthSignOutRoute,
 }
