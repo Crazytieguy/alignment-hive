@@ -45,7 +45,7 @@ BINARY="$CACHE_DIR/remote-kernels"
 # Download if not cached
 if [ ! -x "$BINARY" ]; then
   ARCHIVE_NAME="remote-kernels-${TARGET}.tar.xz"
-  DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/v${VERSION}/${ARCHIVE_NAME}"
+  DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/remote-kernels-v${VERSION}/${ARCHIVE_NAME}"
 
   echo "Downloading remote-kernels v${VERSION} for ${TARGET}..." >&2
   mkdir -p "$CACHE_DIR"
