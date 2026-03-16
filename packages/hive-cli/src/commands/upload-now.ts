@@ -1,3 +1,5 @@
+import { appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth';
 import {
   ensureStateDir,
@@ -16,6 +18,9 @@ import {
   recordUploadedSession,
 } from '../lib/session-state';
 import { uploadSingleSession } from '../lib/upload-session';
+import type { UploadedEntry } from '../lib/session-state';
+
+const UPLOAD_CONCURRENCY = 5;
 
 export async function uploadNow(sessionPrefix?: string): Promise<number> {
   const config = getConfig();
@@ -101,17 +106,41 @@ export async function uploadNow(sessionPrefix?: string): Promise<number> {
   let successes = 0;
   let failures = 0;
 
-  for (const session of sessionsToUpload) {
-    const rawMtime = session.mtime.toISOString();
-    const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, project, rawMtime);
-    if (uploadResult.success) {
-      await recordUploadedSession(stateDir, session.sessionId, rawMtime);
-      successes++;
-    } else {
-      failures++;
-      if (process.env.DEBUG) {
-        console.error(`Failed to upload ${session.sessionId.slice(0, 8)}: ${uploadResult.error}`);
+  for (let i = 0; i < sessionsToUpload.length; i += UPLOAD_CONCURRENCY) {
+    const batch = sessionsToUpload.slice(i, i + UPLOAD_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(async (session) => {
+        const rawMtime = session.mtime.toISOString();
+        const result = await uploadSingleSession(session.path, session.sessionId, checkoutId, project, rawMtime);
+        return { sessionId: session.sessionId, rawMtime, ...result };
+      }),
+    );
+
+    // Batch-write successful uploads to avoid concurrent appendFile race
+    const uploadedLines: Array<string> = [];
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        failures++;
+        if (process.env.DEBUG) {
+          console.error(`Failed to upload: ${r.reason}`);
+        }
+      } else if (r.value.success) {
+        const entry: UploadedEntry = {
+          sessionId: r.value.sessionId,
+          rawMtime: r.value.rawMtime,
+          uploadedAt: new Date().toISOString(),
+        };
+        uploadedLines.push(JSON.stringify(entry) + '\n');
+        successes++;
+      } else {
+        failures++;
+        if (process.env.DEBUG) {
+          console.error(`Failed to upload ${r.value.sessionId.slice(0, 8)}: ${r.value.error}`);
+        }
       }
+    }
+    if (uploadedLines.length > 0) {
+      await appendFile(join(stateDir, 'uploaded-sessions'), uploadedLines.join(''));
     }
   }
 
