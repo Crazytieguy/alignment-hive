@@ -3,6 +3,7 @@ set -euo pipefail
 
 # SessionStart hook for the hive plugin.
 # Minimal bash: sets up env, registers transcript dir, delegates to binary.
+# IMPORTANT: This hook must NEVER exit non-zero — that would disrupt the session.
 
 PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
 
@@ -21,6 +22,11 @@ STATE_DIR="$(resolve_state_dir)"
 
 # Ensure state directory exists
 mkdir -p "$STATE_DIR"
+
+ERROR_LOG="$STATE_DIR/error.log"
+
+# Ensure hook always exits 0 — log unexpected errors for debugging
+trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error at line $LINENO" >> "$ERROR_LOG" 2>/dev/null; exit 0' ERR
 
 # --- Dev environment setup via CLAUDE_ENV_FILE ---
 
@@ -60,10 +66,9 @@ if [ -n "$HIVE_BIN" ]; then
   # Pass plugin version so binary can do the version check
   PLUGIN_VERSION=""
   if [ -f "$PLUGIN_JSON" ]; then
-    PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
   fi
 
-  ERROR_LOG="$STATE_DIR/error.log"
   export HIVE_PLUGIN_VERSION="$PLUGIN_VERSION"
   "$HIVE_BIN" session-start 2>>"$ERROR_LOG" || true
 fi
