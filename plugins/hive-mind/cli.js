@@ -14828,7 +14828,9 @@ Run \`${cli} exclude\` anytime to opt out.`;
   aliasSuccess: "Command added!",
   aliasActivate: (sourceCmd) => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
   aliasFailed: "Couldn't add command automatically.",
-  alreadySetUp: "hive-mind command already set up"
+  alreadySetUp: "hive-mind command already set up",
+  aliasSetupFailed: "Failed to set up alias",
+  aliasAdded: "hive-mind command added to shell config"
 };
 var indexCmd = {
   noSessionsDir: "No sessions found. Run 'extract' first.",
@@ -19584,13 +19586,13 @@ async function setupAliasCommand() {
   const pluginRoot = dirname2(process.argv[1]);
   const { success: success2, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
   if (!success2) {
-    printError("Failed to set up alias");
+    printError(setup.aliasSetupFailed);
     return 1;
   }
   if (alreadyExists) {
     printInfo(setup.alreadySetUp);
   } else {
-    printSuccess("hive-mind command added to shell config");
+    printSuccess(setup.aliasAdded);
     console.log(setup.aliasActivate(sourceCmd));
   }
   return 0;

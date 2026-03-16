@@ -10,14 +10,14 @@ export async function setupAliasCommand(): Promise<number> {
   const { success, alreadyExists, sourceCmd } = await setupAliasWithRoot(pluginRoot);
 
   if (!success) {
-    printError('Failed to set up alias');
+    printError(setup.aliasSetupFailed);
     return 1;
   }
 
   if (alreadyExists) {
     printInfo(setup.alreadySetUp);
   } else {
-    printSuccess('hive-mind command added to shell config');
+    printSuccess(setup.aliasAdded);
     console.log(setup.aliasActivate(sourceCmd));
   }
 

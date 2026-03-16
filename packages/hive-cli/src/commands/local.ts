@@ -1,23 +1,12 @@
-import { errors } from '../lib/messages';
+import { errors, localCmd } from '../lib/messages';
 import { printError } from '../lib/output';
 import { createRawSessionSource } from '../lib/session-source';
-
-function printUsage(): void {
-  console.log('Usage: hive local <search|read|index>');
-  console.log('');
-  console.log('Search and read raw Claude Code session files (no extraction needed).');
-  console.log('');
-  console.log('Commands:');
-  console.log('  search    Search sessions for a pattern');
-  console.log('  read      Read a session by ID prefix');
-  console.log('  index     List sessions with statistics');
-}
 
 export async function local(): Promise<number> {
   const subcommand = process.argv[3];
 
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
-    printUsage();
+    console.log(localCmd.usage());
     return subcommand ? 0 : 1;
   }
 
@@ -44,8 +33,8 @@ export async function local(): Promise<number> {
       return indexCore(source, args);
     }
     default:
-      printError(`Unknown local command: ${subcommand}`);
-      console.log('Available commands: search, read, index');
+      printError(localCmd.unknownCommand(subcommand));
+      console.log(localCmd.availableCommands);
       return 1;
   }
 }
