@@ -17,7 +17,7 @@ export const policySections: PolicySection[] = [
     id: "intro",
     title: null,
     paragraphs: [
-      "This page lets you set your data sharing preferences for alignment-hive. You don't have to share anything to use the platform, but sharing session data helps the AI safety research community. You can review and change these preferences at any time — changes apply going forward and do not affect previously shared data.",
+      "This page lets you set your data sharing preferences for alignment-hive. You don't have to share anything to use the platform, but sharing session data helps the AI safety research community. You can review and change these preferences at any time at alignment-hive.com/consent, changes apply going forward and do not affect previously shared data.",
       "This data has many potential applications for AI safety research: measuring uplift from coding agents, constructing realistic evaluations from real-world usage, and sharing skills, tools, and knowledge across the community.",
     ],
   },
