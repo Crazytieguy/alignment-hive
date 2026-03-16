@@ -22,7 +22,7 @@ STATE_DIR="$(resolve_state_dir)"
 # Get plugin version
 PLUGIN_JSON="$PLUGIN_ROOT/.claude-plugin/plugin.json"
 if [ -f "$PLUGIN_JSON" ]; then
-  PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+  PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "unknown")
 else
   PLUGIN_VERSION="unknown"
 fi

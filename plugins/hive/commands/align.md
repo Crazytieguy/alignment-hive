@@ -7,7 +7,7 @@ allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:
 
 ## Status
 
-!`${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh`
+!`${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh 2>/dev/null || echo "Status unavailable"`
 
 ## Consent Status
 
