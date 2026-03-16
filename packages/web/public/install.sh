@@ -331,7 +331,7 @@ check_auth() {
 }
 
 # --- Step 7: Device auth flow ---
-# Based on docs/workos-device-auth-reference.md
+
 
 device_auth_flow() {
   local response
