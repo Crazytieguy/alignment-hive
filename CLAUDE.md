@@ -58,6 +58,8 @@ Plugin locations:
 - `plugins/llms-fetch-mcp/.claude-plugin/plugin.json`
 - `plugins/remote-kernels/.claude-plugin/plugin.json`
 
+The hive plugin has a `cli-version` file (`plugins/hive/cli-version`) that must match the version in `packages/hive-cli/package.json`. This controls which binary version users download. Always bump both together.
+
 For the mats plugin specifically:
 - **Minor version bump** (e.g., 0.1.x → 0.2.0): New best practices content - users will be prompted to review
 - **Patch version bump** (e.g., 0.1.9 → 0.1.10): Bug fixes, typos, or other changes - users won't be re-prompted
