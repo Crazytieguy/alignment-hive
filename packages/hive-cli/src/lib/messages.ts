@@ -288,6 +288,8 @@ export const setup = {
   aliasActivate: (sourceCmd: string): string => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
   aliasFailed: "Couldn't add command automatically.",
   alreadySetUp: 'hive-mind command already set up',
+  aliasSetupFailed: 'Failed to set up alias',
+  aliasAdded: 'hive-mind command added to shell config',
 };
 
 export const indexCmd = {
@@ -348,6 +350,29 @@ export const uploadCmd = {
   failed: (error: string): string => `failed: ${error}`,
 };
 
+export const localCmd = {
+  usage: (): string => {
+    return [
+      'Usage: hive local <search|read|index>',
+      '',
+      'Search and read raw Claude Code session files (no extraction needed).',
+      '',
+      'Commands:',
+      '  search    Search sessions for a pattern',
+      '  read      Read a session by ID prefix',
+      '  index     List sessions with statistics',
+    ].join('\n');
+  },
+  unknownCommand: (cmd: string): string => `Unknown local command: ${cmd}`,
+  availableCommands: 'Available commands: search, read, index',
+};
+
+export const reviewCmd = {
+  running: (url: string): string => `Review UI running at ${url}`,
+  stopHint: 'Press Ctrl+C to stop.',
+};
+
+
 // ── Hive plugin messages ──
 
 const NOT_AUTHENTICATED = 'Not authenticated. Run the install script to authenticate.';
@@ -358,14 +383,35 @@ export const hive = {
     enableSuccess: (project: string): string => `Sharing enabled for ${project}`,
     enableFailed: 'Failed to enable sharing for project.',
     disableSuccess: (project: string): string => `Sharing disabled for ${project}`,
-    disableServerWarning: 'Warning: local marker created but failed to update server.',
+    disableServerWarning: 'Sharing disabled locally, but could not sync with server.',
     statusNotAuthenticated: 'Not authenticated',
     statusFetchFailed: 'Failed to fetch consent status',
-    statusNotCompleted: 'Web consent: not completed',
-    statusCompleted: 'Web consent: completed',
+    statusNotCompleted: 'Data sharing preferences: not set',
+    statusCompleted: 'Data sharing preferences: completed',
     statusSharing: (enabled: boolean): string => `Session sharing: ${enabled ? 'enabled' : 'disabled'}`,
     statusProject: (canonical: string, enabled: boolean): string =>
       `Current project (${canonical}): ${enabled ? 'enabled' : 'not enabled'}`,
+    // consent-setup command messages
+    fallbackUrl: (url: string): string => `Complete data sharing preferences at: ${url}`,
+    openPrompt: (url: string): string => `Open ${url} to set data sharing preferences?`,
+    visitWhenReady: (url: string): string => `Visit ${url} when ready.`,
+    waiting: 'Waiting for preferences to be saved...',
+    timedOut: 'Timed out. Visit the URL above and try again.',
+    completed: 'Preferences saved',
+    sharingDeclined: 'Session sharing declined.',
+    sharingDisabled: 'Session sharing is disabled. Change at https://alignment-hive.com/consent',
+    noProjects: 'No Claude Code projects detected.',
+    projectsHeader: 'Detected Claude Code projects:',
+    enableManually: 'To enable sharing, run: hive consent enable <project-path>',
+    selectProjects: 'Select projects to share sessions from:',
+    noChanges: 'No changes.',
+    enabledProject: (project: string): string => `Sharing enabled for ${project}`,
+    enableSetupFailed: (project: string): string => `Failed to enable sharing for ${project}`,
+    disabledProject: (project: string): string => `Sharing disabled for ${project}`,
+    disableSetupFailed: (project: string): string => `Failed to disable sharing for ${project}`,
+    summary: (enabled: number, disabled: number): string => `${enabled} enabled, ${disabled} disabled.`,
+    uploadReviewInfo: 'Sessions are uploaded after a 24-hour review period.',
+    uploadHelpHint: 'Run `hive upload --help` to manage uploads.',
   },
   upload: {
     notAuthenticated: NOT_AUTHENTICATED,
@@ -398,7 +444,7 @@ export const hive = {
     snoozeInProgressNote: 'Any in-progress uploads will also check snooze before uploading.',
     invalidDuration: (duration: string): string =>
       `Invalid duration: "${duration}". Use format like 30m, 2h, 1d, 7d.`,
-    consentUnknown: 'Consent status unknown (offline or not authenticated). Eligibility may be inaccurate.',
+    consentUnknown: 'Could not verify sharing preferences (offline or not authenticated). Upload status may be inaccurate.',
   },
   sessionStart: {
     alignNudgeNew: 'Recommendations available: run /hive:align',

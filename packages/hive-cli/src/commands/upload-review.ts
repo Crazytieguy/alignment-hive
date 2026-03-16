@@ -3,6 +3,7 @@ import { fetchRequestHandler } from '@trpc/server/adapters/fetch';
 // Embedded at compile time by Bun. The .bundle extension avoids Bun's HTML bundling feature.
 import reviewHtmlPath from '../../../review-app/dist/review.bundle' with { type: 'file' };
 import { ensureStateDir, getConfig } from '../lib/config';
+import { reviewCmd } from '../lib/messages';
 import { printInfo, printSuccess } from '../lib/output';
 import { createReviewRouter } from '../lib/review-router';
 
@@ -36,8 +37,8 @@ export async function uploadReview(): Promise<number> {
   });
 
   const url = `http://localhost:${server.port}`;
-  printSuccess(`Review UI running at ${url}`);
-  printInfo('Press Ctrl+C to stop.');
+  printSuccess(reviewCmd.running(url));
+  printInfo(reviewCmd.stopHint);
 
   try {
     if (process.platform === 'darwin') {

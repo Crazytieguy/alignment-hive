@@ -6,6 +6,9 @@ import { ReadStream } from 'node:tty';
 import { checkAuthStatus } from '../lib/auth';
 import { getCanonicalProjectName, isWorktree } from '../lib/config';
 import { disableProject, enableProject, getConsentStatus, getEnabledProjects } from '../lib/convex';
+import { hive } from '../lib/messages';
+
+const msg = hive.consent;
 
 /**
  * Get a working TTY input stream. Works around a Bun bug where process.stdin
@@ -139,7 +142,7 @@ export async function consentSetup(): Promise<number> {
 async function consentSetupInner(): Promise<number> {
   const authStatus = await checkAuthStatus(true);
   if (authStatus.needsLogin) {
-    console.error('Not authenticated. Run the install script to authenticate.');
+    console.error(msg.notAuthenticated);
     return 1;
   }
 
@@ -154,32 +157,32 @@ async function consentSetupInner(): Promise<number> {
       const mod = await import('@inquirer/prompts');
       confirm = mod.confirm;
     } catch {
-      console.log(`  Complete data sharing preferences at: ${consentUrl}`);
+      console.log(`  ${msg.fallbackUrl(consentUrl)}`);
       return 0;
     }
 
     const shouldOpen = await confirm({
-      message: `Open ${consentUrl} to set data sharing preferences?`,
+      message: msg.openPrompt(consentUrl),
       default: true,
     }, { input: getInput() });
 
     if (!shouldOpen) {
-      console.log(`  Visit ${consentUrl} when ready.`);
+      console.log(`  ${msg.visitWhenReady(consentUrl)}`);
       return 0;
     }
 
     openUrl(consentUrl);
-    console.log('  Waiting for consent to be completed...');
+    console.log(`  ${msg.waiting}`);
 
     const result = await waitForConsent();
     if (!result) {
-      console.error('  Timed out waiting for consent. Visit the URL above and try again.');
+      console.error(`  ${msg.timedOut}`);
       return 1;
     }
-    console.log('  ✓ Consent completed');
+    console.log(`  ✓ ${msg.completed}`);
 
     if (!result.sessionSharing) {
-      console.log('  Session sharing declined.');
+      console.log(`  ${msg.sharingDeclined}`);
       return 0;
     }
 
@@ -187,7 +190,7 @@ async function consentSetupInner(): Promise<number> {
   }
 
   if (!consent.sessionSharing) {
-    console.log('  Session sharing is disabled. Change at https://alignment-hive.com/consent');
+    console.log(`  ${msg.sharingDisabled}`);
     return 0;
   }
 
@@ -197,7 +200,7 @@ async function consentSetupInner(): Promise<number> {
     getEnabledProjects(),
   ]);
   if (projects.length === 0) {
-    console.log('  No Claude Code projects detected.');
+    console.log(`  ${msg.noProjects}`);
     return 0;
   }
 
@@ -209,17 +212,17 @@ async function consentSetupInner(): Promise<number> {
     const mod = await import('@inquirer/prompts');
     checkbox = mod.checkbox;
   } catch {
-    console.log('\n  Detected Claude Code projects:');
+    console.log(`\n  ${msg.projectsHeader}`);
     projects.forEach((p, i) => {
       const marker = enabledSet.has(p.canonical) ? '✓' : ' ';
       console.log(`  ${marker} ${i + 1}. ${p.canonical}`);
     });
-    console.log('\n  To enable sharing, run: hive consent enable <project-path>');
+    console.log(`\n  ${msg.enableManually}`);
     return 0;
   }
 
   const selected = await checkbox({
-    message: 'Select projects to share sessions from:',
+    message: msg.selectProjects,
     loop: false,
     choices: projects.map((p) => ({
       name: p.canonical,
@@ -235,34 +238,33 @@ async function consentSetupInner(): Promise<number> {
   const toDisable = [...enabledSet].filter((p) => localSet.has(p) && !selectedSet.has(p));
 
   if (toEnable.length === 0 && toDisable.length === 0) {
-    console.log('  No changes.');
+    console.log(`  ${msg.noChanges}`);
     return 0;
   }
 
   for (const project of toEnable) {
     const success = await enableProject(project);
     if (success) {
-      console.log(`  ✓ Sharing enabled for ${project}`);
+      console.log(`  ✓ ${msg.enabledProject(project)}`);
     } else {
-      console.error(`  ✗ Failed to enable sharing for ${project}`);
+      console.error(`  ✗ ${msg.enableSetupFailed(project)}`);
     }
   }
 
   for (const project of toDisable) {
     const success = await disableProject(project);
     if (success) {
-      console.log(`  ✗ Sharing disabled for ${project}`);
+      console.log(`  – ${msg.disabledProject(project)}`);
     } else {
-      console.error(`  ✗ Failed to disable sharing for ${project}`);
+      console.error(`  ✗ ${msg.disableSetupFailed(project)}`);
     }
   }
 
-  console.log(`\n  ${toEnable.length} enabled, ${toDisable.length} disabled.`);
+  console.log(`\n  ${msg.summary(toEnable.length, toDisable.length)}`);
 
   if (toEnable.length > 0) {
-    console.log('\n  Sessions are uploaded after a 24-hour review period.');
-    console.log('  Run `hive upload --help` to manage uploads.');
+    console.log(`\n  ${msg.uploadReviewInfo}`);
+    console.log(`  ${msg.uploadHelpHint}`);
   }
-
   return 0;
 }
