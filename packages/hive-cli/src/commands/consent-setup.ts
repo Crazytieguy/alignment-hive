@@ -261,12 +261,7 @@ async function consentSetupInner(): Promise<number> {
 
   if (toEnable.length > 0) {
     console.log('\n  Sessions are uploaded after a 24-hour review period.');
-    console.log('  You can manage uploads with these commands:');
-    console.log('    hive upload review   — preview sessions in a local web UI before upload');
-    console.log('    hive upload list     — see upload status of all sessions');
-    console.log('    hive upload exclude  — exclude a session from being uploaded');
-    console.log('    hive upload snooze   — pause uploads temporarily');
-    console.log('    hive upload --help   — see all available options');
+    console.log('  Run `hive upload --help` to manage uploads.');
   }
 
   return 0;
