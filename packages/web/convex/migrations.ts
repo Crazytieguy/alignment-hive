@@ -197,3 +197,80 @@ export const lowercaseGitRemotes = internalAction({
     return { projectConsent: totalConsent, sessions: totalSessions };
   },
 });
+
+// --- Migration: remove legacy consentedAt field ---
+
+/** Remove consentedAt from a batch of dataSharingConsent records. */
+export const removeConsentedAtGlobalBatch = internalMutation({
+  args: { cursor: v.optional(v.string()) },
+  handler: async (ctx, { cursor }) => {
+    const page = await ctx.db
+      .query("dataSharingConsent")
+      .paginate({ numItems: BATCH_SIZE, cursor: cursor ?? null });
+
+    let migrated = 0;
+    for (const doc of page.page) {
+      if ('consentedAt' in doc) {
+        await ctx.db.patch(doc._id, { consentedAt: undefined });
+        migrated++;
+      }
+    }
+
+    return { migrated, isDone: page.isDone, cursor: page.continueCursor };
+  },
+});
+
+/** Remove consentedAt from a batch of projectConsent records. */
+export const removeConsentedAtProjectBatch = internalMutation({
+  args: { cursor: v.optional(v.string()) },
+  handler: async (ctx, { cursor }) => {
+    const page = await ctx.db
+      .query("projectConsent")
+      .paginate({ numItems: BATCH_SIZE, cursor: cursor ?? null });
+
+    let migrated = 0;
+    for (const doc of page.page) {
+      if ('consentedAt' in doc) {
+        await ctx.db.patch(doc._id, { consentedAt: undefined });
+        migrated++;
+      }
+    }
+
+    return { migrated, isDone: page.isDone, cursor: page.continueCursor };
+  },
+});
+
+/** Run the consentedAt removal migration. */
+export const removeConsentedAt = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ global: number; project: number }> => {
+    let totalGlobal = 0;
+    let totalProject = 0;
+
+    type BatchResult = { migrated: number; isDone: boolean; cursor: string };
+
+    let cursor: string | undefined;
+    while (true) {
+      const result: BatchResult = await ctx.runMutation(
+        internal.migrations.removeConsentedAtGlobalBatch,
+        { cursor },
+      );
+      totalGlobal += result.migrated;
+      if (result.isDone) break;
+      cursor = result.cursor;
+    }
+
+    cursor = undefined;
+    while (true) {
+      const result: BatchResult = await ctx.runMutation(
+        internal.migrations.removeConsentedAtProjectBatch,
+        { cursor },
+      );
+      totalProject += result.migrated;
+      if (result.isDone) break;
+      cursor = result.cursor;
+    }
+
+    return { global: totalGlobal, project: totalProject };
+  },
+});
