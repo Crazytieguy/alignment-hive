@@ -122,7 +122,8 @@ export function getProjectIdentifiers(cwd: string): { directory: string; gitRemo
       .replace(/^git@/, '')
       .replace(/^https?:\/\//, '')
       .replace(':', '/')
-      .replace(/\.git$/, '');
+      .replace(/\.git$/, '')
+      .toLowerCase();
   } catch {
     // No remote
   }
@@ -153,7 +154,10 @@ export function matchesProject<T extends { directories: Array<string>; gitRemote
   identifiers: { directory?: string; gitRemote?: string },
 ): T | undefined {
   for (const p of enabledProjects) {
-    if (identifiers.gitRemote && p.gitRemotes.includes(identifiers.gitRemote)) return p;
+    if (identifiers.gitRemote) {
+      const lower = identifiers.gitRemote.toLowerCase();
+      if (p.gitRemotes.some((r) => r.toLowerCase() === lower)) return p;
+    }
     if (identifiers.directory && p.directories.includes(identifiers.directory)) return p;
   }
   return undefined;

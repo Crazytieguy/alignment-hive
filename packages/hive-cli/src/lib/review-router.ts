@@ -120,7 +120,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
 
           const session = result.session;
           const rawMtime = session.mtime.toISOString();
-          const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids);
+          const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids, stateDir);
 
           if (uploadResult.success) {
             await recordUploadedSession(stateDir, session.sessionId, rawMtime);

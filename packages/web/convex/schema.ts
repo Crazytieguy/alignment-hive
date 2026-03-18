@@ -24,6 +24,7 @@ export default defineSchema({
     lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
     summary: v.optional(v.string()),
+    sessionStartGitCommitHash: v.optional(v.string()),
     upload: v.optional(
       v.object({
         storageId: v.id("_storage"),
@@ -94,4 +95,22 @@ export default defineSchema({
     .index("by_user_project", ["userId", "project"])
     .index("by_user_directory", ["userId", "directory"])
     .index("by_user_remote", ["userId", "gitRemote"]),
+
+  githubInstallations: defineTable({
+    installationId: v.number(),
+    accountLogin: v.string(),
+    accountId: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_installation_id", ["installationId"])
+    .index("by_account_id", ["accountId"]),
+
+  linkedRepos: defineTable({
+    installationId: v.number(),
+    gitRemote: v.string(), // "github.com/owner/repo"
+    repoId: v.number(),
+  })
+    .index("by_git_remote", ["gitRemote"])
+    .index("by_installation_id", ["installationId"])
+    .index("by_repo_id", ["repoId"]),
 });

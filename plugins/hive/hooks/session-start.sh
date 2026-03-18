@@ -4,8 +4,17 @@ set -euo pipefail
 # SessionStart hook for the hive plugin.
 # Minimal bash: sets up env, registers transcript dir, delegates to binary.
 # Prefer exiting 0 — a non-zero exit just shows a small warning message to the user.
+#
+# Only runs full logic on "startup" and "clear" (fresh context).
+# Skips "resume" and "compact" (continuations where state is already recorded).
 
 PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
+
+# --- Parse hook input from stdin ---
+
+HOOK_INPUT=$(cat)
+SOURCE=$(echo "$HOOK_INPUT" | jq -r '.source // "startup"')
+SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // ""')
 
 # --- Resolve main worktree path for state dir ---
 
@@ -32,6 +41,21 @@ trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error 
 
 if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/dev-env.sh" ]; then
   echo "export PATH=\"$CLAUDE_PROJECT_DIR/.dev:\$PATH\"" >> "$CLAUDE_ENV_FILE"
+fi
+
+# --- Skip for resume/compact (continuations don't need fresh state) ---
+
+if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ]; then
+  exit 0
+fi
+
+# --- Record git commit hash at session start ---
+
+if [ -n "$SESSION_ID" ]; then
+  COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
+  if [ -n "$COMMIT_HASH" ]; then
+    echo "$COMMIT_HASH" > "$STATE_DIR/${SESSION_ID}-commit.txt"
+  fi
 fi
 
 # --- Register transcript directory for local retrieval ---

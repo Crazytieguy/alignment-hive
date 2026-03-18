@@ -77,6 +77,7 @@ export async function generateUploadUrl(
     lineCount: number;
     lastModified?: number;
     parentSessionId?: string;
+    sessionStartGitCommitHash?: string;
   },
 ): Promise<string | null> {
   try {
@@ -154,12 +155,22 @@ export async function getConsentHistory(identifiers: ProjectIdentifier): Promise
   }
 }
 
+/** Narrow ProjectIdentifier (both optional) to the Convex union (at least one required). */
+function narrowIdentifier(
+  id: ProjectIdentifier,
+): { directory: string; gitRemote?: string } | { directory?: string; gitRemote: string } {
+  if (id.directory) return { directory: id.directory, gitRemote: id.gitRemote };
+  if (id.gitRemote) return { gitRemote: id.gitRemote };
+  throw new Error('At least one of directory or gitRemote is required');
+}
+
 export async function enableProject(identifier: ProjectIdentifier): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return false;
-    // Cast: callers always provide at least directory, satisfying the Convex union
-    await client.mutation(api.consent.enableProject, { identifier } as never);
+    await client.mutation(api.consent.enableProject, {
+      identifier: narrowIdentifier(identifier),
+    });
     return true;
   } catch (error) {
     debugLog(`enableProject failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -171,12 +182,26 @@ export async function disableProject(identifier: ProjectIdentifier): Promise<boo
   try {
     const client = await getAuthenticatedClient();
     if (!client) return false;
-    // Cast: callers always provide at least directory, satisfying the Convex union
-    await client.mutation(api.consent.disableProject, { identifier } as never);
+    await client.mutation(api.consent.disableProject, {
+      identifier: narrowIdentifier(identifier),
+    });
     return true;
   } catch (error) {
     debugLog(`disableProject failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
+  }
+}
+
+export type RepoLinkStatus = "linked" | "not-linked";
+
+export async function getRepoLinkStatus(gitRemote: string): Promise<RepoLinkStatus | null> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return null;
+    return await client.query(api.github.getRepoLinkStatus, { gitRemote: gitRemote.toLowerCase() });
+  } catch (error) {
+    debugLog(`getRepoLinkStatus failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
 }
 

@@ -224,6 +224,40 @@ export const getEnabledProjects = query({
   },
 });
 
+/** Get all per-project consents (latest event per group, including disabled). */
+export const getAllProjects = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return [];
+    }
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
+      .first();
+
+    if (!user) {
+      return [];
+    }
+
+    const { groups } = await loadAndGroupUserConsent(ctx, user._id);
+
+    return groups.map((group) => {
+      const latest = group.events.reduce((a, b) =>
+        a.consentedAt > b.consentedAt ? a : b,
+      );
+      return {
+        directories: [...group.directories],
+        gitRemotes: [...group.gitRemotes],
+        sessionSharing: latest.sessionSharing,
+        consentedAt: latest.consentedAt,
+      };
+    });
+  },
+});
+
 /** Get distinct projects and session counts for the authenticated user (for existing data step). */
 export const getUserSessionProjects = query({
   args: {},

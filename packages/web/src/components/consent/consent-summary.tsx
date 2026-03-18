@@ -86,6 +86,12 @@ export default function ConsentSummary({
                 Full policy
               </Link>
               <Link
+                to="/consent/projects"
+                className="text-primary underline underline-offset-4 hover:text-primary/80 transition-colors"
+              >
+                Manage projects
+              </Link>
+              <Link
                 to="/install"
                 className="text-primary underline underline-offset-4 hover:text-primary/80 transition-colors"
               >

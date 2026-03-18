@@ -28,7 +28,7 @@ export const policySections: PolicySection[] = [
       "Your Claude Code sessions, with certain content excluded: images, PDFs, and other non-text content are stripped out. Sessions go through automated secret removal before upload. This catches the vast majority of secrets, but we can't guarantee it catches everything. If you know a session contains sensitive credentials, it's worth reviewing or excluding it.",
       "Keep in mind that your sessions may contain other people's information, like pasted messages or collaborator names. If a session contains sensitive third-party content, consider excluding it.",
       "By sharing sessions, you grant alignment-hive a non-exclusive, royalty-free license to use, store, and share your session data for the purposes described in this policy. You represent that you have the right to share this data, and that doing so does not violate any agreements you are bound by (e.g. employer policies or NDAs).",
-      "We also use the commit hashes in your sessions to correlate them with the state of your codebase, in order to reproduce the environment the session ran in. For private repos, this requires granting us read access, which is a separate per-project opt-in.",
+      "We also use the commit hashes in your sessions to correlate them with the state of your codebase. For public repos, this works automatically. For private repos, you can optionally install our GitHub App, which grants read access to all files and history in the selected repositories. You can choose specific repositories and revoke access at any time.",
     ],
   },
   {
@@ -69,6 +69,14 @@ export const policySections: PolicySection[] = [
 
 export const policyFooter =
   "alignment-hive is operated by Yoav Tzfati. For questions or requests, contact yoav.tzfati@gmail.com.";
+
+/** Short explanation shown on the projects management page. */
+export const projectSharingNote =
+  "Disabling sharing for a project stops future sessions from being uploaded. Previously uploaded data is not automatically deleted — contact yoav.tzfati@gmail.com to request deletion.";
+
+/** Explanation of code context for the GitHub App install step. */
+export const codeContextExplanation =
+  "When you share sessions, researchers can see your conversation with Claude but not the code it references. For public repos this is resolved automatically. For private repos, you can grant read access to specific repositories via our GitHub App — this lets researchers see the exact code state at each commit referenced in your sessions. You choose which repositories, and you can revoke access at any time from GitHub.";
 
 export type ConsentQuestion =
   | "sessionSharing"

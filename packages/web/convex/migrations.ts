@@ -84,13 +84,15 @@ export const migrateProjectIdentifiers = internalAction({
     let totalConsent = 0;
     let totalSessions = 0;
 
+    type BatchResult = { migrated: number; isDone: boolean; cursor: string };
+
     // Migrate projectConsent
     let cursor: string | undefined;
     while (true) {
-      const result = await ctx.runMutation(
+      const result: BatchResult = await ctx.runMutation(
         internal.migrations.migrateProjectConsentBatch,
         { cursor },
-      ) as { migrated: number; isDone: boolean; cursor: string };
+      );
       totalConsent += result.migrated;
       if (result.isDone) break;
       cursor = result.cursor;
@@ -99,10 +101,102 @@ export const migrateProjectIdentifiers = internalAction({
     // Migrate sessions
     cursor = undefined;
     while (true) {
-      const result = await ctx.runMutation(
+      const result: BatchResult = await ctx.runMutation(
         internal.migrations.migrateSessionsBatch,
         { cursor },
-      ) as { migrated: number; isDone: boolean; cursor: string };
+      );
+      totalSessions += result.migrated;
+      if (result.isDone) break;
+      cursor = result.cursor;
+    }
+
+    return { projectConsent: totalConsent, sessions: totalSessions };
+  },
+});
+
+// --- Migration: lowercase gitRemote ---
+
+/** Lowercase gitRemote in a batch of projectConsent records. */
+export const lowercaseProjectConsentBatch = internalMutation({
+  args: { cursor: v.optional(v.string()) },
+  handler: async (ctx, { cursor }) => {
+    const page = await ctx.db
+      .query("projectConsent")
+      .paginate({ numItems: BATCH_SIZE, cursor: cursor ?? null });
+
+    let migrated = 0;
+    for (const doc of page.page) {
+      const remote = (doc as Record<string, unknown>).gitRemote as
+        | string
+        | undefined;
+      if (remote && remote !== remote.toLowerCase()) {
+        await ctx.db.patch(doc._id, {
+          gitRemote: remote.toLowerCase(),
+        } as Record<string, unknown>);
+        migrated++;
+      }
+    }
+
+    return {
+      migrated,
+      isDone: page.isDone,
+      cursor: page.continueCursor,
+    };
+  },
+});
+
+/** Lowercase gitRemote in a batch of session records. */
+export const lowercaseSessionsBatch = internalMutation({
+  args: { cursor: v.optional(v.string()) },
+  handler: async (ctx, { cursor }) => {
+    const page = await ctx.db
+      .query("sessions")
+      .paginate({ numItems: BATCH_SIZE, cursor: cursor ?? null });
+
+    let migrated = 0;
+    for (const doc of page.page) {
+      if (doc.gitRemote && doc.gitRemote !== doc.gitRemote.toLowerCase()) {
+        await ctx.db.patch(doc._id, {
+          gitRemote: doc.gitRemote.toLowerCase(),
+        });
+        migrated++;
+      }
+    }
+
+    return {
+      migrated,
+      isDone: page.isDone,
+      cursor: page.continueCursor,
+    };
+  },
+});
+
+/** Run the lowercase gitRemote migration. Pages through both tables. */
+export const lowercaseGitRemotes = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ projectConsent: number; sessions: number }> => {
+    let totalConsent = 0;
+    let totalSessions = 0;
+
+    type BatchResult = { migrated: number; isDone: boolean; cursor: string };
+
+    let cursor: string | undefined;
+    while (true) {
+      const result: BatchResult = await ctx.runMutation(
+        internal.migrations.lowercaseProjectConsentBatch,
+        { cursor },
+      );
+      totalConsent += result.migrated;
+      if (result.isDone) break;
+      cursor = result.cursor;
+    }
+
+    cursor = undefined;
+    while (true) {
+      const result: BatchResult = await ctx.runMutation(
+        internal.migrations.lowercaseSessionsBatch,
+        { cursor },
+      );
       totalSessions += result.migrated;
       if (result.isDone) break;
       cursor = result.cursor;

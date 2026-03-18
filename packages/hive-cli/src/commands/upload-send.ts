@@ -110,7 +110,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     }
 
     printInfo(hive.upload.uploadingSession(id));
-    const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, session.mtime.toISOString(), ids);
+    const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, session.mtime.toISOString(), ids, stateDir);
     if (uploadResult.success) {
       await recordUploadedSession(stateDir, session.sessionId, session.mtime.toISOString());
       printSuccess(hive.upload.uploadedSession(id));
@@ -168,7 +168,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     const results = await Promise.allSettled(
       batch.map(async (session) => {
         const rawMtime = session.mtime.toISOString();
-        const result = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids);
+        const result = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids, stateDir);
         return { sessionId: session.sessionId, rawMtime, ...result };
       }),
     );

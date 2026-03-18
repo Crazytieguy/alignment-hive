@@ -185,14 +185,18 @@ install_hive_plugin() {
 # --- Step 6: Install hive binary globally ---
 
 install_hive_binary() {
-  # Dev mode: use pre-built dev binary
+  # Dev mode: compile and use dev binary
   if [ "${ALIGNMENT_HIVE_DEV:-}" = "1" ]; then
     local repo_root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+    info "Building dev binary..."
+    (cd "$repo_root" && bun run --filter '@alignment-hive/hive-cli' build:dev) || {
+      warn "Dev binary build failed. Install may use stale binary."
+    }
     if [ -x "$repo_root/.dev/hive" ]; then
       export PATH="$repo_root/.dev:$PATH"
       success "Using dev binary at $repo_root/.dev/hive"
     else
-      info "Dev binary not found. Build with: bun run --filter '@alignment-hive/hive-cli' build:dev"
+      info "Dev binary not found after build."
     fi
     return 0
   fi

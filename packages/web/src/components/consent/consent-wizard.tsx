@@ -11,6 +11,9 @@ import {
 import type { ConsentChoices } from "@/routes/_authenticated/consent";
 import { PolicyParagraph } from "@/components/consent/policy-paragraph";
 import { Button, cn } from "@alignment-hive/ui";
+import { useGithubStatus } from "@/hooks/use-github-status";
+import { GITHUB_APP_INSTALL_URL } from "@/lib/constants";
+import { codeContextExplanation } from "@/components/consent/policy-content";
 
 const STORAGE_KEY = "alignment-hive-consent-step";
 
@@ -56,6 +59,7 @@ export default function ConsentWizard({
         question: QuestionConfig | null;
         creditQuestion: QuestionConfig | null;
       }
+    | { kind: "connect-github" }
     | { kind: "existing-projects" };
 
   const sectionSteps = useMemo(() => {
@@ -89,12 +93,16 @@ export default function ConsentWizard({
     const result: Array<Step> = [];
     for (let i = 0; i < sectionSteps.length; i++) {
       result.push(sectionSteps[i]);
-      if (i === sessionSharingStepIndex && showExistingProjects) {
-        result.push({ kind: "existing-projects" });
+      if (i === sessionSharingStepIndex && choices.sessionSharing) {
+        result.push({ kind: "connect-github" });
+        if (showExistingProjects) {
+          result.push({ kind: "existing-projects" });
+        }
       }
     }
     return result;
   }, [
+    choices.sessionSharing,
     declinedSharing,
     sectionSteps,
     sessionSharingStepIndex,
@@ -151,6 +159,7 @@ export default function ConsentWizard({
   const canAdvance = useCallback(() => {
     if (!step) return false;
     if (step.kind === "existing-projects") return true;
+    if (step.kind === "connect-github") return true;
     const q = step.question;
     const cq = step.creditQuestion;
     if (q && choices[q.id] === null) return false;
@@ -193,6 +202,11 @@ export default function ConsentWizard({
               {step.section.title}
             </span>
           )}
+          {step.kind === "connect-github" && (
+            <span className="text-xs text-muted-foreground font-medium">
+              GitHub
+            </span>
+          )}
           {step.kind === "existing-projects" && (
             <span className="text-xs text-muted-foreground font-medium">
               Existing sessions
@@ -207,14 +221,16 @@ export default function ConsentWizard({
           key={clampedStep}
           className="animate-in fade-in slide-in-from-right-4 duration-300"
         >
-          {step.kind === "existing-projects" ? (
+          {step.kind === "connect-github" ? (
+            <ConnectGitHubStep />
+          ) : step.kind === "existing-projects" ? (
             <ExistingProjectsStep
               existingProjects={existingProjects}
               selectedProjects={selectedProjects}
               toggleProject={toggleProject}
               setSelectedProjects={setSelectedProjects}
             />
-          ) : (
+          ) : step.kind === "section" ? (
             <SectionStep
               step={step}
               currentStep={clampedStep}
@@ -223,7 +239,7 @@ export default function ConsentWizard({
               onChoice={onChoice}
               accessList={accessList}
             />
-          )}
+          ) : null}
         </div>
 
         {/* Navigation */}
@@ -356,6 +372,50 @@ function SectionStep({
 
       {isLastStep && (
         <p className="mt-8 text-sm text-muted-foreground">{policyFooter}</p>
+      )}
+    </>
+  );
+}
+
+function ConnectGitHubStep() {
+  const githubStatus = useGithubStatus();
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold mb-6 tracking-tight">
+        Code context for private repos
+      </h2>
+      <p className="text-[0.938rem] leading-relaxed text-foreground/90 mb-6">
+        {codeContextExplanation}
+      </p>
+
+      {githubStatus === "installed" && (
+        <div className="rounded-lg border-2 border-green-500/30 bg-green-500/5 px-5 py-4 mb-6">
+          <p className="text-sm font-medium text-green-700 dark:text-green-400">
+            Code context enabled! The repos you selected will be available to
+            researchers viewing your sessions.
+          </p>
+        </div>
+      )}
+
+      {githubStatus === "requested" && (
+        <div className="rounded-lg border-2 border-yellow-500/30 bg-yellow-500/5 px-5 py-4 mb-6">
+          <p className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
+            Your org admin has been notified. Repos will appear once approved.
+            You can continue setup now and link repos later.
+          </p>
+        </div>
+      )}
+
+      {!githubStatus && (
+        <div className="space-y-3">
+          <Button asChild>
+            <a href={GITHUB_APP_INSTALL_URL}>Grant repo access</a>
+          </Button>
+          <p className="text-sm text-muted-foreground">
+            You can also do this later from your project settings.
+          </p>
+        </div>
       )}
     </>
   );

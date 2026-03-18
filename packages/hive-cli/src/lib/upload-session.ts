@@ -1,9 +1,19 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { generateUploadUrl, saveUpload } from './convex';
 import { parseJsonl, transformEntry } from './extraction';
 import { sanitizeDeep } from './sanitize';
 import { extractSessionSummary } from './summary';
 import type { KnownEntry } from '@alignment-hive/session-data';
+
+async function readCommitHash(stateDir: string, sessionId: string): Promise<string | undefined> {
+  try {
+    const hash = await readFile(join(stateDir, `${sessionId}-commit.txt`), 'utf-8');
+    return hash.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function uploadSingleSession(
   sessionPath: string,
@@ -11,6 +21,7 @@ export async function uploadSingleSession(
   checkoutId: string,
   rawMtime: string,
   identifiers: { directory: string; gitRemote?: string },
+  stateDir?: string,
 ): Promise<{ success: boolean; error?: string }> {
   let rawContent: string;
   try {
@@ -33,12 +44,14 @@ export async function uploadSingleSession(
   const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
 
   const lastModified = new Date(rawMtime).getTime();
+  const commitHash = stateDir ? await readCommitHash(stateDir, sessionId) : undefined;
   const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId,
     directory: identifiers.directory,
     gitRemote: identifiers.gitRemote,
     lineCount: entries.length,
     lastModified: isFinite(lastModified) ? lastModified : undefined,
+    sessionStartGitCommitHash: commitHash,
   });
   if (!uploadUrl) {
     return { success: false, error: 'Failed to get upload URL' };

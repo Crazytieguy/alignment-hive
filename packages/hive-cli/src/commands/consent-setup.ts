@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
 import { checkAuthStatus } from '../lib/auth';
-import { getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
-import { disableProject, enableProject, getConsentStatus, getEnabledProjects } from '../lib/convex';
+import { getConfig, getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
+import { disableProject, enableProject, getConsentStatus, getEnabledProjects, getRepoLinkStatus } from '../lib/convex';
+import { checkRepoVisibility } from '../lib/github';
 import { hive } from '../lib/messages';
 
 const msg = hive.consent;
@@ -215,7 +216,7 @@ async function consentSetupInner(): Promise<number> {
     checkbox = mod.checkbox;
   } catch {
     console.log(`\n  ${msg.projectsHeader}`);
-    projects.forEach((p, i) => {
+    projects.forEach((p: typeof projects[number], i: number) => {
       const marker = isEnabled(p) ? '✓' : ' ';
       console.log(`  ${marker} ${i + 1}. ${p.displayName}`);
     });
@@ -226,7 +227,7 @@ async function consentSetupInner(): Promise<number> {
   const selected = await checkbox({
     message: msg.selectProjects,
     loop: false,
-    choices: projects.map((p) => ({
+    choices: projects.map((p: typeof projects[number]) => ({
       name: p.displayName,
       value: p.displayName,
       checked: isEnabled(p),
@@ -234,9 +235,9 @@ async function consentSetupInner(): Promise<number> {
   }, { input: getInput() });
 
   const selectedSet = new Set(selected);
-  const toEnable = projects.filter((p) => selectedSet.has(p.displayName) && !isEnabled(p));
+  const toEnable = projects.filter((p: typeof projects[number]) => selectedSet.has(p.displayName) && !isEnabled(p));
   // Only disable projects that exist locally — don't touch projects from other machines
-  const toDisable = projects.filter((p) => !selectedSet.has(p.displayName) && isEnabled(p));
+  const toDisable = projects.filter((p: typeof projects[number]) => !selectedSet.has(p.displayName) && isEnabled(p));
 
   if (toEnable.length === 0 && toDisable.length === 0) {
     console.log(`  ${msg.noChanges}`);
@@ -267,5 +268,69 @@ async function consentSetupInner(): Promise<number> {
     console.log(`\n  ${msg.uploadReviewInfo}`);
     console.log(`  ${msg.uploadHelpHint}`);
   }
+
+  // Check linking for enabled private GitHub repos
+  const cliConfig = getConfig();
+  const enabledGithubProjects = projects.filter(
+    (p: typeof projects[number]) =>
+      selectedSet.has(p.displayName) &&
+      p.identifiers.gitRemote?.startsWith('github.com/'),
+  );
+
+  if (enabledGithubProjects.length > 0) {
+    // Check link status + visibility in parallel per project
+    const unlinkedPrivate = (
+      await Promise.all(
+        enabledGithubProjects.map(async (project) => {
+          const stateDir = cliConfig.getStateDir(project.path);
+          if (existsSync(join(stateDir, 'repo-linking-declined'))) return null;
+
+          const linkStatus = await getRepoLinkStatus(project.identifiers.gitRemote!);
+          if (linkStatus === 'linked') return null;
+
+          const repoPath = project.identifiers.gitRemote!.replace('github.com/', '');
+          const visibility = await checkRepoVisibility(repoPath);
+          return visibility !== 'public' ? project : null;
+        }),
+      )
+    ).filter((p): p is typeof projects[number] => p !== null);
+
+    if (unlinkedPrivate.length > 0) {
+      // TODO: Replace with actual GitHub App slug
+      const appSlug = process.env.GITHUB_APP_SLUG ?? 'alignment-hive';
+      const installUrl = `https://github.com/apps/${appSlug}/installations/new`;
+      console.log(`\n  Some of your private repos aren't linked for code context.`);
+      console.log(`  Install the GitHub App to let researchers see referenced code:`);
+      console.log(`  ${installUrl}`);
+      console.log(`  If you just installed the GitHub App, it may take a moment to sync.`);
+
+      try {
+        const { confirm: confirmLink } = await import('@inquirer/prompts');
+        const shouldLink = await confirmLink({
+          message: 'Open the install page?',
+          default: false,
+        }, { input: getInput() });
+
+        if (shouldLink) {
+          openUrl(installUrl);
+        } else {
+          // Record decline per-project
+          const { writeFileSync, mkdirSync } = await import('node:fs');
+          for (const project of unlinkedPrivate) {
+            const stateDir = cliConfig.getStateDir(project.path);
+            try {
+              mkdirSync(stateDir, { recursive: true });
+              writeFileSync(join(stateDir, 'repo-linking-declined'), '');
+            } catch {
+              // best effort
+            }
+          }
+        }
+      } catch {
+        // inquirer not available, just show the URL
+      }
+    }
+  }
+
   return 0;
 }

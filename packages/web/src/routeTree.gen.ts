@@ -22,6 +22,8 @@ import { Route as AuthorizedUsersIndexRouteImport } from './routes/authorized/us
 import { Route as AuthorizedSessionsIndexRouteImport } from './routes/authorized/sessions/index'
 import { Route as AuthorizedUsersUserIdRouteImport } from './routes/authorized/users/$userId'
 import { Route as AuthorizedSessionsSessionIdRouteImport } from './routes/authorized/sessions/$sessionId'
+import { Route as ApiGithubInstalledRouteImport } from './routes/api/github/installed'
+import { Route as AuthenticatedConsentProjectsRouteImport } from './routes/_authenticated/consent_.projects'
 
 const CallbackRoute = CallbackRouteImport.update({
   id: '/callback',
@@ -88,6 +90,17 @@ const AuthorizedSessionsSessionIdRoute =
     path: '/sessions/$sessionId',
     getParentRoute: () => AuthorizedRoute,
   } as any)
+const ApiGithubInstalledRoute = ApiGithubInstalledRouteImport.update({
+  id: '/api/github/installed',
+  path: '/api/github/installed',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedConsentProjectsRoute =
+  AuthenticatedConsentProjectsRouteImport.update({
+    id: '/consent_/projects',
+    path: '/consent/projects',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -98,6 +111,8 @@ export interface FileRoutesByFullPath {
   '/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/': typeof AuthorizedIndexRoute
+  '/consent/projects': typeof AuthenticatedConsentProjectsRoute
+  '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
   '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
   '/authorized/sessions': typeof AuthorizedSessionsIndexRoute
@@ -111,6 +126,8 @@ export interface FileRoutesByTo {
   '/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized': typeof AuthorizedIndexRoute
+  '/consent/projects': typeof AuthenticatedConsentProjectsRoute
+  '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
   '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
   '/authorized/sessions': typeof AuthorizedSessionsIndexRoute
@@ -127,6 +144,8 @@ export interface FileRoutesById {
   '/_authenticated/policy': typeof AuthenticatedPolicyRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/': typeof AuthorizedIndexRoute
+  '/_authenticated/consent_/projects': typeof AuthenticatedConsentProjectsRoute
+  '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
   '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
   '/authorized/sessions/': typeof AuthorizedSessionsIndexRoute
@@ -143,6 +162,8 @@ export interface FileRouteTypes {
     | '/policy'
     | '/auth/sign-out'
     | '/authorized/'
+    | '/consent/projects'
+    | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
     | '/authorized/users/$userId'
     | '/authorized/sessions'
@@ -156,6 +177,8 @@ export interface FileRouteTypes {
     | '/policy'
     | '/auth/sign-out'
     | '/authorized'
+    | '/consent/projects'
+    | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
     | '/authorized/users/$userId'
     | '/authorized/sessions'
@@ -171,6 +194,8 @@ export interface FileRouteTypes {
     | '/_authenticated/policy'
     | '/auth/sign-out'
     | '/authorized/'
+    | '/_authenticated/consent_/projects'
+    | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
     | '/authorized/users/$userId'
     | '/authorized/sessions/'
@@ -183,6 +208,7 @@ export interface RootRouteChildren {
   AuthorizedRoute: typeof AuthorizedRouteWithChildren
   CallbackRoute: typeof CallbackRoute
   AuthSignOutRoute: typeof AuthSignOutRoute
+  ApiGithubInstalledRoute: typeof ApiGithubInstalledRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -278,6 +304,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthorizedSessionsSessionIdRouteImport
       parentRoute: typeof AuthorizedRoute
     }
+    '/api/github/installed': {
+      id: '/api/github/installed'
+      path: '/api/github/installed'
+      fullPath: '/api/github/installed'
+      preLoaderRoute: typeof ApiGithubInstalledRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/consent_/projects': {
+      id: '/_authenticated/consent_/projects'
+      path: '/consent/projects'
+      fullPath: '/consent/projects'
+      preLoaderRoute: typeof AuthenticatedConsentProjectsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
@@ -285,12 +325,14 @@ interface AuthenticatedRouteChildren {
   AuthenticatedConsentRoute: typeof AuthenticatedConsentRoute
   AuthenticatedInstallRoute: typeof AuthenticatedInstallRoute
   AuthenticatedPolicyRoute: typeof AuthenticatedPolicyRoute
+  AuthenticatedConsentProjectsRoute: typeof AuthenticatedConsentProjectsRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedConsentRoute: AuthenticatedConsentRoute,
   AuthenticatedInstallRoute: AuthenticatedInstallRoute,
   AuthenticatedPolicyRoute: AuthenticatedPolicyRoute,
+  AuthenticatedConsentProjectsRoute: AuthenticatedConsentProjectsRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
@@ -323,6 +365,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthorizedRoute: AuthorizedRouteWithChildren,
   CallbackRoute: CallbackRoute,
   AuthSignOutRoute: AuthSignOutRoute,
+  ApiGithubInstalledRoute: ApiGithubInstalledRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

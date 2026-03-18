@@ -14493,7 +14493,7 @@ function getProjectIdentifiers(cwd) {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     }).trim();
-    gitRemote = remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
+    gitRemote = remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "").toLowerCase();
   } catch {}
   const mainPath = getMainWorktreePath(cwd);
   if (mainPath) {

@@ -45,17 +45,12 @@ Do not offer per-project sharing. Move on to recommendations.
 **If "Session sharing: enabled"**:
 Check the current project line.
 
-- **If current project is "enabled"**: Note "Session sharing: enabled" and move on.
+- **If current project is "enabled"**: Note "Session sharing: enabled" and check repo linking (see below).
 - **If current project is "not enabled" and `.claude/hive/sharing-disabled` exists**: The user previously declined sharing for this project. Note this and move on. Mention they can re-enable anytime with /hive:align.
-- **If current project is "not enabled" and no sharing-disabled file**: Offer to enable sharing:
-  - Explain this will share sessions from this project after a 24-hour review period
-  - If they accept: run `hive consent enable` (user will see and approve via Claude Code permission prompt). The command handles everything including clearing any previous opt-out markers.
-  - After enabling, briefly explain:
-    - Sessions have a 24h review period before upload
-    - `hive upload --help` shows all available commands for managing uploads
-    - `hive upload review` opens a local web UI to preview what will be uploaded
-  - If they decline: record "Declined session sharing" in `.claude/hive/align-rejected.md`
-  - Repo linking for private repos is coming soon — mention this briefly if the project has a git remote
+- **If current project is "not enabled" and no sharing-disabled file**: Consent state is **unsettled** — load the `consent-setup` skill for interactive setup.
+
+**Repo linking check** (when project sharing is enabled and project has a git remote):
+If `.claude/hive/repo-linking-declined` exists, skip. Otherwise, load the `consent-setup` skill to check and offer repo linking.
 
 ### hive-mind Migration
 

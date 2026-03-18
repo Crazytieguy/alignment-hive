@@ -93,6 +93,7 @@ async function upsertSession(
     lineCount: number;
     lastModified?: number;
     parentSessionId?: string;
+    sessionStartGitCommitHash?: string;
   },
 ): Promise<void> {
   const now = Date.now();
@@ -114,6 +115,9 @@ async function upsertSession(
       // Enrich existing sessions with identifiers if provided
       ...(args.directory && { directory: args.directory }),
       ...(args.gitRemote && { gitRemote: args.gitRemote }),
+      ...(args.sessionStartGitCommitHash && {
+        sessionStartGitCommitHash: args.sessionStartGitCommitHash,
+      }),
     });
   } else {
     await ctx.db.insert("sessions", {
@@ -127,6 +131,7 @@ async function upsertSession(
       lastHeartbeat: now,
       lastModified: args.lastModified,
       parentSessionId: args.parentSessionId,
+      sessionStartGitCommitHash: args.sessionStartGitCommitHash,
     });
   }
 }
@@ -141,6 +146,7 @@ export const heartbeatSession = mutation({
     lineCount: v.number(),
     lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
+    sessionStartGitCommitHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -167,6 +173,7 @@ export const generateUploadUrl = mutation({
     lineCount: v.optional(v.number()),
     lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
+    sessionStartGitCommitHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -196,6 +203,7 @@ export const generateUploadUrl = mutation({
         lineCount: args.lineCount,
         lastModified: args.lastModified,
         parentSessionId: args.parentSessionId,
+        sessionStartGitCommitHash: args.sessionStartGitCommitHash,
       });
     } else {
       // No heartbeat fields — just verify session exists (backwards compat)
