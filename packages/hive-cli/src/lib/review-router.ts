@@ -2,8 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { initTRPC } from '@trpc/server';
 import { z } from 'zod';
 import {
-  getCanonicalProjectName,
   getOrCreateCheckoutId,
+  getProjectIdentifiers,
   loadTranscriptsDirs,
 } from './config';
 import { parseJsonl, transformEntry } from './extraction';
@@ -109,7 +109,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         .input(z.object({ sessionId: z.string() }))
         .mutation(async ({ input }) => {
           const checkoutId = await getOrCreateCheckoutId(stateDir);
-          const project = getCanonicalProjectName(cwd);
+          const ids = getProjectIdentifiers(cwd);
 
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
           const { sessions: allSessions } = await loadSessionState(stateDir, transcriptsDirs);
@@ -120,7 +120,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
 
           const session = result.session;
           const rawMtime = session.mtime.toISOString();
-          const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, project, rawMtime);
+          const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids);
 
           if (uploadResult.success) {
             await recordUploadedSession(stateDir, session.sessionId, rawMtime);

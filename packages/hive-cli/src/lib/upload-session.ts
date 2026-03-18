@@ -9,8 +9,8 @@ export async function uploadSingleSession(
   sessionPath: string,
   sessionId: string,
   checkoutId: string,
-  project: string,
   rawMtime: string,
+  identifiers: { directory: string; gitRemote?: string },
 ): Promise<{ success: boolean; error?: string }> {
   let rawContent: string;
   try {
@@ -35,7 +35,8 @@ export async function uploadSingleSession(
   const lastModified = new Date(rawMtime).getTime();
   const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId,
-    project,
+    directory: identifiers.directory,
+    gitRemote: identifiers.gitRemote,
     lineCount: entries.length,
     lastModified: isFinite(lastModified) ? lastModified : undefined,
   });

@@ -12,6 +12,7 @@ import { v } from "convex/values";
 import {
   isKnownContentBlock,
   parseKnownEntry,
+  extractIdentifiers,
   type KnownEntry,
 } from "@alignment-hive/session-data";
 import type { Id } from "./_generated/dataModel";
@@ -67,7 +68,9 @@ export const listSessions = query({
           if (excludeUserIds.has(session.userId)) return false;
           if (args.excludeUnknownUsers && !knownUserIds.has(session.userId))
             return false;
-          if (excludeProjects.has(session.project)) return false;
+          const ids = extractIdentifiers(session);
+          if ((ids.gitRemote && excludeProjects.has(ids.gitRemote)) ||
+              (ids.directory && excludeProjects.has(ids.directory))) return false;
           return consentFilter(session);
         })
         .paginate(args.paginationOpts);
@@ -117,7 +120,11 @@ export const listSessions = query({
     if (excludeProjects.size > 0) {
       for (const project of excludeProjects) {
         sessionsQuery = sessionsQuery.filter((q) =>
-          q.neq(q.field("project"), project),
+          q.and(
+            q.neq(q.field("project"), project),
+            q.neq(q.field("gitRemote"), project),
+            q.neq(q.field("directory"), project),
+          ),
         );
       }
     }

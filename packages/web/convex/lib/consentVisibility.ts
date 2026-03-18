@@ -9,12 +9,18 @@ import type { QueryCtx } from "../_generated/server";
 import {
   computeConsentWindows,
   isInConsentWindow,
+  extractIdentifiers,
+  groupProjectConsentEvents,
+  findGroupForIdentifiers,
   type ConsentWindow,
+  type ProjectConsentEvent,
 } from "@alignment-hive/session-data";
 
 interface SessionForVisibility {
   userId: string; // workosId
-  project: string;
+  project?: string;
+  directory?: string;
+  gitRemote?: string;
   lastModified?: number;
   upload?: { uploadedAt: number };
 }
@@ -23,7 +29,7 @@ interface SessionForVisibility {
  * Build a consent filter function for reader access.
  *
  * Loads all consent events, pre-computes consent windows per user (global)
- * and per user+project. Returns a function that checks whether a session
+ * and per project group. Returns a function that checks whether a session
  * is visible to a reader based on consent windows.
  *
  * A session is visible if its timestamp (lastModified, or upload.uploadedAt
@@ -68,28 +74,40 @@ export async function buildConsentFilter(
     globalWindowsByUser.set(userId, computeConsentWindows(events));
   }
 
-  // Pre-compute project consent windows per user+project
-  const projectWindowsByKey = new Map<string, ConsentWindow[]>();
-  const projectEventsByKey = new Map<
-    string,
-    Array<{ sessionSharing: boolean; consentedAt: number }>
-  >();
+  // Pre-compute project consent windows per user using connected-component grouping
+  const projectEventsByUser = new Map<string, ProjectConsentEvent[]>();
 
   for (const event of allProjectConsent) {
-    const key = `${event.userId}:${event.project}`;
-    let events = projectEventsByKey.get(key);
+    const userId = event.userId as string;
+    let events = projectEventsByUser.get(userId);
     if (!events) {
       events = [];
-      projectEventsByKey.set(key, events);
+      projectEventsByUser.set(userId, events);
     }
+    const ids = extractIdentifiers(event);
     events.push({
+      ...ids,
       sessionSharing: event.sessionSharing,
       consentedAt: event.consentedAt,
     });
   }
 
-  for (const [key, events] of projectEventsByKey) {
-    projectWindowsByKey.set(key, computeConsentWindows(events));
+  // Per user: group events, compute windows per group, build lookup
+  const userProjectData = new Map<
+    string,
+    {
+      lookup: Map<string, number>;
+      groupWindows: Map<number, ConsentWindow[]>;
+    }
+  >();
+
+  for (const [userId, events] of projectEventsByUser) {
+    const { groups, lookup } = groupProjectConsentEvents(events);
+    const groupWindows = new Map<number, ConsentWindow[]>();
+    for (let i = 0; i < groups.length; i++) {
+      groupWindows.set(i, computeConsentWindows(groups[i].events));
+    }
+    userProjectData.set(userId, { lookup, groupWindows });
   }
 
   return (session: SessionForVisibility): boolean => {
@@ -108,9 +126,15 @@ export async function buildConsentFilter(
       return false;
     }
 
-    // Check project consent windows
-    const projectKey = `${docId}:${session.project}`;
-    const projectWindows = projectWindowsByKey.get(projectKey);
+    // Check project consent windows using grouped identifiers
+    const userData = userProjectData.get(docId);
+    if (!userData) return false;
+
+    const sessionIds = extractIdentifiers(session);
+    const groupIdx = findGroupForIdentifiers(userData.lookup, sessionIds);
+    if (groupIdx === undefined) return false; // no match or ambiguous — fail closed
+
+    const projectWindows = userData.groupWindows.get(groupIdx);
     if (!projectWindows || !isInConsentWindow(timestamp, projectWindows)) {
       return false;
     }

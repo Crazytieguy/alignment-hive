@@ -1,5 +1,5 @@
 import { checkAuthStatus } from '../lib/auth';
-import { getCanonicalProjectName, getConfig, getOrCreateCheckoutId, loadTranscriptsDirs } from '../lib/config';
+import { getConfig, getOrCreateCheckoutId, getProjectIdentifiers, loadTranscriptsDirs } from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
 import { countRawLines } from '../lib/extraction';
 import { discoverSessions } from '../lib/session-state';
@@ -19,7 +19,7 @@ export async function hiveHeartbeat(): Promise<number> {
     getOrCreateCheckoutId(stateDir),
     discoverSessions(transcriptsDirs),
   ]);
-  const project = getCanonicalProjectName(cwd);
+  const ids = getProjectIdentifiers(cwd);
 
   let failures = 0;
   for (const s of allSessions) {
@@ -34,7 +34,8 @@ export async function hiveHeartbeat(): Promise<number> {
       await heartbeatSession({
         sessionId: s.sessionId,
         checkoutId,
-        project,
+        directory: ids.directory,
+        gitRemote: ids.gitRemote,
         lineCount: messageCount,
         lastModified: s.mtime.getTime(),
       });

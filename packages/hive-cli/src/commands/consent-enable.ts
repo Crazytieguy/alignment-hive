@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
 import { enableProject } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
-import { getCanonicalProjectName, getConfig } from '../lib/config';
+import { getConfig, getProjectIdentifiers } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printSuccess } from '../lib/output';
 
@@ -14,9 +14,9 @@ export async function consentEnable(projectPath?: string): Promise<number> {
   }
 
   const resolvedPath = projectPath || process.cwd();
-  const project = getCanonicalProjectName(resolvedPath);
+  const ids = getProjectIdentifiers(resolvedPath);
 
-  const success = await enableProject(project);
+  const success = await enableProject(ids);
   if (!success) {
     printError(hive.consent.enableFailed);
     return 1;
@@ -31,6 +31,6 @@ export async function consentEnable(projectPath?: string): Promise<number> {
     // File doesn't exist, that's fine
   }
 
-  printSuccess(hive.consent.enableSuccess(project));
+  printSuccess(hive.consent.enableSuccess(ids.gitRemote ?? ids.directory));
   return 0;
 }

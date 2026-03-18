@@ -105,10 +105,12 @@ export function getShellConfig(): { file: string; sourceCmd: string } {
 }
 
 /**
- * Get a canonical project identifier.
- * Priority: git remote URL (normalized) > git repo root path > cwd path.
+ * Get both project identifiers: directory path and git remote URL.
+ * - directory: main worktree path > git repo root > cwd
+ * - gitRemote: normalized origin URL, or undefined if none
  */
-export function getCanonicalProjectName(cwd: string): string {
+export function getProjectIdentifiers(cwd: string): { directory: string; gitRemote?: string } {
+  let gitRemote: string | undefined;
   try {
     const remoteUrl = execSync('git remote get-url origin', {
       cwd,
@@ -116,26 +118,45 @@ export function getCanonicalProjectName(cwd: string): string {
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
 
-    return remoteUrl
+    gitRemote = remoteUrl
       .replace(/^git@/, '')
       .replace(/^https?:\/\//, '')
       .replace(':', '/')
       .replace(/\.git$/, '');
   } catch {
-    // No remote — try git repo root
+    // No remote
+  }
+
+  // Use main worktree path so all worktrees share the same directory identifier
+  const mainPath = getMainWorktreePath(cwd);
+  if (mainPath) {
+    return { directory: mainPath, gitRemote };
   }
 
   try {
-    return execSync('git rev-parse --show-toplevel', {
+    const gitRoot = execSync('git rev-parse --show-toplevel', {
       cwd,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
+    return { directory: gitRoot, gitRemote };
   } catch {
-    // Not a git repo — use full path
+    // Not a git repo
   }
 
-  return cwd;
+  return { directory: cwd, gitRemote };
+}
+
+/** Check if an enabled project matches the given identifiers. */
+export function matchesProject<T extends { directories: Array<string>; gitRemotes: Array<string> }>(
+  enabledProjects: Array<T>,
+  identifiers: { directory?: string; gitRemote?: string },
+): T | undefined {
+  for (const p of enabledProjects) {
+    if (identifiers.gitRemote && p.gitRemotes.includes(identifiers.gitRemote)) return p;
+    if (identifiers.directory && p.directories.includes(identifiers.directory)) return p;
+  }
+  return undefined;
 }
 
 /**

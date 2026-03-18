@@ -5,8 +5,11 @@ import type { Id } from "./_generated/dataModel";
 import {
   computeConsentWindows,
   isInConsentWindow,
+  extractIdentifiers,
+  type ProjectIdentifiers,
 } from "@alignment-hive/session-data";
 import { upsertUser } from "./lib/users";
+import { getMatchingConsentGroup } from "./lib/projectConsent";
 
 /**
  * Verify that the user has active global + project consent for sharing.
@@ -16,7 +19,7 @@ import { upsertUser } from "./lib/users";
 async function verifyConsent(
   ctx: MutationCtx,
   userId: Id<"users">,
-  project: string,
+  identifiers: ProjectIdentifiers,
   lastModified?: number,
 ): Promise<void> {
   // Load all global consent events (single query covers both current-state
@@ -40,24 +43,22 @@ async function verifyConsent(
     );
   }
 
-  // Load all project consent events
-  const allProjectEvents = await ctx.db
-    .query("projectConsent")
-    .withIndex("by_user_project", (q) =>
-      q.eq("userId", userId).eq("project", project),
-    )
-    .collect();
+  // Find matching project consent group
+  const displayName = identifiers.gitRemote ?? identifiers.directory ?? "unknown";
+  const group = await getMatchingConsentGroup(ctx, userId, identifiers);
 
-  if (allProjectEvents.length === 0) {
+  if (!group || group.events.length === 0) {
     throw new ConvexError(
-      `Session sharing not enabled for project "${project}" — run /hive:align to enable`,
+      `Session sharing not enabled for project "${displayName}" — run /hive:align to enable`,
     );
   }
 
-  const latestProject = allProjectEvents[allProjectEvents.length - 1];
-  if (!latestProject.sessionSharing) {
+  const latestEvent = group.events.reduce((a, b) =>
+    a.consentedAt > b.consentedAt ? a : b,
+  );
+  if (!latestEvent.sessionSharing) {
     throw new ConvexError(
-      `Session sharing disabled for project "${project}" — run /hive:align to re-enable`,
+      `Session sharing disabled for project "${displayName}" — run /hive:align to re-enable`,
     );
   }
 
@@ -70,10 +71,10 @@ async function verifyConsent(
       );
     }
 
-    const projectWindows = computeConsentWindows(allProjectEvents);
+    const projectWindows = computeConsentWindows(group.events);
     if (!isInConsentWindow(lastModified, projectWindows)) {
       throw new ConvexError(
-        `Session was last modified outside a consent window for project "${project}"`,
+        `Session was last modified outside a consent window for project "${displayName}"`,
       );
     }
   }
@@ -86,7 +87,9 @@ async function upsertSession(
   args: {
     sessionId: string;
     checkoutId: string;
-    project: string;
+    project?: string;
+    directory?: string;
+    gitRemote?: string;
     lineCount: number;
     lastModified?: number;
     parentSessionId?: string;
@@ -108,6 +111,9 @@ async function upsertSession(
       ...(args.lastModified !== undefined && {
         lastModified: args.lastModified,
       }),
+      // Enrich existing sessions with identifiers if provided
+      ...(args.directory && { directory: args.directory }),
+      ...(args.gitRemote && { gitRemote: args.gitRemote }),
     });
   } else {
     await ctx.db.insert("sessions", {
@@ -115,6 +121,8 @@ async function upsertSession(
       userId,
       checkoutId: args.checkoutId,
       project: args.project,
+      directory: args.directory,
+      gitRemote: args.gitRemote,
       lineCount: args.lineCount,
       lastHeartbeat: now,
       lastModified: args.lastModified,
@@ -127,7 +135,9 @@ export const heartbeatSession = mutation({
   args: {
     sessionId: v.string(),
     checkoutId: v.string(),
-    project: v.string(),
+    project: v.optional(v.string()),
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
     lineCount: v.number(),
     lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
@@ -139,7 +149,8 @@ export const heartbeatSession = mutation({
     }
 
     const userId = await upsertUser(ctx, identity);
-    await verifyConsent(ctx, userId, args.project, args.lastModified);
+    const identifiers = extractIdentifiers(args);
+    await verifyConsent(ctx, userId, identifiers, args.lastModified);
 
     await upsertSession(ctx, identity.subject, args);
   },
@@ -151,6 +162,8 @@ export const generateUploadUrl = mutation({
     // Optional heartbeat fields — if provided, upserts the session in the same round trip
     checkoutId: v.optional(v.string()),
     project: v.optional(v.string()),
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
     lineCount: v.optional(v.number()),
     lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
@@ -163,13 +176,14 @@ export const generateUploadUrl = mutation({
 
     const userId = identity.subject;
 
-    if (args.checkoutId && args.project && args.lineCount !== undefined) {
+    if (args.checkoutId && (args.project || args.directory || args.gitRemote) && args.lineCount !== undefined) {
       // Inline heartbeat: upsert user + session in the same round trip
       const userDocId = await upsertUser(ctx, identity);
+      const identifiers = extractIdentifiers(args);
       await verifyConsent(
         ctx,
         userDocId,
-        args.project,
+        identifiers,
         args.lastModified,
       );
 
@@ -177,6 +191,8 @@ export const generateUploadUrl = mutation({
         sessionId: args.sessionId,
         checkoutId: args.checkoutId,
         project: args.project,
+        directory: args.directory,
+        gitRemote: args.gitRemote,
         lineCount: args.lineCount,
         lastModified: args.lastModified,
         parentSessionId: args.parentSessionId,
@@ -195,12 +211,13 @@ export const generateUploadUrl = mutation({
         throw new ConvexError("Session belongs to different user");
       }
 
-      // Verify consent using existing session's project and lastModified
+      // Verify consent using existing session's identifiers
       const userDocId = await upsertUser(ctx, identity);
+      const identifiers = extractIdentifiers(session);
       await verifyConsent(
         ctx,
         userDocId,
-        session.project,
+        identifiers,
         args.lastModified ?? session.lastModified,
       );
     }
@@ -233,9 +250,10 @@ export const saveUpload = mutation({
       throw new ConvexError("Session belongs to different user");
     }
 
-    // Verify consent using the session's project and lastModified
+    // Verify consent using the session's identifiers
     const userDocId = await upsertUser(ctx, identity);
-    await verifyConsent(ctx, userDocId, session.project, session.lastModified);
+    const identifiers = extractIdentifiers(session);
+    await verifyConsent(ctx, userDocId, identifiers, session.lastModified);
 
     await ctx.db.patch(session._id, {
       ...(summary && { summary }),

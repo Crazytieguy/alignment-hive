@@ -2,7 +2,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseSession } from '@alignment-hive/session-data';
 import { checkAuthStatus } from '../lib/auth.js';
-import { getCanonicalProjectName } from '../lib/config.js';
+import { getProjectIdentifiers } from '../lib/config.js';
 import { generateUploadUrl, saveUpload } from '../lib/convex.js';
 import {
   getHiveMindSessionsDir,
@@ -34,9 +34,11 @@ async function uploadSession(cwd: string, sessionId: string): Promise<{ success:
   const { meta, entries } = sessionResult;
 
   // Combined heartbeat + generateUploadUrl in a single round trip
+  const ids = getProjectIdentifiers(cwd);
   const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId: meta.checkoutId,
-    project: getCanonicalProjectName(cwd),
+    directory: ids.directory,
+    gitRemote: ids.gitRemote,
     lineCount: meta.messageCount,
     parentSessionId: meta.parentSessionId,
   });

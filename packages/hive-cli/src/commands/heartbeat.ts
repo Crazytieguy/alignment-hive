@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { checkAuthStatus } from '../lib/auth';
-import { getCanonicalProjectName } from '../lib/config';
+import { getProjectIdentifiers } from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from '../lib/extraction';
 
@@ -18,7 +18,7 @@ export async function heartbeat(): Promise<number> {
   }
 
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const project = getCanonicalProjectName(cwd);
+  const ids = getProjectIdentifiers(cwd);
   let failures = 0;
 
   for (const sessionId of sessionIds) {
@@ -32,7 +32,8 @@ export async function heartbeat(): Promise<number> {
       await heartbeatSession({
         sessionId: metaResult.sessionId,
         checkoutId: metaResult.checkoutId,
-        project,
+        directory: ids.directory,
+        gitRemote: ids.gitRemote,
         lineCount: metaResult.messageCount,
         parentSessionId: metaResult.parentSessionId,
       });

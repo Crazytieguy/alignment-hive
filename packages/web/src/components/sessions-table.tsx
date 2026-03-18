@@ -5,7 +5,9 @@ interface Session {
   _id: string;
   sessionId: string;
   userId: string;
-  project: string;
+  project?: string;
+  directory?: string;
+  gitRemote?: string;
   lineCount: number;
   lastHeartbeat: number;
   summary?: string;
@@ -78,8 +80,9 @@ export function SessionsTable({
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {sessions.map((session) => (
-            <tr
+          {sessions.map((session) => {
+            const projectName = session.gitRemote ?? session.directory ?? session.project ?? "unknown";
+            return (<tr
               key={session._id}
               className={`relative ${session.upload ? "hover:bg-muted/50" : "opacity-50"}`}
             >
@@ -125,9 +128,9 @@ export function SessionsTable({
               )}
               <td
                 className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[200px]"
-                title={session.project}
+                title={projectName}
               >
-                {formatProject(session.project)}
+                {formatProject(projectName)}
               </td>
               <td className="px-4 py-3 text-sm tabular-nums">
                 {session.lineCount}
@@ -145,7 +148,7 @@ export function SessionsTable({
                 {session.summary || "—"}
               </td>
             </tr>
-          ))}
+          );})}
         </tbody>
       </table>
     </div>

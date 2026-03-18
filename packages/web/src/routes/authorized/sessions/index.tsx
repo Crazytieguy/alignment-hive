@@ -95,7 +95,13 @@ function SessionsList() {
   );
 
   // Collect unique projects from loaded results
-  const allProjects = [...new Set(results.map((s) => s.project))].sort();
+  const allProjects = [
+    ...new Set(
+      results.map(
+        (s) => s.gitRemote ?? s.directory ?? s.project ?? "unknown",
+      ),
+    ),
+  ].sort();
 
   // Only uploaded sessions can be selected
   const selectableIds = results

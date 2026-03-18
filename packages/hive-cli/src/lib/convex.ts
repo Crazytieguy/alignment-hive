@@ -2,6 +2,7 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { isAuthError, loadAuthData } from './auth';
 import type { Id } from '../../../web/convex/_generated/dataModel';
+import type { ProjectIdentifiers as _ProjectIdentifiers } from '@alignment-hive/session-data';
 
 const CONVEX_URL = process.env.ALIGNMENT_HIVE_CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
@@ -42,10 +43,14 @@ export async function pingCheckout(checkoutId: string): Promise<boolean> {
   }
 }
 
+export type ProjectIdentifier = _ProjectIdentifiers;
+
 export async function heartbeatSession(session: {
   sessionId: string;
   checkoutId: string;
-  project: string;
+  project?: string;
+  directory?: string;
+  gitRemote?: string;
   lineCount: number;
   lastModified?: number;
   parentSessionId?: string;
@@ -66,7 +71,9 @@ export async function generateUploadUrl(
   sessionId: string,
   heartbeat?: {
     checkoutId: string;
-    project: string;
+    project?: string;
+    directory?: string;
+    gitRemote?: string;
     lineCount: number;
     lastModified?: number;
     parentSessionId?: string;
@@ -115,7 +122,14 @@ export async function getConsentStatus(): Promise<{ hasConsent: boolean; session
   }
 }
 
-export async function getEnabledProjects(): Promise<Array<{ project: string; sessionSharing: boolean; consentedAt: number }>> {
+export interface EnabledProject {
+  directories: Array<string>;
+  gitRemotes: Array<string>;
+  sessionSharing: boolean;
+  consentedAt: number;
+}
+
+export async function getEnabledProjects(): Promise<Array<EnabledProject>> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return [];
@@ -126,25 +140,26 @@ export async function getEnabledProjects(): Promise<Array<{ project: string; ses
   }
 }
 
-export async function getConsentHistory(project: string): Promise<{
+export async function getConsentHistory(identifiers: ProjectIdentifier): Promise<{
   global: Array<{ sessionSharing: boolean; consentedAt: number }>;
   project: Array<{ sessionSharing: boolean; consentedAt: number }>;
 } | null> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return null;
-    return await client.query(api.consent.getConsentHistory, { project });
+    return await client.query(api.consent.getConsentHistory, identifiers);
   } catch (error) {
     debugLog(`getConsentHistory failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
 
-export async function enableProject(project: string): Promise<boolean> {
+export async function enableProject(identifier: ProjectIdentifier): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return false;
-    await client.mutation(api.consent.enableProject, { project });
+    // Cast: callers always provide at least directory, satisfying the Convex union
+    await client.mutation(api.consent.enableProject, { identifier } as never);
     return true;
   } catch (error) {
     debugLog(`enableProject failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -152,11 +167,12 @@ export async function enableProject(project: string): Promise<boolean> {
   }
 }
 
-export async function disableProject(project: string): Promise<boolean> {
+export async function disableProject(identifier: ProjectIdentifier): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return false;
-    await client.mutation(api.consent.disableProject, { project });
+    // Cast: callers always provide at least directory, satisfying the Convex union
+    await client.mutation(api.consent.disableProject, { identifier } as never);
     return true;
   } catch (error) {
     debugLog(`disableProject failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -31,6 +31,7 @@ function SessionDetail() {
   }
 
   const { session, contentUrl, user, parentSession, childSessions } = data;
+  const projectName = session.gitRemote ?? session.directory ?? session.project ?? "unknown";
 
   return (
     <div className="space-y-6">
@@ -65,8 +66,11 @@ function SessionDetail() {
               </div>
               <div>
                 <dt className="text-muted-foreground">Project</dt>
-                <dd className="truncate" title={session.project}>
-                  {formatProject(session.project)}
+                <dd
+                  className="truncate"
+                  title={projectName}
+                >
+                  {formatProject(projectName)}
                 </dd>
               </div>
               {model && (

@@ -4,10 +4,11 @@ import { computeConsentWindows, isInConsentWindow } from '@alignment-hive/sessio
 import { checkAuthStatus } from '../lib/auth';
 import {
   ensureStateDir,
-  getCanonicalProjectName,
   getConfig,
   getOrCreateCheckoutId,
+  getProjectIdentifiers,
   loadTranscriptsDirs,
+  matchesProject,
 } from '../lib/config';
 import { getConsentHistory, getConsentStatus, getEnabledProjects } from '../lib/convex';
 import { hive } from '../lib/messages';
@@ -70,8 +71,8 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     return 1;
   }
 
-  const project = getCanonicalProjectName(cwd);
-  const projectConsent = activeProjects.find((p) => p.project === project);
+  const ids = getProjectIdentifiers(cwd);
+  const projectConsent = matchesProject(activeProjects, ids);
   if (!projectConsent) {
     printError(hive.upload.noProjectConsent);
     if (isBackground) await cleanupScheduled(stateDir);
@@ -109,7 +110,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     }
 
     printInfo(hive.upload.uploadingSession(id));
-    const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, project, session.mtime.toISOString());
+    const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, session.mtime.toISOString(), ids);
     if (uploadResult.success) {
       await recordUploadedSession(stateDir, session.sessionId, session.mtime.toISOString());
       printSuccess(hive.upload.uploadedSession(id));
@@ -132,7 +133,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
       });
 
   // Filter by consent windows to prevent uploading sessions from revocation gaps
-  const consentHistory = await getConsentHistory(project);
+  const consentHistory = await getConsentHistory(ids);
   if (consentHistory) {
     const globalWindows = computeConsentWindows(consentHistory.global);
     const projectWindows = computeConsentWindows(consentHistory.project);
@@ -167,7 +168,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     const results = await Promise.allSettled(
       batch.map(async (session) => {
         const rawMtime = session.mtime.toISOString();
-        const result = await uploadSingleSession(session.path, session.sessionId, checkoutId, project, rawMtime);
+        const result = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids);
         return { sessionId: session.sessionId, rawMtime, ...result };
       }),
     );

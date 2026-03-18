@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { checkAuthStatus } from './auth';
-import { getCanonicalProjectName } from './config';
+import { getProjectIdentifiers, matchesProject } from './config';
 import { getConsentStatus, getEnabledProjects } from './convex';
 import { parseJsonl, transformEntry } from './extraction';
 import {
@@ -21,8 +21,8 @@ export async function getProjectConsentMtime(cwd: string): Promise<number | null
       getEnabledProjects(),
     ]);
     if (!consent?.hasConsent || !consent.sessionSharing) return null;
-    const canonical = getCanonicalProjectName(cwd);
-    const projectConsent = activeProjects.find((p) => p.project === canonical);
+    const ids = getProjectIdentifiers(cwd);
+    const projectConsent = matchesProject(activeProjects, ids);
     return projectConsent?.consentedAt ?? null;
   } catch {
     return null;

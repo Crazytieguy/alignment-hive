@@ -4,10 +4,11 @@ import { checkAuthStatus } from '../lib/auth';
 import {
   addTranscriptsDir,
   ensureStateDir,
-  getCanonicalProjectName,
   getConfig,
   getOrCreateCheckoutId,
+  getProjectIdentifiers,
   loadTranscriptsDirs,
+  matchesProject,
 } from '../lib/config';
 import { getConsentStatus, getEnabledProjects, pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
@@ -125,9 +126,9 @@ export async function hiveSessionStart(): Promise<number> {
     return 0;
   }
 
-  // Check per-project consent (use canonical name to match heartbeat/upload)
-  const canonicalProject = getCanonicalProjectName(cwd);
-  const projectConsent = activeProjects.find((p) => p.project === canonicalProject);
+  // Check per-project consent using identifiers
+  const ids = getProjectIdentifiers(cwd);
+  const projectConsent = matchesProject(activeProjects, ids);
   if (!projectConsent) {
     // No consent for this project — don't offer sharing, just note it
     if (messages.length > 0) {

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
 import { checkAuthStatus } from '../lib/auth';
-import { getCanonicalProjectName, isWorktree } from '../lib/config';
+import { getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
 import { disableProject, enableProject, getConsentStatus, getEnabledProjects } from '../lib/convex';
 import { hive } from '../lib/messages';
 
@@ -77,14 +77,14 @@ function extractCwd(projectDir: string): string | null {
 }
 
 /** Detect projects from ~/.claude/projects/ directories.
- *  Returns canonical project names (matching what heartbeats/uploads use). */
-async function detectProjects(): Promise<Array<{ canonical: string; path: string }>> {
+ *  Returns project identifiers (directory + gitRemote) for each project. */
+async function detectProjects(): Promise<Array<{ displayName: string; identifiers: { directory: string; gitRemote?: string }; path: string }>> {
   const projectsDir = join(homedir(), '.claude', 'projects');
   if (!existsSync(projectsDir)) return [];
 
   try {
     const entries = readdirSync(projectsDir, { withFileTypes: true });
-    const seen = new Map<string, string>(); // canonical -> path
+    const seen = new Map<string, { displayName: string; identifiers: { directory: string; gitRemote?: string }; path: string }>(); // displayName -> project
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -94,15 +94,15 @@ async function detectProjects(): Promise<Array<{ canonical: string; path: string
       if (!cwd || !existsSync(cwd)) continue;
       if (await isWorktree(cwd)) continue;
 
-      const canonical = getCanonicalProjectName(cwd);
-      if (!seen.has(canonical)) {
-        seen.set(canonical, cwd);
+      const ids = getProjectIdentifiers(cwd);
+      const displayName = ids.gitRemote ?? ids.directory;
+      if (!seen.has(displayName)) {
+        seen.set(displayName, { displayName, identifiers: ids, path: cwd });
       }
     }
 
-    return [...seen.entries()]
-      .map(([canonical, path]) => ({ canonical, path }))
-      .sort((a, b) => a.canonical.localeCompare(b.canonical));
+    return [...seen.values()]
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
   } catch {
     return [];
   }
@@ -204,7 +204,9 @@ async function consentSetupInner(): Promise<number> {
     return 0;
   }
 
-  const enabledSet = new Set(enabledProjects.map((p) => p.project));
+  // Check which local projects are already enabled
+  const isEnabled = (p: typeof projects[number]): boolean =>
+    !!matchesProject(enabledProjects, p.identifiers);
 
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   let checkbox: typeof import('@inquirer/prompts').checkbox;
@@ -214,8 +216,8 @@ async function consentSetupInner(): Promise<number> {
   } catch {
     console.log(`\n  ${msg.projectsHeader}`);
     projects.forEach((p, i) => {
-      const marker = enabledSet.has(p.canonical) ? '✓' : ' ';
-      console.log(`  ${marker} ${i + 1}. ${p.canonical}`);
+      const marker = isEnabled(p) ? '✓' : ' ';
+      console.log(`  ${marker} ${i + 1}. ${p.displayName}`);
     });
     console.log(`\n  ${msg.enableManually}`);
     return 0;
@@ -225,17 +227,16 @@ async function consentSetupInner(): Promise<number> {
     message: msg.selectProjects,
     loop: false,
     choices: projects.map((p) => ({
-      name: p.canonical,
-      value: p.canonical,
-      checked: enabledSet.has(p.canonical),
+      name: p.displayName,
+      value: p.displayName,
+      checked: isEnabled(p),
     })),
   }, { input: getInput() });
 
   const selectedSet = new Set(selected);
-  const localSet = new Set(projects.map((p) => p.canonical));
-  const toEnable = selected.filter((p) => !enabledSet.has(p));
+  const toEnable = projects.filter((p) => selectedSet.has(p.displayName) && !isEnabled(p));
   // Only disable projects that exist locally — don't touch projects from other machines
-  const toDisable = [...enabledSet].filter((p) => localSet.has(p) && !selectedSet.has(p));
+  const toDisable = projects.filter((p) => !selectedSet.has(p.displayName) && isEnabled(p));
 
   if (toEnable.length === 0 && toDisable.length === 0) {
     console.log(`  ${msg.noChanges}`);
@@ -243,20 +244,20 @@ async function consentSetupInner(): Promise<number> {
   }
 
   for (const project of toEnable) {
-    const success = await enableProject(project);
+    const success = await enableProject(project.identifiers);
     if (success) {
-      console.log(`  ✓ ${msg.enabledProject(project)}`);
+      console.log(`  ✓ ${msg.enabledProject(project.displayName)}`);
     } else {
-      console.error(`  ✗ ${msg.enableSetupFailed(project)}`);
+      console.error(`  ✗ ${msg.enableSetupFailed(project.displayName)}`);
     }
   }
 
   for (const project of toDisable) {
-    const success = await disableProject(project);
+    const success = await disableProject(project.identifiers);
     if (success) {
-      console.log(`  – ${msg.disabledProject(project)}`);
+      console.log(`  – ${msg.disabledProject(project.displayName)}`);
     } else {
-      console.error(`  ✗ ${msg.disableSetupFailed(project)}`);
+      console.error(`  ✗ ${msg.disableSetupFailed(project.displayName)}`);
     }
   }
 

@@ -1,6 +1,27 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { extractIdentifiers } from "@alignment-hive/session-data";
 import { upsertUser } from "./lib/users";
+import { loadAndGroupUserConsent, getMatchingConsentGroup } from "./lib/projectConsent";
+
+/** Validator for project identifiers — at least one of directory/gitRemote required. */
+const projectIdentifierArgs = v.union(
+  v.object({ directory: v.string(), gitRemote: v.optional(v.string()) }),
+  v.object({ directory: v.optional(v.string()), gitRemote: v.string() }),
+);
+
+/** Validate non-empty strings (defense in depth). */
+function validateIdentifiers(ids: { directory?: string; gitRemote?: string }): void {
+  if (!ids.directory && !ids.gitRemote) {
+    throw new ConvexError("At least one of directory or gitRemote is required");
+  }
+  if (ids.directory !== undefined && ids.directory.trim() === "") {
+    throw new ConvexError("directory must not be empty");
+  }
+  if (ids.gitRemote !== undefined && ids.gitRemote.trim() === "") {
+    throw new ConvexError("gitRemote must not be empty");
+  }
+}
 
 /** Append a new global data sharing consent row (never upserts). */
 export const submitConsent = mutation({
@@ -103,45 +124,71 @@ export const getConsentStatus = query({
 
 /** Append a project enable event. */
 export const enableProject = mutation({
-  args: { project: v.string() },
-  handler: async (ctx, { project }) => {
+  args: { identifier: projectIdentifierArgs },
+  handler: async (ctx, { identifier }) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
     }
+    validateIdentifiers(identifier);
 
     const userId = await upsertUser(ctx, identity);
 
-    await ctx.db.insert("projectConsent", {
-      userId,
-      project,
-      sessionSharing: true,
-      consentedAt: Date.now(),
-    });
+    const now = Date.now();
+    if (identifier.directory) {
+      await ctx.db.insert("projectConsent", {
+        userId,
+        directory: identifier.directory,
+        gitRemote: identifier.gitRemote,
+        sessionSharing: true,
+        consentedAt: now,
+      });
+    } else {
+      await ctx.db.insert("projectConsent", {
+        userId,
+        directory: identifier.directory,
+        gitRemote: identifier.gitRemote!,
+        sessionSharing: true,
+        consentedAt: now,
+      });
+    }
   },
 });
 
 /** Append a project disable event. */
 export const disableProject = mutation({
-  args: { project: v.string() },
-  handler: async (ctx, { project }) => {
+  args: { identifier: projectIdentifierArgs },
+  handler: async (ctx, { identifier }) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
     }
+    validateIdentifiers(identifier);
 
     const userId = await upsertUser(ctx, identity);
 
-    await ctx.db.insert("projectConsent", {
-      userId,
-      project,
-      sessionSharing: false,
-      consentedAt: Date.now(),
-    });
+    const now = Date.now();
+    if (identifier.directory) {
+      await ctx.db.insert("projectConsent", {
+        userId,
+        directory: identifier.directory,
+        gitRemote: identifier.gitRemote,
+        sessionSharing: false,
+        consentedAt: now,
+      });
+    } else {
+      await ctx.db.insert("projectConsent", {
+        userId,
+        directory: identifier.directory,
+        gitRemote: identifier.gitRemote!,
+        sessionSharing: false,
+        consentedAt: now,
+      });
+    }
   },
 });
 
-/** Get active per-project consents (latest event per project where sessionSharing is true). */
+/** Get active per-project consents (latest event per group where sessionSharing is true). */
 export const getEnabledProjects = query({
   args: {},
   handler: async (ctx) => {
@@ -159,30 +206,21 @@ export const getEnabledProjects = query({
       return [];
     }
 
-    const allEvents = await ctx.db
-      .query("projectConsent")
-      .withIndex("by_user_id", (q) => q.eq("userId", user._id))
-      .collect();
+    const { groups } = await loadAndGroupUserConsent(ctx, user._id);
 
-    // Group by project, keep latest per project
-    const latestByProject = new Map<
-      string,
-      { project: string; sessionSharing: boolean; consentedAt: number }
-    >();
-
-    for (const event of allEvents) {
-      const existing = latestByProject.get(event.project);
-      if (!existing || event.consentedAt > existing.consentedAt) {
-        latestByProject.set(event.project, {
-          project: event.project,
-          sessionSharing: event.sessionSharing,
-          consentedAt: event.consentedAt,
-        });
-      }
-    }
-
-    // Return only actively enabled projects
-    return [...latestByProject.values()].filter((p) => p.sessionSharing);
+    return groups
+      .map((group) => {
+        const latest = group.events.reduce((a, b) =>
+          a.consentedAt > b.consentedAt ? a : b,
+        );
+        return {
+          directories: [...group.directories],
+          gitRemotes: [...group.gitRemotes],
+          sessionSharing: latest.sessionSharing,
+          consentedAt: latest.consentedAt,
+        };
+      })
+      .filter((g) => g.sessionSharing);
   },
 });
 
@@ -202,10 +240,9 @@ export const getUserSessionProjects = query({
 
     const projectCounts = new Map<string, number>();
     for (const session of sessions) {
-      projectCounts.set(
-        session.project,
-        (projectCounts.get(session.project) ?? 0) + 1,
-      );
+      const ids = extractIdentifiers(session);
+      const key = ids.gitRemote ?? ids.directory ?? "unknown";
+      projectCounts.set(key, (projectCounts.get(key) ?? 0) + 1);
     }
 
     return [...projectCounts.entries()]
@@ -215,10 +252,16 @@ export const getUserSessionProjects = query({
 });
 
 /** Get consent event history for the authenticated user (for consent window computation).
- *  Returns global and project-level events so the CLI can check consent windows locally. */
+ *  Returns global and project-level events so the CLI can check consent windows locally.
+ *  Project events are pre-grouped: returns all events for the matching project group. */
 export const getConsentHistory = query({
-  args: { project: v.string() },
-  handler: async (ctx, { project }) => {
+  args: {
+    // Accept both new identifiers and legacy project string
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
+    project: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       return null;
@@ -238,19 +281,16 @@ export const getConsentHistory = query({
       .withIndex("by_user_id", (q) => q.eq("userId", user._id))
       .collect();
 
-    const projectEvents = await ctx.db
-      .query("projectConsent")
-      .withIndex("by_user_project", (q) =>
-        q.eq("userId", user._id).eq("project", project),
-      )
-      .collect();
+    // Resolve identifiers from args (supports both new and legacy)
+    const identifiers = extractIdentifiers(args);
+    const group = await getMatchingConsentGroup(ctx, user._id, identifiers);
 
     return {
       global: globalEvents.map((e) => ({
         sessionSharing: e.sessionSharing,
         consentedAt: e.consentedAt,
       })),
-      project: projectEvents.map((e) => ({
+      project: (group?.events ?? []).map((e) => ({
         sessionSharing: e.sessionSharing,
         consentedAt: e.consentedAt,
       })),

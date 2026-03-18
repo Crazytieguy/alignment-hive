@@ -6,6 +6,7 @@ import { api } from "../../../convex/_generated/api";
 import type { ConsentQuestion } from "@/components/consent/policy-content";
 import ConsentWizard from "@/components/consent/consent-wizard";
 import ConsentSummary from "@/components/consent/consent-summary";
+import { classifyLegacyProject } from "@alignment-hive/session-data";
 
 export const Route = createFileRoute("/_authenticated/consent")({
   component: ConsentGate,
@@ -95,9 +96,14 @@ function ConsentPage() {
 
         // Create project consent entries for selected existing projects
         if (selectedProjects) {
-          const promises = [...selectedProjects].map((project) =>
-            enableProjectMutation({ project }).catch(() => {}),
-          );
+          const promises = [...selectedProjects].map((project) => {
+            const ids = classifyLegacyProject(project);
+            // classifyLegacyProject always returns at least one identifier
+            const identifier = ids as
+              | { directory: string; gitRemote?: string }
+              | { directory?: string; gitRemote: string };
+            return enableProjectMutation({ identifier }).catch(() => {});
+          });
           await Promise.all(promises);
         }
       } else {

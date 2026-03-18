@@ -16,7 +16,9 @@ export default defineSchema({
     sessionId: v.string(),
     userId: v.string(),
     checkoutId: v.string(),
-    project: v.string(),
+    project: v.optional(v.string()), // legacy — use directory/gitRemote
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
     lineCount: v.number(),
     lastHeartbeat: v.number(),
     lastModified: v.optional(v.number()),
@@ -57,22 +59,39 @@ export default defineSchema({
     ),
   ).index("by_user_id", ["userId"]),
 
+  // At least one of directory/gitRemote must be set (enforced by v.union variants).
+  // Legacy `project` field kept optional for migration period.
   projectConsent: defineTable(
     v.union(
+      // directory required, gitRemote optional
       v.object({
         userId: v.id("users"),
-        project: v.string(),
-        sessionSharing: v.literal(false),
+        project: v.optional(v.string()),
+        directory: v.string(),
+        gitRemote: v.optional(v.string()),
+        sessionSharing: v.boolean(),
         consentedAt: v.number(),
       }),
+      // gitRemote required, directory optional
+      v.object({
+        userId: v.id("users"),
+        project: v.optional(v.string()),
+        directory: v.optional(v.string()),
+        gitRemote: v.string(),
+        sessionSharing: v.boolean(),
+        consentedAt: v.number(),
+      }),
+      // Legacy: project only (pre-migration records)
       v.object({
         userId: v.id("users"),
         project: v.string(),
-        sessionSharing: v.literal(true),
+        sessionSharing: v.boolean(),
         consentedAt: v.number(),
       }),
     ),
   )
     .index("by_user_id", ["userId"])
-    .index("by_user_project", ["userId", "project"]),
+    .index("by_user_project", ["userId", "project"])
+    .index("by_user_directory", ["userId", "directory"])
+    .index("by_user_remote", ["userId", "gitRemote"]),
 });

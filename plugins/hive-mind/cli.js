@@ -14485,23 +14485,29 @@ function getShellConfig() {
   }
   return { file: "~/.profile", sourceCmd: "source ~/.profile" };
 }
-function getCanonicalProjectName(cwd) {
+function getProjectIdentifiers(cwd) {
+  let gitRemote;
   try {
     const remoteUrl = execSync("git remote get-url origin", {
       cwd,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     }).trim();
-    return remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
+    gitRemote = remoteUrl.replace(/^git@/, "").replace(/^https?:\/\//, "").replace(":", "/").replace(/\.git$/, "");
   } catch {}
+  const mainPath = getMainWorktreePath(cwd);
+  if (mainPath) {
+    return { directory: mainPath, gitRemote };
+  }
   try {
-    return execSync("git rev-parse --show-toplevel", {
+    const gitRoot = execSync("git rev-parse --show-toplevel", {
       cwd,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     }).trim();
+    return { directory: gitRoot, gitRemote };
   } catch {}
-  return cwd;
+  return { directory: cwd, gitRemote };
 }
 async function isWorktree(cwd) {
   try {
@@ -20590,9 +20596,11 @@ async function uploadSession(cwd, sessionId) {
     return { success: false, error: "Could not read session data" };
   }
   const { meta: meta3, entries } = sessionResult;
+  const ids = getProjectIdentifiers(cwd);
   const uploadUrl = await generateUploadUrl(sessionId, {
     checkoutId: meta3.checkoutId,
-    project: getCanonicalProjectName(cwd),
+    directory: ids.directory,
+    gitRemote: ids.gitRemote,
     lineCount: meta3.messageCount,
     parentSessionId: meta3.parentSessionId
   });
@@ -20772,7 +20780,7 @@ async function heartbeat() {
     return 1;
   }
   const sessionsDir = getHiveMindSessionsDir(cwd);
-  const project = getCanonicalProjectName(cwd);
+  const ids = getProjectIdentifiers(cwd);
   let failures = 0;
   for (const sessionId of sessionIds) {
     const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
@@ -20784,7 +20792,8 @@ async function heartbeat() {
       await heartbeatSession({
         sessionId: metaResult.sessionId,
         checkoutId: metaResult.checkoutId,
-        project,
+        directory: ids.directory,
+        gitRemote: ids.gitRemote,
         lineCount: metaResult.messageCount,
         parentSessionId: metaResult.parentSessionId
       });

@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { disableProject, getEnabledProjects } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
-import { getCanonicalProjectName, getConfig } from '../lib/config';
+import { getConfig, getProjectIdentifiers, matchesProject } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printSuccess, printWarning } from '../lib/output';
 
@@ -14,7 +14,7 @@ export async function consentDisable(projectPath?: string): Promise<number> {
   }
 
   const resolvedPath = projectPath || process.cwd();
-  const project = getCanonicalProjectName(resolvedPath);
+  const ids = getProjectIdentifiers(resolvedPath);
   const config = getConfig();
   const stateDir = config.getStateDir(resolvedPath);
 
@@ -24,15 +24,15 @@ export async function consentDisable(projectPath?: string): Promise<number> {
 
   // If this project was previously enabled in Convex, append a disable event
   const activeProjects = await getEnabledProjects();
-  const wasEnabled = activeProjects.some(p => p.project === project);
+  const wasEnabled = matchesProject(activeProjects, ids);
 
   if (wasEnabled) {
-    const success = await disableProject(project);
+    const success = await disableProject(ids);
     if (!success) {
       printWarning(hive.consent.disableServerWarning);
     }
   }
 
-  printSuccess(hive.consent.disableSuccess(project));
+  printSuccess(hive.consent.disableSuccess(ids.gitRemote ?? ids.directory));
   return 0;
 }
