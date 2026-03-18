@@ -116,6 +116,7 @@
       "Bash(xargs -I{} cut *)",
       "Bash(bun run --filter *)",
       "Bash(bun packages/hive-cli/src/cli.ts *)",
+      "Bash(bun packages/hive-cli/src/hive-cli.ts *)",
       "Bash(bun install)",
       "Bash(hive-mind)",
       "Bash(hive-mind read)",

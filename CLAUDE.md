@@ -16,7 +16,9 @@ This is a **bun monorepo**:
 
 **For web app**: Read [packages/web/README.md](packages/web/README.md) for local development setup
 
-**For CLI**: Read [packages/hive-cli/CLAUDE.md](packages/hive-cli/CLAUDE.md) for development guidelines. Run CLI commands from the project root: `bun packages/hive-cli/src/cli.ts <command>`
+**For CLI**: Read [packages/hive-cli/CLAUDE.md](packages/hive-cli/CLAUDE.md) for development guidelines. Run CLI commands from the project root:
+- **hive-mind CLI**: `bun packages/hive-cli/src/cli.ts <command>`
+- **hive CLI**: `bun packages/hive-cli/src/hive-cli.ts <command>`
 
 ## Running Scripts
 

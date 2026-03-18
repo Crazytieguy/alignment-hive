@@ -1,5 +1,15 @@
 @packages/web/README.md
 
+## Convex Dev Server
+
+Push backend functions to the dev deployment:
+
+```bash
+bun run --filter '@alignment-hive/web' dev:backend
+```
+
+This runs `convex dev` which watches for changes and pushes them. Use it to deploy schema changes, new functions, and migrations. Stop it when done.
+
 ## Convex Query Design
 
 Make one query per frontend use case, not composable queries. Convex queries are reactive and should return exactly what a component needs.
