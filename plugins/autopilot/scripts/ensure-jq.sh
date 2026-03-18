@@ -7,7 +7,7 @@ if command -v jq >/dev/null 2>&1; then
 fi
 
 # Check if we already bootstrapped it
-CACHE_DIR="$HOME/.cache/autopilot"
+CACHE_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}"
 BINARY="$CACHE_DIR/jq"
 
 if [ -x "$BINARY" ]; then

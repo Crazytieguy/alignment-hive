@@ -2,7 +2,7 @@
 set -euo pipefail
 
 STATE_FILE="$CLAUDE_PROJECT_DIR/.claude/autopilot/state.json"
-LOG_FILE="$HOME/.cache/autopilot/bootstrap.log"
+LOG_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/bootstrap.log"
 
 # On any error, log and inform user
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
@@ -17,8 +17,8 @@ fi
 # Find jq — check only, no download yet
 if command -v jq >/dev/null 2>&1; then
   JQ="jq"
-elif [ -x "$HOME/.cache/autopilot/jq" ]; then
-  JQ="$HOME/.cache/autopilot/jq"
+elif [ -x "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/jq" ]; then
+  JQ="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/jq"
 else
   # No jq yet — async hook will bootstrap it and report back
   echo '{"systemMessage": "autopilot: Bootstrapping jq. Auto-deny will activate once ready."}'

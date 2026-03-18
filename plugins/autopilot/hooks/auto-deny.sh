@@ -2,7 +2,7 @@
 
 input=$(cat)
 
-LOG_FILE="$HOME/.cache/autopilot/auto-deny-error.log"
+LOG_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/auto-deny-error.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 # On any error, log it and tell the user
@@ -12,8 +12,8 @@ set -euo pipefail
 # Find jq: prefer global, fall back to bootstrapped
 if command -v jq >/dev/null 2>&1; then
   JQ="jq"
-elif [ -x "$HOME/.cache/autopilot/jq" ]; then
-  JQ="$HOME/.cache/autopilot/jq"
+elif [ -x "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/jq" ]; then
+  JQ="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/jq"
 else
   # No jq available — can't safely parse input, let normal prompt through
   exit 0
