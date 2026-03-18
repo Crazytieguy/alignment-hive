@@ -11,6 +11,11 @@ Configure permissions and autonomous mode so Claude can accomplish tasks end-to-
 
 Without proper permissions, Claude either blocks on every command (waiting for approval) or requires `--dangerously-skip-permissions`. This setup provides a secure middle ground: Claude gets the permissions it needs to work autonomously, with appropriate guardrails.
 
+## Important Notes
+
+- **Settings are hot-reloaded.** Changes to settings.json and settings.local.json take effect immediately — do not tell the user to restart Claude Code.
+- **settings.local.json is already gitignored** by Claude Code (via `.git/info/exclude`), so it does not need to be added to `.gitignore`.
+
 ## Key Principle: Ask vs Deny
 
 **Deny** is for commands that are **never useful in this project** - steering toward correct alternatives.
