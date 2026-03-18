@@ -40,7 +40,7 @@ function ConsentPage() {
   const accessList = useQuery(api.consent.getAccessList);
   const existingProjects = useQuery(api.consent.getUserSessionProjects);
   const submitConsentMutation = useMutation(api.consent.submitConsent);
-  const enableProjectMutation = useMutation(api.consent.enableProject);
+  const updateProjectSharingMutation = useMutation(api.consent.updateProjectSharing);
 
   const [choices, setChoices] = useState<ConsentChoices>({
     sessionSharing: null,
@@ -95,16 +95,15 @@ function ConsentPage() {
         });
 
         // Create project consent entries for selected existing projects
-        if (selectedProjects) {
-          const promises = [...selectedProjects].map((project) => {
+        if (selectedProjects && selectedProjects.size > 0) {
+          const changes = [...selectedProjects].map((project) => {
             const ids = classifyLegacyProject(project);
-            // classifyLegacyProject always returns at least one identifier
             const identifier = ids as
               | { directory: string; gitRemote?: string }
               | { directory?: string; gitRemote: string };
-            return enableProjectMutation({ identifier }).catch(() => {});
+            return { identifier, sessionSharing: true };
           });
-          await Promise.all(promises);
+          await updateProjectSharingMutation({ changes });
         }
       } else {
         await submitConsentMutation({

@@ -54,7 +54,7 @@ export async function buildConsentFilter(
   const globalWindowsByUser = new Map<string, ConsentWindow[]>();
   const globalEventsByUser = new Map<
     string,
-    Array<{ sessionSharing: boolean; consentedAt: number }>
+    Array<{ sessionSharing: boolean; timestamp: number }>
   >();
 
   for (const event of allGlobalConsent) {
@@ -66,7 +66,7 @@ export async function buildConsentFilter(
     }
     events.push({
       sessionSharing: event.sessionSharing,
-      consentedAt: event.consentedAt,
+      timestamp: event._creationTime,
     });
   }
 
@@ -88,7 +88,7 @@ export async function buildConsentFilter(
     events.push({
       ...ids,
       sessionSharing: event.sessionSharing,
-      consentedAt: event.consentedAt,
+      timestamp: event._creationTime,
     });
   }
 

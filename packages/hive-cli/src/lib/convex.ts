@@ -2,7 +2,7 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { isAuthError, loadAuthData } from './auth';
 import type { Id } from '../../../web/convex/_generated/dataModel';
-import type { ProjectIdentifiers as _ProjectIdentifiers } from '@alignment-hive/session-data';
+import type { ProjectIdentifiers } from '@alignment-hive/session-data';
 
 const CONVEX_URL = process.env.ALIGNMENT_HIVE_CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
 
@@ -43,7 +43,7 @@ export async function pingCheckout(checkoutId: string): Promise<boolean> {
   }
 }
 
-export type ProjectIdentifier = _ProjectIdentifiers;
+export type { ProjectIdentifiers };
 
 export async function heartbeatSession(session: {
   sessionId: string;
@@ -123,27 +123,27 @@ export async function getConsentStatus(): Promise<{ hasConsent: boolean; session
   }
 }
 
-export interface EnabledProject {
+export interface ProjectSharingState {
   directories: Array<string>;
   gitRemotes: Array<string>;
   sessionSharing: boolean;
-  consentedAt: number;
+  latestAt: number;
 }
 
-export async function getEnabledProjects(): Promise<Array<EnabledProject>> {
+export async function getProjectSharing(): Promise<Array<ProjectSharingState>> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return [];
-    return await client.query(api.consent.getEnabledProjects, {});
+    return await client.query(api.consent.getProjectSharing, {});
   } catch (error) {
-    debugLog(`getEnabledProjects failed: ${error instanceof Error ? error.message : String(error)}`);
+    debugLog(`getProjectSharing failed: ${error instanceof Error ? error.message : String(error)}`);
     return [];
   }
 }
 
-export async function getConsentHistory(identifiers: ProjectIdentifier): Promise<{
-  global: Array<{ sessionSharing: boolean; consentedAt: number }>;
-  project: Array<{ sessionSharing: boolean; consentedAt: number }>;
+export async function getConsentHistory(identifiers: ProjectIdentifiers): Promise<{
+  global: Array<{ sessionSharing: boolean; timestamp: number }>;
+  project: Array<{ sessionSharing: boolean; timestamp: number }>;
 } | null> {
   try {
     const client = await getAuthenticatedClient();
@@ -155,39 +155,30 @@ export async function getConsentHistory(identifiers: ProjectIdentifier): Promise
   }
 }
 
-/** Narrow ProjectIdentifier (both optional) to the Convex union (at least one required). */
+/** Narrow ProjectIdentifiers (both optional) to the Convex union (at least one required). */
 function narrowIdentifier(
-  id: ProjectIdentifier,
+  id: ProjectIdentifiers,
 ): { directory: string; gitRemote?: string } | { directory?: string; gitRemote: string } {
   if (id.directory) return { directory: id.directory, gitRemote: id.gitRemote };
   if (id.gitRemote) return { gitRemote: id.gitRemote };
   throw new Error('At least one of directory or gitRemote is required');
 }
 
-export async function enableProject(identifier: ProjectIdentifier): Promise<boolean> {
+export async function updateProjectSharing(
+  changes: Array<{ identifier: ProjectIdentifiers; sessionSharing: boolean }>,
+): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
     if (!client) return false;
-    await client.mutation(api.consent.enableProject, {
-      identifier: narrowIdentifier(identifier),
+    await client.mutation(api.consent.updateProjectSharing, {
+      changes: changes.map(({ identifier, sessionSharing }) => ({
+        identifier: narrowIdentifier(identifier),
+        sessionSharing,
+      })),
     });
     return true;
   } catch (error) {
-    debugLog(`enableProject failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-export async function disableProject(identifier: ProjectIdentifier): Promise<boolean> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return false;
-    await client.mutation(api.consent.disableProject, {
-      identifier: narrowIdentifier(identifier),
-    });
-    return true;
-  } catch (error) {
-    debugLog(`disableProject failed: ${error instanceof Error ? error.message : String(error)}`);
+    debugLog(`updateProjectSharing failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }

@@ -11,20 +11,24 @@ export const Route = createFileRoute("/_authenticated/consent_/projects")({
   component: ProjectsPage,
 });
 
-async function isRepoPublic(gitRemote: string): Promise<boolean> {
+async function checkRepoVisibility(
+  gitRemote: string,
+): Promise<"public" | "private" | "unknown"> {
   const repoPath = gitRemote.replace(/^github\.com\//, "");
   try {
     const res = await fetch(`https://api.github.com/repos/${repoPath}`);
-    return res.status === 200;
+    if (res.status === 200) return "public";
+    if (res.status === 404) return "private";
+    console.warn(`GitHub API returned ${res.status} for ${repoPath}`);
+    return "unknown";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
 function ProjectsPage() {
-  const allProjects = useQuery(api.consent.getAllProjects);
-  const enableProject = useMutation(api.consent.enableProject);
-  const disableProject = useMutation(api.consent.disableProject);
+  const allProjects = useQuery(api.consent.getProjectSharing);
+  const updateProjectSharing = useMutation(api.consent.updateProjectSharing);
   const githubStatus = useGithubStatus();
 
   // Local toggle state — tracks pending changes before save
@@ -65,6 +69,13 @@ function ProjectsPage() {
     if (!allProjects) return;
     setIsSaving(true);
     try {
+      const changes: Array<{
+        identifier:
+          | { directory: string; gitRemote?: string }
+          | { directory?: string; gitRemote: string };
+        sessionSharing: boolean;
+      }> = [];
+
       for (const [i, shouldShare] of pendingState.entries()) {
         const project = allProjects[i];
         if (shouldShare === project.sessionSharing) continue;
@@ -80,11 +91,11 @@ function ProjectsPage() {
             : null;
         if (!identifier) continue;
 
-        if (shouldShare) {
-          await enableProject({ identifier });
-        } else {
-          await disableProject({ identifier });
-        }
+        changes.push({ identifier, sessionSharing: shouldShare });
+      }
+
+      if (changes.length > 0) {
+        await updateProjectSharing({ changes });
       }
       setPendingState(new Map());
     } finally {
@@ -106,7 +117,7 @@ function ProjectsPage() {
 
   // Check visibility for unlinked GitHub repos
   const [visibilityMap, setVisibilityMap] = useState<
-    Map<string, "public" | "private">
+    Map<string, "public" | "private" | "unknown">
   >(new Map());
 
   useEffect(() => {
@@ -120,8 +131,8 @@ function ProjectsPage() {
 
     Promise.all(
       toCheck.map(async (remote) => {
-        const pub = await isRepoPublic(remote);
-        return [remote, pub ? "public" : "private"] as const;
+        const vis = await checkRepoVisibility(remote);
+        return [remote, vis] as const;
       }),
     ).then((results) => {
       setVisibilityMap((prev) => {
@@ -131,6 +142,8 @@ function ProjectsPage() {
         }
         return next;
       });
+    }).catch((err) => {
+      console.error("Failed to check repo visibility:", err);
     });
   }, [allProjects, linkedRemotes]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -189,7 +202,7 @@ function ProjectsPage() {
             </p>
             <div className="flex gap-3">
               <Button size="sm" asChild>
-                <a href={GITHUB_APP_INSTALL_URL}>Grant repo access</a>
+                <a href={`${GITHUB_APP_INSTALL_URL}?state=projects`}>Grant repo access</a>
               </Button>
               <a
                 href="https://github.com/settings/installations"
@@ -204,7 +217,7 @@ function ProjectsPage() {
         ) : (
           <div className="flex gap-4 mb-6 text-sm">
             <a
-              href={GITHUB_APP_INSTALL_URL}
+              href={`${GITHUB_APP_INSTALL_URL}?state=projects`}
               className="text-muted-foreground underline underline-offset-4 hover:text-foreground transition-colors"
             >
               Grant repo access
@@ -337,7 +350,9 @@ function ProjectsPage() {
             No projects configured yet. Enable sharing for projects using the
             CLI: <code className="text-xs">hive consent setup</code>
           </p>
-        ) : null}
+        ) : (
+          <p className="text-muted-foreground">Loading...</p>
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { checkAuthStatus } from './auth';
 import { getProjectIdentifiers, matchesProject } from './config';
-import { getConsentStatus, getEnabledProjects } from './convex';
+import { getConsentStatus, getProjectSharing } from './convex';
 import { parseJsonl, transformEntry } from './extraction';
 import {
   CONSENT_REVIEW_PERIOD_MS,
@@ -16,14 +16,14 @@ export async function getProjectConsentMtime(cwd: string): Promise<number | null
   try {
     const status = await checkAuthStatus(true);
     if (!status.authenticated) return null;
-    const [consent, activeProjects] = await Promise.all([
+    const [consent, allProjects] = await Promise.all([
       getConsentStatus(),
-      getEnabledProjects(),
+      getProjectSharing(),
     ]);
     if (!consent?.hasConsent || !consent.sessionSharing) return null;
     const ids = getProjectIdentifiers(cwd);
-    const projectConsent = matchesProject(activeProjects, ids);
-    return projectConsent?.consentedAt ?? null;
+    const projectConsent = matchesProject(allProjects, ids);
+    return projectConsent?.sessionSharing ? projectConsent.latestAt : null;
   } catch {
     return null;
   }

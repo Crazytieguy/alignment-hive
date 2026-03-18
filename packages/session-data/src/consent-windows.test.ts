@@ -17,7 +17,7 @@ describe("groupProjectConsentEvents", () => {
 
   it("creates one group for a single event with directory only", () => {
     const events: ProjectConsentEvent[] = [
-      { directory: "/home/user/project", sessionSharing: true, consentedAt: 100 },
+      { directory: "/home/user/project", sessionSharing: true, timestamp: 100 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
@@ -29,7 +29,7 @@ describe("groupProjectConsentEvents", () => {
 
   it("creates one group for a single event with gitRemote only", () => {
     const events: ProjectConsentEvent[] = [
-      { gitRemote: "github.com/user/repo", sessionSharing: true, consentedAt: 100 },
+      { gitRemote: "github.com/user/repo", sessionSharing: true, timestamp: 100 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
@@ -45,7 +45,7 @@ describe("groupProjectConsentEvents", () => {
         directory: "/home/user/project",
         gitRemote: "github.com/user/repo",
         sessionSharing: true,
-        consentedAt: 100,
+        timestamp: 100,
       },
     ];
     const result = groupProjectConsentEvents(events);
@@ -63,13 +63,13 @@ describe("groupProjectConsentEvents", () => {
         directory: "/home/user/project",
         gitRemote: "github.com/user/repo",
         sessionSharing: true,
-        consentedAt: 100,
+        timestamp: 100,
       },
       {
         directory: "/home/user/project",
         gitRemote: "github.com/other/fork",
         sessionSharing: true,
-        consentedAt: 200,
+        timestamp: 200,
       },
     ];
     const result = groupProjectConsentEvents(events);
@@ -91,13 +91,13 @@ describe("groupProjectConsentEvents", () => {
         directory: "/home/user/project-a",
         gitRemote: "github.com/user/repo",
         sessionSharing: true,
-        consentedAt: 100,
+        timestamp: 100,
       },
       {
         directory: "/home/user/project-b",
         gitRemote: "github.com/user/repo",
         sessionSharing: false,
-        consentedAt: 200,
+        timestamp: 200,
       },
     ];
     const result = groupProjectConsentEvents(events);
@@ -115,13 +115,13 @@ describe("groupProjectConsentEvents", () => {
         directory: "/home/user/project-a",
         gitRemote: "github.com/user/repo-a",
         sessionSharing: true,
-        consentedAt: 100,
+        timestamp: 100,
       },
       {
         directory: "/home/user/project-b",
         gitRemote: "github.com/user/repo-b",
         sessionSharing: true,
-        consentedAt: 200,
+        timestamp: 200,
       },
     ];
     const result = groupProjectConsentEvents(events);
@@ -139,9 +139,9 @@ describe("groupProjectConsentEvents", () => {
 
   it("merges transitively: A shares dir with B, B shares remote with C", () => {
     const events: ProjectConsentEvent[] = [
-      { directory: "/a", sessionSharing: true, consentedAt: 100 },
-      { directory: "/a", gitRemote: "r1", sessionSharing: true, consentedAt: 200 },
-      { directory: "/b", gitRemote: "r1", sessionSharing: true, consentedAt: 300 },
+      { directory: "/a", sessionSharing: true, timestamp: 100 },
+      { directory: "/a", gitRemote: "r1", sessionSharing: true, timestamp: 200 },
+      { directory: "/b", gitRemote: "r1", sessionSharing: true, timestamp: 300 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
@@ -156,9 +156,9 @@ describe("groupProjectConsentEvents", () => {
 
   it("groups by shared identifiers regardless of consent state", () => {
     const events: ProjectConsentEvent[] = [
-      { directory: "/shared", sessionSharing: true, consentedAt: 100 },
-      { directory: "/shared", sessionSharing: false, consentedAt: 200 },
-      { directory: "/other", sessionSharing: true, consentedAt: 300 },
+      { directory: "/shared", sessionSharing: true, timestamp: 100 },
+      { directory: "/shared", sessionSharing: false, timestamp: 200 },
+      { directory: "/other", sessionSharing: true, timestamp: 300 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(2);
@@ -173,13 +173,13 @@ describe("groupProjectConsentEvents", () => {
     const T3 = 3000;
 
     const events: ProjectConsentEvent[] = [
-      { directory: "/project", sessionSharing: true, consentedAt: T1 },
-      { directory: "/project", sessionSharing: false, consentedAt: T2 },
+      { directory: "/project", sessionSharing: true, timestamp: T1 },
+      { directory: "/project", sessionSharing: false, timestamp: T2 },
       {
         directory: "/project",
         gitRemote: "github.com/user/repo",
         sessionSharing: true,
-        consentedAt: T3,
+        timestamp: T3,
       },
     ];
 
@@ -195,7 +195,7 @@ describe("groupProjectConsentEvents", () => {
 
   it("handles events with no identifiers", () => {
     const events: ProjectConsentEvent[] = [
-      { sessionSharing: true, consentedAt: 100 },
+      { sessionSharing: true, timestamp: 100 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
@@ -206,9 +206,9 @@ describe("groupProjectConsentEvents", () => {
 
   it("handles complex transitive chains across many events", () => {
     const events: ProjectConsentEvent[] = [
-      { directory: "/a", gitRemote: "r1", sessionSharing: true, consentedAt: 100 },
-      { directory: "/b", gitRemote: "r2", sessionSharing: true, consentedAt: 200 },
-      { directory: "/b", gitRemote: "r1", sessionSharing: true, consentedAt: 300 },
+      { directory: "/a", gitRemote: "r1", sessionSharing: true, timestamp: 100 },
+      { directory: "/b", gitRemote: "r2", sessionSharing: true, timestamp: 200 },
+      { directory: "/b", gitRemote: "r1", sessionSharing: true, timestamp: 300 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);

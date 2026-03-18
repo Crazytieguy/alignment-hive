@@ -1,6 +1,6 @@
 ---
 description: Set up session sharing and get tooling recommendations — plugins, documentation patterns, and dev environment setup. This command should also be used when the user asks about setting up their project, which plugins to install, or when the working directory appears empty or newly created.
-allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:*), Bash(hive consent status:*), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh:*), Read, Write
+allowed-tools: Bash(hive consent status), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh)
 ---
 
 # Align
@@ -21,36 +21,27 @@ allowed-tools: Bash(cat:*), Bash(grep:*), Bash(sed:*), Bash(test:*), Bash(mkdir:
 
 ## Instructions
 
-### Session Sharing (ask first, before recommendations)
+### Data Sharing (check first, before recommendations)
 
-Read the consent status output above to determine the user's state.
+Read the consent status output above. Handle errors first, then check if data sharing needs attention.
 
-**If "error: binary not found"**:
-The hive binary is not installed. Direct the user to run the install script:
-`curl -fsSL https://alignment-hive.com/install.sh | bash`
-Then restart Claude Code and run /hive:align again.
+**If "error: binary not found"**: Direct user to run `curl -fsSL https://alignment-hive.com/install.sh | bash`, then restart Claude Code.
 
-**If "Not authenticated"**:
-Direct the user to run the install script to authenticate:
-`curl -fsSL https://alignment-hive.com/install.sh | bash`
+**If "Not authenticated"**: Direct user to run `curl -fsSL https://alignment-hive.com/install.sh | bash`.
 
-**If "Web consent: not completed"**:
-Direct the user to: `https://alignment-hive.com/consent`
-Do not offer per-project sharing until web consent is complete. Move on to recommendations.
+**If "Data sharing preferences: not set"**: Direct user to `https://alignment-hive.com/consent`. Move on to recommendations.
 
-**If "Session sharing: disabled"**:
-Note: "Session sharing: declined on web. You can change this at https://alignment-hive.com/consent"
-Do not offer per-project sharing. Move on to recommendations.
+**If "Session sharing: disabled"**: Note briefly that sharing is declined, changeable at `https://alignment-hive.com/consent`. Move on.
 
-**If "Session sharing: enabled"**:
-Check the current project line.
+**If "Session sharing: enabled"**: Check whether data sharing state is settled or needs attention.
 
-- **If current project is "enabled"**: Note "Session sharing: enabled" and check repo linking (see below).
-- **If current project is "not enabled" and `.claude/hive/sharing-disabled` exists**: The user previously declined sharing for this project. Note this and move on. Mention they can re-enable anytime with /hive:align.
-- **If current project is "not enabled" and no sharing-disabled file**: Consent state is **unsettled** — load the `consent-setup` skill for interactive setup.
+State is **settled** (note status in one line, move on) when:
+- Current project is "enabled", AND either no `Repo visibility` line (not a GitHub repo), or repo is public, or repo is linked, or `.claude/hive/repo-linking-declined` exists
+- OR `.claude/hive/sharing-disabled` exists (user previously declined for this project — mention they can re-enable with `/hive:align` or by asking to enable sharing)
 
-**Repo linking check** (when project sharing is enabled and project has a git remote):
-If `.claude/hive/repo-linking-declined` exists, skip. Otherwise, load the `consent-setup` skill to check and offer repo linking.
+State is **unsettled** (load the `manage-data-sharing` skill) when:
+- Current project is "not enabled" and `.claude/hive/sharing-disabled` does not exist
+- OR project is enabled with `Repo visibility: private` and `Repo link: not-linked` and `.claude/hive/repo-linking-declined` does not exist
 
 ### hive-mind Migration
 

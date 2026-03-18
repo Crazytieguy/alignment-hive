@@ -51,13 +51,11 @@ export const submitConsent = mutation({
         communityFeatures: consent.communityFeatures,
         publicationExcerpts: consent.publicationExcerpts,
         creditByName: consent.creditByName,
-        consentedAt: Date.now(),
       });
     } else {
       await ctx.db.insert("dataSharingConsent", {
         userId,
         sessionSharing: false,
-        consentedAt: Date.now(),
       });
     }
   },
@@ -81,7 +79,7 @@ export const getLatestConsent = query({
       return null;
     }
 
-    // Index sorts by _creationTime — latest row is last
+    // Index sorts by timestamp — latest row is last
     return await ctx.db
       .query("dataSharingConsent")
       .withIndex("by_user_id", (q) => q.eq("userId", user._id))
@@ -122,110 +120,47 @@ export const getConsentStatus = query({
   },
 });
 
-/** Append a project enable event. */
-export const enableProject = mutation({
-  args: { identifier: projectIdentifierArgs },
-  handler: async (ctx, { identifier }) => {
+/** Batch update project sharing state. Each change appends a consent event. */
+export const updateProjectSharing = mutation({
+  args: {
+    changes: v.array(
+      v.object({
+        identifier: projectIdentifierArgs,
+        sessionSharing: v.boolean(),
+      }),
+    ),
+  },
+  handler: async (ctx, { changes }) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
     }
-    validateIdentifiers(identifier);
 
     const userId = await upsertUser(ctx, identity);
 
-    const now = Date.now();
-    if (identifier.directory) {
-      await ctx.db.insert("projectConsent", {
-        userId,
-        directory: identifier.directory,
-        gitRemote: identifier.gitRemote,
-        sessionSharing: true,
-        consentedAt: now,
-      });
-    } else {
-      await ctx.db.insert("projectConsent", {
-        userId,
-        directory: identifier.directory,
-        gitRemote: identifier.gitRemote!,
-        sessionSharing: true,
-        consentedAt: now,
-      });
+    for (const { identifier, sessionSharing } of changes) {
+      validateIdentifiers(identifier);
+      if (identifier.directory) {
+        await ctx.db.insert("projectConsent", {
+          userId,
+          directory: identifier.directory,
+          gitRemote: identifier.gitRemote,
+          sessionSharing,
+        });
+      } else {
+        await ctx.db.insert("projectConsent", {
+          userId,
+          directory: identifier.directory,
+          gitRemote: identifier.gitRemote!,
+          sessionSharing,
+        });
+      }
     }
   },
 });
 
-/** Append a project disable event. */
-export const disableProject = mutation({
-  args: { identifier: projectIdentifierArgs },
-  handler: async (ctx, { identifier }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new ConvexError("Not authenticated");
-    }
-    validateIdentifiers(identifier);
-
-    const userId = await upsertUser(ctx, identity);
-
-    const now = Date.now();
-    if (identifier.directory) {
-      await ctx.db.insert("projectConsent", {
-        userId,
-        directory: identifier.directory,
-        gitRemote: identifier.gitRemote,
-        sessionSharing: false,
-        consentedAt: now,
-      });
-    } else {
-      await ctx.db.insert("projectConsent", {
-        userId,
-        directory: identifier.directory,
-        gitRemote: identifier.gitRemote!,
-        sessionSharing: false,
-        consentedAt: now,
-      });
-    }
-  },
-});
-
-/** Get active per-project consents (latest event per group where sessionSharing is true). */
-export const getEnabledProjects = query({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return [];
-    }
-
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
-      .first();
-
-    if (!user) {
-      return [];
-    }
-
-    const { groups } = await loadAndGroupUserConsent(ctx, user._id);
-
-    return groups
-      .map((group) => {
-        const latest = group.events.reduce((a, b) =>
-          a.consentedAt > b.consentedAt ? a : b,
-        );
-        return {
-          directories: [...group.directories],
-          gitRemotes: [...group.gitRemotes],
-          sessionSharing: latest.sessionSharing,
-          consentedAt: latest.consentedAt,
-        };
-      })
-      .filter((g) => g.sessionSharing);
-  },
-});
-
-/** Get all per-project consents (latest event per group, including disabled). */
-export const getAllProjects = query({
+/** Get per-project sharing state (latest event per group, including disabled). */
+export const getProjectSharing = query({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -246,13 +181,13 @@ export const getAllProjects = query({
 
     return groups.map((group) => {
       const latest = group.events.reduce((a, b) =>
-        a.consentedAt > b.consentedAt ? a : b,
+        a.timestamp > b.timestamp ? a : b,
       );
       return {
         directories: [...group.directories],
         gitRemotes: [...group.gitRemotes],
         sessionSharing: latest.sessionSharing,
-        consentedAt: latest.consentedAt,
+        latestAt: latest.timestamp,
       };
     });
   },
@@ -322,11 +257,11 @@ export const getConsentHistory = query({
     return {
       global: globalEvents.map((e) => ({
         sessionSharing: e.sessionSharing,
-        consentedAt: e.consentedAt,
+        timestamp: e._creationTime,
       })),
       project: (group?.events ?? []).map((e) => ({
         sessionSharing: e.sessionSharing,
-        consentedAt: e.consentedAt,
+        timestamp: e.timestamp,
       })),
     };
   },

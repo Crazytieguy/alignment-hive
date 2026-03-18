@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { disableProject, getEnabledProjects } from '../lib/convex';
+import { getProjectSharing, updateProjectSharing } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
 import { getConfig, getProjectIdentifiers, matchesProject } from '../lib/config';
 import { hive } from '../lib/messages';
@@ -23,11 +23,12 @@ export async function consentDisable(projectPath?: string): Promise<number> {
   await writeFile(join(stateDir, 'sharing-disabled'), '');
 
   // If this project was previously enabled in Convex, append a disable event
-  const activeProjects = await getEnabledProjects();
-  const wasEnabled = matchesProject(activeProjects, ids);
+  const allProjects = await getProjectSharing();
+  const existing = matchesProject(allProjects, ids);
+  const wasEnabled = existing?.sessionSharing;
 
   if (wasEnabled) {
-    const success = await disableProject(ids);
+    const success = await updateProjectSharing([{ identifier: ids, sessionSharing: false }]);
     if (!success) {
       printWarning(hive.consent.disableServerWarning);
     }

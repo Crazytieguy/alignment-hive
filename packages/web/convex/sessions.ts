@@ -35,7 +35,7 @@ async function verifyConsent(
     );
   }
 
-  // Latest event is last by _creationTime (default sort order)
+  // Latest event is last by timestamp (default sort order)
   const latestConsent = allGlobalEvents[allGlobalEvents.length - 1];
   if (!latestConsent.sessionSharing) {
     throw new ConvexError(
@@ -54,7 +54,7 @@ async function verifyConsent(
   }
 
   const latestEvent = group.events.reduce((a, b) =>
-    a.consentedAt > b.consentedAt ? a : b,
+    a.timestamp > b.timestamp ? a : b,
   );
   if (!latestEvent.sessionSharing) {
     throw new ConvexError(
@@ -64,7 +64,12 @@ async function verifyConsent(
 
   // If lastModified is provided, verify it falls within consent windows
   if (lastModified !== undefined) {
-    const globalWindows = computeConsentWindows(allGlobalEvents);
+    const globalWindows = computeConsentWindows(
+      allGlobalEvents.map((e) => ({
+        sessionSharing: e.sessionSharing,
+        timestamp: e._creationTime,
+      })),
+    );
     if (!isInConsentWindow(lastModified, globalWindows)) {
       throw new ConvexError(
         "Session was last modified outside an active consent window",

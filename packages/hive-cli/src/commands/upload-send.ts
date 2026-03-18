@@ -10,7 +10,7 @@ import {
   loadTranscriptsDirs,
   matchesProject,
 } from '../lib/config';
-import { getConsentHistory, getConsentStatus, getEnabledProjects } from '../lib/convex';
+import { getConsentHistory, getConsentStatus, getProjectSharing } from '../lib/convex';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
@@ -61,9 +61,9 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     return 1;
   }
 
-  const [consent, activeProjects] = await Promise.all([
+  const [consent, allProjects] = await Promise.all([
     getConsentStatus(),
-    getEnabledProjects(),
+    getProjectSharing(),
   ]);
   if (!consent?.hasConsent || !consent.sessionSharing) {
     printError(hive.upload.noConsent);
@@ -72,8 +72,8 @@ export async function uploadSend(args: Array<string>): Promise<number> {
   }
 
   const ids = getProjectIdentifiers(cwd);
-  const projectConsent = matchesProject(activeProjects, ids);
-  if (!projectConsent) {
+  const projectConsent = matchesProject(allProjects, ids);
+  if (!projectConsent?.sessionSharing) {
     printError(hive.upload.noProjectConsent);
     if (isBackground) await cleanupScheduled(stateDir);
     return 1;
@@ -122,7 +122,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
   }
 
   // Batch mode: with --delay (background), respect review periods; without, skip them
-  const consentMtime = projectConsent.consentedAt;
+  const consentMtime = projectConsent.latestAt;
   let candidates = isBackground
     ? allSessions.filter((session) =>
         checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime).eligible,

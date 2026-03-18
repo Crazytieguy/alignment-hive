@@ -10,7 +10,7 @@ import {
   loadTranscriptsDirs,
   matchesProject,
 } from '../lib/config';
-import { getConsentStatus, getEnabledProjects, pingCheckout } from '../lib/convex';
+import { getConsentStatus, getProjectSharing, pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
 import { hive } from '../lib/messages';
 import { hookOutput } from '../lib/output';
@@ -112,9 +112,9 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   // Now that auth is fresh, check consent in parallel
-  const [consent, activeProjects] = await Promise.all([
+  const [consent, allProjects] = await Promise.all([
     getConsentStatus(),
-    getEnabledProjects(),
+    getProjectSharing(),
   ]);
 
 
@@ -128,8 +128,8 @@ export async function hiveSessionStart(): Promise<number> {
 
   // Check per-project consent using identifiers
   const ids = getProjectIdentifiers(cwd);
-  const projectConsent = matchesProject(activeProjects, ids);
-  if (!projectConsent) {
+  const projectConsent = matchesProject(allProjects, ids);
+  if (!projectConsent?.sessionSharing) {
     // No consent for this project — don't offer sharing, just note it
     if (messages.length > 0) {
       hookOutput(formatHookMessages(messages));
@@ -137,7 +137,7 @@ export async function hiveSessionStart(): Promise<number> {
     return 0;
   }
 
-  const consentTimestamp = projectConsent.consentedAt;
+  const consentTimestamp = projectConsent.latestAt;
 
   if (transcriptsDirs.length === 0) {
     if (messages.length > 0) {

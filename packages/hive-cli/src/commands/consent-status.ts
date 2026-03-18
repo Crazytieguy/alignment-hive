@@ -1,6 +1,6 @@
 import { checkAuthStatus } from '../lib/auth';
 import { getProjectIdentifiers, matchesProject } from '../lib/config';
-import { getConsentStatus, getEnabledProjects, getRepoLinkStatus } from '../lib/convex';
+import { getConsentStatus, getProjectSharing, getRepoLinkStatus } from '../lib/convex';
 import { checkRepoVisibility } from '../lib/github';
 import { hive } from '../lib/messages';
 import { printError } from '../lib/output';
@@ -29,8 +29,9 @@ export async function consentStatus(): Promise<number> {
   if (consent.sessionSharing) {
     const cwd = process.cwd();
     const ids = getProjectIdentifiers(cwd);
-    const enabledProjects = await getEnabledProjects();
-    const projectEnabled = !!matchesProject(enabledProjects, ids);
+    const allProjects = await getProjectSharing();
+    const projectConsent = matchesProject(allProjects, ids);
+    const projectEnabled = !!projectConsent?.sessionSharing;
     const displayName = ids.gitRemote ?? ids.directory;
     console.log(hive.consent.statusProject(displayName, projectEnabled));
 

@@ -4,6 +4,33 @@ import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { z } from "zod/v4";
+
+const repoSchema = z.object({
+  id: z.number(),
+  full_name: z.string(),
+});
+
+const installationEventSchema = z.object({
+  action: z.string(),
+  installation: z.object({
+    id: z.number(),
+    account: z.object({
+      login: z.string(),
+      id: z.number(),
+    }),
+  }),
+  repositories: z.array(repoSchema).optional().default([]),
+});
+
+const repoEventSchema = z.object({
+  action: z.string(),
+  installation: z.object({ id: z.number() }),
+  repositories_added: z.array(repoSchema).optional().default([]),
+  repositories_removed: z.array(z.object({ id: z.number() }))
+    .optional()
+    .default([]),
+});
 
 /** Process a GitHub webhook. Verifies signature and dispatches to mutations. */
 export const handleWebhook = internalAction({
@@ -31,16 +58,14 @@ export const handleWebhook = internalAction({
       throw new Error("Invalid webhook signature");
     }
 
-    const payload = JSON.parse(rawBody);
-    const action = payload.action as string;
+    const raw = JSON.parse(rawBody);
 
     if (event === "installation") {
-      const installation = payload.installation;
-      const installationId = installation.id as number;
-      const accountLogin = (
-        installation.account.login as string
-      ).toLowerCase();
-      const accountId = installation.account.id as number;
+      const payload = installationEventSchema.parse(raw);
+      const { installation, action } = payload;
+      const installationId = installation.id;
+      const accountLogin = installation.account.login.toLowerCase();
+      const accountId = installation.account.id;
 
       if (action === "created") {
         await ctx.runMutation(internal.github.upsertGithubInstallation, {
@@ -49,14 +74,10 @@ export const handleWebhook = internalAction({
           accountId,
         });
 
-        const repos = (payload.repositories ?? []) as Array<{
-          id: number;
-          full_name: string;
-        }>;
-        if (repos.length > 0) {
+        if (payload.repositories.length > 0) {
           await ctx.runMutation(internal.github.batchUpsertLinkedRepos, {
             installationId,
-            repos: repos.map((r) => ({
+            repos: payload.repositories.map((r) => ({
               repoId: r.id,
               gitRemote: `github.com/${r.full_name}`.toLowerCase(),
             })),
@@ -68,29 +89,23 @@ export const handleWebhook = internalAction({
         });
       }
     } else if (event === "installation_repositories") {
-      const installationId = payload.installation.id as number;
+      const payload = repoEventSchema.parse(raw);
+      const installationId = payload.installation.id;
 
-      if (action === "added") {
-        const repos = (payload.repositories_added ?? []) as Array<{
-          id: number;
-          full_name: string;
-        }>;
-        if (repos.length > 0) {
+      if (payload.action === "added") {
+        if (payload.repositories_added.length > 0) {
           await ctx.runMutation(internal.github.batchUpsertLinkedRepos, {
             installationId,
-            repos: repos.map((r) => ({
+            repos: payload.repositories_added.map((r) => ({
               repoId: r.id,
               gitRemote: `github.com/${r.full_name}`.toLowerCase(),
             })),
           });
         }
-      } else if (action === "removed") {
-        const repos = (payload.repositories_removed ?? []) as Array<{
-          id: number;
-        }>;
-        if (repos.length > 0) {
+      } else if (payload.action === "removed") {
+        if (payload.repositories_removed.length > 0) {
           await ctx.runMutation(internal.github.batchRemoveLinkedRepos, {
-            repoIds: repos.map((r) => r.id),
+            repoIds: payload.repositories_removed.map((r) => r.id),
           });
         }
       }

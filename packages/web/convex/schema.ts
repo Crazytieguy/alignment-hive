@@ -47,7 +47,6 @@ export default defineSchema({
       v.object({
         userId: v.id("users"),
         sessionSharing: v.literal(false),
-        consentedAt: v.number(),
       }),
       v.object({
         userId: v.id("users"),
@@ -55,7 +54,6 @@ export default defineSchema({
         communityFeatures: v.boolean(),
         publicationExcerpts: v.boolean(),
         creditByName: v.boolean(),
-        consentedAt: v.number(),
       }),
     ),
   ).index("by_user_id", ["userId"]),
@@ -71,7 +69,6 @@ export default defineSchema({
         directory: v.string(),
         gitRemote: v.optional(v.string()),
         sessionSharing: v.boolean(),
-        consentedAt: v.number(),
       }),
       // gitRemote required, directory optional
       v.object({
@@ -80,21 +77,16 @@ export default defineSchema({
         directory: v.optional(v.string()),
         gitRemote: v.string(),
         sessionSharing: v.boolean(),
-        consentedAt: v.number(),
       }),
       // Legacy: project only (pre-migration records)
       v.object({
         userId: v.id("users"),
         project: v.string(),
         sessionSharing: v.boolean(),
-        consentedAt: v.number(),
       }),
     ),
   )
-    .index("by_user_id", ["userId"])
-    .index("by_user_project", ["userId", "project"])
-    .index("by_user_directory", ["userId", "directory"])
-    .index("by_user_remote", ["userId", "gitRemote"]),
+    .index("by_user_id", ["userId"]),
 
   githubInstallations: defineTable({
     installationId: v.number(),
@@ -102,8 +94,7 @@ export default defineSchema({
     accountId: v.number(),
     updatedAt: v.number(),
   })
-    .index("by_installation_id", ["installationId"])
-    .index("by_account_id", ["accountId"]),
+    .index("by_installation_id", ["installationId"]),
 
   linkedRepos: defineTable({
     installationId: v.number(),

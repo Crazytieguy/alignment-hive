@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
-import { enableProject } from '../lib/convex';
+import { updateProjectSharing } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
 import { getConfig, getProjectIdentifiers } from '../lib/config';
 import { hive } from '../lib/messages';
@@ -16,7 +16,7 @@ export async function consentEnable(projectPath?: string): Promise<number> {
   const resolvedPath = projectPath || process.cwd();
   const ids = getProjectIdentifiers(resolvedPath);
 
-  const success = await enableProject(ids);
+  const success = await updateProjectSharing([{ identifier: ids, sessionSharing: true }]);
   if (!success) {
     printError(hive.consent.enableFailed);
     return 1;

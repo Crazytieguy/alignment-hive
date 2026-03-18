@@ -3,7 +3,7 @@
  *
  * Consolidates the "load all consent events → group by project identity →
  * find matching group" pattern used by verifyConsent, buildConsentFilter,
- * getEnabledProjects, and getConsentHistory.
+ * getProjectSharing, and getConsentHistory.
  */
 import type { QueryCtx, MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
@@ -35,7 +35,7 @@ export async function loadAndGroupUserConsent(
   const normalized: ProjectConsentEvent[] = rawEvents.map((e) => ({
     ...extractIdentifiers(e),
     sessionSharing: e.sessionSharing,
-    consentedAt: e.consentedAt,
+    timestamp: e._creationTime,
   }));
 
   const { groups, lookup } = groupProjectConsentEvents(normalized);

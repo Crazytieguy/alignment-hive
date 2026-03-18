@@ -19,10 +19,7 @@ export const migrateProjectConsentBatch = internalMutation({
   handler: async (ctx, { cursor }) => {
     const page = await ctx.db
       .query("projectConsent")
-      .paginate({
-        numItems: BATCH_SIZE,
-        cursor: (cursor ?? null) as never,
-      });
+      .paginate({ numItems: BATCH_SIZE, cursor: cursor ?? null });
 
     let migrated = 0;
     for (const record of page.page) {
@@ -31,7 +28,7 @@ export const migrateProjectConsentBatch = internalMutation({
       if ('gitRemote' in record && record.gitRemote) continue;
       if (!('project' in record) || !record.project) continue;
 
-      const ids = classifyLegacyProject(record.project as string);
+      const ids = classifyLegacyProject(record.project);
       await ctx.db.patch(record._id, {
         ...(ids.directory ? { directory: ids.directory } : {}),
         ...(ids.gitRemote ? { gitRemote: ids.gitRemote } : {}),
@@ -52,10 +49,7 @@ export const migrateSessionsBatch = internalMutation({
   handler: async (ctx, { cursor }) => {
     const page = await ctx.db
       .query("sessions")
-      .paginate({
-        numItems: BATCH_SIZE,
-        cursor: (cursor ?? null) as never,
-      });
+      .paginate({ numItems: BATCH_SIZE, cursor: cursor ?? null });
 
     let migrated = 0;
     for (const record of page.page) {
@@ -126,13 +120,11 @@ export const lowercaseProjectConsentBatch = internalMutation({
 
     let migrated = 0;
     for (const doc of page.page) {
-      const remote = (doc as Record<string, unknown>).gitRemote as
-        | string
-        | undefined;
+      const remote = 'gitRemote' in doc ? doc.gitRemote : undefined;
       if (remote && remote !== remote.toLowerCase()) {
         await ctx.db.patch(doc._id, {
           gitRemote: remote.toLowerCase(),
-        } as Record<string, unknown>);
+        });
         migrated++;
       }
     }

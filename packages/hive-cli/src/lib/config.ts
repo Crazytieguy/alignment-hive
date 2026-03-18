@@ -148,12 +148,12 @@ export function getProjectIdentifiers(cwd: string): { directory: string; gitRemo
   return { directory: cwd, gitRemote };
 }
 
-/** Check if an enabled project matches the given identifiers. */
+/** Find a project matching the given identifiers. */
 export function matchesProject<T extends { directories: Array<string>; gitRemotes: Array<string> }>(
-  enabledProjects: Array<T>,
+  projects: Array<T>,
   identifiers: { directory?: string; gitRemote?: string },
 ): T | undefined {
-  for (const p of enabledProjects) {
+  for (const p of projects) {
     if (identifiers.gitRemote) {
       const lower = identifiers.gitRemote.toLowerCase();
       if (p.gitRemotes.some((r) => r.toLowerCase() === lower)) return p;

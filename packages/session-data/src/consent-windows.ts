@@ -6,14 +6,14 @@
  *
  * Window rules:
  * - First consent is retroactive: window starts at 0 (covers legacy data)
- * - Subsequent consents start at their consentedAt time (gap sessions excluded)
- * - Revocations close the current window at their consentedAt time
+ * - Subsequent consents start at their timestamp time (gap sessions excluded)
+ * - Revocations close the current window at their timestamp time
  * - A currently-active consent has end = Infinity
  */
 
 export interface ConsentEvent {
   sessionSharing: boolean;
-  consentedAt: number;
+  timestamp: number;
 }
 
 export interface ConsentWindow {
@@ -26,12 +26,12 @@ export interface ConsentWindow {
  *
  * Events are sorted by time. The first opt-in opens a window at time 0
  * (retroactive for legacy data). Subsequent opt-ins open windows at their
- * consentedAt time. Opt-outs close the current window.
+ * timestamp time. Opt-outs close the current window.
  */
 export function computeConsentWindows(
   events: ConsentEvent[],
 ): ConsentWindow[] {
-  const sorted = [...events].sort((a, b) => a.consentedAt - b.consentedAt);
+  const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
   const windows: ConsentWindow[] = [];
   let isOpen = false;
   let isFirst = true;
@@ -39,14 +39,14 @@ export function computeConsentWindows(
   for (const event of sorted) {
     if (event.sessionSharing && !isOpen) {
       windows.push({
-        start: isFirst ? 0 : event.consentedAt,
+        start: isFirst ? 0 : event.timestamp,
         end: Infinity,
       });
       isOpen = true;
       isFirst = false;
     } else if (!event.sessionSharing && isOpen) {
       // Close the current window
-      windows[windows.length - 1].end = event.consentedAt;
+      windows[windows.length - 1].end = event.timestamp;
       isOpen = false;
     }
   }

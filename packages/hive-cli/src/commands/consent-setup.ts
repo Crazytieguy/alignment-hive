@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
 import { checkAuthStatus } from '../lib/auth';
 import { getConfig, getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
-import { disableProject, enableProject, getConsentStatus, getEnabledProjects, getRepoLinkStatus } from '../lib/convex';
+import { getConsentStatus, getProjectSharing, getRepoLinkStatus, updateProjectSharing } from '../lib/convex';
 import { checkRepoVisibility } from '../lib/github';
 import { hive } from '../lib/messages';
 
@@ -196,9 +196,9 @@ async function consentSetupInner(): Promise<number> {
   }
 
   // Project selection
-  const [projects, enabledProjects] = await Promise.all([
+  const [projects, allProjectSharing] = await Promise.all([
     detectProjects(),
-    getEnabledProjects(),
+    getProjectSharing(),
   ]);
   if (projects.length === 0) {
     console.log(`  ${msg.noProjects}`);
@@ -206,8 +206,10 @@ async function consentSetupInner(): Promise<number> {
   }
 
   // Check which local projects are already enabled
-  const isEnabled = (p: typeof projects[number]): boolean =>
-    !!matchesProject(enabledProjects, p.identifiers);
+  const isEnabled = (p: typeof projects[number]): boolean => {
+    const match = matchesProject(allProjectSharing, p.identifiers);
+    return !!match?.sessionSharing;
+  };
 
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   let checkbox: typeof import('@inquirer/prompts').checkbox;
@@ -239,34 +241,33 @@ async function consentSetupInner(): Promise<number> {
   // Only disable projects that exist locally — don't touch projects from other machines
   const toDisable = projects.filter((p: typeof projects[number]) => !selectedSet.has(p.displayName) && isEnabled(p));
 
-  if (toEnable.length === 0 && toDisable.length === 0) {
+  if (toEnable.length > 0 || toDisable.length > 0) {
+    const changes = [
+      ...toEnable.map((p) => ({ identifier: p.identifiers, sessionSharing: true })),
+      ...toDisable.map((p) => ({ identifier: p.identifiers, sessionSharing: false })),
+    ];
+
+    const success = await updateProjectSharing(changes);
+    if (success) {
+      for (const project of toEnable) {
+        console.log(`  ✓ ${msg.enabledProject(project.displayName)}`);
+      }
+      for (const project of toDisable) {
+        console.log(`  – ${msg.disabledProject(project.displayName)}`);
+      }
+    } else {
+      console.error(`  ✗ Failed to update project sharing`);
+      return 1;
+    }
+
+    console.log(`\n  ${msg.summary(toEnable.length, toDisable.length)}`);
+
+    if (toEnable.length > 0) {
+      console.log(`\n  ${msg.uploadReviewInfo}`);
+      console.log(`  ${msg.uploadHelpHint}`);
+    }
+  } else {
     console.log(`  ${msg.noChanges}`);
-    return 0;
-  }
-
-  for (const project of toEnable) {
-    const success = await enableProject(project.identifiers);
-    if (success) {
-      console.log(`  ✓ ${msg.enabledProject(project.displayName)}`);
-    } else {
-      console.error(`  ✗ ${msg.enableSetupFailed(project.displayName)}`);
-    }
-  }
-
-  for (const project of toDisable) {
-    const success = await disableProject(project.identifiers);
-    if (success) {
-      console.log(`  – ${msg.disabledProject(project.displayName)}`);
-    } else {
-      console.error(`  ✗ ${msg.disableSetupFailed(project.displayName)}`);
-    }
-  }
-
-  console.log(`\n  ${msg.summary(toEnable.length, toDisable.length)}`);
-
-  if (toEnable.length > 0) {
-    console.log(`\n  ${msg.uploadReviewInfo}`);
-    console.log(`  ${msg.uploadHelpHint}`);
   }
 
   // Check linking for enabled private GitHub repos
@@ -300,14 +301,14 @@ async function consentSetupInner(): Promise<number> {
       const appSlug = process.env.GITHUB_APP_SLUG ?? 'alignment-hive';
       const installUrl = `https://github.com/apps/${appSlug}/installations/new`;
       console.log(`\n  Some of your private repos aren't linked for code context.`);
-      console.log(`  Install the GitHub App to let researchers see referenced code:`);
+      console.log(`  Grant repo access to let researchers see referenced code:`);
       console.log(`  ${installUrl}`);
-      console.log(`  If you just installed the GitHub App, it may take a moment to sync.`);
+      console.log(`  If you just granted access, it may take a moment to sync.`);
 
       try {
         const { confirm: confirmLink } = await import('@inquirer/prompts');
         const shouldLink = await confirmLink({
-          message: 'Open the install page?',
+          message: 'Open the repo access page?',
           default: false,
         }, { input: getInput() });
 
