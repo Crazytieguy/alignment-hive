@@ -39,7 +39,8 @@ if [ -n "${REMOTE_KERNELS_DEV:-}" ] && [ -x "$REMOTE_KERNELS_DEV" ]; then
 fi
 
 # Cache directory
-CACHE_DIR="$HOME/.cache/remote-kernels/v${VERSION}"
+CACHE_BASE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/remote-kernels}"
+CACHE_DIR="$CACHE_BASE/v${VERSION}"
 BINARY="$CACHE_DIR/remote-kernels"
 
 # Download if not cached

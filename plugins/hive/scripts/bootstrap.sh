@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
-CACHE_BASE="$HOME/.cache/hive"
+CACHE_BASE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/hive}"
 LAST_USED_FILE="$CACHE_BASE/last-used"
 
 # Read version from cli-version file
