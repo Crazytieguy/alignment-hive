@@ -167,9 +167,12 @@ install_hive_plugin() {
     return 0
   fi
 
+  # Always update marketplace first so the latest plugin list is available
+  info "Updating marketplace..."
+  claude plugin marketplace update alignment-hive 2>/dev/null || true
+
   if [ -f "$INSTALLED_PLUGINS" ] && $JQ -e '.plugins."hive@alignment-hive"' "$INSTALLED_PLUGINS" >/dev/null 2>&1; then
     info "Updating hive plugin..."
-    claude plugin marketplace update alignment-hive 2>/dev/null || true
     claude plugin update hive@alignment-hive 2>/dev/null || true
     success "hive plugin up to date"
   else
