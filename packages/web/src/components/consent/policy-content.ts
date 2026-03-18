@@ -35,7 +35,7 @@ export const policySections: PolicySection[] = [
     id: "access",
     title: "Access and use",
     paragraphs: [
-      "Your data is shared with a curated group of AI safety researchers and organizations. You can visit this page at any time to see the current list.",
+      "Your data, name, and email are shared with a curated group of AI safety researchers and organizations. You can visit this page at any time to see the current list.",
       "We will not monetize your data or sell it to AI labs for training or any other commercial purpose. We ask all parties with access to take reasonable steps to prevent the data from being leaked, for example by not using it as input to AI services that may use the data for training or that don't guarantee privacy.",
       "Data is retained for as long as alignment-hive operates, unless you request deletion. To request deletion, contact yoav.tzfati@gmail.com. We plan to add self-serve deletion in the future. We'll delete what we control and notify others with access to do the same. This is best-effort: all parties with access are required to maintain provenance and honor deletion requests, but we cannot guarantee that no copies exist.",
       "If your data is compromised in a security breach, we will notify you as soon as possible.",
