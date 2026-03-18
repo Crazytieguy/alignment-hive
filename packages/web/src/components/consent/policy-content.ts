@@ -45,7 +45,7 @@ export const policySections: PolicySection[] = [
     id: "controlling",
     title: "Controlling what you share",
     paragraphs: [
-      "Consenting here does not mean your data is uploaded immediately. Sharing is opt-in per project: you choose which projects to share using the CLI (\u200Bhive consent enable\u200B), the install script, or by running /hive:align inside Claude Code. When you enable sharing for a project, all existing sessions in that project enter a 24-hour review period. New sessions enter the review period as they're created.",
+      "**Choosing \"Don't share\" disables all sharing** and cannot be overridden per project. **Choosing \"Share my sessions\" does not upload anything by itself** — sharing is additionally opt-in per project: you choose which projects to share using the CLI (\u200Bhive consent enable\u200B), the install script, or by running /hive:align inside Claude Code. When you enable sharing for a project, all existing sessions in that project enter a 24-hour review period. New sessions enter the review period as they're created.",
       "After the review period, you'll see a reminder at the start of your next Claude Code session and have a 10-minute window before the upload begins. You can exclude any session during either window, or exclude all pending sessions at once. If you know a session contains sensitive credentials, you can review and exclude it during this period. If you need more time, you can delay the upload.",
       "You can stop sharing a project at any time using the CLI (\u200Bhive consent disable\u200B) or by running /hive:align. Previously uploaded data is not automatically deleted when you stop sharing.",
     ],
