@@ -1,3 +1,7 @@
+import { hookColors } from './output';
+
+const { boldMagenta, dim } = hookColors;
+
 export function getCliCommand(hasAlias: boolean): string {
   if (hasAlias) {
     return 'hive-mind';
@@ -38,9 +42,6 @@ export const hook = {
   },
   uploadingSessions: (count: number, delayMinutes: number): string => {
     return `Uploading ${count} session${count === 1 ? '' : 's'} in ${delayMinutes}m`;
-  },
-  uploadInProgress: (count: number): string => {
-    return `${count} session${count === 1 ? '' : 's'} eligible (upload in progress)`;
   },
   toReview: (userHasAlias: boolean): string => {
     const cli = getCliCommand(userHasAlias);
@@ -447,16 +448,16 @@ export const hive = {
     consentUnknown: 'Could not verify sharing preferences (offline or not authenticated). Upload status may be inaccurate.',
   },
   sessionStart: {
-    alignNudgeNew: 'Recommendations available: run /hive:align',
-    alignNudgeUpdate: 'New recommendations available. To review: /hive:align',
-    pendingSingle: (timeStr: string): string => `1 session uploads in ${timeStr}`,
+    alignNudgeNew: `run ${boldMagenta('/hive:align')} for setup recommendations`,
+    alignNudgeUpdate: `run ${boldMagenta('/hive:align')} for new recommendations`,
+    pendingSingle: (timeStr: string): string =>
+      `1 session pending ${dim('·')} uploads in ${timeStr}`,
     pendingMultiple: (count: number, timeStr: string): string =>
-      `${count} sessions pending, first uploads in ${timeStr}`,
+      `${count} sessions pending ${dim('·')} first uploads in ${timeStr}`,
     eligibleSnoozed: (count: number): string =>
-      `${count} session${count === 1 ? '' : 's'} eligible (uploads snoozed)`,
-    eligibleInProgress: (count: number): string =>
-      `${count} session${count === 1 ? '' : 's'} eligible (upload in progress)`,
+      `${count} session${count === 1 ? '' : 's'} pending ${dim('·')} uploads snoozed`,
     uploading: (count: number, delayMin: number): string =>
-      `Uploading ${count} session${count === 1 ? '' : 's'} in ${delayMin}m`,
+      `uploading ${count} session${count === 1 ? '' : 's'} in ${delayMin}m`,
+    reviewHint: `${boldMagenta('$ hive upload review')} ${dim('to preview')}`,
   },
 };

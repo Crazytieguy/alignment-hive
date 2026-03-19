@@ -160,7 +160,6 @@
   },
   "enabledPlugins": {
     "plugin-dev@claude-plugins-official": true,
-    "vercel@claude-plugins-official": true,
     "playwright@claude-plugins-official": true,
     "autopilot@alignment-hive": true
   }

@@ -14555,7 +14555,39 @@ async function addTranscriptsDir(stateDir, dir) {
   }
 }
 
+// src/lib/output.ts
+var colors = {
+  red: (s) => `\x1B[31m${s}\x1B[0m`,
+  green: (s) => `\x1B[32m${s}\x1B[0m`,
+  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
+  blue: (s) => `\x1B[34m${s}\x1B[0m`
+};
+var hookColors = {
+  bold: (s) => `\x1B[1m${s}\x1B[0m`,
+  dim: (s) => `\x1B[2m${s}\x1B[0m`,
+  magenta: (s) => `\x1B[35m${s}\x1B[0m`,
+  boldMagenta: (s) => `\x1B[1;35m${s}\x1B[0m`,
+  cyan: (s) => `\x1B[36m${s}\x1B[0m`,
+  green: (s) => `\x1B[32m${s}\x1B[0m`
+};
+function hookOutput(message) {
+  console.log(JSON.stringify({ systemMessage: message }));
+}
+function printError(message) {
+  console.error(`${colors.red("Error:")} ${message}`);
+}
+function printSuccess(message) {
+  console.log(colors.green(message));
+}
+function printInfo(message) {
+  console.log(colors.blue(message));
+}
+function printWarning(message) {
+  console.log(colors.yellow(message));
+}
+
 // src/lib/messages.ts
+var { boldMagenta, dim } = hookColors;
 function getCliCommand(hasAlias) {
   if (hasAlias) {
     return "hive-mind";
@@ -14594,9 +14626,6 @@ var hook = {
   },
   uploadingSessions: (count, delayMinutes) => {
     return `Uploading ${count} session${count === 1 ? "" : "s"} in ${delayMinutes}m`;
-  },
-  uploadInProgress: (count) => {
-    return `${count} session${count === 1 ? "" : "s"} eligible (upload in progress)`;
   },
   toReview: (userHasAlias) => {
     const cli = getCliCommand(userHasAlias);
@@ -14891,6 +14920,78 @@ var uploadCmd = {
   failedCount: (count) => `Failed to upload ${count} session(s)`,
   done: "done",
   failed: (error48) => `failed: ${error48}`
+};
+var NOT_AUTHENTICATED = "Not authenticated. Run the install script to authenticate.";
+var hive = {
+  consent: {
+    notAuthenticated: NOT_AUTHENTICATED,
+    enableSuccess: (project) => `Sharing enabled for ${project}`,
+    enableFailed: "Failed to enable sharing for project.",
+    disableSuccess: (project) => `Sharing disabled for ${project}`,
+    disableServerWarning: "Sharing disabled locally, but could not sync with server.",
+    statusNotAuthenticated: "Not authenticated",
+    statusFetchFailed: "Failed to fetch consent status",
+    statusNotCompleted: "Data sharing preferences: not set",
+    statusCompleted: "Data sharing preferences: completed",
+    statusSharing: (enabled) => `Session sharing: ${enabled ? "enabled" : "disabled"}`,
+    statusProject: (canonical, enabled) => `Current project (${canonical}): ${enabled ? "enabled" : "not enabled"}`,
+    fallbackUrl: (url2) => `Complete data sharing preferences at: ${url2}`,
+    openPrompt: (url2) => `Open ${url2} to set data sharing preferences?`,
+    visitWhenReady: (url2) => `Visit ${url2} when ready.`,
+    waiting: "Waiting for preferences to be saved...",
+    timedOut: "Timed out. Visit the URL above and try again.",
+    completed: "Preferences saved",
+    sharingDeclined: "Session sharing declined.",
+    sharingDisabled: "Session sharing is disabled. Change at https://alignment-hive.com/consent",
+    noProjects: "No Claude Code projects detected.",
+    projectsHeader: "Detected Claude Code projects:",
+    enableManually: "To enable sharing, run: hive consent enable <project-path>",
+    selectProjects: "Select projects to share sessions from:",
+    noChanges: "No changes.",
+    enabledProject: (project) => `Sharing enabled for ${project}`,
+    enableSetupFailed: (project) => `Failed to enable sharing for ${project}`,
+    disabledProject: (project) => `Sharing disabled for ${project}`,
+    disableSetupFailed: (project) => `Failed to disable sharing for ${project}`,
+    summary: (enabled, disabled) => `${enabled} enabled, ${disabled} disabled.`,
+    uploadReviewInfo: "Sessions are uploaded after a 24-hour review period.",
+    uploadHelpHint: "Run `hive upload --help` to manage uploads."
+  },
+  upload: {
+    notAuthenticated: NOT_AUTHENTICATED,
+    noConsent: "Session sharing not enabled. Complete consent at https://alignment-hive.com/consent",
+    noProjectConsent: "Session sharing not enabled for this project. Run: hive consent enable",
+    noSessions: "No sessions found.",
+    noSessionsToUpload: "No sessions to upload.",
+    uploading: (count) => `Uploading ${count} session${count === 1 ? "" : "s"}...`,
+    uploadingSession: (id) => `Uploading ${id}...`,
+    uploaded: (count) => `Uploaded ${count} session${count === 1 ? "" : "s"}`,
+    uploadedSession: (id) => `Uploaded ${id}`,
+    uploadFailed: (error48) => `Failed to upload: ${error48}`,
+    uploadsFailed: (count) => `Failed to upload ${count} session${count === 1 ? "" : "s"}`,
+    alreadyUploaded: (id) => `Session ${id} is already uploaded.`,
+    alreadyExcluded: (id) => `Session ${id} is already excluded.`,
+    cannotExcludeUploaded: (id) => `Session ${id} is already uploaded and cannot be excluded.`,
+    excluded: (id) => `Excluded session ${id}`,
+    excludedCount: (count) => `Excluded ${count} session${count === 1 ? "" : "s"}`,
+    allExcludedOrUploaded: "All sessions are already excluded or uploaded.",
+    excludeUsage: "Usage: hive upload exclude <session-id> or hive upload exclude --all",
+    sessionExcluded: (id) => `Session ${id} is excluded.`,
+    snoozeClearedMsg: "Snooze cleared. Uploads will resume on next session start.",
+    noActiveSnooze: "No active snooze.",
+    snoozedUntil: (dateStr) => `Uploads paused until ${dateStr}`,
+    snoozeInProgressNote: "Any in-progress uploads will also check snooze before uploading.",
+    invalidDuration: (duration3) => `Invalid duration: "${duration3}". Use format like 30m, 2h, 1d, 7d.`,
+    consentUnknown: "Could not verify sharing preferences (offline or not authenticated). Upload status may be inaccurate."
+  },
+  sessionStart: {
+    alignNudgeNew: `run ${boldMagenta("/hive:align")} for setup recommendations`,
+    alignNudgeUpdate: `run ${boldMagenta("/hive:align")} for new recommendations`,
+    pendingSingle: (timeStr) => `1 session pending ${dim("\xB7")} uploads in ${timeStr}`,
+    pendingMultiple: (count, timeStr) => `${count} sessions pending ${dim("\xB7")} first uploads in ${timeStr}`,
+    eligibleSnoozed: (count) => `${count} session${count === 1 ? "" : "s"} pending ${dim("\xB7")} uploads snoozed`,
+    uploading: (count, delayMin) => `uploading ${count} session${count === 1 ? "" : "s"} in ${delayMin}m`,
+    reviewHint: `${boldMagenta("$ hive upload review")} ${dim("to preview")}`
+  }
 };
 
 // src/lib/secret-rules.ts
@@ -16960,29 +17061,6 @@ async function extractSingleSession(cwd, sessionId) {
     }
   }
   return false;
-}
-
-// src/lib/output.ts
-var colors = {
-  red: (s) => `\x1B[31m${s}\x1B[0m`,
-  green: (s) => `\x1B[32m${s}\x1B[0m`,
-  yellow: (s) => `\x1B[33m${s}\x1B[0m`,
-  blue: (s) => `\x1B[34m${s}\x1B[0m`
-};
-function hookOutput(message) {
-  console.log(JSON.stringify({ systemMessage: message }));
-}
-function printError(message) {
-  console.error(`${colors.red("Error:")} ${message}`);
-}
-function printSuccess(message) {
-  console.log(colors.green(message));
-}
-function printInfo(message) {
-  console.log(colors.blue(message));
-}
-function printWarning(message) {
-  console.log(colors.yellow(message));
 }
 
 // src/lib/utils.ts
@@ -19244,7 +19322,9 @@ async function readHookInput() {
     const data = JSON.parse(input);
     return {
       transcriptPath: typeof data.transcript_path === "string" ? data.transcript_path : undefined,
-      cwd: typeof data.cwd === "string" ? data.cwd : undefined
+      cwd: typeof data.cwd === "string" ? data.cwd : undefined,
+      hookEventName: typeof data.hook_event_name === "string" ? data.hook_event_name : undefined,
+      source: typeof data.source === "string" ? data.source : undefined
     };
   } catch {
     return {};

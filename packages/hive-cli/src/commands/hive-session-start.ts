@@ -13,7 +13,7 @@ import {
 import { getConsentStatus, getProjectSharing, pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
 import { hive } from '../lib/messages';
-import { hookOutput } from '../lib/output';
+import { hookColors, hookContinuationPad, hookOutput } from '../lib/output';
 import { spawnBackground } from '../lib/spawn';
 import {
   CONSENT_REVIEW_PERIOD_MS,
@@ -50,8 +50,17 @@ function spawnBackgroundCommand(args: Array<string>, stateDir: string): boolean 
   });
 }
 
-function formatHookMessages(messages: Array<string>): string {
-  return messages.map((msg, i) => (i === 0 ? `hive: ${msg}` : `→ ${msg}`)).join('\n');
+function formatHookMessages(
+  messages: Array<string>,
+  hookEventName?: string,
+  source?: string,
+): string {
+  const pad = hookContinuationPad(hookEventName, source);
+  // Extra indent past "hive: " (6 chars) for continuation lines
+  const contentPad = pad + '      ';
+  return messages
+    .map((msg, i) => (i === 0 ? `${hookColors.bold('hive:')} ${msg}` : `${contentPad}${msg}`))
+    .join('\n');
 }
 
 /** Check if /hive:align should be nudged based on plugin version. */
@@ -106,7 +115,7 @@ export async function hiveSessionStart(): Promise<number> {
   if (status.needsLogin) {
     // Don't mention auth — /hive:align handles the full setup flow
     if (messages.length > 0) {
-      hookOutput(formatHookMessages(messages));
+      hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
     }
     return 0;
   }
@@ -121,7 +130,7 @@ export async function hiveSessionStart(): Promise<number> {
   // No consent or sharing disabled — just show align nudge if present
   if (!consent?.hasConsent || !consent.sessionSharing) {
     if (messages.length > 0) {
-      hookOutput(formatHookMessages(messages));
+      hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
     }
     return 0;
   }
@@ -132,7 +141,7 @@ export async function hiveSessionStart(): Promise<number> {
   if (!projectConsent?.sessionSharing) {
     // No consent for this project — don't offer sharing, just note it
     if (messages.length > 0) {
-      hookOutput(formatHookMessages(messages));
+      hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
     }
     return 0;
   }
@@ -141,7 +150,7 @@ export async function hiveSessionStart(): Promise<number> {
 
   if (transcriptsDirs.length === 0) {
     if (messages.length > 0) {
-      hookOutput(formatHookMessages(messages));
+      hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
     }
     return 0;
   }
@@ -182,25 +191,36 @@ export async function hiveSessionStart(): Promise<number> {
     }
   }
 
+  let hasSessionInfo = false;
   if (eligibleCount > 0) {
     if (await isSnoozed(stateDir)) {
       messages.push(hive.sessionStart.eligibleSnoozed(eligibleCount));
+      hasSessionInfo = true;
     } else {
       const alreadyScheduled = await checkUploadScheduled(stateDir);
-      if (alreadyScheduled) {
-        messages.push(hive.sessionStart.eligibleInProgress(eligibleCount));
-      } else {
+      if (!alreadyScheduled) {
         await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
         const spawned = spawnBackgroundCommand(['upload', 'send', '--delay', '600'], stateDir);
         if (spawned) {
           messages.push(hive.sessionStart.uploading(eligibleCount, UPLOAD_DELAY_MINUTES));
+          hasSessionInfo = true;
         }
       }
+      // If already in progress, show nothing — user doesn't need to act
     }
   }
 
+  if (pendingCount > 0) {
+    hasSessionInfo = true;
+  }
+
+  // Add review hint when there are sessions the user might want to inspect
+  if (hasSessionInfo) {
+    messages.push(hive.sessionStart.reviewHint);
+  }
+
   if (messages.length > 0) {
-    hookOutput(formatHookMessages(messages));
+    hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
   }
 
   if (status.authenticated && allSessions.length > 0) {

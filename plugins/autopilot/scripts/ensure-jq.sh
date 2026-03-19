@@ -14,6 +14,10 @@ if [ -x "$BINARY" ]; then
   exit 0
 fi
 
+# ANSI via JSON unicode escapes
+B='\u001b[1m'
+R='\u001b[0m'
+
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -21,14 +25,14 @@ ARCH=$(uname -m)
 case "$OS" in
   linux)  OS_NAME="linux" ;;
   darwin) OS_NAME="macos" ;;
-  *)      echo "{\"systemMessage\": \"autopilot: Cannot bootstrap jq — unsupported OS: $OS. Install jq manually.\"}"
+  *)      echo "{\"systemMessage\": \"${B}autopilot:${R} cannot bootstrap jq, unsupported OS: $OS, install jq manually\"}"
           exit 0 ;;
 esac
 
 case "$ARCH" in
   x86_64)        ARCH_NAME="amd64" ;;
   aarch64|arm64) ARCH_NAME="arm64" ;;
-  *)             echo "{\"systemMessage\": \"autopilot: Cannot bootstrap jq — unsupported architecture: $ARCH. Install jq manually.\"}"
+  *)             echo "{\"systemMessage\": \"${B}autopilot:${R} cannot bootstrap jq, unsupported architecture: $ARCH, install jq manually\"}"
                  exit 0 ;;
 esac
 
@@ -42,12 +46,12 @@ if curl -fSL "$DOWNLOAD_URL" -o "$BINARY"; then
   # Verify the binary works (catches corrupt/partial downloads)
   if ! "$BINARY" --version >/dev/null 2>&1; then
     rm -f "$BINARY"
-    echo '{"systemMessage": "autopilot: Downloaded jq binary is corrupt. Install jq manually."}'
+    echo "{\"systemMessage\": \"${B}autopilot:${R} downloaded jq binary is corrupt, install jq manually\"}"
     exit 0
   fi
-  echo '{"systemMessage": "autopilot: jq bootstrapped. Auto-deny is now active."}'
+  echo "{\"systemMessage\": \"${B}autopilot:${R} jq bootstrapped, auto-deny is now active\"}"
 else
   rm -f "$BINARY"
-  echo '{"systemMessage": "autopilot: Failed to download jq. Auto-deny is disabled until jq is installed."}'
+  echo "{\"systemMessage\": \"${B}autopilot:${R} failed to download jq, auto-deny disabled until jq is installed\"}"
   exit 0
 fi

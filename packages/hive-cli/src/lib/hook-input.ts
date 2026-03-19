@@ -1,6 +1,8 @@
 export interface HookInput {
   transcriptPath?: string;
   cwd?: string;
+  hookEventName?: string;
+  source?: string;
 }
 
 async function readStdin(): Promise<string | null> {
@@ -31,6 +33,8 @@ export async function readHookInput(): Promise<HookInput> {
     return {
       transcriptPath: typeof data.transcript_path === 'string' ? data.transcript_path : undefined,
       cwd: typeof data.cwd === 'string' ? data.cwd : undefined,
+      hookEventName: typeof data.hook_event_name === 'string' ? data.hook_event_name : undefined,
+      source: typeof data.source === 'string' ? data.source : undefined,
     };
   } catch {
     return {};

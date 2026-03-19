@@ -6,7 +6,7 @@ PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 report_error() {
     local message="$1"
     if [ "$COMMAND" = "session-start" ]; then
-        echo "{\"systemMessage\": \"hive-mind: $message\"}"
+        echo "{\"systemMessage\": \"\u001b[1mhive-mind:\u001b[0m $message\"}"
         exit 0
     else
         echo "hive-mind: $message"

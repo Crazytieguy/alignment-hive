@@ -94,7 +94,7 @@ if [ -n "$HIVE_BIN" ]; then
   fi
 
   export HIVE_PLUGIN_VERSION="$PLUGIN_VERSION"
-  "$HIVE_BIN" session-start 2>>"$ERROR_LOG" || true
+  echo "$HOOK_INPUT" | "$HIVE_BIN" session-start 2>>"$ERROR_LOG" || true
 fi
 
 exit 0
