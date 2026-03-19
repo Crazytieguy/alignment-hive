@@ -70,6 +70,7 @@ export default defineSchema({
         directory: v.string(),
         gitRemote: v.optional(v.string()),
         sessionSharing: v.boolean(),
+        project: v.optional(v.string()),
         consentedAt: v.optional(v.number()),
       }),
       // gitRemote required, directory optional
@@ -78,6 +79,7 @@ export default defineSchema({
         directory: v.optional(v.string()),
         gitRemote: v.string(),
         sessionSharing: v.boolean(),
+        project: v.optional(v.string()),
         consentedAt: v.optional(v.number()),
       }),
     ),
