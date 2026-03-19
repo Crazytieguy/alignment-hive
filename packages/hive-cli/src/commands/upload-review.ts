@@ -18,6 +18,7 @@ export async function uploadReview(): Promise<number> {
 
   const server = Bun.serve({
     port: 0,
+    hostname: 'localhost',
     async fetch(req) {
       const url = new URL(req.url);
 
