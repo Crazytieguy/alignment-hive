@@ -3,6 +3,7 @@ import { unlink } from 'node:fs/promises';
 import { updateProjectSharing } from '../lib/convex';
 import { checkAuthStatus } from '../lib/auth';
 import { getConfig, getProjectIdentifiers } from '../lib/config';
+import { discoverWorktreeTranscriptDirsForOne } from '../lib/transcript-discovery';
 import { hive } from '../lib/messages';
 import { printError, printSuccess } from '../lib/output';
 
@@ -32,5 +33,12 @@ export async function consentEnable(projectPath?: string): Promise<number> {
   }
 
   printSuccess(hive.consent.enableSuccess(ids.gitRemote ?? ids.directory));
+
+  // Discover worktree transcript dirs for this project
+  const result = await discoverWorktreeTranscriptDirsForOne(ids.directory, stateDir, (msg) =>
+    printSuccess(msg),
+  );
+  printSuccess(hive.consent.sessionDirsResult(result.existing + result.discovered, result.discovered));
+
   return 0;
 }

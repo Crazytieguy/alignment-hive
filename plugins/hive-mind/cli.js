@@ -14236,7 +14236,7 @@ function findToolResult(entries, toolUseId) {
       if (block.type === "tool_result" && "tool_use_id" in block && block.tool_use_id === toolUseId) {
         const agentId = "agentId" in entry && typeof entry.agentId === "string" ? entry.agentId : undefined;
         return {
-          content: formatToolResultContent(block.content),
+          content: getToolResultText(block.content),
           agentId
         };
       }
@@ -14244,7 +14244,7 @@ function findToolResult(entries, toolUseId) {
   }
   return;
 }
-function formatToolResultContent(content) {
+function getToolResultText(content) {
   if (!content)
     return "";
   if (typeof content === "string")
@@ -18871,22 +18871,6 @@ function extractCommitMessage(command) {
     return simpleMatch[1];
   }
   return;
-}
-function getToolResultText(content) {
-  if (!content)
-    return "";
-  if (typeof content === "string")
-    return content;
-  const parts = [];
-  for (const block of content) {
-    if (!isKnownContentBlock(block))
-      continue;
-    if (block.type === "text" && "text" in block) {
-      parts.push(block.text);
-    }
-  }
-  return parts.join(`
-`);
 }
 
 // src/commands/search.ts

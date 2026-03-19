@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
+import { getToolResultText, isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
 import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
 import { errors, indexCmd, usage } from '../lib/messages';
 import { colors, printError } from '../lib/output';
@@ -665,16 +665,4 @@ function extractCommitMessage(command: string): string | undefined {
   return undefined;
 }
 
-function getToolResultText(content: string | Array<ContentBlock> | undefined): string {
-  if (!content) return '';
-  if (typeof content === 'string') return content;
 
-  const parts: Array<string> = [];
-  for (const block of content) {
-    if (!isKnownContentBlock(block)) continue;
-    if (block.type === 'text' && 'text' in block) {
-      parts.push(block.text);
-    }
-  }
-  return parts.join('\n');
-}

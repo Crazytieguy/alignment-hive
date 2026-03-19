@@ -69,7 +69,7 @@ function findToolResult(entries: Array<KnownEntry>, toolUseId: string): ToolResu
       if (block.type === 'tool_result' && 'tool_use_id' in block && block.tool_use_id === toolUseId) {
         const agentId = 'agentId' in entry && typeof entry.agentId === 'string' ? entry.agentId : undefined;
         return {
-          content: formatToolResultContent(block.content),
+          content: getToolResultText(block.content),
           agentId,
         };
       }
@@ -78,7 +78,7 @@ function findToolResult(entries: Array<KnownEntry>, toolUseId: string): ToolResu
   return undefined;
 }
 
-function formatToolResultContent(content: string | Array<ContentBlock> | undefined): string {
+export function getToolResultText(content: string | Array<ContentBlock> | undefined): string {
   if (!content) return '';
   if (typeof content === 'string') return content;
 

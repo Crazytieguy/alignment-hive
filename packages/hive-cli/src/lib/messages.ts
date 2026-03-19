@@ -413,6 +413,10 @@ export const hive = {
     summary: (enabled: number, disabled: number): string => `${enabled} enabled, ${disabled} disabled.`,
     uploadReviewInfo: 'Sessions are uploaded after a 24-hour review period.',
     uploadHelpHint: 'Run `hive upload --help` to manage uploads.',
+    sessionDirsResult: (existing: number, discovered: number): string => {
+      if (discovered === 0) return `${existing} session ${existing === 1 ? 'directory' : 'directories'} tracked`;
+      return `${existing} session ${existing === 1 ? 'directory' : 'directories'} tracked, ${discovered} new`;
+    },
   },
   upload: {
     notAuthenticated: NOT_AUTHENTICATED,

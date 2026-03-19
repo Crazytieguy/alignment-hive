@@ -1,10 +1,11 @@
 import { execSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
 import { checkAuthStatus } from '../lib/auth';
 import { getConfig, getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
+import { discoverWorktreeTranscriptDirsForAll, extractCwd } from '../lib/transcript-discovery';
 import { getConsentStatus, getProjectSharing, getRepoLinkStatus, updateProjectSharing } from '../lib/convex';
 import { checkRepoVisibility } from '../lib/github';
 import { hive } from '../lib/messages';
@@ -35,47 +36,6 @@ function destroyInput(): void {
 }
 
 const CONSENT_POLL_INTERVAL_MS = 5000;
-
-const CWD_READ_BYTES = 8192;
-
-/** Extract the cwd from the first session file in a project directory
- *  that has a "cwd" field. Only reads the first 8KB of each file since
- *  cwd appears in early entries. Returns null if none found. */
-function extractCwd(projectDir: string): string | null {
-  try {
-    const entries = readdirSync(projectDir);
-    for (const entry of entries) {
-      if (!entry.endsWith('.jsonl')) continue;
-      try {
-        const filePath = join(projectDir, entry);
-        const fd = openSync(filePath, 'r');
-        try {
-          const buf = Buffer.alloc(CWD_READ_BYTES);
-          const bytesRead = readSync(fd, buf, 0, CWD_READ_BYTES, 0);
-          const content = buf.toString('utf-8', 0, bytesRead);
-          for (const line of content.split('\n')) {
-            if (!line.includes('"cwd"')) continue;
-            try {
-              const parsed = JSON.parse(line) as Record<string, unknown>;
-              if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
-                return parsed.cwd;
-              }
-            } catch {
-              // skip unparseable lines (last line may be truncated)
-            }
-          }
-        } finally {
-          closeSync(fd);
-        }
-      } catch {
-        // skip unreadable files
-      }
-    }
-  } catch {
-    // skip unreadable directories
-  }
-  return null;
-}
 
 /** Detect projects from ~/.claude/projects/ directories.
  *  Returns project identifiers (directory + gitRemote) for each project. */
@@ -270,8 +230,19 @@ async function consentSetupInner(): Promise<number> {
     console.log(`  ${msg.noChanges}`);
   }
 
-  // Check linking for enabled private GitHub repos
+  // Discover worktree transcript dirs for all enabled projects (scans once)
   const cliConfig = getConfig();
+  const enabledProjects = projects.filter((p: typeof projects[number]) => selectedSet.has(p.displayName));
+  const result = await discoverWorktreeTranscriptDirsForAll(
+    enabledProjects.map((p) => ({
+      projectDir: p.identifiers.directory,
+      stateDir: cliConfig.getStateDir(p.path),
+    })),
+    (m) => console.log(`  ${m}`),
+  );
+  console.log(`  ${msg.sessionDirsResult(result.existing + result.discovered, result.discovered)}`);
+
+  // Check linking for enabled private GitHub repos
   const enabledGithubProjects = projects.filter(
     (p: typeof projects[number]) =>
       selectedSet.has(p.displayName) &&
