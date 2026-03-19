@@ -1,26 +1,23 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "convex-helpers/react/cache";
+import { useSuspenseQuery, useQuery } from "@tanstack/react-query";
+import { convexQuery } from "@convex-dev/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { api } from "../../../../convex/_generated/api";
 import { SessionViewer } from "~/components/session-viewer";
 import { formatProject, formatSessionId } from "@alignment-hive/ui";
 
 export const Route = createFileRoute("/authorized/sessions/$sessionId")({
+  loader: async ({ context, params }) => {
+    await context.queryClient.ensureQueryData(
+      convexQuery(api.authorized.getSession, { sessionId: params.sessionId }),
+    );
+  },
   component: SessionDetail,
 });
 
 function SessionDetail() {
   const { sessionId } = Route.useParams();
-  const data = useQuery(api.authorized.getSession, { sessionId });
+  const { data } = useSuspenseQuery(convexQuery(api.authorized.getSession, { sessionId }));
   const model = useSessionModel(data?.contentUrl ?? null);
-
-  if (data === undefined) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-muted-foreground">Loading...</div>
-      </div>
-    );
-  }
 
   if (!data) {
     return (
@@ -171,40 +168,40 @@ function SessionDetail() {
   );
 }
 
+function parseModel(text: string): string | undefined {
+  const counts = new Map<string, number>();
+  for (const line of text.split("\n")) {
+    if (!line.includes('"assistant"')) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === "assistant" && entry.message?.model) {
+        const m = entry.message.model;
+        counts.set(m, (counts.get(m) ?? 0) + 1);
+      }
+    } catch {
+      // skip
+    }
+  }
+  let best: string | undefined;
+  let bestCount = 0;
+  for (const [m, count] of counts) {
+    if (count > bestCount) {
+      best = m;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 function useSessionModel(contentUrl: string | null): string | undefined {
-  const [model, setModel] = useState<string | undefined>();
-
-  useEffect(() => {
-    if (!contentUrl) return;
-
-    fetch(contentUrl)
-      .then((res) => res.text())
-      .then((text) => {
-        const counts = new Map<string, number>();
-        for (const line of text.split("\n")) {
-          if (!line.includes('"assistant"')) continue;
-          try {
-            const entry = JSON.parse(line);
-            if (entry.type === "assistant" && entry.message?.model) {
-              const m = entry.message.model;
-              counts.set(m, (counts.get(m) ?? 0) + 1);
-            }
-          } catch {
-            // skip
-          }
-        }
-        let best: string | undefined;
-        let bestCount = 0;
-        for (const [m, count] of counts) {
-          if (count > bestCount) {
-            best = m;
-            bestCount = count;
-          }
-        }
-        setModel(best);
-      })
-      .catch(() => {});
-  }, [contentUrl]);
-
-  return model;
+  const { data } = useQuery({
+    queryKey: ["sessionModel", contentUrl],
+    queryFn: async () => {
+      const res = await fetch(contentUrl!);
+      return parseModel(await res.text());
+    },
+    enabled: !!contentUrl,
+    staleTime: Infinity,
+  });
+  return data ?? undefined;
 }

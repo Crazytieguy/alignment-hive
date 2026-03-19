@@ -1,15 +1,23 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Authenticated, AuthLoading } from "convex/react";
-import { useQuery, useMutation } from "convex/react";
-import { useState } from "react";
+import { useMutation } from "convex/react";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { convexQuery } from "@convex-dev/react-query";
+import { useLayoutEffect, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { ConsentQuestion } from "@/components/consent/policy-content";
-import ConsentWizard from "@/components/consent/consent-wizard";
+import ConsentWizard, { WIZARD_STORAGE_KEY } from "@/components/consent/consent-wizard";
 import ConsentSummary from "@/components/consent/consent-summary";
 import { classifyLegacyProject } from "@alignment-hive/session-data";
 
 export const Route = createFileRoute("/_authenticated/consent")({
-  component: ConsentGate,
+  loader: async ({ context }) => {
+    await Promise.all([
+      context.queryClient.ensureQueryData(convexQuery(api.consent.getLatestConsent, {})),
+      context.queryClient.ensureQueryData(convexQuery(api.consent.getAccessList, {})),
+      context.queryClient.ensureQueryData(convexQuery(api.consent.getUserSessionProjects, {})),
+    ]);
+  },
+  component: ConsentPage,
 });
 
 export interface ConsentChoices {
@@ -19,55 +27,72 @@ export interface ConsentChoices {
   creditByName: boolean | null;
 }
 
-function ConsentGate() {
-  return (
-    <>
-      <AuthLoading>
-        <div className="min-h-screen flex items-center justify-center">
-          <p className="text-muted-foreground">Loading...</p>
-        </div>
-      </AuthLoading>
-      <Authenticated>
-        <ConsentPage />
-      </Authenticated>
-    </>
-  );
-}
-
 function ConsentPage() {
   const navigate = useNavigate();
-  const latestConsent = useQuery(api.consent.getLatestConsent);
-  const accessList = useQuery(api.consent.getAccessList);
-  const existingProjects = useQuery(api.consent.getUserSessionProjects);
+  const { data: latestConsent } = useSuspenseQuery(convexQuery(api.consent.getLatestConsent, {}));
+  const { data: accessList } = useSuspenseQuery(convexQuery(api.consent.getAccessList, {}));
+  const { data: existingProjects } = useSuspenseQuery(convexQuery(api.consent.getUserSessionProjects, {}));
   const submitConsentMutation = useMutation(api.consent.submitConsent);
   const updateProjectSharingMutation = useMutation(api.consent.updateProjectSharing);
 
-  const [choices, setChoices] = useState<ConsentChoices>({
-    sessionSharing: null,
-    communityFeatures: null,
-    publicationExcerpts: null,
-    creditByName: null,
+  // For first-time users, defer wizard rendering until client mount so
+  // localStorage state can be restored without a hydration mismatch.
+  const [wizardMounted, setWizardMounted] = useState(!!latestConsent);
+  useLayoutEffect(() => {
+    if (!wizardMounted) setWizardMounted(true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [choices, setChoices] = useState<ConsentChoices>(() => {
+    if (latestConsent) {
+      return {
+        sessionSharing: latestConsent.sessionSharing,
+        communityFeatures: latestConsent.sessionSharing
+          ? latestConsent.communityFeatures
+          : null,
+        publicationExcerpts: latestConsent.sessionSharing
+          ? latestConsent.publicationExcerpts
+          : null,
+        creditByName: latestConsent.sessionSharing
+          ? latestConsent.creditByName
+          : null,
+      };
+    }
+    // Restore from localStorage for first-time users (client only)
+    if (typeof window !== "undefined") {
+      try {
+        const raw = JSON.parse(localStorage.getItem(WIZARD_STORAGE_KEY) ?? "null");
+        if (raw?.choices) {
+          const c = raw.choices;
+          return {
+            sessionSharing: typeof c.sessionSharing === "boolean" ? c.sessionSharing : null,
+            communityFeatures: typeof c.communityFeatures === "boolean" ? c.communityFeatures : null,
+            publicationExcerpts: typeof c.publicationExcerpts === "boolean" ? c.publicationExcerpts : null,
+            creditByName: typeof c.creditByName === "boolean" ? c.creditByName : null,
+          };
+        }
+      } catch { /* invalid localStorage */ }
+    }
+    return { sessionSharing: null, communityFeatures: null, publicationExcerpts: null, creditByName: null };
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Still loading
-  if (
-    latestConsent === undefined ||
-    accessList === undefined ||
-    existingProjects === undefined
-  ) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-muted-foreground">Loading...</p>
-      </div>
-    );
-  }
-
-  const isReturning = latestConsent !== null;
+  // Track if user was returning at mount — used to suppress the wizard→preferences
+  // flash for first-time users (whose mutation makes latestConsent non-null before navigate fires).
+  const [wasReturning] = useState(() => latestConsent !== null);
+  const isReturning = latestConsent !== null && (wasReturning || !isSubmitting);
 
   const handleChoice = (question: ConsentQuestion, value: boolean) => {
-    setChoices((prev) => ({ ...prev, [question]: value }));
+    setChoices((prev) => {
+      const next = { ...prev, [question]: value };
+      // When re-enabling sharing, restore sub-preferences from latest consent
+      if (question === "sessionSharing" && value && latestConsent?.sessionSharing) {
+        next.communityFeatures ??= latestConsent.communityFeatures;
+        next.publicationExcerpts ??= latestConsent.publicationExcerpts;
+        next.creditByName ??= latestConsent.creditByName;
+      }
+      return next;
+    });
   };
 
   const handleSubmit = async (selectedProjects?: Set<string>) => {
@@ -113,16 +138,8 @@ function ConsentPage() {
 
       // First-time users go to install page; returning users stay on consent
       if (isReturning) {
-        // Force re-render with updated Convex data
         setIsSubmitting(false);
-        setChoices({
-          sessionSharing: null,
-          communityFeatures: null,
-          publicationExcerpts: null,
-          creditByName: null,
-        });
       } else {
-        // Navigate before clearing isSubmitting to avoid flash of consent page
         navigate({ to: "/install" });
       }
     } catch (error) {
@@ -142,7 +159,7 @@ function ConsentPage() {
         onSubmit={() => handleSubmit()}
         isSubmitting={isSubmitting}
         submitError={submitError}
-        accessList={accessList ?? []}
+        accessList={accessList}
         existingConsent={
           latestConsent
             ? {
@@ -161,7 +178,8 @@ function ConsentPage() {
     );
   }
 
-  // First-time users see the wizard
+  // First-time users see the wizard (deferred until client mount)
+  if (!wizardMounted) return null;
   return (
     <ConsentWizard
       choices={choices}
@@ -169,8 +187,8 @@ function ConsentPage() {
       onSubmit={handleSubmit}
       isSubmitting={isSubmitting}
       submitError={submitError}
-      accessList={accessList ?? []}
-      existingProjects={existingProjects ?? []}
+      accessList={accessList}
+      existingProjects={existingProjects}
     />
   );
 }

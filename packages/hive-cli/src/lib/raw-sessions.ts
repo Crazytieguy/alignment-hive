@@ -36,7 +36,6 @@ export async function readRawSession(rawPath: string, checkoutId?: string): Prom
     checkoutId: checkoutId ?? 'local',
     rawMtime: fileStat.mtime.toISOString(),
     messageCount: entries.length,
-    rawPath,
     ...(agentId && { agentId }),
   };
 

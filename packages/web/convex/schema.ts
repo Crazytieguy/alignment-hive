@@ -47,6 +47,7 @@ export default defineSchema({
       v.object({
         userId: v.id("users"),
         sessionSharing: v.literal(false),
+        consentedAt: v.optional(v.number()),
       }),
       v.object({
         userId: v.id("users"),
@@ -54,6 +55,7 @@ export default defineSchema({
         communityFeatures: v.boolean(),
         publicationExcerpts: v.boolean(),
         creditByName: v.boolean(),
+        consentedAt: v.optional(v.number()),
       }),
     ),
   ).index("by_user_id", ["userId"]),
@@ -68,6 +70,7 @@ export default defineSchema({
         directory: v.string(),
         gitRemote: v.optional(v.string()),
         sessionSharing: v.boolean(),
+        consentedAt: v.optional(v.number()),
       }),
       // gitRemote required, directory optional
       v.object({
@@ -75,6 +78,7 @@ export default defineSchema({
         directory: v.optional(v.string()),
         gitRemote: v.string(),
         sessionSharing: v.boolean(),
+        consentedAt: v.optional(v.number()),
       }),
     ),
   )

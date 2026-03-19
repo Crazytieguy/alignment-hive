@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
+import { AccessList } from "@/components/consent/access-list";
 import {
   policySections,
   policyFooter,
@@ -15,7 +16,7 @@ import { useGithubStatus } from "@/hooks/use-github-status";
 import { GITHUB_APP_INSTALL_URL } from "@/lib/constants";
 import { codeContextExplanation } from "@/components/consent/policy-content";
 
-const STORAGE_KEY = "alignment-hive-consent-step";
+export const WIZARD_STORAGE_KEY = "alignment-hive-consent-step";
 
 interface ConsentWizardProps {
   choices: ConsentChoices;
@@ -109,46 +110,28 @@ export default function ConsentWizard({
     showExistingProjects,
   ]);
 
+  // Safe to read localStorage here — wizard only renders on the client
   const [currentStep, setCurrentStep] = useState(() => {
-    if (typeof window === "undefined") return 0;
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-      if (saved && typeof saved === "object" && typeof saved.step === "number") {
-        // Restore choices from localStorage
-        if (saved.choices) {
-          for (const [key, value] of Object.entries(saved.choices)) {
-            if (value !== null && typeof value === "boolean") {
-              onChoice(key as ConsentQuestion, value);
-            }
-          }
-        }
-        return Math.max(0, saved.step);
+      const raw = JSON.parse(localStorage.getItem(WIZARD_STORAGE_KEY) ?? "null");
+      if (raw && typeof raw === "object" && typeof raw.step === "number") {
+        return Math.max(0, raw.step);
       }
-    } catch {
-      // invalid localStorage data
-    }
+    } catch { /* invalid localStorage */ }
     return 0;
   });
 
   useEffect(() => {
     localStorage.setItem(
-      STORAGE_KEY,
+      WIZARD_STORAGE_KEY,
       JSON.stringify({ step: currentStep, choices }),
     );
   }, [currentStep, choices]);
 
   const handleSubmit = () => {
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(WIZARD_STORAGE_KEY);
     onSubmit(showExistingProjects ? selectedProjects : undefined);
   };
-
-  // Clamp step to valid range when effectiveSteps changes (e.g., after declining sharing)
-  useEffect(() => {
-    const maxStep = effectiveSteps.length - 1;
-    if (currentStep > maxStep) {
-      setCurrentStep(maxStep);
-    }
-  }, [effectiveSteps.length, currentStep]);
 
   const clampedStep = Math.min(currentStep, effectiveSteps.length - 1);
 
@@ -326,31 +309,9 @@ function SectionStep({
         ))}
       </div>
 
-      {step.section.id === "access" && accessList.length > 0 && (
-        <div className="mt-6 rounded-lg border px-5 py-4">
-          <p className="text-sm font-medium mb-3">
-            People with access to shared data
-          </p>
-          <ul className="space-y-1.5">
-            {accessList.map((person, i) => (
-              <li
-                key={i}
-                className="text-sm text-muted-foreground flex items-baseline gap-2"
-              >
-                <span className="size-1.5 rounded-full bg-primary/40 shrink-0 mt-1.5" />
-                {person.name ? (
-                  <span>
-                    {person.name}{" "}
-                    <span className="text-muted-foreground/60">
-                      ({person.email})
-                    </span>
-                  </span>
-                ) : (
-                  <span>{person.email}</span>
-                )}
-              </li>
-            ))}
-          </ul>
+      {step.section.id === "access" && (
+        <div className="mt-6">
+          <AccessList accessList={accessList} />
         </div>
       )}
 

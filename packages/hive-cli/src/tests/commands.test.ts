@@ -22,7 +22,6 @@ function createTestSession(sessionId: string, entries: Array<object>, options?: 
     checkoutId: 'test-checkout-id',
     extractedAt: '2025-01-01T00:00:00Z',
     rawMtime: '2025-01-01T00:00:00Z',
-    rawPath: `/fake/path/${sessionId}.jsonl`,
     messageCount: entries.length,
     ...(options?.agentId && { agentId: options.agentId }),
   };

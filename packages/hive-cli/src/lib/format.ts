@@ -559,7 +559,6 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
     checkoutId: 'unknown',
     extractedAt: new Date().toISOString(),
     rawMtime: new Date().toISOString(),
-    rawPath: 'unknown',
     messageCount: entries.length,
   };
 

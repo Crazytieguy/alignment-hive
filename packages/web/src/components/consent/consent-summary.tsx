@@ -1,10 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   questionConfigs,
   policyFooter,
   type ConsentQuestion,
 } from "@/components/consent/policy-content";
+import { AccessList } from "@/components/consent/access-list";
 import type { ConsentChoices } from "@/routes/_authenticated/consent";
 import { Button, cn } from "@alignment-hive/ui";
 
@@ -32,21 +33,6 @@ export default function ConsentSummary({
   accessList,
   existingConsent,
 }: ConsentSummaryProps) {
-  // Pre-fill from existing consent
-  useEffect(() => {
-    if (existingConsent && choices.sessionSharing === null) {
-      onChoice("sessionSharing", existingConsent.sessionSharing);
-      if (existingConsent.sessionSharing) {
-        if (existingConsent.communityFeatures !== undefined)
-          onChoice("communityFeatures", existingConsent.communityFeatures);
-        if (existingConsent.publicationExcerpts !== undefined)
-          onChoice("publicationExcerpts", existingConsent.publicationExcerpts);
-        if (existingConsent.creditByName !== undefined)
-          onChoice("creditByName", existingConsent.creditByName);
-      }
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   const allAnswered =
     choices.sessionSharing !== null &&
     (!choices.sessionSharing ||
@@ -102,28 +88,23 @@ export default function ConsentSummary({
         </div>
 
         {/* Session sharing — always shown */}
-        {(() => {
-          const config = questionConfigs[0];
-          return (
-            <div className="rounded-lg border p-4">
-              <p className="text-sm font-medium mb-3">{config.label}</p>
-              <div className="grid grid-cols-2 gap-2">
-                <ChoiceButton
-                  label={config.yesLabel}
-                  selected={choices.sessionSharing === true}
-                  onClick={() => onChoice(config.id, true)}
-                  variant="positive"
-                />
-                <ChoiceButton
-                  label={config.noLabel}
-                  selected={choices.sessionSharing === false}
-                  onClick={() => onChoice(config.id, false)}
-                  variant="negative"
-                />
-              </div>
-            </div>
-          );
-        })()}
+        <div className="rounded-lg border p-4">
+          <p className="text-sm font-medium mb-3">{questionConfigs[0].label}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <ChoiceButton
+              label={questionConfigs[0].yesLabel}
+              selected={choices.sessionSharing === true}
+              onClick={() => onChoice(questionConfigs[0].id, true)}
+              variant="positive"
+            />
+            <ChoiceButton
+              label={questionConfigs[0].noLabel}
+              selected={choices.sessionSharing === false}
+              onClick={() => onChoice(questionConfigs[0].id, false)}
+              variant="negative"
+            />
+          </div>
+        </div>
 
         {/* Sub-preferences — grouped with left border */}
         {choices.sessionSharing && (
@@ -151,33 +132,9 @@ export default function ConsentSummary({
         )}
 
         {/* Access list */}
-        {accessList.length > 0 && (
-          <div className="mt-6 rounded-lg border px-5 py-4">
-            <p className="text-sm font-medium mb-3">
-              People with access to shared data
-            </p>
-            <ul className="space-y-1.5">
-              {accessList.map((person, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-muted-foreground flex items-baseline gap-2"
-                >
-                  <span className="size-1.5 rounded-full bg-primary/40 shrink-0 mt-1.5" />
-                  {person.name ? (
-                    <span>
-                      {person.name}{" "}
-                      <span className="text-muted-foreground/60">
-                        ({person.email})
-                      </span>
-                    </span>
-                  ) : (
-                    <span>{person.email}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+        <div className="mt-6">
+          <AccessList accessList={accessList} />
+        </div>
 
         {/* Submit */}
         <div className="mt-8 flex flex-col items-stretch gap-2">

@@ -1,30 +1,23 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Authenticated, AuthLoading } from "convex/react";
-import { useQuery } from "convex/react";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { convexQuery } from "@convex-dev/react-query";
 import { api } from "../../../convex/_generated/api";
 import {
   policySections,
   policyFooter,
 } from "@/components/consent/policy-content";
 import { PolicyParagraph } from "@/components/consent/policy-paragraph";
+import { AccessList } from "@/components/consent/access-list";
 
 export const Route = createFileRoute("/_authenticated/policy")({
-  component: () => (
-    <>
-      <AuthLoading>
-        <div className="min-h-screen flex items-center justify-center">
-          <p className="text-muted-foreground">Loading...</p>
-        </div>
-      </AuthLoading>
-      <Authenticated>
-        <PolicyPage />
-      </Authenticated>
-    </>
-  ),
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(convexQuery(api.consent.getAccessList, {}));
+  },
+  component: PolicyPage,
 });
 
 function PolicyPage() {
-  const accessList = useQuery(api.consent.getAccessList);
+  const { data: accessList } = useSuspenseQuery(convexQuery(api.consent.getAccessList, {}));
 
   return (
     <div className="min-h-screen flex flex-col items-center pt-16 pb-24 px-4">
@@ -64,31 +57,9 @@ function PolicyPage() {
                 ))}
               </div>
 
-              {section.id === "access" && accessList && accessList.length > 0 && (
-                <div className="mt-4 rounded-lg border px-5 py-4">
-                  <p className="text-sm font-medium mb-3">
-                    People with access to shared data
-                  </p>
-                  <ul className="space-y-1.5">
-                    {accessList.map((person, i) => (
-                      <li
-                        key={i}
-                        className="text-sm text-muted-foreground flex items-baseline gap-2"
-                      >
-                        <span className="size-1.5 rounded-full bg-primary/40 shrink-0 mt-1.5" />
-                        {person.name ? (
-                          <span>
-                            {person.name}{" "}
-                            <span className="text-muted-foreground/60">
-                              ({person.email})
-                            </span>
-                          </span>
-                        ) : (
-                          <span>{person.email}</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
+              {section.id === "access" && (
+                <div className="mt-4">
+                  <AccessList accessList={accessList} />
                 </div>
               )}
             </div>

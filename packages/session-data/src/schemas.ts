@@ -247,7 +247,6 @@ export const SessionMetaSchema = z.object({
   extractedAt: z.string().optional(),
   rawMtime: z.string(),
   messageCount: z.number(),
-  rawPath: z.string(),
   agentId: z.string().optional(),
   parentSessionId: z.string().optional(),
   rawLineCount: z.number().optional(),

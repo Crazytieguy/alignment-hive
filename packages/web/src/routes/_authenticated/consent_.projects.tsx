@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery, useMutation } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSuspenseQuery, useQuery } from "@tanstack/react-query";
+import { convexQuery } from "@convex-dev/react-query";
 import { api } from "../../../convex/_generated/api";
 import { Button, cn } from "@alignment-hive/ui";
 import { useGithubStatus } from "@/hooks/use-github-status";
@@ -8,8 +10,18 @@ import { GITHUB_APP_INSTALL_URL } from "@/lib/constants";
 import { projectSharingNote } from "@/components/consent/policy-content";
 
 export const Route = createFileRoute("/_authenticated/consent_/projects")({
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(
+      convexQuery(api.consent.getProjectSharing, {}),
+    );
+  },
   component: ProjectsPage,
 });
+
+const EMPTY_VISIBILITY_MAP = new Map<string, "public" | "private" | "unknown">();
+
+const projectKey = (p: { gitRemotes: string[]; directories: string[] }) =>
+  p.gitRemotes[0] ?? p.directories[0] ?? "unknown";
 
 async function checkRepoVisibility(
   gitRemote: string,
@@ -27,46 +39,42 @@ async function checkRepoVisibility(
 }
 
 function ProjectsPage() {
-  const allProjects = useQuery(api.consent.getProjectSharing);
+  const { data: allProjects } = useSuspenseQuery(convexQuery(api.consent.getProjectSharing, {}));
   const updateProjectSharing = useMutation(api.consent.updateProjectSharing);
   const githubStatus = useGithubStatus();
 
   // Local toggle state — tracks pending changes before save
-  const [pendingState, setPendingState] = useState<Map<number, boolean>>(
+  const [pendingState, setPendingState] = useState<Map<string, boolean>>(
     new Map(),
   );
   const [isSaving, setIsSaving] = useState(false);
 
-  // Reset pending state when server data changes
-  useEffect(() => {
-    setPendingState(new Map());
-  }, [allProjects]);
-
-  const getEffectiveSharing = (i: number, serverSharing: boolean) =>
-    pendingState.has(i) ? pendingState.get(i)! : serverSharing;
+  const getEffectiveSharing = (key: string, serverSharing: boolean) =>
+    pendingState.has(key) ? pendingState.get(key)! : serverSharing;
 
   const hasChanges =
-    allProjects?.some(
-      (p, i) => pendingState.has(i) && pendingState.get(i) !== p.sessionSharing,
-    ) ?? false;
+    allProjects.some(
+      (p) => {
+        const key = projectKey(p);
+        return pendingState.has(key) && pendingState.get(key) !== p.sessionSharing;
+      },
+    );
 
-  const toggleProject = (i: number, currentServerState: boolean) => {
+  const toggleProject = (key: string, currentServerState: boolean) => {
     setPendingState((prev) => {
       const next = new Map(prev);
-      const currentEffective = next.has(i) ? next.get(i)! : currentServerState;
+      const currentEffective = next.has(key) ? next.get(key)! : currentServerState;
       const newValue = !currentEffective;
-      // If toggling back to server state, remove from pending
       if (newValue === currentServerState) {
-        next.delete(i);
+        next.delete(key);
       } else {
-        next.set(i, newValue);
+        next.set(key, newValue);
       }
       return next;
     });
   };
 
   const saveChanges = async () => {
-    if (!allProjects) return;
     setIsSaving(true);
     try {
       const changes: Array<{
@@ -76,9 +84,9 @@ function ProjectsPage() {
         sessionSharing: boolean;
       }> = [];
 
-      for (const [i, shouldShare] of pendingState.entries()) {
-        const project = allProjects[i];
-        if (shouldShare === project.sessionSharing) continue;
+      for (const [key, shouldShare] of pendingState.entries()) {
+        const project = allProjects.find((p) => projectKey(p) === key);
+        if (!project || shouldShare === project.sessionSharing) continue;
 
         const githubRemote = project.gitRemotes.find((r) =>
           r.startsWith("github.com/"),
@@ -104,57 +112,43 @@ function ProjectsPage() {
   };
 
   // Batch check link status for GitHub remotes
-  const githubRemotes =
-    allProjects
-      ?.flatMap((p) => p.gitRemotes)
-      .filter((r) => r.startsWith("github.com/")) ?? [];
-
-  const linkedRemotes = useQuery(
-    api.github.getLinkedRemotesFromList,
-    githubRemotes.length > 0 ? { gitRemotes: githubRemotes } : "skip",
+  const githubRemotes = useMemo(
+    () => allProjects.flatMap((p) => p.gitRemotes).filter((r) => r.startsWith("github.com/")),
+    [allProjects],
   );
-  const linkedSet = new Set(linkedRemotes ?? []);
+
+  const { data: linkedRemotes } = useQuery({
+    ...convexQuery(api.github.getLinkedRemotesFromList, { gitRemotes: githubRemotes }),
+    enabled: githubRemotes.length > 0,
+  });
+  const linkedSet = useMemo(() => new Set(linkedRemotes ?? []), [linkedRemotes]);
 
   // Check visibility for unlinked GitHub repos
-  const [visibilityMap, setVisibilityMap] = useState<
-    Map<string, "public" | "private" | "unknown">
-  >(new Map());
+  const unlinkedRemotes = useMemo(
+    () => githubRemotes.filter((r) => !linkedSet.has(r)),
+    [githubRemotes, linkedSet],
+  );
 
-  useEffect(() => {
-    if (!allProjects || !linkedRemotes) return;
-
-    const unlinkedRemotes = githubRemotes.filter((r) => !linkedSet.has(r));
-    if (unlinkedRemotes.length === 0) return;
-
-    const toCheck = unlinkedRemotes.filter((r) => !visibilityMap.has(r));
-    if (toCheck.length === 0) return;
-
-    Promise.all(
-      toCheck.map(async (remote) => {
-        const vis = await checkRepoVisibility(remote);
-        return [remote, vis] as const;
-      }),
-    ).then((results) => {
-      setVisibilityMap((prev) => {
-        const next = new Map(prev);
-        for (const [remote, vis] of results) {
-          next.set(remote, vis);
-        }
-        return next;
-      });
-    }).catch((err) => {
-      console.error("Failed to check repo visibility:", err);
-    });
-  }, [allProjects, linkedRemotes]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { data: visibilityMap = EMPTY_VISIBILITY_MAP } = useQuery({
+    queryKey: ["repoVisibility", unlinkedRemotes],
+    queryFn: async () => {
+      const results = await Promise.all(
+        unlinkedRemotes.map(async (remote) => [remote, await checkRepoVisibility(remote)] as const),
+      );
+      return new Map(results);
+    },
+    enabled: unlinkedRemotes.length > 0,
+    staleTime: Infinity,
+  });
 
   const hasPrivateUnlinked =
-    allProjects?.some((p) =>
+    allProjects.some((p) =>
       p.gitRemotes.some((r) => {
         if (!r.startsWith("github.com/")) return false;
         if (linkedSet.has(r)) return false;
         return visibilityMap.get(r) === "private";
       }),
-    ) ?? false;
+    );
 
   return (
     <div className="min-h-screen flex flex-col items-center pt-16 pb-24 px-4">
@@ -234,14 +228,11 @@ function ProjectsPage() {
         )}
 
         {/* Project list */}
-        {allProjects && allProjects.length > 0 ? (
+        {allProjects.length > 0 ? (
           <>
             <div className="space-y-2">
-              {allProjects.map((project, i) => {
-                const displayName =
-                  project.gitRemotes[0] ??
-                  project.directories[0] ??
-                  "Unknown";
+              {allProjects.map((project) => {
+                const key = projectKey(project);
 
                 const githubRemote = project.gitRemotes.find((r) =>
                   r.startsWith("github.com/"),
@@ -257,18 +248,18 @@ function ProjectsPage() {
                   githubRemote && visibility === "private";
 
                 const effectiveSharing = getEffectiveSharing(
-                  i,
+                  key,
                   project.sessionSharing,
                 );
                 const isChanged =
-                  pendingState.has(i) &&
-                  pendingState.get(i) !== project.sessionSharing;
+                  pendingState.has(key) &&
+                  pendingState.get(key) !== project.sessionSharing;
 
                 return (
                   <button
-                    key={displayName}
+                    key={key}
                     type="button"
-                    onClick={() => toggleProject(i, project.sessionSharing)}
+                    onClick={() => toggleProject(key, project.sessionSharing)}
                     className={cn(
                       "w-full flex items-center justify-between rounded-md border-2 px-4 py-3 text-left transition-all duration-200",
                       effectiveSharing
@@ -303,7 +294,7 @@ function ProjectsPage() {
                         )}
                       </div>
                       <span className="font-mono text-sm truncate">
-                        {displayName}
+                        {key}
                       </span>
                       {showLinkBadge && (
                         <span
@@ -345,13 +336,11 @@ function ProjectsPage() {
               )}
             </div>
           </>
-        ) : allProjects ? (
+        ) : (
           <p className="text-sm text-muted-foreground">
             No projects configured yet. Enable sharing for projects using the
             CLI: <code className="text-xs">hive consent setup</code>
           </p>
-        ) : (
-          <p className="text-muted-foreground">Loading...</p>
         )}
       </div>
     </div>

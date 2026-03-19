@@ -29,7 +29,6 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
         sessionId: result.meta.sessionId,
         checkoutId: '',
         rawMtime: result.meta.rawMtime,
-        rawPath: '',
         messageCount: result.meta.messageCount,
       };
 

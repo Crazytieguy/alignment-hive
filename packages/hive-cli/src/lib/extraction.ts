@@ -114,7 +114,6 @@ export async function extractSession(options: ExtractSessionOptions) {
     rawMtime: rawStat.mtime.toISOString(),
     messageCount: entries.length,
     rawLineCount,
-    rawPath,
     ...(agentId && { agentId }),
     ...(parentSessionId && { parentSessionId }),
     ...(schemaErrors.length > 0 && { schemaErrors }),

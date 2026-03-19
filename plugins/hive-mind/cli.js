@@ -14165,7 +14165,6 @@ var SessionMetaSchema = exports_external.object({
   extractedAt: exports_external.string().optional(),
   rawMtime: exports_external.string(),
   messageCount: exports_external.number(),
-  rawPath: exports_external.string(),
   agentId: exports_external.string().optional(),
   parentSessionId: exports_external.string().optional(),
   rawLineCount: exports_external.number().optional(),
@@ -16793,7 +16792,6 @@ async function extractSession(options) {
     rawMtime: rawStat.mtime.toISOString(),
     messageCount: entries.length,
     rawLineCount,
-    rawPath,
     ...agentId && { agentId },
     ...parentSessionId && { parentSessionId },
     ...schemaErrors.length > 0 && { schemaErrors },
@@ -17829,7 +17827,6 @@ function formatSession(entries, options = {}) {
     checkoutId: "unknown",
     extractedAt: new Date().toISOString(),
     rawMtime: new Date().toISOString(),
-    rawPath: "unknown",
     messageCount: entries.length
   };
   const parsed = parseSession(meta3, entries);

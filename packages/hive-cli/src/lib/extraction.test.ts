@@ -371,7 +371,6 @@ describe('metadata line', () => {
       expect(typeof meta.checkoutId).toBe('string');
       expect(meta.checkoutId.length).toBeGreaterThan(0);
       expect(meta.messageCount).toBe(3); // summary + user + assistant
-      expect(meta.rawPath).toBe(rawPath);
       expect(meta.extractedAt).toBeDefined();
       expect(meta.rawMtime).toBeDefined();
     } finally {
