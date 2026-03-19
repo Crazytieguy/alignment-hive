@@ -59,7 +59,7 @@ function formatHookMessages(
   // Extra indent past "hive: " (6 chars) for continuation lines
   const contentPad = pad + '      ';
   return messages
-    .map((msg, i) => (i === 0 ? `${hookColors.bold('hive:')} ${msg}` : `${contentPad}${msg}`))
+    .map((msg, i) => (i === 0 ? `${hookColors.boldBlue('hive:')} ${msg}` : `${contentPad}${msg}`))
     .join('\n');
 }
 

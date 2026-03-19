@@ -6,7 +6,7 @@ LOG_FILE="$HOME/.cache/autopilot/auto-deny-error.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 # On any error, log it and tell the user
-trap 'echo "$0: line $LINENO: unexpected error" >> "$LOG_FILE" 2>/dev/null; echo "{\"systemMessage\":\"\u001b[1mautopilot:\u001b[0m hook error, autonomous mode disabled, see '$LOG_FILE'\"}"' ERR
+trap 'echo "$0: line $LINENO: unexpected error" >> "$LOG_FILE" 2>/dev/null; echo "{\"systemMessage\":\"\u001b[1;32mautopilot:\u001b[0m hook error, autonomous mode disabled, see '$LOG_FILE'\"}"' ERR
 set -euo pipefail
 
 # Find jq: prefer global, fall back to bootstrapped

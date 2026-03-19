@@ -15,7 +15,7 @@ if [ -x "$BINARY" ]; then
 fi
 
 # ANSI via JSON unicode escapes
-B='\u001b[1m'
+B='\u001b[1;32m'
 R='\u001b[0m'
 
 # Detect platform

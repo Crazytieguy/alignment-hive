@@ -14566,6 +14566,7 @@ var hookColors = {
   dim: (s) => `\x1B[2m${s}\x1B[0m`,
   magenta: (s) => `\x1B[35m${s}\x1B[0m`,
   boldMagenta: (s) => `\x1B[1;35m${s}\x1B[0m`,
+  boldBlue: (s) => `\x1B[1;34m${s}\x1B[0m`,
   cyan: (s) => `\x1B[36m${s}\x1B[0m`,
   green: (s) => `\x1B[32m${s}\x1B[0m`
 };
@@ -14953,7 +14954,12 @@ var hive = {
     disableSetupFailed: (project) => `Failed to disable sharing for ${project}`,
     summary: (enabled, disabled) => `${enabled} enabled, ${disabled} disabled.`,
     uploadReviewInfo: "Sessions are uploaded after a 24-hour review period.",
-    uploadHelpHint: "Run `hive upload --help` to manage uploads."
+    uploadHelpHint: "Run `hive upload --help` to manage uploads.",
+    sessionDirsResult: (existing, discovered) => {
+      if (discovered === 0)
+        return `${existing} session ${existing === 1 ? "directory" : "directories"} tracked`;
+      return `${existing} session ${existing === 1 ? "directory" : "directories"} tracked, ${discovered} new`;
+    }
   },
   upload: {
     notAuthenticated: NOT_AUTHENTICATED,

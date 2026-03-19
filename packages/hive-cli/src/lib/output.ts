@@ -12,6 +12,7 @@ export const hookColors = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
   magenta: (s: string) => `\x1b[35m${s}\x1b[0m`,
   boldMagenta: (s: string) => `\x1b[1;35m${s}\x1b[0m`,
+  boldBlue: (s: string) => `\x1b[1;34m${s}\x1b[0m`,
   cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
   green: (s: string) => `\x1b[32m${s}\x1b[0m`,
 };

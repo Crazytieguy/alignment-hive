@@ -5,7 +5,7 @@ STATE_FILE="$CLAUDE_PROJECT_DIR/.claude/autopilot/state.json"
 LOG_FILE="$HOME/.cache/autopilot/bootstrap.log"
 
 # ANSI via JSON unicode escapes
-B='\u001b[1m'   # bold
+B='\u001b[1;32m' # bold green
 M='\u001b[1;35m' # bold magenta
 R='\u001b[0m'    # reset
 
