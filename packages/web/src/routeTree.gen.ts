@@ -15,6 +15,7 @@ import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
+import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
 import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
 import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
 import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticated/consent'
@@ -53,6 +54,11 @@ const AuthSignOutRoute = AuthSignOutRouteImport.update({
   id: '/auth/sign-out',
   path: '/auth/sign-out',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
+  id: '/welcome',
+  path: '/welcome',
+  getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedPolicyRoute = AuthenticatedPolicyRouteImport.update({
   id: '/policy',
@@ -109,6 +115,7 @@ export interface FileRoutesByFullPath {
   '/consent': typeof AuthenticatedConsentRoute
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
+  '/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/': typeof AuthorizedIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
@@ -124,6 +131,7 @@ export interface FileRoutesByTo {
   '/consent': typeof AuthenticatedConsentRoute
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
+  '/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized': typeof AuthorizedIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
@@ -142,6 +150,7 @@ export interface FileRoutesById {
   '/_authenticated/consent': typeof AuthenticatedConsentRoute
   '/_authenticated/install': typeof AuthenticatedInstallRoute
   '/_authenticated/policy': typeof AuthenticatedPolicyRoute
+  '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/': typeof AuthorizedIndexRoute
   '/_authenticated/consent_/projects': typeof AuthenticatedConsentProjectsRoute
@@ -160,6 +169,7 @@ export interface FileRouteTypes {
     | '/consent'
     | '/install'
     | '/policy'
+    | '/welcome'
     | '/auth/sign-out'
     | '/authorized/'
     | '/consent/projects'
@@ -175,6 +185,7 @@ export interface FileRouteTypes {
     | '/consent'
     | '/install'
     | '/policy'
+    | '/welcome'
     | '/auth/sign-out'
     | '/authorized'
     | '/consent/projects'
@@ -192,6 +203,7 @@ export interface FileRouteTypes {
     | '/_authenticated/consent'
     | '/_authenticated/install'
     | '/_authenticated/policy'
+    | '/_authenticated/welcome'
     | '/auth/sign-out'
     | '/authorized/'
     | '/_authenticated/consent_/projects'
@@ -254,6 +266,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/auth/sign-out'
       preLoaderRoute: typeof AuthSignOutRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/welcome': {
+      id: '/_authenticated/welcome'
+      path: '/welcome'
+      fullPath: '/welcome'
+      preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
+      parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/policy': {
       id: '/_authenticated/policy'
@@ -325,6 +344,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedConsentRoute: typeof AuthenticatedConsentRoute
   AuthenticatedInstallRoute: typeof AuthenticatedInstallRoute
   AuthenticatedPolicyRoute: typeof AuthenticatedPolicyRoute
+  AuthenticatedWelcomeRoute: typeof AuthenticatedWelcomeRoute
   AuthenticatedConsentProjectsRoute: typeof AuthenticatedConsentProjectsRoute
 }
 
@@ -332,6 +352,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedConsentRoute: AuthenticatedConsentRoute,
   AuthenticatedInstallRoute: AuthenticatedInstallRoute,
   AuthenticatedPolicyRoute: AuthenticatedPolicyRoute,
+  AuthenticatedWelcomeRoute: AuthenticatedWelcomeRoute,
   AuthenticatedConsentProjectsRoute: AuthenticatedConsentProjectsRoute,
 }
 
