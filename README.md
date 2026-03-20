@@ -2,14 +2,12 @@
 
 A shared tooling and knowledge layer for the AI alignment community.
 
-As AI capabilities accelerate, the alignment community needs to keep pace. Large labs benefit from shared tooling and accumulated knowledge across their researchers and agents, but the broader alignment community doesn't have that. Each person starts from scratch, sifting through noise to find good tools, repeating mistakes others have already solved.
-
-Alignment Hive provides curation, discoverability, and shared knowledge for everyone working on alignment. The best way to scale is for the community to build this together, and contributions are actively encouraged.
+As soft takeoff picks up, the alignment community needs shared infrastructure to keep pace. Alignment Hive aims to provide the benefits of scale that large labs have, through shared tooling and accumulated knowledge. AI tooling is moving fast, and it's hard to keep up with what's available and what works.
 
 **Currently available:**
 
-- **Claude Code plugin marketplace.** Curated plugins for common research workflows.
-- **Session sharing.** Opt-in system for sharing Claude Code session learnings across the community, building a collective knowledge base.
+- **Claude Code plugin marketplace.** Curated plugins built around concrete bottlenecks observed at MATS.
+- **Session sharing.** Opt-in system for sharing Claude Code session data with AI safety research organizations.
 
 ## Getting Started
 
@@ -49,6 +47,3 @@ The [plugin-dev](https://github.com/anthropics/claude-code-plugins) plugin auto-
 
 Feedback and suggestions welcome. Open an [issue](https://github.com/Crazytieguy/alignment-hive/issues) or email yoav.tzfati@gmail.com.
 
-## Web App
-
-The web interface at [alignment-hive.com](https://alignment-hive.com) handles user signup and data sharing consent.
