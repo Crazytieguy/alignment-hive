@@ -11,7 +11,7 @@ Before committing:
 
 Use `cargo add <crate>` to get latest versions. Check generated docs in `target/doc-md` with `cargo doc-md` (run from the crate directory, not workspace root).
 
-@crates/remote-kernels/target/doc-md/index.md
+@remote-kernels/target/doc-md/index.md
 
 ## Code Style
 

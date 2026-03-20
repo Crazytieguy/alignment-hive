@@ -1,1 +1,1 @@
-@packages/hive-cli/README.md
+@README.md

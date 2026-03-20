@@ -1,4 +1,4 @@
-@packages/web/README.md
+@README.md
 
 ## Convex Dev Server
 
