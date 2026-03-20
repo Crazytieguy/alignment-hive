@@ -442,6 +442,8 @@ var require_main = __commonJS((exports, module) => {
 var import_dotenv = __toESM(require_main(), 1);
 import { join } from "path";
 function loadEnvFiles() {
+  if (!process.env.ALIGNMENT_HIVE_DEV)
+    return;
   const cwd = process.cwd();
   import_dotenv.config({ path: [join(cwd, ".env.local"), join(cwd, ".env")], quiet: true });
 }
@@ -20874,7 +20876,7 @@ async function heartbeat() {
   return failures > 0 ? 1 : 0;
 }
 
-// src/cli.ts
+// src/hive-mind-cli.ts
 loadEnvFiles();
 initConfig(createHiveMindConfig());
 var COMMANDS = {

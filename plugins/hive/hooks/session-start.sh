@@ -37,12 +37,6 @@ ERROR_LOG="$STATE_DIR/error.log"
 # Exit 0 on unexpected errors — log them for debugging
 trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error at line $LINENO" >> "$ERROR_LOG" 2>/dev/null; exit 0' ERR
 
-# --- Dev environment setup via CLAUDE_ENV_FILE ---
-
-if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/dev-env.sh" ]; then
-  echo "export PATH=\"$CLAUDE_PROJECT_DIR/.dev:\$PATH\"" >> "$CLAUDE_ENV_FILE"
-fi
-
 # --- Skip for resume/compact (continuations don't need fresh state) ---
 
 if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ]; then
@@ -76,9 +70,9 @@ if [ -f "$DISABLE_FILE" ]; then
   exit 0
 fi
 
-# Find hive binary: .dev/ (dev mode) first, then PATH, then ~/.local/bin
+# Find hive binary: dev binary when running from local plugin dir, else production
 HIVE_BIN=""
-if [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
+if [[ "${CLAUDE_PLUGIN_ROOT:-}" == "${CLAUDE_PROJECT_DIR}"/* ]] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
   HIVE_BIN="$CLAUDE_PROJECT_DIR/.dev/hive"
 elif command -v hive >/dev/null 2>&1; then
   HIVE_BIN="hive"

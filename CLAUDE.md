@@ -1,24 +1,25 @@
 # alignment-hive
 
-Claude Code infrastructure for AI safety researchers.
+Shared tooling and knowledge layer for the AI alignment community.
 
 ## About This Repo
 
 @README.md explains what this is. Keep it up to date as the project evolves.
 
-This is a **bun monorepo**:
+This is a **bun + cargo monorepo**:
 - `packages/web/` - TanStack Start web app (alignment-hive.com)
 - `packages/hive-cli/` - CLI for session extraction and sharing
 - `packages/session-data/` - Shared code (schemas, parsing)
+- `crates/` - Rust crates (remote-kernels MCP server)
 - `plugins/` - Plugin distributions
 
 ## Working on the Code
 
 **For web app**: Read [packages/web/README.md](packages/web/README.md) for local development setup
 
-**For CLI**: Read [packages/hive-cli/CLAUDE.md](packages/hive-cli/CLAUDE.md) for development guidelines. Run CLI commands from the project root:
-- **hive-mind CLI**: `bun packages/hive-cli/src/cli.ts <command>`
-- **hive CLI**: `bun packages/hive-cli/src/hive-cli.ts <command>`
+**For CLI**: Read [packages/hive-cli/CLAUDE.md](packages/hive-cli/CLAUDE.md) for development guidelines
+
+**For Rust crates**: Read [crates/CLAUDE.md](crates/CLAUDE.md) for quality gates and conventions
 
 ## Running Scripts
 
@@ -49,7 +50,7 @@ New plugins must be registered in `.claude-plugin/marketplace.json` to appear in
 
 ## Plugin Versioning
 
-When updating plugin content (skills, commands, hooks, etc.), you must bump the version in the plugin's `plugin.json` for users to receive the update. The auto-update system compares installed versions with marketplace versions - without a version bump, changes won't propagate to users.
+When updating plugin content (skills, commands, hooks, etc.), you must bump the version in the plugin's `plugin.json` for users to receive the update. The auto-update system compares installed versions with marketplace versions — without a version bump, changes won't propagate to users.
 
 Plugin locations:
 - `plugins/autopilot/.claude-plugin/plugin.json`
@@ -62,50 +63,16 @@ Plugin locations:
 
 The hive plugin has a `cli-version` file (`plugins/hive/cli-version`) that must match the version in `packages/hive-cli/package.json`. This controls which binary version users download. Always bump both together.
 
-For the mats plugin specifically:
-- **Minor version bump** (e.g., 0.1.x → 0.2.0): New best practices content - users will be prompted to review
-- **Patch version bump** (e.g., 0.1.9 → 0.1.10): Bug fixes, typos, or other changes - users won't be re-prompted
-- **Update README.md** when adding or significantly changing mats plugin skills/commands
-
-**Auto-expanding bash commands fail hard.** If `!`command`` returns non-zero, the entire skill/agent/command fails to load. Use fallbacks like `command 2>/dev/null || echo "fallback"`.
+**Auto-expanding bash commands fail hard.** If `` !`command` `` returns non-zero, the entire skill/agent/command fails to load. Use fallbacks like `command 2>/dev/null || echo "fallback"`.
 
 ## Python
 
 Use [uv](https://docs.astral.sh/uv/) with inline dependencies (PEP 723). Run scripts with `uv run script.py`.
 
-## hive-mind Session Files
+## Ad-hoc Scripts
 
-The `.claude/hive-mind/sessions/` directory contains extracted session data. These files are gitignored.
+Only `/tmp/claude-execution-allowed/alignment-hive/` is approved for ad-hoc scripts. JavaScript/TypeScript scripts run with `bun /tmp/claude-execution-allowed/alignment-hive/<script-name>`. Bash scripts run with `bash /tmp/claude-execution-allowed/alignment-hive/<script-name>`.
 
-## Running Commands
-
-Run scripts via `bun run --filter <workspace> <script>`. Available scripts vary by workspace - see "Running Scripts" section above.
-
-**Ad-hoc scripts:** Only `/tmp/claude-execution-allowed/alignment-hive/` is approved for ad-hoc scripts. JavaScript/TypeScript scripts run with `bun /tmp/claude-execution-allowed/alignment-hive/<script-name>`. Bash scripts run with `bash /tmp/claude-execution-allowed/alignment-hive/<script-name>`.
-
-**Bash operations:**
-
-Complex bash syntax is hard for Claude Code to permission correctly. Keep commands simple.
-
-Simple operations are fine: `|`, `||`, `&&`, `>` redirects.
-
-For bulk operations on multiple files, use xargs:
-- Plain: `ls *.md | xargs wc -l`
-- With placeholder: `ls *.md | xargs -I{} head -1 {}`
-
-For string interpolation (`$()`, backticks, `${}`), heredocs, loops, or advanced xargs flags (`-P`, `-L`, `-n`), write a script in `/tmp/claude-execution-allowed/alignment-hive/` instead.
-
-**Patterns:**
-- File creation: Write tool, not `cat << 'EOF' > file`
-- Env vars: `export VAR=val && command`, not `VAR=val command` or `env VAR=val command`
-- Bulk operations: `ls *.md | xargs wc -l`, not `for f in *.md; do cmd "$f"; done`
-- Parallel/batched xargs: script, not `xargs -P4` or `xargs -L1`
-- Per-item shell logic: script, not `xargs sh -c '...'`
-- Git: `git <command>`, not `git -C <path> <command>` (breaks permissions)
-
-If a command that should be allowed is denied, or if project structure changes significantly, ask about running `/autopilot:setup` to update settings.
-
-## Codebase exploration
+## Codebase Exploration
 
 Always use `precis` for codebase exploration. Run `precis .` for a full overview, or `precis src/some/directory` to zoom into a specific area.
-

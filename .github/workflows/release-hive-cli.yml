@@ -74,7 +74,7 @@ jobs:
       - name: Build binary
         run: |
           bun build --compile --minify --target=${{ matrix.bun-target }} \
-            packages/hive-cli/src/hive-cli.ts \
+            packages/hive-cli/src/cli.ts \
             --outfile dist/hive-cli-${{ matrix.target }}
 
       - name: Upload artifact
