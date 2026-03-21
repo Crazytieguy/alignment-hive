@@ -1,0 +1,87 @@
+#!/bin/bash
+set -euo pipefail
+
+# Sandboxed Deno runner. See --help for usage.
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat <<'HELP'
+deno-sandbox — Run JS/TS in a sandboxed Deno environment.
+Reads code from .claude/deno-sandbox/$DENO_SANDBOX_SESSION_ID.ts
+(written by Claude via the Write tool). Stdin is free for data piping.
+
+Usage:
+  # First, write code to the sandbox script file, then:
+  deno-sandbox
+
+  # With stdin data:
+  cat data.csv | deno-sandbox
+
+Default: read-only access to current directory.
+Use deno-sandbox-grant to add permissions for the session.
+
+Note: symlinks in readable directories are followed to their targets.
+HELP
+  exit 0
+fi
+
+if ! command -v deno >/dev/null 2>&1; then
+  echo "error: deno not found. It will be installed automatically on next session start." >&2
+  exit 1
+fi
+
+# Validate session ID (no path traversal)
+sid="${DENO_SANDBOX_SESSION_ID:-unknown}"
+if [[ "$sid" =~ [/\\] ]]; then
+  echo "error: invalid session ID" >&2
+  exit 1
+fi
+
+SCRIPT_DIR=".claude/deno-sandbox"
+SCRIPT_FILE="$SCRIPT_DIR/$sid.ts"
+
+if [ ! -f "$SCRIPT_FILE" ]; then
+  echo "error: no script found at $SCRIPT_FILE" >&2
+  echo "Write your code to this file first, then run deno-sandbox." >&2
+  exit 1
+fi
+
+FLAGS=(--allow-read=. --deny-run)
+DENY_WRITE=(.claude .git "$HOME/.claude" "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}")
+
+# Merge same-type grants (Deno rejects duplicate flag types)
+grant_read="" grant_write="" grant_net="" grant_env="" grant_import=""
+STATE_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/$sid"
+if [ -f "$STATE_FILE" ]; then
+  while IFS= read -r flag; do
+    if [[ "$flag" =~ ^--allow-(read|write|net|env|import)=(.+)$ ]]; then
+      kind="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+
+      varname="grant_$kind"
+      cur="${!varname}"
+      if [ -n "$cur" ]; then
+        printf -v "$varname" "%s,%s" "$cur" "$value"
+      else
+        printf -v "$varname" "%s" "$value"
+      fi
+
+      if [ "$kind" = "write" ]; then
+        DENY_WRITE+=("$value/.claude" "$value/.git")
+      fi
+    fi
+  done < "$STATE_FILE"
+fi
+
+for kind in read write net env import; do
+  varname="grant_$kind"
+  val="${!varname}"
+  if [ -n "$val" ]; then
+    FLAGS+=("--allow-$kind=$val")
+  fi
+done
+
+deny_write_joined=$(IFS=,; echo "${DENY_WRITE[*]}")
+FLAGS+=(--deny-write="$deny_write_joined")
+
+exec env DENO_NO_PACKAGE_JSON=1 \
+  deno run --no-config --node-modules-dir=none "${FLAGS[@]}" -- "$SCRIPT_FILE"

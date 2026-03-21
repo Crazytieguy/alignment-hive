@@ -20,10 +20,12 @@ else
 fi
 
 # Extract everything we need in a single jq call
-eval "$(echo "$input" | "$JQ" -r --arg cwd "$CLAUDE_PROJECT_DIR" '
+# Use .cwd from hook input (not $CLAUDE_PROJECT_DIR) — .cwd tracks the actual
+# working directory, which differs from the project dir inside worktrees.
+eval "$(echo "$input" | "$JQ" -r '.cwd as $cwd |
   "permission_mode=" + (.permission_mode | @sh),
   "has_session_dest=" + ([.permission_suggestions // [] | .[] | select(.destination == "session")] | length | tostring),
-  "session_in_project=" + ([.permission_suggestions // [] | .[] | select(.destination == "session") | .rules[]? | .ruleContent | gsub("^/+"; "/") | gsub("/\\*\\*$"; "") | startswith($cwd)] | any | tostring),
+  "session_in_cwd=" + ([.permission_suggestions // [] | .[] | select(.destination == "session") | .rules[]? | .ruleContent | gsub("^/+"; "/") | gsub("/\\*\\*$"; "") | startswith($cwd)] | any | tostring),
   "rule_content=" + ([.permission_suggestions // [] | .[] | select(.type == "addRules" and .destination != "session") | .rules[]? | .ruleContent] | first // "" | @sh),
   "has_suggestions=" + (.permission_suggestions // [] | length > 0 | tostring)
 ')"
@@ -38,8 +40,13 @@ if ! "$JQ" -e '.autonomous_mode == true' "$STATE_FILE" >/dev/null 2>&1; then
   exit 0
 fi
 
-# Let through session suggestions unless they point inside the project dir (bogus)
-if [ "$has_session_dest" -gt 0 ] && [ "$session_in_project" != "true" ]; then
+# Let through session suggestions unless they point inside the cwd (bogus)
+if [ "$has_session_dest" -gt 0 ] && [ "$session_in_cwd" != "true" ]; then
+  exit 0
+fi
+
+# Let deno-sandbox-grant through so the user can approve/deny
+if [[ "$rule_content" == deno-sandbox-grant* ]]; then
   exit 0
 fi
 

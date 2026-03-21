@@ -14,6 +14,12 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/ensure-jq.sh",
             "async": true,
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/ensure-deno.sh",
+            "async": true,
+            "timeout": 60
           }
         ]
       }
@@ -22,6 +28,11 @@
       {
         "matcher": "*",
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/sandbox-permissions.sh",
+            "timeout": 5
+          },
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/auto-deny.sh",
