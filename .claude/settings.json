@@ -123,6 +123,8 @@
       "Bash(hive-mind search)",
       "Bash(hive-mind search *)",
       "Bash(bun --version)",
+      "Bash(cargo doc-md)",
+      "Bash(cargo doc-md *)",
       "mcp__convex__*",
       "mcp__remote-kernels__*"
     ],
