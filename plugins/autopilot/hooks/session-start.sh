@@ -37,7 +37,9 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo "export PATH=\"\$HOME/.deno/bin:${CLAUDE_PLUGIN_ROOT}/scripts:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 fi
 
-# Ensure sandbox script directory exists with gitignore
+# Ensure sandbox script directory exists.
+# .gitignore is only written on first creation — if the directory already
+# exists (e.g. with committed scripts), we don't overwrite the user's choice.
 SANDBOX_DIR="$CLAUDE_PROJECT_DIR/.claude/deno-sandbox"
 if [ ! -d "$SANDBOX_DIR" ]; then
   mkdir -p "$SANDBOX_DIR"
@@ -63,27 +65,28 @@ fi
 
 # Deno sandbox additionalContext
 if command -v deno >/dev/null 2>&1 || [ -x "$HOME/.deno/bin/deno" ]; then
-  read -r -d '' ADDITIONAL_CONTEXT << 'CONTEXT' || true
+  SANDBOX_SCRIPT=".claude/deno-sandbox/$SESSION_ID.ts"
+  read -r -d '' ADDITIONAL_CONTEXT << CONTEXT || true
 ## deno-sandbox
 
-`deno-sandbox` runs JavaScript/TypeScript in a secure Deno sandbox. Default: read-only access to current directory. Network, writes, and env access are all blocked unless explicitly granted.
+\`deno-sandbox\` runs JavaScript/TypeScript in a secure Deno sandbox. Default: read-only access to current directory. Network, writes, and env access are all blocked unless explicitly granted.
 
 **Usage:**
-```
-# 1. Write code to .claude/deno-sandbox/${DENO_SANDBOX_SESSION_ID}.ts
+\`\`\`
+# 1. Write code to $SANDBOX_SCRIPT
 # 2. Run the sandbox:
 deno-sandbox
 # With data piped in:
 cat data.csv | deno-sandbox
-```
+\`\`\`
 
-npm and jsr packages work out of the box: `import { parse } from "npm:csv-parse/sync";`
+\`npm:\` and \`jsr:\` imports work out of the box (packages are fetched from their registries; sandbox permissions still apply to what the code can do): \`import { parse } from "npm:csv-parse/sync";\`
 
 **Granting permissions** (each grant requires user approval):
-```
+\`\`\`
 deno-sandbox-grant --allow-write=. --allow-net=api.example.com
-```
-Available: `--allow-{read,write,net,env,import}=<scope>`. Follow the principle of least privilege — request only the most specific permissions needed.
+\`\`\`
+Available: \`--allow-{read,write,net,env,import}=<scope>\`. Follow the principle of least privilege — request only the most specific permissions needed. Read and write are separate permissions — granting write to a path does not grant read.
 
 Request any necessary permissions as early as possible. The user is typically available to review grants at the start of a session and will want you to work without interruption afterward.
 CONTEXT

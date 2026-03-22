@@ -29,8 +29,12 @@ if ! command -v deno >/dev/null 2>&1; then
   exit 1
 fi
 
-# Validate session ID (no path traversal)
-sid="${DENO_SANDBOX_SESSION_ID:-unknown}"
+# Validate session ID
+sid="${DENO_SANDBOX_SESSION_ID:-}"
+if [ -z "$sid" ]; then
+  echo "error: sandbox is not available for this session." >&2
+  exit 1
+fi
 if [[ "$sid" =~ [/\\] ]]; then
   echo "error: invalid session ID" >&2
   exit 1
@@ -65,7 +69,7 @@ if [ -f "$STATE_FILE" ]; then
         printf -v "$varname" "%s" "$value"
       fi
 
-      if [ "$kind" = "write" ]; then
+      if [ "$kind" = "write" ] && [ -d "$value" ]; then
         DENY_WRITE+=("$value/.claude" "$value/.git")
       fi
     fi

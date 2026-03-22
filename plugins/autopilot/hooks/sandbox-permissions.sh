@@ -25,30 +25,6 @@ fi
 
 target_path=$(echo "$input" | "$JQ" -r '.tool_input.file_path // .tool_input.path // ""')
 
-# Auto-allow Write/Edit to the sandbox script directory
-if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
-  # Reject paths with traversal
-  if [[ "$target_path" == *..* ]]; then
-    exit 0
-  fi
-  if [[ "$target_path" == */.claude/deno-sandbox/* ]]; then
-    "$JQ" -n '{
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: { behavior: "allow" }
-      }
-    }'
-    exit 0
-  fi
-  exit 0
-fi
-
-# Only handle Read, Grep, Glob from here
-case "$tool_name" in
-  Read|Grep|Glob) ;;
-  *) exit 0 ;;
-esac
-
 if [ -z "$target_path" ]; then
   exit 0
 fi
@@ -58,8 +34,21 @@ if [[ "$target_path" == *..* ]]; then
   exit 0
 fi
 
+# Auto-allow Write/Edit to the sandbox script directory
+if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
+  if [[ "$target_path" == */.claude/deno-sandbox/* ]]; then
+    "$JQ" -n '{
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" }
+      }
+    }'
+  fi
+  exit 0
+fi
+
 # Load granted read paths from session state
-STATE_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/${DENO_SANDBOX_SESSION_ID:-unknown}"
+STATE_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/${DENO_SANDBOX_SESSION_ID:-}"
 if [ ! -f "$STATE_FILE" ]; then
   exit 0
 fi

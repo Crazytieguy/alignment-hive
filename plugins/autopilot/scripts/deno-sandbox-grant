@@ -28,9 +28,18 @@ for flag in "$@"; do
     kind="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
 
-    # Resolve relative paths to absolute for read/write
+    # Resolve paths to absolute for read/write
     if [ "$kind" = "read" ] || [ "$kind" = "write" ]; then
-      resolved=$(cd "$value" 2>/dev/null && pwd || realpath "$value" 2>/dev/null || echo "$value")
+      dir=$(dirname "$value")
+      base=$(basename "$value")
+      if [ -d "$value" ]; then
+        resolved=$(cd "$value" && pwd)
+      elif [ -d "$dir" ]; then
+        resolved=$(cd "$dir" && echo "$(pwd)/$base")
+      else
+        echo "error: path does not exist: '$value'" >&2
+        exit 1
+      fi
       flag="--allow-$kind=$resolved"
     fi
 
@@ -50,12 +59,16 @@ deno_err=$(echo '' | deno run --no-config "${validated[@]}" - 2>&1) || {
 }
 
 # Write validated flags to state file
+if [ -z "${DENO_SANDBOX_SESSION_ID:-}" ]; then
+  echo "error: sandbox is not available for this session." >&2
+  exit 1
+fi
 STATE_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions"
-STATE_FILE="$STATE_DIR/${DENO_SANDBOX_SESSION_ID:-unknown}"
+STATE_FILE="$STATE_DIR/$DENO_SANDBOX_SESSION_ID"
 mkdir -p "$STATE_DIR"
 
 for flag in "${validated[@]}"; do
-  if ! grep -qxF "$flag" "$STATE_FILE" 2>/dev/null; then
+  if ! grep -qxF -- "$flag" "$STATE_FILE" 2>/dev/null; then
     echo "$flag" >> "$STATE_FILE"
   fi
 done
