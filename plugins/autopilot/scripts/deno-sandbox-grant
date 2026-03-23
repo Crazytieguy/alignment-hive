@@ -11,6 +11,7 @@ Usage:
 Allowed flags (must include = with a scope):
   --allow-read=<path>     Read access to a directory or file
   --allow-write=<path>    Write access (.claude/ and .git/ always protected)
+  --allow-run=<binary>    Run a specific command (e.g. git, python3)
   --allow-net=<host>      Network access to a specific host
   --allow-env=<VAR>       Access to a specific environment variable
   --allow-import=<host>   Import from a specific remote host
@@ -24,7 +25,7 @@ fi
 # Validate all flags before writing any (no partial state on error)
 validated=()
 for flag in "$@"; do
-  if [[ "$flag" =~ ^--allow-(read|write|net|env|import)=(.+)$ ]]; then
+  if [[ "$flag" =~ ^--allow-(read|write|run|net|env|import)=(.+)$ ]]; then
     kind="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
 
@@ -46,7 +47,7 @@ for flag in "$@"; do
     validated+=("$flag")
   else
     echo "error: rejected '$flag'" >&2
-    echo "Only scoped --allow-{read,write,net,env,import}=<value> flags are accepted." >&2
+    echo "Only scoped --allow-{read,write,run,net,env,import}=<value> flags are accepted." >&2
     exit 1
   fi
 done

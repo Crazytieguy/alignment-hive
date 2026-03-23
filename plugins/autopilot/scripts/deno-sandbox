@@ -49,15 +49,15 @@ if [ ! -f "$SCRIPT_FILE" ]; then
   exit 1
 fi
 
-FLAGS=(--allow-read=. --deny-run)
+FLAGS=(--allow-read=.)
 DENY_WRITE=(.claude .git "$HOME/.claude" "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}")
 
 # Merge same-type grants (Deno rejects duplicate flag types)
-grant_read="" grant_write="" grant_net="" grant_env="" grant_import=""
+grant_read="" grant_write="" grant_run="" grant_net="" grant_env="" grant_import=""
 STATE_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/$sid"
 if [ -f "$STATE_FILE" ]; then
   while IFS= read -r flag; do
-    if [[ "$flag" =~ ^--allow-(read|write|net|env|import)=(.+)$ ]]; then
+    if [[ "$flag" =~ ^--allow-(read|write|run|net|env|import)=(.+)$ ]]; then
       kind="${BASH_REMATCH[1]}"
       value="${BASH_REMATCH[2]}"
 
@@ -76,7 +76,7 @@ if [ -f "$STATE_FILE" ]; then
   done < "$STATE_FILE"
 fi
 
-for kind in read write net env import; do
+for kind in read write run net env import; do
   varname="grant_$kind"
   val="${!varname}"
   if [ -n "$val" ]; then

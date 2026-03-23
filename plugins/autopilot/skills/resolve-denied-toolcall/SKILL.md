@@ -11,6 +11,8 @@ Proposing a permission is costly — it blocks progress until the user notices a
 
 Read `.claude/settings.json` and `.claude/settings.local.json`. Look for permitted commands that accomplish the same thing — especially project scripts and allowed package manager invocations.
 
+If the deno sandbox is available, consider whether the task can be done by writing TypeScript in the sandbox instead.
+
 Examples of non-obvious alternatives:
 
 - `Bash(bash scripts/check-gpu.sh *)` is allowed — no need for `ssh lab-server nvidia-smi`. The script already SSHes to the configured server.

@@ -72,7 +72,7 @@ Check `.claude/settings.json` and `.claude/settings.local.json` for installed pl
 
 Propose relevant plugins:
 
-- **Autopilot** (permissions + autonomous mode): `autopilot@alignment-hive` — **Always recommend**
+- **Autopilot** (permissions, autonomous mode, sandboxed scripting): `autopilot@alignment-hive` — **Always recommend**
 - **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)

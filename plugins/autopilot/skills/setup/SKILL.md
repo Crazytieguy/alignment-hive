@@ -1,11 +1,11 @@
 ---
 name: setup
-description: This skill should be used when the user asks to set up or configure Claude Code permissions and/or autopilot/autonomous mode for a project.
+description: This skill should be used when the user asks to set up or configure Claude Code permissions, autonomous mode, and/or deno sandbox for a project.
 ---
 
 # Autopilot Setup
 
-Configure permissions and autonomous mode so Claude can accomplish tasks end-to-end.
+Configure permissions, autonomous mode, and deno sandbox so Claude can accomplish tasks end-to-end.
 
 ## Purpose
 
@@ -19,14 +19,22 @@ Settings files are hot-reloaded (no restart needed) and `settings.local.json` is
 
 **Ask** is safer than deny for **sometimes dangerous** commands. With ask, the session stops until the user provides attention. With deny, a potentially compromised model might try variations autonomously. Use ask for commands that are sometimes legitimate but could be misused.
 
+## Re-run Behavior
+
+If existing permissions are already configured (settings files exist with non-trivial content), treat this as a re-run. For each step, check whether the existing configuration already matches one of the options (or a close variation). If it does, skip the step silently. Only ask about things that don't seem set up yet.
+
+This means a user running `:setup` for the second time will only see questions for newly added features or unconfigured areas, not a repeat of everything they already decided.
+
+Exception: if the user explicitly asks to reconfigure from scratch or change previous choices, ask all steps regardless of existing configuration.
+
 ## Workflow Overview
 
 1. Detect project type and audit existing permissions (automatic)
 2. Ask initial preferences (batch of 3) + edit universally safe commands
-3. Ask web access + script execution preferences (batch of 2) + edit
+3. Ask web access + project script preferences (batch of 2) + edit
 4. Ask MCP server permissions + edit (if applicable)
 5. Confirm secrets/git/mode/cleanup + edit
-6. Autonomous mode opt-in
+6. Autopilot features (autonomous mode, then deno sandbox — separate questions, shared action)
 
 ---
 
@@ -43,8 +51,6 @@ Detect the project type and audit existing permissions automatically before aski
 **MCP servers:** Check `.mcp.json` for configured servers.
 
 **Secret files:** Look for `.env`, `.env.local`, `.envrc`, credentials files, API keys. Note which ones exist for the secrets confirmation later.
-
-**Bash scripts folder:** Look for `scripts/`, `bin/`, or similar directories containing shell scripts. Fall back to `scripts/` if none found. This is used for the "Full execution" tier.
 
 **hive-mind plugin:** If the `hive-mind:retrieval` subagent is available, include hive-mind commands in the universally safe commands.
 
@@ -294,7 +300,7 @@ If hive-mind plugin is detected, also include:
 
 ---
 
-## Step 3: Web Access + Script Execution Questions + Edit
+## Step 3: Web Access + Project Scripts Questions + Edit
 
 Use AskUserQuestion to ask both questions in a single batch.
 
@@ -308,28 +314,27 @@ Use AskUserQuestion to ask both questions in a single batch.
 
 - **Specific domains only** - Only documentation sites relevant to the project. For when prompt injection protection must be absolute.
 
-### Script Execution Question
+### Project Scripts Question
 
-> "What level of script execution do you want? Higher tiers increase exposure to data exfiltration or loss from prompt injection."
+> "Which project scripts should Claude be allowed to run?"
+
+Not all tiers apply to all projects — only show options that make a meaningful difference given the detected scripts. No recommendation.
 
 **Options:**
 
-- **No scripts** - Only lint/format/typecheck. No ad-hoc script execution.
+- **Lint/format/typecheck only** - Safe, deterministic tools only. Tell the user exactly which commands this includes based on what was detected.
 
-- **Project scripts only** - Can run project-defined scripts (test, build, etc.) but not ad-hoc scripts.
+- **Tests + lint/format/typecheck** - Also allow test commands.
 
-- **Temp folder scripts (Recommended)** - Scripting access controlled per-session. Claude asks once, you decide whether this session needs it.
-
-- **Full execution** - Can run ad-hoc scripts directly. Always available, no per-session gate.
+- **All project scripts** - All detected project scripts (dev, build, test, lint, format, etc.).
 
 ### Edit Immediately After
 
 Based on the user's choice, edit the appropriate settings file(s).
 
-**Determine target files based on settings strategy:**
-- Split: project-specific commands → settings.json (shared infrastructure), script tier permissions → settings.local.json (personal preference)
-- Shared only: everything → settings.json
-- Personal only: everything → settings.local.json
+**Determine target file based on settings strategy:**
+- Split or Shared only: → settings.json
+- Personal only: → settings.local.json
 
 **Web access edit:** — Pick option; specific domains requires judgment.
 
@@ -396,13 +401,18 @@ Example for a Python ML project:
 }
 ```
 
-**Edit 1: Project-Specific Commands** (to settings.json for split/shared, settings.local.json for personal) — Adapt to project.
-
-Based on detected package manager, add commands for enumerated scripts. These are **examples** - adapt to the actual project structure, scripts, and invocation patterns.
+**Project scripts edit:** Based on detected package manager and the user's chosen tier, add allow rules for the applicable scripts. These are **examples** — adapt to the actual project structure, scripts, and invocation patterns.
 
 **Pattern note:** For each script, use two patterns: exact match (`bun run dev`) and with-arguments (`bun run dev *`). This allows passing flags like `--port 3000` without accidentally matching other scripts (e.g., `bun run dev*` would also match `bun run devscript.js`).
 
-**Example for bun project with scripts: dev, build, test, lint, format, typecheck:**
+Which scripts to include depends on the user's chosen tier:
+- **Lint/format/typecheck only** → only lint, format, typecheck commands
+- **Tests + lint/format/typecheck** → test commands + lint, format, typecheck
+- **All project scripts** → all detected scripts (dev, build, test, lint, format, typecheck, etc.)
+
+Always include deny rules for bypass vectors regardless of tier.
+
+**Example for bun project — "All project scripts" tier:**
 
 ```json
 {
@@ -438,9 +448,11 @@ Based on detected package manager, add commands for enumerated scripts. These ar
 }
 ```
 
+For "Tests + lint/format/typecheck", the allow list would include only `bun run test`, `bun run lint`, `bun run format`, `bun run typecheck` (and their `*` variants). For "Lint/format/typecheck only", it would include only `bun run lint`, `bun run format`, `bun run typecheck`.
+
 Note: `bun install`, `bun add`, `bun remove` are left on default ask - rarely needed mid-session and users often want control.
 
-**Example for uv/Python project with scripts in scripts/ directory:**
+**Example for uv/Python project with scripts in scripts/ directory — "All project scripts" tier:**
 
 ```json
 {
@@ -475,9 +487,11 @@ Note: `bun install`, `bun add`, `bun remove` are left on default ask - rarely ne
 }
 ```
 
+For "Tests + lint/format/typecheck", allow `uv run pytest`, `uv run mypy`, `uv run ruff` only. For "Lint/format/typecheck only", allow `uv run mypy`, `uv run ruff` only.
+
 Note: `uv sync`, `uv add`, `uv remove` are left on default ask - rarely needed mid-session and users often want control.
 
-**Example for Cargo/Rust project:**
+**Example for Cargo/Rust project — "All project scripts" tier:**
 
 ```json
 {
@@ -504,65 +518,9 @@ Note: `uv sync`, `uv add`, `uv remove` are left on default ask - rarely needed m
 }
 ```
 
+For "Tests + lint/format/typecheck", allow `cargo test`, `cargo check`, `cargo clippy`, `cargo fmt`. For "Lint/format/typecheck only", allow `cargo check`, `cargo clippy`, `cargo fmt`.
+
 Note: `cargo add`, `cargo remove` are left on default ask.
-
-**Edit 2: Script Execution Permissions** (to settings.local.json for split strategy, otherwise per strategy) — Adapt to project.
-
-**For "Full execution" tier:**
-
-Adapt to project's package manager and detected scripts folder:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(uv run *)",
-      "Bash(bun run *)",
-      "Bash(bash scripts/*)",
-      "Bash(xargs uv run *)",
-      "Bash(xargs bun run *)",
-      "Bash(xargs bash scripts/*)",
-      "Bash(xargs -I{} uv run *)",
-      "Bash(xargs -I{} bun run *)",
-      "Bash(xargs -I{} bash scripts/*)"
-    ]
-  }
-}
-```
-
-**For "Temp folder scripts" tier:**
-
-Use the project name in the path:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(uv run /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(bun run /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(bash /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(xargs uv run /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(xargs bun run /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(xargs bash /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(xargs -I{} uv run /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(xargs -I{} bun run /tmp/claude-execution-allowed/<project-name>/*)",
-      "Bash(xargs -I{} bash /tmp/claude-execution-allowed/<project-name>/*)"
-    ]
-  }
-}
-```
-
-**For "Project scripts only" and "No scripts" tiers:** No additional script permissions.
-
-**CLAUDE.md guidance for "Temp folder scripts" tier:**
-
-Add to CLAUDE.md (split/shared) or CLAUDE.local.md (personal):
-
-```markdown
-## Ad-hoc Scripts
-
-Only `/tmp/claude-execution-allowed/[project-name]/` is approved for ad-hoc scripts. Non-bash scripts run with `[package-manager] run /tmp/claude-execution-allowed/[project-name]/<script-name>`. Bash scripts run with `bash /tmp/claude-execution-allowed/[project-name]/<script-name>`.
-```
 
 ---
 
@@ -672,27 +630,46 @@ Note: `git commit` uses `:*` instead of ` *` because commit messages use heredoc
 
 ---
 
-## Step 6: Autonomous Mode Opt-In
+## Step 6: Autopilot Features
 
-After all permissions are configured, explain autonomous mode and ask for explicit consent.
+Ask about autonomous mode and the deno sandbox in separate question batches — each question must be its own AskUserQuestion call so the user reads the explanation before answering. Execute both together after.
 
-**Explanation to give the user:**
+### Q1: Autonomous Mode
+
+**Explanation to give the user right before the question:**
 
 The autopilot plugin includes an autonomous mode that changes how Claude handles permission requests when you're in `acceptEdits` mode:
 
 - **Without autonomous mode:** Claude blocks on every unpermitted command, waiting for you to approve or deny each one.
 - **With autonomous mode:** Unpermitted commands are automatically denied. Claude will try alternatives or propose adding a permission instead of blocking.
 
-This means you can leave Claude running unattended in `acceptEdits` mode.
+This means you can leave Claude running unattended in `acceptEdits` mode. If you need to approve a one-off command that isn't in your allow list, switch out of `acceptEdits` mode first (toggle with Shift+Tab).
 
-**Important:** If you need to approve a one-off command that isn't in your allow list, switch out of `acceptEdits` mode first (toggle with Shift+Tab). Autonomous mode only activates in `acceptEdits` mode.
-
-**Question:**
-
-> "Enable autonomous mode? (auto-deny unpermitted commands in acceptEdits mode instead of blocking)"
+> "Enable autonomous mode?"
 
 - **Yes** - Enable autonomous mode
 - **No** - Keep standard behavior (block on unpermitted commands)
+
+### Q2: Deno Sandbox
+
+**Explanation to give the user right before the question:**
+
+The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the project directory — network, writes, env, and subprocess execution are all blocked.
+
+When Claude needs additional capabilities, it will run `deno-sandbox-grant` to request a scoped permission. Each grant requires your approval and looks like this:
+
+```
+deno-sandbox-grant --allow-net=api.example.com
+deno-sandbox-grant --allow-write=./output
+deno-sandbox-grant --allow-run=python3
+```
+
+Review grants before approving — especially `--allow-run`, which gives unsandboxed subprocess execution. Grants persist for the session only.
+
+> "Enable deno sandbox? (Recommended)"
+
+- **Yes (Recommended)** - Enable the deno sandbox
+- **No** - Disable the deno sandbox
 
 ### Action
 
@@ -702,8 +679,12 @@ Create the state directory and write the state file:
 mkdir -p .claude/autopilot
 ```
 
-Write `.claude/autopilot/state.json`:
-- If yes: `{"autonomous_mode": true}`
-- If no: `{"autonomous_mode": false}`
+Write `.claude/autopilot/state.json` with both keys:
+```json
+{
+  "autonomous_mode": true|false,
+  "deno_sandbox": true|false
+}
+```
 
 Ensure `.claude/autopilot/` is gitignored — add to `.gitignore` if not already covered.
