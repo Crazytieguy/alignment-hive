@@ -46,7 +46,7 @@ if [ "$has_session_dest" -gt 0 ] && [ "$session_in_cwd" != "true" ]; then
 fi
 
 # Let deno-sandbox-grant through so the user can approve/deny
-if [[ "$rule_content" == deno-sandbox-grant* ]]; then
+if [[ "${rule_content%% *}" == "deno-sandbox-grant" ]]; then
   exit 0
 fi
 

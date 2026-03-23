@@ -73,6 +73,7 @@ if [ "$sandbox" = "true" ]; then
   # Environment setup
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     echo "export DENO_SANDBOX_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+    echo "export DENO_SANDBOX_PROJECT_DIR=\"$CLAUDE_PROJECT_DIR\"" >> "$CLAUDE_ENV_FILE"
     echo "export PATH=\"\$HOME/.deno/bin:${CLAUDE_PLUGIN_ROOT}/scripts:\$PATH\"" >> "$CLAUDE_ENV_FILE"
   fi
 
@@ -84,10 +85,26 @@ if [ "$sandbox" = "true" ]; then
     mkdir -p "$SANDBOX_DIR"
     echo '*' > "$SANDBOX_DIR/.gitignore"
   fi
+  # Suppress TS LSP diagnostics (Deno APIs aren't in the project's TS types)
+  if [ ! -f "$SANDBOX_DIR/tsconfig.json" ]; then
+    cat > "$SANDBOX_DIR/tsconfig.json" << 'TSCONFIG'
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "lib": ["esnext"],
+    "strict": true
+  }
+}
+TSCONFIG
+  fi
 
   # Emit additionalContext if deno is available
   if command -v deno >/dev/null 2>&1 || [ -x "$HOME/.deno/bin/deno" ]; then
-    SANDBOX_SCRIPT=".claude/deno-sandbox/$SESSION_ID.ts"
+    SANDBOX_SCRIPT="$CLAUDE_PROJECT_DIR/.claude/deno-sandbox/$SESSION_ID.ts"
     read -r -d '' ADDITIONAL_CONTEXT << CONTEXT || true
 ## deno-sandbox
 
@@ -95,7 +112,7 @@ if [ "$sandbox" = "true" ]; then
 
 ### Usage
 
-Write code to $SANDBOX_SCRIPT using the Write or Edit tools, then run with \`Bash(deno-sandbox)\` or \`Bash(cat data.csv | deno-sandbox)\`
+Your sandbox script file is $SANDBOX_SCRIPT (use this exact path for the entire session). Write code to it using the Write or Edit tools, then run with \`Bash(deno-sandbox)\` or \`Bash(cat data.csv | deno-sandbox)\`
 
 \`npm:\` and \`jsr:\` imports work out of the box (packages are fetched from their registries; sandbox permissions still apply to what the code can do): \`import { parse } from "npm:csv-parse/sync";\`
 

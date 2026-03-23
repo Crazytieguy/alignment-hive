@@ -40,8 +40,12 @@ if [[ "$sid" =~ [/\\] ]]; then
   exit 1
 fi
 
-SCRIPT_DIR=".claude/deno-sandbox"
-SCRIPT_FILE="$SCRIPT_DIR/$sid.ts"
+PROJECT_DIR="${DENO_SANDBOX_PROJECT_DIR:-}"
+if [ -z "$PROJECT_DIR" ]; then
+  echo "error: sandbox is not configured for this session." >&2
+  exit 1
+fi
+SCRIPT_FILE="$PROJECT_DIR/.claude/deno-sandbox/$sid.ts"
 
 if [ ! -f "$SCRIPT_FILE" ]; then
   echo "error: no script found at $SCRIPT_FILE" >&2
@@ -50,7 +54,15 @@ if [ ! -f "$SCRIPT_FILE" ]; then
 fi
 
 FLAGS=(--allow-read=.)
-DENY_WRITE=(.claude .git "$HOME/.claude" "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}")
+# Deny writes to sensitive directories at three levels:
+#   1. Relative (protects cwd)
+#   2. DENO_SANDBOX_PROJECT_DIR (protects the directory the session was started in)
+#   3. git toplevel (protects the repo root for the current cwd, if in a git repo)
+DENY_WRITE=(.claude .git "$PROJECT_DIR/.claude" "$PROJECT_DIR/.git" "$HOME/.claude" "$HOME/.deno" "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}")
+git_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [ -n "$git_toplevel" ] && [ "$git_toplevel" != "$PROJECT_DIR" ]; then
+  DENY_WRITE+=("$git_toplevel/.claude" "$git_toplevel/.git")
+fi
 
 # Merge same-type grants (Deno rejects duplicate flag types)
 grant_read="" grant_write="" grant_run="" grant_net="" grant_env="" grant_import=""

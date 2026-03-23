@@ -10,7 +10,7 @@ Usage:
 
 Allowed flags (must include = with a scope):
   --allow-read=<path>     Read access to a directory or file
-  --allow-write=<path>    Write access (.claude/ and .git/ always protected)
+  --allow-write=<path>    Write access (.claude/ and .git/ blocked via --deny-write)
   --allow-run=<binary>    Run a specific command (e.g. git, python3)
   --allow-net=<host>      Network access to a specific host
   --allow-env=<VAR>       Access to a specific environment variable
@@ -77,4 +77,10 @@ done
 echo "Granted for this session:"
 for g in "${validated[@]}"; do
   echo "  $g"
+  if [[ "$g" == --allow-write=* ]]; then
+    case "$g" in
+      */.claude|*/.claude/*|*/.git|*/.git/*)
+        echo "  Warning: .claude/ and .git/ are protected by --deny-write at runtime and will not be writable." ;;
+    esac
+  fi
 done
