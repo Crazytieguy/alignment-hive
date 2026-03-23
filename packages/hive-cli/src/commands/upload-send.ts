@@ -1,6 +1,5 @@
-import { unlink } from 'node:fs/promises';
+import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { computeConsentWindows, isInConsentWindow } from '@alignment-hive/session-data';
 import { checkAuthStatus } from '../lib/auth';
 import {
   ensureStateDir,
@@ -10,21 +9,50 @@ import {
   loadTranscriptsDirs,
   matchesProject,
 } from '../lib/config';
-import { getConsentHistory, getConsentStatus, getProjectSharing } from '../lib/convex';
+import { getConsentStatus, getProjectSharing } from '../lib/convex';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
 import {
   checkSessionEligibility,
-  isSessionUploaded,
+  findAgentsForParent,
   loadSessionState,
-  recordUploadedSession,
-  recordUploadedSessions,
 } from '../lib/session-state';
 import { isSnoozed } from '../lib/snooze';
-import { uploadSingleSession } from '../lib/upload-session';
+import { isInConsentWindows, loadConsentWindows, uploadParentWithAgents } from '../lib/upload-session';
 
 const UPLOAD_CONCURRENCY = 5;
+
+async function acquireUploadLock(lockFile: string): Promise<boolean> {
+  const { open } = await import('node:fs/promises');
+  try {
+    // Atomic create — fails if file already exists (O_EXCL)
+    const fd = await open(lockFile, 'wx');
+    await fd.writeFile(String(process.pid));
+    await fd.close();
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+  }
+
+  // File exists — check if the owning process is still alive
+  try {
+    const content = await readFile(lockFile, 'utf-8');
+    const pid = parseInt(content.trim(), 10);
+    if (!isNaN(pid)) {
+      try {
+        process.kill(pid, 0);
+        return false; // Process is alive — lock is held
+      } catch {
+        // Process is dead — stale lock, replace it
+      }
+    }
+    await writeFile(lockFile, String(process.pid));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function uploadSend(args: Array<string>): Promise<number> {
   let delaySeconds = 0;
@@ -54,10 +82,34 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     }
   }
 
+  // Acquire upload lock to prevent concurrent uploads
+  const lockFile = join(stateDir, 'upload-lock');
+  if (!await acquireUploadLock(lockFile)) {
+    if (isBackground) await cleanupScheduled(stateDir);
+    return 0; // Another upload is running — silently exit
+  }
+  const releaseLock = async () => { try { await unlink(lockFile); } catch { /* gone */ } };
+  const onSignal = () => { releaseLock().finally(() => process.exit(1)); };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+
+  try {
+    return await doUploadWork(sessionPrefix, isBackground, stateDir, cwd);
+  } finally {
+    await releaseLock();
+    if (isBackground) await cleanupScheduled(stateDir);
+  }
+}
+
+async function doUploadWork(
+  sessionPrefix: string | undefined,
+  isBackground: boolean,
+  stateDir: string,
+  cwd: string,
+): Promise<number> {
   const status = await checkAuthStatus(true);
   if (!status.authenticated) {
     printError(hive.upload.notAuthenticated);
-    if (isBackground) await cleanupScheduled(stateDir);
     return 1;
   }
 
@@ -67,7 +119,6 @@ export async function uploadSend(args: Array<string>): Promise<number> {
   ]);
   if (!consent?.hasConsent || !consent.sessionSharing) {
     printError(hive.upload.noConsent);
-    if (isBackground) await cleanupScheduled(stateDir);
     return 1;
   }
 
@@ -75,18 +126,25 @@ export async function uploadSend(args: Array<string>): Promise<number> {
   const projectConsent = matchesProject(allProjects, ids);
   if (!projectConsent?.sessionSharing) {
     printError(hive.upload.noProjectConsent);
-    if (isBackground) await cleanupScheduled(stateDir);
     return 1;
   }
 
   const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-  const { sessions: allSessions, uploadedMap, excludedSet } = await loadSessionState(stateDir, transcriptsDirs);
+  const { parentSessions, agentsByParent, uploadedMap, excludedSet, migrationTimestamp } = await loadSessionState(stateDir, transcriptsDirs);
   const checkoutId = await getOrCreateCheckoutId(stateDir);
+  const consentWindows = await loadConsentWindows(ids);
+  const consentMtime = projectConsent.latestAt;
 
   // Single session mode
   if (sessionPrefix) {
-    const result = lookupRawSession(allSessions, sessionPrefix);
+    const result = lookupRawSession(parentSessions, sessionPrefix);
     if (!result.found) {
+      const allSessions = [...parentSessions, ...[...agentsByParent.values()].flat()];
+      const agentMatch = lookupRawSession(allSessions, sessionPrefix);
+      if (agentMatch.found && agentMatch.session.agentId) {
+        printError('Agent sessions cannot be uploaded individually. Upload the parent session instead.');
+        return 1;
+      }
       printError(result.error);
       if (result.matches) {
         for (const m of result.matches) {
@@ -99,63 +157,59 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     const session = result.session;
     const id = session.sessionId.slice(0, 8);
 
-    if (excludedSet.has(session.sessionId)) {
-      printError(hive.upload.sessionExcluded(id));
-      return 1;
-    }
-
-    if (isSessionUploaded(session, uploadedMap)) {
-      printInfo(hive.upload.alreadyUploaded(id));
-      return 0;
+    const eligibility = checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime, migrationTimestamp);
+    if (!eligibility.eligible) {
+      if (eligibility.reason === 'excluded') {
+        printError(hive.upload.sessionExcluded(id));
+        return 1;
+      }
+      if (eligibility.reason === 'already uploaded') {
+        printInfo(hive.upload.alreadyUploaded(id));
+        return 0;
+      }
+      // For manual single-session upload, skip review periods
     }
 
     printInfo(hive.upload.uploadingSession(id));
-    const uploadResult = await uploadSingleSession(session.path, session.sessionId, checkoutId, session.mtime.toISOString(), ids, stateDir);
-    if (uploadResult.success) {
-      await recordUploadedSession(stateDir, session.sessionId, session.mtime.toISOString());
-      printSuccess(hive.upload.uploadedSession(id));
+    const agents = await findAgentsForParent(session, agentsByParent, transcriptsDirs);
+    const uploadResult = await uploadParentWithAgents({ parent: session, agents, checkoutId, ids, stateDir, uploadedMap });
+    if (uploadResult.parentSuccess) {
+      const agentMsg = agents.length > 0 ? ` (+${uploadResult.agentSuccesses} agents)` : '';
+      printSuccess(hive.upload.uploadedSession(id) + agentMsg);
       return 0;
     } else {
-      printError(hive.upload.uploadFailed(uploadResult.error ?? 'Unknown error'));
+      printError(hive.upload.uploadFailed(uploadResult.error));
       return 1;
     }
   }
 
-  // Batch mode: with --delay (background), respect review periods; without, skip them
-  const consentMtime = projectConsent.latestAt;
-  let candidates = isBackground
-    ? allSessions.filter((session) =>
-        checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime).eligible,
-      )
-    : allSessions.filter((session) => {
-        if (excludedSet.has(session.sessionId)) return false;
-        return !isSessionUploaded(session, uploadedMap);
-      });
+  // Batch mode
+  let candidates = parentSessions.filter((session) => {
+    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime, migrationTimestamp);
+    if (result.eligible) return true;
+    if (!isBackground) {
+      // Manual mode: skip review periods, only respect excluded + fully uploaded
+      return result.reason !== 'excluded' && result.reason !== 'already uploaded';
+    }
+    return false;
+  });
 
-  // Filter by consent windows to prevent uploading sessions from revocation gaps
-  const consentHistory = await getConsentHistory(ids);
-  if (consentHistory) {
-    const globalWindows = computeConsentWindows(consentHistory.global);
-    const projectWindows = computeConsentWindows(consentHistory.project);
-    candidates = candidates.filter((session) => {
-      const mtime = session.mtime.getTime();
-      return isInConsentWindow(mtime, globalWindows) && isInConsentWindow(mtime, projectWindows);
-    });
+  if (consentWindows) {
+    candidates = candidates.filter((session) =>
+      isInConsentWindows(session.mtime.getTime(), consentWindows),
+    );
   }
 
-  const sessionsToUpload = candidates;
-
-  if (sessionsToUpload.length === 0) {
+  if (candidates.length === 0) {
     printInfo(hive.upload.noSessionsToUpload);
-    if (isBackground) await cleanupScheduled(stateDir);
     return 0;
   }
 
-  printInfo(hive.upload.uploading(sessionsToUpload.length));
+  printInfo(hive.upload.uploading(candidates.length));
   let successes = 0;
   let failures = 0;
 
-  for (let i = 0; i < sessionsToUpload.length; i += UPLOAD_CONCURRENCY) {
+  for (let i = 0; i < candidates.length; i += UPLOAD_CONCURRENCY) {
     if (i > 0) {
       const refreshStatus = await checkAuthStatus(true);
       if (!refreshStatus.authenticated) {
@@ -164,35 +218,30 @@ export async function uploadSend(args: Array<string>): Promise<number> {
       }
     }
 
-    const batch = sessionsToUpload.slice(i, i + UPLOAD_CONCURRENCY);
+    const batch = candidates.slice(i, i + UPLOAD_CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map(async (session) => {
-        const rawMtime = session.mtime.toISOString();
-        const result = await uploadSingleSession(session.path, session.sessionId, checkoutId, rawMtime, ids, stateDir);
-        return { sessionId: session.sessionId, rawMtime, ...result };
+        const agents = await findAgentsForParent(session, agentsByParent, transcriptsDirs);
+        return uploadParentWithAgents({ parent: session, agents, checkoutId, ids, stateDir, uploadedMap });
       }),
     );
 
-    const batchUploaded: Array<{ sessionId: string; rawMtime: string }> = [];
     for (const r of results) {
       if (r.status === 'rejected') {
         failures++;
         console.error(`Failed to upload: ${r.reason}`);
-      } else if (r.value.success) {
-        batchUploaded.push({ sessionId: r.value.sessionId, rawMtime: r.value.rawMtime });
+      } else if (r.value.parentSuccess) {
         successes++;
       } else {
         failures++;
-        console.error(`Failed to upload ${r.value.sessionId.slice(0, 8)}: ${r.value.error}`);
+        if (r.value.error) console.error(`Failed: ${r.value.error}`);
       }
     }
-    await recordUploadedSessions(stateDir, batchUploaded);
   }
 
   if (successes > 0) printSuccess(hive.upload.uploaded(successes));
   if (failures > 0) printError(hive.upload.uploadsFailed(failures));
 
-  if (isBackground) await cleanupScheduled(stateDir);
   return failures > 0 ? 1 : 0;
 }
 

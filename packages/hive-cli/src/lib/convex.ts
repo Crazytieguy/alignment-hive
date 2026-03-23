@@ -94,6 +94,56 @@ export async function generateUploadUrl(
   }
 }
 
+export async function generateUploadUrls(
+  sessionId: string,
+  agentSessionIds: Array<string>,
+  heartbeat: {
+    checkoutId: string;
+    project?: string;
+    directory?: string;
+    gitRemote?: string;
+    lineCount: number;
+    lastModified?: number;
+    sessionStartGitCommitHash?: string;
+  },
+): Promise<Record<string, string> | null> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return null;
+
+    return await client.mutation(api.sessions.generateUploadUrls, {
+      sessionId,
+      agentSessionIds,
+      ...heartbeat,
+    });
+  } catch (error) {
+    debugLog(`generateUploadUrls failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+export async function saveUploads(
+  parentSessionId: string,
+  uploads: Array<{ sessionId: string; storageId: string; summary?: string }>,
+): Promise<boolean> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return false;
+
+    await client.mutation(api.sessions.saveUploads, {
+      parentSessionId,
+      uploads: uploads.map((u) => ({
+        ...u,
+        storageId: u.storageId as unknown as Id<"_storage">,
+      })),
+    });
+    return true;
+  } catch (error) {
+    debugLog(`saveUploads failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
 export async function saveUpload(sessionId: string, storageId: string, summary?: string): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();

@@ -4,7 +4,8 @@ import { SessionDetail } from "./SessionDetail";
 
 type View =
   | { page: "list" }
-  | { page: "detail"; sessionId: string };
+  | { page: "detail"; sessionId: string }
+  | { page: "agent-detail"; parentSessionId: string; agentSessionId: string };
 
 export function App() {
   const [view, setView] = useState<View>({ page: "list" });
@@ -22,6 +23,14 @@ export function App() {
               &larr; Back to list
             </button>
           )}
+          {view.page === "agent-detail" && (
+            <button
+              onClick={() => setView({ page: "detail", sessionId: view.parentSessionId })}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              &larr; Back to session
+            </button>
+          )}
         </div>
       </header>
       <main className="p-6">
@@ -36,6 +45,19 @@ export function App() {
           <SessionDetail
             sessionId={view.sessionId}
             onBack={() => setView({ page: "list" })}
+            onSelectAgent={(agentSessionId) =>
+              setView({ page: "agent-detail", parentSessionId: view.sessionId, agentSessionId })
+            }
+          />
+        )}
+        {view.page === "agent-detail" && (
+          <SessionDetail
+            sessionId={view.parentSessionId}
+            viewingAgentId={view.agentSessionId}
+            onBack={() => setView({ page: "detail", sessionId: view.parentSessionId })}
+            onSelectAgent={(agentSessionId) =>
+              setView({ page: "agent-detail", parentSessionId: view.parentSessionId, agentSessionId })
+            }
           />
         )}
       </main>

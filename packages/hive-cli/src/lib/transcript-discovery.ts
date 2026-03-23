@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getToolResultText, isKnownContentBlock, parseKnownEntry } from '@alignment-hive/session-data';
-import { ensureStateDir, getMainWorktreePath, loadTranscriptsDirs } from './config';
+import { ensureStateDir, getClaudeProjectDir, getMainWorktreePath, loadTranscriptsDirs, parseCwdFromLine } from './config';
 
 const CWD_READ_BYTES = 8192;
 
@@ -30,15 +30,8 @@ export function extractCwd(projectDir: string): string | null {
           const bytesRead = readSync(fd, buf, 0, CWD_READ_BYTES, 0);
           const content = buf.toString('utf-8', 0, bytesRead);
           for (const line of content.split('\n')) {
-            if (!line.includes('"cwd"')) continue;
-            try {
-              const parsed = JSON.parse(line) as Record<string, unknown>;
-              if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
-                return parsed.cwd;
-              }
-            } catch {
-              // skip unparseable lines (last line may be truncated)
-            }
+            const cwd = parseCwdFromLine(line);
+            if (cwd) return cwd;
           }
         } finally {
           closeSync(fd);
@@ -248,7 +241,6 @@ async function discoverWorktreeTranscriptDirs(
   scanData?: TranscriptScanData,
   commitHashCandidates?: Map<string, Array<string>>,
 ): Promise<DiscoverResult> {
-  const projectsBase = join(homedir(), '.claude', 'projects');
   const existing = await loadTranscriptsDirs(stateDir);
   const existingSet = new Set(existing);
   const discovered: Array<string> = [];
@@ -261,8 +253,7 @@ async function discoverWorktreeTranscriptDirs(
   }
 
   // Add the main project's own transcript dir
-  const mainDirName = projectDir.replaceAll('/', '-');
-  addIfNew(join(projectsBase, mainDirName));
+  addIfNew(getClaudeProjectDir(projectDir));
 
   // Strategy 1: git worktree list → construct expected dir names
   try {
@@ -274,8 +265,7 @@ async function discoverWorktreeTranscriptDirs(
     for (const match of output.matchAll(/^worktree (.+)$/gm)) {
       const worktreePath = match[1];
       if (worktreePath === projectDir) continue;
-      const dirName = worktreePath.replaceAll('/', '-');
-      addIfNew(join(projectsBase, dirName));
+      addIfNew(getClaudeProjectDir(worktreePath));
     }
   } catch {
     // git command failed — continue with other strategies

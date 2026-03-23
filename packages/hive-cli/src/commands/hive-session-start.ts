@@ -19,9 +19,8 @@ import {
   CONSENT_REVIEW_PERIOD_MS,
   SESSION_REVIEW_PERIOD_MS,
   checkSessionEligibility,
-  discoverSessions,
-  loadExcludedSessions,
-  loadUploadedSessions,
+  loadSessionState,
+  writeAgentMigrationTs,
 } from '../lib/session-state';
 import { isSnoozed } from '../lib/snooze';
 
@@ -156,18 +155,25 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   // Run session discovery, uploaded/excluded loading in parallel
-  const [allSessions, uploadedMap, excludedSet] = await Promise.all([
-    discoverSessions(transcriptsDirs),
-    loadUploadedSessions(stateDir),
-    loadExcludedSessions(stateDir),
-  ]);
+  const { parentSessions: allSessions, uploadedMap, excludedSet, migrationTimestamp } = await loadSessionState(stateDir, transcriptsDirs);
+
+  // Write migration timestamp if we find uploaded parents without agentSessionIds (first discovery)
+  if (migrationTimestamp === null) {
+    const hasOrphanedAgents = allSessions.some((s) => {
+      const entry = uploadedMap.get(s.sessionId);
+      return entry && !entry.agentSessionIds && !excludedSet.has(s.sessionId);
+    });
+    if (hasOrphanedAgents) {
+      await writeAgentMigrationTs(stateDir);
+    }
+  }
 
   let eligibleCount = 0;
   let pendingCount = 0;
   let earliestEligibleAt = Infinity;
 
   for (const session of allSessions) {
-    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentTimestamp);
+    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentTimestamp, migrationTimestamp);
     if (result.eligible) {
       eligibleCount++;
     } else if (result.reason === 'pending review' || result.reason === 'consent review period') {

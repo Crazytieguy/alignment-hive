@@ -14900,29 +14900,6 @@ var excludeCmd = {
   excludedLine: (id) => `  \u2717 ${id} excluded`,
   failedLine: (id) => `  ! ${id} failed`
 };
-var uploadCmd = {
-  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
-  waitingDelay: (seconds) => `Waiting ${seconds} seconds before upload...`,
-  sessionNotFound: (id) => `Session '${id}' not found`,
-  ambiguousSession: (id, count) => `Multiple sessions match '${id}' (${count} matches):`,
-  sessionExcluded: (id) => `Session ${id} was excluded, skipping`,
-  uploading: (id) => `Uploading ${id}...`,
-  uploaded: (id) => `Uploaded ${id}`,
-  uploadedWithAgents: (id, agentCount) => `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? "" : "s"})`,
-  failedToUpload: (id, error48) => `Failed to upload ${id}: ${error48}`,
-  checking: "Checking for sessions ready to upload...",
-  noExtractedSessions: "No extracted sessions found.",
-  sessionsHeader: "Sessions:",
-  noSessionsReady: "No sessions ready for upload.",
-  pendingCount: (count) => `${count} session(s) still in review period.`,
-  readyCount: (count) => `${count} session(s) ready for upload.`,
-  confirmUpload: "Upload these sessions?",
-  cancelled: "Cancelled.",
-  uploadedCount: (count) => `Uploaded ${count} session(s)`,
-  failedCount: (count) => `Failed to upload ${count} session(s)`,
-  done: "done",
-  failed: (error48) => `failed: ${error48}`
-};
 var NOT_AUTHENTICATED = "Not authenticated. Run the install script to authenticate.";
 var hive = {
   consent: {
@@ -16873,26 +16850,6 @@ async function readExtractedSession(extractedPath) {
   return { meta: metaParsed.data, entries };
 }
 var isSessionError = isErrorResult;
-async function markSessionUploaded(sessionPath) {
-  try {
-    const content = await readFile2(sessionPath, "utf-8");
-    const newlineIndex = content.indexOf(`
-`);
-    if (newlineIndex === -1)
-      return { success: false };
-    const firstLine = content.slice(0, newlineIndex);
-    const parsed = SessionMetaSchema.safeParse(JSON.parse(firstLine));
-    if (!parsed.success) {
-      return { success: false, error: errors3.schemaError(sessionPath, parsed.error.message) };
-    }
-    const meta3 = { ...parsed.data, uploadedAt: new Date().toISOString() };
-    const newContent = JSON.stringify(meta3) + content.slice(newlineIndex);
-    await writeFile2(sessionPath, newContent);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: errors3.markUploadedFailed(err instanceof Error ? err.message : String(err)) };
-  }
-}
 function getHiveMindSessionsDir(projectCwd) {
   return join3(projectCwd, ".claude", "hive-mind", "sessions");
 }
@@ -16906,13 +16863,35 @@ async function countRawLines(filePath) {
   }
   return count;
 }
+async function extractParentSessionId(agentPath) {
+  const stream = createReadStream(agentPath, { encoding: "utf-8" });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      try {
+        const parsed = JSON.parse(line);
+        if (typeof parsed.sessionId === "string")
+          return parsed.sessionId;
+      } catch {}
+      return;
+    }
+    return;
+  } catch {
+    return;
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
 async function findRawSessions(rawDir) {
   const files = await readdir(rawDir);
   const sessions = [];
   for (const f of files) {
     if (f.endsWith(".jsonl")) {
       if (f.startsWith("agent-")) {
-        sessions.push({ path: join3(rawDir, f), agentId: f.replace("agent-", "").replace(".jsonl", "") });
+        const agentPath = join3(rawDir, f);
+        const parentSessionId = await extractParentSessionId(agentPath);
+        sessions.push({ path: agentPath, agentId: f.replace("agent-", "").replace(".jsonl", ""), parentSessionId });
       } else {
         sessions.push({ path: join3(rawDir, f) });
       }
@@ -16925,7 +16904,8 @@ async function findRawSessions(rawDir) {
         if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
           sessions.push({
             path: join3(subagentsDir, sf),
-            agentId: sf.replace("agent-", "").replace(".jsonl", "")
+            agentId: sf.replace("agent-", "").replace(".jsonl", ""),
+            parentSessionId: f
           });
         }
       }
@@ -17073,9 +17053,6 @@ async function extractSingleSession(cwd, sessionId) {
 import { createInterface as createInterface2 } from "readline";
 import { readdir as readdir2 } from "fs/promises";
 import { join as join4 } from "path";
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 function confirm(message) {
   const rl = createInterface2({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
@@ -19471,7 +19448,7 @@ async function openBrowser(url2) {
   }
   return false;
 }
-function sleep2(ms) {
+function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 async function checkExistingAuth() {
@@ -19530,7 +19507,7 @@ async function deviceAuthFlow() {
   const startTime = Date.now();
   const expiresAt = startTime + deviceAuth.expires_in * 1000;
   while (Date.now() < expiresAt) {
-    await sleep2(interval);
+    await sleep(interval);
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
     const tokenResponse = await fetch(`${WORKOS_API_URL2}/authenticate`, {
       method: "POST",
@@ -19675,8 +19652,7 @@ async function setupAliasCommand() {
   return 0;
 }
 
-// src/commands/upload.ts
-import { readFile as readFile5, unlink, writeFile as writeFile5 } from "fs/promises";
+// src/commands/heartbeat.ts
 import { join as join10 } from "path";
 // ../../node_modules/convex/dist/esm/server/functionName.js
 var functionName = Symbol.for("functionName");
@@ -20619,225 +20595,8 @@ async function heartbeatSession(session) {
     return false;
   }
 }
-async function generateUploadUrl(sessionId, heartbeat) {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client)
-      return null;
-    return await client.mutation(api2.sessions.generateUploadUrl, {
-      sessionId,
-      ...heartbeat
-    });
-  } catch (error48) {
-    debugLog(`generateUploadUrl failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
-    return null;
-  }
-}
-async function saveUpload(sessionId, storageId, summary) {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client)
-      return false;
-    await client.mutation(api2.sessions.saveUpload, {
-      sessionId,
-      storageId,
-      summary
-    });
-    return true;
-  } catch (error48) {
-    debugLog(`saveUpload failed: ${error48 instanceof Error ? error48.message : String(error48)}`);
-    return false;
-  }
-}
-
-// src/commands/upload.ts
-async function uploadSession(cwd, sessionId) {
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
-  let content;
-  try {
-    content = await readFile5(sessionPath, "utf-8");
-  } catch {
-    return { success: false, error: "Session file not found" };
-  }
-  const sessionResult = await readExtractedSession(sessionPath);
-  if (!sessionResult || isSessionError(sessionResult)) {
-    return { success: false, error: "Could not read session data" };
-  }
-  const { meta: meta3, entries } = sessionResult;
-  const ids = getProjectIdentifiers(cwd);
-  const uploadUrl = await generateUploadUrl(sessionId, {
-    checkoutId: meta3.checkoutId,
-    directory: ids.directory,
-    gitRemote: ids.gitRemote,
-    lineCount: meta3.messageCount,
-    parentSessionId: meta3.parentSessionId
-  });
-  if (!uploadUrl) {
-    return { success: false, error: "Failed to get upload URL" };
-  }
-  try {
-    const response = await fetch(uploadUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-ndjson" },
-      body: content
-    });
-    if (!response.ok) {
-      return { success: false, error: `Upload failed: ${response.status}` };
-    }
-    const result = await response.json();
-    if (!result.storageId) {
-      return { success: false, error: "No storage ID returned" };
-    }
-    const summary = extractSessionSummary(entries);
-    const saved = await saveUpload(sessionId, result.storageId, summary);
-    if (!saved) {
-      return { success: false, error: "Failed to save upload metadata" };
-    }
-    const markResult = await markSessionUploaded(sessionPath);
-    if (!markResult.success && markResult.error) {
-      if (process.env.DEBUG) {
-        console.error(`[upload] ${markResult.error}`);
-      }
-    }
-    return { success: true };
-  } catch (error48) {
-    return {
-      success: false,
-      error: error48 instanceof Error ? error48.message : "Unknown upload error"
-    };
-  }
-}
-async function getAgentIds(cwd, sessionId) {
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-  const sessionPath = join10(sessionsDir, `${sessionId}.jsonl`);
-  const sessionResult = await readExtractedSession(sessionPath);
-  if (!sessionResult || isSessionError(sessionResult)) {
-    if (isSessionError(sessionResult) && process.env.DEBUG) {
-      console.error(`[upload] ${sessionResult.error}`);
-    }
-    return [];
-  }
-  const parsed = parseSession(sessionResult.meta, sessionResult.entries);
-  const agentIds = new Set;
-  for (const block of parsed.blocks) {
-    if (block.type === "tool" && block.agentId) {
-      agentIds.add(block.agentId);
-    }
-  }
-  return Array.from(agentIds);
-}
-async function uploadSessionWithAgents(cwd, sessionId) {
-  const mainResult = await uploadSession(cwd, sessionId);
-  if (!mainResult.success) {
-    return { ...mainResult, agentCount: 0 };
-  }
-  const agentIds = await getAgentIds(cwd, sessionId);
-  let agentCount = 0;
-  for (const agentId of agentIds) {
-    const agentResult = await uploadSession(cwd, `agent-${agentId}`);
-    if (agentResult.success) {
-      agentCount++;
-    }
-  }
-  return { success: true, agentCount };
-}
-async function uploadSingleSession(cwd, sessionIdPrefix) {
-  const lookup2 = await lookupSession(cwd, sessionIdPrefix);
-  if (lookup2.type === "not_found") {
-    printError(uploadCmd.sessionNotFound(sessionIdPrefix));
-    return 1;
-  }
-  if (lookup2.type === "ambiguous") {
-    printError(uploadCmd.ambiguousSession(sessionIdPrefix, lookup2.matches.length));
-    for (const m of lookup2.matches.slice(0, 5)) {
-      console.log(`  ${m}`);
-    }
-    if (lookup2.matches.length > 5) {
-      console.log(errors3.andMore(lookup2.matches.length - 5));
-    }
-    return 1;
-  }
-  const { sessionId, meta: meta3 } = lookup2;
-  if (meta3.excluded) {
-    printInfo(uploadCmd.sessionExcluded(sessionId));
-    return 0;
-  }
-  printInfo(uploadCmd.uploading(sessionId));
-  const result = await uploadSessionWithAgents(cwd, sessionId);
-  if (result.success) {
-    if (result.agentCount > 0) {
-      printSuccess(uploadCmd.uploadedWithAgents(sessionId, result.agentCount));
-    } else {
-      printSuccess(uploadCmd.uploaded(sessionId));
-    }
-    return 0;
-  } else {
-    printError(uploadCmd.failedToUpload(sessionId, result.error || "Unknown error"));
-    return 1;
-  }
-}
-async function upload() {
-  const args = process.argv.slice(3);
-  const sessionIds = [];
-  let delaySeconds = 0;
-  let pidFile = null;
-  for (let i2 = 0;i2 < args.length; i2++) {
-    const arg = args[i2];
-    if (arg === "--delay" && args[i2 + 1]) {
-      delaySeconds = parseInt(args[i2 + 1], 10);
-      i2++;
-    } else if (arg === "--pid-file" && args[i2 + 1]) {
-      pidFile = args[i2 + 1];
-      i2++;
-    } else if (!arg.startsWith("-")) {
-      sessionIds.push(arg);
-    }
-  }
-  if (sessionIds.length === 0) {
-    console.log(usage.upload());
-    return 1;
-  }
-  const cwd = process.env.CWD || process.cwd();
-  if (pidFile) {
-    try {
-      await writeFile5(pidFile, String(process.pid));
-    } catch {}
-  }
-  const cleanup = async () => {
-    if (pidFile) {
-      try {
-        await unlink(pidFile);
-      } catch {}
-    }
-  };
-  const onSignal = () => {
-    cleanup().finally(() => process.exit(1));
-  };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
-  if (delaySeconds > 0) {
-    printInfo(uploadCmd.waitingDelay(delaySeconds));
-    await sleep(delaySeconds * 1000);
-  }
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) {
-    printError(uploadCmd.notAuthenticated);
-    await cleanup();
-    return 1;
-  }
-  let failures = 0;
-  for (const sessionId of sessionIds) {
-    const result = await uploadSingleSession(cwd, sessionId);
-    if (result !== 0)
-      failures++;
-  }
-  await cleanup();
-  return failures > 0 ? 1 : 0;
-}
 
 // src/commands/heartbeat.ts
-import { join as join11 } from "path";
 async function heartbeat() {
   const cwd = process.env.CWD || process.cwd();
   const sessionIds = process.argv.slice(3);
@@ -20852,7 +20611,7 @@ async function heartbeat() {
   const ids = getProjectIdentifiers(cwd);
   let failures = 0;
   for (const sessionId of sessionIds) {
-    const metaResult = await readExtractedMeta(join11(sessionsDir, `${sessionId}.jsonl`));
+    const metaResult = await readExtractedMeta(join10(sessionsDir, `${sessionId}.jsonl`));
     if (!metaResult || isMetaError(metaResult)) {
       failures++;
       continue;
@@ -20887,7 +20646,10 @@ var COMMANDS = {
   read: { description: "Read session entries", handler: read },
   login: { description: "Log in to hive-mind", handler: login },
   "setup-alias": { description: "Add hive-mind command to shell config", handler: setupAliasCommand },
-  upload: { description: "Upload eligible sessions", handler: upload },
+  upload: { description: "Deprecated \u2014 use hive upload send", handler: () => {
+    console.log("hive-mind upload is deprecated. Run: curl -fsSL https://alignment-hive.com/install.sh | bash");
+    return Promise.resolve(1);
+  } },
   "session-start": { description: "SessionStart hook (internal)", handler: sessionStart },
   heartbeat: { description: "Send heartbeat (internal)", handler: heartbeat, hidden: true }
 };

@@ -5,8 +5,27 @@ import { Button } from "@alignment-hive/ui";
 
 type Filter = "all" | "pending" | "uploaded";
 
+// Derive session type from tRPC inference
+type SessionsResult = Awaited<ReturnType<typeof trpc.sessions.list.query>>;
+type Session = SessionsResult["sessions"][number];
+type Status = Session["status"];
+
 interface SessionListProps {
   onSelectSession: (sessionId: string) => void;
+}
+
+function isPending(status: Status) {
+  return status.type === "pending" || status.type === "ready" || status.type === "snoozed"
+    || (status.type === "uploaded" && status.agentsPending);
+}
+
+function canExclude(status: Status) {
+  return status.type !== "excluded" && !(status.type === "uploaded" && !status.agentsPending);
+}
+
+function canUpload(status: Status) {
+  return status.type === "ready" || status.type === "pending"
+    || (status.type === "uploaded" && status.agentsPending);
 }
 
 export function SessionList({ onSelectSession }: SessionListProps) {
@@ -54,13 +73,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const snoozeUntil = data?.snoozeUntil;
 
   const filtered = sessions.filter((s) => {
-    if (filter === "pending") return s.status.startsWith("pending") || s.status === "ready" || s.status === "snoozed";
-    if (filter === "uploaded") return s.status === "uploaded";
+    if (filter === "pending") return isPending(s.status);
+    if (filter === "uploaded") return s.status.type === "uploaded" && !s.status.agentsPending;
     return true;
   });
-
-  const canExclude = (status: string) =>
-    status !== "uploaded" && status !== "excluded";
 
   const handleExcludeSelected = async () => {
     for (const id of selected) {
@@ -144,6 +160,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               <th className="px-4 py-3 font-medium">Session</th>
               <th className="px-4 py-3 font-medium">Date</th>
               <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium">Agents</th>
               <th className="px-4 py-3 font-medium">Summary</th>
               <th className="px-4 py-3 font-medium">Actions</th>
             </tr>
@@ -173,7 +190,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                   {new Date(session.date).toLocaleDateString()}
                 </td>
                 <td className="px-4 py-3">
-                  <StatusBadge status={session.status} />
+                  <StatusBadge status={session.status} label={session.statusLabel} />
+                </td>
+                <td className="px-4 py-3 text-center text-sm text-muted-foreground">
+                  {session.agentCount > 0 ? session.agentCount : "—"}
                 </td>
                 <td className="max-w-[300px] truncate px-4 py-3 text-sm text-muted-foreground" title={session.summary}>
                   {session.summary || "—"}
@@ -190,7 +210,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                         Exclude
                       </Button>
                     )}
-                    {(session.status === "ready" || session.status.startsWith("pending")) && (
+                    {canUpload(session.status) && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -216,16 +236,20 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, label }: { status: Status; label: string }) {
   let className = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ";
-  if (status === "ready") className += "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300";
-  else if (status === "uploaded") className += "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
-  else if (status.startsWith("pending")) className += "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300";
-  else if (status === "excluded") className += "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400";
-  else if (status === "snoozed") className += "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300";
-  else className += "bg-muted text-muted-foreground";
-
-  const label = status.startsWith("pending:") ? `pending (${status.slice(8)})` : status;
+  switch (status.type) {
+    case "ready": className += "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300"; break;
+    case "uploaded":
+      className += status.agentsPending
+        ? "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300"
+        : "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
+      break;
+    case "pending": className += "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300"; break;
+    case "excluded": className += "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"; break;
+    case "snoozed": className += "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300"; break;
+    default: className += "bg-muted text-muted-foreground";
+  }
 
   return <span className={className}>{label}</span>;
 }

@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc";
-import { SessionViewer, Button } from "@alignment-hive/ui";
+import { SessionViewer, Button, formatSessionId } from "@alignment-hive/ui";
 import {
   parseSession,
   parseKnownEntry,
@@ -8,38 +8,44 @@ import {
   type SessionMeta,
 } from "@alignment-hive/session-data";
 
-interface SessionDetailProps {
-  sessionId: string;
-  onBack: () => void;
+function parseEntries(rawEntries: Array<unknown>) {
+  const entries: KnownEntry[] = [];
+  for (const rawEntry of rawEntries) {
+    const parsed = parseKnownEntry(rawEntry);
+    if (parsed.data) entries.push(parsed.data);
+  }
+  return entries;
 }
 
-export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
+function buildSessionModel(
+  meta: { sessionId: string; rawMtime: string; messageCount: number },
+  rawEntries: Array<unknown>,
+) {
+  const sessionMeta: SessionMeta = {
+    _type: "session-meta",
+    version: "0.1",
+    sessionId: meta.sessionId,
+    checkoutId: "",
+    rawMtime: meta.rawMtime,
+    messageCount: meta.messageCount,
+  };
+  return parseSession(sessionMeta, parseEntries(rawEntries));
+}
+
+interface SessionDetailProps {
+  sessionId: string;
+  viewingAgentId?: string;
+  onBack: () => void;
+  onSelectAgent?: (agentSessionId: string) => void;
+}
+
+export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent }: SessionDetailProps) {
   const queryClient = useQueryClient();
 
+  // Always fetch the parent's content (includes all agent contents)
   const { data, isLoading, error } = useQuery({
     queryKey: ["session-content", sessionId],
-    queryFn: async () => {
-      const result = await trpc.sessions.content.query({ sessionId });
-
-      // Build a minimal SessionMeta from the router response.
-      // The router already sanitized the data — no need to re-validate with SessionMetaSchema.
-      const meta: SessionMeta = {
-        _type: result.meta._type,
-        version: result.meta.version,
-        sessionId: result.meta.sessionId,
-        checkoutId: '',
-        rawMtime: result.meta.rawMtime,
-        messageCount: result.meta.messageCount,
-      };
-
-      const entries: KnownEntry[] = [];
-      for (const rawEntry of result.entries) {
-        const parsed = parseKnownEntry(rawEntry);
-        if (parsed.data) entries.push(parsed.data);
-      }
-
-      return parseSession(meta, entries);
-    },
+    queryFn: () => trpc.sessions.content.query({ sessionId }),
     staleTime: 60_000,
   });
 
@@ -67,7 +73,7 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
     );
   }
 
-  if (error) {
+  if (error || !data) {
     return (
       <div className="flex h-96 items-center justify-center text-destructive">
         {error instanceof Error ? error.message : "Failed to load session"}
@@ -75,35 +81,99 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
     );
   }
 
+  // If viewing an agent, find it in the parent's cached data
+  const viewingAgent = viewingAgentId
+    ? data.agents.find((a) => a.sessionId === viewingAgentId)
+    : null;
+
+  const sessionModel = viewingAgent
+    ? buildSessionModel(
+        { sessionId: viewingAgent.sessionId, rawMtime: data.meta.rawMtime, messageCount: viewingAgent.messageCount },
+        viewingAgent.entries,
+      )
+    : buildSessionModel(data.meta, data.entries);
+
+  const displayId = viewingAgent ? viewingAgent.sessionId : sessionId;
+  const hasSidebar = data.agents.length > 0 || viewingAgent;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
         <span className="font-mono text-sm text-muted-foreground">
-          {sessionId.slice(0, 12)}
+          {formatSessionId(displayId)}
         </span>
-        <div className="ml-auto flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => uploadMutation.mutate()}
-            disabled={uploadMutation.isPending}
-          >
-            Upload now
-          </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            onClick={() => excludeMutation.mutate()}
-            disabled={excludeMutation.isPending}
-          >
-            Exclude
-          </Button>
-        </div>
+        {!viewingAgent && (
+          <div className="ml-auto flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => uploadMutation.mutate()}
+              disabled={uploadMutation.isPending}
+            >
+              Upload now
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => excludeMutation.mutate()}
+              disabled={excludeMutation.isPending}
+            >
+              Exclude
+            </Button>
+          </div>
+        )}
       </div>
       <div className="rounded-lg border border-yellow-500/30 bg-yellow-50 px-4 py-2 text-sm text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">
         This shows the sanitized version that would be uploaded. Verify that no secrets or sensitive data remain.
       </div>
-      <SessionViewer data={data ?? undefined} />
+
+      <div className={`grid gap-4 ${hasSidebar ? "lg:grid-cols-[1fr_300px]" : ""}`}>
+        <div>
+          <SessionViewer data={sessionModel} />
+        </div>
+
+        {hasSidebar && (
+          <div className="space-y-4">
+            {viewingAgent && onSelectAgent && (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h2 className="mb-3 text-sm font-medium text-foreground">
+                  Parent Session
+                </h2>
+                <button
+                  onClick={onBack}
+                  className="font-mono text-sm text-primary hover:underline"
+                >
+                  {formatSessionId(sessionId)}
+                </button>
+              </div>
+            )}
+
+            {data.agents.length > 0 && onSelectAgent && (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h2 className="mb-3 text-sm font-medium text-foreground">
+                  Agent Sessions ({data.agents.length})
+                </h2>
+                <ul className="space-y-1">
+                  {data.agents.map((agent) => (
+                    <li key={agent.sessionId}>
+                      <button
+                        onClick={() => onSelectAgent(agent.sessionId)}
+                        className={`font-mono text-sm hover:underline ${
+                          agent.sessionId === viewingAgentId
+                            ? "text-foreground font-medium"
+                            : "text-primary"
+                        }`}
+                      >
+                        {formatSessionId(agent.sessionId)}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

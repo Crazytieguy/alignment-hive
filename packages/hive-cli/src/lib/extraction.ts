@@ -241,14 +241,37 @@ export async function countRawLines(filePath: string): Promise<number> {
   return count;
 }
 
+/** Extract parentSessionId from a flat agent file by reading its first line's sessionId field. */
+async function extractParentSessionId(agentPath: string): Promise<string | undefined> {
+  const stream = createReadStream(agentPath, { encoding: 'utf-8' });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (typeof parsed.sessionId === 'string') return parsed.sessionId;
+      } catch { /* skip */ }
+      return undefined; // Only check first line
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
 export async function findRawSessions(rawDir: string) {
   const files = await readdir(rawDir);
-  const sessions: Array<{ path: string; agentId?: string }> = [];
+  const sessions: Array<{ path: string; agentId?: string; parentSessionId?: string }> = [];
 
   for (const f of files) {
     if (f.endsWith('.jsonl')) {
       if (f.startsWith('agent-')) {
-        sessions.push({ path: join(rawDir, f), agentId: f.replace('agent-', '').replace('.jsonl', '') });
+        const agentPath = join(rawDir, f);
+        const parentSessionId = await extractParentSessionId(agentPath);
+        sessions.push({ path: agentPath, agentId: f.replace('agent-', '').replace('.jsonl', ''), parentSessionId });
       } else {
         sessions.push({ path: join(rawDir, f) });
       }
@@ -263,6 +286,7 @@ export async function findRawSessions(rawDir: string) {
           sessions.push({
             path: join(subagentsDir, sf),
             agentId: sf.replace('agent-', '').replace('.jsonl', ''),
+            parentSessionId: f,
           });
         }
       }

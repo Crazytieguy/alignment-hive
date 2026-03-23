@@ -254,7 +254,7 @@ export const getSession = query({
   },
 });
 
-/** Bulk fetch content URLs for multiple sessions. Runs buildConsentFilter once. */
+/** Bulk fetch content URLs for multiple sessions and their agents. Runs buildConsentFilter once. */
 export const getSessionContentUrls = query({
   args: { sessionIds: v.array(v.string()) },
   handler: async (ctx, args) => {
@@ -292,6 +292,24 @@ export const getSessionContentUrls = query({
       const contentUrl = await ctx.storage.getUrl(session.upload.storageId);
       if (contentUrl) {
         results.push({ sessionId, contentUrl });
+      }
+
+      // Include uploaded agent sessions for parent sessions
+      if (!session.parentSessionId) {
+        const children = await ctx.db
+          .query("sessions")
+          .withIndex("by_parent_session_id", (q) =>
+            q.eq("parentSessionId", sessionId),
+          )
+          .collect();
+
+        for (const child of children) {
+          if (!child.upload) continue;
+          const childUrl = await ctx.storage.getUrl(child.upload.storageId);
+          if (childUrl) {
+            results.push({ sessionId: child.sessionId, contentUrl: childUrl });
+          }
+        }
       }
     }
 

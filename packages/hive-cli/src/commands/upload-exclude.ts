@@ -22,9 +22,9 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
     return 0;
   }
 
-  const { sessions: allSessions, excludedSet, uploadedMap } = await loadSessionState(stateDir, transcriptsDirs);
+  const { parentSessions, sessionById, excludedSet, uploadedMap } = await loadSessionState(stateDir, transcriptsDirs);
 
-  if (allSessions.length === 0) {
+  if (parentSessions.length === 0) {
     printInfo(hive.upload.noSessions);
     return 0;
   }
@@ -32,7 +32,7 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
   if (args.includes('--all')) {
     let count = 0;
     const lines: Array<string> = [];
-    for (const session of allSessions) {
+    for (const session of parentSessions) {
       if (excludedSet.has(session.sessionId)) continue;
       if (isSessionUploaded(session, uploadedMap)) continue;
       lines.push(session.sessionId + '\n');
@@ -53,7 +53,15 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
   }
 
   const prefix = args[0];
-  const result = lookupRawSession(allSessions, prefix);
+
+  // Check if they tried to exclude an agent session
+  const agentSession = sessionById.get(prefix) ?? [...sessionById.values()].find((s) => s.sessionId.startsWith(prefix));
+  if (agentSession?.agentId) {
+    printError('Agent sessions cannot be excluded individually. Exclude the parent session instead.');
+    return 1;
+  }
+
+  const result = lookupRawSession(parentSessions, prefix);
 
   if (!result.found) {
     printError(result.error);

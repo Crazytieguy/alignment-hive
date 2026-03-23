@@ -9,7 +9,14 @@ import {
 } from './session-state';
 import { extractSessionSummary } from './summary';
 import type { KnownEntry } from '@alignment-hive/session-data';
-import type { DiscoveredSession, checkSessionEligibility } from './session-state';
+import type { DiscoveredSession, UploadedEntry, checkSessionEligibility } from './session-state';
+
+export type DisplayStatus =
+  | { type: 'excluded' }
+  | { type: 'uploaded'; agentsPending: boolean }
+  | { type: 'ready' }
+  | { type: 'snoozed' }
+  | { type: 'pending'; remainingHours: number };
 
 /** Resolve the project consent mtime, or null if offline/unauthorized. */
 export async function getProjectConsentMtime(cwd: string): Promise<number | null> {
@@ -49,19 +56,22 @@ export async function getSessionSummary(sessionPath: string): Promise<string> {
   }
 }
 
-/** Map eligibility result to a display status string. */
+/** Map eligibility result to a structured display status. */
 export function getDisplayStatus(
   result: ReturnType<typeof checkSessionEligibility>,
   session: DiscoveredSession,
   consentMtime: number | null,
   snoozeUntil: number | null,
-): string {
+  opts?: { uploadedEntry?: UploadedEntry; agentCount?: number },
+): DisplayStatus {
   if (!result.eligible) {
     switch (result.reason) {
       case 'excluded':
-        return 'excluded';
-      case 'already uploaded':
-        return 'uploaded';
+        return { type: 'excluded' };
+      case 'already uploaded': {
+        const agentsPending = !!(opts?.uploadedEntry && !opts.uploadedEntry.agentSessionIds && opts.agentCount && opts.agentCount > 0);
+        return { type: 'uploaded', agentsPending };
+      }
       case 'pending review':
       case 'consent review period': {
         const mtimeMs = session.mtime.getTime();
@@ -70,11 +80,22 @@ export function getDisplayStatus(
         const eligibleAt = Math.max(sessionEligibleAt, consentEligibleAt);
         const remainingMs = eligibleAt - Date.now();
         const remainingHours = Math.max(0, Math.ceil(remainingMs / (60 * 60 * 1000)));
-        return `pending:${remainingHours}h`;
+        return { type: 'pending', remainingHours };
       }
       default:
-        return result.reason;
+        return { type: 'pending', remainingHours: 0 };
     }
   }
-  return snoozeUntil ? 'snoozed' : 'ready';
+  return snoozeUntil ? { type: 'snoozed' } : { type: 'ready' };
+}
+
+/** Format a display status for CLI output. */
+export function formatDisplayStatus(status: DisplayStatus): string {
+  switch (status.type) {
+    case 'excluded': return 'excluded';
+    case 'uploaded': return status.agentsPending ? 'uploaded (agents pending)' : 'uploaded';
+    case 'ready': return 'ready';
+    case 'snoozed': return 'snoozed';
+    case 'pending': return `pending (${status.remainingHours}h)`;
+  }
 }

@@ -9,7 +9,6 @@ import { read } from './commands/read';
 import { sessionStart } from './commands/session-start';
 import { login } from './commands/login';
 import { setupAliasCommand } from './commands/setup-alias';
-import { upload } from './commands/upload';
 import { heartbeat } from './commands/heartbeat';
 import { createHiveMindConfig, initConfig } from './lib/config';
 import { errors, usage } from './lib/messages';
@@ -26,7 +25,7 @@ const COMMANDS = {
   'read': { description: 'Read session entries', handler: read },
   'login': { description: 'Log in to hive-mind', handler: login },
   'setup-alias': { description: 'Add hive-mind command to shell config', handler: setupAliasCommand },
-  'upload': { description: 'Upload eligible sessions', handler: upload },
+  'upload': { description: 'Deprecated — use hive upload send', handler: () => { console.log('hive-mind upload is deprecated. Run: curl -fsSL https://alignment-hive.com/install.sh | bash'); return Promise.resolve(1); } },
   'session-start': { description: 'SessionStart hook (internal)', handler: sessionStart },
   'heartbeat': { description: 'Send heartbeat (internal)', handler: heartbeat, hidden: true },
 } as const;

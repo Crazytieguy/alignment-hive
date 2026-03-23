@@ -38,6 +38,7 @@ export async function hiveHeartbeat(): Promise<number> {
         gitRemote: ids.gitRemote,
         lineCount: messageCount,
         lastModified: s.mtime.getTime(),
+        ...(s.parentSessionId && { parentSessionId: s.parentSessionId }),
       });
     } catch (error) {
       if (process.env.DEBUG) {

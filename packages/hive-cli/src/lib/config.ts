@@ -52,6 +52,30 @@ export function createHiveMindConfig(): CliConfig {
   };
 }
 
+/** Extract cwd from a JSONL line. Returns null if the line doesn't contain a valid cwd. */
+export function parseCwdFromLine(line: string): string | null {
+  if (!line.includes('"cwd"')) return null;
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
+      return parsed.cwd;
+    }
+  } catch {
+    // unparseable
+  }
+  return null;
+}
+
+/** Convert an absolute path to the Claude project directory name (e.g., /Users/foo/bar → -Users-foo-bar). */
+export function toClaudeProjectDirName(absolutePath: string): string {
+  return absolutePath.replaceAll('/', '-');
+}
+
+/** Get the full Claude project directory path for a given cwd. */
+export function getClaudeProjectDir(cwd: string): string {
+  return join(homedir(), '.claude', 'projects', toClaudeProjectDirName(cwd));
+}
+
 export function getAuthDir(): string {
   return getConfig().authDir;
 }
