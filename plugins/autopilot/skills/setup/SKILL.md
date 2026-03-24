@@ -632,44 +632,52 @@ Note: `git commit` uses `:*` instead of ` *` because commit messages use heredoc
 
 ## Step 6: Autopilot Features
 
-Ask about autonomous mode and the deno sandbox in separate question batches — each question must be its own AskUserQuestion call so the user reads the explanation before answering. Execute both together after.
+Ask about autonomous mode and the deno sandbox in separate question batches — each question must be its own AskUserQuestion call so the user reads the explanation before answering. For each, first give the explanation, then ask the question. Then execute both together after.
 
 ### Q1: Autonomous Mode
 
-**Explanation to give the user right before the question:**
+Output the following explanation, then ask the question:
 
-The autopilot plugin includes an autonomous mode that changes how Claude handles permission requests when you're in `acceptEdits` mode:
+**Explanation:**
 
-- **Without autonomous mode:** Claude blocks on every unpermitted command, waiting for you to approve or deny each one.
-- **With autonomous mode:** Unpermitted commands are automatically denied. Claude will try alternatives or propose adding a permission instead of blocking.
+> The autopilot plugin includes an autonomous mode that changes how Claude handles permission requests when you're in `acceptEdits` mode:
+>
+> - **Without autonomous mode:** Claude blocks on every unpermitted command, waiting for you to approve or deny each one.
+> - **With autonomous mode:** Unpermitted commands are automatically denied. Claude will try alternatives or propose adding a permission instead of blocking.
+>
+> This means you can leave Claude running unattended in `acceptEdits` mode. If you need to approve a one-off command that isn't in your allow list, switch out of `acceptEdits` mode first (toggle with Shift+Tab).
 
-This means you can leave Claude running unattended in `acceptEdits` mode. If you need to approve a one-off command that isn't in your allow list, switch out of `acceptEdits` mode first (toggle with Shift+Tab).
+**Question:**
 
 > "Enable autonomous mode?"
-
-- **Yes** - Enable autonomous mode
-- **No** - Keep standard behavior (block on unpermitted commands)
+>
+> - **Yes** - Enable autonomous mode
+> - **No** - Keep standard behavior (block on unpermitted commands)
 
 ### Q2: Deno Sandbox
 
-**Explanation to give the user right before the question:**
+Output the following explanation, then ask the question:
 
-The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the project directory — network, writes, env, and subprocess execution are all blocked.
+**Explanation:**
 
-When Claude needs additional capabilities, it will run `deno-sandbox-grant` to request a scoped permission. Each grant requires your approval and looks like this:
+> The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the project directory — network, writes, env, and subprocess execution are all blocked.
+>
+> When Claude needs additional capabilities, it will run `deno-sandbox-grant` to request a scoped permission. Each grant requires your approval and looks like this:
+>
+> ```
+> deno-sandbox-grant --allow-net=api.example.com
+> deno-sandbox-grant --allow-write=./output
+> deno-sandbox-grant --allow-run=python3
+> ```
+>
+> Review grants before approving — especially `--allow-run`, which gives unsandboxed subprocess execution. Grants persist for the session only.
 
-```
-deno-sandbox-grant --allow-net=api.example.com
-deno-sandbox-grant --allow-write=./output
-deno-sandbox-grant --allow-run=python3
-```
-
-Review grants before approving — especially `--allow-run`, which gives unsandboxed subprocess execution. Grants persist for the session only.
+**Question:**
 
 > "Enable deno sandbox? (Recommended)"
-
-- **Yes (Recommended)** - Enable the deno sandbox
-- **No** - Disable the deno sandbox
+>
+> - **Yes (Recommended)** - Enable the deno sandbox
+> - **No** - Disable the deno sandbox
 
 ### Action
 
@@ -684,6 +692,19 @@ Write `.claude/autopilot/state.json` with both keys:
 {
   "autonomous_mode": true|false,
   "deno_sandbox": true|false
+}
+```
+
+If the user enabled the deno sandbox, also add sandbox permissions to the settings file (use the same target file as Step 3):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(deno-sandbox)",
+      "Bash(deno-sandbox *)"
+    ]
+  }
 }
 ```
 
