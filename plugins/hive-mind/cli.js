@@ -14965,7 +14965,10 @@ var hive = {
     snoozedUntil: (dateStr) => `Uploads paused until ${dateStr}`,
     snoozeInProgressNote: "Any in-progress uploads will also check snooze before uploading.",
     invalidDuration: (duration3) => `Invalid duration: "${duration3}". Use format like 30m, 2h, 1d, 7d.`,
-    consentUnknown: "Could not verify sharing preferences (offline or not authenticated). Upload status may be inaccurate."
+    consentUnknown: "Could not verify sharing preferences (offline or not authenticated). Upload status may be inaccurate.",
+    agentCannotExclude: "Agent sessions cannot be excluded individually. Exclude the parent session instead.",
+    agentCannotUpload: "Agent sessions cannot be uploaded individually. Upload the parent session instead.",
+    outsideConsentWindow: "Session was last modified outside an active consent window."
   },
   sessionStart: {
     alignNudgeNew: `run ${boldMagenta("/hive:align")} for setup recommendations`,
@@ -16886,12 +16889,11 @@ async function extractParentSessionId(agentPath) {
 async function findRawSessions(rawDir) {
   const files = await readdir(rawDir);
   const sessions = [];
+  const flatAgentFiles = [];
   for (const f of files) {
     if (f.endsWith(".jsonl")) {
       if (f.startsWith("agent-")) {
-        const agentPath = join3(rawDir, f);
-        const parentSessionId = await extractParentSessionId(agentPath);
-        sessions.push({ path: agentPath, agentId: f.replace("agent-", "").replace(".jsonl", ""), parentSessionId });
+        flatAgentFiles.push({ path: join3(rawDir, f), agentId: basename(f, ".jsonl").slice("agent-".length) });
       } else {
         sessions.push({ path: join3(rawDir, f) });
       }
@@ -16904,13 +16906,18 @@ async function findRawSessions(rawDir) {
         if (sf.endsWith(".jsonl") && sf.startsWith("agent-")) {
           sessions.push({
             path: join3(subagentsDir, sf),
-            agentId: sf.replace("agent-", "").replace(".jsonl", ""),
+            agentId: basename(sf, ".jsonl").slice("agent-".length),
             parentSessionId: f
           });
         }
       }
     } catch {}
   }
+  const flatResults = await Promise.all(flatAgentFiles.map(async ({ path, agentId }) => {
+    const parentSessionId = await extractParentSessionId(path);
+    return { path, agentId, parentSessionId };
+  }));
+  sessions.push(...flatResults);
   return sessions;
 }
 var verbose = () => process.env.HIVE_MIND_VERBOSE === "1";

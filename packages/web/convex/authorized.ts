@@ -361,52 +361,19 @@ export const getUserSessions = query({
     const consentFilter =
       auth.role === "reader" ? await buildConsentFilter(ctx) : null;
 
-    if (consentFilter) {
-      // For readers: use stream+filterWith for correct pre-pagination filtering
-      const paginatedSessions = await stream(ctx.db, schema)
-        .query("sessions")
-        .withIndex("by_user_id", (q) => q.eq("userId", args.userId))
-        .order("desc")
-        .filterWith(async (session) => {
-          if (session.parentSessionId) return false;
-          return consentFilter(session);
-        })
-        .paginate(args.paginationOpts);
-
-      const childCounts = await Promise.all(
-        paginatedSessions.page.map(async (session) => {
-          const children = await ctx.db
-            .query("sessions")
-            .withIndex("by_parent_session_id", (q) =>
-              q.eq("parentSessionId", session.sessionId),
-            )
-            .collect();
-          return children.length;
-        }),
-      );
-
-      return {
-        ...paginatedSessions,
-        page: paginatedSessions.page.map((session, i) => ({
-          ...session,
-          childSessionCount: childCounts[i],
-        })),
-      };
-    }
-
-    // Admin path: standard pagination
-    const paginatedSessions = await ctx.db
+    // Use stream+filterWith for both roles to filter children pre-pagination
+    const paginatedSessions = await stream(ctx.db, schema)
       .query("sessions")
       .withIndex("by_user_id", (q) => q.eq("userId", args.userId))
       .order("desc")
+      .filterWith(async (session) => {
+        if (session.parentSessionId) return false;
+        return consentFilter ? consentFilter(session) : true;
+      })
       .paginate(args.paginationOpts);
 
-    const filteredPage = paginatedSessions.page.filter(
-      (s) => !s.parentSessionId,
-    );
-
     const childCounts = await Promise.all(
-      filteredPage.map(async (session) => {
+      paginatedSessions.page.map(async (session) => {
         const children = await ctx.db
           .query("sessions")
           .withIndex("by_parent_session_id", (q) =>
@@ -419,7 +386,7 @@ export const getUserSessions = query({
 
     return {
       ...paginatedSessions,
-      page: filteredPage.map((session, i) => ({
+      page: paginatedSessions.page.map((session, i) => ({
         ...session,
         childSessionCount: childCounts[i],
       })),

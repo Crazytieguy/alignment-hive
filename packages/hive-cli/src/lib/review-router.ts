@@ -5,7 +5,9 @@ import {
   getProjectIdentifiers,
   loadTranscriptsDirs,
 } from './config';
-import { formatDisplayStatus, getDisplayStatus, getProjectConsentMtime, getSessionSummary } from './session-display';
+import { getProjectConsentMtime } from './convex';
+import { hive } from './messages';
+import { formatDisplayStatus, getDisplayStatus } from './session-display';
 import {
   checkSessionEligibility,
   findAgentsForParent,
@@ -14,7 +16,7 @@ import {
   recordExcludedSession,
 } from './session-state';
 import { clearSnooze, getSnoozeUntil, parseDuration, setSnooze } from './snooze';
-import { readAndSanitizeSession, uploadParentWithAgents } from './upload-session';
+import { isInConsentWindows, loadConsentWindows, loadSessionStateWithAgentMigration, readAndSanitizeSession, readSessionSummary, uploadParentWithAgents } from './upload-session';
 
 const t = initTRPC.create();
 
@@ -23,32 +25,43 @@ export function createReviewRouter(stateDir: string, cwd: string) {
     sessions: t.router({
       list: t.procedure.query(async () => {
         const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-        const { parentSessions, agentsByParent, uploadedMap, excludedSet, migrationTimestamp } = await loadSessionState(stateDir, transcriptsDirs);
+        const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
+          await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
         const consentMtime = await getProjectConsentMtime(cwd);
         const snoozeUntil = await getSnoozeUntil(stateDir);
 
-        const sessions = await Promise.all(
-          parentSessions
-            .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-            .map(async (session) => {
-              const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime ?? Date.now(), migrationTimestamp);
-              // Use findAgentsForParent for accurate count (includes worktree agents)
-              const agents = await findAgentsForParent(session, agentsByParent, transcriptsDirs);
-              const agentCount = agents.length;
-              const uploadedEntry = uploadedMap.get(session.sessionId);
-              const status = getDisplayStatus(result, session, consentMtime, snoozeUntil, { uploadedEntry, agentCount });
-              const summary = await getSessionSummary(session.path);
+        const sorted = parentSessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
-              return {
-                sessionId: session.sessionId,
-                date: session.mtime.toISOString(),
-                status,
-                statusLabel: formatDisplayStatus(status),
-                summary: summary.slice(0, 120),
-                agentCount,
-              };
+        // Compute statuses (no file reads), then read summaries in batches
+        const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: consentMtime ?? Date.now(), migrationTimestamp };
+        const displayCtx = { consentMtime, snoozeUntil, migrationTimestamp };
+        const sessionMetas = sorted.map((session) => {
+          const result = checkSessionEligibility(session, eligibilityCtx);
+          const status = getDisplayStatus(result, session, displayCtx);
+          return { session, status };
+        });
+
+        const SUMMARY_BATCH = 10;
+        const sessions = [];
+        for (let i = 0; i < sessionMetas.length; i += SUMMARY_BATCH) {
+          const batch = sessionMetas.slice(i, i + SUMMARY_BATCH);
+          const summaries = await Promise.all(
+            batch.map(async ({ session }) => {
+              try { return await readSessionSummary(session.path); }
+              catch { return ''; }
             }),
-        );
+          );
+          for (let j = 0; j < batch.length; j++) {
+            const { session, status } = batch[j];
+            sessions.push({
+              sessionId: session.sessionId,
+              date: session.mtime.toISOString(),
+              status,
+              statusLabel: formatDisplayStatus(status),
+              summary: summaries[j].slice(0, 120),
+            });
+          }
+        }
 
         return { sessions, snoozeUntil };
       }),
@@ -65,25 +78,31 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           }
 
           // Use the same read+sanitize pipeline as the upload flow
-          const { sanitizedEntries } = await readAndSanitizeSession(session.path);
+          const sessionRead = await readAndSanitizeSession(session.path);
 
           // Find ALL agents (including worktree agents) — same code path as upload
           const allAgents = session.agentId
             ? [] // Agent sessions don't have their own agents
-            : await findAgentsForParent(session, agentsByParent, transcriptsDirs);
+            : await findAgentsForParent(session, agentsByParent, transcriptsDirs, sessionRead.cwds);
 
-          // Read and sanitize each agent's content
-          const agents = await Promise.all(
-            allAgents.map(async (agent) => {
-              const agentRead = await readAndSanitizeSession(agent.path);
-              return {
-                sessionId: agent.sessionId,
-                agentId: agent.agentId,
-                entries: agentRead.sanitizedEntries,
-                messageCount: agentRead.sanitizedEntries.length,
-              };
-            }),
-          );
+          // Read and sanitize each agent's content in batches
+          const AGENT_READ_BATCH = 10;
+          const agents = [];
+          for (let i = 0; i < allAgents.length; i += AGENT_READ_BATCH) {
+            const batch = allAgents.slice(i, i + AGENT_READ_BATCH);
+            const batchResults = await Promise.all(
+              batch.map(async (agent) => {
+                const agentRead = await readAndSanitizeSession(agent.path);
+                return {
+                  sessionId: agent.sessionId,
+                  agentId: agent.agentId,
+                  entries: agentRead.sanitizedEntries,
+                  messageCount: agentRead.sanitizedEntries.length,
+                };
+              }),
+            );
+            agents.push(...batchResults);
+          }
 
           return {
             meta: {
@@ -91,11 +110,11 @@ export function createReviewRouter(stateDir: string, cwd: string) {
               version: '0.1' as const,
               sessionId: session.sessionId,
               rawMtime: session.mtime.toISOString(),
-              messageCount: sanitizedEntries.length,
+              messageCount: sessionRead.sanitizedEntries.length,
               ...(session.agentId && { agentId: session.agentId }),
               ...(session.parentSessionId && { parentSessionId: session.parentSessionId }),
             },
-            entries: sanitizedEntries,
+            entries: sessionRead.sanitizedEntries,
             agents,
           };
         }),
@@ -112,7 +131,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           }
 
           if (session.agentId) {
-            throw new Error('Agent sessions cannot be excluded individually. Exclude the parent session instead.');
+            throw new Error(hive.upload.agentCannotExclude);
           }
 
           if (excludedSet.has(session.sessionId)) {
@@ -134,7 +153,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           const ids = getProjectIdentifiers(cwd);
 
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-          const { sessionById, agentsByParent, uploadedMap } = await loadSessionState(stateDir, transcriptsDirs);
+          const { sessionById, agentsByParent } = await loadSessionState(stateDir, transcriptsDirs);
 
           const session = sessionById.get(input.sessionId);
           if (!session) {
@@ -142,11 +161,18 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           }
 
           if (session.agentId) {
-            throw new Error('Agent sessions cannot be uploaded individually. Upload the parent session instead.');
+            throw new Error(hive.upload.agentCannotUpload);
           }
 
-          const agents = await findAgentsForParent(session, agentsByParent, transcriptsDirs);
-          return uploadParentWithAgents({ parent: session, agents, checkoutId, ids, stateDir, uploadedMap });
+          // Check consent windows before uploading
+          const consentWindows = await loadConsentWindows(ids);
+          if (consentWindows && !isInConsentWindows(session.mtime.getTime(), consentWindows)) {
+            throw new Error(hive.upload.outsideConsentWindow);
+          }
+
+          const parentRead = await readAndSanitizeSession(session.path);
+          const agents = await findAgentsForParent(session, agentsByParent, transcriptsDirs, parentRead.cwds);
+          return uploadParentWithAgents({ parent: session, parentRead, agents, checkoutId, ids, stateDir });
         }),
     }),
 
@@ -170,14 +196,16 @@ export function createReviewRouter(stateDir: string, cwd: string) {
       status: t.procedure.query(async () => {
         const snoozeUntil = await getSnoozeUntil(stateDir);
         const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-        const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } = await loadSessionState(stateDir, transcriptsDirs);
+        const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
+          await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
         let pending = 0;
         let ready = 0;
         let uploaded = 0;
         let excluded = 0;
+        const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: Date.now(), migrationTimestamp };
         for (const session of parentSessions) {
-          const result = checkSessionEligibility(session, uploadedMap, excludedSet, Date.now(), migrationTimestamp);
+          const result = checkSessionEligibility(session, eligibilityCtx);
           if (result.eligible) ready++;
           else if (result.reason === 'excluded') excluded++;
           else if (result.reason === 'already uploaded') uploaded++;

@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc";
-import { SessionViewer, Button, formatSessionId } from "@alignment-hive/ui";
+import { Alert, SessionViewer, Button, formatSessionId } from "@alignment-hive/ui";
 import {
   parseSession,
   parseKnownEntry,
@@ -86,6 +86,14 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
     ? data.agents.find((a) => a.sessionId === viewingAgentId)
     : null;
 
+  if (viewingAgentId && !viewingAgent) {
+    return (
+      <div className="flex h-96 items-center justify-center text-destructive">
+        Agent session {formatSessionId(viewingAgentId)} not found in parent data
+      </div>
+    );
+  }
+
   const sessionModel = viewingAgent
     ? buildSessionModel(
         { sessionId: viewingAgent.sessionId, rawMtime: data.meta.rawMtime, messageCount: viewingAgent.messageCount },
@@ -123,9 +131,14 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
           </div>
         )}
       </div>
-      <div className="rounded-lg border border-yellow-500/30 bg-yellow-50 px-4 py-2 text-sm text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">
+      {(excludeMutation.error || uploadMutation.error) && (
+        <Alert variant="error">
+          {excludeMutation.error instanceof Error ? excludeMutation.error.message : uploadMutation.error instanceof Error ? (uploadMutation.error as Error).message : 'Operation failed'}
+        </Alert>
+      )}
+      <Alert variant="warning">
         This shows the sanitized version that would be uploaded. Verify that no secrets or sensitive data remain.
-      </div>
+      </Alert>
 
       <div className={`grid gap-4 ${hasSidebar ? "lg:grid-cols-[1fr_300px]" : ""}`}>
         <div>

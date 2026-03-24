@@ -5,14 +5,19 @@ import {
 } from '../lib/config';
 import { hive } from '../lib/messages';
 import { colors, printInfo, printWarning } from '../lib/output';
-import { formatDisplayStatus, getDisplayStatus, getProjectConsentMtime, getSessionSummary } from '../lib/session-display';
+import { getProjectConsentMtime } from '../lib/convex';
+import { formatDisplayStatus, getDisplayStatus, getDisplayStatusColor } from '../lib/session-display';
+import { loadSessionStateWithAgentMigration, readSessionSummary } from '../lib/upload-session';
 import {
   checkSessionEligibility,
-  loadSessionState,
 } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
 
-export async function uploadList(): Promise<number> {
+const SUMMARY_CONCURRENCY = 10;
+
+export async function uploadList(args: Array<string>): Promise<number> {
+  const showAll = args.includes('--all');
+
   const config = getConfig();
   const cwd = process.cwd();
   const stateDir = config.getStateDir(cwd);
@@ -30,7 +35,8 @@ export async function uploadList(): Promise<number> {
     return 0;
   }
 
-  const { parentSessions, agentsByParent, uploadedMap, excludedSet, migrationTimestamp } = await loadSessionState(stateDir, transcriptsDirs);
+  const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
+    await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
   if (parentSessions.length === 0) {
     printInfo(hive.upload.noSessions);
@@ -44,13 +50,13 @@ export async function uploadList(): Promise<number> {
   let uploadedCount = 0;
   let excludedCount = 0;
 
-  const rows: Array<{ id: string; date: string; status: string; statusColor: 'green' | 'blue' | 'yellow' | 'default'; summary: string }> = [];
+  // First pass: compute statuses (no file reads)
+  const sessionStatuses: Array<{ session: typeof parentSessions[0]; status: ReturnType<typeof getDisplayStatus>; statusColor: 'green' | 'blue' | 'yellow' | 'default' }> = [];
+  const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: consentMtime ?? Date.now(), migrationTimestamp };
 
   for (const session of parentSessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())) {
-    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentMtime ?? Date.now(), migrationTimestamp);
-    const agentCount = agentsByParent.get(session.sessionId)?.length ?? 0;
-    const uploadedEntry = uploadedMap.get(session.sessionId);
-    const status = getDisplayStatus(result, session, consentMtime, snoozeUntil, { uploadedEntry, agentCount });
+    const result = checkSessionEligibility(session, eligibilityCtx);
+    const status = getDisplayStatus(result, session, { consentMtime, snoozeUntil, migrationTimestamp });
 
     switch (status.type) {
       case 'excluded': excludedCount++; break;
@@ -59,34 +65,49 @@ export async function uploadList(): Promise<number> {
       case 'ready': readyCount++; break;
     }
 
-    const statusColor = status.type === 'ready' ? 'green' as const
-      : status.type === 'uploaded' ? 'blue' as const
-      : status.type === 'pending' || status.type === 'snoozed' ? 'yellow' as const
-      : 'default' as const;
+    sessionStatuses.push({ session, status, statusColor: getDisplayStatusColor(status) });
+  }
 
-    const summary = await getSessionSummary(session.path);
-    const agentSuffix = agentCount > 0 ? ` (+${agentCount} agents)` : '';
+  // Filter: only show actionable sessions unless --all
+  const visible = showAll
+    ? sessionStatuses
+    : sessionStatuses.filter((s) => s.status.type !== 'uploaded' && s.status.type !== 'excluded');
 
-    rows.push({
-      id: session.sessionId.slice(0, 12),
-      date: session.mtime.toLocaleDateString(),
-      status: formatDisplayStatus(status),
-      statusColor,
-      summary: (summary + agentSuffix).slice(0, 60),
-    });
+  // Second pass: read summaries in batches (only for visible sessions)
+  const rows: Array<{ id: string; date: string; status: string; statusColor: 'green' | 'blue' | 'yellow' | 'default'; summary: string }> = [];
+
+  for (let i = 0; i < visible.length; i += SUMMARY_CONCURRENCY) {
+    const batch = visible.slice(i, i + SUMMARY_CONCURRENCY);
+    const summaries = await Promise.all(
+      batch.map(async ({ session }) => {
+        try { return await readSessionSummary(session.path); }
+        catch { return ''; }
+      }),
+    );
+
+    for (let j = 0; j < batch.length; j++) {
+      const { session, status, statusColor } = batch[j];
+      rows.push({
+        id: session.sessionId.slice(0, 12),
+        date: session.mtime.toLocaleDateString(),
+        status: formatDisplayStatus(status),
+        statusColor,
+        summary: summaries[j].slice(0, 60),
+      });
+    }
   }
 
   console.log(`${'ID'.padEnd(14)} ${'DATE'.padEnd(12)} ${'STATUS'.padEnd(24)} SUMMARY`);
   console.log(`${'─'.repeat(14)} ${'─'.repeat(12)} ${'─'.repeat(24)} ${'─'.repeat(40)}`);
 
   for (const row of rows) {
-    const coloredStatus = row.statusColor === 'green' ? colors.green(row.status)
-      : row.statusColor === 'blue' ? colors.blue(row.status)
-      : row.statusColor === 'yellow' ? colors.yellow(row.status)
-      : row.status;
+    const paddedStatus = row.status.padEnd(24);
+    const coloredStatus = row.statusColor === 'green' ? colors.green(paddedStatus)
+      : row.statusColor === 'blue' ? colors.blue(paddedStatus)
+      : row.statusColor === 'yellow' ? colors.yellow(paddedStatus)
+      : paddedStatus;
 
-    const paddedRow = `${row.id.padEnd(14)} ${row.date.padEnd(12)} ${coloredStatus.padEnd(24 + 9)} ${row.summary}`;
-    console.log(paddedRow);
+    console.log(`${row.id.padEnd(14)} ${row.date.padEnd(12)} ${coloredStatus} ${row.summary}`);
   }
 
   console.log('');

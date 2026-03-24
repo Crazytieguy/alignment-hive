@@ -1,3 +1,4 @@
+export { Alert } from "./components/alert";
 export { Button, buttonVariants } from "./components/button";
 export {
   Card,

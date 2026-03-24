@@ -53,17 +53,15 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
   }
 
   const prefix = args[0];
-
-  // Check if they tried to exclude an agent session
-  const agentSession = sessionById.get(prefix) ?? [...sessionById.values()].find((s) => s.sessionId.startsWith(prefix));
-  if (agentSession?.agentId) {
-    printError('Agent sessions cannot be excluded individually. Exclude the parent session instead.');
-    return 1;
-  }
-
   const result = lookupRawSession(parentSessions, prefix);
 
   if (!result.found) {
+    // Check if they tried to exclude an agent session
+    const agentSession = sessionById.get(prefix) ?? [...sessionById.values()].find((s) => s.sessionId.startsWith(prefix));
+    if (agentSession?.agentId) {
+      printError(hive.upload.agentCannotExclude);
+      return 1;
+    }
     printError(result.error);
     if (result.matches) {
       for (const m of result.matches) {

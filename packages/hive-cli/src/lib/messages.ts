@@ -450,6 +450,9 @@ export const hive = {
     invalidDuration: (duration: string): string =>
       `Invalid duration: "${duration}". Use format like 30m, 2h, 1d, 7d.`,
     consentUnknown: 'Could not verify sharing preferences (offline or not authenticated). Upload status may be inaccurate.',
+    agentCannotExclude: 'Agent sessions cannot be excluded individually. Exclude the parent session instead.',
+    agentCannotUpload: 'Agent sessions cannot be uploaded individually. Upload the parent session instead.',
+    outsideConsentWindow: 'Session was last modified outside an active consent window.',
   },
   sessionStart: {
     alignNudgeNew: `run ${boldMagenta('/hive:align')} for setup recommendations`,

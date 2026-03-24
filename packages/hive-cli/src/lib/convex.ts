@@ -1,6 +1,7 @@
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
-import { isAuthError, loadAuthData } from './auth';
+import { checkAuthStatus, isAuthError, loadAuthData } from './auth';
+import { getProjectIdentifiers, matchesProject } from './config';
 import type { Id } from '../../../web/convex/_generated/dataModel';
 import type { ProjectIdentifiers } from '@alignment-hive/session-data';
 
@@ -67,44 +68,13 @@ export async function heartbeatSession(session: {
   }
 }
 
-export async function generateUploadUrl(
-  sessionId: string,
-  heartbeat?: {
-    checkoutId: string;
-    project?: string;
-    directory?: string;
-    gitRemote?: string;
-    lineCount: number;
-    lastModified?: number;
-    parentSessionId?: string;
-    sessionStartGitCommitHash?: string;
-  },
-): Promise<string | null> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return null;
-
-    return await client.mutation(api.sessions.generateUploadUrl, {
-      sessionId,
-      ...heartbeat,
-    });
-  } catch (error) {
-    debugLog(`generateUploadUrl failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
-  }
-}
-
 export async function generateUploadUrls(
   sessionId: string,
   agentSessionIds: Array<string>,
-  heartbeat: {
-    checkoutId: string;
-    project?: string;
+  consentIdentifiers: {
     directory?: string;
     gitRemote?: string;
-    lineCount: number;
     lastModified?: number;
-    sessionStartGitCommitHash?: string;
   },
 ): Promise<Record<string, string> | null> {
   try {
@@ -114,7 +84,7 @@ export async function generateUploadUrls(
     return await client.mutation(api.sessions.generateUploadUrls, {
       sessionId,
       agentSessionIds,
-      ...heartbeat,
+      ...consentIdentifiers,
     });
   } catch (error) {
     debugLog(`generateUploadUrls failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -124,7 +94,14 @@ export async function generateUploadUrls(
 
 export async function saveUploads(
   parentSessionId: string,
-  uploads: Array<{ sessionId: string; storageId: string; summary?: string }>,
+  sessionMeta: {
+    checkoutId: string;
+    directory?: string;
+    gitRemote?: string;
+    lastModified?: number;
+    sessionStartGitCommitHash?: string;
+  },
+  uploads: Array<{ sessionId: string; storageId: string; summary?: string; lineCount: number; parentSessionId?: string }>,
 ): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
@@ -132,6 +109,7 @@ export async function saveUploads(
 
     await client.mutation(api.sessions.saveUploads, {
       parentSessionId,
+      ...sessionMeta,
       uploads: uploads.map((u) => ({
         ...u,
         storageId: u.storageId as unknown as Id<"_storage">,
@@ -140,24 +118,6 @@ export async function saveUploads(
     return true;
   } catch (error) {
     debugLog(`saveUploads failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-export async function saveUpload(sessionId: string, storageId: string, summary?: string): Promise<boolean> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return false;
-
-    // storageId is returned by Convex storage upload as a string but the mutation expects Id<"_storage">
-    await client.mutation(api.sessions.saveUpload, {
-      sessionId,
-      storageId: storageId as unknown as Id<"_storage">,
-      summary,
-    });
-    return true;
-  } catch (error) {
-    debugLog(`saveUpload failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }
@@ -242,6 +202,35 @@ export async function getRepoLinkStatus(gitRemote: string): Promise<RepoLinkStat
     return await client.query(api.github.getRepoLinkStatus, { gitRemote: gitRemote.toLowerCase() });
   } catch (error) {
     debugLog(`getRepoLinkStatus failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+/** Resolve project consent state for the current project. */
+export async function resolveProjectConsent(cwd: string) {
+  const status = await checkAuthStatus(true);
+  if (!status.authenticated) return { error: 'not-authenticated' } as const;
+
+  const [consent, allProjects] = await Promise.all([
+    getConsentStatus(),
+    getProjectSharing(),
+  ]);
+
+  if (!consent?.hasConsent || !consent.sessionSharing) return { error: 'no-consent' } as const;
+
+  const ids = getProjectIdentifiers(cwd);
+  const projectConsent = matchesProject(allProjects, ids);
+  if (!projectConsent?.sessionSharing) return { error: 'no-project-consent' } as const;
+
+  return { consentMtime: projectConsent.latestAt, ids } as const;
+}
+
+/** Resolve the project consent mtime, or null if offline/unauthorized. */
+export async function getProjectConsentMtime(cwd: string): Promise<number | null> {
+  try {
+    const result = await resolveProjectConsent(cwd);
+    return 'error' in result ? null : result.consentMtime;
+  } catch {
     return null;
   }
 }

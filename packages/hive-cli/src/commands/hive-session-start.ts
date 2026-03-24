@@ -16,13 +16,11 @@ import { hive } from '../lib/messages';
 import { hookColors, hookContinuationPad, hookOutput } from '../lib/output';
 import { spawnBackground } from '../lib/spawn';
 import {
-  CONSENT_REVIEW_PERIOD_MS,
-  SESSION_REVIEW_PERIOD_MS,
   checkSessionEligibility,
-  loadSessionState,
-  writeAgentMigrationTs,
+  computeEligibleAt,
 } from '../lib/session-state';
 import { isSnoozed } from '../lib/snooze';
+import { loadSessionStateWithAgentMigration } from '../lib/upload-session';
 
 const UPLOAD_SCHEDULE_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
 const UPLOAD_DELAY_MINUTES = 10;
@@ -154,34 +152,22 @@ export async function hiveSessionStart(): Promise<number> {
     return 0;
   }
 
-  // Run session discovery, uploaded/excluded loading in parallel
-  const { parentSessions: allSessions, uploadedMap, excludedSet, migrationTimestamp } = await loadSessionState(stateDir, transcriptsDirs);
+  // Run session discovery and one-time agent migration if needed
+  const { parentSessions: allSessions, uploadedMap, excludedSet, migrationTimestamp: effectiveMigrationTs } =
+    await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
-  // Write migration timestamp if we find uploaded parents without agentSessionIds (first discovery)
-  if (migrationTimestamp === null) {
-    const hasOrphanedAgents = allSessions.some((s) => {
-      const entry = uploadedMap.get(s.sessionId);
-      return entry && !entry.agentSessionIds && !excludedSet.has(s.sessionId);
-    });
-    if (hasOrphanedAgents) {
-      await writeAgentMigrationTs(stateDir);
-    }
-  }
-
-  let eligibleCount = 0;
+  const eligibleIds: Array<string> = [];
   let pendingCount = 0;
   let earliestEligibleAt = Infinity;
+  const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: consentTimestamp, migrationTimestamp: effectiveMigrationTs };
 
   for (const session of allSessions) {
-    const result = checkSessionEligibility(session, uploadedMap, excludedSet, consentTimestamp, migrationTimestamp);
+    const result = checkSessionEligibility(session, eligibilityCtx);
     if (result.eligible) {
-      eligibleCount++;
+      eligibleIds.push(session.sessionId);
     } else if (result.reason === 'pending review' || result.reason === 'consent review period') {
       pendingCount++;
-      const mtimeMs = session.mtime.getTime();
-      const sessionEligibleAt = mtimeMs + SESSION_REVIEW_PERIOD_MS;
-      const consentEligibleAt = consentTimestamp + CONSENT_REVIEW_PERIOD_MS;
-      earliestEligibleAt = Math.min(earliestEligibleAt, Math.max(sessionEligibleAt, consentEligibleAt));
+      earliestEligibleAt = Math.min(earliestEligibleAt, computeEligibleAt(session.mtime.getTime(), consentTimestamp, effectiveMigrationTs));
     }
   }
 
@@ -198,17 +184,20 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   let hasSessionInfo = false;
-  if (eligibleCount > 0) {
+  if (eligibleIds.length > 0) {
     if (await isSnoozed(stateDir)) {
-      messages.push(hive.sessionStart.eligibleSnoozed(eligibleCount));
+      messages.push(hive.sessionStart.eligibleSnoozed(eligibleIds.length));
       hasSessionInfo = true;
     } else {
       const alreadyScheduled = await checkUploadScheduled(stateDir);
       if (!alreadyScheduled) {
         await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
-        const spawned = spawnBackgroundCommand(['upload', 'send', '--delay', '600'], stateDir);
+        const spawned = spawnBackgroundCommand(
+          ['upload', 'send', '--delay', '600', '--sessions', eligibleIds.join(',')],
+          stateDir,
+        );
         if (spawned) {
-          messages.push(hive.sessionStart.uploading(eligibleCount, UPLOAD_DELAY_MINUTES));
+          messages.push(hive.sessionStart.uploading(eligibleIds.length, UPLOAD_DELAY_MINUTES));
           hasSessionInfo = true;
         }
       }

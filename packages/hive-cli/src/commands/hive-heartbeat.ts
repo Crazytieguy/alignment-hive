@@ -22,7 +22,8 @@ export async function hiveHeartbeat(): Promise<number> {
   const ids = getProjectIdentifiers(cwd);
 
   let failures = 0;
-  for (const s of allSessions) {
+  const parentSessions = allSessions.filter((s) => !s.agentId);
+  for (const s of parentSessions) {
     let messageCount: number;
     try {
       messageCount = await countRawLines(s.path);
@@ -38,7 +39,6 @@ export async function hiveHeartbeat(): Promise<number> {
         gitRemote: ids.gitRemote,
         lineCount: messageCount,
         lastModified: s.mtime.getTime(),
-        ...(s.parentSessionId && { parentSessionId: s.parentSessionId }),
       });
     } catch (error) {
       if (process.env.DEBUG) {

@@ -13,7 +13,7 @@ const COMMANDS = new Map<string, () => Promise<number>>([
     const sub = process.argv[3];
     switch (sub) {
       case 'list':
-        return (await import('./commands/upload-list')).uploadList();
+        return (await import('./commands/upload-list')).uploadList(process.argv.slice(4));
       case 'review':
         return (await import('./commands/upload-review')).uploadReview();
       case 'exclude':

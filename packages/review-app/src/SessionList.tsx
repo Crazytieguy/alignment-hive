@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc";
-import { Button } from "@alignment-hive/ui";
+import { Alert, Button } from "@alignment-hive/ui";
 
 type Filter = "all" | "pending" | "uploaded";
 
@@ -15,22 +15,21 @@ interface SessionListProps {
 }
 
 function isPending(status: Status) {
-  return status.type === "pending" || status.type === "ready" || status.type === "snoozed"
-    || (status.type === "uploaded" && status.agentsPending);
+  return status.type === "pending" || status.type === "ready" || status.type === "snoozed";
 }
 
 function canExclude(status: Status) {
-  return status.type !== "excluded" && !(status.type === "uploaded" && !status.agentsPending);
+  return status.type !== "excluded" && status.type !== "uploaded";
 }
 
 function canUpload(status: Status) {
-  return status.type === "ready" || status.type === "pending"
-    || (status.type === "uploaded" && status.agentsPending);
+  return status.type === "ready" || status.type === "pending";
 }
 
 export function SessionList({ onSelectSession }: SessionListProps) {
   const [filter, setFilterState] = useState<Filter>("pending");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   const setFilter = (f: Filter) => {
     setFilterState(f);
@@ -43,22 +42,28 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     queryFn: () => trpc.sessions.list.query(),
   });
 
+  const onMutationError = (err: unknown) => setError(err instanceof Error ? err.message : 'Operation failed');
+  const onMutationSuccess = () => { setError(null); queryClient.invalidateQueries({ queryKey: ["sessions"] }); };
+
   const excludeMutation = useMutation({
     mutationFn: (sessionId: string) =>
       trpc.sessions.exclude.mutate({ sessionId }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: onMutationSuccess,
+    onError: onMutationError,
   });
 
   const snoozeMutation = useMutation({
     mutationFn: (duration: string) =>
       trpc.upload.snooze.mutate({ duration }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: onMutationSuccess,
+    onError: onMutationError,
   });
 
   const uploadMutation = useMutation({
     mutationFn: (sessionId: string) =>
       trpc.sessions.upload.mutate({ sessionId }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: onMutationSuccess,
+    onError: onMutationError,
   });
 
   if (isLoading) {
@@ -74,7 +79,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
 
   const filtered = sessions.filter((s) => {
     if (filter === "pending") return isPending(s.status);
-    if (filter === "uploaded") return s.status.type === "uploaded" && !s.status.agentsPending;
+    if (filter === "uploaded") return s.status.type === "uploaded";
     return true;
   });
 
@@ -103,10 +108,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
 
   return (
     <div className="space-y-4">
+      {error && <Alert variant="error">{error}</Alert>}
       {snoozeUntil && (
-        <div className="rounded-lg border border-yellow-500/30 bg-yellow-50 px-4 py-2 text-sm text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">
+        <Alert variant="warning">
           Uploads snoozed until {new Date(snoozeUntil).toLocaleString()}
-        </div>
+        </Alert>
       )}
 
       <div className="flex items-center gap-2">
@@ -160,7 +166,6 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               <th className="px-4 py-3 font-medium">Session</th>
               <th className="px-4 py-3 font-medium">Date</th>
               <th className="px-4 py-3 font-medium">Status</th>
-              <th className="px-4 py-3 font-medium">Agents</th>
               <th className="px-4 py-3 font-medium">Summary</th>
               <th className="px-4 py-3 font-medium">Actions</th>
             </tr>
@@ -191,9 +196,6 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                 </td>
                 <td className="px-4 py-3">
                   <StatusBadge status={session.status} label={session.statusLabel} />
-                </td>
-                <td className="px-4 py-3 text-center text-sm text-muted-foreground">
-                  {session.agentCount > 0 ? session.agentCount : "—"}
                 </td>
                 <td className="max-w-[300px] truncate px-4 py-3 text-sm text-muted-foreground" title={session.summary}>
                   {session.summary || "—"}
@@ -240,11 +242,7 @@ function StatusBadge({ status, label }: { status: Status; label: string }) {
   let className = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ";
   switch (status.type) {
     case "ready": className += "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300"; break;
-    case "uploaded":
-      className += status.agentsPending
-        ? "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300"
-        : "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
-      break;
+    case "uploaded": className += "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300"; break;
     case "pending": className += "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300"; break;
     case "excluded": className += "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"; break;
     case "snoozed": className += "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300"; break;

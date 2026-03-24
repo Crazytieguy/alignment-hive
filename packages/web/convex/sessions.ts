@@ -85,7 +85,7 @@ async function verifyConsent(
   }
 }
 
-/** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing */
+/** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the document ID. */
 async function upsertSession(
   ctx: MutationCtx,
   userId: string,
@@ -100,7 +100,7 @@ async function upsertSession(
     parentSessionId?: string;
     sessionStartGitCommitHash?: string;
   },
-): Promise<void> {
+): Promise<Id<"sessions">> {
   const now = Date.now();
   const existing = await ctx.db
     .query("sessions")
@@ -125,8 +125,9 @@ async function upsertSession(
         sessionStartGitCommitHash: args.sessionStartGitCommitHash,
       }),
     });
+    return existing._id;
   } else {
-    await ctx.db.insert("sessions", {
+    return await ctx.db.insert("sessions", {
       sessionId: args.sessionId,
       userId,
       checkoutId: args.checkoutId,
@@ -168,93 +169,19 @@ export const heartbeatSession = mutation({
   },
 });
 
-export const generateUploadUrl = mutation({
-  args: {
-    sessionId: v.string(),
-    // Optional heartbeat fields — if provided, upserts the session in the same round trip
-    checkoutId: v.optional(v.string()),
-    project: v.optional(v.string()),
-    directory: v.optional(v.string()),
-    gitRemote: v.optional(v.string()),
-    lineCount: v.optional(v.number()),
-    lastModified: v.optional(v.number()),
-    parentSessionId: v.optional(v.string()),
-    sessionStartGitCommitHash: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new ConvexError("Not authenticated");
-    }
 
-    const userId = identity.subject;
-
-    // Reject agent sessions — they must be uploaded via generateUploadUrls
-    const existing = await ctx.db
-      .query("sessions")
-      .withIndex("by_session_id", (q) => q.eq("sessionId", args.sessionId))
-      .first();
-    if (existing?.parentSessionId) {
-      throw new ConvexError("Agent sessions must be uploaded with their parent session. Use generateUploadUrls instead.");
-    }
-
-    if (args.checkoutId && (args.project || args.directory || args.gitRemote) && args.lineCount !== undefined) {
-      // Inline heartbeat: upsert user + session in the same round trip
-      const userDocId = await upsertUser(ctx, identity);
-      const identifiers = extractIdentifiers(args);
-      await verifyConsent(
-        ctx,
-        userDocId,
-        identifiers,
-        args.lastModified,
-      );
-
-      await upsertSession(ctx, userId, {
-        sessionId: args.sessionId,
-        checkoutId: args.checkoutId,
-        project: args.project,
-        directory: args.directory,
-        gitRemote: args.gitRemote,
-        lineCount: args.lineCount,
-        lastModified: args.lastModified,
-        parentSessionId: args.parentSessionId,
-        sessionStartGitCommitHash: args.sessionStartGitCommitHash,
-      });
-    } else {
-      if (!existing) {
-        throw new ConvexError("Session not found - heartbeat first");
-      }
-      if (existing.userId !== userId) {
-        throw new ConvexError("Session belongs to different user");
-      }
-
-      // Verify consent using existing session's identifiers
-      const userDocId = await upsertUser(ctx, identity);
-      const identifiers = extractIdentifiers(existing);
-      await verifyConsent(
-        ctx,
-        userDocId,
-        identifiers,
-        args.lastModified ?? existing.lastModified,
-      );
-    }
-
-    return await ctx.storage.generateUploadUrl();
-  },
-});
-
-/** Generate upload URLs for a parent session and its agents in one round trip. */
+/**
+ * Generate upload URLs for a parent session and its agents in one round trip.
+ * Only verifies consent and generates URLs — no session record mutations.
+ * Session records are created/updated by saveUploads after files are uploaded.
+ */
 export const generateUploadUrls = mutation({
   args: {
     sessionId: v.string(),
     agentSessionIds: v.array(v.string()),
-    checkoutId: v.string(),
-    project: v.optional(v.string()),
     directory: v.optional(v.string()),
     gitRemote: v.optional(v.string()),
-    lineCount: v.number(),
     lastModified: v.optional(v.number()),
-    sessionStartGitCommitHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -266,30 +193,6 @@ export const generateUploadUrls = mutation({
     const identifiers = extractIdentifiers(args);
     await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
 
-    // Upsert parent session
-    await upsertSession(ctx, identity.subject, {
-      sessionId: args.sessionId,
-      checkoutId: args.checkoutId,
-      project: args.project,
-      directory: args.directory,
-      gitRemote: args.gitRemote,
-      lineCount: args.lineCount,
-      lastModified: args.lastModified,
-      sessionStartGitCommitHash: args.sessionStartGitCommitHash,
-    });
-
-    // Upsert each agent session with parentSessionId
-    for (const agentId of args.agentSessionIds) {
-      await upsertSession(ctx, identity.subject, {
-        sessionId: agentId,
-        checkoutId: args.checkoutId,
-        directory: args.directory,
-        gitRemote: args.gitRemote,
-        lineCount: 0, // actual line count not known at URL generation time
-        parentSessionId: args.sessionId,
-      });
-    }
-
     // Generate upload URLs for all sessions
     const allSessionIds = [args.sessionId, ...args.agentSessionIds];
     const urls: Record<string, string> = {};
@@ -300,103 +203,73 @@ export const generateUploadUrls = mutation({
   },
 });
 
-export const saveUpload = mutation({
-  args: {
-    sessionId: v.string(),
-    storageId: v.id("_storage"),
-    summary: v.optional(v.string()),
-  },
-  handler: async (ctx, { sessionId, storageId, summary }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new ConvexError("Not authenticated");
-    }
-
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_session_id", (q) => q.eq("sessionId", sessionId))
-      .first();
-
-    if (!session) {
-      throw new ConvexError("Session not found");
-    }
-    if (session.userId !== identity.subject) {
-      throw new ConvexError("Session belongs to different user");
-    }
-    // Reject agent sessions — they must be saved via saveUploads
-    if (session.parentSessionId) {
-      throw new ConvexError("Agent sessions must be saved with their parent session. Use saveUploads instead.");
-    }
-
-    // Verify consent using the session's identifiers
-    const userDocId = await upsertUser(ctx, identity);
-    const identifiers = extractIdentifiers(session);
-    await verifyConsent(ctx, userDocId, identifiers, session.lastModified);
-
-    await ctx.db.patch(session._id, {
-      ...(summary && { summary }),
-      upload: {
-        storageId,
-        uploadedAt: Date.now(),
-      },
-    });
-  },
-});
-
-/** Save uploads for a parent session and its agents atomically. */
+/**
+ * Save uploads for a parent session and its agents atomically.
+ * Upserts all session records with full data and links storage blobs.
+ * This is the single point of session record mutation for the upload flow.
+ * Consent is verified once for the parent — agent sessions inherit parent consent.
+ */
 export const saveUploads = mutation({
   args: {
     parentSessionId: v.string(),
+    // Session metadata — used to upsert the parent session record
+    checkoutId: v.string(),
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
+    lastModified: v.optional(v.number()),
+    sessionStartGitCommitHash: v.optional(v.string()),
+    // Upload data for parent + agents
     uploads: v.array(v.object({
       sessionId: v.string(),
       storageId: v.id("_storage"),
       summary: v.optional(v.string()),
+      lineCount: v.number(),
+      parentSessionId: v.optional(v.string()),
     })),
   },
-  handler: async (ctx, { parentSessionId, uploads }) => {
+  handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
     }
 
+    const userDocId = await upsertUser(ctx, identity);
+    const identifiers = extractIdentifiers(args);
+    await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
+
+    // Verify parent session ownership if it already exists
+    const existingParent = await ctx.db
+      .query("sessions")
+      .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))
+      .first();
+    if (existingParent && existingParent.userId !== identity.subject) {
+      throw new ConvexError("Parent session belongs to different user");
+    }
+
     const now = Date.now();
 
-    // Verify consent once using the parent session
-    const parentSession = await ctx.db
-      .query("sessions")
-      .withIndex("by_session_id", (q) => q.eq("sessionId", parentSessionId))
-      .first();
-    if (!parentSession) {
-      throw new ConvexError("Parent session not found");
-    }
-    if (parentSession.userId !== identity.subject) {
-      throw new ConvexError("Session belongs to different user");
-    }
-
-    const userDocId = await upsertUser(ctx, identity);
-    const identifiers = extractIdentifiers(parentSession);
-    await verifyConsent(ctx, userDocId, identifiers, parentSession.lastModified);
-
-    // Save each upload — verify it belongs to this parent
-    for (const upload of uploads) {
-      const session = await ctx.db
-        .query("sessions")
-        .withIndex("by_session_id", (q) => q.eq("sessionId", upload.sessionId))
-        .first();
-
-      if (!session) {
-        throw new ConvexError(`Session ${upload.sessionId} not found`);
-      }
-      if (session.userId !== identity.subject) {
-        throw new ConvexError(`Session ${upload.sessionId} belongs to different user`);
-      }
-      // Must be the parent itself or an agent of this parent
-      if (upload.sessionId !== parentSessionId && session.parentSessionId !== parentSessionId) {
-        throw new ConvexError(`Session ${upload.sessionId} is not an agent of ${parentSessionId}`);
+    for (const upload of args.uploads) {
+      // Each upload must be either the parent itself or an agent of this parent
+      const isParent = upload.sessionId === args.parentSessionId && !upload.parentSessionId;
+      const isAgent = upload.parentSessionId === args.parentSessionId;
+      if (!isParent && !isAgent) {
+        throw new ConvexError(`Session ${upload.sessionId} is not the parent or an agent of ${args.parentSessionId}`);
       }
 
-      await ctx.db.patch(session._id, {
-        ...(upload.summary && { summary: upload.summary }),
+      // Upsert the session record with full data + link storage blob
+      const sessionDocId = await upsertSession(ctx, identity.subject, {
+        sessionId: upload.sessionId,
+        checkoutId: args.checkoutId,
+        directory: args.directory,
+        gitRemote: args.gitRemote,
+        lineCount: upload.lineCount,
+        lastModified: args.lastModified,
+        parentSessionId: upload.parentSessionId,
+        sessionStartGitCommitHash: upload.parentSessionId ? undefined : args.sessionStartGitCommitHash,
+      });
+
+      await ctx.db.patch(sessionDocId, {
+        ...(upload.summary !== undefined && { summary: upload.summary }),
         upload: {
           storageId: upload.storageId,
           uploadedAt: now,

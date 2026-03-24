@@ -1,83 +1,35 @@
-import { readFile } from 'node:fs/promises';
-import { checkAuthStatus } from './auth';
-import { getProjectIdentifiers, matchesProject } from './config';
-import { getConsentStatus, getProjectSharing } from './convex';
-import { parseJsonl, transformEntry } from './extraction';
-import {
-  CONSENT_REVIEW_PERIOD_MS,
-  SESSION_REVIEW_PERIOD_MS,
-} from './session-state';
-import { extractSessionSummary } from './summary';
-import type { KnownEntry } from '@alignment-hive/session-data';
-import type { DiscoveredSession, UploadedEntry, checkSessionEligibility } from './session-state';
+import { computeEligibleAt } from './session-state';
+import type { DiscoveredSession, checkSessionEligibility } from './session-state';
 
 export type DisplayStatus =
   | { type: 'excluded' }
-  | { type: 'uploaded'; agentsPending: boolean }
+  | { type: 'uploaded' }
   | { type: 'ready' }
   | { type: 'snoozed' }
   | { type: 'pending'; remainingHours: number };
 
-/** Resolve the project consent mtime, or null if offline/unauthorized. */
-export async function getProjectConsentMtime(cwd: string): Promise<number | null> {
-  try {
-    const status = await checkAuthStatus(true);
-    if (!status.authenticated) return null;
-    const [consent, allProjects] = await Promise.all([
-      getConsentStatus(),
-      getProjectSharing(),
-    ]);
-    if (!consent?.hasConsent || !consent.sessionSharing) return null;
-    const ids = getProjectIdentifiers(cwd);
-    const projectConsent = matchesProject(allProjects, ids);
-    return projectConsent?.sessionSharing ? projectConsent.latestAt : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Get a summary from the first entries of a session file. */
-export async function getSessionSummary(sessionPath: string): Promise<string> {
-  try {
-    const content = await readFile(sessionPath, 'utf-8');
-    const entries: Array<KnownEntry> = [];
-    let count = 0;
-    for (const rawEntry of parseJsonl(content)) {
-      const { entry } = transformEntry(rawEntry);
-      if (entry) {
-        entries.push(entry as KnownEntry);
-        count++;
-        if (count >= 20) break;
-      }
-    }
-    return extractSessionSummary(entries) || '';
-  } catch {
-    return '';
-  }
+export interface DisplayContext {
+  consentMtime: number | null;
+  snoozeUntil: number | null;
+  migrationTimestamp?: number | null;
 }
 
 /** Map eligibility result to a structured display status. */
 export function getDisplayStatus(
   result: ReturnType<typeof checkSessionEligibility>,
   session: DiscoveredSession,
-  consentMtime: number | null,
-  snoozeUntil: number | null,
-  opts?: { uploadedEntry?: UploadedEntry; agentCount?: number },
+  ctx: DisplayContext,
 ): DisplayStatus {
+  const { consentMtime, snoozeUntil, migrationTimestamp } = ctx;
   if (!result.eligible) {
     switch (result.reason) {
       case 'excluded':
         return { type: 'excluded' };
-      case 'already uploaded': {
-        const agentsPending = !!(opts?.uploadedEntry && !opts.uploadedEntry.agentSessionIds && opts.agentCount && opts.agentCount > 0);
-        return { type: 'uploaded', agentsPending };
-      }
+      case 'already uploaded':
+        return { type: 'uploaded' };
       case 'pending review':
       case 'consent review period': {
-        const mtimeMs = session.mtime.getTime();
-        const sessionEligibleAt = mtimeMs + SESSION_REVIEW_PERIOD_MS;
-        const consentEligibleAt = (consentMtime ?? 0) + CONSENT_REVIEW_PERIOD_MS;
-        const eligibleAt = Math.max(sessionEligibleAt, consentEligibleAt);
+        const eligibleAt = computeEligibleAt(session.mtime.getTime(), consentMtime ?? 0, migrationTimestamp);
         const remainingMs = eligibleAt - Date.now();
         const remainingHours = Math.max(0, Math.ceil(remainingMs / (60 * 60 * 1000)));
         return { type: 'pending', remainingHours };
@@ -93,9 +45,19 @@ export function getDisplayStatus(
 export function formatDisplayStatus(status: DisplayStatus): string {
   switch (status.type) {
     case 'excluded': return 'excluded';
-    case 'uploaded': return status.agentsPending ? 'uploaded (agents pending)' : 'uploaded';
+    case 'uploaded': return 'uploaded';
     case 'ready': return 'ready';
     case 'snoozed': return 'snoozed';
     case 'pending': return `pending (${status.remainingHours}h)`;
+  }
+}
+
+/** Map display status type to a CLI color name. */
+export function getDisplayStatusColor(status: DisplayStatus): 'green' | 'blue' | 'yellow' | 'default' {
+  switch (status.type) {
+    case 'ready': return 'green';
+    case 'uploaded': return 'blue';
+    case 'pending': case 'snoozed': return 'yellow';
+    default: return 'default';
   }
 }

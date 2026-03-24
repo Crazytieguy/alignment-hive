@@ -202,30 +202,6 @@ export async function readExtractedSession(extractedPath: string): Promise<ReadS
 
 export const isSessionError = isErrorResult<{ meta: SessionMeta; entries: Array<KnownEntry> }>;
 
-export type MarkUploadedResult = { success: true } | { success: false; error?: string };
-
-export async function markSessionUploaded(sessionPath: string): Promise<MarkUploadedResult> {
-  try {
-    const content = await readFile(sessionPath, 'utf-8');
-    const newlineIndex = content.indexOf('\n');
-    if (newlineIndex === -1) return { success: false };
-
-    const firstLine = content.slice(0, newlineIndex);
-    const parsed = SessionMetaSchema.safeParse(JSON.parse(firstLine));
-    if (!parsed.success) {
-      return { success: false, error: errors.schemaError(sessionPath, parsed.error.message) };
-    }
-
-    const meta = { ...parsed.data, uploadedAt: new Date().toISOString() };
-    const newContent = JSON.stringify(meta) + content.slice(newlineIndex);
-
-    await writeFile(sessionPath, newContent);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: errors.markUploadedFailed(err instanceof Error ? err.message : String(err)) };
-  }
-}
-
 export function getHiveMindSessionsDir(projectCwd: string): string {
   return join(projectCwd, '.claude', 'hive-mind', 'sessions');
 }
@@ -266,12 +242,13 @@ export async function findRawSessions(rawDir: string) {
   const files = await readdir(rawDir);
   const sessions: Array<{ path: string; agentId?: string; parentSessionId?: string }> = [];
 
+  // Collect flat agent files that need parentSessionId extraction
+  const flatAgentFiles: Array<{ path: string; agentId: string }> = [];
+
   for (const f of files) {
     if (f.endsWith('.jsonl')) {
       if (f.startsWith('agent-')) {
-        const agentPath = join(rawDir, f);
-        const parentSessionId = await extractParentSessionId(agentPath);
-        sessions.push({ path: agentPath, agentId: f.replace('agent-', '').replace('.jsonl', ''), parentSessionId });
+        flatAgentFiles.push({ path: join(rawDir, f), agentId: basename(f, '.jsonl').slice('agent-'.length) });
       } else {
         sessions.push({ path: join(rawDir, f) });
       }
@@ -285,7 +262,7 @@ export async function findRawSessions(rawDir: string) {
         if (sf.endsWith('.jsonl') && sf.startsWith('agent-')) {
           sessions.push({
             path: join(subagentsDir, sf),
-            agentId: sf.replace('agent-', '').replace('.jsonl', ''),
+            agentId: basename(sf, '.jsonl').slice('agent-'.length),
             parentSessionId: f,
           });
         }
@@ -294,6 +271,16 @@ export async function findRawSessions(rawDir: string) {
       // Subagents directory doesn't exist - continue
     }
   }
+
+  // Extract parentSessionIds in parallel for flat agent files
+  const flatResults = await Promise.all(
+    flatAgentFiles.map(async ({ path, agentId }) => {
+      const parentSessionId = await extractParentSessionId(path);
+      return { path, agentId, parentSessionId };
+    }),
+  );
+  sessions.push(...flatResults);
+
   return sessions;
 }
 

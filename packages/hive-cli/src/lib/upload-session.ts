@@ -1,13 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { computeConsentWindows, isInConsentWindow } from '@alignment-hive/session-data';
+import { parseCwdFromLine } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads } from './convex';
 import { parseJsonl, transformEntry } from './extraction';
 import { sanitizeDeep } from './sanitize';
-import { isSessionUploaded, recordUploadedSessions } from './session-state';
+import { loadSessionState, recordUploadedSessions, runAgentMigration } from './session-state';
 import { extractSessionSummary } from './summary';
 import type { KnownEntry } from '@alignment-hive/session-data';
-import type { DiscoveredSession, UploadedEntry } from './session-state';
+import type { DiscoveredSession } from './session-state';
 
 async function readCommitHash(stateDir: string, sessionId: string): Promise<string | undefined> {
   try {
@@ -18,8 +19,32 @@ async function readCommitHash(stateDir: string, sessionId: string): Promise<stri
   }
 }
 
-/** Read, parse, and sanitize a session file. Shared by both the review UI and the upload flow. */
+/** Read, parse, and sanitize a session file. Also extracts cwds for worktree agent discovery. */
 export async function readAndSanitizeSession(sessionPath: string) {
+  const rawContent = await readFile(sessionPath, 'utf-8');
+
+  const entries: Array<KnownEntry> = [];
+  const cwds = new Set<string>();
+  for (const rawEntry of parseJsonl(rawContent)) {
+    const { entry } = transformEntry(rawEntry);
+    if (entry) {
+      entries.push(entry as KnownEntry);
+      if ('cwd' in entry && typeof entry.cwd === 'string' && entry.cwd.startsWith('/')) {
+        cwds.add(entry.cwd);
+      }
+    }
+  }
+
+  const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
+  const rawSummary = extractSessionSummary(entries);
+  const summary = rawSummary ? sanitizeDeep(rawSummary) : undefined;
+  const hasAssistant = entries.some((e) => e.type === 'assistant');
+
+  return { sanitizedEntries, summary, hasAssistant, cwds };
+}
+
+/** Parse all entries and extract a sanitized summary. Same logic as readAndSanitizeSession. */
+export async function readSessionSummary(sessionPath: string): Promise<string> {
   const rawContent = await readFile(sessionPath, 'utf-8');
 
   const entries: Array<KnownEntry> = [];
@@ -28,11 +53,29 @@ export async function readAndSanitizeSession(sessionPath: string) {
     if (entry) entries.push(entry as KnownEntry);
   }
 
-  const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
-  const summary = extractSessionSummary(entries);
-  const hasAssistant = entries.some((e) => e.type === 'assistant');
+  const rawSummary = extractSessionSummary(entries);
+  return rawSummary ? sanitizeDeep(rawSummary) : '';
+}
 
-  return { sanitizedEntries, summary, hasAssistant };
+/** Extract cwds from a session file without full parsing or sanitization. For migration only. */
+async function readSessionCwds(sessionPath: string) {
+  const rawContent = await readFile(sessionPath, 'utf-8');
+  const cwds = new Set<string>();
+  for (const line of rawContent.split('\n')) {
+    const cwd = parseCwdFromLine(line);
+    if (cwd) cwds.add(cwd);
+  }
+  return { cwds };
+}
+
+/** Load session state and run one-time agent migration if needed. */
+export async function loadSessionStateWithAgentMigration(stateDir: string, transcriptsDirs: Array<string>) {
+  const state = await loadSessionState(stateDir, transcriptsDirs);
+  const migrationTimestamp = await runAgentMigration(
+    state, stateDir, transcriptsDirs,
+    readSessionCwds,
+  );
+  return { ...state, migrationTimestamp };
 }
 
 /** Build NDJSON upload content from sanitized entries. */
@@ -100,70 +143,52 @@ export function isInConsentWindows(mtime: number, windows: ConsentWindows | null
   return isInConsentWindow(mtime, windows.global) && isInConsentWindow(mtime, windows.project);
 }
 
+export type SessionReadResult = Awaited<ReturnType<typeof readAndSanitizeSession>>;
+
 export interface UploadParentOpts {
   parent: DiscoveredSession;
+  parentRead: SessionReadResult;
   agents: Array<DiscoveredSession>;
   checkoutId: string;
   ids: { directory: string; gitRemote?: string };
   stateDir: string;
-  uploadedMap: Map<string, UploadedEntry>;
 }
 
 /**
  * Upload a parent session and all its agents using the bulk backend endpoints.
  * Shared by upload-send.ts and review-router.ts.
+ *
+ * Consent model: agents inherit their parent's consent. Consent is verified once
+ * for the parent session (by the backend in generateUploadUrls/saveUploads).
+ * Agents are not checked individually — they are part of the parent's session.
  */
 export async function uploadParentWithAgents(opts: UploadParentOpts) {
-  const { parent, agents, checkoutId, ids, stateDir, uploadedMap } = opts;
-  // Filter agents: skip already-uploaded ones. Agents inherit parent's consent — no separate consent check.
-  const agentsToUpload: Array<DiscoveredSession> = [];
-  const alreadyUploadedAgentIds: Array<string> = [];
+  const { parent, parentRead, agents, checkoutId, ids, stateDir } = opts;
 
-  for (const agent of agents) {
-    if (isSessionUploaded(agent, uploadedMap)) {
-      alreadyUploadedAgentIds.push(agent.sessionId);
-    } else {
-      agentsToUpload.push(agent);
-    }
+  // Parent sessions must have assistant content
+  if (!parentRead.hasAssistant) {
+    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'No assistant messages' } as const;
   }
 
   const rawMtime = parent.mtime.toISOString();
   const lastModified = new Date(rawMtime).getTime();
   const commitHash = await readCommitHash(stateDir, parent.sessionId);
+  const validLastModified = isFinite(lastModified) ? lastModified : undefined;
 
-  // 1. Get upload URLs for parent + agents in one round trip
+  // 1. Get upload URLs for parent + agents in one round trip (consent check only, no record mutations)
   const urls = await generateUploadUrls(
     parent.sessionId,
-    agentsToUpload.map((a) => a.sessionId),
-    {
-      checkoutId,
-      directory: ids.directory,
-      gitRemote: ids.gitRemote,
-      lineCount: 0, // will be set by content
-      lastModified: isFinite(lastModified) ? lastModified : undefined,
-      sessionStartGitCommitHash: commitHash,
-    },
+    agents.map((a) => a.sessionId),
+    { directory: ids.directory, gitRemote: ids.gitRemote, lastModified: validLastModified },
   );
   if (!urls) {
     return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'Failed to get upload URLs' } as const;
   }
 
-  // 2. Prepare and upload parent
+  // 2. Upload parent
   const parentUrl = urls[parent.sessionId];
   if (!parentUrl) {
     return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'No URL for parent session' } as const;
-  }
-
-  let parentRead;
-  try {
-    parentRead = await readAndSanitizeSession(parent.path);
-  } catch {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'Failed to read parent session' } as const;
-  }
-
-  // Parent sessions must have assistant content
-  if (!parentRead.hasAssistant) {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'No assistant messages' } as const;
   }
 
   const parentContent = buildUploadContent(parentRead.sanitizedEntries, parent.sessionId, checkoutId, rawMtime);
@@ -174,58 +199,59 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
     return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: err instanceof Error ? err.message : 'Upload failed' } as const;
   }
 
-  // 3. Upload agents in parallel
-  const uploads: Array<{ sessionId: string; storageId: string; summary?: string }> = [
-    { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary },
+  // 3. Upload agents in batches — all-or-nothing (if any fail, we don't save and retry next time)
+  const AGENT_UPLOAD_BATCH = 10;
+  const uploads: Array<{ sessionId: string; storageId: string; summary?: string; lineCount: number; parentSessionId?: string }> = [
+    { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary, lineCount: parentRead.sanitizedEntries.length },
   ];
 
-  let agentSuccesses = 0;
   let agentFailures = 0;
+  for (let i = 0; i < agents.length; i += AGENT_UPLOAD_BATCH) {
+    const batch = agents.slice(i, i + AGENT_UPLOAD_BATCH);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (agent) => {
+        const agentUrl = urls[agent.sessionId];
+        if (!agentUrl) throw new Error('No URL');
 
-  const agentResults = await Promise.allSettled(
-    agentsToUpload.map(async (agent) => {
-      const agentUrl = urls[agent.sessionId];
-      if (!agentUrl) throw new Error('No URL');
+        const agentMtime = agent.mtime.toISOString();
+        const agentRead = await readAndSanitizeSession(agent.path);
+        const agentContent = buildUploadContent(agentRead.sanitizedEntries, agent.sessionId, checkoutId, agentMtime, parent.sessionId);
+        const storageId = await uploadToStorage(agentUrl, agentContent);
+        return { sessionId: agent.sessionId, storageId, summary: agentRead.summary, lineCount: agentRead.sanitizedEntries.length, parentSessionId: parent.sessionId };
+      }),
+    );
 
-      const agentMtime = agent.mtime.toISOString();
-      // Agent files without assistant content are valid (interrupted agents)
-      const agentRead = await readAndSanitizeSession(agent.path);
-      const agentContent = buildUploadContent(agentRead.sanitizedEntries, agent.sessionId, checkoutId, agentMtime, parent.sessionId);
-      const storageId = await uploadToStorage(agentUrl, agentContent);
-      return { sessionId: agent.sessionId, storageId, summary: agentRead.summary };
-    }),
-  );
+    for (const r of batchResults) {
+      if (r.status === 'rejected') agentFailures++;
+      else uploads.push(r.value);
+    }
 
-  for (const r of agentResults) {
-    if (r.status === 'fulfilled') {
-      uploads.push(r.value);
-      agentSuccesses++;
-    } else {
-      agentFailures++;
+    if (agentFailures > 0) {
+      return { parentSuccess: false, agentSuccesses: 0, agentFailures, error: `${agentFailures} agent upload(s) failed` } as const;
     }
   }
 
-  // 4. Save all uploads atomically
-  const saved = await saveUploads(parent.sessionId, uploads);
+  // 4. Save all uploads atomically — upserts session records + links storage blobs
+  const saved = await saveUploads(
+    parent.sessionId,
+    {
+      checkoutId,
+      directory: ids.directory,
+      gitRemote: ids.gitRemote,
+      lastModified: validLastModified,
+      sessionStartGitCommitHash: commitHash,
+    },
+    uploads,
+  );
   if (!saved) {
     return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'Failed to save upload metadata' } as const;
   }
 
-  // 5. Record in local uploaded-sessions
-  const agentMtimeMap = new Map(agentsToUpload.map((a) => [a.sessionId, a.mtime.toISOString()]));
-  const uploadedAgentUploads = uploads.filter((u) => u.sessionId !== parent.sessionId);
-  const allUploadedAgentIds = [
-    ...alreadyUploadedAgentIds,
-    ...uploadedAgentUploads.map((u) => u.sessionId),
-  ];
-  const records = [
-    ...uploadedAgentUploads.map((u) => ({
-      sessionId: u.sessionId,
-      rawMtime: agentMtimeMap.get(u.sessionId) ?? '',
-    })),
-    { sessionId: parent.sessionId, rawMtime, agentSessionIds: allUploadedAgentIds },
-  ];
-  await recordUploadedSessions(stateDir, records);
+  // 5. Record in local uploaded-sessions — parent only, with all agent IDs
+  const allAgentIds = agents.map((a) => a.sessionId);
+  await recordUploadedSessions(stateDir, [
+    { sessionId: parent.sessionId, rawMtime, agentSessionIds: allAgentIds },
+  ]);
 
-  return { parentSuccess: true, agentSuccesses, agentFailures } as const;
+  return { parentSuccess: true, agentSuccesses: agents.length, agentFailures: 0 } as const;
 }

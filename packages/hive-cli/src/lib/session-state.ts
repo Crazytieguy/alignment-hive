@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs';
 import { appendFile, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { getClaudeProjectDir, parseCwdFromLine } from './config';
+import { getClaudeProjectDir } from './config';
 import { findRawSessions } from './extraction';
 
 const UPLOADED_SESSIONS_FILE = 'uploaded-sessions';
@@ -10,6 +10,18 @@ const EXCLUDED_SESSIONS_FILE = 'excluded-sessions';
 
 export const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
 export const CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
+
+/** Compute when a session becomes eligible for upload, given all review-period timestamps. */
+export function computeEligibleAt(
+  mtimeMs: number,
+  consentMtime: number,
+  migrationTimestamp?: number | null,
+): number {
+  const sessionEligibleAt = mtimeMs + SESSION_REVIEW_PERIOD_MS;
+  const consentEligibleAt = consentMtime + CONSENT_REVIEW_PERIOD_MS;
+  const migrationEligibleAt = migrationTimestamp ? migrationTimestamp + SESSION_REVIEW_PERIOD_MS : 0;
+  return Math.max(sessionEligibleAt, consentEligibleAt, migrationEligibleAt);
+}
 
 export interface UploadedEntry {
   sessionId: string;
@@ -59,7 +71,8 @@ export async function discoverSessions(
   for (const rawSessions of dirResults) {
     for (const s of rawSessions) {
       const sessionId = basename(s.path, '.jsonl');
-      // Agent files always have assistant content — skip the file scan for them
+      // Skip hasAssistantContent check for agent files — blank session filtering
+      // only applies to abandoned parent sessions, not agents
       if (s.agentId) {
         promises.push(
           stat(s.path)
@@ -117,13 +130,18 @@ async function loadExcludedSessions(stateDir: string): Promise<Set<string>> {
 
 export type IneligibleReason = 'excluded' | 'already uploaded' | 'pending review' | 'consent review period';
 
+export interface EligibilityContext {
+  uploadedMap: Map<string, UploadedEntry>;
+  excludedSet: Set<string>;
+  consentMtime: number;
+  migrationTimestamp?: number | null;
+}
+
 export function checkSessionEligibility(
   session: DiscoveredSession,
-  uploadedMap: Map<string, UploadedEntry>,
-  excludedSet: Set<string>,
-  consentMtime: number,
-  migrationTimestamp?: number | null,
+  ctx: EligibilityContext,
 ): { eligible: true } | { eligible: false; reason: IneligibleReason } {
+  const { uploadedMap, excludedSet, consentMtime, migrationTimestamp } = ctx;
   if (excludedSet.has(session.sessionId)) {
     return { eligible: false, reason: 'excluded' };
   }
@@ -134,9 +152,15 @@ export function checkSessionEligibility(
       // Fully uploaded with agent tracking — done
       return { eligible: false, reason: 'already uploaded' };
     }
-    // Legacy entry: uploaded without agent tracking. Re-eligible after migration review period.
+    // Legacy entry: uploaded without agent tracking.
+    // If migration hasn't run yet, treat as already uploaded (safe default).
+    // Once migration runs, it either marks agentSessionIds: [] (stays uploaded)
+    // or writes a migration timestamp (enters review period for re-upload with agents).
+    if (migrationTimestamp == null) {
+      return { eligible: false, reason: 'already uploaded' };
+    }
     const now = Date.now();
-    if (migrationTimestamp != null && now < migrationTimestamp + SESSION_REVIEW_PERIOD_MS) {
+    if (now < migrationTimestamp + SESSION_REVIEW_PERIOD_MS) {
       return { eligible: false, reason: 'pending review' };
     }
     return { eligible: true };
@@ -176,7 +200,7 @@ export async function recordUploadedSessions(
     sessionId: s.sessionId,
     rawMtime: s.rawMtime,
     uploadedAt: now,
-    ...(s.agentSessionIds && { agentSessionIds: s.agentSessionIds }),
+    ...(s.agentSessionIds !== undefined && { agentSessionIds: s.agentSessionIds }),
   } satisfies UploadedEntry) + '\n');
   await appendFile(join(stateDir, UPLOADED_SESSIONS_FILE), lines.join(''));
 }
@@ -235,10 +259,11 @@ export async function findAgentsForParent(
   parent: DiscoveredSession,
   agentsByParent: Map<string, Array<DiscoveredSession>>,
   transcriptsDirs: Array<string>,
+  cwds: Set<string>,
 ): Promise<Array<DiscoveredSession>> {
   const discovered = agentsByParent.get(parent.sessionId) ?? [];
   const knownDirs = new Set(transcriptsDirs);
-  const worktreeAgents = await findWorktreeAgents(parent.path, parent.sessionId, knownDirs);
+  const worktreeAgents = await findWorktreeAgents(parent.sessionId, knownDirs, cwds);
 
   // Dedupe worktree agents against discovered ones
   const seen = new Set(discovered.map((a) => a.sessionId));
@@ -274,58 +299,116 @@ export async function writeAgentMigrationTs(stateDir: string): Promise<number> {
 }
 
 /**
- * Find agent sessions spawned in worktrees by scanning the parent session's
- * cwd entries and checking corresponding Claude project directories.
+ * One-time migration for legacy uploaded sessions (no agentSessionIds field).
+ * Reads each legacy session to discover agents via worktree scanning.
+ * Sessions with no agents are immediately marked as fully tracked (agentSessionIds: []).
+ * Sessions with agents get a migration timestamp so they enter the 24h review period.
+ * Returns the effective migration timestamp for use in eligibility checks.
+ *
+ * NOTE: Mutates state.uploadedMap in place so subsequent eligibility checks see the updated entries.
  */
-export async function findWorktreeAgents(
-  parentSessionPath: string,
-  parentSessionId: string,
-  knownDirs: Set<string>,
-): Promise<Array<DiscoveredSession>> {
-  const cwds = new Set<string>();
-  const stream = createReadStream(parentSessionPath, { encoding: 'utf-8' });
-  const rl = createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
-      const cwd = parseCwdFromLine(line);
-      if (cwd) cwds.add(cwd);
+export async function runAgentMigration(
+  state: SessionState,
+  stateDir: string,
+  transcriptsDirs: Array<string>,
+  readSession: (path: string) => Promise<{ cwds: Set<string> }>,
+): Promise<number | null> {
+  if (state.migrationTimestamp !== null) return state.migrationTimestamp;
+
+  const legacySessions = state.parentSessions.filter((s) => {
+    const entry = state.uploadedMap.get(s.sessionId);
+    return entry && !entry.agentSessionIds && !state.excludedSet.has(s.sessionId);
+  });
+
+  if (legacySessions.length === 0) return null;
+
+  const MIGRATION_CONCURRENCY = 10;
+  const noAgentRecords: Array<{ sessionId: string; rawMtime: string; agentSessionIds: Array<string> }> = [];
+  let hasSessionsWithAgents = false;
+
+  for (let i = 0; i < legacySessions.length; i += MIGRATION_CONCURRENCY) {
+    const batch = legacySessions.slice(i, i + MIGRATION_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(async (session) => {
+        const uploaded = state.uploadedMap.get(session.sessionId)!;
+        const { cwds } = await readSession(session.path);
+        const agents = await findAgentsForParent(session, state.agentsByParent, transcriptsDirs, cwds);
+        return { session, uploaded, hasAgents: agents.length > 0 };
+      }),
+    );
+
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        hasSessionsWithAgents = true; // Conservative: treat errors as having agents
+      } else if (r.value.hasAgents) {
+        hasSessionsWithAgents = true;
+      } else {
+        noAgentRecords.push({
+          sessionId: r.value.session.sessionId,
+          rawMtime: r.value.uploaded.rawMtime,
+          agentSessionIds: [],
+        });
+      }
     }
-  } finally {
-    rl.close();
-    stream.destroy();
   }
 
-  const agents: Array<DiscoveredSession> = [];
+  if (noAgentRecords.length > 0) {
+    await recordUploadedSessions(stateDir, noAgentRecords);
+    for (const r of noAgentRecords) {
+      state.uploadedMap.set(r.sessionId, {
+        sessionId: r.sessionId, rawMtime: r.rawMtime,
+        uploadedAt: new Date().toISOString(), agentSessionIds: r.agentSessionIds,
+      });
+    }
+  }
+
+  if (hasSessionsWithAgents) {
+    return writeAgentMigrationTs(stateDir);
+  }
+
+  return null;
+}
+
+/**
+ * Find agent sessions spawned in worktrees by checking Claude project
+ * directories corresponding to the given cwds.
+ */
+export async function findWorktreeAgents(
+  parentSessionId: string,
+  knownDirs: Set<string>,
+  cwds: Set<string>,
+): Promise<Array<DiscoveredSession>> {
+  const promises: Array<Promise<Array<DiscoveredSession>>> = [];
+
   for (const cwd of cwds) {
     const projectDir = getClaudeProjectDir(cwd);
     if (knownDirs.has(projectDir)) continue;
 
     const subagentsDir = join(projectDir, parentSessionId, 'subagents');
-    let files: Array<string>;
-    try {
-      files = await readdir(subagentsDir);
-    } catch {
-      continue;
-    }
-
-    for (const f of files) {
-      if (!f.endsWith('.jsonl') || !f.startsWith('agent-')) continue;
-      const agentPath = join(subagentsDir, f);
-      try {
-        const fileStat = await stat(agentPath);
-        agents.push({
-          sessionId: basename(f, '.jsonl'),
-          path: agentPath,
-          mtime: fileStat.mtime,
-          agentId: f.replace('agent-', '').replace('.jsonl', ''),
-          parentSessionId,
-        });
-      } catch {
-        // skip unreadable files
-      }
-    }
+    promises.push(
+      readdir(subagentsDir)
+        .then((files) =>
+          Promise.all(
+            files
+              .filter((f) => f.endsWith('.jsonl') && f.startsWith('agent-'))
+              .map(async (f) => {
+                const agentPath = join(subagentsDir, f);
+                const fileStat = await stat(agentPath);
+                const sessionId = basename(f, '.jsonl');
+                return {
+                  sessionId,
+                  path: agentPath,
+                  mtime: fileStat.mtime,
+                  agentId: sessionId.slice('agent-'.length),
+                  parentSessionId,
+                } satisfies DiscoveredSession;
+              }),
+          ),
+        )
+        .catch(() => [] as Array<DiscoveredSession>),
+    );
   }
 
-  return agents;
+  return (await Promise.all(promises)).flat();
 }
 

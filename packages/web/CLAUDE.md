@@ -36,7 +36,7 @@ Defined in `packages/session-data/src/consent-windows.ts` (shared between CLI an
 
 ### Child sessions
 
-Child (agent) sessions inherit their parent's consent visibility. They are never shown independently in session lists. When viewing a child session directly, the parent's consent is checked.
+Child (agent) sessions inherit their parent's consent — they are never checked individually. See `uploadParentWithAgents` (CLI) and `generateUploadUrls`/`saveUploads` (backend) for the implementation and rationale.
 
 ### Rules for modifying this code
 
