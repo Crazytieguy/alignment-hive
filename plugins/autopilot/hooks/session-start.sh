@@ -101,6 +101,20 @@ if [ "$sandbox" = "true" ]; then
 }
 TSCONFIG
   fi
+  if [ ! -f "$SANDBOX_DIR/deno.d.ts" ]; then
+    _tmp="$SANDBOX_DIR/deno.d.ts.tmp"
+    if command -v deno >/dev/null 2>&1; then
+      deno types > "$_tmp" 2>/dev/null && mv "$_tmp" "$SANDBOX_DIR/deno.d.ts" || rm -f "$_tmp"
+    elif [ -x "$HOME/.deno/bin/deno" ]; then
+      "$HOME/.deno/bin/deno" types > "$_tmp" 2>/dev/null && mv "$_tmp" "$SANDBOX_DIR/deno.d.ts" || rm -f "$_tmp"
+    fi
+  fi
+  if [ ! -f "$SANDBOX_DIR/globals.d.ts" ]; then
+    cat > "$SANDBOX_DIR/globals.d.ts" << 'DTS'
+declare module "npm:*";
+declare module "jsr:*";
+DTS
+  fi
 
   # Emit additionalContext if deno is available
   if command -v deno >/dev/null 2>&1 || [ -x "$HOME/.deno/bin/deno" ]; then

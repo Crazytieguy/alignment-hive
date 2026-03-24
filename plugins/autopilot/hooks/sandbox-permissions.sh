@@ -67,15 +67,21 @@ if [ -n "$session_id" ] && [ "$target_path" = "$sandbox_script" ]; then
 fi
 if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
   if [[ "$target_path" == "$sandbox_dir"/* ]] || [[ "$target_path" == */.claude/deno-sandbox/* ]]; then
-    "$JQ" -n --arg script "$sandbox_script" '{
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: {
-          behavior: "deny",
-          message: ("Write to your sandbox script file instead: " + $script)
-        }
-      }
-    }'
+    # Only block writes to script files (.ts), not config/declaration files (.d.ts, .json, etc.)
+    case "$target_path" in
+      *.d.ts) ;;
+      *.ts)
+        "$JQ" -n --arg script "$sandbox_script" '{
+          hookSpecificOutput: {
+            hookEventName: "PermissionRequest",
+            decision: {
+              behavior: "deny",
+              message: ("Write to your sandbox script file instead: " + $script)
+            }
+          }
+        }'
+        ;;
+    esac
   fi
   exit 0
 fi
