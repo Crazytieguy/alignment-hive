@@ -236,49 +236,35 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
   --threshold 0.85
 ```
 
-### Phase 4: Download and Convert PDFs
+### Phases 4-6: Download, Convert, and Summarize (Pipelined)
 
-Create the papers directory and run download/conversion. **PDF-to-markdown conversion is parallelized** across multiple threads for speed:
+These three stages run as a **pipeline** for maximum throughput. Papers flow through download → markdown conversion → summarization incrementally, rather than waiting for all papers to finish one stage before starting the next.
 
-```bash
-mkdir -p <output_dir>/papers
+#### Step 1: Start the pipeline in the background
 
-uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/download_pdfs.py \
-  --input <output_dir>/deduplicated.json \
-  --output-dir <output_dir>/papers/
-
-uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/pdf_to_markdown.py \
-  --input-dir <output_dir>/papers/ \
-  --output-dir <output_dir>/papers/ \
-  --ascii-width 60 \
-  --workers 8
-```
-
-The `--workers` flag controls parallelism (default: 8 threads). Increase for faster conversion on machines with more cores.
-
-### Phase 5: Process LessWrong/AF Posts
-
-Convert LessWrong and Alignment Forum posts to markdown:
+Create directories and start the pipeline script. It downloads PDFs, converts them to markdown, and processes LW/AF posts—all incrementally. Each completed markdown file path is printed to stdout as it becomes ready.
 
 ```bash
-uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/html_to_markdown.py \
+mkdir -p <output_dir>/papers <output_dir>/summaries
+
+uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/process_papers_pipeline.py \
   --input <output_dir>/deduplicated.json \
   --output-dir <output_dir>/papers/
 ```
 
-### Phase 6: Parallel Summarization
+Run this command **in the background** using the Bash tool's `run_in_background` parameter.
 
-Create the summaries directory:
+#### Step 2: Summarize papers as they become ready
 
-```bash
-mkdir -p <output_dir>/summaries
-```
+While the pipeline runs, repeatedly check for new markdown files that need summarization. **Loop until the pipeline finishes and all papers are summarized:**
 
-List all markdown files in `<output_dir>/papers/`. For each paper/post that doesn't already have a summary in `<output_dir>/summaries/`, spawn a summarizer subagent.
+1. List markdown files in `<output_dir>/papers/` that do NOT yet have a corresponding summary in `<output_dir>/summaries/`
+2. For any unsummarized files found, spawn up to 5 summarizer agents simultaneously using the Task tool (one call per paper, all in the same message)
+3. Wait for the current batch to complete
+4. Check the pipeline's background task status—if it's still running, wait ~15 seconds and go back to step 1
+5. Once the pipeline finishes, do one final check for any remaining unsummarized papers and process them
 
-**Spawn summarizer agents in parallel batches of 5.** For each batch:
-
-Use the Task tool to spawn 5 summarizer agents simultaneously (in a single message with multiple Task tool calls). Each agent should receive:
+Each summarizer agent should receive:
 - The paper markdown path
 - The original proposal content (for relevance assessment)
 - The output summary path
@@ -295,7 +281,7 @@ Write the summary to: <output_dir>/summaries/<paper_id>.md
 Follow the summarizer agent instructions for output format.
 ```
 
-Wait for each batch to complete before spawning the next batch. Continue until all papers are summarized.
+This pipelined approach means summarization starts within seconds of the first paper being ready, rather than waiting for all downloads and conversions to finish.
 
 ### Phase 7: Generate Catalog
 
@@ -385,13 +371,14 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
   --threshold 0.85
 ```
 
-### Phase 12: Download and Summarize New Papers
+### Phase 12: Download, Convert, and Summarize New Papers (Pipelined)
 
 1. Compare `deduplicated_merged.json` to original `deduplicated.json` to identify NEW papers
-2. Download PDFs for new papers only
-3. Convert new PDFs to markdown
-4. Process any new LessWrong/AF posts with `html_to_markdown.py`
-5. Spawn summarizer agents for new papers (in batches of 5)
+2. Write the new papers to a temporary JSON file (e.g., `<output_dir>/new_papers_stage2.json`)
+3. Run the pipeline + summarization loop from Phases 4-6 on the new papers only:
+   - Start `process_papers_pipeline.py` in the background with `--input <output_dir>/new_papers_stage2.json`
+   - Spawn summarizer agents for papers as they become ready
+   - Continue until all new papers are processed and summarized
 
 ### Phase 13: Evaluate and Decide Next Steps
 

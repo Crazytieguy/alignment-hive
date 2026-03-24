@@ -26,9 +26,12 @@ from pathlib import Path
 
 def load_api_key() -> str | None:
     """Load Exa API key from environment or .env file."""
-    key = os.environ.get("EXA_API_KEY")
-    if key:
-        return key
+    env_var_names = ["EXA_API_KEY", "EXA_SEARCH", "MATS_EXA_SEARCH"]
+
+    for name in env_var_names:
+        key = os.environ.get(name)
+        if key:
+            return key
 
     # Try loading from .env files
     env_paths = [
@@ -42,8 +45,9 @@ def load_api_key() -> str | None:
             with open(env_path) as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("EXA_API_KEY="):
-                        return line.split("=", 1)[1].strip().strip('"\'')
+                    for name in env_var_names:
+                        if line.startswith(f"{name}="):
+                            return line.split("=", 1)[1].strip().strip('"\'')
 
     return None
 
@@ -54,6 +58,7 @@ def exa_search(query: str, api_key: str, num_results: int = 10, domains: list[st
     headers = {
         "Content-Type": "application/json",
         "x-api-key": api_key,
+        "User-Agent": "alignment-hive-lit-review/1.0",
     }
 
     data = {
@@ -110,10 +115,11 @@ def main():
     # Load API key
     api_key = load_api_key()
     if not api_key:
-        print("Error: EXA_API_KEY not found.", file=sys.stderr)
+        print("Error: Exa API key not found.", file=sys.stderr)
+        print("Checked env vars: EXA_API_KEY, EXA_SEARCH, MATS_EXA_SEARCH", file=sys.stderr)
         print("Get a free API key at https://exa.ai and set it as:", file=sys.stderr)
         print("  export EXA_API_KEY=your_key_here", file=sys.stderr)
-        print("Or create a .env file with: EXA_API_KEY=your_key_here", file=sys.stderr)
+        print("Or add to a .env file: EXA_API_KEY=your_key_here", file=sys.stderr)
         sys.exit(1)
 
     # Load queries
