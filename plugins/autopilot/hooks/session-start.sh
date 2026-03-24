@@ -141,6 +141,8 @@ deno-sandbox-grant --allow-write=. --allow-net=api.example.com
 Available: \`--allow-{read,write,run,net,env,import}=<scope>\`. Follow the principle of least privilege — request only the most specific permissions needed. Read and write are separate permissions — granting write to a path does not grant read.
 
 Request any necessary permissions as early as possible. The user is typically available to review grants at the start of a session and will want you to work without interruption afterward.
+
+Generated Deno API types are at \`$SANDBOX_DIR/deno.d.ts\`.
 CONTEXT
   fi
 fi
