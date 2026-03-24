@@ -100,7 +100,7 @@ def main():
     converted = 0
     for paper in papers:
         source = paper.get("source", "").lower()
-        if source not in ("lesswrong", "alignment_forum", "alignmentforum"):
+        if source not in ("lesswrong", "alignment_forum", "alignmentforum", "ea_forum"):
             continue
 
         if not paper.get("html_content"):

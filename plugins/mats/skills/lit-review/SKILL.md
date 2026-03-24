@@ -5,7 +5,7 @@ description: Generate comprehensive literature review from research proposal. Us
 
 # Literature Review Generator
 
-Generate a comprehensive literature review for AI safety research. This skill walks you through the process step by step.
+Generate a comprehensive literature review on any research topic. This skill walks you through the process step by step. While it includes LessWrong and Alignment Forum as sources (useful for AI safety research), it works equally well for any field — the academic search engines (arXiv, Semantic Scholar, Google Scholar) cover all disciplines.
 
 ---
 
@@ -17,7 +17,7 @@ Explain to the user what this skill does:
 >
 > 1. **Setup** - We'll create a folder for your lit review outputs
 > 2. **Research focus** - You'll tell me about your research topic (or I can help you develop one)
-> 3. **Automated search** - I'll search academic databases, arXiv, and AI safety forums
+> 3. **Automated search** - I'll search academic databases, arXiv, and relevant forums
 > 4. **Processing** - I'll download papers, remove duplicates, and summarize each one
 > 5. **Report** - You'll get a catalog of papers and a curated top-10 report
 >
@@ -132,9 +132,9 @@ Save queries to `<output_dir>/search_terms.json` as a JSON array of strings.
 Example format:
 ```json
 [
-  "AI alignment interpretability",
-  "mechanistic interpretability transformer",
-  "neural network feature visualization safety"
+  "main research question keywords",
+  "specific method or technique name",
+  "related concept from adjacent field"
 ]
 ```
 
@@ -164,11 +164,17 @@ Note: Google Scholar may fail due to rate limiting—this is expected.
 
 **LessWrong and Alignment Forum:**
 
-For LW/AF posts, use the WebSearch tool directly. Keep it brief for Stage 1—just 1-2 searches to get a sense of the relevant terminology:
+Search for LW/AF posts using the WebSearch tool. Keep it brief for Stage 1—just 1-2 searches per platform:
 
 ```
 site:lesswrong.com [main query]
+site:alignmentforum.org [main query]
 ```
+
+**Important notes on LW/AF cross-posting:**
+- Posts are often cross-posted to both LessWrong and Alignment Forum. The post content is identical, but **comments may differ** between platforms. Famous researchers sometimes post important insights in comments.
+- Collect URLs from both platforms. The fetch script deduplicates by post ID (same post on LW and AF shares the same ID).
+- All content is fetched through LessWrong's API, which serves both platforms. Comments from both LW and AF are returned together.
 
 Collect the URLs (aim for ~5-10 posts) and save them to `<output_dir>/raw_results/lesswrong_urls.json` as a JSON array:
 
@@ -179,13 +185,18 @@ Collect the URLs (aim for ~5-10 posts) and save them to `<output_dir>/raw_result
 ]
 ```
 
-Then fetch full content (including comments) via GraphQL:
+Then fetch full content (posts + comments) using the scraper via the LW GraphQL API:
 
 ```bash
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/fetch_lesswrong.py \
   --urls <output_dir>/raw_results/lesswrong_urls.json \
   --output <output_dir>/raw_results/lesswrong.json
 ```
+
+The scraper:
+- Fetches full post HTML content and metadata via GraphQL
+- Collects up to 500 comments per post (with author, score, threading)
+- Handles both LW and AF URLs through the same endpoint
 
 <!--
 INTERNAL NOTES FOR FUTURE CLAUDES - Exa Search API:
@@ -227,7 +238,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
 
 ### Phase 4: Download and Convert PDFs
 
-Create the papers directory and run download/conversion:
+Create the papers directory and run download/conversion. **PDF-to-markdown conversion is parallelized** across multiple threads for speed:
 
 ```bash
 mkdir -p <output_dir>/papers
@@ -239,8 +250,11 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/download_pdfs.py \
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/pdf_to_markdown.py \
   --input-dir <output_dir>/papers/ \
   --output-dir <output_dir>/papers/ \
-  --ascii-width 60
+  --ascii-width 60 \
+  --workers 8
 ```
+
+The `--workers` flag controls parallelism (default: 8 threads). Increase for faster conversion on machines with more cores.
 
 ### Phase 5: Process LessWrong/AF Posts
 
@@ -348,15 +362,16 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
 
 **LessWrong and Alignment Forum (comprehensive):**
 
-Now do thorough LW/AF searches with all refined queries:
+Now do thorough LW/AF searches with all refined queries. Search both platforms since comments differ:
 ```
 site:lesswrong.com [refined query 1]
 site:lesswrong.com [refined query 2]
 site:alignmentforum.org [refined query 1]
+site:alignmentforum.org [refined query 2]
 ...
 ```
 
-Collect all URLs and fetch via `fetch_lesswrong.py` as in Stage 1.
+Collect all URLs into `<output_dir>/raw_results_stage2/lesswrong_urls.json` and fetch via `fetch_lesswrong.py` as in Stage 1. The scraper deduplicates by post ID, so cross-posted URLs won't be fetched twice.
 
 ### Phase 11: Merge and Deduplicate
 
@@ -432,6 +447,10 @@ Summarize:
 - Total papers found and summarized across all stages
 - Search term evolution across stages
 - Any issues encountered
+
+## Style Notes
+
+- **Do not pipe content into `python -c "..."`** for ad-hoc processing. This produces long, hard-to-read commands that make users nervous. If you need to do data manipulation beyond what the provided scripts handle, write a small temporary script file, run it, then delete it.
 
 ## Error Handling
 
