@@ -77,13 +77,23 @@ Propose relevant plugins:
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
 - **Documentation fetching**: `llms-fetch-mcp@alignment-hive` — Fetch docs with [llms.txt](https://llmstxt.org/) support
+- **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
 - **TypeScript/JavaScript**: `frontend-design` (for web projects)
 
 For non-alignment-hive plugins:
 ```json
 {
   "enabledPlugins": {
+    "precis@precis": true,
     "frontend-design@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "precis": {
+      "source": {
+        "source": "github",
+        "repo": "Crazytieguy/precis"
+      }
+    }
   }
 }
 ```
