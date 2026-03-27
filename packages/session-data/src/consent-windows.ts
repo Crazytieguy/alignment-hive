@@ -129,7 +129,7 @@ export function groupProjectConsentEvents(events: ProjectConsentEvent[]): {
   for (const event of events) {
     const keys: string[] = [];
     if (event.directory) keys.push(`dir:${event.directory}`);
-    if (event.gitRemote) keys.push(`remote:${event.gitRemote}`);
+    if (event.gitRemote) keys.push(`remote:${event.gitRemote.toLowerCase()}`);
 
     // Find all existing groups that match any of this event's identifiers
     const matchedGroupIndices = new Set<number>();
@@ -217,7 +217,7 @@ export function findGroupForIdentifiers(
   }
 
   if (identifiers.gitRemote) {
-    const idx = lookup.get(`remote:${identifiers.gitRemote}`);
+    const idx = lookup.get(`remote:${identifiers.gitRemote.toLowerCase()}`);
     if (idx !== undefined) {
       if (result !== undefined && result !== idx) return undefined; // ambiguous
       result = idx;

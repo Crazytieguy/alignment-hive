@@ -193,6 +193,22 @@ describe("groupProjectConsentEvents", () => {
     ]);
   });
 
+  it("merges events with same gitRemote in different cases into one group", () => {
+    const events: ProjectConsentEvent[] = [
+      { gitRemote: "github.com/User/Repo", sessionSharing: true, timestamp: 100 },
+      { gitRemote: "github.com/user/repo", sessionSharing: false, timestamp: 200 },
+    ];
+    const result = groupProjectConsentEvents(events);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].events).toHaveLength(2);
+    // Both original-case remotes are preserved in the set
+    expect(result.groups[0].gitRemotes).toEqual(
+      new Set(["github.com/User/Repo", "github.com/user/repo"]),
+    );
+    // Lookup uses lowercase
+    expect(result.lookup.get("remote:github.com/user/repo")).toBe(0);
+  });
+
   it("handles events with no identifiers", () => {
     const events: ProjectConsentEvent[] = [
       { sessionSharing: true, timestamp: 100 },
@@ -282,6 +298,14 @@ describe("findGroupForIdentifiers", () => {
   it("returns undefined when identifiers are empty", () => {
     const lookup = new Map<string, number>([["dir:/home/user/project", 0]]);
     expect(findGroupForIdentifiers(lookup, {})).toBeUndefined();
+  });
+
+  it("matches gitRemote case-insensitively", () => {
+    const lookup = new Map<string, number>([
+      ["dir:/home/user/project", 0],
+      ["remote:github.com/user/repo", 0],
+    ]);
+    expect(findGroupForIdentifiers(lookup, { gitRemote: "github.com/User/Repo" })).toBe(0);
   });
 
   it("matches on one identifier when the other is undefined", () => {
