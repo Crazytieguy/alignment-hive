@@ -18,3 +18,4 @@ target/
 # remote-kernels MCP server
 /remote-kernels/
 /remote-kernels.log
+.playwright-mcp/

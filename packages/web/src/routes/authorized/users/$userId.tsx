@@ -4,11 +4,15 @@ import { convexQuery } from "@convex-dev/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { api } from "../../../../convex/_generated/api";
 import { SessionsTable } from "~/components/sessions-table";
+import { Button } from "@alignment-hive/ui";
+import type { Id } from "../../../../convex/_generated/dataModel";
 
 export const Route = createFileRoute("/authorized/users/$userId")({
   loader: async ({ context, params }) => {
     await context.queryClient.ensureQueryData(
-      convexQuery(api.authorized.getUser, { workosId: params.userId }),
+      convexQuery(api.authorized.getUser, {
+        userId: params.userId as Id<"users">,
+      }),
     );
   },
   component: UserDetail,
@@ -18,12 +22,21 @@ function UserDetail() {
   const { userId } = Route.useParams();
 
   const { results, status, loadMore } = usePaginatedQuery(
-    api.authorized.getUserSessions,
-    { userId },
+    api.authorized.listSessions,
+    {
+      filter: {
+        type: "include" as const,
+        userId: userId as Id<"users">,
+      },
+    },
     { initialNumItems: 50 },
   );
 
-  const { data: user } = useSuspenseQuery(convexQuery(api.authorized.getUser, { workosId: userId }));
+  const { data: user } = useSuspenseQuery(
+    convexQuery(api.authorized.getUser, {
+      userId: userId as Id<"users">,
+    }),
+  );
 
   if (!user) {
     return (
@@ -48,6 +61,10 @@ function UserDetail() {
           {user.firstName} {user.lastName}
         </h1>
         <p className="text-sm text-muted-foreground">{user.email}</p>
+        <div className="mt-2 flex gap-4 text-sm text-muted-foreground">
+          <span>{user.sessionCount} sessions</span>
+          <span>{user.uploadCount} uploads</span>
+        </div>
       </div>
 
       <div className="space-y-4">
@@ -60,12 +77,13 @@ function UserDetail() {
         />
 
         {status === "CanLoadMore" && (
-          <button
+          <Button
+            variant="outline"
+            className="w-full"
             onClick={() => loadMore(50)}
-            className="w-full rounded-lg border border-border bg-card py-2 text-sm text-muted-foreground hover:bg-muted"
           >
             Load more
-          </button>
+          </Button>
         )}
       </div>
     </div>

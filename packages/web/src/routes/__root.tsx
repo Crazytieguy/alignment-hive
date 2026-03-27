@@ -12,23 +12,12 @@ import type { ReactNode } from "react";
 import type { ConvexReactClient } from "convex/react";
 import type { ConvexQueryClient } from "@convex-dev/react-query";
 
-function getAdminEmails(): string[] {
-  const envValue = process.env.ADMIN_EMAILS ?? "";
-  return envValue
-    .split("\n")
-    .map((e) => e.trim())
-    .filter(Boolean);
-}
-
 const fetchWorkosAuth = createServerFn({ method: "GET" }).handler(async () => {
   const auth = await getAuth();
-  const email = auth.user?.email;
-  const isAdmin = email ? getAdminEmails().includes(email) : false;
 
   return {
     userId: auth.user?.id ?? null,
     token: auth.user ? auth.accessToken : null,
-    isAdmin,
   };
 });
 
@@ -58,13 +47,13 @@ export const Route = createRootRouteWithContext<{
   component: RootComponent,
   notFoundComponent: () => <div>Not Found</div>,
   beforeLoad: async (ctx) => {
-    const { userId, token, isAdmin } = await fetchWorkosAuth();
+    const { userId, token } = await fetchWorkosAuth();
 
     if (token) {
       ctx.context.convexQueryClient.serverHttpClient?.setAuth(token);
     }
 
-    return { userId, token, isAdmin };
+    return { userId, token };
   },
 });
 

@@ -1,26 +1,28 @@
 import { Link } from "@tanstack/react-router";
 import { formatProject, formatRelativeTime } from "@alignment-hive/ui";
 
-interface Session {
-  _id: string;
-  sessionId: string;
+interface SessionUser {
   userId: string;
-  project?: string;
+  firstName?: string;
+  lastName?: string;
+  email: string;
+}
+
+interface AgentSession {
+  sessionId: string;
+  upload?: { contentUrl: string; uploadedAt: number };
+}
+
+interface Session {
+  sessionId: string;
   directory?: string;
   gitRemote?: string;
   lineCount: number;
   lastHeartbeat: number;
   summary?: string;
-  childSessionCount?: number;
-  upload?: {
-    storageId: string;
-    uploadedAt: number;
-  };
-  user?: {
-    firstName?: string;
-    lastName?: string;
-    email: string;
-  } | null;
+  upload?: { contentUrl: string; uploadedAt: number };
+  user?: SessionUser | null;
+  agentSessions: AgentSession[];
 }
 
 interface SelectableConfig {
@@ -59,6 +61,7 @@ export function SessionsTable({
               <th className="w-10 px-4 py-3">
                 <input
                   type="checkbox"
+                  aria-label="Select all sessions"
                   checked={
                     selectable.selectedIds.size > 0 &&
                     sessions.filter((s) => s.upload).every((s) =>
@@ -81,74 +84,78 @@ export function SessionsTable({
         </thead>
         <tbody className="divide-y divide-border">
           {sessions.map((session) => {
-            const projectName = session.gitRemote ?? session.directory ?? session.project ?? "unknown";
-            return (<tr
-              key={session._id}
-              className={`relative ${session.upload ? "hover:bg-muted/50" : "opacity-50"}`}
-            >
-              {selectable && (
-                <td className="relative z-10 w-10 px-4 py-3">
-                  {session.upload && (
-                    <input
-                      type="checkbox"
-                      checked={selectable.selectedIds.has(session.sessionId)}
-                      onChange={() => selectable.onToggle(session.sessionId)}
-                      className="rounded"
-                    />
-                  )}
-                </td>
-              )}
-              <td className="px-4 py-3 font-mono text-sm">
-                {session.upload ? (
-                  <Link
-                    to="/authorized/sessions/$sessionId"
-                    params={{ sessionId: session.sessionId }}
-                    className="after:absolute after:inset-0"
-                  >
-                    {session.sessionId.slice(0, 8)}
-                  </Link>
-                ) : (
-                  session.sessionId.slice(0, 8)
+            const projectName =
+              session.gitRemote ?? session.directory ?? "unknown";
+            return (
+              <tr
+                key={session.sessionId}
+                className={`relative ${session.upload ? "hover:bg-muted/50" : "opacity-50"}`}
+              >
+                {selectable && (
+                  <td className="relative z-10 w-10 px-4 py-3">
+                    {session.upload && (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select session ${session.sessionId.slice(0, 8)}`}
+                        checked={selectable.selectedIds.has(session.sessionId)}
+                        onChange={() => selectable.onToggle(session.sessionId)}
+                        className="rounded"
+                      />
+                    )}
+                  </td>
                 )}
-              </td>
-              {showUserColumn && (
-                <td className="relative z-10 px-4 py-3 text-sm">
-                  {session.user ? (
+                <td className="px-4 py-3 font-mono text-sm">
+                  {session.upload ? (
                     <Link
-                      to="/authorized/users/$userId"
-                      params={{ userId: session.userId }}
-                      className="text-primary hover:underline"
+                      to="/authorized/sessions/$sessionId"
+                      params={{ sessionId: session.sessionId }}
+                      className="after:absolute after:inset-0"
                     >
-                      {formatUserName(session.user)}
+                      {session.sessionId.slice(0, 8)}
                     </Link>
                   ) : (
-                    <span className="text-muted-foreground">Unknown</span>
+                    session.sessionId.slice(0, 8)
                   )}
                 </td>
-              )}
-              <td
-                className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[200px]"
-                title={projectName}
-              >
-                {formatProject(projectName)}
-              </td>
-              <td className="px-4 py-3 text-sm tabular-nums">
-                {session.lineCount}
-              </td>
-              <td className="px-4 py-3 text-sm tabular-nums text-muted-foreground">
-                {session.childSessionCount || "—"}
-              </td>
-              <td className="px-4 py-3 text-sm text-muted-foreground">
-                {formatRelativeTime(session.lastHeartbeat)}
-              </td>
-              <td
-                className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[300px]"
-                title={session.summary}
-              >
-                {session.summary || "—"}
-              </td>
-            </tr>
-          );})}
+                {showUserColumn && (
+                  <td className="relative z-10 px-4 py-3 text-sm">
+                    {session.user ? (
+                      <Link
+                        to="/authorized/users/$userId"
+                        params={{ userId: session.user.userId }}
+                        className="text-primary hover:underline"
+                      >
+                        {formatUserName(session.user)}
+                      </Link>
+                    ) : (
+                      <span className="text-muted-foreground">Unknown</span>
+                    )}
+                  </td>
+                )}
+                <td
+                  className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[200px]"
+                  title={projectName}
+                >
+                  {formatProject(projectName)}
+                </td>
+                <td className="px-4 py-3 text-sm tabular-nums">
+                  {session.lineCount}
+                </td>
+                <td className="px-4 py-3 text-sm tabular-nums text-muted-foreground">
+                  {session.agentSessions.length || "\u2014"}
+                </td>
+                <td className="px-4 py-3 text-sm text-muted-foreground">
+                  {formatRelativeTime(session.lastHeartbeat)}
+                </td>
+                <td
+                  className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[300px]"
+                  title={session.summary}
+                >
+                  {session.summary || "\u2014"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

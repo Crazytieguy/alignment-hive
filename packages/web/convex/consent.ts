@@ -4,6 +4,7 @@ import { extractIdentifiers } from "@alignment-hive/session-data";
 import { upsertUser } from "./lib/users";
 import { loadAndGroupUserConsent, getMatchingConsentGroup } from "./lib/projectConsent";
 
+
 /** Validator for project identifiers — at least one of directory/gitRemote required. */
 const projectIdentifierArgs = v.union(
   v.object({ directory: v.string(), gitRemote: v.optional(v.string()) }),

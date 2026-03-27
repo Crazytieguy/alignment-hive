@@ -20,12 +20,23 @@ export const Route = createFileRoute("/authorized")({
     const authInfo = await context.queryClient.ensureQueryData(
       convexQuery(api.auth.getAuthInfo, {}),
     );
-    if (!authInfo || (!authInfo.isAdmin && !authInfo.hasDataAccess)) {
+    if (!authInfo || !authInfo.hasDataAccess) {
       throw redirect({ to: "/" });
+    }
+
+    // Redirect to agreement page if not yet agreed (but don't loop)
+    if (
+      !authInfo.hasAgreed &&
+      !location.pathname.startsWith("/authorized/agreement")
+    ) {
+      throw redirect({ to: "/authorized/agreement" });
     }
   },
   component: AuthorizedLayout,
 });
+
+const navLinkClass =
+  "text-sm text-muted-foreground hover:text-foreground [&.active]:text-foreground [&.active]:font-medium";
 
 function AuthorizedLayout() {
   return (
@@ -39,17 +50,17 @@ function AuthorizedLayout() {
               </Link>
             </div>
             <div className="flex items-center gap-4">
-              <Link
-                to="/authorized/sessions"
-                className="text-sm text-muted-foreground hover:text-foreground [&.active]:text-foreground [&.active]:font-medium"
-              >
+              <Link to="/authorized/sessions" className={navLinkClass}>
                 Sessions
               </Link>
-              <Link
-                to="/authorized/users"
-                className="text-sm text-muted-foreground hover:text-foreground [&.active]:text-foreground [&.active]:font-medium"
-              >
+              <Link to="/authorized/users" className={navLinkClass}>
                 Users
+              </Link>
+              <Link to="/authorized/data-access" className={navLinkClass}>
+                Data Access
+              </Link>
+              <Link to="/authorized/agreement" className={navLinkClass}>
+                Agreement
               </Link>
               <Link
                 to="/auth/sign-out"

@@ -1,9 +1,8 @@
 /**
- * Authorized session data queries. All queries here MUST:
- * 1. Call requireAuthorized() — rejects unauthenticated and unauthorized users
- * 2. Apply buildConsentFilter() for reader role — ensures readers only see
- *    sessions within consent windows
- * 3. Respect child session inheritance — children inherit parent visibility
+ * Authorized session data queries. All public queries call requireAuthorized() for JWT auth.
+ * Internal query variants are used by HTTP API endpoints (API key auth handled externally).
+ * Both paths call shared *Impl functions from lib/authorizedQueries.ts for identical
+ * consent filtering and data shaping.
  *
  * See CLAUDE.md "Session Data Access Control" for the full security model.
  */
@@ -12,7 +11,6 @@ import { v } from "convex/values";
 import {
   isKnownContentBlock,
   parseKnownEntry,
-  extractIdentifiers,
   type KnownEntry,
 } from "@alignment-hive/session-data";
 import type { Id } from "./_generated/dataModel";
@@ -23,141 +21,56 @@ import {
   internalQuery,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { stream } from "convex-helpers/server/stream";
-import schema from "./schema";
 import { requireAuthorized } from "./lib/auth";
-import { buildConsentFilter } from "./lib/consentVisibility";
+import {
+  listSessionsImpl,
+  getSessionImpl,
+  getUserImpl,
+  listUsersImpl,
+  listProjectsImpl,
+} from "./lib/authorizedQueries";
+
+// --- Shared Convex validator for the session filter ---
+
+const sessionFilterValidator = v.optional(
+  v.union(
+    v.object({
+      type: v.literal("include"),
+      userId: v.id("users"),
+      project: v.optional(
+        v.union(
+          v.object({ directory: v.string() }),
+          v.object({ gitRemote: v.string() }),
+        ),
+      ),
+      hasUpload: v.optional(v.boolean()),
+    }),
+    v.object({
+      type: v.literal("exclude"),
+      excludeUserIds: v.optional(v.array(v.id("users"))),
+      excludeDirectories: v.optional(v.array(v.string())),
+      excludeGitRemotes: v.optional(v.array(v.string())),
+      hasUpload: v.optional(v.boolean()),
+    }),
+  ),
+);
+
+const paginationOptsArg = v.object({
+  numItems: v.number(),
+  cursor: v.union(v.string(), v.null()),
+});
+
+// --- Public queries (JWT auth via requireAuthorized) ---
 
 export const listSessions = query({
   args: {
     paginationOpts: paginationOptsValidator,
-    excludeUserIds: v.optional(v.array(v.string())),
-    excludeUnknownUsers: v.optional(v.boolean()),
-    excludeProjects: v.optional(v.array(v.string())),
-    hasUpload: v.optional(v.boolean()),
+    filter: sessionFilterValidator,
   },
   handler: async (ctx, args) => {
     const auth = await requireAuthorized(ctx);
-    if (!auth) {
-      return { page: [], isDone: true, continueCursor: "" };
-    }
-
-    const allUsers = await ctx.db.query("users").collect();
-    const userMap = new Map(allUsers.map((u) => [u.workosId, u]));
-
-    const consentFilter =
-      auth.role === "reader"
-        ? await buildConsentFilter(ctx, allUsers)
-        : null;
-
-    // Build exclude sets for the filter predicate
-    const excludeUserIds = new Set(args.excludeUserIds ?? []);
-    const excludeProjects = new Set(args.excludeProjects ?? []);
-    const knownUserIds = new Set(allUsers.map((u) => u.workosId));
-
-    // For readers, use stream+filterWith for correct pre-pagination filtering.
-    // For admins, use standard Convex query+paginate.
-    if (consentFilter) {
-      const paginatedSessions = await stream(ctx.db, schema)
-        .query("sessions")
-        .withIndex("by_parent_session_id", (q) =>
-          q.eq("parentSessionId", undefined),
-        )
-        .order("desc")
-        .filterWith(async (session) => {
-          if (excludeUserIds.has(session.userId)) return false;
-          if (args.excludeUnknownUsers && !knownUserIds.has(session.userId))
-            return false;
-          const ids = extractIdentifiers(session);
-          if ((ids.gitRemote && excludeProjects.has(ids.gitRemote)) ||
-              (ids.directory && excludeProjects.has(ids.directory))) return false;
-          return consentFilter(session);
-        })
-        .paginate(args.paginationOpts);
-
-      const childCounts = await Promise.all(
-        paginatedSessions.page.map(async (session) => {
-          const children = await ctx.db
-            .query("sessions")
-            .withIndex("by_parent_session_id", (q) =>
-              q.eq("parentSessionId", session.sessionId),
-            )
-            .collect();
-          return children.length;
-        }),
-      );
-
-      return {
-        ...paginatedSessions,
-        page: paginatedSessions.page.map((session, i) => ({
-          ...session,
-          user: userMap.get(session.userId) ?? null,
-          childSessionCount: childCounts[i],
-        })),
-      };
-    }
-
-    // Admin path: use standard Convex query with .filter() + .paginate()
-    let sessionsQuery = ctx.db
-      .query("sessions")
-      .withIndex("by_parent_session_id", (q) =>
-        q.eq("parentSessionId", undefined),
-      )
-      .order("desc");
-
-    if (excludeUserIds.size > 0) {
-      for (const id of excludeUserIds) {
-        sessionsQuery = sessionsQuery.filter((q) =>
-          q.neq(q.field("userId"), id),
-        );
-      }
-    }
-    if (args.excludeUnknownUsers) {
-      sessionsQuery = sessionsQuery.filter((q) =>
-        q.or(...allUsers.map((u) => q.eq(q.field("userId"), u.workosId))),
-      );
-    }
-    if (excludeProjects.size > 0) {
-      for (const project of excludeProjects) {
-        sessionsQuery = sessionsQuery.filter((q) =>
-          q.and(
-            q.neq(q.field("project"), project),
-            q.neq(q.field("gitRemote"), project),
-            q.neq(q.field("directory"), project),
-          ),
-        );
-      }
-    }
-    if (args.hasUpload !== undefined) {
-      sessionsQuery = args.hasUpload
-        ? sessionsQuery.filter((q) => q.neq(q.field("upload"), undefined))
-        : sessionsQuery.filter((q) => q.eq(q.field("upload"), undefined));
-    }
-
-    const paginatedSessions = await sessionsQuery.paginate(
-      args.paginationOpts,
-    );
-
-    const childCounts = await Promise.all(
-      paginatedSessions.page.map(async (session) => {
-        const children = await ctx.db
-          .query("sessions")
-          .withIndex("by_parent_session_id", (q) =>
-            q.eq("parentSessionId", session.sessionId),
-          )
-          .collect();
-        return children.length;
-      }),
-    );
-
-    return {
-      ...paginatedSessions,
-      page: paginatedSessions.page.map((session, i) => ({
-        ...session,
-        user: userMap.get(session.userId) ?? null,
-        childSessionCount: childCounts[i],
-      })),
-    };
+    if (!auth) return { page: [], isDone: true, continueCursor: "" };
+    return listSessionsImpl(ctx, args);
   },
 });
 
@@ -165,168 +78,17 @@ export const getSession = query({
   args: { sessionId: v.string() },
   handler: async (ctx, args) => {
     const auth = await requireAuthorized(ctx);
-    if (!auth) {
-      return null;
-    }
-
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_session_id", (q) => q.eq("sessionId", args.sessionId))
-      .first();
-
-    if (!session) return null;
-
-    const consentFilter =
-      auth.role === "reader" ? await buildConsentFilter(ctx) : null;
-
-    // For readers: child sessions inherit parent visibility.
-    // If this is a child, check the parent's consent instead.
-    if (consentFilter) {
-      if (session.parentSessionId) {
-        const parent = await ctx.db
-          .query("sessions")
-          .withIndex("by_session_id", (q) =>
-            q.eq("sessionId", session.parentSessionId!),
-          )
-          .first();
-        if (!parent || !consentFilter(parent)) return null;
-      } else {
-        if (!consentFilter(session)) return null;
-      }
-    }
-
-    const contentUrl = session.upload
-      ? await ctx.storage.getUrl(session.upload.storageId)
-      : null;
-
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", session.userId))
-      .first();
-
-    const userSessions = user
-      ? await ctx.db
-          .query("sessions")
-          .withIndex("by_user_id", (q) => q.eq("userId", session.userId))
-          .collect()
-      : [];
-
-    // For readers, only count consent-visible parent sessions in user stats.
-    // Child sessions are not counted independently — they inherit parent visibility.
-    const visibleUserSessions = consentFilter
-      ? userSessions.filter(
-          (s) => !s.parentSessionId && consentFilter(s),
-        )
-      : userSessions;
-
-    const userWithStats = user
-      ? {
-          ...user,
-          sessionCount: visibleUserSessions.length,
-          uploadCount: visibleUserSessions.filter((s) => s.upload).length,
-        }
-      : null;
-
-    const parentSession = session.parentSessionId
-      ? await ctx.db
-          .query("sessions")
-          .withIndex("by_session_id", (q) =>
-            q.eq("sessionId", session.parentSessionId!),
-          )
-          .first()
-      : null;
-
-    // Child sessions always inherit parent visibility — no individual filtering
-    const childSessions = await ctx.db
-      .query("sessions")
-      .withIndex("by_parent_session_id", (q) =>
-        q.eq("parentSessionId", args.sessionId),
-      )
-      .collect();
-
-    return {
-      session,
-      contentUrl,
-      user: userWithStats,
-      parentSession,
-      childSessions,
-    };
-  },
-});
-
-/** Bulk fetch content URLs for multiple sessions and their agents. Runs buildConsentFilter once. */
-export const getSessionContentUrls = query({
-  args: { sessionIds: v.array(v.string()) },
-  handler: async (ctx, args) => {
-    const auth = await requireAuthorized(ctx);
-    if (!auth) return [];
-
-    const consentFilter =
-      auth.role === "reader" ? await buildConsentFilter(ctx) : null;
-
-    const results: Array<{ sessionId: string; contentUrl: string }> = [];
-
-    for (const sessionId of args.sessionIds) {
-      const session = await ctx.db
-        .query("sessions")
-        .withIndex("by_session_id", (q) => q.eq("sessionId", sessionId))
-        .first();
-
-      if (!session?.upload) continue;
-
-      // For readers: check consent (child sessions check parent)
-      if (consentFilter) {
-        if (session.parentSessionId) {
-          const parent = await ctx.db
-            .query("sessions")
-            .withIndex("by_session_id", (q) =>
-              q.eq("sessionId", session.parentSessionId!),
-            )
-            .first();
-          if (!parent || !consentFilter(parent)) continue;
-        } else {
-          if (!consentFilter(session)) continue;
-        }
-      }
-
-      const contentUrl = await ctx.storage.getUrl(session.upload.storageId);
-      if (contentUrl) {
-        results.push({ sessionId, contentUrl });
-      }
-
-      // Include uploaded agent sessions for parent sessions
-      if (!session.parentSessionId) {
-        const children = await ctx.db
-          .query("sessions")
-          .withIndex("by_parent_session_id", (q) =>
-            q.eq("parentSessionId", sessionId),
-          )
-          .collect();
-
-        for (const child of children) {
-          if (!child.upload) continue;
-          const childUrl = await ctx.storage.getUrl(child.upload.storageId);
-          if (childUrl) {
-            results.push({ sessionId: child.sessionId, contentUrl: childUrl });
-          }
-        }
-      }
-    }
-
-    return results;
+    if (!auth) return null;
+    return getSessionImpl(ctx, args);
   },
 });
 
 export const getUser = query({
-  args: { workosId: v.string() },
+  args: { userId: v.id("users") },
   handler: async (ctx, args) => {
     const auth = await requireAuthorized(ctx);
     if (!auth) return null;
-
-    return await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", args.workosId))
-      .first();
+    return getUserImpl(ctx, args);
   },
 });
 
@@ -334,64 +96,45 @@ export const listUsers = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     const auth = await requireAuthorized(ctx);
-    if (!auth) {
-      return { page: [], isDone: true, continueCursor: "" };
-    }
-
-    const paginatedUsers = await ctx.db
-      .query("users")
-      .order("desc")
-      .paginate(args.paginationOpts);
-
-    return paginatedUsers;
+    if (!auth) return { page: [], isDone: true, continueCursor: "" };
+    return listUsersImpl(ctx, args);
   },
 });
 
-export const getUserSessions = query({
-  args: {
-    paginationOpts: paginationOptsValidator,
-    userId: v.string(),
-  },
+export const listProjects = query({
+  args: { userId: v.id("users") },
   handler: async (ctx, args) => {
     const auth = await requireAuthorized(ctx);
-    if (!auth) {
-      return { page: [], isDone: true, continueCursor: "" };
-    }
-
-    const consentFilter =
-      auth.role === "reader" ? await buildConsentFilter(ctx) : null;
-
-    // Use stream+filterWith for both roles to filter children pre-pagination
-    const paginatedSessions = await stream(ctx.db, schema)
-      .query("sessions")
-      .withIndex("by_user_id", (q) => q.eq("userId", args.userId))
-      .order("desc")
-      .filterWith(async (session) => {
-        if (session.parentSessionId) return false;
-        return consentFilter ? consentFilter(session) : true;
-      })
-      .paginate(args.paginationOpts);
-
-    const childCounts = await Promise.all(
-      paginatedSessions.page.map(async (session) => {
-        const children = await ctx.db
-          .query("sessions")
-          .withIndex("by_parent_session_id", (q) =>
-            q.eq("parentSessionId", session.sessionId),
-          )
-          .collect();
-        return children.length;
-      }),
-    );
-
-    return {
-      ...paginatedSessions,
-      page: paginatedSessions.page.map((session, i) => ({
-        ...session,
-        childSessionCount: childCounts[i],
-      })),
-    };
+    if (!auth) return [];
+    return listProjectsImpl(ctx, args);
   },
+});
+
+// --- Internal query variants (for HTTP API — auth handled by Hono middleware) ---
+
+export const listSessionsInternal = internalQuery({
+  args: { paginationOpts: paginationOptsArg, filter: sessionFilterValidator },
+  handler: async (ctx, args) => listSessionsImpl(ctx, args),
+});
+
+export const getSessionInternal = internalQuery({
+  args: { sessionId: v.string() },
+  handler: async (ctx, args) => getSessionImpl(ctx, args),
+});
+
+export const getUserInternal = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => getUserImpl(ctx, args),
+});
+
+export const listUsersInternal = internalQuery({
+  args: { paginationOpts: paginationOptsArg },
+  handler: async (ctx, args) => listUsersImpl(ctx, args),
+});
+
+export const listProjectsInternal = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => listProjectsImpl(ctx, args),
 });
 
 // --- Backfill (internal only, unchanged) ---

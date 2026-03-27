@@ -1,40 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useConvex } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import { SessionsTable } from "~/components/sessions-table";
-import { formatProject } from "@alignment-hive/ui";
+import { Button, formatProject } from "@alignment-hive/ui";
+import type { Id } from "../../../../convex/_generated/dataModel";
 
 type UploadFilter = "all" | "uploaded" | "not-uploaded";
 
 interface SessionsSearch {
   upload?: UploadFilter;
   excludeUsers?: string[];
-  excludeProjects?: string[];
+  excludeDirectories?: string[];
+  excludeGitRemotes?: string[];
 }
 
 export const Route = createFileRoute("/authorized/sessions/")({
   validateSearch: (search: Record<string, unknown>): SessionsSearch => ({
     upload: (search.upload as UploadFilter) || undefined,
     excludeUsers: (search.excludeUsers as string[]) || undefined,
-    excludeProjects: (search.excludeProjects as string[]) || undefined,
+    excludeDirectories: (search.excludeDirectories as string[]) || undefined,
+    excludeGitRemotes: (search.excludeGitRemotes as string[]) || undefined,
   }),
   component: SessionsList,
 });
 
-const UNKNOWN_USERS_KEY = "__unknown__";
-
 function SessionsList() {
   const search = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
-  const convex = useConvex();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [downloading, setDownloading] = useState(false);
 
   const uploadFilter = search.upload ?? "all";
   const excludedUserIds = new Set(search.excludeUsers ?? []);
-  const excludedProjects = new Set(search.excludeProjects ?? []);
+  const excludedDirectories = new Set(search.excludeDirectories ?? []);
+  const excludedGitRemotes = new Set(search.excludeGitRemotes ?? []);
 
   const setUploadFilter = (value: UploadFilter) =>
     navigate({
@@ -54,14 +54,26 @@ function SessionsList() {
       replace: true,
     });
 
-  const setExcludedProjects = (ids: Set<string>) =>
+  const setExcludedProjects = (ids: Set<string>) => {
+    const dirs: string[] = [];
+    const remotes: string[] = [];
+    for (const id of ids) {
+      // Simple heuristic: git remotes contain dots (github.com/...)
+      if (id.includes(".")) {
+        remotes.push(id);
+      } else {
+        dirs.push(id);
+      }
+    }
     navigate({
       search: (prev) => ({
         ...prev,
-        excludeProjects: ids.size > 0 ? [...ids] : undefined,
+        excludeDirectories: dirs.length > 0 ? dirs : undefined,
+        excludeGitRemotes: remotes.length > 0 ? remotes : undefined,
       }),
       replace: true,
     });
+  };
 
   // Get users for filter dropdown
   const usersData = usePaginatedQuery(
@@ -70,22 +82,38 @@ function SessionsList() {
     { initialNumItems: 100 },
   );
 
-  const excludeUnknownUsers = excludedUserIds.has(UNKNOWN_USERS_KEY);
-  const excludeUserIdsList = [...excludedUserIds].filter(
-    (id) => id !== UNKNOWN_USERS_KEY,
-  );
-  const excludeProjectsList = [...excludedProjects];
+  const excludeUserIdsList = [...excludedUserIds] as Id<"users">[];
+  const excludeDirectoriesList = [...excludedDirectories];
+  const excludeGitRemotesList = [...excludedGitRemotes];
+
+  const hasExcludes =
+    excludeUserIdsList.length > 0 ||
+    excludeDirectoriesList.length > 0 ||
+    excludeGitRemotesList.length > 0;
 
   const queryArgs = {
-    ...(uploadFilter === "uploaded" && { hasUpload: true }),
-    ...(uploadFilter === "not-uploaded" && { hasUpload: false }),
-    ...(excludeUserIdsList.length > 0 && {
-      excludeUserIds: excludeUserIdsList,
-    }),
-    ...(excludeUnknownUsers && { excludeUnknownUsers: true }),
-    ...(excludeProjectsList.length > 0 && {
-      excludeProjects: excludeProjectsList,
-    }),
+    filter: hasExcludes
+      ? ({
+          type: "exclude" as const,
+          ...(excludeUserIdsList.length > 0 && {
+            excludeUserIds: excludeUserIdsList,
+          }),
+          ...(excludeDirectoriesList.length > 0 && {
+            excludeDirectories: excludeDirectoriesList,
+          }),
+          ...(excludeGitRemotesList.length > 0 && {
+            excludeGitRemotes: excludeGitRemotesList,
+          }),
+          ...(uploadFilter === "uploaded" && { hasUpload: true }),
+          ...(uploadFilter === "not-uploaded" && { hasUpload: false }),
+        } as const)
+      : uploadFilter !== "all"
+        ? ({
+            type: "exclude" as const,
+            ...(uploadFilter === "uploaded" && { hasUpload: true }),
+            ...(uploadFilter === "not-uploaded" && { hasUpload: false }),
+          } as const)
+        : undefined,
   };
 
   const { results, status, loadMore } = usePaginatedQuery(
@@ -97,11 +125,14 @@ function SessionsList() {
   // Collect unique projects from loaded results
   const allProjects = [
     ...new Set(
-      results.map(
-        (s) => s.gitRemote ?? s.directory ?? s.project ?? "unknown",
-      ),
+      results.map((s) => s.gitRemote ?? s.directory ?? "unknown"),
     ),
   ].sort();
+
+  const allExcludedProjects = new Set([
+    ...excludedDirectories,
+    ...excludedGitRemotes,
+  ]);
 
   // Only uploaded sessions can be selected
   const selectableIds = results
@@ -133,16 +164,30 @@ function SessionsList() {
     if (selectedIds.size === 0) return;
     setDownloading(true);
     try {
-      // Single bulk query for all content URLs (runs consent filter once)
-      const sessionUrls = await convex.query(
-        api.authorized.getSessionContentUrls,
-        { sessionIds: [...selectedIds] },
-      );
+      // Collect all content URLs from the inline data (parent + agents)
+      const urlEntries: Array<{ sessionId: string; contentUrl: string }> = [];
+      for (const session of results) {
+        if (!selectedIds.has(session.sessionId)) continue;
+        if (session.upload) {
+          urlEntries.push({
+            sessionId: session.sessionId,
+            contentUrl: session.upload.contentUrl,
+          });
+        }
+        for (const agent of session.agentSessions) {
+          if (agent.upload) {
+            urlEntries.push({
+              sessionId: agent.sessionId,
+              contentUrl: agent.upload.contentUrl,
+            });
+          }
+        }
+      }
 
       // Fetch content from each URL in parallel
       const contents = (
         await Promise.all(
-          sessionUrls.map(async ({ sessionId, contentUrl }) => {
+          urlEntries.map(async ({ sessionId, contentUrl }) => {
             try {
               const res = await fetch(contentUrl);
               if (!res.ok) return null;
@@ -175,7 +220,7 @@ function SessionsList() {
     } finally {
       setDownloading(false);
     }
-  }, [selectedIds, convex]);
+  }, [selectedIds, results]);
 
   return (
     <div className="space-y-4">
@@ -183,22 +228,22 @@ function SessionsList() {
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-semibold text-foreground">Sessions</h1>
           {selectedIds.size > 0 && (
-            <button
+            <Button
+              size="sm"
               onClick={handleDownload}
               disabled={downloading}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               {downloading
                 ? "Downloading..."
                 : `Download ${selectedIds.size} session${selectedIds.size !== 1 ? "s" : ""}`}
-            </button>
+            </Button>
           )}
         </div>
         <div className="flex items-center gap-4">
           <MultiSelectFilter
             label="User"
             options={usersData.results.map((u) => ({
-              id: u.workosId,
+              id: u.userId,
               label:
                 u.firstName && u.lastName
                   ? `${u.firstName} ${u.lastName}`
@@ -206,7 +251,6 @@ function SessionsList() {
             }))}
             excludedIds={excludedUserIds}
             onChange={setExcludedUserIds}
-            specialOption={{ id: UNKNOWN_USERS_KEY, label: "Unknown users" }}
           />
           <MultiSelectFilter
             label="Project"
@@ -214,7 +258,7 @@ function SessionsList() {
               id: p,
               label: formatProject(p),
             }))}
-            excludedIds={excludedProjects}
+            excludedIds={allExcludedProjects}
             onChange={setExcludedProjects}
           />
           <div className="flex items-center gap-2">
@@ -243,12 +287,13 @@ function SessionsList() {
       />
 
       {status === "CanLoadMore" && (
-        <button
+        <Button
+          variant="outline"
+          className="w-full"
           onClick={() => loadMore(50)}
-          className="w-full rounded-lg border border-border bg-card py-2 text-sm text-muted-foreground hover:bg-muted"
         >
           Load more
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -264,13 +309,11 @@ function MultiSelectFilter({
   options,
   excludedIds,
   onChange,
-  specialOption,
 }: {
   label: string;
   options: FilterOption[];
   excludedIds: Set<string>;
   onChange: (ids: Set<string>) => void;
-  specialOption?: FilterOption;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -295,10 +338,7 @@ function MultiSelectFilter({
     onChange(next);
   };
 
-  const allOptionIds = [
-    ...(specialOption ? [specialOption.id] : []),
-    ...options.map((o) => o.id),
-  ];
+  const allOptionIds = options.map((o) => o.id);
   const selectedCount = allOptionIds.filter(
     (id) => !excludedIds.has(id),
   ).length;
@@ -339,18 +379,6 @@ function MultiSelectFilter({
               Deselect all
             </button>
           </div>
-          {specialOption && (
-            <label className="flex cursor-pointer items-center gap-2 border-b border-border px-3 py-2 hover:bg-muted">
-              <input
-                type="checkbox"
-                checked={!excludedIds.has(specialOption.id)}
-                onChange={() => toggleId(specialOption.id)}
-              />
-              <span className="text-sm italic text-muted-foreground">
-                {specialOption.label}
-              </span>
-            </label>
-          )}
           {options.map((option) => (
             <label
               key={option.id}

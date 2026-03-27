@@ -14,6 +14,8 @@ import { Route as AuthorizedRouteImport } from './routes/authorized'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
+import { Route as AuthorizedDataAccessRouteImport } from './routes/authorized/data-access'
+import { Route as AuthorizedAgreementRouteImport } from './routes/authorized/agreement'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
 import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
 import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
@@ -48,6 +50,16 @@ const IndexRoute = IndexRouteImport.update({
 const AuthorizedIndexRoute = AuthorizedIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AuthorizedRoute,
+} as any)
+const AuthorizedDataAccessRoute = AuthorizedDataAccessRouteImport.update({
+  id: '/data-access',
+  path: '/data-access',
+  getParentRoute: () => AuthorizedRoute,
+} as any)
+const AuthorizedAgreementRoute = AuthorizedAgreementRouteImport.update({
+  id: '/agreement',
+  path: '/agreement',
   getParentRoute: () => AuthorizedRoute,
 } as any)
 const AuthSignOutRoute = AuthSignOutRouteImport.update({
@@ -117,6 +129,8 @@ export interface FileRoutesByFullPath {
   '/policy': typeof AuthenticatedPolicyRoute
   '/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
+  '/authorized/agreement': typeof AuthorizedAgreementRoute
+  '/authorized/data-access': typeof AuthorizedDataAccessRoute
   '/authorized/': typeof AuthorizedIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
@@ -133,6 +147,8 @@ export interface FileRoutesByTo {
   '/policy': typeof AuthenticatedPolicyRoute
   '/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
+  '/authorized/agreement': typeof AuthorizedAgreementRoute
+  '/authorized/data-access': typeof AuthorizedDataAccessRoute
   '/authorized': typeof AuthorizedIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
@@ -152,6 +168,8 @@ export interface FileRoutesById {
   '/_authenticated/policy': typeof AuthenticatedPolicyRoute
   '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
+  '/authorized/agreement': typeof AuthorizedAgreementRoute
+  '/authorized/data-access': typeof AuthorizedDataAccessRoute
   '/authorized/': typeof AuthorizedIndexRoute
   '/_authenticated/consent_/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
@@ -171,6 +189,8 @@ export interface FileRouteTypes {
     | '/policy'
     | '/welcome'
     | '/auth/sign-out'
+    | '/authorized/agreement'
+    | '/authorized/data-access'
     | '/authorized/'
     | '/consent/projects'
     | '/api/github/installed'
@@ -187,6 +207,8 @@ export interface FileRouteTypes {
     | '/policy'
     | '/welcome'
     | '/auth/sign-out'
+    | '/authorized/agreement'
+    | '/authorized/data-access'
     | '/authorized'
     | '/consent/projects'
     | '/api/github/installed'
@@ -205,6 +227,8 @@ export interface FileRouteTypes {
     | '/_authenticated/policy'
     | '/_authenticated/welcome'
     | '/auth/sign-out'
+    | '/authorized/agreement'
+    | '/authorized/data-access'
     | '/authorized/'
     | '/_authenticated/consent_/projects'
     | '/api/github/installed'
@@ -258,6 +282,20 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/authorized/'
       preLoaderRoute: typeof AuthorizedIndexRouteImport
+      parentRoute: typeof AuthorizedRoute
+    }
+    '/authorized/data-access': {
+      id: '/authorized/data-access'
+      path: '/data-access'
+      fullPath: '/authorized/data-access'
+      preLoaderRoute: typeof AuthorizedDataAccessRouteImport
+      parentRoute: typeof AuthorizedRoute
+    }
+    '/authorized/agreement': {
+      id: '/authorized/agreement'
+      path: '/agreement'
+      fullPath: '/authorized/agreement'
+      preLoaderRoute: typeof AuthorizedAgreementRouteImport
       parentRoute: typeof AuthorizedRoute
     }
     '/auth/sign-out': {
@@ -361,6 +399,8 @@ const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
 )
 
 interface AuthorizedRouteChildren {
+  AuthorizedAgreementRoute: typeof AuthorizedAgreementRoute
+  AuthorizedDataAccessRoute: typeof AuthorizedDataAccessRoute
   AuthorizedIndexRoute: typeof AuthorizedIndexRoute
   AuthorizedSessionsSessionIdRoute: typeof AuthorizedSessionsSessionIdRoute
   AuthorizedUsersUserIdRoute: typeof AuthorizedUsersUserIdRoute
@@ -369,6 +409,8 @@ interface AuthorizedRouteChildren {
 }
 
 const AuthorizedRouteChildren: AuthorizedRouteChildren = {
+  AuthorizedAgreementRoute: AuthorizedAgreementRoute,
+  AuthorizedDataAccessRoute: AuthorizedDataAccessRoute,
   AuthorizedIndexRoute: AuthorizedIndexRoute,
   AuthorizedSessionsSessionIdRoute: AuthorizedSessionsSessionIdRoute,
   AuthorizedUsersUserIdRoute: AuthorizedUsersUserIdRoute,

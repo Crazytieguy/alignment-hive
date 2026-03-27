@@ -17,7 +17,8 @@ import {
 } from "@alignment-hive/session-data";
 
 interface SessionForVisibility {
-  userId: string; // workosId
+  userId?: string; // workosId (legacy, being phased out)
+  userDocId?: string; // Convex user doc ID (replacing userId)
   project?: string;
   directory?: string;
   gitRemote?: string;
@@ -116,8 +117,10 @@ export async function buildConsentFilter(
     // Determine the timestamp to check: prefer lastModified, fall back to uploadedAt
     const timestamp = session.lastModified ?? session.upload.uploadedAt;
 
-    // Map workosId to Convex doc ID
-    const docId = workosToDocId.get(session.userId);
+    // Resolve to Convex doc ID: prefer userDocId, fall back to workosId lookup
+    const docId: string | undefined =
+      session.userDocId ??
+      (session.userId ? workosToDocId.get(session.userId) : undefined);
     if (!docId) return false;
 
     // Check global consent windows

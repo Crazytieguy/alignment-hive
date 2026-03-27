@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import {
@@ -89,6 +89,7 @@ async function verifyConsent(
 async function upsertSession(
   ctx: MutationCtx,
   userId: string,
+  userDocId: Id<"users">,
   args: {
     sessionId: string;
     checkoutId: string;
@@ -108,10 +109,15 @@ async function upsertSession(
     .first();
 
   if (existing) {
-    if (existing.userId !== userId) {
+    // Ownership check: match either userDocId or legacy userId
+    const ownerMatch =
+      (existing.userDocId && existing.userDocId === userDocId) ||
+      (existing.userId && existing.userId === userId);
+    if (!ownerMatch) {
       throw new ConvexError("Session belongs to different user");
     }
     await ctx.db.patch(existing._id, {
+      userDocId, // backfill userDocId on existing sessions
       lineCount: args.lineCount,
       lastHeartbeat: now,
       ...(args.lastModified !== undefined && {
@@ -130,6 +136,7 @@ async function upsertSession(
     return await ctx.db.insert("sessions", {
       sessionId: args.sessionId,
       userId,
+      userDocId,
       checkoutId: args.checkoutId,
       project: args.project,
       directory: args.directory,
@@ -161,11 +168,11 @@ export const heartbeatSession = mutation({
       throw new ConvexError("Not authenticated");
     }
 
-    const userId = await upsertUser(ctx, identity);
+    const userDocId = await upsertUser(ctx, identity);
     const identifiers = extractIdentifiers(args);
-    await verifyConsent(ctx, userId, identifiers, args.lastModified);
+    await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
 
-    await upsertSession(ctx, identity.subject, args);
+    await upsertSession(ctx, identity.subject, userDocId, args);
   },
 });
 
@@ -242,8 +249,13 @@ export const saveUploads = mutation({
       .query("sessions")
       .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))
       .first();
-    if (existingParent && existingParent.userId !== identity.subject) {
-      throw new ConvexError("Parent session belongs to different user");
+    if (existingParent) {
+      const ownerMatch =
+        (existingParent.userDocId && existingParent.userDocId === userDocId) ||
+        (existingParent.userId && existingParent.userId === identity.subject);
+      if (!ownerMatch) {
+        throw new ConvexError("Parent session belongs to different user");
+      }
     }
 
     const now = Date.now();
@@ -257,7 +269,7 @@ export const saveUploads = mutation({
       }
 
       // Upsert the session record with full data + link storage blob
-      const sessionDocId = await upsertSession(ctx, identity.subject, {
+      const sessionDocId = await upsertSession(ctx, identity.subject, userDocId, {
         sessionId: upload.sessionId,
         checkoutId: args.checkoutId,
         directory: args.directory,
@@ -276,21 +288,6 @@ export const saveUploads = mutation({
         },
       });
     }
-  },
-});
-
-export const listUserSessions = query({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return [];
-    }
-
-    return await ctx.db
-      .query("sessions")
-      .withIndex("by_user_id", (q) => q.eq("userId", identity.subject))
-      .collect();
   },
 });
 

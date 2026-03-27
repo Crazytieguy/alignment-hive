@@ -1,6 +1,7 @@
 import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { api } from "../../../../convex/_generated/api";
+import { Button } from "@alignment-hive/ui";
 
 export const Route = createFileRoute("/authorized/users/")({
   component: UsersList,
@@ -36,11 +37,11 @@ function UsersList() {
           </thead>
           <tbody className="divide-y divide-border">
             {results.map((user) => (
-              <tr key={user._id} className="hover:bg-muted/50">
+              <tr key={user.userId} className="hover:bg-muted/50">
                 <td className="px-4 py-3 text-sm">
                   <Link
                     to="/authorized/users/$userId"
-                    params={{ userId: user.workosId }}
+                    params={{ userId: user.userId }}
                     className="text-primary hover:underline"
                   >
                     {user.firstName} {user.lastName}
@@ -56,12 +57,13 @@ function UsersList() {
       </div>
 
       {status === "CanLoadMore" && (
-        <button
+        <Button
+          variant="outline"
+          className="w-full"
           onClick={() => loadMore(50)}
-          className="w-full rounded-lg border border-border bg-card py-2 text-sm text-muted-foreground hover:bg-muted"
         >
           Load more
-        </button>
+        </Button>
       )}
     </div>
   );

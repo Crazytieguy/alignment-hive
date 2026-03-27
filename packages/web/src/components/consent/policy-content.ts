@@ -1,3 +1,6 @@
+// Keep consistent with ../../../convex/lib/agreement.ts —
+// changes to access/use terms must be reflected in both files.
+
 /** Single source of truth for user-facing data sharing policy text.
  *  Each section contains the policy text, broken into renderable chunks.
  *

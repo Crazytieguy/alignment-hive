@@ -17,7 +17,8 @@ export const Route = createFileRoute("/authorized/sessions/$sessionId")({
 function SessionDetail() {
   const { sessionId } = Route.useParams();
   const { data } = useSuspenseQuery(convexQuery(api.authorized.getSession, { sessionId }));
-  const model = useSessionModel(data?.contentUrl ?? null);
+  const contentUrl = data?.upload?.contentUrl ?? null;
+  const model = useSessionModel(contentUrl);
 
   if (!data) {
     return (
@@ -27,8 +28,7 @@ function SessionDetail() {
     );
   }
 
-  const { session, contentUrl, user, parentSession, childSessions } = data;
-  const projectName = session.gitRemote ?? session.directory ?? session.project ?? "unknown";
+  const projectName = data.gitRemote ?? data.directory ?? "unknown";
 
   return (
     <div className="space-y-6">
@@ -59,14 +59,11 @@ function SessionDetail() {
             <dl className="space-y-2 text-sm">
               <div>
                 <dt className="text-muted-foreground">ID</dt>
-                <dd className="font-mono">{session.sessionId}</dd>
+                <dd className="font-mono">{data.sessionId}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Project</dt>
-                <dd
-                  className="truncate"
-                  title={projectName}
-                >
+                <dd className="truncate" title={projectName}>
                   {formatProject(projectName)}
                 </dd>
               </div>
@@ -78,24 +75,24 @@ function SessionDetail() {
               )}
               <div>
                 <dt className="text-muted-foreground">Lines</dt>
-                <dd>{session.lineCount}</dd>
+                <dd>{data.lineCount}</dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">Last Activity</dt>
-                <dd>{new Date(session.lastHeartbeat).toLocaleString()}</dd>
+                <dd>{new Date(data.lastHeartbeat).toLocaleString()}</dd>
               </div>
-              {session.upload && (
+              {data.upload && (
                 <div>
                   <dt className="text-muted-foreground">Uploaded</dt>
                   <dd>
-                    {new Date(session.upload.uploadedAt).toLocaleString()}
+                    {new Date(data.upload.uploadedAt).toLocaleString()}
                   </dd>
                 </div>
               )}
             </dl>
           </div>
 
-          {user && (
+          {data.user && (
             <div className="rounded-lg border border-border bg-card p-4">
               <h2 className="mb-3 text-sm font-medium text-foreground">User</h2>
               <dl className="space-y-2 text-sm">
@@ -104,52 +101,44 @@ function SessionDetail() {
                   <dd>
                     <Link
                       to="/authorized/users/$userId"
-                      params={{ userId: session.userId }}
+                      params={{ userId: data.user.userId }}
                       className="text-primary hover:underline"
                     >
-                      {user.firstName} {user.lastName}
+                      {data.user.firstName} {data.user.lastName}
                     </Link>
                   </dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Email</dt>
-                  <dd>{user.email}</dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">Sessions</dt>
-                  <dd>{user.sessionCount}</dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">Uploads</dt>
-                  <dd>{user.uploadCount}</dd>
+                  <dd>{data.user.email}</dd>
                 </div>
               </dl>
             </div>
           )}
 
-          {parentSession && (
+          {data.parentSession && (
             <div className="rounded-lg border border-border bg-card p-4">
               <h2 className="mb-3 text-sm font-medium text-foreground">
                 Parent Session
               </h2>
               <Link
                 to="/authorized/sessions/$sessionId"
-                params={{ sessionId: parentSession.sessionId }}
+                params={{ sessionId: data.parentSession.sessionId }}
                 className="font-mono text-sm text-primary hover:underline"
               >
-                {parentSession.sessionId.slice(0, 8)}
+                {formatSessionId(data.parentSession.sessionId)}
               </Link>
             </div>
           )}
 
-          {childSessions.length > 0 && (
+          {data.agentSessions.length > 0 && (
             <div className="rounded-lg border border-border bg-card p-4">
               <h2 className="mb-3 text-sm font-medium text-foreground">
-                Agent Sessions ({childSessions.length})
+                Agent Sessions ({data.agentSessions.length})
               </h2>
               <ul className="space-y-1">
-                {childSessions.map((child: { _id: string; sessionId: string }) => (
-                  <li key={child._id}>
+                {data.agentSessions.map((child) => (
+                  <li key={child.sessionId}>
                     <Link
                       to="/authorized/sessions/$sessionId"
                       params={{ sessionId: child.sessionId }}
