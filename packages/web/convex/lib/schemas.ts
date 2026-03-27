@@ -78,9 +78,16 @@ export const sessionDetailResponseSchema = sessionResponseSchema.extend({
   parentSession: parentSessionSchema.describe("The parent session, if this is an agent session").optional(),
 });
 
+export const consentPreferencesSchema = z.object({
+  communityFeatures: z.boolean().describe("Allows sessions to be used for community features"),
+  publicationExcerpts: z.boolean().describe("Allows verbatim session excerpts in published research"),
+  creditByName: z.boolean().describe("Prefers to be credited by name in research publications"),
+}).describe("The contributor's current data sharing preferences");
+
 export const userDetailResponseSchema = userResponseSchema.extend({
   sessionCount: z.int().describe("Number of consent-visible parent sessions from this user"),
   uploadCount: z.int().describe("Number of consent-visible uploaded parent sessions from this user"),
+  consentPreferences: consentPreferencesSchema.nullable().describe("Current consent preferences, or null if the user has revoked sharing"),
 });
 
 export const paginatedUsersResponseSchema = z.object({

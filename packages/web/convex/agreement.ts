@@ -60,8 +60,16 @@ export const submitAgreement = action({
         }>;
       };
 
-      for (const membership of memberships.data) {
-        if (membership.status !== "active") continue;
+      const activeMemberships = memberships.data.filter(
+        (m) => m.status === "active",
+      );
+      if (activeMemberships.length === 0) {
+        throw new Error(
+          "No active organization membership — ask an admin to add you to an organization first",
+        );
+      }
+
+      for (const membership of activeMemberships) {
         if (membership.role?.slug === DATA_ACCESSOR_ROLE_SLUG) continue;
 
         const updateResp = await fetch(

@@ -49,7 +49,7 @@ export const agreementSections: AgreementSection[] = [
     title: "Quoting and crediting contributors",
     paragraphs: [
       "Contributors set preferences about being quoted and credited. If a contributor has opted out of verbatim excerpts, do not quote from their sessions. If they have opted out of being named, do not name them. If a contributor has opted in to being credited, crediting them is encouraged but not required.",
-      "Make a best effort to anonymize all verbatim excerpts in public-facing outputs (publications, presentations, blog posts, etc.), including removing identifiable project details, file paths, and repository references. Consent preferences are visible alongside the data.",
+      "Make a best effort to anonymize all verbatim excerpts in public-facing outputs (publications, presentations, blog posts, etc.), including removing identifiable project details, file paths, and repository references. Each contributor's quoting and crediting preferences are visible on their user profile and available via the API and CLI.",
       "Citing Alignment Hive as a data source is encouraged.",
     ],
   },

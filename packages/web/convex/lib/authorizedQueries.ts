@@ -323,10 +323,27 @@ export async function getUserImpl(
     (s) => !s.parentSessionId && consentFilter(s),
   );
 
+  // Fetch latest consent to expose preferences
+  const latestConsent = await ctx.db
+    .query("dataSharingConsent")
+    .withIndex("by_user_id", (q) => q.eq("userId", args.userId))
+    .order("desc")
+    .first();
+
+  const consentPreferences =
+    latestConsent?.sessionSharing
+      ? {
+          communityFeatures: latestConsent.communityFeatures,
+          publicationExcerpts: latestConsent.publicationExcerpts,
+          creditByName: latestConsent.creditByName,
+        }
+      : null;
+
   return {
     ...formatUser(user),
     sessionCount: visibleParents.length,
     uploadCount: visibleParents.filter((s) => s.upload).length,
+    consentPreferences,
   };
 }
 
