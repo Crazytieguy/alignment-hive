@@ -56,9 +56,6 @@ function AuthorizedLayout() {
               <Link to="/authorized/users" className={navLinkClass}>
                 Users
               </Link>
-              <Link to="/authorized/data-access" className={navLinkClass}>
-                Data Access
-              </Link>
               <Link to="/authorized/agreement" className={navLinkClass}>
                 Agreement
               </Link>
