@@ -1,7 +1,7 @@
 /**
- * Canonical consent visibility filter for reader access.
+ * Canonical consent visibility filter.
  * This is the SINGLE source of truth for determining which sessions
- * a reader can see. All read queries in authorized.ts must use this.
+ * are visible. All read queries in authorized.ts must use this.
  *
  * See consent-windows.ts in session-data for the window computation logic.
  */
@@ -27,11 +27,11 @@ interface SessionForVisibility {
 }
 
 /**
- * Build a consent filter function for reader access.
+ * Build a consent filter function.
  *
  * Loads all consent events, pre-computes consent windows per user (global)
  * and per project group. Returns a function that checks whether a session
- * is visible to a reader based on consent windows.
+ * is visible based on consent windows.
  *
  * A session is visible if its timestamp (lastModified, or upload.uploadedAt
  * as fallback) falls within BOTH a global and project consent window.

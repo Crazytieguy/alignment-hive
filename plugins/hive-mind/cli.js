@@ -14834,8 +14834,6 @@ var setup = {
   header: "Join the hive-mind shared knowledge base",
   alreadyLoggedIn: "You're already connected.",
   confirmRelogin: "Do you want to reconnect?",
-  refreshing: "Refreshing your session...",
-  refreshSuccess: "Session refreshed!",
   starting: "Starting authentication...",
   deviceAuth: (url2, code) => {
     return ["Open this URL in your browser:", "", `  ${url2}`, "", "Confirm this code matches:", "", `  ${code}`].join(`
@@ -18235,18 +18233,20 @@ function isTokenExpired(token) {
   return payload.exp <= Math.floor(Date.now() / 1000);
 }
 async function readAuthData() {
-  try {
-    const file2 = Bun.file(getAuthFile());
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success)
-      return null;
-    return parsed.data;
-  } catch {
+  const file2 = Bun.file(getAuthFile());
+  if (!await file2.exists())
     return null;
+  let data;
+  try {
+    data = await file2.json();
+  } catch {
+    throw new Error(errors3.authSchemaError("invalid JSON"));
   }
+  const parsed = AuthDataSchema.safeParse(data);
+  if (!parsed.success) {
+    throw new Error(errors3.authSchemaError(parsed.error.message));
+  }
+  return parsed.data;
 }
 async function saveAuthData(data) {
   await mkdir3(getAuthDir(), { recursive: true });

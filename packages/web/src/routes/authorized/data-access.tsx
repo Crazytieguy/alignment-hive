@@ -24,7 +24,10 @@ const fetchWidgetToken = createServerFn({ method: "GET" }).handler(
       `https://api.workos.com/user_management/organization_memberships?user_id=${encodeURIComponent(auth.user.id)}`,
       { headers: { Authorization: `Bearer ${workosApiKey}` } },
     );
-    if (!membershipsResp.ok) return null;
+    if (!membershipsResp.ok) {
+      console.error(`WorkOS memberships request failed: ${membershipsResp.status}`);
+      return null;
+    }
 
     const memberships = (await membershipsResp.json()) as {
       data: Array<{ organization_id: string; status: string }>;
@@ -46,7 +49,10 @@ const fetchWidgetToken = createServerFn({ method: "GET" }).handler(
         scopes: ["widgets:api-keys:manage"],
       }),
     });
-    if (!tokenResp.ok) return null;
+    if (!tokenResp.ok) {
+      console.error(`WorkOS widget token request failed: ${tokenResp.status}`);
+      return null;
+    }
 
     const { token } = (await tokenResp.json()) as { token: string };
     return token;

@@ -9,7 +9,6 @@ import {
   listSessionsQuerySchema,
   paginationQuerySchema,
   paginatedSessionsResponseSchema,
-  sessionResponseSchema,
   sessionDetailResponseSchema,
   userDetailResponseSchema,
   paginatedUsersResponseSchema,
@@ -48,7 +47,7 @@ app.get(
   "/api/sessions",
   describeRoute({
     tags: ["Sessions"],
-    description: "List Claude Code sessions shared by alignment researchers. Returns parent sessions only — each includes its agent (child) sessions inline. Only sessions within the contributor's active consent windows are visible. When userId is provided, results are scoped to that user and the directory, gitRemote, and hasUpload filters take effect. Without userId, only pagination applies.",
+    description: "List Claude Code sessions shared by alignment researchers. Returns parent sessions only — each includes its agent (child) sessions inline. Only sessions within the contributor's active consent windows are visible. When userId is provided, results are scoped to that user and the directory and gitRemote filters take effect. The hasUpload filter applies independently of userId.",
     responses: {
       200: {
         description: "Paginated sessions",
@@ -189,15 +188,20 @@ app.get(
   }),
   async (c) => {
     const userId = c.req.param("userId") as Id<"users">;
-    const result = await c.env.runQuery(
-      internal.authorized.getUserInternal,
-      { userId },
-    );
-    if (!result) return c.json({ error: "Not found" }, 404);
-    return c.json(
-      result satisfies z.infer<typeof userDetailResponseSchema>,
-      200,
-    );
+    try {
+      const result = await c.env.runQuery(
+        internal.authorized.getUserInternal,
+        { userId },
+      );
+      if (!result) return c.json({ error: "Not found" }, 404);
+      return c.json(
+        result satisfies z.infer<typeof userDetailResponseSchema>,
+        200,
+      );
+    } catch (error) {
+      console.error("getUserInternal error:", error);
+      return c.json({ error: "Invalid userId" }, 400);
+    }
   },
 );
 
@@ -217,18 +221,27 @@ app.get(
         description: "Unauthorized",
         content: { "application/json": { schema: resolver(errorResponseSchema) } },
       },
+      400: {
+        description: "Invalid userId",
+        content: { "application/json": { schema: resolver(errorResponseSchema) } },
+      },
     },
   }),
   async (c) => {
     const userId = c.req.param("userId") as Id<"users">;
-    const result = await c.env.runQuery(
-      internal.authorized.listProjectsInternal,
-      { userId },
-    );
-    return c.json(
-      result satisfies z.infer<typeof listProjectsResponseSchema>,
-      200,
-    );
+    try {
+      const result = await c.env.runQuery(
+        internal.authorized.listProjectsInternal,
+        { userId },
+      );
+      return c.json(
+        result satisfies z.infer<typeof listProjectsResponseSchema>,
+        200,
+      );
+    } catch (error) {
+      console.error("listProjectsInternal error:", error);
+      return c.json({ error: "Invalid userId" }, 400);
+    }
   },
 );
 

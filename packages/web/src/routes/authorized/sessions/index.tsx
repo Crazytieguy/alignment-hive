@@ -57,16 +57,8 @@ function SessionsList() {
     });
 
   const setExcludedProjects = (ids: Set<string>) => {
-    const dirs: string[] = [];
-    const remotes: string[] = [];
-    for (const id of ids) {
-      // Simple heuristic: git remotes contain dots (github.com/...)
-      if (id.includes(".")) {
-        remotes.push(id);
-      } else {
-        dirs.push(id);
-      }
-    }
+    const dirs = [...ids].filter((id) => knownDirectories.has(id));
+    const remotes = [...ids].filter((id) => knownGitRemotes.has(id));
     navigate({
       search: (prev) => ({
         ...prev,
@@ -122,7 +114,13 @@ function SessionsList() {
     { initialNumItems: 50 },
   );
 
-  // Collect unique projects from loaded results
+  // Collect unique directories and git remotes from loaded results
+  const knownDirectories = new Set<string>();
+  const knownGitRemotes = new Set<string>();
+  for (const s of results) {
+    if (s.gitRemote) knownGitRemotes.add(s.gitRemote);
+    if (s.directory) knownDirectories.add(s.directory);
+  }
   const allProjects = [
     ...new Set(
       results.map((s) => s.gitRemote ?? s.directory ?? "unknown"),

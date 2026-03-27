@@ -308,6 +308,7 @@ export async function getUserImpl(
     .withIndex("by_user_doc_id", (q) => q.eq("userDocId", args.userId))
     .collect();
 
+  // TODO(phase 2): remove after backfillUserDocId migration completes
   const legacySessions = await ctx.db
     .query("sessions")
     .withIndex("by_user_id", (q) => q.eq("userId", user.workosId))

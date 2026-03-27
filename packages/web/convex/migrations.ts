@@ -27,14 +27,14 @@ export const allUsersForMigration = internalQuery({
   },
 });
 
-/** Patch a single session with the resolved userDocId. */
+/** Patch a single session: set userDocId and clear legacy userId. */
 export const patchOneSession = internalMutation({
   args: {
     sessionId: v.id("sessions"),
     userDocId: v.id("users"),
   },
   handler: async (ctx, { sessionId, userDocId }) => {
-    await ctx.db.patch(sessionId, { userDocId });
+    await ctx.db.patch(sessionId, { userDocId, userId: undefined });
   },
 });
 

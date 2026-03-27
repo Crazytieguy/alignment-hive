@@ -45,18 +45,21 @@ function isTokenExpired(token: string): boolean {
   return payload.exp <= Math.floor(Date.now() / 1000);
 }
 
-/** Read auth data from disk. Returns null if not logged in. */
+/** Read auth data from disk. Returns null if no auth file. Throws on corrupt data. */
 export async function readAuthData(): Promise<AuthData | null> {
+  const file = Bun.file(getAuthFile());
+  if (!(await file.exists())) return null;
+  let data: unknown;
   try {
-    const file = Bun.file(getAuthFile());
-    if (!(await file.exists())) return null;
-    const data = await file.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success) return null;
-    return parsed.data;
+    data = await file.json();
   } catch {
-    return null;
+    throw new Error(errors.authSchemaError("invalid JSON"));
   }
+  const parsed = AuthDataSchema.safeParse(data);
+  if (!parsed.success) {
+    throw new Error(errors.authSchemaError(parsed.error.message));
+  }
+  return parsed.data;
 }
 
 export async function saveAuthData(data: AuthData): Promise<void> {

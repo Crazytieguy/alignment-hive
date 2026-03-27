@@ -20,11 +20,14 @@ export const submitAgreement = action({
       throw new Error("Not authenticated");
     }
 
-    // 1. Create agreement record
+    // 1. Create agreement record (null if already agreed)
     const agreementId = await ctx.runMutation(
       internal.agreement.submitAgreementInternal,
       { workosId: identity.subject },
     );
+
+    // Already agreed — no further action needed
+    if (!agreementId) return;
 
     // 2. Grant WorkOS data-accessor role
     const workosApiKey = process.env.WORKOS_API_KEY;
@@ -100,6 +103,11 @@ export const submitAgreementInternal = internalMutation({
 
     if (!user?.hasDataAccess) {
       throw new Error("Not authorized — no data access");
+    }
+
+    // Idempotent — return null if already agreed (so the action skips WorkOS + rollback)
+    if (await hasCurrentAgreement(ctx, user._id)) {
+      return null;
     }
 
     return await ctx.db.insert("dataAccessorAgreements", {

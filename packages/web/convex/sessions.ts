@@ -125,7 +125,8 @@ async function upsertSession(
       throw new ConvexError("Session belongs to different user");
     }
     await ctx.db.patch(existing._id, {
-      userDocId, // backfill userDocId on existing sessions
+      userDocId,
+      userId: undefined, // clear legacy field
       lineCount: args.lineCount,
       lastHeartbeat: now,
       ...(args.lastModified !== undefined && {
@@ -143,7 +144,6 @@ async function upsertSession(
   } else {
     return await ctx.db.insert("sessions", {
       sessionId: args.sessionId,
-      userId,
       userDocId,
       checkoutId: args.checkoutId,
       project: args.project,

@@ -255,8 +255,6 @@ export const setup = {
   header: 'Join the hive-mind shared knowledge base',
   alreadyLoggedIn: "You're already connected.",
   confirmRelogin: 'Do you want to reconnect?',
-  refreshing: 'Refreshing your session...',
-  refreshSuccess: 'Session refreshed!',
   starting: 'Starting authentication...',
   deviceAuth: (url: string, code: string): string => {
     return ['Open this URL in your browser:', '', `  ${url}`, '', 'Confirm this code matches:', '', `  ${code}`].join(
