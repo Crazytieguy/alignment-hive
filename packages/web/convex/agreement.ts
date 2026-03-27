@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { query, action, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { CURRENT_AGREEMENT_VERSION } from "./lib/agreement";
+import { CURRENT_AGREEMENT_VERSION, hasCurrentAgreement } from "./lib/agreement";
 
 const DATA_ACCESSOR_ROLE_SLUG = "data-accessor";
 
@@ -135,6 +135,7 @@ export const getAgreementStatus = query({
       return { agreement: undefined };
     }
 
+    // This query needs the creation time, so it can't use the shared helper
     const agreements = await ctx.db
       .query("dataAccessorAgreements")
       .withIndex("by_user_id", (q) => q.eq("userId", user._id))

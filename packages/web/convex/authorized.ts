@@ -30,9 +30,9 @@ import {
   listProjectsImpl,
 } from "./lib/authorizedQueries";
 
-// --- Shared Convex validator for the session filter ---
+// --- Shared Convex validators ---
 
-const sessionFilterValidator = v.optional(
+const sessionScopeValidator = v.optional(
   v.union(
     v.object({
       type: v.literal("include"),
@@ -43,14 +43,12 @@ const sessionFilterValidator = v.optional(
           v.object({ gitRemote: v.string() }),
         ),
       ),
-      hasUpload: v.optional(v.boolean()),
     }),
     v.object({
       type: v.literal("exclude"),
       excludeUserIds: v.optional(v.array(v.id("users"))),
       excludeDirectories: v.optional(v.array(v.string())),
       excludeGitRemotes: v.optional(v.array(v.string())),
-      hasUpload: v.optional(v.boolean()),
     }),
   ),
 );
@@ -65,7 +63,8 @@ const paginationOptsArg = v.object({
 export const listSessions = query({
   args: {
     paginationOpts: paginationOptsValidator,
-    filter: sessionFilterValidator,
+    scope: sessionScopeValidator,
+    hasUpload: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const auth = await requireAuthorized(ctx);
@@ -113,7 +112,7 @@ export const listProjects = query({
 // --- Internal query variants (for HTTP API — auth handled by Hono middleware) ---
 
 export const listSessionsInternal = internalQuery({
-  args: { paginationOpts: paginationOptsArg, filter: sessionFilterValidator },
+  args: { paginationOpts: paginationOptsArg, scope: sessionScopeValidator, hasUpload: v.optional(v.boolean()) },
   handler: async (ctx, args) => listSessionsImpl(ctx, args),
 });
 

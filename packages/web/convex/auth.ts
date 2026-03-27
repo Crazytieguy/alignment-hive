@@ -1,5 +1,5 @@
 import { query } from "./_generated/server";
-import { CURRENT_AGREEMENT_VERSION } from "./lib/agreement";
+import { hasCurrentAgreement } from "./lib/agreement";
 
 /** Lightweight auth info for the frontend route guard. */
 export const getAuthInfo = query({
@@ -20,17 +20,9 @@ export const getAuthInfo = query({
     }
 
     const hasDataAccess = user.hasDataAccess ?? false;
-
-    let hasAgreed = false;
-    if (hasDataAccess) {
-      const agreements = await ctx.db
-        .query("dataAccessorAgreements")
-        .withIndex("by_user_id", (q) => q.eq("userId", user._id))
-        .collect();
-      hasAgreed = agreements.some(
-        (a) => a.agreementVersion === CURRENT_AGREEMENT_VERSION,
-      );
-    }
+    const hasAgreed = hasDataAccess
+      ? await hasCurrentAgreement(ctx, user._id)
+      : false;
 
     return { hasDataAccess, hasAgreed };
   },

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import { getProjectIdentifiers } from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from '../lib/extraction';
@@ -12,8 +12,8 @@ export async function heartbeat(): Promise<number> {
     return 1;
   }
 
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) {
+  const authData = await getAuthData();
+  if (!authData) {
     return 1;
   }
 

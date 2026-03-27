@@ -1,6 +1,6 @@
 import { open, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import {
   ensureStateDir,
   getConfig,
@@ -216,8 +216,8 @@ async function doUploadWork(
 
   for (let i = 0; i < candidates.length; i += UPLOAD_CONCURRENCY) {
     if (i > 0) {
-      const refreshStatus = await checkAuthStatus(true);
-      if (!refreshStatus.authenticated) {
+      const authData = await getAuthData();
+      if (!authData) {
         printError(hive.upload.notAuthenticated);
         break;
       }

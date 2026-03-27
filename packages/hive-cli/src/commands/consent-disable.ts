@@ -1,14 +1,14 @@
 import { join } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { getProjectSharing, updateProjectSharing } from '../lib/convex';
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import { getConfig, getProjectIdentifiers, matchesProject } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printSuccess, printWarning } from '../lib/output';
 
 export async function consentDisable(projectPath?: string): Promise<number> {
-  const authStatus = await checkAuthStatus(true);
-  if (authStatus.needsLogin) {
+  const authData = await getAuthData();
+  if (!authData) {
     printError(hive.consent.notAuthenticated);
     return 1;
   }

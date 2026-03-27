@@ -1,4 +1,5 @@
 import { getAuthenticatedClient } from './convex';
+import { printError } from './output';
 import type { ConvexHttpClient } from 'convex/browser';
 
 /**
@@ -10,7 +11,7 @@ export async function runDataCommand(
 ): Promise<number> {
   const client = await getAuthenticatedClient();
   if (!client) {
-    console.error('Not authenticated. Run `hive login` first.');
+    printError('Not authenticated. Run `hive login` first.');
     return 1;
   }
 
@@ -21,12 +22,12 @@ export async function runDataCommand(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('Agreement required')) {
-      console.error(
+      printError(
         'You must sign the data accessor agreement first at https://alignment-hive.com/authorized/agreement',
       );
       return 1;
     }
-    console.error(`Error: ${message}`);
+    printError(message);
     return 1;
   }
 }

@@ -454,7 +454,7 @@ import { join as join5 } from "path";
 
 // src/lib/extraction.ts
 import { createReadStream } from "fs";
-import { mkdir as mkdir3, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir2, readFile as readFile2, readdir, stat as stat2, writeFile as writeFile2 } from "fs/promises";
 import { createInterface } from "readline";
 import { basename, join as join3 } from "path";
 
@@ -16564,146 +16564,10 @@ function sanitizeDeep(value, depth = 0) {
   return value;
 }
 
-// src/lib/auth.ts
-import { mkdir as mkdir2 } from "fs/promises";
-var WORKOS_API_URL = "https://api.workos.com/user_management";
-var AuthUserSchema = exports_external.object({
-  id: exports_external.string(),
-  email: exports_external.string(),
-  first_name: exports_external.string().nullish(),
-  last_name: exports_external.string().nullish()
-});
-var AuthDataSchema = exports_external.object({
-  access_token: exports_external.string(),
-  refresh_token: exports_external.string(),
-  user: AuthUserSchema,
-  authenticated_at: exports_external.number().optional()
-});
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3)
-      return null;
-    let payload = parts[1];
-    const padding = 4 - payload.length % 4;
-    if (padding < 4) {
-      payload += "=".repeat(padding);
-    }
-    return JSON.parse(atob(payload));
-  } catch {
-    return null;
-  }
-}
-function isTokenExpired(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number")
-    return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
-}
+// src/lib/extraction.ts
 function isErrorResult(result) {
   return result !== null && typeof result === "object" && "error" in result;
 }
-var isAuthError = isErrorResult;
-async function loadAuthData() {
-  try {
-    const file2 = Bun.file(getAuthFile());
-    if (!await file2.exists())
-      return null;
-    const data = await file2.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success) {
-      return { error: errors3.authSchemaError(parsed.error.message) };
-    }
-    return parsed.data;
-  } catch {
-    return null;
-  }
-}
-async function saveAuthData(data) {
-  await mkdir2(getAuthDir(), { recursive: true });
-  await Bun.write(getAuthFile(), JSON.stringify(data, null, 2), { mode: 384 });
-}
-async function refreshToken(refreshTokenValue, existingAuthenticatedAt) {
-  try {
-    const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshTokenValue,
-        client_id: getClientId()
-      })
-    });
-    if (!response.ok) {
-      return { error: errors3.refreshFailed(response.status) };
-    }
-    const data = await response.json();
-    const parsed = AuthDataSchema.safeParse(data);
-    if (!parsed.success) {
-      return { error: errors3.refreshFailed(response.status) };
-    }
-    return {
-      ...parsed.data,
-      authenticated_at: existingAuthenticatedAt
-    };
-  } catch {
-    return null;
-  }
-}
-function toOptionalErrors(arr) {
-  return arr.length > 0 ? arr : undefined;
-}
-function notAuthenticated(authErrors) {
-  return { authenticated: false, needsLogin: true, errors: authErrors };
-}
-function authenticated(user, authErrors) {
-  return { authenticated: true, user, needsLogin: false, errors: authErrors };
-}
-async function tryRefresh(authData) {
-  const collectedErrors = [];
-  const refreshResult = await refreshToken(authData.refresh_token, authData.authenticated_at);
-  if (isErrorResult(refreshResult)) {
-    collectedErrors.push(refreshResult.error);
-    const freshResult = await loadAuthData();
-    if (isAuthError(freshResult)) {
-      collectedErrors.push(freshResult.error);
-    }
-    const freshData = isAuthError(freshResult) ? null : freshResult;
-    if (freshData?.access_token && !isTokenExpired(freshData.access_token)) {
-      return authenticated(freshData.user, toOptionalErrors(collectedErrors));
-    }
-    return notAuthenticated(collectedErrors);
-  }
-  if (!refreshResult)
-    return notAuthenticated(toOptionalErrors(collectedErrors));
-  await saveAuthData(refreshResult);
-  return authenticated(refreshResult.user, toOptionalErrors(collectedErrors));
-}
-async function checkAuthStatus(attemptRefresh = true) {
-  const collectedErrors = [];
-  const authResult = await loadAuthData();
-  if (isAuthError(authResult)) {
-    collectedErrors.push(authResult.error);
-  }
-  const authData = isAuthError(authResult) ? null : authResult;
-  if (!authData?.access_token) {
-    return notAuthenticated(toOptionalErrors(collectedErrors));
-  }
-  if (!isTokenExpired(authData.access_token)) {
-    return authenticated(authData.user, toOptionalErrors(collectedErrors));
-  }
-  if (!attemptRefresh || !authData.refresh_token) {
-    return notAuthenticated(toOptionalErrors(collectedErrors));
-  }
-  const refreshStatus = await tryRefresh(authData);
-  const allErrors = [...collectedErrors, ...refreshStatus.errors ?? []];
-  return { ...refreshStatus, errors: toOptionalErrors(allErrors) };
-}
-function getUserDisplayName(user) {
-  return user.first_name || user.email;
-}
-
-// src/lib/extraction.ts
 var HIVE_MIND_VERSION = "0.1";
 function* parseJsonl(content) {
   for (const line of content.split(`
@@ -17034,7 +16898,7 @@ async function extractSingleSession(cwd, sessionId) {
   ]);
   if (transcriptsDirs.length === 0)
     return false;
-  await mkdir3(extractedDir, { recursive: true });
+  await mkdir2(extractedDir, { recursive: true });
   for (const transcriptsDir of transcriptsDirs) {
     try {
       const rawSessions = await findRawSessions(transcriptsDir);
@@ -18334,18 +18198,118 @@ function extractSessionSummary(entries) {
   return findSummaryEntry(entries) || findFirstUserPrompt(entries);
 }
 
+// src/lib/auth.ts
+import { mkdir as mkdir3 } from "fs/promises";
+var WORKOS_API_URL = "https://api.workos.com/user_management";
+var AuthUserSchema = exports_external.object({
+  id: exports_external.string(),
+  email: exports_external.string(),
+  first_name: exports_external.string().nullish(),
+  last_name: exports_external.string().nullish()
+});
+var AuthDataSchema = exports_external.object({
+  access_token: exports_external.string(),
+  refresh_token: exports_external.string(),
+  user: AuthUserSchema,
+  authenticated_at: exports_external.number().optional()
+});
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3)
+      return null;
+    let payload = parts[1];
+    const padding = 4 - payload.length % 4;
+    if (padding < 4) {
+      payload += "=".repeat(padding);
+    }
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number")
+    return true;
+  return payload.exp <= Math.floor(Date.now() / 1000);
+}
+async function readAuthData() {
+  try {
+    const file2 = Bun.file(getAuthFile());
+    if (!await file2.exists())
+      return null;
+    const data = await file2.json();
+    const parsed = AuthDataSchema.safeParse(data);
+    if (!parsed.success)
+      return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+async function saveAuthData(data) {
+  await mkdir3(getAuthDir(), { recursive: true });
+  await Bun.write(getAuthFile(), JSON.stringify(data, null, 2), { mode: 384 });
+}
+async function refreshToken(authData) {
+  const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: authData.refresh_token,
+      client_id: getClientId()
+    })
+  });
+  if (!response.ok) {
+    throw new Error(errors3.refreshFailed(response.status));
+  }
+  const data = await response.json();
+  const parsed = AuthDataSchema.safeParse(data);
+  if (!parsed.success) {
+    throw new Error(errors3.refreshFailed(response.status));
+  }
+  return {
+    ...parsed.data,
+    authenticated_at: authData.authenticated_at
+  };
+}
+async function getAuthData() {
+  const authData = await readAuthData();
+  if (!authData)
+    return null;
+  if (!isTokenExpired(authData.access_token)) {
+    return authData;
+  }
+  try {
+    const refreshed = await refreshToken(authData);
+    await saveAuthData(refreshed);
+    return refreshed;
+  } catch (refreshError) {
+    const freshData = await readAuthData();
+    if (freshData && !isTokenExpired(freshData.access_token)) {
+      return freshData;
+    }
+    throw refreshError;
+  }
+}
+function getUserDisplayName(user) {
+  return user.first_name || user.email;
+}
+
 // src/lib/upload-eligibility.ts
 var AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000;
 async function getAuthIssuedAt() {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult))
+  const authData = await readAuthData();
+  if (!authData)
     return null;
-  if (authResult.authenticated_at === undefined) {
+  if (authData.authenticated_at === undefined) {
     const now = Date.now();
-    await saveAuthData({ ...authResult, authenticated_at: now });
+    await saveAuthData({ ...authData, authenticated_at: now });
     return now;
   }
-  return authResult.authenticated_at;
+  return authData.authenticated_at;
 }
 function checkSessionEligibility(meta3, authIssuedAt) {
   const sessionId = meta3.sessionId;
@@ -19459,25 +19423,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 async function checkExistingAuth() {
-  const status = await checkAuthStatus(false);
-  if (status.authenticated && status.user) {
-    printWarning(setup.alreadyLoggedIn);
-    return await confirm2(setup.confirmRelogin);
-  }
+  try {
+    const authData = await getAuthData();
+    if (authData) {
+      printWarning(setup.alreadyLoggedIn);
+      return await confirm2(setup.confirmRelogin);
+    }
+  } catch {}
   return true;
-}
-async function tryRefresh2() {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult))
-    return { success: false };
-  printInfo(setup.refreshing);
-  const refreshResult = await refreshToken(authResult.refresh_token, authResult.authenticated_at);
-  if (refreshResult && !isErrorResult(refreshResult)) {
-    await saveAuthData(refreshResult);
-    printSuccess(setup.refreshSuccess);
-    return { success: true, user: refreshResult.user };
-  }
-  return { success: false };
 }
 async function deviceAuthFlow() {
   printInfo(setup.starting);
@@ -19555,11 +19508,15 @@ async function deviceAuthFlow() {
   return 1;
 }
 async function showStatus() {
-  const status = await checkAuthStatus(true);
-  if (status.authenticated && status.user) {
-    const displayName = getUserDisplayName(status.user);
-    console.log(errors3.loginStatusYes(displayName));
-  } else {
+  try {
+    const authData = await getAuthData();
+    if (authData) {
+      const displayName = getUserDisplayName(authData.user);
+      console.log(errors3.loginStatusYes(displayName));
+    } else {
+      console.log(errors3.loginStatusNo);
+    }
+  } catch {
     console.log(errors3.loginStatusNo);
   }
   return 0;
@@ -19571,10 +19528,6 @@ async function login() {
   printInfo(setup.header);
   console.log("");
   if (!await checkExistingAuth()) {
-    return 0;
-  }
-  const refreshResult = await tryRefresh2();
-  if (refreshResult.success) {
     return 0;
   }
   return await deviceAuthFlow();
@@ -20582,12 +20535,11 @@ function getConvexClient() {
   return clientInstance;
 }
 async function getAuthenticatedClient() {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult)) {
+  const authData = await getAuthData();
+  if (!authData)
     return null;
-  }
   const client = getConvexClient();
-  client.setAuth(authResult.access_token);
+  client.setAuth(authData.access_token);
   return client;
 }
 async function heartbeatSession(session) {
@@ -20610,8 +20562,8 @@ async function heartbeat() {
   if (sessionIds.length === 0) {
     return 1;
   }
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) {
+  const authData = await getAuthData();
+  if (!authData) {
     return 1;
   }
   const sessionsDir = getHiveMindSessionsDir(cwd);

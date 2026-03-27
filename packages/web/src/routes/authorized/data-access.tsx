@@ -92,12 +92,8 @@ export const Route = createFileRoute("/authorized/data-access")({
 });
 
 const convexSiteUrl = (() => {
-  const cloudUrl = import.meta.env.VITE_CONVEX_URL;
-  if (!cloudUrl.includes(".convex.cloud")) {
-    throw new Error(
-      `Expected VITE_CONVEX_URL to contain .convex.cloud, got: ${cloudUrl}`,
-    );
-  }
+  const cloudUrl = import.meta.env.VITE_CONVEX_URL ?? "";
+  if (!cloudUrl.includes(".convex.cloud")) return null;
   return cloudUrl.replace(".convex.cloud", ".convex.site");
 })();
 
@@ -133,18 +129,25 @@ function DataAccessPage() {
       {/* HTTP API */}
       <section>
         <h2 className="text-sm font-medium text-muted-foreground">HTTP API</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Generate an API key below, then see the{" "}
-          <a
-            href={`${convexSiteUrl}/api/doc`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary underline underline-offset-4 hover:text-primary/80"
-          >
-            OpenAPI spec
-          </a>{" "}
-          for endpoints and authentication.
-        </p>
+        {convexSiteUrl ? (
+          <p className="mt-2 text-sm text-muted-foreground">
+            Generate an API key below, then see the{" "}
+            <a
+              href={`${convexSiteUrl}/api/doc`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline underline-offset-4 hover:text-primary/80"
+            >
+              OpenAPI spec
+            </a>{" "}
+            for endpoints and authentication.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm text-destructive">
+            HTTP API unavailable — VITE_CONVEX_URL is not configured for Convex
+            Cloud.
+          </p>
+        )}
       </section>
 
       <hr className="my-8 border-border" />

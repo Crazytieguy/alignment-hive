@@ -31,7 +31,7 @@ All queries in `convex/authorized.ts` MUST call `requireAuthorized()` (from `con
 
 ### Data accessor agreement
 
-Users with `hasDataAccess` must sign the current version of the data accessor agreement (`CURRENT_AGREEMENT_VERSION` in `convex/lib/agreement.ts`) before accessing any data. The agreement is stored in the `dataAccessorAgreements` table. The `getAccessList` query in `consent.ts` only shows users who have both `hasDataAccess` and a valid agreement.
+Users with `hasDataAccess` must sign the current version of the data accessor agreement (`CURRENT_AGREEMENT_VERSION` in `convex/lib/agreement.ts`) before accessing any data. The agreement is stored in the `dataAccessorAgreements` table.
 
 ### userId migration (phase 1 — in progress)
 

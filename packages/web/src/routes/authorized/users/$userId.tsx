@@ -24,7 +24,7 @@ function UserDetail() {
   const { results, status, loadMore } = usePaginatedQuery(
     api.authorized.listSessions,
     {
-      filter: {
+      scope: {
         type: "include" as const,
         userId: userId as Id<"users">,
       },

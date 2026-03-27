@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import {
   addTranscriptsDir,
   ensureStateDir,
@@ -104,12 +104,22 @@ export async function hiveSessionStart(): Promise<number> {
     .catch(() => {});
 
   // Auth must complete before Convex queries (refresh may update the token)
-  const [status, transcriptsDirs] = await Promise.all([
-    checkAuthStatus(true),
-    loadTranscriptsDirs(stateDir),
-  ]);
+  let authData;
+  let transcriptsDirs;
+  try {
+    [authData, transcriptsDirs] = await Promise.all([
+      getAuthData(),
+      loadTranscriptsDirs(stateDir),
+    ]);
+  } catch {
+    // Auth refresh failed — show what we have and bail
+    if (messages.length > 0) {
+      hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
+    }
+    return 0;
+  }
 
-  if (status.needsLogin) {
+  if (!authData) {
     // Don't mention auth — /hive:align handles the full setup flow
     if (messages.length > 0) {
       hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
@@ -218,7 +228,7 @@ export async function hiveSessionStart(): Promise<number> {
     hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
   }
 
-  if (status.authenticated && allSessions.length > 0) {
+  if (allSessions.length > 0) {
     spawnBackgroundCommand(['heartbeat'], stateDir);
   }
 

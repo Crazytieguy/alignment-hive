@@ -2,18 +2,13 @@ import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import {
   AuthDataSchema,
-  checkAuthStatus,
+  getAuthData,
   getUserDisplayName,
-  isAuthError,
-  isErrorResult,
-  loadAuthData,
-  refreshToken,
   saveAuthData,
 } from '../lib/auth';
 import { getClientId } from '../lib/config';
 import { errors, setup as msg } from '../lib/messages';
 import { colors, printError, printInfo, printSuccess, printWarning } from '../lib/output';
-import type { AuthUser } from '../lib/auth';
 
 const WORKOS_API_URL = 'https://api.workos.com/user_management';
 
@@ -77,30 +72,16 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function checkExistingAuth(): Promise<boolean> {
-  const status = await checkAuthStatus(false);
-
-  if (status.authenticated && status.user) {
-    printWarning(msg.alreadyLoggedIn);
-    return await confirm(msg.confirmRelogin);
+  try {
+    const authData = await getAuthData();
+    if (authData) {
+      printWarning(msg.alreadyLoggedIn);
+      return await confirm(msg.confirmRelogin);
+    }
+  } catch {
+    // Token expired and refresh failed — proceed to login
   }
-
   return true;
-}
-
-async function tryRefresh(): Promise<{ success: boolean; user?: AuthUser }> {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult)) return { success: false };
-
-  printInfo(msg.refreshing);
-
-  const refreshResult = await refreshToken(authResult.refresh_token, authResult.authenticated_at);
-  if (refreshResult && !isErrorResult(refreshResult)) {
-    await saveAuthData(refreshResult);
-    printSuccess(msg.refreshSuccess);
-    return { success: true, user: refreshResult.user };
-  }
-
-  return { success: false };
 }
 
 async function deviceAuthFlow(): Promise<number> {
@@ -200,11 +181,15 @@ async function deviceAuthFlow(): Promise<number> {
 }
 
 async function showStatus(): Promise<number> {
-  const status = await checkAuthStatus(true);
-  if (status.authenticated && status.user) {
-    const displayName = getUserDisplayName(status.user);
-    console.log(errors.loginStatusYes(displayName));
-  } else {
+  try {
+    const authData = await getAuthData();
+    if (authData) {
+      const displayName = getUserDisplayName(authData.user);
+      console.log(errors.loginStatusYes(displayName));
+    } else {
+      console.log(errors.loginStatusNo);
+    }
+  } catch {
     console.log(errors.loginStatusNo);
   }
   return 0;
@@ -219,11 +204,6 @@ export async function login(): Promise<number> {
   console.log('');
 
   if (!(await checkExistingAuth())) {
-    return 0;
-  }
-
-  const refreshResult = await tryRefresh();
-  if (refreshResult.success) {
     return 0;
   }
 

@@ -3,7 +3,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import { getConfig, getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
 import { discoverWorktreeTranscriptDirsForAll, extractCwd } from '../lib/transcript-discovery';
 import { getConsentStatus, getProjectSharing, getRepoLinkStatus, updateProjectSharing } from '../lib/convex';
@@ -101,8 +101,8 @@ export async function consentSetup(): Promise<number> {
 }
 
 async function consentSetupInner(): Promise<number> {
-  const authStatus = await checkAuthStatus(true);
-  if (authStatus.needsLogin) {
+  const authData = await getAuthData();
+  if (!authData) {
     console.error(msg.notAuthenticated);
     return 1;
   }

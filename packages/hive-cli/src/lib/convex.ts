@@ -1,6 +1,6 @@
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
-import { checkAuthStatus, isAuthError, loadAuthData } from './auth';
+import { getAuthData } from './auth';
 import { getProjectIdentifiers, matchesProject } from './config';
 import type { Id } from '../../../web/convex/_generated/dataModel';
 import type { ProjectIdentifiers } from '@alignment-hive/session-data';
@@ -22,14 +22,12 @@ export function getConvexClient(): ConvexHttpClient {
   return clientInstance;
 }
 
+/** Get an authenticated Convex client, refreshing the token if needed. Returns null if not logged in. Throws on refresh failure. */
 export async function getAuthenticatedClient(): Promise<ConvexHttpClient | null> {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult)) {
-    return null;
-  }
-
+  const authData = await getAuthData();
+  if (!authData) return null;
   const client = getConvexClient();
-  client.setAuth(authResult.access_token);
+  client.setAuth(authData.access_token);
   return client;
 }
 
@@ -208,8 +206,8 @@ export async function getRepoLinkStatus(gitRemote: string): Promise<RepoLinkStat
 
 /** Resolve project consent state for the current project. */
 export async function resolveProjectConsent(cwd: string) {
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) return { error: 'not-authenticated' } as const;
+  const authData = await getAuthData();
+  if (!authData) return { error: 'not-authenticated' } as const;
 
   const [consent, allProjects] = await Promise.all([
     getConsentStatus(),

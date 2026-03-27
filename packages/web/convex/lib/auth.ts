@@ -1,5 +1,5 @@
 import type { QueryCtx, MutationCtx } from "../_generated/server";
-import { CURRENT_AGREEMENT_VERSION } from "./agreement";
+import { hasCurrentAgreement } from "./agreement";
 
 /**
  * Check if the current user is authorized to view shared session data.
@@ -29,17 +29,7 @@ export async function requireAuthorized(
     throw new Error("Not authorized");
   }
 
-  // Check agreement
-  const agreements = await ctx.db
-    .query("dataAccessorAgreements")
-    .withIndex("by_user_id", (q) => q.eq("userId", user._id))
-    .collect();
-
-  const hasValidAgreement = agreements.some(
-    (a) => a.agreementVersion === CURRENT_AGREEMENT_VERSION,
-  );
-
-  if (!hasValidAgreement) {
+  if (!(await hasCurrentAgreement(ctx, user._id))) {
     throw new Error("Agreement required");
   }
 

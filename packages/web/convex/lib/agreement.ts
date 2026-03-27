@@ -1,7 +1,24 @@
 // Keep consistent with ../../../src/components/consent/policy-content.ts —
 // changes to access/use terms must be reflected in both files.
 
+import type { QueryCtx } from "../_generated/server";
+import type { Id } from "../_generated/dataModel";
+
 export const CURRENT_AGREEMENT_VERSION = "2026-03";
+
+/** Check whether a user has signed the current agreement version. */
+export async function hasCurrentAgreement(
+  ctx: QueryCtx,
+  userId: Id<"users">,
+): Promise<boolean> {
+  const agreements = await ctx.db
+    .query("dataAccessorAgreements")
+    .withIndex("by_user_id", (q) => q.eq("userId", userId))
+    .collect();
+  return agreements.some(
+    (a) => a.agreementVersion === CURRENT_AGREEMENT_VERSION,
+  );
+}
 
 export interface AgreementSection {
   id: string;

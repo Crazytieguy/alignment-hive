@@ -85,6 +85,18 @@ async function verifyConsent(
   }
 }
 
+/** Check session ownership during the userId→userDocId migration. Matches either field. */
+function isSessionOwner(
+  session: { userId?: string; userDocId?: Id<"users"> },
+  userId: string,
+  userDocId: Id<"users">,
+): boolean {
+  return (
+    (!!session.userDocId && session.userDocId === userDocId) ||
+    (!!session.userId && session.userId === userId)
+  );
+}
+
 /** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the document ID. */
 async function upsertSession(
   ctx: MutationCtx,
@@ -109,11 +121,7 @@ async function upsertSession(
     .first();
 
   if (existing) {
-    // Ownership check: match either userDocId or legacy userId
-    const ownerMatch =
-      (existing.userDocId && existing.userDocId === userDocId) ||
-      (existing.userId && existing.userId === userId);
-    if (!ownerMatch) {
+    if (!isSessionOwner(existing, userId, userDocId)) {
       throw new ConvexError("Session belongs to different user");
     }
     await ctx.db.patch(existing._id, {
@@ -249,13 +257,8 @@ export const saveUploads = mutation({
       .query("sessions")
       .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))
       .first();
-    if (existingParent) {
-      const ownerMatch =
-        (existingParent.userDocId && existingParent.userDocId === userDocId) ||
-        (existingParent.userId && existingParent.userId === identity.subject);
-      if (!ownerMatch) {
-        throw new ConvexError("Parent session belongs to different user");
-      }
+    if (existingParent && !isSessionOwner(existingParent, identity.subject, userDocId)) {
+      throw new ConvexError("Parent session belongs to different user");
     }
 
     const now = Date.now();

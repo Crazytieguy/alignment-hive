@@ -5,7 +5,7 @@
  */
 import type { QueryCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
-import type { PaginationOptions } from "convex/server";
+import type { PaginationOptions, PaginationResult } from "convex/server";
 import { stream } from "convex-helpers/server/stream";
 import schema from "../schema";
 import { buildConsentFilter } from "./consentVisibility";
@@ -90,62 +90,65 @@ async function resolveSessionUser(
   return null;
 }
 
-// --- Filter type (shared between public and internal queries) ---
+// --- Scope type (shared between public and internal queries) ---
 
-export type SessionFilter =
+export type SessionScope =
   | {
       type: "include";
       userId: Id<"users">;
       project?: { directory: string } | { gitRemote: string };
-      hasUpload?: boolean;
     }
   | {
       type: "exclude";
       excludeUserIds?: Array<Id<"users">>;
       excludeDirectories?: string[];
       excludeGitRemotes?: string[];
-      hasUpload?: boolean;
     };
 
 // --- Query implementations ---
 
 export async function listSessionsImpl(
   ctx: QueryCtx,
-  args: { paginationOpts: PaginationOptions; filter?: SessionFilter },
+  args: {
+    paginationOpts: PaginationOptions;
+    scope?: SessionScope;
+    hasUpload?: boolean;
+  },
 ) {
   const allUsers = await ctx.db.query("users").collect();
   const consentFilter = await buildConsentFilter(ctx, allUsers);
 
-  const filter = args.filter;
-  const hasUpload = filter?.hasUpload;
+  const { scope, hasUpload } = args;
 
-  if (filter?.type === "include") {
+  const uploadFilter = (session: Doc<"sessions">) => {
+    if (hasUpload === undefined) return true;
+    return hasUpload ? !!session.upload : !session.upload;
+  };
+
+  if (scope?.type === "include") {
     const projectDir =
-      filter.project && "directory" in filter.project
-        ? filter.project.directory
+      scope.project && "directory" in scope.project
+        ? scope.project.directory
         : undefined;
     const projectRemote =
-      filter.project && "gitRemote" in filter.project
-        ? filter.project.gitRemote
+      scope.project && "gitRemote" in scope.project
+        ? scope.project.gitRemote
         : undefined;
 
     const paginatedSessions = await stream(ctx.db, schema)
       .query("sessions")
-      .withIndex("by_user_doc_id", (q) => q.eq("userDocId", filter.userId))
+      .withIndex("by_user_doc_id", (q) => q.eq("userDocId", scope.userId))
       .order("desc")
       .filterWith(async (session) => {
         if (session.parentSessionId) return false;
-        if (hasUpload !== undefined) {
-          if (hasUpload && !session.upload) return false;
-          if (!hasUpload && session.upload) return false;
-        }
+        if (!uploadFilter(session)) return false;
         if (projectDir && session.directory !== projectDir) return false;
         if (projectRemote && session.gitRemote !== projectRemote) return false;
         return consentFilter(session);
       })
       .paginate(args.paginationOpts);
 
-    const user = await ctx.db.get(filter.userId);
+    const user = await ctx.db.get(scope.userId);
 
     return {
       ...paginatedSessions,
@@ -166,49 +169,16 @@ export async function listSessionsImpl(
     };
   }
 
-  // Exclude path (default) — build user maps for resolving session owners
+  // User maps for resolving session owners (shared by no-scope and exclude paths)
   const userDocMap = new Map(allUsers.map((u) => [u._id as string, u]));
   const workosToUser = new Map(allUsers.map((u) => [u.workosId, u]));
-  const excludeUserIds = new Set(
-    filter?.type === "exclude"
-      ? (filter.excludeUserIds ?? []).map(String)
-      : [],
-  );
-  const excludeDirectories = new Set(
-    filter?.type === "exclude" ? (filter.excludeDirectories ?? []) : [],
-  );
-  const excludeGitRemotes = new Set(
-    filter?.type === "exclude" ? (filter.excludeGitRemotes ?? []) : [],
-  );
 
-  const paginatedSessions = await stream(ctx.db, schema)
-    .query("sessions")
-    .withIndex("by_parent_session_id", (q) =>
-      q.eq("parentSessionId", undefined),
-    )
-    .order("desc")
-    .filterWith(async (session) => {
-      if (hasUpload !== undefined) {
-        if (hasUpload && !session.upload) return false;
-        if (!hasUpload && session.upload) return false;
-      }
-      if (session.userDocId && excludeUserIds.has(session.userDocId)) {
-        return false;
-      }
-      if (session.directory && excludeDirectories.has(session.directory)) {
-        return false;
-      }
-      if (session.gitRemote && excludeGitRemotes.has(session.gitRemote)) {
-        return false;
-      }
-      return consentFilter(session);
-    })
-    .paginate(args.paginationOpts);
-
-  return {
+  const formatPage = async (
+    paginatedSessions: PaginationResult<Doc<"sessions">>,
+  ) => ({
     ...paginatedSessions,
     page: await Promise.all(
-      paginatedSessions.page.map(async (session) => {
+      paginatedSessions.page.map(async (session: Doc<"sessions">) => {
         const upload = await formatUpload(ctx, session.upload);
         const user =
           (session.userDocId
@@ -227,7 +197,52 @@ export async function listSessionsImpl(
         };
       }),
     ),
-  };
+  });
+
+  // No-scope path — just consent + optional hasUpload
+  if (!scope) {
+    const paginatedSessions = await stream(ctx.db, schema)
+      .query("sessions")
+      .withIndex("by_parent_session_id", (q) =>
+        q.eq("parentSessionId", undefined),
+      )
+      .order("desc")
+      .filterWith(async (session) =>
+        uploadFilter(session) && consentFilter(session),
+      )
+      .paginate(args.paginationOpts);
+    return formatPage(paginatedSessions);
+  }
+
+  // Exclude path
+  const excludeUserIds = new Set(
+    (scope.excludeUserIds ?? []).map(String),
+  );
+  const excludeDirectories = new Set(scope.excludeDirectories ?? []);
+  const excludeGitRemotes = new Set(scope.excludeGitRemotes ?? []);
+
+  const paginatedSessions = await stream(ctx.db, schema)
+    .query("sessions")
+    .withIndex("by_parent_session_id", (q) =>
+      q.eq("parentSessionId", undefined),
+    )
+    .order("desc")
+    .filterWith(async (session) => {
+      if (!uploadFilter(session)) return false;
+      if (session.userDocId && excludeUserIds.has(session.userDocId)) {
+        return false;
+      }
+      if (session.directory && excludeDirectories.has(session.directory)) {
+        return false;
+      }
+      if (session.gitRemote && excludeGitRemotes.has(session.gitRemote)) {
+        return false;
+      }
+      return consentFilter(session);
+    })
+    .paginate(args.paginationOpts);
+
+  return formatPage(paginatedSessions);
 }
 
 export async function getSessionImpl(

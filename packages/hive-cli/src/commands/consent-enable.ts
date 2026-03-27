@@ -1,15 +1,15 @@
 import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
 import { updateProjectSharing } from '../lib/convex';
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import { getConfig, getProjectIdentifiers } from '../lib/config';
 import { discoverWorktreeTranscriptDirsForOne } from '../lib/transcript-discovery';
 import { hive } from '../lib/messages';
 import { printError, printSuccess } from '../lib/output';
 
 export async function consentEnable(projectPath?: string): Promise<number> {
-  const authStatus = await checkAuthStatus(true);
-  if (authStatus.needsLogin) {
+  const authData = await getAuthData();
+  if (!authData) {
     printError(hive.consent.notAuthenticated);
     return 1;
   }

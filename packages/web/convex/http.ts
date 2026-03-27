@@ -64,10 +64,10 @@ app.get(
   async (c) => {
     const q = c.req.valid("query");
 
-    // Build include filter from flat params (HTTP API only exposes include-style)
-    let filter;
+    // Build include scope from flat params (HTTP API only exposes include-style)
+    let scope;
     if (q.userId) {
-      filter = {
+      scope = {
         type: "include" as const,
         userId: q.userId as Id<"users">,
         project: q.directory
@@ -75,7 +75,6 @@ app.get(
           : q.gitRemote
             ? ({ gitRemote: q.gitRemote } as const)
             : undefined,
-        hasUpload: q.hasUpload,
       };
     }
 
@@ -86,7 +85,8 @@ app.get(
           numItems: q.numItems,
           cursor: q.cursor ?? null,
         },
-        filter,
+        scope,
+        hasUpload: q.hasUpload,
       },
     );
     return c.json(

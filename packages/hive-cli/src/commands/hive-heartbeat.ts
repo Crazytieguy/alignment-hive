@@ -1,4 +1,4 @@
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import { getConfig, getOrCreateCheckoutId, getProjectIdentifiers, loadTranscriptsDirs } from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
 import { countRawLines } from '../lib/extraction';
@@ -9,8 +9,8 @@ export async function hiveHeartbeat(): Promise<number> {
   const cwd = process.cwd();
   const stateDir = config.getStateDir(cwd);
 
-  const status = await checkAuthStatus(true);
-  if (!status.authenticated) return 1;
+  const authData = await getAuthData();
+  if (!authData) return 1;
 
   const transcriptsDirs = await loadTranscriptsDirs(stateDir);
   if (transcriptsDirs.length === 0) return 0;

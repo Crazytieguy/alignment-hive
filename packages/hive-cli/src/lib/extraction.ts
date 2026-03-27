@@ -6,9 +6,14 @@ import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/session-data
 import { getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
 import { errors } from './messages';
 import { getDetectSecretsStats, resetDetectSecretsStats, sanitizeDeep } from './sanitize';
-import { isErrorResult } from './auth';
-import type { ErrorResult } from './auth';
 import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
+
+export type ErrorResult = { error: string };
+
+/** Type guard for any result type that may contain an error */
+export function isErrorResult<T>(result: T | ErrorResult | null): result is ErrorResult {
+  return result !== null && typeof result === 'object' && 'error' in result;
+}
 
 export const HIVE_MIND_VERSION = '0.1' as const;
 

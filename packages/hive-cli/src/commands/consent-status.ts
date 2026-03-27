@@ -1,4 +1,4 @@
-import { checkAuthStatus } from '../lib/auth';
+import { getAuthData } from '../lib/auth';
 import { getProjectIdentifiers, matchesProject } from '../lib/config';
 import { getConsentStatus, getProjectSharing, getRepoLinkStatus } from '../lib/convex';
 import { checkRepoVisibility } from '../lib/github';
@@ -6,8 +6,8 @@ import { hive } from '../lib/messages';
 import { printError } from '../lib/output';
 
 export async function consentStatus(): Promise<number> {
-  const authStatus = await checkAuthStatus(true);
-  if (authStatus.needsLogin) {
+  const authData = await getAuthData();
+  if (!authData) {
     printError(hive.consent.statusNotAuthenticated);
     return 1;
   }

@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isAuthError, loadAuthData, saveAuthData } from './auth';
+import { readAuthData, saveAuthData } from './auth';
 import { getHiveMindSessionsDir, isMetaError, readExtractedMeta } from './extraction';
 import { SESSION_REVIEW_PERIOD_MS } from './session-state';
 import type { SessionMeta } from '@alignment-hive/session-data';
@@ -8,17 +8,17 @@ import type { SessionMeta } from '@alignment-hive/session-data';
 const AUTH_REVIEW_PERIOD_MS = 4 * 60 * 60 * 1000; // 4h for auth age
 
 export async function getAuthIssuedAt(): Promise<number | null> {
-  const authResult = await loadAuthData();
-  if (!authResult || isAuthError(authResult)) return null;
+  const authData = await readAuthData();
+  if (!authData) return null;
 
   // Migration: if authenticated_at is missing, set it to now
-  if (authResult.authenticated_at === undefined) {
+  if (authData.authenticated_at === undefined) {
     const now = Date.now();
-    await saveAuthData({ ...authResult, authenticated_at: now });
+    await saveAuthData({ ...authData, authenticated_at: now });
     return now;
   }
 
-  return authResult.authenticated_at;
+  return authData.authenticated_at;
 }
 
 export interface SessionEligibility {

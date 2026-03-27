@@ -11,7 +11,8 @@ export async function dataListSessions(argv: Array<string>): Promise<number> {
         numItems: args.numItems,
         cursor: args.cursor,
       },
-      filter: args.filter,
+      scope: args.scope,
+      hasUpload: args.hasUpload,
     }),
   );
 }
@@ -72,28 +73,28 @@ function parseArgs(argv: Array<string>) {
     return {
       numItems,
       cursor,
-      filter: {
+      hasUpload,
+      scope: {
         type: 'include' as const,
         userId: userId as Id<'users'>,
         project,
-        hasUpload,
       },
     };
   }
 
-  if (excludeUserIds || excludeDirectories || excludeGitRemotes || hasUpload !== undefined) {
+  if (excludeUserIds || excludeDirectories || excludeGitRemotes) {
     return {
       numItems,
       cursor,
-      filter: {
+      hasUpload,
+      scope: {
         type: 'exclude' as const,
         excludeUserIds: excludeUserIds as Array<Id<'users'>> | undefined,
         excludeDirectories,
         excludeGitRemotes,
-        hasUpload,
       },
     };
   }
 
-  return { numItems, cursor, filter: undefined };
+  return { numItems, cursor, hasUpload, scope: undefined };
 }

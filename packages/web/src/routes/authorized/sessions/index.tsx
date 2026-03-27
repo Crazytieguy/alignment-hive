@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useConvex } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import { SessionsTable } from "~/components/sessions-table";
 import { Button, formatProject } from "@alignment-hive/ui";
@@ -30,6 +31,7 @@ function SessionsList() {
   const navigate = useNavigate({ from: Route.fullPath });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [downloading, setDownloading] = useState(false);
+  const convex = useConvex();
 
   const uploadFilter = search.upload ?? "all";
   const excludedUserIds = new Set(search.excludeUsers ?? []);
@@ -92,7 +94,7 @@ function SessionsList() {
     excludeGitRemotesList.length > 0;
 
   const queryArgs = {
-    filter: hasExcludes
+    scope: hasExcludes
       ? ({
           type: "exclude" as const,
           ...(excludeUserIdsList.length > 0 && {
@@ -104,16 +106,14 @@ function SessionsList() {
           ...(excludeGitRemotesList.length > 0 && {
             excludeGitRemotes: excludeGitRemotesList,
           }),
-          ...(uploadFilter === "uploaded" && { hasUpload: true }),
-          ...(uploadFilter === "not-uploaded" && { hasUpload: false }),
         } as const)
-      : uploadFilter !== "all"
-        ? ({
-            type: "exclude" as const,
-            ...(uploadFilter === "uploaded" && { hasUpload: true }),
-            ...(uploadFilter === "not-uploaded" && { hasUpload: false }),
-          } as const)
-        : undefined,
+      : undefined,
+    hasUpload:
+      uploadFilter === "uploaded"
+        ? true
+        : uploadFilter === "not-uploaded"
+          ? false
+          : undefined,
   };
 
   const { results, status, loadMore } = usePaginatedQuery(
@@ -184,13 +184,23 @@ function SessionsList() {
         }
       }
 
-      // Fetch content from each URL in parallel
+      // Fetch content from each URL in parallel, retrying with fresh URLs on failure
       const contents = (
         await Promise.all(
           urlEntries.map(async ({ sessionId, contentUrl }) => {
             try {
-              const res = await fetch(contentUrl);
-              if (!res.ok) return null;
+              let res = await fetch(contentUrl);
+              if (!res.ok) {
+                // URL may have expired — fetch a fresh one
+                const fresh = await convex.query(
+                  api.authorized.getSession,
+                  { sessionId },
+                );
+                const freshUrl = fresh?.upload?.contentUrl;
+                if (!freshUrl) return null;
+                res = await fetch(freshUrl);
+                if (!res.ok) return null;
+              }
               const content = await res.text();
               return { sessionId, content };
             } catch {
@@ -220,7 +230,7 @@ function SessionsList() {
     } finally {
       setDownloading(false);
     }
-  }, [selectedIds, results]);
+  }, [selectedIds, results, convex]);
 
   return (
     <div className="space-y-4">
