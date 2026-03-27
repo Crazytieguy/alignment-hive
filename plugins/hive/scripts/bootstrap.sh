@@ -2,33 +2,38 @@
 set -euo pipefail
 
 # Bootstrap script for hive CLI binary.
-# Downloads the prebuilt binary from GitHub releases (cached locally),
-# then exec's it so signals propagate correctly.
-# Falls back to last successfully used binary if download fails.
+# Ensures the correct version is cached and updates ~/.local/bin/hive.
+# exec's the binary with all arguments, so the caller can pipe stdin to it.
+#
+# Outputs JSON systemMessage to stdout for expected issues (not installed, download failed).
+# Unexpected errors go to stderr (caller redirects to error log).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 CACHE_BASE="$HOME/.cache/hive"
-LAST_USED_FILE="$CACHE_BASE/last-used"
 
-# Read version from cli-version file
+# --- Check if hive is installed globally ---
+
+if ! command -v hive >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/hive" ]; then
+  echo '{"systemMessage": "\u001b[1mhive:\u001b[0m to install, run \u001b[1;35m$ curl -fsSL https://alignment-hive.com/install.sh | bash\u001b[0m"}'
+  exit 0
+fi
+
+# --- Read expected version from cli-version file ---
+
 CLI_VERSION_FILE="$PLUGIN_ROOT/cli-version"
 if [ ! -f "$CLI_VERSION_FILE" ]; then
-  echo "cli-version file not found" >&2
+  echo "cli-version file not found at $CLI_VERSION_FILE" >&2
   exit 1
 fi
-VERSION=$(cat "$CLI_VERSION_FILE" | tr -d '[:space:]')
+VERSION=$(tr -d '[:space:]' < "$CLI_VERSION_FILE")
 if [ -z "$VERSION" ]; then
   echo "cli-version file is empty" >&2
   exit 1
 fi
 
-# Dev mode: use locally-built binary if ALIGNMENT_HIVE_DEV is set
-if [ "${ALIGNMENT_HIVE_DEV:-}" = "1" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
-  exec "$CLAUDE_PROJECT_DIR/.dev/hive" "$@"
-fi
+# --- Detect platform ---
 
-# Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
@@ -46,23 +51,11 @@ esac
 
 TARGET="${OS}-${ARCH_NAME}"
 
-# Cache directory for this version
+# --- Ensure correct version is cached ---
+
 CACHE_DIR="$CACHE_BASE/v${VERSION}"
 BINARY="$CACHE_DIR/hive"
 
-# Try to fall back to last successfully used binary
-fallback_or_exit() {
-  if [ -f "$LAST_USED_FILE" ]; then
-    FALLBACK=$(cat "$LAST_USED_FILE")
-    if [ -n "$FALLBACK" ] && [ -x "$FALLBACK" ] && [ "$FALLBACK" != "$BINARY" ]; then
-      echo "Falling back to $(basename "$(dirname "$FALLBACK")")" >&2
-      exec "$FALLBACK" "$@"
-    fi
-  fi
-  exit 1
-}
-
-# Download if not cached
 if [ ! -x "$BINARY" ]; then
   BINARY_NAME="hive-cli-${TARGET}"
   DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/hive-cli-v${VERSION}/${BINARY_NAME}"
@@ -70,22 +63,22 @@ if [ ! -x "$BINARY" ]; then
   echo "Downloading hive-cli v${VERSION} for ${TARGET}..." >&2
   mkdir -p "$CACHE_DIR"
 
-  if ! curl -fSL "$DOWNLOAD_URL" -o "$BINARY" 2>/dev/null; then
-    echo "Failed to download hive-cli v${VERSION}" >&2
-    rm -f "$BINARY"
-    fallback_or_exit "$@"
+  TMPFILE="$CACHE_DIR/.hive.tmp.$$"
+  if ! curl -fSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
+    echo "Failed to download hive-cli v${VERSION} from $DOWNLOAD_URL" >&2
+    rm -f "$TMPFILE"
+    echo '{"systemMessage": "\u001b[1mhive:\u001b[0m CLI update failed"}'
+    exit 0
   fi
 
-  chmod +x "$BINARY"
-  echo "Installed hive-cli v${VERSION}" >&2
+  chmod +x "$TMPFILE"
+  mv "$TMPFILE" "$BINARY"
 
-  # Also install globally
+  # Update global installation
   mkdir -p "$HOME/.local/bin"
   cp "$BINARY" "$HOME/.local/bin/hive"
-fi
 
-# Record this as the last known good binary
-mkdir -p "$CACHE_BASE"
-echo "$BINARY" > "$LAST_USED_FILE"
+  echo "Installed hive-cli v${VERSION}" >&2
+fi
 
 exec "$BINARY" "$@"

@@ -70,25 +70,20 @@ if [ -f "$DISABLE_FILE" ]; then
   exit 0
 fi
 
-# Find hive binary: dev binary when running from local plugin dir, else production
-HIVE_BIN=""
+# Pass plugin version so binary can do its version check
+PLUGIN_VERSION=""
+if [ -f "$PLUGIN_JSON" ]; then
+  PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
+fi
+export HIVE_PLUGIN_VERSION="$PLUGIN_VERSION"
+
+# Dev binary shortcircuit: use locally-built binary when running from the repo
 if [[ "${CLAUDE_PLUGIN_ROOT:-}" == "${CLAUDE_PROJECT_DIR}"/* ]] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
-  HIVE_BIN="$CLAUDE_PROJECT_DIR/.dev/hive"
-elif command -v hive >/dev/null 2>&1; then
-  HIVE_BIN="hive"
-elif [ -x "$HOME/.local/bin/hive" ]; then
-  HIVE_BIN="$HOME/.local/bin/hive"
+  echo "$HOOK_INPUT" | "$CLAUDE_PROJECT_DIR/.dev/hive" session-start 2>>"$ERROR_LOG" || true
+  exit 0
 fi
 
-if [ -n "$HIVE_BIN" ]; then
-  # Pass plugin version so binary can do the version check
-  PLUGIN_VERSION=""
-  if [ -f "$PLUGIN_JSON" ]; then
-    PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
-  fi
-
-  export HIVE_PLUGIN_VERSION="$PLUGIN_VERSION"
-  echo "$HOOK_INPUT" | "$HIVE_BIN" session-start 2>>"$ERROR_LOG" || true
-fi
+# Bootstrap: ensure the correct CLI version is cached, updated, and exec'd
+echo "$HOOK_INPUT" | "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh" session-start 2>>"$ERROR_LOG" || true
 
 exit 0
