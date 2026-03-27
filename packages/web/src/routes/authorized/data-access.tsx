@@ -4,12 +4,9 @@ import { getAuth } from "@workos/authkit-tanstack-react-start";
 import {
   lazy,
   Suspense,
-  useCallback,
   useEffect,
-  useRef,
   useState,
 } from "react";
-import { Button } from "@alignment-hive/ui";
 
 /** Fetch a widget token server-side for the API keys widget. */
 const fetchWidgetToken = createServerFn({ method: "GET" }).handler(
@@ -110,27 +107,8 @@ function DataAccessPage() {
     <div className="mx-auto max-w-3xl">
       <h1 className="text-2xl font-semibold tracking-tight">Data Access</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Session data is available via the CLI and the HTTP API.
+        Session data is available via the HTTP API.
       </p>
-
-      {/* CLI */}
-      <section className="mt-8">
-        <h2 className="text-sm font-medium text-muted-foreground">CLI</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          <a
-            href="/install"
-            className="text-primary underline underline-offset-4 hover:text-primary/80"
-          >
-            Install the CLI
-          </a>
-          , then:
-        </p>
-        <div className="mt-2">
-          <CopyableCode text="hive data --help" />
-        </div>
-      </section>
-
-      <hr className="my-8 border-border" />
 
       {/* HTTP API */}
       <section>
@@ -232,38 +210,3 @@ function DataAccessPage() {
   );
 }
 
-function Code({ children }: { children: React.ReactNode }) {
-  return (
-    <code className="rounded bg-muted px-1.5 py-0.5 text-[0.85em] font-mono">
-      {children}
-    </code>
-  );
-}
-
-function CopyableCode({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setCopied(false), 2000);
-  }, [text]);
-
-  return (
-    <div className="flex items-center gap-2">
-      <code className="flex-1 overflow-x-auto rounded-lg border border-border bg-muted px-3 py-2 font-mono text-[13px] text-foreground">
-        {text}
-      </code>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={handleCopy}
-        className="h-9 shrink-0 px-2 text-xs text-muted-foreground"
-      >
-        {copied ? "Copied" : "Copy"}
-      </Button>
-    </div>
-  );
-}

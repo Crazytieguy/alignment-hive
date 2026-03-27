@@ -18,7 +18,7 @@ const cards = [
   {
     to: "/authorized/data-access" as const,
     title: "Data Access",
-    description: "CLI setup, HTTP API, and API key management.",
+    description: "HTTP API and API key management.",
   },
   {
     to: "/authorized/agreement" as const,
