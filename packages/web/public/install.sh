@@ -265,9 +265,9 @@ install_hive_binary() {
     chmod +x "$binary"
   fi
 
-  # Install to ~/.local/bin
+  # Symlink to ~/.local/bin
   mkdir -p "$HOME/.local/bin"
-  cp "$binary" "$HOME/.local/bin/hive"
+  ln -sf "$binary" "$HOME/.local/bin/hive"
 
   # Ensure ~/.local/bin is in PATH
   if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then

@@ -77,6 +77,10 @@ jobs:
             packages/hive-cli/src/cli.ts \
             --outfile dist/hive-cli-${{ matrix.target }}
 
+      - name: Codesign macOS binary
+        if: startsWith(matrix.target, 'darwin-')
+        run: codesign -s - dist/hive-cli-${{ matrix.target }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

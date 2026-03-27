@@ -74,9 +74,8 @@ if [ ! -x "$BINARY" ]; then
   chmod +x "$TMPFILE"
   mv "$TMPFILE" "$BINARY"
 
-  # Update global installation
   mkdir -p "$HOME/.local/bin"
-  cp "$BINARY" "$HOME/.local/bin/hive"
+  ln -sf "$BINARY" "$HOME/.local/bin/hive"
 
   echo "Installed hive-cli v${VERSION}" >&2
 fi
