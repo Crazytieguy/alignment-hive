@@ -17,8 +17,7 @@ import {
 } from "@alignment-hive/session-data";
 
 interface SessionForVisibility {
-  userId?: string; // workosId (legacy, being phased out)
-  userDocId?: string; // Convex user doc ID (replacing userId)
+  userDocId: string;
   project?: string;
   directory?: string;
   gitRemote?: string;
@@ -38,13 +37,7 @@ interface SessionForVisibility {
  */
 export async function buildConsentFilter(
   ctx: QueryCtx,
-  preloadedUsers?: Array<{ _id: string; workosId: string }>,
 ): Promise<(session: SessionForVisibility) => boolean> {
-  // Use pre-loaded users if available, otherwise load
-  const allUsers =
-    preloadedUsers ?? (await ctx.db.query("users").collect());
-  const workosToDocId = new Map(allUsers.map((u) => [u.workosId, u._id]));
-
   // Load all consent events
   const allGlobalConsent = await ctx.db
     .query("dataSharingConsent")
@@ -117,11 +110,7 @@ export async function buildConsentFilter(
     // Determine the timestamp to check: prefer lastModified, fall back to uploadedAt
     const timestamp = session.lastModified ?? session.upload.uploadedAt;
 
-    // Resolve to Convex doc ID: prefer userDocId, fall back to workosId lookup
-    const docId: string | undefined =
-      session.userDocId ??
-      (session.userId ? workosToDocId.get(session.userId) : undefined);
-    if (!docId) return false;
+    const docId = session.userDocId;
 
     // Check global consent windows
     const globalWindows = globalWindowsByUser.get(docId);

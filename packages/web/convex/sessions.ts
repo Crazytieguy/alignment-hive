@@ -85,22 +85,16 @@ async function verifyConsent(
   }
 }
 
-/** Check session ownership during the userId→userDocId migration. Matches either field. */
 function isSessionOwner(
-  session: { userId?: string; userDocId?: Id<"users"> },
-  userId: string,
+  session: { userDocId: Id<"users"> },
   userDocId: Id<"users">,
 ): boolean {
-  return (
-    (!!session.userDocId && session.userDocId === userDocId) ||
-    (!!session.userId && session.userId === userId)
-  );
+  return session.userDocId === userDocId;
 }
 
 /** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the document ID. */
 async function upsertSession(
   ctx: MutationCtx,
-  userId: string,
   userDocId: Id<"users">,
   args: {
     sessionId: string;
@@ -121,12 +115,11 @@ async function upsertSession(
     .first();
 
   if (existing) {
-    if (!isSessionOwner(existing, userId, userDocId)) {
+    if (!isSessionOwner(existing, userDocId)) {
       throw new ConvexError("Session belongs to different user");
     }
     await ctx.db.patch(existing._id, {
       userDocId,
-      userId: undefined, // clear legacy field
       lineCount: args.lineCount,
       lastHeartbeat: now,
       ...(args.lastModified !== undefined && {
@@ -180,7 +173,7 @@ export const heartbeatSession = mutation({
     const identifiers = extractIdentifiers(args);
     await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
 
-    await upsertSession(ctx, identity.subject, userDocId, args);
+    await upsertSession(ctx, userDocId, args);
   },
 });
 
@@ -257,7 +250,7 @@ export const saveUploads = mutation({
       .query("sessions")
       .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))
       .first();
-    if (existingParent && !isSessionOwner(existingParent, identity.subject, userDocId)) {
+    if (existingParent && !isSessionOwner(existingParent, userDocId)) {
       throw new ConvexError("Parent session belongs to different user");
     }
 
@@ -272,7 +265,7 @@ export const saveUploads = mutation({
       }
 
       // Upsert the session record with full data + link storage blob
-      const sessionDocId = await upsertSession(ctx, identity.subject, userDocId, {
+      const sessionDocId = await upsertSession(ctx, userDocId, {
         sessionId: upload.sessionId,
         checkoutId: args.checkoutId,
         directory: args.directory,

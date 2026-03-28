@@ -78,16 +78,7 @@ async function resolveSessionUser(
   ctx: QueryCtx,
   session: Doc<"sessions">,
 ): Promise<Doc<"users"> | null> {
-  if (session.userDocId) {
-    return await ctx.db.get(session.userDocId);
-  }
-  if (session.userId) {
-    return await ctx.db
-      .query("users")
-      .withIndex("by_workos_id", (q) => q.eq("workosId", session.userId!))
-      .first();
-  }
-  return null;
+  return await ctx.db.get(session.userDocId);
 }
 
 // --- Scope type (shared between public and internal queries) ---
@@ -116,7 +107,7 @@ export async function listSessionsImpl(
   },
 ) {
   const allUsers = await ctx.db.query("users").collect();
-  const consentFilter = await buildConsentFilter(ctx, allUsers);
+  const consentFilter = await buildConsentFilter(ctx);
 
   const { scope, hasUpload } = args;
 
@@ -169,9 +160,8 @@ export async function listSessionsImpl(
     };
   }
 
-  // User maps for resolving session owners (shared by no-scope and exclude paths)
+  // User map for resolving session owners (shared by no-scope and exclude paths)
   const userDocMap = new Map(allUsers.map((u) => [u._id as string, u]));
-  const workosToUser = new Map(allUsers.map((u) => [u.workosId, u]));
 
   const formatPage = async (
     paginatedSessions: PaginationResult<Doc<"sessions">>,
@@ -180,12 +170,7 @@ export async function listSessionsImpl(
     page: await Promise.all(
       paginatedSessions.page.map(async (session: Doc<"sessions">) => {
         const upload = await formatUpload(ctx, session.upload);
-        const user =
-          (session.userDocId
-            ? userDocMap.get(session.userDocId)
-            : session.userId
-              ? workosToUser.get(session.userId)
-              : null) ?? null;
+        const user = userDocMap.get(session.userDocId) ?? null;
         const agentSessions = await formatAgentSessions(
           ctx,
           session.sessionId,
@@ -308,18 +293,7 @@ export async function getUserImpl(
     .withIndex("by_user_doc_id", (q) => q.eq("userDocId", args.userId))
     .collect();
 
-  // TODO(phase 2): remove after backfillUserDocId migration completes
-  const legacySessions = await ctx.db
-    .query("sessions")
-    .withIndex("by_user_id", (q) => q.eq("userId", user.workosId))
-    .collect();
-
-  const allSessions = new Map<string, Doc<"sessions">>();
-  for (const s of [...userSessions, ...legacySessions]) {
-    allSessions.set(s.sessionId, s);
-  }
-
-  const visibleParents = [...allSessions.values()].filter(
+  const visibleParents = userSessions.filter(
     (s) => !s.parentSessionId && consentFilter(s),
   );
 

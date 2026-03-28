@@ -23,7 +23,6 @@ import type * as lib_consentVisibility from "../lib/consentVisibility.js";
 import type * as lib_projectConsent from "../lib/projectConsent.js";
 import type * as lib_schemas from "../lib/schemas.js";
 import type * as lib_users from "../lib/users.js";
-import type * as migrations from "../migrations.js";
 import type * as sessions from "../sessions.js";
 
 import type {
@@ -48,7 +47,6 @@ declare const fullApi: ApiFromModules<{
   "lib/projectConsent": typeof lib_projectConsent;
   "lib/schemas": typeof lib_schemas;
   "lib/users": typeof lib_users;
-  migrations: typeof migrations;
   sessions: typeof sessions;
 }>;
 

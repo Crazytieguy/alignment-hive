@@ -14,8 +14,7 @@ export default defineSchema({
 
   sessions: defineTable({
     sessionId: v.string(),
-    userId: v.optional(v.string()), // workosId, being phased out — use userDocId
-    userDocId: v.optional(v.id("users")), // replacing userId
+    userDocId: v.id("users"),
     checkoutId: v.string(),
     project: v.optional(v.string()), // legacy — use directory/gitRemote
     directory: v.optional(v.string()),
@@ -34,7 +33,6 @@ export default defineSchema({
     ),
   })
     .index("by_session_id", ["sessionId"])
-    .index("by_user_id", ["userId"]) // legacy — for pre-migration reads
     .index("by_user_doc_id", ["userDocId"])
     .index("by_parent_session_id", ["parentSessionId"]),
 

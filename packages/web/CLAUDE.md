@@ -33,14 +33,6 @@ All queries in `convex/authorized.ts` MUST call `requireAuthorized()` (from `con
 
 Users with `hasDataAccess` must sign the current version of the data accessor agreement (`CURRENT_AGREEMENT_VERSION` in `convex/lib/agreement.ts`) before accessing any data. The agreement is stored in the `dataAccessorAgreements` table.
 
-### userId migration (phase 1 — in progress)
-
-Sessions are migrating from `userId` (workosId string) to `userDocId` (Convex `Id<"users">`). During the transition:
-- Both fields exist, `userId` is optional, `userDocId` is optional
-- Write paths populate both fields
-- Read paths check `userDocId` first, fall back to `userId` lookup
-- Run `migrations.backfillUserDocId` after deploy to backfill existing sessions
-- Phase 2 (follow-up): drop `userId`, make `userDocId` required
 
 ### Consent windows
 
