@@ -1,9 +1,9 @@
 import { execSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getToolResultText, isKnownContentBlock, parseKnownEntry } from '@alignment-hive/session-data';
-import { getClaudeProjectDir, getMainWorktreePath, loadTranscriptsDirs, parseCwdFromLine, statePaths } from './config';
+import { ensureStateDir, getClaudeProjectDir, getMainWorktreePath, loadTranscriptsDirs, parseCwdFromLine, statePaths } from './config';
 
 const CWD_READ_BYTES = 8192;
 
@@ -295,7 +295,7 @@ async function discoverWorktreeTranscriptDirs(
 
   // Single batch write if anything was discovered
   if (discovered.length > 0) {
-    mkdirSync(stateDir, { recursive: true });
+    await ensureStateDir(stateDir);
     const all = [...existing, ...discovered];
     writeFileSync(statePaths(stateDir).transcriptsDirs, all.join('\n') + '\n', 'utf-8');
   }

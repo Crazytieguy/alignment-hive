@@ -1,7 +1,7 @@
 import { getAuthData } from '../lib/auth';
 import { getConfig, getOrCreateCheckoutId, getProjectIdentifiers, loadTranscriptsDirs } from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
-import { countRawLines } from '../lib/extraction';
+import { countRawLines } from '../lib/session-io';
 import { discoverSessions } from '../lib/session-state';
 
 export async function hiveHeartbeat(): Promise<number> {

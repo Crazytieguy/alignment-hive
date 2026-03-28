@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { computeConsentWindows, extractSessionSummary, isInConsentWindow } from '@alignment-hive/session-data';
 import { parseCwdFromLine, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads } from './convex';
-import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './extraction';
+import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
 import { sanitizeDeep } from './sanitize';
 import { loadSessionState, recordUploadedSessions, runAgentMigration } from './session-state';
 import type { KnownEntry } from '@alignment-hive/session-data';

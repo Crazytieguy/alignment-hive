@@ -10,9 +10,9 @@
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/session-data';
-import type { SessionSource } from '../lib/session-source';
 import type { KnownEntry } from '@alignment-hive/session-data';
-import type { ReadSessionResult } from '../lib/extraction';
+import type { ReadSessionResult } from '../lib/session-format';
+import type { SessionSource } from '../lib/session-io';
 
 // Test session data
 function createTestSession(sessionId: string, entries: Array<object>, options?: { agentId?: string }): string {

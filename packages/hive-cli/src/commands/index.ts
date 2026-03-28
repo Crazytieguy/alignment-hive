@@ -1,11 +1,10 @@
 import { homedir } from 'node:os';
 import { extractSessionSummary, getToolResultText, isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
-import { isSessionError } from '../lib/extraction';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
-import type { ReadSessionResult } from '../lib/extraction';
+import type { ReadSessionResult } from '../lib/session-format';
 import type { ContentBlock, KnownEntry, LogicalBlock, SessionMeta } from '@alignment-hive/session-data';
-import type { SessionSource } from '../lib/session-source';
+import type { SessionSource } from '../lib/session-io';
 
 interface SessionInfo {
   meta: SessionMeta;
@@ -110,8 +109,8 @@ export async function indexCore(source: SessionSource, args: Array<string>): Pro
 
   const allSessions = new Map<string, SessionInfo>();
   for (const sessionResult of results) {
-    if (!sessionResult || isSessionError(sessionResult)) {
-      if (isSessionError(sessionResult)) {
+    if (!sessionResult || 'error' in sessionResult) {
+      if (sessionResult && 'error' in sessionResult) {
         printError(sessionResult.error);
       }
       continue;

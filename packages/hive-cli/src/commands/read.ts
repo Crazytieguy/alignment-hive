@@ -1,11 +1,10 @@
 import { basename } from 'node:path';
 import { parseSession } from '@alignment-hive/session-data';
-import { isSessionError } from '../lib/extraction';
 import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
-import type { SessionSource } from '../lib/session-source';
+import type { SessionSource } from '../lib/session-io';
 
 function printUsage(): void {
   console.log(usage.read());
@@ -122,8 +121,8 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
   }
 
   const sessionResult = await source.readSession(sessionFile);
-  if (!sessionResult || isSessionError(sessionResult)) {
-    if (isSessionError(sessionResult)) {
+  if (!sessionResult || 'error' in sessionResult) {
+    if (sessionResult && 'error' in sessionResult) {
       printError(sessionResult.error);
     } else {
       printError(errors.emptySession);
@@ -135,7 +134,7 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
     return 1;
   }
 
-  const { meta, entries } = sessionResult;
+  const { entries } = sessionResult;
 
   if (entryNumber === null && rangeStart === null) {
     const output = formatSession(entries, {

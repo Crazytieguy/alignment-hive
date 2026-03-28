@@ -3,7 +3,7 @@ import { appendFile, readFile, readdir, stat, writeFile } from 'node:fs/promises
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { getClaudeProjectDir, statePaths  } from './config';
-import { findRawSessions } from './extraction';
+import { findRawSessions } from './session-io';
 
 
 const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h

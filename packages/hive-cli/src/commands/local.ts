@@ -1,6 +1,6 @@
 import { errors, localCmd } from '../lib/messages';
 import { printError } from '../lib/output';
-import { createRawSessionSource } from '../lib/session-source';
+import { createRawSessionSource } from '../lib/session-io';
 
 export async function local(): Promise<number> {
   const subcommand = process.argv[3];

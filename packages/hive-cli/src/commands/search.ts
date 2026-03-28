@@ -1,6 +1,5 @@
 import { basename } from 'node:path';
 import { parseSession } from '@alignment-hive/session-data';
-import { isSessionError } from '../lib/extraction';
 import { SearchFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks } from '../lib/format';
 import { errors, usage } from '../lib/messages';
@@ -8,7 +7,7 @@ import { printError } from '../lib/output';
 import { isInTimeRange, parseTimeSpec } from '../lib/time-filter';
 import { computeMinimalPrefixes } from './index';
 import type { LogicalBlock } from '@alignment-hive/session-data';
-import type { SessionSource } from '../lib/session-source';
+import type { SessionSource } from '../lib/session-io';
 
 const DEFAULT_CONTEXT_WORDS = 10;
 
@@ -115,7 +114,7 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
     const sessionResult = await source.readSession(file);
-    if (!sessionResult || isSessionError(sessionResult) || sessionResult.meta.agentId) continue;
+    if (!sessionResult || 'error' in sessionResult || sessionResult.meta.agentId) continue;
 
     const sessionId = sessionResult.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);

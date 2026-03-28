@@ -29,13 +29,16 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
           await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
         const consentResult = await resolveProjectConsent(cwd);
-        const consentMtime = 'error' in consentResult ? null : consentResult.consentMtime;
+        if ('error' in consentResult) {
+          throw new Error(`Consent not available: ${consentResult.error}`);
+        }
+        const { consentMtime } = consentResult;
         const snoozeUntil = await getSnoozeUntil(stateDir);
 
         const sorted = parentSessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
         // Compute statuses (no file reads), then read summaries in batches
-        const statusCtx = { uploadedMap, excludedSet, consentMtime: consentMtime ?? 0, snoozeUntil, migrationTimestamp };
+        const statusCtx = { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp };
         const sessionMetas = sorted.map((session) => {
           const status = computeSessionStatus(session, statusCtx);
           return { session, status };
@@ -200,7 +203,10 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
         const consentResult = await resolveProjectConsent(cwd);
-        const consentMtime = 'error' in consentResult ? 0 : consentResult.consentMtime;
+        if ('error' in consentResult) {
+          throw new Error(`Consent not available: ${consentResult.error}`);
+        }
+        const { consentMtime } = consentResult;
 
         let pending = 0;
         let ready = 0;

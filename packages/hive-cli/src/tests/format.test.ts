@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { parseKnownEntry } from '@alignment-hive/session-data';
-import { parseJsonl } from '../lib/extraction';
+import { parseJsonl } from '../lib/session-format';
 import { ReadFieldFilter } from '../lib/field-filter';
 import { formatSession } from '../lib/format';
 import type { KnownEntry } from '@alignment-hive/session-data';

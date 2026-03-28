@@ -1,50 +1,12 @@
 import { createReadStream } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { basename, join } from 'node:path';
-import { parseKnownEntry } from '@alignment-hive/session-data';
+import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
+import { getClaudeProjectDir, getConfig, getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
+import { discoverSessions } from './session-state';
 import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
-
-export type ErrorResult = { error: string };
-
-/** Type guard for any result type that may contain an error */
-export function isErrorResult<T>(result: T | ErrorResult | null): result is ErrorResult {
-  return result !== null && typeof result === 'object' && 'error' in result;
-}
-
-export const SESSION_FORMAT_VERSION = '0.1' as const;
-
-export function* parseJsonl(content: string) {
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      yield JSON.parse(trimmed) as unknown;
-    } catch (error) {
-      if (process.env.DEBUG) {
-        console.warn('Skipping malformed JSONL line:', error);
-      }
-    }
-  }
-}
-
-type ExtractedEntry = Exclude<ReturnType<typeof parseKnownEntry>['data'], null>;
-
-export function transformEntry(rawEntry: unknown): { entry: ExtractedEntry | null; error?: string } {
-  const result = parseKnownEntry(rawEntry);
-  if (result.error) return { entry: null, error: result.error };
-  if (!result.data) return { entry: null };
-
-  const type = result.data.type;
-  if (type === 'user' || type === 'assistant' || type === 'summary' || type === 'system') {
-    return { entry: result.data };
-  }
-  return { entry: null };
-}
-
-export type ReadSessionResult = { meta: SessionMeta; entries: Array<KnownEntry> } | { error: string } | null;
-
-export const isSessionError = isErrorResult<{ meta: SessionMeta; entries: Array<KnownEntry> }>;
+import type { ReadSessionResult } from './session-format';
 
 /** Count non-empty lines in a file by streaming (no parsing) */
 export async function countRawLines(filePath: string): Promise<number> {
@@ -118,4 +80,72 @@ export async function findRawSessions(rawDir: string) {
   sessions.push(...flatResults);
 
   return sessions;
+}
+
+export async function readRawSession(rawPath: string, checkoutId?: string): Promise<ReadSessionResult> {
+  let content: string;
+  let fileStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    [content, fileStat] = await Promise.all([readFile(rawPath, 'utf-8'), stat(rawPath)]);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return { error: `Failed to read ${rawPath}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  const entries: Array<KnownEntry> = [];
+  for (const rawEntry of parseJsonl(content)) {
+    const { entry } = transformEntry(rawEntry);
+    if (entry) entries.push(entry);
+  }
+
+  if (entries.length === 0) return null;
+
+  const filename = basename(rawPath, '.jsonl');
+  const isAgent = filename.startsWith('agent-');
+  const agentId = isAgent ? filename.slice('agent-'.length) : undefined;
+
+  const meta: SessionMeta = {
+    _type: 'session-meta',
+    version: SESSION_FORMAT_VERSION,
+    sessionId: filename,
+    checkoutId: checkoutId ?? 'local',
+    rawMtime: fileStat.mtime.toISOString(),
+    messageCount: entries.length,
+    ...(agentId && { agentId }),
+  };
+
+  return { meta, entries };
+}
+
+export async function discoverRawSessionPaths(cwd: string): Promise<Array<string>> {
+  const stateDir = getConfig().getStateDir(cwd);
+  let dirs = await loadTranscriptsDirs(stateDir);
+
+  if (dirs.length === 0) {
+    dirs = [getClaudeProjectDir(cwd)];
+  }
+
+  const sessions = await discoverSessions(dirs);
+  return sessions.map((s) => s.path);
+}
+
+// --- SessionSource ---
+
+export interface SessionSource {
+  listSessionFiles: (cwd: string) => Promise<Array<string>>;
+  readSession: (path: string) => Promise<ReadSessionResult>;
+}
+
+// listSessionFiles must be called before readSession — it resolves the checkoutId
+export function createRawSessionSource(): SessionSource {
+  let checkoutId: string | undefined;
+
+  return {
+    async listSessionFiles(cwd: string) {
+      const stateDir = getConfig().getStateDir(cwd);
+      checkoutId = await getOrCreateCheckoutId(stateDir);
+      return discoverRawSessionPaths(cwd);
+    },
+    readSession: (path) => readRawSession(path, checkoutId),
+  };
 }
