@@ -5,7 +5,6 @@ import { SearchFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks } from '../lib/format';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
-import { extractedSessionSource } from '../lib/session-source';
 import { isInTimeRange, parseTimeSpec } from '../lib/time-filter';
 import { computeMinimalPrefixes } from './index';
 import type { LogicalBlock } from '@alignment-hive/session-data';
@@ -121,12 +120,12 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     const sessionId = sessionResult.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
 
-    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
+    const blocks = parseSession(sessionResult.entries);
 
     // Find matching block indices
     const matchingIndices = new Set<number>();
-    for (let i = 0; i < parsed.blocks.length; i++) {
-      const block = parsed.blocks[i];
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
 
       if (options.afterTime || options.beforeTime) {
         if (!isInTimeRange(block.timestamp, { after: options.afterTime, before: options.beforeTime })) {
@@ -155,7 +154,7 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
 
     if (!options.countOnly && !options.listOnly) {
-      const output = formatBlocks(parsed.blocks, {
+      const output = formatBlocks(blocks, {
         sessionPrefix,
         cwd,
         showTimestamp: false,
@@ -186,10 +185,6 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
   }
 
   return 0;
-}
-
-export async function search(): Promise<number> {
-  return searchCore(extractedSessionSource, process.argv.slice(3));
 }
 
 function parseSearchOptions(args: Array<string>): SearchOptions | null {

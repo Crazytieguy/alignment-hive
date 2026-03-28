@@ -1,8 +1,7 @@
-import { join } from 'node:path';
 import { unlink } from 'node:fs/promises';
 import { updateProjectSharing } from '../lib/convex';
 import { getAuthData } from '../lib/auth';
-import { getConfig, getProjectIdentifiers } from '../lib/config';
+import { getConfig, getProjectIdentifiers, statePaths } from '../lib/config';
 import { discoverWorktreeTranscriptDirsForOne } from '../lib/transcript-discovery';
 import { hive } from '../lib/messages';
 import { printError, printSuccess } from '../lib/output';
@@ -27,7 +26,7 @@ export async function consentEnable(projectPath?: string): Promise<number> {
   const config = getConfig();
   const stateDir = config.getStateDir(resolvedPath);
   try {
-    await unlink(join(stateDir, 'sharing-disabled'));
+    await unlink(statePaths(stateDir).sharingDisabled);
   } catch {
     // File doesn't exist, that's fine
   }

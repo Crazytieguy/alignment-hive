@@ -1,6 +1,6 @@
 # hive-cli
 
-CLI for alignment-hive session extraction, sharing, and management. Powers both the `hive` and `hive-mind` plugins.
+CLI for alignment-hive session sharing and management. Powers the `hive` plugin.
 
 ## Development
 
@@ -14,21 +14,9 @@ Both must pass before committing.
 
 **Important:** Never pipe test output (e.g., `bun test 2>&1 | head`). This causes the process to stall indefinitely. Always run tests without piping.
 
-## Session Metadata
-
-Keep session metadata minimal. Statistics should be computed on-the-fly during queries rather than stored. This reduces breaking changes and avoids requiring users to re-extract sessions.
-
 ## User-Facing Messages
 
 All user-facing strings (CLI output, error messages, help text) should be defined in `src/lib/messages.ts`. This centralizes text for consistency and potential i18n.
-
-## Re-extracting Sessions
-
-To re-extract all sessions (e.g., after schema changes):
-```bash
-rm -rf .claude/hive-mind/sessions/
-bun packages/hive-cli/src/hive-mind-cli.ts session-start
-```
 
 ## Regenerating Snapshot Tests
 
@@ -47,9 +35,7 @@ The retrieval skill dynamically includes `--help` output. When CLI behavior chan
 
 | Variable | Description |
 |----------|-------------|
-| `HIVE_MIND_VERBOSE` | Set to `1` to show full error details in session-start hook output. By default, errors are summarized as a count. Only affects the session-start hook. |
-| `HIVE_MIND_CLIENT_ID` | Override WorkOS client ID for hive-mind (for staging/testing). |
-| `ALIGNMENT_HIVE_CLIENT_ID` | Override WorkOS client ID for hive (for staging/testing). |
+| `ALIGNMENT_HIVE_CLIENT_ID` | Override WorkOS client ID (for staging/testing). |
 | `ALIGNMENT_HIVE_CONVEX_URL` | Override Convex deployment URL (for local dev). Set in `.env.local`. |
 | `DEBUG` | Set to `1` to enable debug logging. |
 

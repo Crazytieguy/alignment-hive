@@ -5,12 +5,13 @@ import {
   getProjectIdentifiers,
   loadTranscriptsDirs,
 } from './config';
-import { getProjectConsentMtime } from './convex';
+import { resolveProjectConsent } from './convex';
 import { hive } from './messages';
-import { formatDisplayStatus, getDisplayStatus } from './session-display';
 import {
-  checkSessionEligibility,
+  computeSessionStatus,
   findAgentsForParent,
+  formatSessionStatus,
+  isEligibleForAutoUpload,
   isSessionUploaded,
   loadSessionState,
   recordExcludedSession,
@@ -27,17 +28,16 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         const transcriptsDirs = await loadTranscriptsDirs(stateDir);
         const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
           await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
-        const consentMtime = await getProjectConsentMtime(cwd);
+        const consentResult = await resolveProjectConsent(cwd);
+        const consentMtime = 'error' in consentResult ? null : consentResult.consentMtime;
         const snoozeUntil = await getSnoozeUntil(stateDir);
 
         const sorted = parentSessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
         // Compute statuses (no file reads), then read summaries in batches
-        const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: consentMtime ?? Date.now(), migrationTimestamp };
-        const displayCtx = { consentMtime, snoozeUntil, migrationTimestamp };
+        const statusCtx = { uploadedMap, excludedSet, consentMtime: consentMtime ?? 0, snoozeUntil, migrationTimestamp };
         const sessionMetas = sorted.map((session) => {
-          const result = checkSessionEligibility(session, eligibilityCtx);
-          const status = getDisplayStatus(result, session, displayCtx);
+          const status = computeSessionStatus(session, statusCtx);
           return { session, status };
         });
 
@@ -57,7 +57,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
               sessionId: session.sessionId,
               date: session.mtime.toISOString(),
               status,
-              statusLabel: formatDisplayStatus(status),
+              statusLabel: formatSessionStatus(status),
               summary: summaries[j].slice(0, 120),
             });
           }
@@ -199,16 +199,19 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
           await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
+        const consentResult = await resolveProjectConsent(cwd);
+        const consentMtime = 'error' in consentResult ? 0 : consentResult.consentMtime;
+
         let pending = 0;
         let ready = 0;
         let uploaded = 0;
         let excluded = 0;
-        const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: Date.now(), migrationTimestamp };
+        const statusCtx = { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp };
         for (const session of parentSessions) {
-          const result = checkSessionEligibility(session, eligibilityCtx);
-          if (result.eligible) ready++;
-          else if (result.reason === 'excluded') excluded++;
-          else if (result.reason === 'already uploaded') uploaded++;
+          const status = computeSessionStatus(session, statusCtx);
+          if (isEligibleForAutoUpload(status)) ready++;
+          else if (status.type === 'excluded') excluded++;
+          else if (status.type === 'uploaded') uploaded++;
           else pending++;
         }
 

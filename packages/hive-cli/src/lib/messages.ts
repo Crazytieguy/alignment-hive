@@ -2,76 +2,14 @@ import { hookColors } from './output';
 
 const { boldMagenta, dim } = hookColors;
 
-export function getCliCommand(hasAlias: boolean): string {
-  if (hasAlias) {
-    return 'hive-mind';
-  }
-  return `bun ${process.argv[1]}`;
-}
-
-export const hook = {
-  notLoggedIn: (): string => {
-    return 'To connect: run /hive-mind:setup';
-  },
-  loggedIn: (displayName: string): string => {
-    return `Connected as ${displayName}`;
-  },
-  extracted: (count: number): string => {
-    return `Extracted ${count} session${count === 1 ? '' : 's'}`;
-  },
-  schemaErrors: (errorCount: number, sessionCount: number, errors: Array<string>): string => {
-    const unique = [...new Set(errors)];
-    return `Schema issues in ${sessionCount} session${sessionCount === 1 ? '' : 's'} (${errorCount} entries): ${unique.join('; ')}`;
-  },
-  extractionFailed: (error: string): string => {
-    return `Extraction failed: ${error}`;
-  },
-  bunNotInstalled: (): string => {
-    return 'To set up hive-mind: run /hive-mind:setup';
-  },
-  pendingSessions: (count: number, earliestUploadAt: number): string => {
-    const totalMinutes = Math.max(0, Math.ceil((earliestUploadAt - Date.now()) / (1000 * 60)));
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-
-    if (count === 1) {
-      return `1 session uploads in ${timeStr}`;
-    }
-    return `${count} sessions pending, first uploads in ${timeStr}`;
-  },
-  uploadingSessions: (count: number, delayMinutes: number): string => {
-    return `Uploading ${count} session${count === 1 ? '' : 's'} in ${delayMinutes}m`;
-  },
-  toReview: (userHasAlias: boolean): string => {
-    const cli = getCliCommand(userHasAlias);
-    return `To review: ${cli} index --pending`;
-  },
-  aliasUpdated: (): string => {
-    return 'hive-mind alias updated';
-  },
-  extractionsFailed: (count: number): string => {
-    return `Failed to extract ${count} session${count === 1 ? '' : 's'}`;
-  },
-  sessionCheckFailed: (): string => {
-    return 'Failed to check session upload status';
-  },
-  errorsOccurred: (count: number): string => {
-    return `${count} error${count === 1 ? '' : 's'} occurred. Set HIVE_MIND_VERBOSE=1 for details.`;
-  },
-};
-
 export const errors = {
   schemaError: (path: string, error: string): string => `Schema error in ${path}: ${error}`,
   authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
-  refreshFailed: (status: number): string => `Token refresh failed (${status}). Run /hive-mind:setup to re-login.`,
+  refreshFailed: (status: number): string => `Token refresh failed (${status}). Run \`hive login\` to re-login.`,
   readTranscriptsDirFailed: (dir: string, error: string): string =>
     `Failed to read transcripts directory ${dir}: ${error}`,
   statFailed: (path: string, error: string): string => `Failed to stat ${path}: ${error}`,
   parseSessionFailed: (sessionId: string, error: string): string => `Failed to parse session ${sessionId}: ${error}`,
-  aliasUpdateFailed: (error: string): string => `Failed to update alias: ${error}`,
-  eligibilityCheckFailed: (error: string): string => `Failed to check session eligibility: ${error}`,
-  markUploadedFailed: (error: string): string => `Failed to mark session uploaded: ${error}`,
   noSessions: 'No sessions found yet. Sessions are extracted automatically when you start Claude Code.',
   noSessionsIn: (dir: string): string => `No sessions in ${dir}`,
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
@@ -94,20 +32,11 @@ export const errors = {
   unknownCommand: (cmd: string): string => `Unknown command: ${cmd}`,
   unknownFlag: (flag: string): string => `Unknown flag: ${flag}`,
   unexpectedResponse: 'Unexpected response from server',
-  bunNotInstalled: 'To run hive-mind, install Bun: curl -fsSL https://bun.sh/install | bash',
   loginStatusYes: (displayName: string): string => `logged in: yes (${displayName})`,
   loginStatusNo: 'logged in: no',
 };
 
 export const usage = {
-  main: (commands: Array<{ name: string; description: string }>): string => {
-    const lines = ['Usage: hive-mind <command>', '', 'Commands:'];
-    for (const { name, description } of commands) {
-      lines.push(`  ${name.padEnd(15)} ${description}`);
-    }
-    return lines.join('\n');
-  },
-
   read: (): string => {
     return [
       'Usage: read <session-id> [N | N-M] [options]',
@@ -212,47 +141,10 @@ export const usage = {
     ].join('\n');
   },
 
-  indexFull: (): string => {
-    return [
-      'Usage: index [--escape-file-refs] [--pending]',
-      '',
-      'List all extracted sessions with statistics, summary, and commits.',
-      'Agent sessions are excluded (explore via Task tool calls in parent sessions).',
-      'Statistics include work from subagent sessions.',
-      '',
-      'Options:',
-      '  --escape-file-refs  Escape @ symbols to prevent file reference interpretation',
-      '  --pending           Show upload eligibility status for each session',
-      '',
-      'Output columns:',
-      '  ID                   Session ID prefix (first 16 chars)',
-      '  DATETIME             Session modification time',
-      '  MSGS                 Total message count',
-      '  USER_MESSAGES        User message count',
-      '  BASH_CALLS           Bash commands executed',
-      '  WEB_FETCHES          Web fetches',
-      '  WEB_SEARCHES         Web searches',
-      '  LINES_ADDED          Lines added',
-      '  LINES_REMOVED        Lines removed',
-      '  FILES_TOUCHED        Number of unique files modified',
-      '  SIGNIFICANT_LOCATIONS Paths where >30% of work happened',
-      '  SUMMARY              Session summary or first user prompt',
-      '  COMMITS              Git commit hashes from the session',
-    ].join('\n');
-  },
-
-  upload: (): string => {
-    return [
-      'Usage: upload <session-id>... [--delay N]',
-      '',
-      'Upload one or more sessions to the shared knowledge base.',
-      'Use `index --pending` to see upload eligibility status.',
-    ].join('\n');
-  },
 };
 
 export const setup = {
-  header: 'Join the hive-mind shared knowledge base',
+  header: 'Join the alignment-hive shared knowledge base',
   alreadyLoggedIn: "You're already connected.",
   confirmRelogin: 'Do you want to reconnect?',
   starting: 'Starting authentication...',
@@ -268,85 +160,10 @@ export const setup = {
   success: "You're connected!",
   welcome: (name: string | null | undefined, email: string): string =>
     name ? `Welcome, ${name} (${email})!` : `Logged in as: ${email}`,
-  // Consent (shown before auth)
-  consentInfo: (userHasAlias: boolean): string => {
-    const cli = getCliCommand(userHasAlias);
-    return `Your sessions will contribute to the shared knowledge base.\nYou'll have 24 hours to review sessions before auto-submission.\nRun \`${cli} exclude\` anytime to opt out.`;
-  },
-  consentConfirm: 'Continue?',
-  consentDeclined: 'Setup cancelled. Run setup again if you change your mind.',
   timeout: 'Authentication timed out. Please try again.',
   startFailed: (error: string): string => `Couldn't start authentication: ${error}`,
   authFailed: (error: string): string => `Authentication failed: ${error}`,
   unexpectedAuthResponse: 'Unexpected response from authentication server',
-  // Alias setup
-  aliasPrompt: 'Set up a command to run hive-mind more easily?',
-  aliasExplain: 'This adds `alias hive-mind=...` to your shell config.',
-  aliasConfirm: 'Set up hive-mind command?',
-  aliasSuccess: 'Command added!',
-  aliasActivate: (sourceCmd: string): string => `Run \`${sourceCmd}\` or restart your terminal to activate.`,
-  aliasFailed: "Couldn't add command automatically.",
-  alreadySetUp: 'hive-mind command already set up',
-  aliasSetupFailed: 'Failed to set up alias',
-  aliasAdded: 'hive-mind command added to shell config',
-};
-
-export const indexCmd = {
-  noSessionsDir: "No sessions found. Run 'extract' first.",
-  noSessionsIn: (dir: string): string => `No sessions found in ${dir}`,
-  uploadStatus: 'Upload eligibility status:',
-  noExtractedSessions: 'No extracted sessions found.',
-  total: (count: number, summary: string): string => `Total: ${count} sessions (${summary})`,
-  runUpload: "Run 'hive-mind upload' to upload ready sessions.",
-  excludeSession: 'To exclude a session: hive-mind exclude <session-id>',
-  excludeAll: 'To exclude all sessions: hive-mind exclude --all',
-};
-
-export const excludeCmd = {
-  noSessionsDir: 'No sessions directory found',
-  noSessions: 'No sessions found.',
-  allAlreadyExcluded: 'All sessions are already excluded.',
-  foundNonExcluded: (count: number): string => `Found ${count} session(s) not yet excluded.`,
-  confirmExcludeAll: 'Exclude all sessions from upload?',
-  cancelled: 'Cancelled.',
-  excludedCount: (count: number): string => `Excluded ${count} session(s)`,
-  failedCount: (count: number): string => `Failed to exclude ${count} session(s)`,
-  sessionNotFound: (id: string): string => `Session '${id}' not found`,
-  ambiguousSession: (id: string, count: number): string => `Ambiguous session ID '${id}' matches ${count} sessions`,
-  matches: 'Matches:',
-  couldNotRead: (id: string): string => `Could not read session '${id}'`,
-  alreadyExcluded: (id: string): string => `Session ${id} is already excluded`,
-  excluded: (id: string): string => `Excluded session ${id}`,
-  failedToExclude: (id: string): string => `Failed to exclude session ${id}`,
-  cannotExcludeAgent: 'Agent sessions cannot be excluded directly. Exclude the parent session instead.',
-  usage: 'Usage: hive-mind exclude <session-id> or hive-mind exclude --all',
-  excludedLine: (id: string): string => `  ✗ ${id} excluded`,
-  failedLine: (id: string): string => `  ! ${id} failed`,
-};
-
-export const uploadCmd = {
-  notAuthenticated: "Not authenticated. Run 'hive-mind setup' first.",
-  waitingDelay: (seconds: number): string => `Waiting ${seconds} seconds before upload...`,
-  sessionNotFound: (id: string): string => `Session '${id}' not found`,
-  ambiguousSession: (id: string, count: number): string => `Multiple sessions match '${id}' (${count} matches):`,
-  sessionExcluded: (id: string): string => `Session ${id} was excluded, skipping`,
-  uploading: (id: string): string => `Uploading ${id}...`,
-  uploaded: (id: string): string => `Uploaded ${id}`,
-  uploadedWithAgents: (id: string, agentCount: number): string =>
-    `Uploaded ${id} (+${agentCount} agent${agentCount === 1 ? '' : 's'})`,
-  failedToUpload: (id: string, error: string): string => `Failed to upload ${id}: ${error}`,
-  checking: 'Checking for sessions ready to upload...',
-  noExtractedSessions: 'No extracted sessions found.',
-  sessionsHeader: 'Sessions:',
-  noSessionsReady: 'No sessions ready for upload.',
-  pendingCount: (count: number): string => `${count} session(s) still in review period.`,
-  readyCount: (count: number): string => `${count} session(s) ready for upload.`,
-  confirmUpload: 'Upload these sessions?',
-  cancelled: 'Cancelled.',
-  uploadedCount: (count: number): string => `Uploaded ${count} session(s)`,
-  failedCount: (count: number): string => `Failed to upload ${count} session(s)`,
-  done: 'done',
-  failed: (error: string): string => `failed: ${error}`,
 };
 
 export const localCmd = {

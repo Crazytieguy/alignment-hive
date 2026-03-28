@@ -1,6 +1,7 @@
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { statePaths } from './config';
 
 const MAX_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -24,10 +25,10 @@ export function parseDuration(duration: string): number | null {
 /** Read the snooze-until timestamp from the state dir. Returns null if not snoozed or expired. */
 export async function getSnoozeUntil(stateDir: string): Promise<number | null> {
   try {
-    const content = await readFile(join(stateDir, 'snooze-until'), 'utf-8');
+    const content = await readFile(statePaths(stateDir).snoozeUntil, 'utf-8');
     const timestamp = parseInt(content.trim(), 10);
     if (isNaN(timestamp)) return null;
-    if (Date.now() >= timestamp) return null; // expired
+    if (Date.now() >= timestamp) return null;
     return timestamp;
   } catch {
     return null;
@@ -40,14 +41,14 @@ export async function setSnooze(stateDir: string, durationMs: number): Promise<n
   const until = Date.now() + capped;
   const tmpFile = join(tmpdir(), `snooze-until-${Date.now()}`);
   await writeFile(tmpFile, String(until));
-  await rename(tmpFile, join(stateDir, 'snooze-until'));
+  await rename(tmpFile, statePaths(stateDir).snoozeUntil);
   return until;
 }
 
 /** Clear the snooze. */
 export async function clearSnooze(stateDir: string): Promise<boolean> {
   try {
-    await unlink(join(stateDir, 'snooze-until'));
+    await unlink(statePaths(stateDir).snoozeUntil);
     return true;
   } catch {
     return false;

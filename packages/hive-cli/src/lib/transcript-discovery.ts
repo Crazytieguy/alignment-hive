@@ -1,16 +1,11 @@
 import { execSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getToolResultText, isKnownContentBlock, parseKnownEntry } from '@alignment-hive/session-data';
-import { ensureStateDir, getClaudeProjectDir, getMainWorktreePath, loadTranscriptsDirs, parseCwdFromLine } from './config';
+import { getClaudeProjectDir, getMainWorktreePath, loadTranscriptsDirs, parseCwdFromLine, statePaths } from './config';
 
 const CWD_READ_BYTES = 8192;
-
-function getTranscriptsDirsFile(stateDir: string): string {
-  return join(stateDir, 'transcripts-dirs');
-}
 
 /**
  * Extract the cwd from the first session file in a project directory
@@ -300,9 +295,9 @@ async function discoverWorktreeTranscriptDirs(
 
   // Single batch write if anything was discovered
   if (discovered.length > 0) {
-    await ensureStateDir(stateDir);
+    mkdirSync(stateDir, { recursive: true });
     const all = [...existing, ...discovered];
-    await writeFile(getTranscriptsDirsFile(stateDir), all.join('\n') + '\n', 'utf-8');
+    writeFileSync(statePaths(stateDir).transcriptsDirs, all.join('\n') + '\n', 'utf-8');
   }
 
   return { existing: existing.length, discovered: discovered.length };

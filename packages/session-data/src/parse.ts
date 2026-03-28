@@ -1,4 +1,4 @@
-import type { ContentBlock, SessionMeta, KnownContentBlock, KnownEntry, UserEntry } from './schemas';
+import type { ContentBlock, KnownEntry, UserEntry } from './schemas';
 import { isKnownContentBlock } from './schemas';
 
 function isNoiseBlock(block: ContentBlock): boolean {
@@ -105,7 +105,7 @@ function findLastSummaryIndex(entries: Array<KnownEntry>): number {
   return -1;
 }
 
-export function parseSession(meta: SessionMeta, entries: Array<KnownEntry>) {
+export function parseSession(entries: Array<KnownEntry>) {
   const blocks = [];
   const uuidToLine = new Map<string, number>();
   let lineNumber = 0;
@@ -240,11 +240,7 @@ export function parseSession(meta: SessionMeta, entries: Array<KnownEntry>) {
     }
   }
 
-  return {
-    meta,
-    blocks,
-  };
+  return blocks;
 }
 
-export type ParsedSession = ReturnType<typeof parseSession>;
-export type LogicalBlock = ParsedSession['blocks'][number];
+export type LogicalBlock = ReturnType<typeof parseSession>[number];

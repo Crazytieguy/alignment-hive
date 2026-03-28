@@ -223,14 +223,4 @@ export async function resolveProjectConsent(cwd: string) {
   return { consentMtime: projectConsent.latestAt, ids } as const;
 }
 
-/** Resolve the project consent mtime, or null if offline/unauthorized. */
-export async function getProjectConsentMtime(cwd: string): Promise<number | null> {
-  try {
-    const result = await resolveProjectConsent(cwd);
-    return 'error' in result ? null : result.consentMtime;
-  } catch {
-    return null;
-  }
-}
-
 export { api };

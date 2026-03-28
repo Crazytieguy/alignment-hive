@@ -1,22 +1,25 @@
-import { open, readFile, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { open, readFile, unlink } from 'node:fs/promises';
 import { getAuthData } from '../lib/auth';
 import {
   ensureStateDir,
   getConfig,
   getOrCreateCheckoutId,
   loadTranscriptsDirs,
+  statePaths,
 } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { resolveProjectConsent } from '../lib/convex';
 import { lookupRawSession } from '../lib/session-lookup';
 import {
-  checkSessionEligibility,
+  canUpload,
+  computeSessionStatus,
   findAgentsForParent,
+  isEligibleForAutoUpload,
 } from '../lib/session-state';
 import { isSnoozed } from '../lib/snooze';
 import { isInConsentWindows, loadConsentWindows, loadSessionStateWithAgentMigration, readAndSanitizeSession, uploadParentWithAgents } from '../lib/upload-session';
+import type { StatusContext } from '../lib/session-state';
 
 const UPLOAD_CONCURRENCY = 5;
 
@@ -87,7 +90,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
   }
 
   // Acquire upload lock to prevent concurrent uploads
-  const lockFile = join(stateDir, 'upload-lock');
+  const lockFile = statePaths(stateDir).uploadLock;
   if (!await acquireUploadLock(lockFile)) {
     if (isBackground) await cleanupScheduled(stateDir);
     return 0; // Another upload is running — silently exit
@@ -129,7 +132,7 @@ async function doUploadWork(
     getOrCreateCheckoutId(stateDir),
     loadConsentWindows(ids),
   ]);
-  const eligibilityCtx = { uploadedMap, excludedSet, consentMtime, migrationTimestamp };
+  const statusCtx: StatusContext = { uploadedMap, excludedSet, consentMtime, snoozeUntil: null, migrationTimestamp };
 
   // Single session mode
   if (sessionPrefix) {
@@ -153,17 +156,14 @@ async function doUploadWork(
     const session = result.session;
     const id = session.sessionId.slice(0, 8);
 
-    const eligibility = checkSessionEligibility(session, eligibilityCtx);
-    if (!eligibility.eligible) {
-      if (eligibility.reason === 'excluded') {
-        printError(hive.upload.sessionExcluded(id));
-        return 1;
-      }
-      if (eligibility.reason === 'already uploaded') {
-        printInfo(hive.upload.alreadyUploaded(id));
-        return 0;
-      }
-      // For manual single-session upload, skip review periods
+    const status = computeSessionStatus(session, statusCtx);
+    if (status.type === 'excluded') {
+      printError(hive.upload.sessionExcluded(id));
+      return 1;
+    }
+    if (status.type === 'uploaded') {
+      printInfo(hive.upload.alreadyUploaded(id));
+      return 0;
     }
 
     if (consentWindows && !isInConsentWindows(session.mtime.getTime(), consentWindows)) {
@@ -188,13 +188,12 @@ async function doUploadWork(
   // Batch mode
   const targetSet = targetSessionIds ? new Set(targetSessionIds) : null;
   let candidates = parentSessions.filter((session) => {
-    // When session IDs are specified, only consider those sessions
     if (targetSet && !targetSet.has(session.sessionId)) return false;
-    const result = checkSessionEligibility(session, eligibilityCtx);
-    if (result.eligible) return true;
+    const status = computeSessionStatus(session, statusCtx);
+    if (isEligibleForAutoUpload(status)) return true;
     if (!isBackground) {
-      // Manual mode: skip review periods, only respect excluded + fully uploaded
-      return result.reason !== 'excluded' && result.reason !== 'already uploaded';
+      // Manual mode: allow uploading pending sessions too
+      return canUpload(status);
     }
     return false;
   });
@@ -255,7 +254,7 @@ async function doUploadWork(
 
 async function cleanupScheduled(stateDir: string): Promise<void> {
   try {
-    await unlink(join(stateDir, 'upload-scheduled'));
+    await unlink(statePaths(stateDir).uploadScheduled);
   } catch {
     // Already gone
   }

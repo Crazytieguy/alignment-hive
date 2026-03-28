@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { getAuthData } from '../lib/auth';
 import {
   addTranscriptsDir,
@@ -9,6 +9,7 @@ import {
   getProjectIdentifiers,
   loadTranscriptsDirs,
   matchesProject,
+  statePaths,
 } from '../lib/config';
 import { getConsentStatus, getProjectSharing, pingCheckout } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
@@ -16,8 +17,8 @@ import { hive } from '../lib/messages';
 import { hookColors, hookContinuationPad, hookOutput } from '../lib/output';
 import { spawnBackground } from '../lib/spawn';
 import {
-  checkSessionEligibility,
-  computeEligibleAt,
+  computeSessionStatus,
+  isEligibleForAutoUpload,
 } from '../lib/session-state';
 import { isSnoozed } from '../lib/snooze';
 import { loadSessionStateWithAgentMigration } from '../lib/upload-session';
@@ -27,7 +28,7 @@ const UPLOAD_DELAY_MINUTES = 10;
 
 async function checkUploadScheduled(stateDir: string): Promise<boolean> {
   try {
-    const content = await readFile(join(stateDir, 'upload-scheduled'), 'utf-8');
+    const content = await readFile(statePaths(stateDir).uploadScheduled, 'utf-8');
     const timestamp = parseInt(content.trim(), 10);
     if (isNaN(timestamp)) return false;
     return Date.now() - timestamp < UPLOAD_SCHEDULE_COOLDOWN_MS;
@@ -43,7 +44,7 @@ function spawnBackgroundCommand(args: Array<string>, stateDir: string): boolean 
   return spawnBackground({
     executable: isCompiled ? process.execPath : process.argv[0],
     args: isCompiled ? args : [process.argv[1], ...args],
-    errorLogPath: join(stateDir, 'error.log'),
+    errorLogPath: statePaths(stateDir).errorLog,
   });
 }
 
@@ -65,7 +66,7 @@ async function checkAlignVersion(stateDir: string): Promise<string | null> {
   const pluginVersion = process.env.HIVE_PLUGIN_VERSION;
   if (!pluginVersion) return null;
 
-  const versionFile = join(stateDir, 'align-version');
+  const versionFile = statePaths(stateDir).alignVersion;
   try {
     const currentVersion = await readFile(versionFile, 'utf-8');
     const currentMinor = currentVersion.trim().split('.').slice(0, 2).join('.');
@@ -166,23 +167,27 @@ export async function hiveSessionStart(): Promise<number> {
   const { parentSessions: allSessions, uploadedMap, excludedSet, migrationTimestamp: effectiveMigrationTs } =
     await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
+  const snoozeUntil = await isSnoozed(stateDir) ? Date.now() + 1 : null; // truthy if snoozed
+  const statusCtx = { uploadedMap, excludedSet, consentMtime: consentTimestamp, snoozeUntil, migrationTimestamp: effectiveMigrationTs };
+
   const eligibleIds: Array<string> = [];
   let pendingCount = 0;
-  let earliestEligibleAt = Infinity;
-  const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: consentTimestamp, migrationTimestamp: effectiveMigrationTs };
+  let earliestRemainingMs = Infinity;
 
   for (const session of allSessions) {
-    const result = checkSessionEligibility(session, eligibilityCtx);
-    if (result.eligible) {
+    const status = computeSessionStatus(session, statusCtx);
+    if (isEligibleForAutoUpload(status)) {
       eligibleIds.push(session.sessionId);
-    } else if (result.reason === 'pending review' || result.reason === 'consent review period') {
+    } else if (status.type === 'snoozed') {
+      eligibleIds.push(session.sessionId);
+    } else if (status.type === 'pending') {
       pendingCount++;
-      earliestEligibleAt = Math.min(earliestEligibleAt, computeEligibleAt(session.mtime.getTime(), consentTimestamp, effectiveMigrationTs));
+      earliestRemainingMs = Math.min(earliestRemainingMs, status.remainingMs);
     }
   }
 
-  if (pendingCount > 0 && earliestEligibleAt < Infinity) {
-    const totalMinutes = Math.max(0, Math.ceil((earliestEligibleAt - Date.now()) / (1000 * 60)));
+  if (pendingCount > 0 && earliestRemainingMs < Infinity) {
+    const totalMinutes = Math.max(0, Math.ceil(earliestRemainingMs / (1000 * 60)));
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
     const timeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
@@ -194,24 +199,22 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   let hasSessionInfo = false;
-  if (eligibleIds.length > 0) {
-    if (await isSnoozed(stateDir)) {
-      messages.push(hive.sessionStart.eligibleSnoozed(eligibleIds.length));
-      hasSessionInfo = true;
-    } else {
-      const alreadyScheduled = await checkUploadScheduled(stateDir);
-      if (!alreadyScheduled) {
-        await writeFile(join(stateDir, 'upload-scheduled'), String(Date.now()));
-        const spawned = spawnBackgroundCommand(
-          ['upload', 'send', '--delay', '600', '--sessions', eligibleIds.join(',')],
-          stateDir,
-        );
-        if (spawned) {
-          messages.push(hive.sessionStart.uploading(eligibleIds.length, UPLOAD_DELAY_MINUTES));
-          hasSessionInfo = true;
-        }
+  const snoozedCount = eligibleIds.length > 0 && snoozeUntil ? eligibleIds.length : 0;
+  if (snoozedCount > 0) {
+    messages.push(hive.sessionStart.eligibleSnoozed(snoozedCount));
+    hasSessionInfo = true;
+  } else if (eligibleIds.length > 0) {
+    const alreadyScheduled = await checkUploadScheduled(stateDir);
+    if (!alreadyScheduled) {
+      await writeFile(statePaths(stateDir).uploadScheduled, String(Date.now()));
+      const spawned = spawnBackgroundCommand(
+        ['upload', 'send', '--delay', '600', '--sessions', eligibleIds.join(',')],
+        stateDir,
+      );
+      if (spawned) {
+        messages.push(hive.sessionStart.uploading(eligibleIds.length, UPLOAD_DELAY_MINUTES));
+        hasSessionInfo = true;
       }
-      // If already in progress, show nothing — user doesn't need to act
     }
   }
 

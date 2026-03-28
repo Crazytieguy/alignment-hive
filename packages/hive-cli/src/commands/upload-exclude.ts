@@ -1,6 +1,5 @@
 import { appendFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { ensureStateDir, getConfig, loadTranscriptsDirs } from '../lib/config';
+import { ensureStateDir, getConfig, loadTranscriptsDirs, statePaths } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
@@ -42,7 +41,7 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
       printInfo(hive.upload.allExcludedOrUploaded);
       return 0;
     }
-    await appendFile(join(stateDir, 'excluded-sessions'), lines.join(''));
+    await appendFile(statePaths(stateDir).excludedSessions, lines.join(''));
     printSuccess(hive.upload.excludedCount(count));
     return 0;
   }

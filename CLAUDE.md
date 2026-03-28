@@ -56,7 +56,6 @@ Plugin locations:
 - `plugins/autopilot/.claude-plugin/plugin.json`
 - `plugins/github-action/.claude-plugin/plugin.json`
 - `plugins/hive/.claude-plugin/plugin.json`
-- `plugins/hive-mind/.claude-plugin/plugin.json`
 - `plugins/mats/.claude-plugin/plugin.json`
 - `plugins/llms-fetch-mcp/.claude-plugin/plugin.json`
 - `plugins/remote-kernels/.claude-plugin/plugin.json`

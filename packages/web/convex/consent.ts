@@ -203,10 +203,22 @@ export const getUserSessionProjects = query({
       return [];
     }
 
-    const sessions = await ctx.db
-      .query("sessions")
-      .withIndex("by_user_id", (q) => q.eq("userId", identity.subject))
-      .collect();
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_workos_id", (q) => q.eq("workosId", identity.subject))
+      .first();
+
+    // Query both indexes to cover pre- and post-migration sessions
+    const [byDocId, byWorkosId] = await Promise.all([
+      user
+        ? ctx.db.query("sessions").withIndex("by_user_doc_id", (q) => q.eq("userDocId", user._id)).collect()
+        : Promise.resolve([]),
+      ctx.db.query("sessions").withIndex("by_user_id", (q) => q.eq("userId", identity.subject)).collect(),
+    ]);
+    // Dedup: byWorkosId first, then byDocId overwrites (migrated records are canonical)
+    const sessionsMap = new Map(byWorkosId.map((s) => [s.sessionId, s]));
+    for (const s of byDocId) sessionsMap.set(s.sessionId, s);
+    const sessions = [...sessionsMap.values()];
 
     const projectCounts = new Map<string, number>();
     for (const session of sessions) {

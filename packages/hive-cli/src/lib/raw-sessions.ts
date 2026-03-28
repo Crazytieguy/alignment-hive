@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { HIVE_MIND_VERSION, parseJsonl, transformEntry } from './extraction';
+import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './extraction';
 import { getClaudeProjectDir, getConfig, loadTranscriptsDirs } from './config';
 import { discoverSessions } from './session-state';
 import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
@@ -30,7 +30,7 @@ export async function readRawSession(rawPath: string, checkoutId?: string): Prom
 
   const meta: SessionMeta = {
     _type: 'session-meta',
-    version: HIVE_MIND_VERSION,
+    version: SESSION_FORMAT_VERSION,
     sessionId: filename,
     checkoutId: checkoutId ?? 'local',
     rawMtime: fileStat.mtime.toISOString(),

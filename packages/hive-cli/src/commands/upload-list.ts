@@ -4,12 +4,13 @@ import {
   loadTranscriptsDirs,
 } from '../lib/config';
 import { hive } from '../lib/messages';
-import { colors, printInfo, printWarning } from '../lib/output';
-import { getProjectConsentMtime } from '../lib/convex';
-import { formatDisplayStatus, getDisplayStatus, getDisplayStatusColor } from '../lib/session-display';
+import { colors, printError, printInfo, printWarning } from '../lib/output';
+import { resolveProjectConsent } from '../lib/convex';
 import { loadSessionStateWithAgentMigration, readSessionSummary } from '../lib/upload-session';
 import {
-  checkSessionEligibility,
+  computeSessionStatus,
+  formatSessionStatus,
+  getStatusColor,
 } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
 
@@ -43,7 +44,16 @@ export async function uploadList(args: Array<string>): Promise<number> {
     return 0;
   }
 
-  const consentMtime = await getProjectConsentMtime(cwd);
+  const consentResult = await resolveProjectConsent(cwd);
+  if ('error' in consentResult) {
+    switch (consentResult.error) {
+      case 'not-authenticated': printError(hive.upload.notAuthenticated); break;
+      case 'no-consent': printError(hive.upload.noConsent); break;
+      case 'no-project-consent': printError(hive.upload.noProjectConsent); break;
+    }
+    return 1;
+  }
+  const { consentMtime } = consentResult;
 
   let pendingCount = 0;
   let readyCount = 0;
@@ -51,12 +61,11 @@ export async function uploadList(args: Array<string>): Promise<number> {
   let excludedCount = 0;
 
   // First pass: compute statuses (no file reads)
-  const sessionStatuses: Array<{ session: typeof parentSessions[0]; status: ReturnType<typeof getDisplayStatus>; statusColor: 'green' | 'blue' | 'yellow' | 'default' }> = [];
-  const eligibilityCtx = { uploadedMap, excludedSet, consentMtime: consentMtime ?? Date.now(), migrationTimestamp };
+  const statusCtx = { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp };
+  const sessionStatuses: Array<{ session: typeof parentSessions[0]; status: ReturnType<typeof computeSessionStatus>; statusColor: 'green' | 'blue' | 'yellow' | 'default' }> = [];
 
   for (const session of parentSessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())) {
-    const result = checkSessionEligibility(session, eligibilityCtx);
-    const status = getDisplayStatus(result, session, { consentMtime, snoozeUntil, migrationTimestamp });
+    const status = computeSessionStatus(session, statusCtx);
 
     switch (status.type) {
       case 'excluded': excludedCount++; break;
@@ -65,7 +74,7 @@ export async function uploadList(args: Array<string>): Promise<number> {
       case 'ready': readyCount++; break;
     }
 
-    sessionStatuses.push({ session, status, statusColor: getDisplayStatusColor(status) });
+    sessionStatuses.push({ session, status, statusColor: getStatusColor(status) });
   }
 
   // Filter: only show actionable sessions unless --all
@@ -90,7 +99,7 @@ export async function uploadList(args: Array<string>): Promise<number> {
       rows.push({
         id: session.sessionId.slice(0, 12),
         date: session.mtime.toLocaleDateString(),
-        status: formatDisplayStatus(status),
+        status: formatSessionStatus(status),
         statusColor,
         summary: summaries[j].slice(0, 60),
       });
@@ -117,10 +126,6 @@ export async function uploadList(args: Array<string>): Promise<number> {
   if (uploadedCount > 0) parts.push(`${uploadedCount} uploaded`);
   if (excludedCount > 0) parts.push(`${excludedCount} excluded`);
   console.log(`Total: ${parentSessions.length} sessions (${parts.join(', ')})`);
-
-  if (consentMtime === null) {
-    printWarning(hive.upload.consentUnknown);
-  }
 
   return 0;
 }

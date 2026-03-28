@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
 import { getAuthData } from '../lib/auth';
-import { getConfig, getProjectIdentifiers, isWorktree, matchesProject } from '../lib/config';
+import { getConfig, getProjectIdentifiers, isWorktree, matchesProject, statePaths } from '../lib/config';
 import { discoverWorktreeTranscriptDirsForAll, extractCwd } from '../lib/transcript-discovery';
 import { getConsentStatus, getProjectSharing, getRepoLinkStatus, updateProjectSharing } from '../lib/convex';
 import { checkRepoVisibility } from '../lib/github';
@@ -255,7 +255,7 @@ async function consentSetupInner(): Promise<number> {
       await Promise.all(
         enabledGithubProjects.map(async (project) => {
           const stateDir = cliConfig.getStateDir(project.path);
-          if (existsSync(join(stateDir, 'repo-linking-declined'))) return null;
+          if (existsSync(statePaths(stateDir).repoLinkingDeclined)) return null;
 
           const linkStatus = await getRepoLinkStatus(project.identifiers.gitRemote!);
           if (linkStatus === 'linked') return null;
@@ -292,7 +292,7 @@ async function consentSetupInner(): Promise<number> {
             const stateDir = cliConfig.getStateDir(project.path);
             try {
               mkdirSync(stateDir, { recursive: true });
-              writeFileSync(join(stateDir, 'repo-linking-declined'), '');
+              writeFileSync(statePaths(stateDir).repoLinkingDeclined, '');
             } catch {
               // best effort
             }

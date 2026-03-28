@@ -42,15 +42,6 @@ export function createHiveConfig(): CliConfig {
   };
 }
 
-export function createHiveMindConfig(): CliConfig {
-  const authDir = join(homedir(), '.claude', 'hive-mind');
-  return {
-    authDir,
-    authFile: resolveAuthFile(process.env.HIVE_MIND_AUTH_FILE, join(authDir, 'auth.json')),
-    clientId: process.env.HIVE_MIND_CLIENT_ID ?? 'client_01KE10CZ6FFQB9TR2NVBQJ4AKV',
-    getStateDir: (cwd: string) => join(cwd, '.claude', 'hive-mind'),
-  };
-}
 
 /** Extract cwd from a JSONL line. Returns null if the line doesn't contain a valid cwd. */
 export function parseCwdFromLine(line: string): string | null {
@@ -60,9 +51,7 @@ export function parseCwdFromLine(line: string): string | null {
     if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
       return parsed.cwd;
     }
-  } catch {
-    // unparseable
-  }
+  } catch {}
   return null;
 }
 
@@ -90,7 +79,7 @@ export function getClientId(): string {
 
 export async function ensureStateDir(stateDir: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
-  const gitignorePath = join(stateDir, '.gitignore');
+  const gitignorePath = join(stateDir, '.gitignore'); // Not in statePaths — infrastructure, not data
   try {
     await access(gitignorePath);
   } catch {
@@ -99,7 +88,7 @@ export async function ensureStateDir(stateDir: string): Promise<void> {
 }
 
 export async function getOrCreateCheckoutId(stateDir: string): Promise<string> {
-  const checkoutIdFile = join(stateDir, 'checkout-id');
+  const checkoutIdFile = statePaths(stateDir).checkoutId;
   try {
     const id = await readFile(checkoutIdFile, 'utf-8');
     return id.trim();
@@ -148,9 +137,7 @@ export function getProjectIdentifiers(cwd: string): { directory: string; gitRemo
       .replace(':', '/')
       .replace(/\.git$/, '')
       .toLowerCase();
-  } catch {
-    // No remote
-  }
+  } catch {}
 
   // Use main worktree path so all worktrees share the same directory identifier
   const mainPath = getMainWorktreePath(cwd);
@@ -165,9 +152,7 @@ export function getProjectIdentifiers(cwd: string): { directory: string; gitRemo
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     return { directory: gitRoot, gitRemote };
-  } catch {
-    // Not a git repo
-  }
+  } catch {}
 
   return { directory: cwd, gitRemote };
 }
@@ -222,9 +207,25 @@ export function getMainWorktreePath(cwd: string): string | null {
   }
 }
 
-function getTranscriptsDirsFile(stateDir: string): string {
-  return join(stateDir, 'transcripts-dirs');
+/** All known files in the state directory. */
+export function statePaths(stateDir: string) {
+  return {
+    transcriptsDirs: join(stateDir, 'transcripts-dirs'),
+    uploadedSessions: join(stateDir, 'uploaded-sessions'),
+    excludedSessions: join(stateDir, 'excluded-sessions'),
+    agentMigrationTs: join(stateDir, 'agent-upload-migration-ts'),
+    snoozeUntil: join(stateDir, 'snooze-until'),
+    uploadScheduled: join(stateDir, 'upload-scheduled'),
+    uploadLock: join(stateDir, 'upload-lock'),
+    errorLog: join(stateDir, 'error.log'),
+    alignVersion: join(stateDir, 'align-version'),
+    sharingDisabled: join(stateDir, 'sharing-disabled'),
+    repoLinkingDeclined: join(stateDir, 'repo-linking-declined'),
+    checkoutId: join(stateDir, 'checkout-id'),
+    commitHash: (sessionId: string) => join(stateDir, `${sessionId}-commit.txt`),
+  } as const;
 }
+
 
 /**
  * Load all transcripts directories from the transcripts-dirs file.
@@ -233,7 +234,7 @@ function getTranscriptsDirsFile(stateDir: string): string {
  */
 export async function loadTranscriptsDirs(stateDir: string): Promise<Array<string>> {
   try {
-    const content = await readFile(getTranscriptsDirsFile(stateDir), 'utf-8');
+    const content = await readFile(statePaths(stateDir).transcriptsDirs, 'utf-8');
     const dirs = content
       .split('\n')
       .map((line) => line.trim())
@@ -253,6 +254,6 @@ export async function addTranscriptsDir(stateDir: string, dir: string): Promise<
   const existing = await loadTranscriptsDirs(stateDir);
   if (!existing.includes(dir)) {
     existing.push(dir);
-    await writeFile(getTranscriptsDirsFile(stateDir), existing.join('\n') + '\n', 'utf-8');
+    await writeFile(statePaths(stateDir).transcriptsDirs, existing.join('\n') + '\n', 'utf-8');
   }
 }

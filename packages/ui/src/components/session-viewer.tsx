@@ -2,23 +2,20 @@ import { useEffect, useState, useRef, useCallback, type ReactNode } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   parseSession,
-  SessionMetaSchema,
   parseKnownEntry,
   type LogicalBlock,
-  type SessionMeta,
   type KnownEntry,
 } from "@alignment-hive/session-data";
 import { formatSessionId } from "../lib/format";
 
 interface SessionViewerProps {
-  /** Pre-parsed session data (used by review app with pre-sanitized data) */
-  data?: { meta: SessionMeta; blocks: LogicalBlock[] };
+  blocks?: LogicalBlock[];
   /** Optional render function for agent links (router-agnostic) */
   renderAgentLink?: (agentId: string) => ReactNode;
 }
 
-/** Session viewer that takes pre-parsed data directly */
-export function SessionViewer({ data, renderAgentLink }: SessionViewerProps) {
+/** Session viewer that takes pre-parsed blocks directly */
+export function SessionViewer({ blocks, renderAgentLink }: SessionViewerProps) {
   const [expandedBlocks, setExpandedBlocks] = useState<Set<number>>(new Set());
 
   const toggleExpand = useCallback((index: number) => {
@@ -33,17 +30,17 @@ export function SessionViewer({ data, renderAgentLink }: SessionViewerProps) {
     });
   }, []);
 
-  if (!data) {
+  if (!blocks) {
     return null;
   }
 
   return (
     <div className="rounded-lg border border-border bg-card">
       <div className="border-b border-border px-4 py-2 text-sm text-muted-foreground">
-        {data.blocks.length} blocks
+        {blocks.length} blocks
       </div>
       <VirtualizedBlockList
-        blocks={data.blocks}
+        blocks={blocks}
         expandedBlocks={expandedBlocks}
         onToggleExpand={toggleExpand}
         renderAgentLink={renderAgentLink}
@@ -61,10 +58,7 @@ interface SessionViewerFromUrlProps {
 
 /** Session viewer that fetches and parses session data from a URL */
 export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFromUrlProps) {
-  const [data, setData] = useState<{
-    meta: SessionMeta;
-    blocks: LogicalBlock[];
-  } | null>(null);
+  const [blocks, setBlocks] = useState<LogicalBlock[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -81,14 +75,8 @@ export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFrom
         const text = await response.text();
         const lines = text.split("\n").filter((line) => line.trim());
 
-        if (lines.length === 0) {
+        if (lines.length < 2) {
           throw new Error("Empty session file");
-        }
-
-        const metaLine = JSON.parse(lines[0]);
-        const metaResult = SessionMetaSchema.safeParse(metaLine);
-        if (!metaResult.success) {
-          throw new Error("Invalid session metadata");
         }
 
         const entries: KnownEntry[] = [];
@@ -99,15 +87,11 @@ export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFrom
             if (result.data) {
               entries.push(result.data);
             }
-          } catch {
-            // Skip malformed lines
-          }
+          } catch {}
         }
 
-        const parsed = parseSession(metaResult.data, entries);
-
         if (!cancelled) {
-          setData(parsed);
+          setBlocks(parseSession(entries));
           setLoading(false);
         }
       } catch (err) {
@@ -140,7 +124,7 @@ export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFrom
     );
   }
 
-  return <SessionViewer data={data ?? undefined} renderAgentLink={renderAgentLink} />;
+  return <SessionViewer blocks={blocks ?? undefined} renderAgentLink={renderAgentLink} />;
 }
 
 interface VirtualizedBlockListProps {
@@ -318,15 +302,7 @@ function BlockContent({ block }: { block: LogicalBlock }) {
 
 function getBlockSummary(block: LogicalBlock): string {
   if (block.type === "tool" && "toolName" in block) {
-    if (block.toolName === "Edit" && "toolInput" in block) {
-      const input = block.toolInput as { file_path?: string };
-      return input.file_path ?? block.toolName;
-    }
-    if (block.toolName === "Read" && "toolInput" in block) {
-      const input = block.toolInput as { file_path?: string };
-      return input.file_path ?? block.toolName;
-    }
-    if (block.toolName === "Write" && "toolInput" in block) {
+    if ((block.toolName === "Edit" || block.toolName === "Read" || block.toolName === "Write") && "toolInput" in block) {
       const input = block.toolInput as { file_path?: string };
       return input.file_path ?? block.toolName;
     }

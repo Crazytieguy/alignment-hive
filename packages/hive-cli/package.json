@@ -9,7 +9,6 @@
     "lint": "tsc --noEmit -p src/tsconfig.json && eslint src --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write src",
-    "build": "bun build src/hive-mind-cli.ts --outfile=../../plugins/hive-mind/cli.js --target=bun",
     "build:dev": "bun build --compile src/cli.ts --outfile ../../.dev/hive --define 'process.env.ALIGNMENT_HIVE_DEV=\"1\"'"
   },
   "dependencies": {

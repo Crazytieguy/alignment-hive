@@ -1,18 +1,16 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { computeConsentWindows, isInConsentWindow } from '@alignment-hive/session-data';
-import { parseCwdFromLine } from './config';
+import { computeConsentWindows, extractSessionSummary, isInConsentWindow } from '@alignment-hive/session-data';
+import { parseCwdFromLine, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads } from './convex';
-import { parseJsonl, transformEntry } from './extraction';
+import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './extraction';
 import { sanitizeDeep } from './sanitize';
 import { loadSessionState, recordUploadedSessions, runAgentMigration } from './session-state';
-import { extractSessionSummary } from './summary';
 import type { KnownEntry } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-state';
 
 async function readCommitHash(stateDir: string, sessionId: string): Promise<string | undefined> {
   try {
-    const hash = await readFile(join(stateDir, `${sessionId}-commit.txt`), 'utf-8');
+    const hash = await readFile(statePaths(stateDir).commitHash(sessionId), 'utf-8');
     return hash.trim() || undefined;
   } catch {
     return undefined;
@@ -88,7 +86,7 @@ function buildUploadContent(
 ) {
   const meta = {
     _type: 'session-meta' as const,
-    version: '0.1' as const,
+    version: SESSION_FORMAT_VERSION,
     sessionId,
     checkoutId,
     extractedAt: new Date().toISOString(),

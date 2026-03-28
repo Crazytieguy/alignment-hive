@@ -2,17 +2,15 @@ import { createReadStream } from 'node:fs';
 import { appendFile, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { getClaudeProjectDir } from './config';
+import { getClaudeProjectDir, statePaths  } from './config';
 import { findRawSessions } from './extraction';
 
-const UPLOADED_SESSIONS_FILE = 'uploaded-sessions';
-const EXCLUDED_SESSIONS_FILE = 'excluded-sessions';
 
-export const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
-export const CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
+const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
+const CONSENT_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
 
 /** Compute when a session becomes eligible for upload, given all review-period timestamps. */
-export function computeEligibleAt(
+function computeEligibleAt(
   mtimeMs: number,
   consentMtime: number,
   migrationTimestamp?: number | null,
@@ -98,7 +96,7 @@ export async function discoverSessions(
 async function loadUploadedSessions(stateDir: string): Promise<Map<string, UploadedEntry>> {
   const map = new Map<string, UploadedEntry>();
   try {
-    const content = await readFile(join(stateDir, UPLOADED_SESSIONS_FILE), 'utf-8');
+    const content = await readFile(statePaths(stateDir).uploadedSessions, 'utf-8');
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -108,76 +106,106 @@ async function loadUploadedSessions(stateDir: string): Promise<Map<string, Uploa
         // skip malformed lines
       }
     }
-  } catch {
-    // file doesn't exist
-  }
+  } catch {}
   return map;
 }
 
 async function loadExcludedSessions(stateDir: string): Promise<Set<string>> {
   const set = new Set<string>();
   try {
-    const content = await readFile(join(stateDir, EXCLUDED_SESSIONS_FILE), 'utf-8');
+    const content = await readFile(statePaths(stateDir).excludedSessions, 'utf-8');
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
       if (trimmed) set.add(trimmed);
     }
-  } catch {
-    // file doesn't exist
-  }
+  } catch {}
   return set;
 }
 
-export type IneligibleReason = 'excluded' | 'already uploaded' | 'pending review' | 'consent review period';
+// --- Session status ---
 
-export interface EligibilityContext {
+export type SessionStatus =
+  | { type: 'excluded' }
+  | { type: 'uploaded' }
+  | { type: 'pending'; remainingMs: number }
+  | { type: 'snoozed' }
+  | { type: 'ready' };
+
+export interface StatusContext {
   uploadedMap: Map<string, UploadedEntry>;
   excludedSet: Set<string>;
   consentMtime: number;
+  snoozeUntil: number | null;
   migrationTimestamp?: number | null;
 }
 
-export function checkSessionEligibility(
+export function computeSessionStatus(
   session: DiscoveredSession,
-  ctx: EligibilityContext,
-): { eligible: true } | { eligible: false; reason: IneligibleReason } {
-  const { uploadedMap, excludedSet, consentMtime, migrationTimestamp } = ctx;
+  ctx: StatusContext,
+): SessionStatus {
+  const { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp } = ctx;
+
   if (excludedSet.has(session.sessionId)) {
-    return { eligible: false, reason: 'excluded' };
+    return { type: 'excluded' };
   }
 
   const uploaded = uploadedMap.get(session.sessionId);
   if (uploaded && uploaded.rawMtime === session.mtime.toISOString()) {
     if (uploaded.agentSessionIds !== undefined) {
-      // Fully uploaded with agent tracking — done
-      return { eligible: false, reason: 'already uploaded' };
+      return { type: 'uploaded' };
     }
-    // Legacy entry: uploaded without agent tracking.
-    // If migration hasn't run yet, treat as already uploaded (safe default).
-    // Once migration runs, it either marks agentSessionIds: [] (stays uploaded)
-    // or writes a migration timestamp (enters review period for re-upload with agents).
+    // Legacy entry without agent tracking — see runAgentMigration for details
     if (migrationTimestamp == null) {
-      return { eligible: false, reason: 'already uploaded' };
+      return { type: 'uploaded' };
     }
     const now = Date.now();
     if (now < migrationTimestamp + SESSION_REVIEW_PERIOD_MS) {
-      return { eligible: false, reason: 'pending review' };
+      return { type: 'pending', remainingMs: migrationTimestamp + SESSION_REVIEW_PERIOD_MS - now };
     }
-    return { eligible: true };
+    return snoozeUntil ? { type: 'snoozed' } : { type: 'ready' };
   }
 
   const now = Date.now();
-  const mtimeMs = session.mtime.getTime();
-
-  if (now < mtimeMs + SESSION_REVIEW_PERIOD_MS) {
-    return { eligible: false, reason: 'pending review' };
+  const eligibleAt = computeEligibleAt(session.mtime.getTime(), consentMtime, migrationTimestamp);
+  if (now < eligibleAt) {
+    return { type: 'pending', remainingMs: eligibleAt - now };
   }
 
-  if (now < consentMtime + CONSENT_REVIEW_PERIOD_MS) {
-    return { eligible: false, reason: 'consent review period' };
-  }
+  return snoozeUntil ? { type: 'snoozed' } : { type: 'ready' };
+}
 
-  return { eligible: true };
+export function canExclude(status: SessionStatus): boolean {
+  return status.type !== 'excluded' && status.type !== 'uploaded';
+}
+
+export function canUpload(status: SessionStatus): boolean {
+  return status.type === 'ready' || status.type === 'pending';
+}
+
+export function isEligibleForAutoUpload(status: SessionStatus): boolean {
+  return status.type === 'ready';
+}
+
+export function formatSessionStatus(status: SessionStatus): string {
+  switch (status.type) {
+    case 'excluded': return 'excluded';
+    case 'uploaded': return 'uploaded';
+    case 'ready': return 'ready';
+    case 'snoozed': return 'snoozed';
+    case 'pending': {
+      const remainingHours = Math.max(0, Math.ceil(status.remainingMs / (60 * 60 * 1000)));
+      return `pending (${remainingHours}h)`;
+    }
+  }
+}
+
+export function getStatusColor(status: SessionStatus): 'green' | 'blue' | 'yellow' | 'default' {
+  switch (status.type) {
+    case 'ready': return 'green';
+    case 'uploaded': return 'blue';
+    case 'pending': case 'snoozed': return 'yellow';
+    default: return 'default';
+  }
 }
 
 /** Check if a session has been uploaded with its current mtime. */
@@ -202,12 +230,12 @@ export async function recordUploadedSessions(
     uploadedAt: now,
     ...(s.agentSessionIds !== undefined && { agentSessionIds: s.agentSessionIds }),
   } satisfies UploadedEntry) + '\n');
-  await appendFile(join(stateDir, UPLOADED_SESSIONS_FILE), lines.join(''));
+  await appendFile(statePaths(stateDir).uploadedSessions, lines.join(''));
 }
 
 /** Record a session as excluded. Appends to the excluded-sessions file. */
 export async function recordExcludedSession(stateDir: string, sessionId: string): Promise<void> {
-  await appendFile(join(stateDir, EXCLUDED_SESSIONS_FILE), sessionId + '\n');
+  await appendFile(statePaths(stateDir).excludedSessions, sessionId + '\n');
 }
 
 export interface SessionState {
@@ -278,12 +306,11 @@ export async function findAgentsForParent(
   return combined;
 }
 
-const AGENT_MIGRATION_TS_FILE = 'agent-upload-migration-ts';
 
 /** Load the agent upload migration timestamp. Returns null if not set. */
 export async function loadAgentMigrationTs(stateDir: string): Promise<number | null> {
   try {
-    const content = await readFile(join(stateDir, AGENT_MIGRATION_TS_FILE), 'utf-8');
+    const content = await readFile(statePaths(stateDir).agentMigrationTs, 'utf-8');
     const ts = parseInt(content.trim(), 10);
     return isNaN(ts) ? null : ts;
   } catch {
@@ -294,7 +321,7 @@ export async function loadAgentMigrationTs(stateDir: string): Promise<number | n
 /** Write the agent upload migration timestamp (first time new CLI discovers orphaned agents). */
 export async function writeAgentMigrationTs(stateDir: string): Promise<number> {
   const now = Date.now();
-  await writeFile(join(stateDir, AGENT_MIGRATION_TS_FILE), String(now));
+  await writeFile(statePaths(stateDir).agentMigrationTs, String(now));
   return now;
 }
 

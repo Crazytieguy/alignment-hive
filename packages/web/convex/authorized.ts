@@ -9,8 +9,8 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import {
-  isKnownContentBlock,
   parseKnownEntry,
+  extractSessionSummary,
   type KnownEntry,
 } from "@alignment-hive/session-data";
 import type { Id } from "./_generated/dataModel";
@@ -148,43 +148,6 @@ export const updateSessionSummary = internalMutation({
   },
 });
 
-function extractSummaryFromEntries(entries: KnownEntry[]): string | undefined {
-  const summaries = entries.filter(
-    (e): e is KnownEntry & { type: "summary" } => e.type === "summary",
-  );
-  if (summaries.length > 0) {
-    return summaries.at(-1)!.summary;
-  }
-  for (const entry of entries) {
-    if (entry.type !== "user") continue;
-    const content = entry.message.content;
-    if (!content) continue;
-    let text: string | undefined;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (!isKnownContentBlock(block)) continue;
-        if (block.type === "text" && "text" in block) {
-          text = block.text;
-          break;
-        }
-      }
-    }
-    if (text) {
-      const trimmed = text.trim();
-      if (trimmed.startsWith("<")) continue;
-      const firstLine = trimmed.split("\n")[0].trim();
-      if (firstLine) {
-        return firstLine.length > 100
-          ? `${firstLine.slice(0, 97)}...`
-          : firstLine;
-      }
-    }
-  }
-  return undefined;
-}
-
 export const backfillSummaries = internalAction({
   args: {},
   handler: async (
@@ -222,7 +185,7 @@ export const backfillSummaries = internalAction({
         }
       }
 
-      const summary = extractSummaryFromEntries(entries);
+      const summary = extractSessionSummary(entries);
       if (summary) {
         await ctx.runMutation(internal.authorized.updateSessionSummary, {
           sessionId: session._id,

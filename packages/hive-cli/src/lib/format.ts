@@ -552,22 +552,12 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
 export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
   const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
 
-  const meta = {
-    _type: 'session-meta' as const,
-    version: '0.1' as const,
-    sessionId: 'unknown',
-    checkoutId: 'unknown',
-    extractedAt: new Date().toISOString(),
-    rawMtime: new Date().toISOString(),
-    messageCount: entries.length,
-  };
-
-  const parsed = parseSession(meta, entries);
+  const blocks = parseSession(entries);
 
   // Extract header info
   let model: string | undefined;
   let gitBranch: string | undefined;
-  for (const block of parsed.blocks) {
+  for (const block of blocks) {
     if (!model && block.type === 'assistant' && 'model' in block && block.model) {
       model = block.model;
     }
@@ -587,7 +577,7 @@ export function formatSession(entries: Array<KnownEntry>, options: SessionFormat
     }
   }
 
-  const blocksOutput = formatBlocks(parsed.blocks, { redact, targetWords, skipWords, fieldFilter });
+  const blocksOutput = formatBlocks(blocks, { redact, targetWords, skipWords, fieldFilter });
 
   if (headerParts.length > 0) {
     const separator = redact ? '\n' : '\n\n';

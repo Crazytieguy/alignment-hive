@@ -5,7 +5,6 @@ import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
-import { extractedSessionSource } from '../lib/session-source';
 import type { SessionSource } from '../lib/session-source';
 
 function printUsage(): void {
@@ -149,8 +148,7 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
     return 0;
   }
 
-  const parsed = parseSession(meta, entries);
-  const { blocks } = parsed;
+  const blocks = parseSession(entries);
   const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
   const maxLine = lineNumbers.at(-1) ?? 0;
 
@@ -188,6 +186,3 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
   return 0;
 }
 
-export async function read(): Promise<number> {
-  return readCore(extractedSessionSource, process.argv.slice(3));
-}

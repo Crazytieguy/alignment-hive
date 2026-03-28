@@ -8,10 +8,11 @@
  * 4. Verifying expected results
  */
 
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/session-data';
+import type { SessionSource } from '../lib/session-source';
+import type { KnownEntry } from '@alignment-hive/session-data';
+import type { ReadSessionResult } from '../lib/extraction';
 
 // Test session data
 function createTestSession(sessionId: string, entries: Array<object>, options?: { agentId?: string }): string {
@@ -80,53 +81,70 @@ const userWithToolResult = (uuid: string, parentUuid: string, toolUseId: string,
   },
 });
 
+/** Parse JSONL session content into a ReadSessionResult, same as the real source but in-memory. */
+function parseSessionContent(sessionId: string, content: string): ReadSessionResult {
+  const lines = content.split('\n').filter((l) => l.trim());
+  if (lines.length === 0) return null;
+
+  const metaParsed = SessionMetaSchema.safeParse(JSON.parse(lines[0]));
+  if (!metaParsed.success) return { error: `Invalid meta for ${sessionId}` };
+
+  const entries: Array<KnownEntry> = [];
+  for (let i = 1; i < lines.length; i++) {
+    const result = parseKnownEntry(JSON.parse(lines[i]));
+    if (result.data) entries.push(result.data);
+  }
+  return { meta: metaParsed.data, entries };
+}
+
+/** Create an in-memory SessionSource backed by a Map of sessionId → JSONL content. */
+function createInMemorySource(sessions: Map<string, string>): SessionSource {
+  return {
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async listSessionFiles() {
+      return [...sessions.keys()];
+    },
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async readSession(sessionId: string) {
+      const content = sessions.get(sessionId);
+      if (!content) return null;
+      return parseSessionContent(sessionId, content);
+    },
+  };
+}
+
 describe('search command', () => {
-  let tempDir: string;
-  let sessionsDir: string;
-  let originalCwd: () => string;
+  let sessions: Map<string, string>;
+  let source: SessionSource;
   let originalArgv: Array<string>;
   let consoleOutput: Array<string>;
   let consoleSpy: ReturnType<typeof spyOn>;
 
-  beforeEach(async () => {
-    // Create temp directory structure
-    tempDir = join(tmpdir(), `hive-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    sessionsDir = join(tempDir, '.claude', 'hive-mind', 'sessions');
-    await mkdir(sessionsDir, { recursive: true });
-
-    // Mock process.cwd
-    originalCwd = process.cwd;
-    process.cwd = () => tempDir;
-
-    // Save original argv
+  beforeEach(() => {
+    sessions = new Map();
+    source = createInMemorySource(sessions);
     originalArgv = process.argv;
-
-    // Capture console output
     consoleOutput = [];
     consoleSpy = spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
       consoleOutput.push(args.map(String).join(' '));
     });
   });
 
-  afterEach(async () => {
-    process.cwd = originalCwd;
+  afterEach(() => {
     process.argv = originalArgv;
     consoleSpy.mockRestore();
-    await rm(tempDir, { recursive: true });
   });
 
   test('finds simple pattern in session', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-1.jsonl'),
-      createTestSession('test-session-1', [
+    sessions.set('test-session-1.jsonl', createTestSession('test-session-1', [
         userEntry('1', 'Hello world'),
         assistantEntry('2', '1', 'Hi there! How can I help with your TODO list?'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'search', 'TODO'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('TODO'))).toBe(true);
     // Uses minimal prefix - "test" is unique enough
@@ -134,53 +152,47 @@ describe('search command', () => {
   });
 
   test('case insensitive search with -i flag', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-2.jsonl'),
-      createTestSession('test-session-2', [userEntry('1', 'hello'), assistantEntry('2', '1', 'HELLO back to you')]),
+    sessions.set('test-session-2.jsonl', createTestSession('test-session-2', [userEntry('1', 'hello'), assistantEntry('2', '1', 'HELLO back to you')]),
     );
 
     // Without -i, should not match lowercase when searching uppercase
     process.argv = ['node', 'cli', 'search', 'HELLO'];
-    const { search } = await import('../commands/search');
+    const { searchCore } = await import('../commands/search');
     consoleOutput = [];
-    await search();
+    await searchCore(source, process.argv.slice(3));
     const withoutI = consoleOutput.filter((line) => line.includes('hello')).length;
 
     // With -i, should match both
     process.argv = ['node', 'cli', 'search', '-i', 'HELLO'];
     consoleOutput = [];
-    await search();
+    await searchCore(source, process.argv.slice(3));
     const withI = consoleOutput.filter((line) => line.toLowerCase().includes('hello')).length;
 
     expect(withI).toBeGreaterThan(withoutI);
   });
 
   test('count mode with -c flag', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-3.jsonl'),
-      createTestSession('test-session-3', [
+    sessions.set('test-session-3.jsonl', createTestSession('test-session-3', [
         userEntry('1', 'error one'),
         assistantEntry('2', '1', 'error two and error three'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'search', '-c', 'error'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Should output session:count format (with minimal prefix)
     expect(consoleOutput.some((line) => /test.*:\d+/.test(line))).toBe(true);
   });
 
   test('list mode with -l flag', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-4.jsonl'),
-      createTestSession('test-session-4', [userEntry('1', 'find me'), assistantEntry('2', '1', 'found you')]),
+    sessions.set('test-session-4.jsonl', createTestSession('test-session-4', [userEntry('1', 'find me'), assistantEntry('2', '1', 'found you')]),
     );
 
     process.argv = ['node', 'cli', 'search', '-l', 'find'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Should output only session ID, not the matching line (with minimal prefix)
     expect(consoleOutput.length).toBe(1);
@@ -189,17 +201,15 @@ describe('search command', () => {
   });
 
   test('max matches with -m flag', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-5.jsonl'),
-      createTestSession('test-session-5', [
+    sessions.set('test-session-5.jsonl', createTestSession('test-session-5', [
         userEntry('1', 'match1'),
         assistantEntry('2', '1', 'match2\nmatch3\nmatch4\nmatch5'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'search', '-m', '2', 'match'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Should stop after 2 matching blocks (block headers start with session prefix and line number)
     const blockCount = consoleOutput.filter((line) => /^test.*\|\d+\|/.test(line)).length;
@@ -207,17 +217,15 @@ describe('search command', () => {
   });
 
   test('context lines with -C flag', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-6.jsonl'),
-      createTestSession('test-session-6', [
+    sessions.set('test-session-6.jsonl', createTestSession('test-session-6', [
         userEntry('1', 'line1\nline2\nTARGET\nline4\nline5'),
         assistantEntry('2', '1', 'ok'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'search', '-C', '1', 'TARGET'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Should show context lines around match
     const output = consoleOutput.join('\n');
@@ -227,25 +235,21 @@ describe('search command', () => {
   });
 
   test('searches thinking blocks', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-7.jsonl'),
-      createTestSession('test-session-7', [
+    sessions.set('test-session-7.jsonl', createTestSession('test-session-7', [
         userEntry('1', 'question'),
         assistantWithThinking('2', '1', 'Let me think about SECRET_THOUGHT', 'Here is my answer'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'search', 'SECRET_THOUGHT'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('SECRET_THOUGHT'))).toBe(true);
   });
 
   test('searches tool inputs', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-8.jsonl'),
-      createTestSession('test-session-8', [
+    sessions.set('test-session-8.jsonl', createTestSession('test-session-8', [
         userEntry('1', 'read a file'),
         assistantWithToolUse('2', '1', 'Read', { file_path: '/path/to/SPECIAL_FILE.txt' }),
         userWithToolResult('3', '2', 'tool-1', 'file contents'),
@@ -254,8 +258,8 @@ describe('search command', () => {
     );
 
     process.argv = ['node', 'cli', 'search', 'SPECIAL_FILE'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('SPECIAL_FILE'))).toBe(true);
   });
@@ -264,9 +268,7 @@ describe('search command', () => {
     // Tool-result-only user entries are skipped by getLogicalEntries
     // because they're displayed merged with the tool_use that triggered them.
     // This test verifies that behavior.
-    await writeFile(
-      join(sessionsDir, 'test-session-9.jsonl'),
-      createTestSession('test-session-9', [
+    sessions.set('test-session-9.jsonl', createTestSession('test-session-9', [
         userEntry('1', 'run command'),
         assistantWithToolUse('2', '1', 'Bash', { command: 'ls' }),
         userWithToolResult('3', '2', 'tool-1', 'UNIQUE_OUTPUT_12345'),
@@ -275,17 +277,15 @@ describe('search command', () => {
     );
 
     process.argv = ['node', 'cli', 'search', 'UNIQUE_OUTPUT_12345'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Tool result content in tool-result-only entries is not searched by default
     expect(consoleOutput.some((line) => line.includes('UNIQUE_OUTPUT_12345'))).toBe(false);
   });
 
   test('searches tool results with --in tool:result flag', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-10.jsonl'),
-      createTestSession('test-session-10', [
+    sessions.set('test-session-10.jsonl', createTestSession('test-session-10', [
         userEntry('1', 'run command'),
         assistantWithToolUse('2', '1', 'Bash', { command: 'ls' }),
         userWithToolResult('3', '2', 'tool-1', 'SEARCHABLE_OUTPUT_67890'),
@@ -294,8 +294,8 @@ describe('search command', () => {
     );
 
     process.argv = ['node', 'cli', 'search', '--in', 'tool:result', 'SEARCHABLE_OUTPUT_67890'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // With --in tool:result, tool result content IS searched
     expect(consoleOutput.some((line) => line.includes('SEARCHABLE_OUTPUT_67890'))).toBe(true);
@@ -303,18 +303,14 @@ describe('search command', () => {
 
   test('filters to specific session with -s flag', async () => {
     // Create two sessions
-    await writeFile(
-      join(sessionsDir, 'session-aaa111.jsonl'),
-      createTestSession('session-aaa111', [userEntry('1', 'FINDME in aaa'), assistantEntry('2', '1', 'response')]),
+    sessions.set('session-aaa111.jsonl', createTestSession('session-aaa111', [userEntry('1', 'FINDME in aaa'), assistantEntry('2', '1', 'response')]),
     );
-    await writeFile(
-      join(sessionsDir, 'session-bbb222.jsonl'),
-      createTestSession('session-bbb222', [userEntry('1', 'FINDME in bbb'), assistantEntry('2', '1', 'response')]),
+    sessions.set('session-bbb222.jsonl', createTestSession('session-bbb222', [userEntry('1', 'FINDME in bbb'), assistantEntry('2', '1', 'response')]),
     );
 
     process.argv = ['node', 'cli', 'search', '-s', 'session-aaa', 'FINDME'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Should find in aaa session only
     expect(consoleOutput.some((line) => line.includes('aaa'))).toBe(true);
@@ -323,22 +319,18 @@ describe('search command', () => {
 
   test('skips agent sessions', async () => {
     // Regular session
-    await writeFile(
-      join(sessionsDir, 'regular-session.jsonl'),
-      createTestSession('regular-session', [userEntry('1', 'FINDME regular'), assistantEntry('2', '1', 'response')]),
+    sessions.set('regular-session.jsonl', createTestSession('regular-session', [userEntry('1', 'FINDME regular'), assistantEntry('2', '1', 'response')]),
     );
 
     // Agent session (should be skipped)
-    await writeFile(
-      join(sessionsDir, 'agent-abc123.jsonl'),
-      createTestSession('agent-abc123', [userEntry('1', 'FINDME agent'), assistantEntry('2', '1', 'response')], {
+    sessions.set('agent-abc123.jsonl', createTestSession('agent-abc123', [userEntry('1', 'FINDME agent'), assistantEntry('2', '1', 'response')], {
         agentId: 'abc123',
       }),
     );
 
     process.argv = ['node', 'cli', 'search', 'FINDME'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     // Should find regular session
     expect(consoleOutput.some((line) => line.includes('regular'))).toBe(true);
@@ -347,30 +339,26 @@ describe('search command', () => {
   });
 
   test('handles regex patterns', async () => {
-    await writeFile(
-      join(sessionsDir, 'test-session-10.jsonl'),
-      createTestSession('test-session-10', [userEntry('1', 'error123 and error456'), assistantEntry('2', '1', 'ok')]),
+    sessions.set('test-session-10.jsonl', createTestSession('test-session-10', [userEntry('1', 'error123 and error456'), assistantEntry('2', '1', 'ok')]),
     );
 
     process.argv = ['node', 'cli', 'search', 'error\\d+'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('error123'))).toBe(true);
   });
 
   test('shows usage when no pattern provided', async () => {
     process.argv = ['node', 'cli', 'search'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('Usage'))).toBe(true);
   });
 
   test('filters by --after time', async () => {
-    await writeFile(
-      join(sessionsDir, 'time-test-1.jsonl'),
-      createTestSession('time-test-1', [
+    sessions.set('time-test-1.jsonl', createTestSession('time-test-1', [
         { ...userEntry('1', 'OLD message'), timestamp: '2020-01-01T00:00:00Z' },
         { ...assistantEntry('2', '1', 'old response'), timestamp: '2020-01-01T00:00:01Z' },
         { ...userEntry('3', 'NEW message'), timestamp: '2025-06-01T00:00:00Z' },
@@ -379,17 +367,15 @@ describe('search command', () => {
     );
 
     process.argv = ['node', 'cli', 'search', '--after', '2024-01-01', 'message'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('NEW'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('OLD'))).toBe(false);
   });
 
   test('filters by --before time', async () => {
-    await writeFile(
-      join(sessionsDir, 'time-test-2.jsonl'),
-      createTestSession('time-test-2', [
+    sessions.set('time-test-2.jsonl', createTestSession('time-test-2', [
         { ...userEntry('1', 'OLD message'), timestamp: '2020-01-01T00:00:00Z' },
         { ...assistantEntry('2', '1', 'old response'), timestamp: '2020-01-01T00:00:01Z' },
         { ...userEntry('3', 'NEW message'), timestamp: '2025-06-01T00:00:00Z' },
@@ -398,17 +384,15 @@ describe('search command', () => {
     );
 
     process.argv = ['node', 'cli', 'search', '--before', '2021-01-01', 'message'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('OLD'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('NEW'))).toBe(false);
   });
 
   test('combines --after and --before for time window', async () => {
-    await writeFile(
-      join(sessionsDir, 'time-test-3.jsonl'),
-      createTestSession('time-test-3', [
+    sessions.set('time-test-3.jsonl', createTestSession('time-test-3', [
         { ...userEntry('1', 'EARLY message'), timestamp: '2020-01-01T00:00:00Z' },
         { ...userEntry('2', 'MIDDLE message'), timestamp: '2023-06-01T00:00:00Z' },
         { ...userEntry('3', 'LATE message'), timestamp: '2025-06-01T00:00:00Z' },
@@ -416,8 +400,8 @@ describe('search command', () => {
     );
 
     process.argv = ['node', 'cli', 'search', '--after', '2022-01-01', '--before', '2024-01-01', 'message'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('MIDDLE'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('EARLY'))).toBe(false);
@@ -425,7 +409,7 @@ describe('search command', () => {
   });
 
   test('shows error for invalid --after time spec', async () => {
-    await writeFile(join(sessionsDir, 'time-test-4.jsonl'), createTestSession('time-test-4', [userEntry('1', 'test')]));
+    sessions.set('time-test-4.jsonl', createTestSession('time-test-4', [userEntry('1', 'test')]));
 
     const errorOutput: Array<string> = [];
     const errorSpy = spyOn(console, 'error').mockImplementation((...args: Array<unknown>) => {
@@ -433,8 +417,8 @@ describe('search command', () => {
     });
 
     process.argv = ['node', 'cli', 'search', '--after', 'invalid-time', 'test'];
-    const { search } = await import('../commands/search');
-    await search();
+    const { searchCore } = await import('../commands/search');
+    await searchCore(source, process.argv.slice(3));
 
     errorSpy.mockRestore();
 
@@ -443,47 +427,37 @@ describe('search command', () => {
 });
 
 describe('read command', () => {
-  let tempDir: string;
-  let sessionsDir: string;
-  let originalCwd: () => string;
+  let sessions: Map<string, string>;
+  let source: SessionSource;
   let originalArgv: Array<string>;
   let consoleOutput: Array<string>;
   let consoleSpy: ReturnType<typeof spyOn>;
 
-  beforeEach(async () => {
-    tempDir = join(tmpdir(), `hive-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    sessionsDir = join(tempDir, '.claude', 'hive-mind', 'sessions');
-    await mkdir(sessionsDir, { recursive: true });
-
-    originalCwd = process.cwd;
-    process.cwd = () => tempDir;
+  beforeEach(() => {
+    sessions = new Map();
+    source = createInMemorySource(sessions);
     originalArgv = process.argv;
-
     consoleOutput = [];
     consoleSpy = spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
       consoleOutput.push(args.map(String).join(' '));
     });
   });
 
-  afterEach(async () => {
-    process.cwd = originalCwd;
+  afterEach(() => {
     process.argv = originalArgv;
     consoleSpy.mockRestore();
-    await rm(tempDir, { recursive: true });
   });
 
   test('reads all entries with full content when under target', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-test-1.jsonl'),
-      createTestSession('read-test-1', [
+    sessions.set('read-test-1.jsonl', createTestSession('read-test-1', [
         userEntry('1', 'line1\nline2\nline3\nline4\nline5'),
         assistantEntry('2', '1', 'response'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'read', 'read-tes'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     const output = consoleOutput.join('\n');
     // Should show full content since it's under the target word limit
@@ -493,9 +467,7 @@ describe('read command', () => {
   });
 
   test('reads specific entry by number', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-test-3.jsonl'),
-      createTestSession('read-test-3', [
+    sessions.set('read-test-3.jsonl', createTestSession('read-test-3', [
         userEntry('1', 'first entry'),
         assistantEntry('2', '1', 'second entry'),
         userEntry('3', 'third entry'),
@@ -504,34 +476,30 @@ describe('read command', () => {
     );
 
     process.argv = ['node', 'cli', 'read', 'read-test-3', '2'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     const output = consoleOutput.join('\n');
     expect(output).toContain('second entry');
   });
 
   test('session prefix matching', async () => {
-    await writeFile(
-      join(sessionsDir, 'abcd1234-full-session-id.jsonl'),
-      createTestSession('abcd1234-full-session-id', [
+    sessions.set('abcd1234-full-session-id.jsonl', createTestSession('abcd1234-full-session-id', [
         userEntry('1', 'found by prefix'),
         assistantEntry('2', '1', 'response'),
       ]),
     );
 
     process.argv = ['node', 'cli', 'read', 'abcd'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     const output = consoleOutput.join('\n');
     expect(output).toContain('found by prefix');
   });
 
   test('reports error for non-existent entry number', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-test-9.jsonl'),
-      createTestSession('read-test-9', [userEntry('1', 'only entry'), assistantEntry('2', '1', 'response')]),
+    sessions.set('read-test-9.jsonl', createTestSession('read-test-9', [userEntry('1', 'only entry'), assistantEntry('2', '1', 'response')]),
     );
 
     const errorOutput: Array<string> = [];
@@ -540,8 +508,8 @@ describe('read command', () => {
     });
 
     process.argv = ['node', 'cli', 'read', 'read-test-9', '99'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     errorSpy.mockRestore();
 
@@ -550,16 +518,14 @@ describe('read command', () => {
 
   test('shows usage when no session provided', async () => {
     process.argv = ['node', 'cli', 'read'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     expect(consoleOutput.some((line) => line.includes('Usage'))).toBe(true);
   });
 
   test('reads range of entries with N-M syntax', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-range-1.jsonl'),
-      createTestSession('read-range-1', [
+    sessions.set('read-range-1.jsonl', createTestSession('read-range-1', [
         userEntry('1', 'entry one'),
         assistantEntry('2', '1', 'entry two'),
         userEntry('3', 'entry three'),
@@ -570,8 +536,8 @@ describe('read command', () => {
     );
 
     process.argv = ['node', 'cli', 'read', 'read-range-1', '2-4'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     const output = consoleOutput.join('\n');
     // Should show entries 2, 3, 4
@@ -585,9 +551,7 @@ describe('read command', () => {
   });
 
   test('range read preserves original line numbers', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-range-2.jsonl'),
-      createTestSession('read-range-2', [
+    sessions.set('read-range-2.jsonl', createTestSession('read-range-2', [
         userEntry('1', 'entry one'),
         assistantEntry('2', '1', 'entry two'),
         userEntry('3', 'entry three'),
@@ -596,8 +560,8 @@ describe('read command', () => {
     );
 
     process.argv = ['node', 'cli', 'read', 'read-range-2', '3-4'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     const output = consoleOutput.join('\n');
     // Line numbers should be 3 and 4, not 1 and 2
@@ -611,9 +575,7 @@ describe('read command', () => {
     // Create entries with enough content to trigger truncation (500 words each, 1500 total)
     // Use --target 100 to force truncation
     const longContent = Array.from({ length: 500 }, (_, i) => `word${i}`).join(' ');
-    await writeFile(
-      join(sessionsDir, 'read-range-4.jsonl'),
-      createTestSession('read-range-4', [
+    sessions.set('read-range-4.jsonl', createTestSession('read-range-4', [
         userEntry('1', longContent),
         assistantEntry('2', '1', longContent),
         userEntry('3', longContent),
@@ -621,8 +583,8 @@ describe('read command', () => {
     );
 
     process.argv = ['node', 'cli', 'read', 'read-range-4', '1-3', '--target', '100'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     const output = consoleOutput.join('\n');
     // Should show truncation notice
@@ -630,9 +592,7 @@ describe('read command', () => {
   });
 
   test('range read reports error for invalid range', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-range-5.jsonl'),
-      createTestSession('read-range-5', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
+    sessions.set('read-range-5.jsonl', createTestSession('read-range-5', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
     );
 
     const errorOutput: Array<string> = [];
@@ -641,8 +601,8 @@ describe('read command', () => {
     });
 
     process.argv = ['node', 'cli', 'read', 'read-range-5', '5-3'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     errorSpy.mockRestore();
 
@@ -651,9 +611,7 @@ describe('read command', () => {
   });
 
   test('range read reports error for range beyond session', async () => {
-    await writeFile(
-      join(sessionsDir, 'read-range-6.jsonl'),
-      createTestSession('read-range-6', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
+    sessions.set('read-range-6.jsonl', createTestSession('read-range-6', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
     );
 
     const errorOutput: Array<string> = [];
@@ -662,8 +620,8 @@ describe('read command', () => {
     });
 
     process.argv = ['node', 'cli', 'read', 'read-range-6', '10-20'];
-    const { read } = await import('../commands/read');
-    await read();
+    const { readCore } = await import('../commands/read');
+    await readCore(source, process.argv.slice(3));
 
     errorSpy.mockRestore();
 

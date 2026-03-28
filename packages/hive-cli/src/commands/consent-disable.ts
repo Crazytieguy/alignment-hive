@@ -1,8 +1,7 @@
-import { join } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { getProjectSharing, updateProjectSharing } from '../lib/convex';
 import { getAuthData } from '../lib/auth';
-import { getConfig, getProjectIdentifiers, matchesProject } from '../lib/config';
+import { getConfig, getProjectIdentifiers, matchesProject, statePaths } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printSuccess, printWarning } from '../lib/output';
 
@@ -20,7 +19,7 @@ export async function consentDisable(projectPath?: string): Promise<number> {
 
   // Create local sharing-disabled marker
   await mkdir(stateDir, { recursive: true });
-  await writeFile(join(stateDir, 'sharing-disabled'), '');
+  await writeFile(statePaths(stateDir).sharingDisabled, '');
 
   // If this project was previously enabled in Convex, append a disable event
   const allProjects = await getProjectSharing();

@@ -5,31 +5,15 @@ import {
   parseSession,
   parseKnownEntry,
   type KnownEntry,
-  type SessionMeta,
 } from "@alignment-hive/session-data";
 
-function parseEntries(rawEntries: Array<unknown>) {
+function parseAndBuildBlocks(rawEntries: Array<unknown>) {
   const entries: KnownEntry[] = [];
   for (const rawEntry of rawEntries) {
     const parsed = parseKnownEntry(rawEntry);
     if (parsed.data) entries.push(parsed.data);
   }
-  return entries;
-}
-
-function buildSessionModel(
-  meta: { sessionId: string; rawMtime: string; messageCount: number },
-  rawEntries: Array<unknown>,
-) {
-  const sessionMeta: SessionMeta = {
-    _type: "session-meta",
-    version: "0.1",
-    sessionId: meta.sessionId,
-    checkoutId: "",
-    rawMtime: meta.rawMtime,
-    messageCount: meta.messageCount,
-  };
-  return parseSession(sessionMeta, parseEntries(rawEntries));
+  return parseSession(entries);
 }
 
 interface SessionDetailProps {
@@ -39,8 +23,23 @@ interface SessionDetailProps {
   onSelectAgent?: (agentSessionId: string) => void;
 }
 
+type SessionsResult = Awaited<ReturnType<typeof trpc.sessions.list.query>>;
+type Status = SessionsResult["sessions"][number]["status"];
+
+function canExclude(status: Status) {
+  return status.type !== "excluded" && status.type !== "uploaded";
+}
+
+function canUpload(status: Status) {
+  return status.type === "ready" || status.type === "pending";
+}
+
 export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent }: SessionDetailProps) {
   const queryClient = useQueryClient();
+
+  // Read cached session status from list query
+  const sessionsData = queryClient.getQueryData<SessionsResult>(["sessions"]);
+  const sessionStatus = sessionsData?.sessions.find((s) => s.sessionId === sessionId)?.status;
 
   // Always fetch the parent's content (includes all agent contents)
   const { data, isLoading, error } = useQuery({
@@ -94,12 +93,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
     );
   }
 
-  const sessionModel = viewingAgent
-    ? buildSessionModel(
-        { sessionId: viewingAgent.sessionId, rawMtime: data.meta.rawMtime, messageCount: viewingAgent.messageCount },
-        viewingAgent.entries,
-      )
-    : buildSessionModel(data.meta, data.entries);
+  const blocks = parseAndBuildBlocks(viewingAgent ? viewingAgent.entries : data.entries);
 
   const displayId = viewingAgent ? viewingAgent.sessionId : sessionId;
   const hasSidebar = data.agents.length > 0 || viewingAgent;
@@ -110,30 +104,39 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
         <span className="font-mono text-sm text-muted-foreground">
           {formatSessionId(displayId)}
         </span>
-        {!viewingAgent && (
+        {!viewingAgent && sessionStatus && (
           <div className="ml-auto flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => uploadMutation.mutate()}
-              disabled={uploadMutation.isPending}
-            >
-              Upload now
-            </Button>
-            <Button
-              size="sm"
-              variant="destructive"
-              onClick={() => excludeMutation.mutate()}
-              disabled={excludeMutation.isPending}
-            >
-              Exclude
-            </Button>
+            {canUpload(sessionStatus) && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => uploadMutation.mutate()}
+                disabled={uploadMutation.isPending}
+              >
+                Upload now
+              </Button>
+            )}
+            {canExclude(sessionStatus) && (
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => excludeMutation.mutate()}
+                disabled={excludeMutation.isPending}
+              >
+                Exclude
+              </Button>
+            )}
           </div>
         )}
       </div>
-      {(excludeMutation.error || uploadMutation.error) && (
+      {excludeMutation.error && (
         <Alert variant="error">
-          {excludeMutation.error instanceof Error ? excludeMutation.error.message : uploadMutation.error instanceof Error ? (uploadMutation.error as Error).message : 'Operation failed'}
+          {excludeMutation.error instanceof Error ? excludeMutation.error.message : 'Exclude failed'}
+        </Alert>
+      )}
+      {uploadMutation.error && (
+        <Alert variant="error">
+          {uploadMutation.error instanceof Error ? uploadMutation.error.message : 'Upload failed'}
         </Alert>
       )}
       <Alert variant="warning">
@@ -142,7 +145,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
 
       <div className={`grid gap-4 ${hasSidebar ? "lg:grid-cols-[1fr_300px]" : ""}`}>
         <div>
-          <SessionViewer data={sessionModel} />
+          <SessionViewer blocks={blocks} />
         </div>
 
         {hasSidebar && (

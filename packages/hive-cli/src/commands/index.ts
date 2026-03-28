@@ -1,22 +1,16 @@
-import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { getToolResultText, isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
-import { getHiveMindSessionsDir, isSessionError, readExtractedSession } from '../lib/extraction';
-import { errors, indexCmd, usage } from '../lib/messages';
-import { colors, printError } from '../lib/output';
-import { extractedSessionSource } from '../lib/session-source';
-import { extractSessionSummary } from '../lib/summary';
-import { checkSessionEligibility, getAuthIssuedAt } from '../lib/upload-eligibility';
+import { extractSessionSummary, getToolResultText, isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
+import { isSessionError } from '../lib/extraction';
+import { errors, usage } from '../lib/messages';
+import { printError } from '../lib/output';
 import type { ReadSessionResult } from '../lib/extraction';
+import type { ContentBlock, KnownEntry, LogicalBlock, SessionMeta } from '@alignment-hive/session-data';
 import type { SessionSource } from '../lib/session-source';
-import type { SessionEligibility } from '../lib/upload-eligibility';
-import type { ContentBlock, KnownEntry, LogicalBlock, ParsedSession, SessionMeta } from '@alignment-hive/session-data';
 
 interface SessionInfo {
   meta: SessionMeta;
   entries: Array<KnownEntry>;
-  parsed: ParsedSession;
+  blocks: Array<LogicalBlock>;
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -82,181 +76,11 @@ interface FileStats {
   removed: number;
 }
 
-function printUsage(): void {
-  console.log(usage.indexFull());
-}
-
-interface PendingSessionInfo {
-  eligibility: SessionEligibility;
-  entries: Array<KnownEntry>;
-  agentCount: number;
-}
-
-function formatPendingSession(
-  info: PendingSessionInfo,
-  idPrefix: string,
-  dateDisplay: string,
-  maxAgentWidth: number,
-  maxMsgWidth: number,
-  maxDateWidth: number,
-): string {
-  const { eligibility, entries, agentCount } = info;
-  const summary = extractSessionSummary(entries) || '';
-  const truncatedSummary = summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
-
-  const dateCol = dateDisplay.padEnd(maxDateWidth);
-  const msgCount = String(eligibility.meta.messageCount).padStart(maxMsgWidth);
-  const agentText = agentCount > 0 ? `+${agentCount} agents` : '';
-  const agentCol = agentText.padEnd(maxAgentWidth);
-
-  let statusIcon: string;
-  let statusText: string;
-  if (eligibility.status === 'excluded') {
-    statusIcon = colors.yellow('✗');
-    statusText = colors.yellow('excluded'.padEnd(14));
-  } else if (eligibility.status === 'ready') {
-    statusIcon = colors.green('✓');
-    statusText = colors.green('ready'.padEnd(14));
-  } else {
-    statusIcon = colors.blue('○');
-    statusText = colors.blue(eligibility.reason.padEnd(14));
-  }
-
-  return `  ${statusIcon} ${idPrefix}  ${dateCol}  ${msgCount} msgs  ${agentCol}  ${statusText}  ${truncatedSummary}`;
-}
-
-function countAgentsInBlocks(blocks: Array<LogicalBlock>): number {
-  const agentIds = new Set<string>();
-  for (const block of blocks) {
-    if (block.type === 'tool' && block.agentId) {
-      agentIds.add(block.agentId);
-    }
-  }
-  return agentIds.size;
-}
-
-async function showPendingStatus(cwd: string): Promise<number> {
-  const sessionsDir = getHiveMindSessionsDir(cwd);
-
-  let files: Array<string>;
-  try {
-    files = await readdir(sessionsDir);
-  } catch {
-    console.log(indexCmd.noExtractedSessions);
-    return 0;
-  }
-
-  const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'));
-  if (jsonlFiles.length === 0) {
-    console.log(indexCmd.noExtractedSessions);
-    return 0;
-  }
-
-  const mainSessions: Array<{ meta: SessionMeta; entries: Array<KnownEntry>; parsed: ParsedSession }> = [];
-
-  for (const file of jsonlFiles) {
-    const path = join(sessionsDir, file);
-    const sessionResult = await readExtractedSession(path);
-    if (!sessionResult || isSessionError(sessionResult)) {
-      if (isSessionError(sessionResult)) {
-        printError(sessionResult.error);
-      }
-      continue;
-    }
-    if (sessionResult.meta.agentId) continue;
-
-    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
-    mainSessions.push({ ...sessionResult, parsed });
-  }
-
-  if (mainSessions.length === 0) {
-    console.log(indexCmd.noExtractedSessions);
-    return 0;
-  }
-
-  const authIssuedAt = await getAuthIssuedAt();
-  const pendingInfos: Array<PendingSessionInfo> = [];
-
-  for (const session of mainSessions) {
-    const eligibility = checkSessionEligibility(session.meta, authIssuedAt);
-    const agentCount = countAgentsInBlocks(session.parsed.blocks);
-    pendingInfos.push({
-      eligibility,
-      entries: session.entries,
-      agentCount,
-    });
-  }
-
-  pendingInfos.sort((a, b) => {
-    return b.eligibility.meta.rawMtime.localeCompare(a.eligibility.meta.rawMtime);
-  });
-
-  const sessionIds = pendingInfos.map((p) => p.eligibility.sessionId);
-  const idPrefixes = computeMinimalPrefixes(sessionIds);
-
-  const formatDate = (rawMtime: string): string => {
-    const d = new Date(rawMtime);
-    const month = MONTH_NAMES[d.getMonth()];
-    const day = d.getDate();
-    const year = d.getFullYear();
-    return `${month} ${day}, ${year}`;
-  };
-
-  const dateDisplays = new Map<string, string>();
-  for (const info of pendingInfos) {
-    const display = formatDate(info.eligibility.meta.rawMtime);
-    dateDisplays.set(info.eligibility.sessionId, display);
-  }
-
-  const maxAgentWidth = Math.max(
-    0,
-    ...pendingInfos.map((p) => (p.agentCount > 0 ? `+${p.agentCount} agents`.length : 0)),
-  );
-  const maxMsgWidth = Math.max(...pendingInfos.map((p) => String(p.eligibility.meta.messageCount).length));
-  const maxDateWidth = Math.max(...Array.from(dateDisplays.values()).map((d) => d.length));
-
-  console.log(indexCmd.uploadStatus);
-  console.log('');
-
-  for (const info of pendingInfos) {
-    const prefix = idPrefixes.get(info.eligibility.sessionId) || info.eligibility.sessionId.slice(0, 8);
-    const dateDisplay = dateDisplays.get(info.eligibility.sessionId) || '';
-    console.log(formatPendingSession(info, prefix, dateDisplay, maxAgentWidth, maxMsgWidth, maxDateWidth));
-  }
-
-  console.log('');
-
-  const ready = pendingInfos.filter((s) => s.eligibility.status === 'ready').length;
-  const pending = pendingInfos.filter((s) => s.eligibility.status === 'pending').length;
-  const excluded = pendingInfos.filter((s) => s.eligibility.status === 'excluded').length;
-  const uploaded = pendingInfos.filter((s) => s.eligibility.status === 'uploaded').length;
-
-  const statusSummary: Array<string> = [];
-  if (ready > 0) statusSummary.push(`${ready} ready`);
-  if (pending > 0) statusSummary.push(`${pending} pending`);
-  if (excluded > 0) statusSummary.push(`${excluded} excluded`);
-  if (uploaded > 0) statusSummary.push(`${uploaded} uploaded`);
-  console.log(indexCmd.total(pendingInfos.length, statusSummary.join(', ')));
-
-  if (ready > 0) {
-    console.log('');
-    console.log(indexCmd.runUpload);
-  }
-
-  if (ready > 0 || pending > 0) {
-    console.log('');
-    console.log(indexCmd.excludeSession);
-    console.log(indexCmd.excludeAll);
-  }
-
-  return 0;
-}
-
 const READ_BATCH_SIZE = 10;
 
 export async function indexCore(source: SessionSource, args: Array<string>): Promise<number> {
   if (args.includes('--help') || args.includes('-h')) {
-    printUsage();
+    console.log(usage.index());
     return 0;
   }
 
@@ -267,12 +91,12 @@ export async function indexCore(source: SessionSource, args: Array<string>): Pro
   try {
     files = await source.listSessionFiles(cwd);
   } catch {
-    printError(indexCmd.noSessionsDir);
+    printError(errors.noSessions);
     return 1;
   }
 
   if (files.length === 0) {
-    printError(indexCmd.noSessionsDir);
+    printError(errors.noSessions);
     return 1;
   }
 
@@ -292,8 +116,8 @@ export async function indexCore(source: SessionSource, args: Array<string>): Pro
       }
       continue;
     }
-    const parsed = parseSession(sessionResult.meta, sessionResult.entries);
-    const sessionInfo: SessionInfo = { ...sessionResult, parsed };
+    const blocks = parseSession(sessionResult.entries);
+    const sessionInfo: SessionInfo = { ...sessionResult, blocks };
     allSessions.set(sessionResult.meta.sessionId, sessionInfo);
     if (sessionResult.meta.agentId) {
       allSessions.set(sessionResult.meta.agentId, sessionInfo);
@@ -330,24 +154,6 @@ export async function indexCore(source: SessionSource, args: Array<string>): Pro
   return 0;
 }
 
-const KNOWN_EXTRACTED_FLAGS = new Set(['--help', '-h', '--escape-file-refs', '--pending']);
-
-export async function index(): Promise<number> {
-  const args = process.argv.slice(3);
-
-  const unknownFlag = args.find((a) => a.startsWith('-') && !KNOWN_EXTRACTED_FLAGS.has(a));
-  if (unknownFlag) {
-    printError(errors.unknownFlag(unknownFlag));
-    return 1;
-  }
-
-  if (args.includes('--pending')) {
-    return await showPendingStatus(process.cwd());
-  }
-
-  return indexCore(extractedSessionSource, args);
-}
-
 function formatSessionLine(
   session: SessionInfo,
   allSessions: Map<string, SessionInfo>,
@@ -367,7 +173,7 @@ function formatSessionLine(
     .map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message))
     .join(' ');
 
-  const stats = computeSessionStats(session.parsed.blocks, allSessions, new Set(), cwd);
+  const stats = computeSessionStats(session.blocks, allSessions, new Set(), cwd);
   const fmt = (n: number) => (n === 0 ? '' : String(n));
   const { display: datetime, date, year } = formatRelativeDateTime(meta.rawMtime, prevDate, prevYear);
 
@@ -467,7 +273,7 @@ function computeSessionStats(
     const subSession = allSessions.get(agentId);
     if (!subSession) continue;
 
-    const subStats = computeSessionStats(subSession.parsed.blocks, allSessions, visited, cwd);
+    const subStats = computeSessionStats(subSession.blocks, allSessions, visited, cwd);
     stats.linesAdded += subStats.linesAdded;
     stats.linesRemoved += subStats.linesRemoved;
     stats.bashCount += subStats.bashCount;
