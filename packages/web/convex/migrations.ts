@@ -38,6 +38,85 @@ export const patchOneSession = internalMutation({
   },
 });
 
+/** Create user records for orphaned workOS IDs found in sessions. */
+export const backfillUsersFromWorkOS = internalAction({
+  args: {},
+  handler: async (ctx) => {
+    const orphanedIds = (await ctx.runQuery(
+      internal.migrations.orphanedWorkosIds,
+    )) as string[];
+
+    if (orphanedIds.length === 0) return { created: 0, failed: [] };
+
+    const workosApiKey = process.env.WORKOS_API_KEY;
+    if (!workosApiKey) throw new Error("WORKOS_API_KEY not set");
+
+    const created: string[] = [];
+    const failed: Array<{ id: string; reason: string }> = [];
+
+    for (const workosId of orphanedIds) {
+      const resp = await fetch(
+        `https://api.workos.com/user_management/users/${encodeURIComponent(workosId)}`,
+        { headers: { Authorization: `Bearer ${workosApiKey}` } },
+      );
+
+      if (!resp.ok) {
+        failed.push({ id: workosId, reason: `HTTP ${resp.status}` });
+        continue;
+      }
+
+      const user = (await resp.json()) as {
+        id: string;
+        email: string;
+        first_name: string | null;
+        last_name: string | null;
+      };
+
+      await ctx.runMutation(internal.migrations.insertUser, {
+        workosId: user.id,
+        email: user.email,
+        firstName: user.first_name ?? undefined,
+        lastName: user.last_name ?? undefined,
+      });
+
+      created.push(`${user.email} (${workosId})`);
+    }
+
+    return { created: created.length, createdUsers: created, failed };
+  },
+});
+
+/** Find workOS IDs in sessions that have no matching user record. */
+export const orphanedWorkosIds = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const sessions = await ctx.db.query("sessions").collect();
+    const workosIds = new Set(
+      sessions
+        .filter((s) => s.userId && !s.userDocId)
+        .map((s) => s.userId!),
+    );
+
+    const users = await ctx.db.query("users").collect();
+    const knownWorkosIds = new Set(users.map((u) => u.workosId));
+
+    return [...workosIds].filter((id) => !knownWorkosIds.has(id));
+  },
+});
+
+/** Insert a single user record. */
+export const insertUser = internalMutation({
+  args: {
+    workosId: v.string(),
+    email: v.string(),
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+  },
+  handler: async (ctx, { workosId, email, firstName, lastName }) => {
+    return await ctx.db.insert("users", { workosId, email, firstName, lastName });
+  },
+});
+
 /** Backfill userDocId on all sessions that only have the legacy userId (workosId). */
 export const backfillUserDocId = internalAction({
   args: {},
