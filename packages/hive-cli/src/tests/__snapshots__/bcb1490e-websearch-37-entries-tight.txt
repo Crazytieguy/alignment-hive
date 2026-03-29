@@ -1,0 +1,27 @@
+# model=claude-opus-4-6 branch=main
+1|2026-03-25T03:13|user|"The workos sign in magic link seems to be taking a lot of time to show up in people's email inbox. Do you know if"...9words
+2|03:13|thinking|0words
+3|03:13|assistant|"Let me check WorkOS's status page."
+4|03:13|tool|ToolSearch|query="WebSearch"|max_results="1"
+5|03:13|tool|WebSearch|query="WorkOS status page availability issues March 2026"|result=243words
+6|03:13|tool|WebSearch|query="WorkOS magic link email delay slow 2026"|result=320words
+7|03:14|thinking|0words
+8|03:14|assistant
+  No current WorkOS outages. The last incident was March 17 (elevated API errors, resolved within ~90 minutes). Service has been stable since.
+
+  For slow magic...132words
+9|03:14|user|"Right I meant magic auth, not magic link. So is there anything I can do about this?"
+10|03:14|thinking|0words
+11|03:14|assistant
+  The main levers are:
+
+  1. **Custom email domain** — Instead of emails coming from WorkOS's domain, you send from your own. This avoids shared reputation...85words
+12|03:15|user|"Will I be able to set up a custom email domain if I own alignment-hive.com through vercel and I'm on the free workos plan?"
+13|03:15|tool|ToolSearch|query="select:WebFetch"|max_results="1"
+14|03:15|tool|WebFetch|url=https://workos.com/docs/email|result=162words
+15|03:15|tool|WebSearch|query="WorkOS custom email domain free plan pricing requirements 2026"|result=239words
+16|03:16|assistant
+  Custom email domains on WorkOS cost **$99/month** on top of any plan — they're not included in the free tier.
+
+  On the DNS side it...81words
+[Limited to 25 words per field. Use --skip 25 for more.]

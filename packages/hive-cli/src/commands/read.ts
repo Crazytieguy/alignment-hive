@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { parseSession } from '@alignment-hive/session-data';
-import { ReadFieldFilter, parseFieldList } from '../lib/field-filter';
+import { ReadFieldFilter, SelectFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
@@ -38,17 +38,23 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
 
   const targetWords = parseNumericFlag(args, '--target');
   const skipWords = parseNumericFlag(args, '--skip');
-  const showFields = parseStringFlag(args, '--show');
-  const hideFields = parseStringFlag(args, '--hide');
+  const expandFields = parseStringFlag(args, '--expand');
+  const redactFields = parseStringFlag(args, '--redact');
+  const selectFields = parseStringFlag(args, '--select');
 
   let fieldFilter: ReadFieldFilter | undefined;
-  if (showFields || hideFields) {
-    const show = showFields ? parseFieldList(showFields) : [];
-    const hide = hideFields ? parseFieldList(hideFields) : [];
-    fieldFilter = new ReadFieldFilter(show, hide);
+  if (expandFields || redactFields) {
+    const expand = expandFields ? parseFieldList(expandFields) : [];
+    const redact = redactFields ? parseFieldList(redactFields) : [];
+    fieldFilter = new ReadFieldFilter(expand, redact);
   }
 
-  const flagsWithValues = new Set(['--skip', '--target', '--show', '--hide']);
+  let selectFilter: SelectFilter | undefined;
+  if (selectFields) {
+    selectFilter = new SelectFilter(parseFieldList(selectFields));
+  }
+
+  const flagsWithValues = new Set(['--skip', '--target', '--expand', '--redact', '--select']);
   const filteredArgs = args.filter((a, i) => {
     if (flagsWithValues.has(a)) return false;
     for (const flag of flagsWithValues) {
@@ -138,10 +144,11 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
 
   if (entryNumber === null && rangeStart === null) {
     const output = formatSession(entries, {
-      redact: true,
+      truncate: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
       fieldFilter,
+      selectFilter,
     });
     console.log(output);
     return 0;
@@ -160,10 +167,11 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
     }
 
     const output = formatBlocks(rangeBlocks, {
-      redact: true,
+      truncate: true,
       targetWords: targetWords ?? undefined,
       skipWords: skipWords ?? undefined,
       fieldFilter,
+      selectFilter,
       cwd,
     });
     console.log(output);
@@ -175,8 +183,9 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
     }
 
     const output = formatBlocks(entryBlocks, {
-      redact: false,
+      truncate: false,
       fieldFilter,
+      selectFilter,
       cwd,
     });
     console.log(output);
@@ -184,4 +193,3 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
 
   return 0;
 }
-

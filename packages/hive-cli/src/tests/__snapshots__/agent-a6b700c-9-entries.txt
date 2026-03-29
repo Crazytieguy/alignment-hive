@@ -14,7 +14,7 @@
 
   Don't run bash commands. Provide specific issues with file paths and line numbers.
 
-2|06:03|tool|Read|file_path=src/lib/schemas.ts
+2|06:03|tool|Read|src/lib/schemas.ts
 [result]
        1→import { z } from "zod";
        2→
@@ -253,7 +253,7 @@
   </system-reminder>
 
 
-3|06:03|tool|Read|file_path=src/lib/sanitize.ts
+3|06:03|tool|Read|src/lib/sanitize.ts
 [result]
        1→import { lintSource } from "@secretlint/core";
        2→import { creator as presetRecommend } from "@secretlint/secretlint-rule-preset-recommend";
@@ -362,7 +362,7 @@
   </system-reminder>
 
 
-4|06:03|tool|Read|file_path=src/lib/extraction.ts
+4|06:03|tool|Read|src/lib/extraction.ts
 [result]
        1→import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
        2→import { join, dirname, basename } from "node:path";
@@ -899,7 +899,7 @@
   </system-reminder>
 
 
-5|06:03|tool|Read|file_path=src/commands/session-start.ts
+5|06:03|tool|Read|src/commands/session-start.ts
 [result]
        1→import { [REDACTED:generic-api-key]} from "../lib/auth";
        2→import { extractAllSessions } from "../lib/extraction";
@@ -948,7 +948,7 @@
 6|06:03|assistant
   Let me also check the auth and messages modules to understand the full context of the session-start command:
 
-7|06:03|tool|Read|file_path=src/lib/auth.ts
+7|06:03|tool|Read|src/lib/auth.ts
 [result]
        1→import { mkdir } from "fs/promises";
        2→import { AUTH_DIR, [REDACTED:generic-api-key]} from "./config";
@@ -1066,7 +1066,7 @@
   </system-reminder>
 
 
-8|06:03|tool|Read|file_path=src/lib/messages.ts
+8|06:03|tool|Read|src/lib/messages.ts
 [result]
        1→import { getShellConfig } from "./config";
        2→
@@ -1142,7 +1142,7 @@
   </system-reminder>
 
 
-9|06:03|tool|Read|file_path=src/lib/output.ts
+9|06:03|tool|Read|src/lib/output.ts
 [result]
        1→export const colors = {
        2→  red: (s: string) => `\x1b[31m${s}\x1b[0m`,

@@ -335,7 +335,5 @@
 
   2. **No input validation for environment variables**: `CWD`, `TRANSCRIPT_PATH`, etc. are used directly without sanitization. While typically trusted, malformed paths could cause issues.
 
-  3. **Memory concerns with large sessions**: The extraction process loads entire session files into memory, transforms all entries, then sanitizes all entries. For very large sessions, this could cause memory pressure.
-
-  4....53words
-[Limited to 1925 words per field. Use --skip 1925 for more.]
+  3. **Memory concerns with large sessions**: The extraction process loads entire session files into memory, transforms all entries, then sanitizes all entries. For very large...60words
+[Limited to 1918 words per field. Use --skip 1918 for more.]

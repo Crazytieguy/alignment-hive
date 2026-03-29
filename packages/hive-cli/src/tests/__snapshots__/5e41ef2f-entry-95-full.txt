@@ -1,0 +1,65 @@
+95|2026-01-05T03:21|tool|Bash|command="bun test"|description="Run hive-mind-cli tests"
+[result]
+  bun test v1.2.14 (6a363a38)
+
+  src/lib/sanitize.test.ts:
+  (pass) detectSecrets > detects GitHub token [6.81ms]
+  (pass) detectSecrets > detects Slack webhook [1.87ms]
+  (pass) detectSecrets > returns empty for clean content [0.47ms]
+  (pass) sanitizeString > replaces GitHub token with redaction marker [1.27ms]
+  (pass) sanitizeString > preserves non-secret content [0.22ms]
+  (pass) sanitizeString > handles token at end of string [0.21ms]
+  (pass) sanitizeDeep > sanitizes strings in nested objects [0.70ms]
+  (pass) sanitizeDeep > sanitizes strings in arrays [0.73ms]
+  (pass) sanitizeDeep > handles mixed nested structures [0.43ms]
+  (pass) sanitizeDeep > preserves null and undefined [0.20ms]
+  (pass) sanitizeDeep > preserves numbers and booleans [0.09ms]
+  (pass) sanitizeDeep > handles deeply nested structures within depth limit [0.51ms]
+  (pass) sanitizeString edge cases > handles multiple secrets in one string [1.28ms]
+  (pass) sanitizeString edge cases > handles empty string [0.07ms]
+
+  src/lib/extraction.test.ts:
+  (pass) parseJsonl > parses valid JSONL lines [1.39ms]
+  (pass) parseJsonl > skips empty lines
+  (pass) parseJsonl > skips malformed lines [1.15ms]
+  (pass) transformEntry > strips file-history-snapshot entries [11.83ms]
+  (pass) transformEntry > strips queue-operation entries [1.96ms]
+  (pass) content block transformation > strips base64 data from image blocks [2.50ms]
+  (pass) content block transformation > strips base64 data from document blocks [2.15ms]
+  (pass) metadata stripping > strips low-value fields, keeps usage [1.64ms]
+  (pass) metadata line > writes correct metadata as first line [2.40ms]
+  (pass) summary validation > uses summary with matching leafUuid [1.60ms]
+  (pass) system entries > keeps system entries with content and level [2.02ms]
+  (pass) edge cases > handles empty session file [1.11ms]
+  (pass) edge cases > strips toolUseResult entirely [2.59ms]
+  (pass) edge cases > handles message with string content [1.49ms]
+  (pass) edge cases > handles nested tool_result with base64 content [1.85ms]
+  (pass) edge cases > skips unknown entry types gracefully [2.22ms]
+
+  src/lib/gitleaks.test.ts:
+  (pass) AI [REDACTED:generic-api-key]> detects valid secrets [0.76ms]
+  (pass) AI [REDACTED:generic-api-key]> rejects false positives [0.24ms]
+  (pass) AI APIs > openai-api-key > detects valid secrets [4.62ms]
+  (pass) AI [REDACTED:generic-api-key]> detects valid secrets [0.18ms]
+  (pass) AI [REDACTED:generic-api-key]> rejects false positives [0.03ms]
+  (pass) Cloud Providers > aws-access-token > detects valid secrets [0.02ms]
+  (pass) Cloud Providers > aws-access-token > rejects false positives [0.04ms]
+  (pass) Cloud Providers > azure-ad-client-secret > detects valid secrets [0.04ms]
+  (pass) Code Hosting > github-pat > detects valid secrets [0.02ms]
+  (pass) Code Hosting > github-pat > rejects false positives [0.02ms]
+  (pass) Code Hosting > gitlab-pat > detects valid secrets [0.02ms]
+  (pass) Code Hosting > gitlab-pat > rejects false positives [0.03ms]
+  (pass) Code Hosting > npm-access-token > detects valid secrets [0.06ms]
+  (pass) Communication > slack-bot-token > detects valid secrets [0.02ms]
+  (pass) Communication > slack-webhook-url > detects valid secrets [0.02ms]
+  (pass) Authentication > jwt > detects valid secrets [3.59ms]
+  (pass) Authentication > generic-api-key > detects secrets with context [0.11ms]
+  (pass) Authentication > generic-api-key > rejects false positives [0.13ms]
+  (pass) Other Services > stripe-access-token > detects valid secrets [0.10ms]
+  (pass) Other Services > sendgrid-api-token > detects valid secrets [0.20ms]
+  (pass) Other Services > mailchimp-api-key > detects valid secrets with context [0.07ms]
+
+   51 pass
+   0 fail
+   122 expect() calls
+  Ran 51 tests across 3 files. [275.00ms]

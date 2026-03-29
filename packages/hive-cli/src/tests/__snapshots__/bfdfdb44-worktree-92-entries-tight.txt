@@ -1,0 +1,64 @@
+# model=claude-opus-4-6 branch=main
+1|2026-03-23T20:28|user|"<local-command-caveat>Caveat: The messages below were generated"...27words
+2|20:28|user
+  <command-name>/clear</command-name>
+              <command-message>clear</command-message>
+              <command-args></command-args>
+3|20:28|system|subtype=local_command|"<local-command-stdout></local-command-stdout>"
+4|20:28|user|"I want to do a comprehensive"...13words
+5|20:28|thinking|0words
+6|20:28|assistant|"Let me try out the deno-sandbox"...5words
+7|20:28|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=57lines|result=5words
+8|20:28|tool|Bash|command="deno-sandbox"|description="Run deno sandbox test script"|result=33words
+9|20:29|assistant
+  Everything works as expected:
+
+  - **Basic...45words
+10|20:29|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=15lines|result=7words
+11|20:29|tool|Bash|description="Test stdin piping with CSV parsing via npm import"|result=32words
+[command]
+  echo 'name,age,role
+  Alice,30,engineer
+  Bob,25,designer
+  Carol,35,manager' | deno-sandbox
+12|20:29|assistant|"Stdin piping and npm imports both"...19words
+13|20:29|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=53lines|result=7words
+14|20:29|tool|Bash|command="deno-sandbox"|description="Test file access boundaries, web APIs, crypto"|result=45words
+15|20:29|assistant|"All good. Here's the summary so"...129words
+17|20:30|user|"Let's try some permission grants, and"...14words
+18|20:30|thinking|0words
+19|20:30|assistant|"Let me grant a few permissions and test them."
+20|20:30|tool|Bash|command="deno-sandbox-grant --allow-write=/tmp/deno-test --allow-net=example.com"|description="Grant write and net permissions to deno sandbox"|result=6words
+21|20:31|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=41lines|result=7words
+22|20:31|tool|Bash|command="deno-sandbox"|description="Test granted permissions (write + net)"|result=32words
+23|20:31|assistant|"Interesting — write permission doesn't imply"...23words
+24|20:31|tool|Bash|command="deno-sandbox-grant --allow-read=/tmp/deno-test"|description="Grant read permission for /tmp/deno-test"|result=5words
+25|20:31|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=12lines|result=7words
+26|20:31|tool|Bash|command="deno-sandbox"|description="Test write+read with both permissions granted"|result=9words
+27|20:31|assistant|"Permission grants working correctly. Now let"...7words
+28|20:31|tool|ToolSearch|query="select:EnterWorktree"|max_results="1"
+29|20:31|tool|EnterWorktree|name="deno-sandbox-test"|result=27words
+30|20:32|assistant|"Now in the worktree. Let me"...9words
+31|20:32|tool|Bash|command="pwd && echo \"---\" && ls"...10words|description="Check worktree cwd and sandbox dir"|result=40words
+32|20:32|assistant|"The sandbox script file exists in"...22words
+33|20:32|tool|Write|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=43lines|result=13words
+34|20:32|tool|Read|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|result=43words
+35|20:32|tool|Write|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=43lines|result=7words
+36|20:34|user|"Just noting that this gave me"...5words
+37|20:34|assistant|"Good to know — that's probably"...13words
+38|20:34|tool|Bash|command="deno-sandbox"|description="Run deno sandbox tests from worktree"|result=25words
+39|20:34|assistant|"Everything works from the worktree. Key"...82words
+40|20:34|tool|ToolSearch|query="select:ExitWorktree"|max_results="1"
+41|20:34|tool|ExitWorktree|action="remove"|discard_changes="true"|result=12words
+42|20:35|assistant
+  Here's the full test summary:
+
+  **Defaults...131words
+44|20:35|user|"Wait what \"known issue\" are you referring to?"
+45|20:35|thinking|0words
+46|20:35|assistant|"I was referencing a memory I"...14words
+47|20:35|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/memory/project_worktree_permission_bug.md|result=115words
+48|20:35|assistant|"That memory is about reading **plugin"...60words
+49|20:36|user|"First: can you confirm that when"...17words
+50|20:36|assistant|"Yes — the output confirms it."...38words
+[Limited to 6 words per field. Use --skip 6 for more.]

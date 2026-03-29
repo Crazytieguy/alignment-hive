@@ -14,7 +14,7 @@
 
   Provide specific examples of data that seems redundant or missing.
 
-2|01:20|tool|Glob|pattern="**/*.jsonl"|result=101files
+2|01:20|tool|Glob|pattern="**/*.jsonl"
 [result]
   /Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/agent-a36ff0b.jsonl
   /Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl
@@ -118,7 +118,7 @@
   /Users/yoav/projects/alignment-hive/.claude/hive-mind/sessions/agent-a405529.jsonl
   (Results are truncated. Consider using a more specific path or pattern.)
 
-3|01:20|tool|Read|file_path=docs/claude-code-jsonl-format.md
+3|01:20|tool|Read|docs/claude-code-jsonl-format.md
 [result]
        1→# Claude Code JSONL Format Reference
        2→
@@ -933,7 +933,7 @@
 4|01:20|assistant
   Now let me read a few extracted session files to analyze the data quality:
 
-5|01:20|tool|Read|file_path=.claude/hive-mind/sessions/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl
+5|01:20|tool|Read|.claude/hive-mind/sessions/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl
 [result]
        1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"cb6aa757-c24a-4950-b034-131e5c6acfd5","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.062Z","rawMtime":"2026-01-02T01:53:47.996Z","messageCount":38,"summary":"Memory System: Hook Behavior & Plugin Architecture","rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/cb6aa757-c24a-4950-b034-131e5c6acfd5.jsonl"}
        2→{"type":"summary","summary":"Memory system hook behavior & user prompting","leafUuid":"a19ec152-9862-4530-9882-6f294aa5dae1"}
@@ -981,7 +981,7 @@
   </system-reminder>
 
 
-6|01:20|tool|Read|file_path=.claude/hive-mind/sessions/agent-a36ff0b.jsonl
+6|01:20|tool|Read|.claude/hive-mind/sessions/agent-a36ff0b.jsonl
 [result]
        1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"a36ff0b","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.048Z","rawMtime":"2025-12-30T22:00:03.847Z","messageCount":1,"rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/agent-a36ff0b.jsonl","agentId":"a36ff0b","parentSessionId":"424cac5b-9c1c-4316-8c26-c23fe169af4c"}
        2→{"type":"user","uuid":"b1983f6c-1441-4e6c-a109-f69e787f842c","parentUuid":null,"timestamp":"2025-12-30T21:59:58.980Z","sessionId":"424cac5b-9c1c-4316-8c26-c23fe169af4c","cwd":"/Users/yoav/projects/alignment-hive","gitBranch":"main","version":"2.0.76","isSidechain":true,"agentId":"a36ff0b","message":{"role":"user","content":"Warmup"}}
@@ -992,7 +992,7 @@
   </system-reminder>
 
 
-7|01:20|tool|Read|file_path=.claude/hive-mind/sessions/73a1d417-9818-4888-879b-cb816af7a7e9.jsonl
+7|01:20|tool|Read|.claude/hive-mind/sessions/73a1d417-9818-4888-879b-cb816af7a7e9.jsonl
 [result]
        1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"73a1d417-9818-4888-879b-cb816af7a7e9","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.091Z","rawMtime":"2026-01-02T02:04:13.846Z","messageCount":6,"summary":"SessionStart Hook Output Pollution Test","rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/73a1d417-9818-4888-879b-cb816af7a7e9.jsonl"}
        2→{"type":"summary","summary":"SessionStart Hook Output Pollution Test","leafUuid":"f38c3b96-ad59-4ece-b31b-ed91c0d67ca0"}
@@ -1011,19 +1011,13 @@
 8|01:21|assistant
   Let me read one more extracted file that seems more substantial to get a better picture of the data quality:
 
-9|01:21|tool|Read|file_path=.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl
-[result]
-  <tool_use_error>File content (287.4KB) exceeds maximum allowed size (256KB). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.</tool_use_error>
+9|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|result="<tool_use_error>File content (287.4KB) exceeds maximum allowed size (256KB). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.</tool_use_error>"
 
-10|01:21|tool|Read|file_path=.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|limit=100
-[result]
-  File content (61964 tokens) exceeds maximum allowed tokens (25000). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.
+10|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|limit=100|result="File content (61964 tokens) exceeds maximum allowed tokens (25000). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content."
 
-11|01:21|tool|Read|file_path=.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|offset=1|limit=50
-[result]
-  File content (38102 tokens) exceeds maximum allowed tokens (25000). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content.
+11|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|offset=1|limit=50|result="File content (38102 tokens) exceeds maximum allowed tokens (25000). Please use offset and limit parameters to read specific portions of the file, or use the GrepTool to search for specific content."
 
-12|01:21|tool|Read|file_path=.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|offset=1|limit=20
+12|01:21|tool|Read|.claude/hive-mind/sessions/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl|offset=1|limit=20
 [result]
        1→{"_type":"hive-mind-meta","version":"0.1","sessionId":"6e855450-f8c6-4880-a87c-30088ac7a3b2","machineId":"6b343c24-8a7b-408c-be8c-15f16404b1cc","extractedAt":"2026-01-05T01:16:14.106Z","rawMtime":"2026-01-03T05:07:24.409Z","messageCount":150,"summary":"Plugin auth setup and multi-environment distribution","rawPath":"/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/6e855450-f8c6-4880-a87c-30088ac7a3b2.jsonl"}
        2→{"type":"user","uuid":"90b57e7e-4af0-43f2-a894-c861ec4a0108","parentUuid":null,"timestamp":"2026-01-03T03:09:44.214Z","sessionId":"6e855450-f8c6-4880-a87c-30088ac7a3b2","cwd":"/Users/yoav/projects/alignment-hive","gitBranch":"main","version":"2.0.76","isSidechain":false,"isMeta":true,"message":{"role":"user","content":"Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to."}}
@@ -1054,12 +1048,12 @@
 13|01:21|assistant
   Now let me also check the extraction code to understand what transformations are being applied:
 
-14|01:21|tool|Glob|pattern="**/extraction*.ts"|result=2files
+14|01:21|tool|Glob|pattern="**/extraction*.ts"
 [result]
   /Users/yoav/projects/alignment-hive/hive-mind-cli/src/lib/extraction.ts
   /Users/yoav/projects/alignment-hive/hive-mind-cli/src/lib/extraction.test.ts
 
-15|01:21|tool|Read|file_path=hive-mind-cli/src/lib/extraction.ts
+15|01:21|tool|Read|hive-mind-cli/src/lib/extraction.ts
 [result]
        1→import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
        2→import { homedir } from "node:os";
@@ -1387,7 +1381,7 @@
 16|01:21|assistant
   Let me also check the schemas to understand what fields are being stripped:
 
-17|01:21|tool|Read|file_path=hive-mind-cli/src/lib/schemas.ts
+17|01:21|tool|Read|hive-mind-cli/src/lib/schemas.ts
 [result]
        1→import { z } from "zod";
        2→

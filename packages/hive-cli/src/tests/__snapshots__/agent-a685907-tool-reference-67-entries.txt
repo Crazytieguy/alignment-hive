@@ -31,7 +31,7 @@
 
   Now let me fetch the WorkOS documentation pages in parallel.
 
-5|07:57|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+5|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   # Device Authorization Flow Details
 
@@ -62,7 +62,7 @@
 
   The excerpt provided covers initial setup but omits technical implementation details for device authorization workflows.
 
-6|07:57|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+6|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   Based on the provided web page content, I cannot extract details about the device authorization flow API reference because **that information is not included in the source material**.
 
@@ -78,7 +78,7 @@
 
   To find the device authorization flow API documentation, you would need to access additional pages from the WorkOS documentation, likely a dedicated API reference section not shown here.
 
-7|07:57|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+7|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   # AuthKit Authentication Methods - Search Results
 
@@ -99,7 +99,7 @@
 8|07:58|assistant
   Those pages redirected to the general AuthKit docs. Let me try more specific URLs and the API reference.
 
-9|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+9|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   # Device Code Authentication in AuthKit
 
@@ -116,7 +116,7 @@
 
   To find comprehensive device code authentication documentation, you would need to access AuthKit's full API reference or developer documentation at workos.com/docs, which isn't included in the excerpt provided.
 
-10|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+10|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   Based on the provided content, I cannot extract details about creating a device authorization because that information is not included in the webpage excerpt.
 
@@ -124,7 +124,7 @@
 
   To obtain this information, you would need to access the complete AuthKit API documentation on the WorkOS website.
 
-11|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+11|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   # Device Authorization Flow Guide - Not Found
 
@@ -148,17 +148,11 @@
 12|07:58|assistant
   All those URLs seem to redirect to the generic AuthKit page. Let me try the llms.txt approach and the actual API reference section.
 
-13|07:58|tool|WebFetch|url="https://workos.com/llms.txt"
-[result]
-  Request failed with status code 500
+13|07:58|tool|WebFetch|url=https://workos.com/llms.txt|result="Request failed with status code 500"
 
-14|07:58|tool|WebFetch|url="https://workos.com/docs/reference"
-[result]
-  <tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>
+14|07:58|tool|WebFetch|url=https://workos.com/docs/reference|result="<tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>"
 
-15|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
-[result]
-  <tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>
+15|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result="<tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>"
 
 16|07:58|assistant
   Let me try a few more approaches - the MCP fetch tool and direct WorkOS API docs.
@@ -276,7 +270,7 @@
 
   ](https://workos.com/docs/domain-verification)
 
-19|07:58|tool|WebFetch|url="https://workos.com/docs/reference/user-management"
+19|07:58|tool|WebFetch|url=https://workos.com/docs/reference/user-management
 [result]
   # AuthKit API Endpoints Analysis
 
@@ -338,13 +332,9 @@
 
   **Not a developer?** You can explore most of WorkOS without writing any code. The [WorkOS Dashboard](https://dashboard.workos.com/) lets you configure SSO connections, manage directories, set up audit log streams, and more -- all from a visual interface.
 
-22|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
-[result]
-  Request failed with status code 404
+22|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result="Request failed with status code 404"
 
-23|07:58|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]?q=device"
-[result]
-  <tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>
+23|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]?q=device|result="<tool_use_error>Cancelled: parallel tool call WebFetch errored</tool_use_error>"
 
 24|07:58|assistant
   Let me look at the WorkOS Node SDK source code on GitHub and search for device flow documentation more specifically.
@@ -788,7 +778,7 @@
 
   Let me read the full Go blog post for additional implementation details.
 
-36|07:59|tool|Read|file_path=[REDACTED:high-entropy-secret]
+36|07:59|tool|Read|[REDACTED:high-entropy-secret]
 [result]
        1→July 30, 2025
        2→
@@ -1103,7 +1093,7 @@
 38|07:59|assistant
   Let me read the authentication reference to see if it documents the device code grant type specifically.
 
-39|07:59|tool|Read|file_path=[REDACTED:high-entropy-secret]|offset=1170|limit=163
+39|07:59|tool|Read|[REDACTED:high-entropy-secret]|offset=1170|limit=163
 [result]
     1170→### POST /user_management/authenticate
     1171→

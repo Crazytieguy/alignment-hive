@@ -1,7 +1,7 @@
 import { parseSession } from '@alignment-hive/session-data';
 import { computeUniformLimit, countWords, truncateWords } from './truncation';
 import type { KnownEntry, LogicalBlock } from '@alignment-hive/session-data';
-import type { ReadFieldFilter } from './field-filter';
+import type { ReadFieldFilter, SelectFilter } from './field-filter';
 
 const MAX_CONTENT_SUMMARY_LEN = 300;
 const DEFAULT_TARGET_WORDS = 2000;
@@ -119,10 +119,11 @@ interface ToolResultInfo {
 }
 
 export interface SessionFormatOptions {
-  redact?: boolean;
+  truncate?: boolean;
   targetWords?: number;
   skipWords?: number;
   fieldFilter?: ReadFieldFilter;
+  selectFilter?: SelectFilter;
 }
 
 export type TruncationStrategy =
@@ -157,8 +158,8 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
     case 'user': {
       parts.push('user');
       if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
-      const hidden = fieldFilter && !fieldFilter.shouldShow('user');
-      if (hidden) {
+      const redacted = fieldFilter?.isRedacted('user') ?? false;
+      if (redacted) {
         parts.push(formatFieldValue(block.content));
         return parts.join('|');
       }
@@ -168,8 +169,8 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
     case 'assistant': {
       parts.push('assistant');
       if (parentIndicator !== undefined) parts.push(`parent=${parentIndicator}`);
-      const hidden = fieldFilter && !fieldFilter.shouldShow('assistant');
-      if (hidden) {
+      const redacted = fieldFilter?.isRedacted('assistant') ?? false;
+      if (redacted) {
         parts.push(formatFieldValue(block.content));
         return parts.join('|');
       }
@@ -178,12 +179,17 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
 
     case 'thinking': {
       parts.push('thinking');
-      const showFull = fieldFilter?.showFullThinking() ?? false;
-      if (!showFull && truncation?.type !== 'full' && truncation?.type !== 'matchContext') {
+      const expand = fieldFilter?.hasExplicitExpandRule('thinking') ?? false;
+      const redacted = fieldFilter?.isRedacted('thinking') ?? false;
+      if (redacted) {
         parts.push(formatWordCount(block.content));
         return parts.join('|');
       }
-      const thinkingTruncation: TruncationStrategy = showFull ? { type: 'full' } : (truncation ?? { type: 'full' });
+      if (!expand && truncation?.type !== 'full' && truncation?.type !== 'matchContext') {
+        parts.push(formatWordCount(block.content));
+        return parts.join('|');
+      }
+      const thinkingTruncation: TruncationStrategy = expand ? { type: 'full' } : (truncation ?? { type: 'full' });
       return formatBlockContent(parts.join('|'), block.content, thinkingTruncation);
     }
 
@@ -194,8 +200,8 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
       parts.push('system');
       if (block.subtype) parts.push(`subtype=${block.subtype}`);
       if (block.level && block.level !== 'info') parts.push(`level=${block.level}`);
-      const hidden = fieldFilter && !fieldFilter.shouldShow('system');
-      if (hidden) {
+      const redacted = fieldFilter?.isRedacted('system') ?? false;
+      if (redacted) {
         parts.push(formatFieldValue(block.content));
         return parts.join('|');
       }
@@ -204,8 +210,8 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
 
     case 'summary': {
       parts.push('summary');
-      const hidden = fieldFilter && !fieldFilter.shouldShow('summary');
-      if (hidden) {
+      const redacted = fieldFilter?.isRedacted('summary') ?? false;
+      if (redacted) {
         parts.push(formatFieldValue(block.content));
         return parts.join('|');
       }
@@ -353,6 +359,18 @@ function findMatchPositions(text: string, pattern: RegExp): Array<{ start: numbe
   return positions;
 }
 
+// --- Tool field pipeline ---
+
+export interface ToolField {
+  name?: string;
+  value: string;
+  summary?: string;
+  category: 'input' | 'result' | 'meta';
+  display: 'header' | 'body' | 'auto';
+}
+
+type ToolExtractor = (input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string) => Array<ToolField>;
+
 function formatToolBlock(
   block: Extract<LogicalBlock, { type: 'tool' }>,
   headerParts: Array<string>,
@@ -360,272 +378,352 @@ function formatToolBlock(
 ): string | null {
   const { cwd, truncation, fieldFilter } = options;
   const parts = [...headerParts, 'tool', block.toolName];
-
-  const redact = truncation?.type !== 'full';
-  const hideResult = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:result`) : false;
-  const hideInput = fieldFilter ? !fieldFilter.shouldShow(`tool:${block.toolName}:input`) : false;
-  const showFullResult = fieldFilter?.shouldShow(`tool:${block.toolName}:result`) ?? false;
   const resultInfo = block.toolResult ? { content: block.toolResult, agentId: block.agentId } : undefined;
+  const truncate = truncation ? truncation.type !== 'full' : false;
 
-  const toolFormatter = getToolFormatter(block.toolName);
-  const { headerParams, multilineParams, suppressResult } = toolFormatter({
-    input: block.toolInput,
-    result: resultInfo,
-    cwd,
-    redact,
-    truncation,
-    hideInput,
-    hideResult,
-  });
-  parts.push(...headerParams);
+  const extractor = getToolExtractor(block.toolName);
+  const fields = extractor(block.toolInput, resultInfo, cwd);
 
-  if (redact) {
-    if (resultInfo && !suppressResult) {
-      if (hideResult) {
-        parts.push(`result=${formatFieldValue(resultInfo.content)}`);
-      } else if (showFullResult && truncation) {
-        const formatted = formatToolText(resultInfo.content, truncation);
-        if (!formatted.isEmpty) {
-          const bodyLines = formatMultilineParams(multilineParams);
-          bodyLines.push('[result]');
-          if (formatted.isMultiline) {
-            const indentedResult = indent(formatted.blockContent, 2);
-            const prefixed = formatted.blockPrefix
-              ? `  ${formatted.blockPrefix}${indentedResult.slice(2)}`
-              : indentedResult;
-            bodyLines.push(formatted.blockSuffix ? prefixed + formatted.blockSuffix : prefixed);
-          } else {
-            bodyLines.push(`  ${formatted.inline}`);
-          }
-          const header = parts.join('|');
-          return bodyLines.length > 0 ? `${header}\n${bodyLines.join('\n')}` : header;
+  // Apply visibility: explicit redact, default summary collapse, or pass through
+  type ProcessedField = { name?: string; value: string; display: 'header' | 'body' | 'auto' };
+  const processed: Array<ProcessedField> = [];
+
+  for (const field of fields) {
+    const fieldPath = `tool:${block.toolName}:${field.category}`;
+    const redacted = fieldFilter?.isRedacted(fieldPath) ?? false;
+    const expanded = fieldFilter?.hasExplicitExpandRule(fieldPath) ?? false;
+
+    if (redacted) {
+      processed.push({ name: field.name, value: field.summary ?? formatFieldValue(field.value), display: 'header' });
+    } else if (field.summary && truncate && !expanded) {
+      processed.push({ name: field.name, value: field.summary, display: 'header' });
+    } else {
+      processed.push({ name: field.name, value: field.value, display: field.display });
+    }
+  }
+
+  // Truncate and render each field into header or body
+  const headerValues: Array<string> = [];
+  const bodyParts: Array<MultilineParam> = [];
+  const effectiveTruncation = truncation ?? { type: 'full' as const };
+
+  for (const field of processed) {
+    if (field.display === 'header') {
+      headerValues.push(field.name ? `${field.name}=${field.value}` : field.value);
+      continue;
+    }
+
+    if (field.display === 'body') {
+      if (truncate) {
+        // Truncate body content with word limit
+        const formatted = formatToolText(field.value, effectiveTruncation);
+        if (formatted.isEmpty) continue;
+        if (formatted.isMultiline && field.name) {
+          bodyParts.push({
+            name: field.name,
+            content: formatted.blockContent,
+            prefix: formatted.blockPrefix || undefined,
+            suffix: formatted.blockSuffix || undefined,
+          });
+        } else if (field.name) {
+          // Truncated to single line — still show as body for explicit body fields
+          bodyParts.push({ name: field.name, content: formatted.blockContent });
         }
-      } else {
-        parts.push(`result=${formatFieldValue(resultInfo.content)}`);
+      } else if (field.name && field.value) {
+        bodyParts.push({ name: field.name, content: field.value });
       }
+      continue;
     }
-    const header = parts.join('|');
-    if (multilineParams.length > 0) {
-      const bodyLines = formatMultilineParams(multilineParams);
-      return `${header}\n${bodyLines.join('\n')}`;
+
+    // display: 'auto' — use formatToolText to determine header vs body
+    const formatted = formatToolText(field.value, effectiveTruncation);
+    if (formatted.isEmpty) continue;
+
+    if (formatted.isMultiline && field.name) {
+      bodyParts.push({
+        name: field.name,
+        content: formatted.blockContent,
+        prefix: formatted.blockPrefix || undefined,
+        suffix: formatted.blockSuffix || undefined,
+      });
+    } else {
+      headerValues.push(field.name ? `${field.name}=${formatted.inline}` : formatted.inline);
     }
-    return header;
   }
 
+  // Assemble output
+  parts.push(...headerValues);
   const header = parts.join('|');
-  const bodyLines = formatMultilineParams(multilineParams);
-  if (resultInfo) {
-    bodyLines.push('[result]');
-    bodyLines.push(indent(resultInfo.content, 2));
-  }
+  const bodyLines = formatMultilineParams(bodyParts);
   if (bodyLines.length === 0) return header;
   return `${header}\n${bodyLines.join('\n')}`;
 }
 
-export interface BlocksFormatOptions {
-  // Truncation mode (existing behavior)
-  redact?: boolean;
-  targetWords?: number;
-  skipWords?: number;
-
-  // Per-block truncation override (when set, overrides redact-based logic)
-  getTruncation?: (block: LogicalBlock, index: number) => TruncationStrategy;
-
-  // Filter which blocks to output (still tracks all for parent indicators)
-  shouldOutput?: (block: LogicalBlock, index: number) => boolean;
-
-  // Session prefix for grep-style output (replaces line number)
-  sessionPrefix?: string;
-
-  // Output customization
-  separator?: string;
-  showTimestamp?: boolean;
-
-  fieldFilter?: ReadFieldFilter;
-  cwd?: string;
+function defaultResultField(result: ToolResultInfo): ToolField {
+  return { name: 'result', value: result.content, summary: formatFieldValue(result.content), category: 'result', display: 'auto' };
 }
 
-function computeParentIndicator(
-  block: LogicalBlock,
-  prevUuid: string | undefined,
-  prevLineNumber: number,
-): string | number | undefined {
-  if (block.lineNumber === prevLineNumber || !prevUuid) {
-    return undefined;
+// --- Tool extractors ---
+
+function getToolExtractor(name: string): ToolExtractor {
+  switch (name) {
+    case 'Edit':
+      return extractEditTool;
+    case 'Read':
+      return extractReadTool;
+    case 'Write':
+      return extractWriteTool;
+    case 'Bash':
+      return extractBashTool;
+    case 'Grep':
+      return extractGrepTool;
+    case 'Glob':
+      return extractGlobTool;
+    case 'Task':
+      return extractTaskTool;
+    case 'TodoWrite':
+      return extractTodoWriteTool;
+    case 'AskUserQuestion':
+      return extractAskUserQuestionTool;
+    case 'ExitPlanMode':
+      return extractExitPlanModeTool;
+    case 'WebFetch':
+      return extractWebFetchTool;
+    case 'WebSearch':
+      return extractWebSearchTool;
+    default:
+      return extractGenericTool;
   }
-  const parentUuid = 'parentUuid' in block ? block.parentUuid : undefined;
-  const parentLineNumber = 'parentLineNumber' in block ? block.parentLineNumber : undefined;
-  if (parentLineNumber === null) {
-    return 'start';
-  }
-  if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
-    return parentLineNumber;
-  }
-  return undefined;
 }
 
-export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatOptions = {}): string {
-  const {
-    redact = false,
-    targetWords = DEFAULT_TARGET_WORDS,
-    skipWords = 0,
-    getTruncation,
-    shouldOutput,
-    sessionPrefix,
-    showTimestamp = true,
-    fieldFilter,
-  } = options;
-
-  // Compute word limit for redact mode (only if not using custom getTruncation)
-  let wordLimit: number | undefined;
-  if (redact && !getTruncation) {
-    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords);
-    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
+function extractEditTool(input: Record<string, unknown>, _result?: ToolResultInfo, cwd?: string): Array<ToolField> {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const oldStr = String(input.old_string || '');
+  const newStr = String(input.new_string || '');
+  const fields: Array<ToolField> = [{ value: path, category: 'meta', display: 'header' }];
+  if (oldStr) {
+    fields.push({
+      name: 'old_string',
+      value: oldStr,
+      summary: `-${countLines(oldStr)}`,
+      category: 'input',
+      display: 'body',
+    });
   }
+  if (newStr) {
+    fields.push({
+      name: 'new_string',
+      value: newStr,
+      summary: `+${countLines(newStr)}`,
+      category: 'input',
+      display: 'body',
+    });
+  }
+  return fields;
+}
 
-  const results: Array<string> = [];
-  let prevUuid: string | undefined;
-  let prevDate: string | undefined;
-  let prevLineNumber = 0;
-  let cwd = options.cwd;
-  let firstOutput = true;
+function extractReadTool(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): Array<ToolField> {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const fields: Array<ToolField> = [{ value: path, category: 'meta', display: 'header' }];
+  if (input.offset !== undefined) {
+    fields.push({ name: 'offset', value: String(input.offset), category: 'meta', display: 'header' });
+  }
+  if (input.limit !== undefined) {
+    fields.push({ name: 'limit', value: String(input.limit), category: 'meta', display: 'header' });
+  }
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
+}
 
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
+function extractWriteTool(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): Array<ToolField> {
+  const path = shortenPath(String(input.file_path || ''), cwd);
+  const content = String(input.content || '');
+  const lineCount = countLines(content);
+  const fields: Array<ToolField> = [
+    { value: path, category: 'meta', display: 'header' },
+    { name: 'written', value: `${lineCount}lines`, category: 'meta', display: 'header' },
+  ];
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
+}
 
-    if (block.type === 'user' && 'cwd' in block && block.cwd) {
-      cwd = block.cwd;
+function extractBashTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const command = String(input.command || '').trim();
+  const desc = input.description ? String(input.description) : undefined;
+  const fields: Array<ToolField> = [{ name: 'command', value: command, category: 'input', display: 'auto' }];
+  if (desc) {
+    fields.push({ name: 'description', value: desc, category: 'input', display: 'auto' });
+  }
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
+}
+
+function extractGrepTool(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): Array<ToolField> {
+  const pattern = String(input.pattern || '');
+  const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
+  const fields: Array<ToolField> = [{ name: 'pattern', value: pattern, category: 'input', display: 'auto' }];
+  if (path) {
+    fields.push({ value: path, category: 'meta', display: 'header' });
+  }
+  if (input.output_mode) {
+    fields.push({ name: 'output_mode', value: String(input.output_mode), category: 'meta', display: 'header' });
+  }
+  if (input.glob) {
+    fields.push({ name: 'glob', value: String(input.glob), category: 'input', display: 'auto' });
+  }
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
+}
+
+function extractGlobTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const pattern = String(input.pattern || '');
+  const fields: Array<ToolField> = [{ name: 'pattern', value: pattern, category: 'input', display: 'auto' }];
+  if (result) {
+    const files = result.content.split('\n').filter((l) => l.trim()).length;
+    fields.push({
+      name: 'result',
+      value: result.content,
+      summary: `${files}files`,
+      category: 'result',
+      display: 'auto',
+    });
+  }
+  return fields;
+}
+
+function extractTaskTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const desc = String(input.description || '');
+  const prompt = String(input.prompt || '');
+  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
+  const fields: Array<ToolField> = [];
+  if (subagentType) {
+    fields.push({ value: subagentType, category: 'meta', display: 'header' });
+  }
+  if (result?.agentId) {
+    fields.push({ value: `session=agent-${result.agentId}`, category: 'meta', display: 'header' });
+  }
+  fields.push({ name: 'description', value: desc, category: 'input', display: 'auto' });
+  fields.push({
+    name: 'prompt',
+    value: prompt,
+    summary: formatFieldValue(prompt),
+    category: 'input',
+    display: 'body',
+  });
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
+}
+
+function extractTodoWriteTool(input: Record<string, unknown>): Array<ToolField> {
+  const todos = Array.isArray(input.todos) ? input.todos : [];
+  const todoLines: Array<string> = [];
+  for (const todo of todos) {
+    if (typeof todo === 'object' && todo !== null) {
+      const t = todo as { content?: string; status?: string };
+      const status = t.status || 'pending';
+      const marker = status === 'completed' ? '[x]' : status === 'in_progress' ? '[>]' : '[ ]';
+      todoLines.push(`${marker} ${t.content || ''}`);
     }
+  }
+  const content = todoLines.join('\n');
+  return [
+    {
+      name: 'todos',
+      value: content || `${todos.length} items`,
+      summary: String(todos.length),
+      category: 'input',
+      display: 'body',
+    },
+  ];
+}
 
-    const parentIndicator = computeParentIndicator(block, prevUuid, prevLineNumber);
-
-    // Determine truncation strategy
-    const truncation: TruncationStrategy = getTruncation
-      ? getTruncation(block, i)
-      : redact && wordLimit !== undefined
-        ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
-        : { type: 'full' };
-
-    // Check if we should output this block
-    const includeInOutput = shouldOutput ? shouldOutput(block, i) : true;
-
-    if (includeInOutput) {
-      const timestamp = 'timestamp' in block ? block.timestamp : undefined;
-      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
-
-      const formatted = formatBlock(block, {
-        sessionPrefix,
-        showTimestamp,
-        prevDate,
-        isFirst: firstOutput,
-        cwd,
-        truncation,
-        fieldFilter,
-        parentIndicator,
-      });
-
-      if (formatted) {
-        results.push(formatted);
-        firstOutput = false;
+function extractAskUserQuestionTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const questionLines: Array<string> = [];
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i] as { question?: string; header?: string; options?: Array<{ label?: string }> };
+    questionLines.push(`${i + 1}. ${q.question || ''}`);
+    if (q.options && Array.isArray(q.options)) {
+      for (const opt of q.options) {
+        questionLines.push(`   - ${opt.label || ''}`);
       }
-
-      if (currentDate) {
-        prevDate = currentDate;
-      }
     }
-
-    // Always track for parent indicator computation
-    if ('uuid' in block && block.uuid) {
-      prevUuid = block.uuid;
-    }
-    prevLineNumber = block.lineNumber;
   }
-
-  if (redact && !getTruncation && wordLimit !== undefined) {
-    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  const content = questionLines.join('\n');
+  const fields: Array<ToolField> = [
+    {
+      name: 'questions',
+      value: content || `${questions.length} questions`,
+      summary: String(questions.length),
+      category: 'input',
+      display: 'body',
+    },
+  ];
+  if (result) {
+    fields.push(defaultResultField(result));
   }
-
-  const separator = options.separator ?? (redact ? '\n' : '\n\n');
-  return results.join(separator);
+  return fields;
 }
 
-export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
-  const { redact = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter } = options;
-
-  const blocks = parseSession(entries);
-
-  // Extract header info
-  let model: string | undefined;
-  let gitBranch: string | undefined;
-  for (const block of blocks) {
-    if (!model && block.type === 'assistant' && 'model' in block && block.model) {
-      model = block.model;
-    }
-    if (!gitBranch && block.type === 'user' && 'gitBranch' in block && block.gitBranch) {
-      gitBranch = block.gitBranch;
-    }
-    if (model && gitBranch) break;
-  }
-
-  const headerParts: Array<string> = [];
-  if (redact) {
-    const parts = ['#'];
-    if (model) parts.push(`model=${model}`);
-    if (gitBranch) parts.push(`branch=${gitBranch}`);
-    if (parts.length > 1) {
-      headerParts.push(parts.join(' '));
-    }
-  }
-
-  const blocksOutput = formatBlocks(blocks, { redact, targetWords, skipWords, fieldFilter });
-
-  if (headerParts.length > 0) {
-    const separator = redact ? '\n' : '\n\n';
-    return headerParts.join(separator) + separator + blocksOutput;
-  }
-
-  return blocksOutput;
+function extractExitPlanModeTool(input: Record<string, unknown>): Array<ToolField> {
+  const plan = input.plan ? String(input.plan) : '';
+  if (!plan) return [];
+  return [
+    {
+      name: 'plan',
+      value: plan,
+      summary: formatWordCount(plan),
+      category: 'input',
+      display: 'body',
+    },
+  ];
 }
 
-function collectWordCountsFromBlocks(blocks: Array<LogicalBlock>, skipWords: number): Array<number> {
-  const counts: Array<number> = [];
-
-  for (const block of blocks) {
-    if (
-      block.type === 'user' ||
-      block.type === 'assistant' ||
-      block.type === 'system' ||
-      block.type === 'thinking' ||
-      block.type === 'summary'
-    ) {
-      const words = countWords(block.content);
-      const afterSkip = Math.max(0, words - skipWords);
-      if (afterSkip > 0) {
-        counts.push(afterSkip);
-      }
-    }
+function extractWebFetchTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const url = String(input.url || '');
+  const fields: Array<ToolField> = [{ name: 'url', value: url, category: 'input', display: 'header' }];
+  if (result) {
+    fields.push(defaultResultField(result));
   }
-
-  return counts;
+  return fields;
 }
 
-interface ToolFormatResult {
-  headerParams: Array<string>;
-  multilineParams: Array<MultilineParam>;
-  suppressResult?: boolean;
+function extractWebSearchTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const query = String(input.query || '');
+  const fields: Array<ToolField> = [{ name: 'query', value: query, category: 'input', display: 'auto' }];
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
 }
 
-interface ToolFormatterOptions {
-  input: Record<string, unknown>;
-  result?: ToolResultInfo;
-  cwd?: string;
-  redact?: boolean;
-  truncation?: TruncationStrategy;
-  hideInput?: boolean;
-  hideResult?: boolean;
+function extractGenericTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
+  const fields: Array<ToolField> = [];
+  let count = 0;
+  for (const [key, value] of Object.entries(input)) {
+    if (value === null || value === undefined) continue;
+    const str = typeof value === 'string' ? value : JSON.stringify(value);
+    fields.push({ name: key, value: str, category: 'input', display: 'auto' });
+    count++;
+    if (count >= 5) break;
+  }
+  if (result) {
+    fields.push(defaultResultField(result));
+  }
+  return fields;
 }
 
-type ToolFormatter = (options: ToolFormatterOptions) => ToolFormatResult;
+// --- formatToolText (used by truncation stage) ---
 
 interface FormattedText {
   isEmpty: boolean;
@@ -687,331 +785,216 @@ function formatToolText(text: string, truncation?: TruncationStrategy): Formatte
   };
 }
 
-function getToolFormatter(name: string): ToolFormatter {
-  switch (name) {
-    case 'Edit':
-      return formatEditTool;
-    case 'Read':
-      return formatReadTool;
-    case 'Write':
-      return formatWriteTool;
-    case 'Bash':
-      return formatBashTool;
-    case 'Grep':
-      return formatGrepTool;
-    case 'Glob':
-      return formatGlobTool;
-    case 'Task':
-      return formatTaskTool;
-    case 'TodoWrite':
-      return formatTodoWriteTool;
-    case 'AskUserQuestion':
-      return formatAskUserQuestionTool;
-    case 'ExitPlanMode':
-      return formatExitPlanModeTool;
-    case 'WebFetch':
-      return formatWebFetchTool;
-    case 'WebSearch':
-      return formatWebSearchTool;
-    default:
-      return formatGenericTool;
-  }
+// --- Block collection and formatting ---
+
+export interface BlocksFormatOptions {
+  truncate?: boolean;
+  targetWords?: number;
+  skipWords?: number;
+
+  getTruncation?: (block: LogicalBlock, index: number) => TruncationStrategy;
+  shouldOutput?: (block: LogicalBlock, index: number) => boolean;
+
+  sessionPrefix?: string;
+  separator?: string;
+  showTimestamp?: boolean;
+
+  fieldFilter?: ReadFieldFilter;
+  selectFilter?: SelectFilter;
+  cwd?: string;
 }
 
-function formatEditTool({ input, cwd, redact }: ToolFormatterOptions): ToolFormatResult {
-  const path = shortenPath(String(input.file_path || ''), cwd);
-  const oldStr = String(input.old_string || '');
-  const newStr = String(input.new_string || '');
-  const oldLines = countLines(oldStr);
-  const newLines = countLines(newStr);
-
-  if (redact) {
-    return {
-      headerParams: [path, `-${oldLines}+${newLines}`],
-      multilineParams: [],
-      suppressResult: true,
-    };
+function computeParentIndicator(
+  block: LogicalBlock,
+  prevUuid: string | undefined,
+  prevLineNumber: number,
+): string | number | undefined {
+  if (block.lineNumber === prevLineNumber || !prevUuid) {
+    return undefined;
   }
-
-  const multilineParams: Array<MultilineParam> = [];
-  if (oldStr) {
-    multilineParams.push({ name: 'old_string', content: oldStr });
+  const parentUuid = 'parentUuid' in block ? block.parentUuid : undefined;
+  const parentLineNumber = 'parentLineNumber' in block ? block.parentLineNumber : undefined;
+  if (parentLineNumber === null) {
+    return 'start';
   }
-  if (newStr) {
-    multilineParams.push({ name: 'new_string', content: newStr });
+  if (parentUuid && parentUuid !== prevUuid && parentLineNumber !== undefined) {
+    return parentLineNumber;
   }
-
-  return {
-    headerParams: [`file_path=${path}`],
-    multilineParams,
-  };
+  return undefined;
 }
 
-function formatReadTool({ input, cwd, redact }: ToolFormatterOptions): ToolFormatResult {
-  const path = shortenPath(String(input.file_path || ''), cwd);
-  const headerParams: Array<string> = redact ? [path] : [`file_path=${path}`];
-
-  if (input.offset !== undefined) {
-    headerParams.push(`offset=${input.offset}`);
-  }
-  if (input.limit !== undefined) {
-    headerParams.push(`limit=${input.limit}`);
-  }
-  return { headerParams, multilineParams: [] };
+function getBlockTypeForFilter(block: LogicalBlock): string {
+  if (block.type === 'tool') return `tool:${block.toolName}`;
+  return block.type;
 }
 
-function formatWriteTool({ input, cwd, redact }: ToolFormatterOptions): ToolFormatResult {
-  const path = shortenPath(String(input.file_path || ''), cwd);
-  const content = String(input.content || '');
-  const lineCount = countLines(content);
+export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatOptions = {}): string {
+  const {
+    truncate = false,
+    targetWords = DEFAULT_TARGET_WORDS,
+    skipWords = 0,
+    getTruncation,
+    shouldOutput,
+    sessionPrefix,
+    showTimestamp = true,
+    fieldFilter,
+    selectFilter,
+  } = options;
 
-  if (redact) {
-    return {
-      headerParams: [path, `written=${lineCount}lines`],
-      multilineParams: [],
-      suppressResult: true,
-    };
+  // Compute word limit for truncate mode (only if not using custom getTruncation)
+  let wordLimit: number | undefined;
+  if (truncate && !getTruncation) {
+    const wordCounts = collectWordCountsFromBlocks(blocks, skipWords, fieldFilter, selectFilter);
+    wordLimit = computeUniformLimit(wordCounts, targetWords) ?? undefined;
   }
 
-  return {
-    headerParams: [`file_path=${path}`, `written=${lineCount}lines`],
-    multilineParams: [],
-  };
+  const results: Array<string> = [];
+  let prevUuid: string | undefined;
+  let prevDate: string | undefined;
+  let prevLineNumber = 0;
+  let cwd = options.cwd;
+  let firstOutput = true;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+
+    if (block.type === 'user' && 'cwd' in block && block.cwd) {
+      cwd = block.cwd;
+    }
+
+    const parentIndicator = computeParentIndicator(block, prevUuid, prevLineNumber);
+
+    // Determine truncation strategy
+    const truncation: TruncationStrategy = getTruncation
+      ? getTruncation(block, i)
+      : truncate && wordLimit !== undefined
+        ? { type: 'wordLimit', limit: wordLimit, skip: skipWords }
+        : { type: 'full' };
+
+    // Check if we should output this block (select filter + shouldOutput callback)
+    let includeInOutput = shouldOutput ? shouldOutput(block, i) : true;
+    if (includeInOutput && selectFilter) {
+      includeInOutput = selectFilter.includes(getBlockTypeForFilter(block));
+    }
+
+    if (includeInOutput) {
+      const timestamp = 'timestamp' in block ? block.timestamp : undefined;
+      const currentDate = timestamp ? timestamp.slice(0, 10) : undefined;
+
+      const formatted = formatBlock(block, {
+        sessionPrefix,
+        showTimestamp,
+        prevDate,
+        isFirst: firstOutput,
+        cwd,
+        truncation,
+        fieldFilter,
+        parentIndicator,
+      });
+
+      if (formatted) {
+        results.push(formatted);
+        firstOutput = false;
+      }
+
+      if (currentDate) {
+        prevDate = currentDate;
+      }
+    }
+
+    // Always track for parent indicator computation
+    if ('uuid' in block && block.uuid) {
+      prevUuid = block.uuid;
+    }
+    prevLineNumber = block.lineNumber;
+  }
+
+  if (truncate && !getTruncation && wordLimit !== undefined) {
+    results.push(`[Limited to ${wordLimit} words per field. Use --skip ${wordLimit} for more.]`);
+  }
+
+  const separator = options.separator ?? (truncate ? '\n' : '\n\n');
+  return results.join(separator);
 }
 
-function addFormattedParam(
-  headerParams: Array<string>,
-  multilineParams: Array<MultilineParam>,
-  name: string,
-  text: string,
-  truncation?: TruncationStrategy,
-) {
-  const formatted = formatToolText(text, truncation);
-  if (formatted.isEmpty) return;
+export function formatSession(entries: Array<KnownEntry>, options: SessionFormatOptions = {}): string {
+  const { truncate = false, targetWords = DEFAULT_TARGET_WORDS, skipWords = 0, fieldFilter, selectFilter } = options;
 
-  if (formatted.isMultiline) {
-    multilineParams.push({
-      name,
-      content: formatted.blockContent,
-      prefix: formatted.blockPrefix || undefined,
-      suffix: formatted.blockSuffix || undefined,
-    });
-  } else {
-    headerParams.push(`${name}=${formatted.inline}`);
+  const blocks = parseSession(entries);
+
+  // Extract header info
+  let model: string | undefined;
+  let gitBranch: string | undefined;
+  for (const block of blocks) {
+    if (!model && block.type === 'assistant' && 'model' in block && block.model) {
+      model = block.model;
+    }
+    if (!gitBranch && block.type === 'user' && 'gitBranch' in block && block.gitBranch) {
+      gitBranch = block.gitBranch;
+    }
+    if (model && gitBranch) break;
   }
+
+  const headerParts: Array<string> = [];
+  if (truncate) {
+    const parts = ['#'];
+    if (model) parts.push(`model=${model}`);
+    if (gitBranch) parts.push(`branch=${gitBranch}`);
+    if (parts.length > 1) {
+      headerParts.push(parts.join(' '));
+    }
+  }
+
+  const blocksOutput = formatBlocks(blocks, { truncate, targetWords, skipWords, fieldFilter, selectFilter });
+
+  if (headerParts.length > 0) {
+    const separator = truncate ? '\n' : '\n\n';
+    return headerParts.join(separator) + separator + blocksOutput;
+  }
+
+  return blocksOutput;
 }
 
-function formatBashTool({
-  input,
-  result,
-  redact,
-  truncation,
-  hideInput,
-  hideResult,
-}: ToolFormatterOptions): ToolFormatResult {
-  const command = String(input.command || '').trim();
-  const desc = input.description ? String(input.description) : undefined;
+function collectWordCountsFromBlocks(
+  blocks: Array<LogicalBlock>,
+  skipWords: number,
+  fieldFilter?: ReadFieldFilter,
+  selectFilter?: SelectFilter,
+): Array<number> {
+  const counts: Array<number> = [];
 
-  const headerParams: Array<string> = [];
-  const multilineParams: Array<MultilineParam> = [];
+  for (const block of blocks) {
+    // Skip blocks excluded by select filter
+    if (selectFilter && !selectFilter.includes(getBlockTypeForFilter(block))) continue;
 
-  if (hideInput) {
-    headerParams.push(`command=${formatFieldValue(command)}`);
-  } else {
-    addFormattedParam(headerParams, multilineParams, 'command', command, truncation);
-  }
-  if (desc) {
-    addFormattedParam(headerParams, multilineParams, 'description', desc, truncation);
-  }
-
-  if (redact && result) {
-    if (hideResult) {
-      headerParams.push(`result=${formatFieldValue(result.content)}`);
+    if (block.type === 'tool') {
+      // Count tool input values (typically short — commands, paths, queries).
+      // Tool results are NOT counted: they're collapsed to summaries in truncated mode,
+      // so including them would make the word limit far too tight.
+      const inputRedacted = fieldFilter?.isRedacted(`tool:${block.toolName}:input`) ?? false;
+      if (!inputRedacted) {
+        for (const value of Object.values(block.toolInput)) {
+          if (typeof value === 'string') {
+            const words = countWords(value);
+            const afterSkip = Math.max(0, words - skipWords);
+            if (afterSkip > 0) {
+              counts.push(afterSkip);
+            }
+          }
+        }
+      }
     } else {
-      addFormattedParam(headerParams, multilineParams, 'result', result.content, truncation);
-    }
-    return { headerParams, multilineParams, suppressResult: true };
-  }
+      // Text blocks: user, assistant, system, thinking, summary
+      // Skip blocks that are redacted (they'll be collapsed to word counts, not truncated)
+      if (fieldFilter?.isRedacted(block.type)) continue;
 
-  return { headerParams, multilineParams };
-}
-
-function formatGrepTool({ input, cwd, truncation }: ToolFormatterOptions): ToolFormatResult {
-  const pattern = String(input.pattern || '');
-  const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
-
-  const headerParams: Array<string> = [];
-  const multilineParams: Array<MultilineParam> = [];
-
-  addFormattedParam(headerParams, multilineParams, 'pattern', pattern, truncation);
-  if (path) {
-    headerParams.push(path);
-  }
-  if (input.output_mode) {
-    headerParams.push(`output_mode=${input.output_mode}`);
-  }
-  if (input.glob) {
-    addFormattedParam(headerParams, multilineParams, 'glob', String(input.glob), truncation);
-  }
-
-  return { headerParams, multilineParams };
-}
-
-function formatGlobTool({ input, result, truncation }: ToolFormatterOptions): ToolFormatResult {
-  const pattern = String(input.pattern || '');
-  const headerParams: Array<string> = [];
-  const multilineParams: Array<MultilineParam> = [];
-
-  addFormattedParam(headerParams, multilineParams, 'pattern', pattern, truncation);
-
-  if (result) {
-    const files = result.content.split('\n').filter((l) => l.trim()).length;
-    headerParams.push(`result=${files}files`);
-  }
-
-  return { headerParams, multilineParams, suppressResult: true };
-}
-
-function formatTaskTool({ input, result, redact, truncation }: ToolFormatterOptions): ToolFormatResult {
-  const desc = String(input.description || '');
-  const prompt = String(input.prompt || '');
-  const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
-
-  const headerParams: Array<string> = [];
-  const multilineParams: Array<MultilineParam> = [];
-
-  if (subagentType) {
-    headerParams.push(subagentType);
-  }
-  if (result?.agentId) {
-    headerParams.push(`session=agent-${result.agentId}`);
-  }
-  addFormattedParam(headerParams, multilineParams, 'description', desc, truncation);
-
-  if (redact) {
-    headerParams.push(`prompt=${formatFieldValue(prompt)}`);
-    return { headerParams, multilineParams };
-  }
-
-  multilineParams.push({ name: 'prompt', content: prompt });
-  return { headerParams, multilineParams };
-}
-
-function formatTodoWriteTool({ input, redact }: ToolFormatterOptions): ToolFormatResult {
-  const todos = Array.isArray(input.todos) ? input.todos : [];
-
-  if (redact) {
-    return {
-      headerParams: [`todos=${todos.length}`],
-      multilineParams: [],
-      suppressResult: true,
-    };
-  }
-
-  const todoLines: Array<string> = [];
-  for (const todo of todos) {
-    if (typeof todo === 'object' && todo !== null) {
-      const t = todo as { content?: string; status?: string };
-      const status = t.status || 'pending';
-      const marker = status === 'completed' ? '[x]' : status === 'in_progress' ? '[>]' : '[ ]';
-      todoLines.push(`${marker} ${t.content || ''}`);
-    }
-  }
-
-  return {
-    headerParams: [],
-    multilineParams: todoLines.length > 0 ? [{ name: 'todos', content: todoLines.join('\n') }] : [],
-  };
-}
-
-function formatAskUserQuestionTool({
-  input,
-  result,
-  redact,
-  truncation,
-  hideResult,
-}: ToolFormatterOptions): ToolFormatResult {
-  const questions = Array.isArray(input.questions) ? input.questions : [];
-  const headerParams: Array<string> = [`questions=${questions.length}`];
-  const multilineParams: Array<MultilineParam> = [];
-
-  if (redact) {
-    if (result) {
-      if (hideResult) {
-        headerParams.push(`result=${formatWordCount(result.content)}`);
-      } else {
-        addFormattedParam(headerParams, multilineParams, 'result', result.content, truncation);
-      }
-    }
-    return { headerParams, multilineParams, suppressResult: true };
-  }
-
-  const questionLines: Array<string> = [];
-  for (let i = 0; i < questions.length; i++) {
-    const q = questions[i] as { question?: string; header?: string; options?: Array<{ label?: string }> };
-    questionLines.push(`${i + 1}. ${q.question || ''}`);
-    if (q.options && Array.isArray(q.options)) {
-      for (const opt of q.options) {
-        questionLines.push(`   - ${opt.label || ''}`);
+      const words = countWords(block.content);
+      const afterSkip = Math.max(0, words - skipWords);
+      if (afterSkip > 0) {
+        counts.push(afterSkip);
       }
     }
   }
 
-  if (questionLines.length > 0) {
-    multilineParams.push({ name: 'questions', content: questionLines.join('\n') });
-  }
-
-  return { headerParams: [], multilineParams };
-}
-
-function formatExitPlanModeTool({ input, redact }: ToolFormatterOptions): ToolFormatResult {
-  const plan = input.plan ? String(input.plan) : '';
-
-  if (redact) {
-    if (plan) {
-      return {
-        headerParams: [`plan=${formatWordCount(plan)}`],
-        multilineParams: [],
-        suppressResult: true,
-      };
-    }
-    return { headerParams: [], multilineParams: [], suppressResult: true };
-  }
-
-  return {
-    headerParams: [],
-    multilineParams: plan ? [{ name: 'plan', content: plan }] : [],
-    suppressResult: true,
-  };
-}
-
-function formatWebFetchTool({ input }: ToolFormatterOptions): ToolFormatResult {
-  const url = String(input.url || '');
-  return {
-    headerParams: [`url="${url}"`],
-    multilineParams: [],
-  };
-}
-
-function formatWebSearchTool({ input, truncation }: ToolFormatterOptions): ToolFormatResult {
-  const query = String(input.query || '');
-  const headerParams: Array<string> = [];
-  const multilineParams: Array<MultilineParam> = [];
-
-  addFormattedParam(headerParams, multilineParams, 'query', query, truncation);
-  return { headerParams, multilineParams };
-}
-
-function formatGenericTool({ input, redact, truncation }: ToolFormatterOptions): ToolFormatResult {
-  const headerParams: Array<string> = [];
-  const multilineParams: Array<MultilineParam> = [];
-
-  for (const [key, value] of Object.entries(input)) {
-    if (value === null || value === undefined) continue;
-    const str = typeof value === 'string' ? value : JSON.stringify(value);
-    addFormattedParam(headerParams, multilineParams, key, str, truncation);
-    if (redact && headerParams.length >= 3) break;
-  }
-
-  return { headerParams, multilineParams };
+  return counts;
 }

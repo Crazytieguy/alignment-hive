@@ -90,7 +90,7 @@
 
   REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
 
-8|23:40|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+8|23:40|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   REDIRECT DETECTED: The URL redirects to a different host.
 
@@ -105,7 +105,7 @@
 9|23:40|assistant
   Let me follow the redirect and also check additional sources.
 
-10|23:40|tool|WebFetch|url="https:[REDACTED:high-entropy-secret]"
+10|23:40|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]
 [result]
   <persisted-output>
   Output too large (86.4KB). Full output saved to: /Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_015NWcW6GKcXDMbfU22HLWr5.txt
@@ -153,7 +153,7 @@
   ...
   </persisted-output>
 
-11|23:40|tool|WebFetch|url="https://docs.anthropic.com/en/api/messages"
+11|23:40|tool|WebFetch|url=https://docs.anthropic.com/en/api/messages
 [result]
   REDIRECT DETECTED: The URL redirects to a different host.
 
@@ -165,7 +165,7 @@
   - url: "https://platform.claude.com/docs/en/api/messages"
   - prompt: "Search for any mention of "tool_reference" as a content block type. List all content block types that are documented, especially those that can appear inside tool_result content arrays."
 
-12|23:40|tool|WebFetch|url="https://code.claude.com/docs/en/cli-reference"
+12|23:40|tool|WebFetch|url=https://code.claude.com/docs/en/cli-reference
 [result]
   > ## Documentation Index
   > Fetch the complete documentation index at: https://code.claude.com/docs/llms.txt
@@ -366,7 +366,7 @@
 14|23:40|assistant
   The last search gave us the key lead -- the "Tool search tool" documentation page. Let me fetch that and the Messages API reference.
 
-15|23:40|tool|WebFetch|url="https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool"
+15|23:40|tool|WebFetch|url=https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
 [result]
   <persisted-output>
   Output too large (50.6KB). Full output saved to: /Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01HWTh3qZNRcizUaux5tFY6q.txt
@@ -397,7 +397,7 @@
   ...
   </persisted-output>
 
-16|23:40|tool|WebFetch|url="https://platform.claude.com/docs/en/api/messages"
+16|23:40|tool|WebFetch|url=https://platform.claude.com/docs/en/api/messages
 [result]
   # Tool Reference and Tool Result Content Block Types
 
@@ -436,7 +436,7 @@
 17|23:41|assistant
   Now let me read the full tool search tool documentation to get the complete picture.
 
-18|23:41|tool|Read|file_path=/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01HWTh3qZNRcizUaux5tFY6q.txt
+18|23:41|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01HWTh3qZNRcizUaux5tFY6q.txt
 [result]
   <persisted-output>
   Output too large (62.2KB). Full output saved to: /Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt
@@ -467,7 +467,7 @@
   ...
   </persisted-output>
 
-19|23:41|tool|Read|file_path=/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt|offset=1|limit=500
+19|23:41|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt|offset=1|limit=500
 [result]
        1→     1→# Tool search tool
        2→     2→
@@ -970,7 +970,7 @@
      499→   499→        type: "object",
      500→   500→        properties: {
 
-20|23:41|tool|Read|file_path=/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt|offset=500|limit=500
+20|23:41|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt|offset=500|limit=500
 [result]
      500→   500→        properties: {
      501→   501→          query: { type: "string" },
@@ -1473,7 +1473,7 @@
      998→   998→    { role: "user", content: "What events are in my database?" }
      999→   999→  ]
 
-21|23:41|tool|Read|file_path=/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt|offset=1000|limit=500
+21|23:41|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01Qiriz5dGYbZAqCyF1nv6TB.txt|offset=1000|limit=500
 [result]
     1000→  1000→)
     1001→  1001→
@@ -1979,9 +1979,7 @@
 22|23:41|assistant
   Now let me also check how Claude Code itself uses `tool_reference` blocks in its session files, to see if it matches the API spec or adds its own semantics.
 
-23|23:41|tool|Grep|pattern="tool_reference"|[REDACTED:high-entropy-secret]|output_mode=files_with_matches
-[result]
-  No files found
+23|23:41|tool|Grep|pattern="tool_reference"|[REDACTED:high-entropy-secret]|output_mode=files_with_matches|result="No files found"
 
 24|23:41|assistant
   I now have a comprehensive picture. Here's what I found:

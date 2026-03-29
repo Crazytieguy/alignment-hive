@@ -4,6 +4,7 @@ import {
   ReadFieldFilter,
   SEARCH_DEFAULT_FIELDS,
   SearchFieldFilter,
+  SelectFilter,
   parseFieldList,
 } from '../lib/field-filter';
 
@@ -39,88 +40,116 @@ describe('ReadFieldFilter', () => {
       expect(READ_DEFAULT_SHOWN).toEqual(new Set(['user', 'assistant', 'thinking', 'tool', 'system', 'summary']));
     });
 
-    test('empty filter shows defaults', () => {
+    test('empty filter does not redact defaults', () => {
       const filter = new ReadFieldFilter([], []);
-      expect(filter.shouldShow('user')).toBe(true);
-      expect(filter.shouldShow('assistant')).toBe(true);
-      expect(filter.shouldShow('thinking')).toBe(true);
-      expect(filter.shouldShow('tool')).toBe(true);
-      expect(filter.shouldShow('system')).toBe(true);
-      expect(filter.shouldShow('summary')).toBe(true);
+      expect(filter.isRedacted('user')).toBe(false);
+      expect(filter.isRedacted('assistant')).toBe(false);
+      expect(filter.isRedacted('thinking')).toBe(false);
+      expect(filter.isRedacted('tool')).toBe(false);
+      expect(filter.isRedacted('system')).toBe(false);
+      expect(filter.isRedacted('summary')).toBe(false);
     });
 
     test('tool children inherit from tool default', () => {
       const filter = new ReadFieldFilter([], []);
-      expect(filter.shouldShow('tool:Bash')).toBe(true);
-      expect(filter.shouldShow('tool:Bash:input')).toBe(true);
-      expect(filter.shouldShow('tool:Bash:result')).toBe(true);
+      expect(filter.isRedacted('tool:Bash')).toBe(false);
+      expect(filter.isRedacted('tool:Bash:input')).toBe(false);
+      expect(filter.isRedacted('tool:Bash:result')).toBe(false);
     });
 
-    test('non-defaults are not shown', () => {
+    test('non-defaults are redacted', () => {
       const filter = new ReadFieldFilter([], []);
-      expect(filter.shouldShow('unknown')).toBe(false);
+      expect(filter.isRedacted('unknown')).toBe(true);
     });
   });
 
-  describe('show rules', () => {
-    test('show adds field to visibility', () => {
+  describe('expand rules', () => {
+    test('expand marks field as not redacted', () => {
       const filter = new ReadFieldFilter(['tool:result'], []);
-      expect(filter.shouldShow('tool:result')).toBe(true);
-      expect(filter.shouldShow('tool:Bash:result')).toBe(true);
+      expect(filter.isRedacted('tool:result')).toBe(false);
+      expect(filter.isRedacted('tool:Bash:result')).toBe(false);
     });
 
-    test('showFullThinking returns true when thinking in show', () => {
+    test('hasExplicitExpandRule returns true for explicit expand', () => {
       const filter = new ReadFieldFilter(['thinking'], []);
-      expect(filter.showFullThinking()).toBe(true);
+      expect(filter.hasExplicitExpandRule('thinking')).toBe(true);
     });
 
-    test('showFullThinking returns false when thinking not in show', () => {
+    test('hasExplicitExpandRule returns false without explicit expand', () => {
       const filter = new ReadFieldFilter([], []);
-      expect(filter.showFullThinking()).toBe(false);
+      expect(filter.hasExplicitExpandRule('thinking')).toBe(false);
+    });
+
+    test('hasExplicitExpandRule returns false for default-shown fields', () => {
+      const filter = new ReadFieldFilter([], []);
+      expect(filter.hasExplicitExpandRule('tool:Bash:result')).toBe(false);
     });
   });
 
-  describe('hide rules', () => {
-    test('hide removes field from visibility', () => {
+  describe('redact rules', () => {
+    test('redact collapses field', () => {
       const filter = new ReadFieldFilter([], ['user']);
-      expect(filter.shouldShow('user')).toBe(false);
+      expect(filter.isRedacted('user')).toBe(true);
     });
 
-    test('hide tool hides all tool children', () => {
+    test('redact tool redacts all tool children', () => {
       const filter = new ReadFieldFilter([], ['tool']);
-      expect(filter.shouldShow('tool')).toBe(false);
-      expect(filter.shouldShow('tool:Bash')).toBe(false);
-      expect(filter.shouldShow('tool:Bash:input')).toBe(false);
+      expect(filter.isRedacted('tool')).toBe(true);
+      expect(filter.isRedacted('tool:Bash')).toBe(true);
+      expect(filter.isRedacted('tool:Bash:input')).toBe(true);
     });
 
-    test('hide specific tool only hides that tool', () => {
+    test('redact specific tool only redacts that tool', () => {
       const filter = new ReadFieldFilter([], ['tool:Edit']);
-      expect(filter.shouldShow('tool')).toBe(true);
-      expect(filter.shouldShow('tool:Edit')).toBe(false);
-      expect(filter.shouldShow('tool:Bash')).toBe(true);
+      expect(filter.isRedacted('tool')).toBe(false);
+      expect(filter.isRedacted('tool:Edit')).toBe(true);
+      expect(filter.isRedacted('tool:Bash')).toBe(false);
     });
   });
 
   describe('specificity resolution', () => {
-    test('more specific show overrides less specific hide', () => {
+    test('more specific expand overrides less specific redact', () => {
       const filter = new ReadFieldFilter(['tool:Bash:result'], ['tool:result']);
-      expect(filter.shouldShow('tool:result')).toBe(false);
-      expect(filter.shouldShow('tool:Bash:result')).toBe(true);
-      expect(filter.shouldShow('tool:Edit:result')).toBe(false);
+      expect(filter.isRedacted('tool:result')).toBe(true);
+      expect(filter.isRedacted('tool:Bash:result')).toBe(false);
+      expect(filter.isRedacted('tool:Edit:result')).toBe(true);
     });
 
-    test('more specific hide overrides less specific show', () => {
+    test('more specific redact overrides less specific expand', () => {
       const filter = new ReadFieldFilter(['tool:result'], ['tool:Bash:result']);
-      expect(filter.shouldShow('tool:result')).toBe(true);
-      expect(filter.shouldShow('tool:Edit:result')).toBe(true);
-      expect(filter.shouldShow('tool:Bash:result')).toBe(false);
+      expect(filter.isRedacted('tool:result')).toBe(false);
+      expect(filter.isRedacted('tool:Edit:result')).toBe(false);
+      expect(filter.isRedacted('tool:Bash:result')).toBe(true);
     });
 
-    test('equal specificity uses last rule', () => {
-      // hide comes after show in constructor, so hide should win for same specificity
+    test('equal specificity: redact wins', () => {
+      // redact comes after expand in constructor, so redact should win for same specificity
       const filter = new ReadFieldFilter(['user'], ['user']);
-      expect(filter.shouldShow('user')).toBe(false);
+      expect(filter.isRedacted('user')).toBe(true);
     });
+  });
+});
+
+describe('SelectFilter', () => {
+  test('includes matching block type', () => {
+    const filter = new SelectFilter(['user', 'tool']);
+    expect(filter.includes('user')).toBe(true);
+    expect(filter.includes('tool:Bash')).toBe(true);
+    expect(filter.includes('assistant')).toBe(false);
+  });
+
+  test('includes specific tool', () => {
+    const filter = new SelectFilter(['tool:Bash']);
+    expect(filter.includes('tool:Bash')).toBe(true);
+    expect(filter.includes('tool:Edit')).toBe(false);
+    expect(filter.includes('tool')).toBe(false);
+  });
+
+  test('includes with broad tool match', () => {
+    const filter = new SelectFilter(['tool']);
+    expect(filter.includes('tool:Bash')).toBe(true);
+    expect(filter.includes('tool:Edit')).toBe(true);
+    expect(filter.includes('user')).toBe(false);
   });
 });
 

@@ -25,7 +25,7 @@ function specificity(field: string): number {
 
 interface FieldRule {
   field: string;
-  action: 'show' | 'hide';
+  action: 'expand' | 'redact';
   specificity: number;
 }
 
@@ -36,35 +36,42 @@ export const SEARCH_DEFAULT_FIELDS = new Set(['user', 'assistant', 'thinking', '
 export class ReadFieldFilter {
   private rules: Array<FieldRule>;
 
-  constructor(show: Array<string>, hide: Array<string>) {
+  constructor(expand: Array<string>, redact: Array<string>) {
     this.rules = [];
 
-    for (const field of show) {
-      this.rules.push({ field, action: 'show', specificity: specificity(field) });
+    for (const field of expand) {
+      this.rules.push({ field, action: 'expand', specificity: specificity(field) });
     }
-    for (const field of hide) {
-      this.rules.push({ field, action: 'hide', specificity: specificity(field) });
+    for (const field of redact) {
+      this.rules.push({ field, action: 'redact', specificity: specificity(field) });
     }
 
     this.rules.sort((a, b) => {
       if (b.specificity !== a.specificity) return b.specificity - a.specificity;
-      if (a.action === 'hide' && b.action !== 'hide') return -1;
-      if (b.action === 'hide' && a.action !== 'hide') return 1;
+      if (a.action === 'redact' && b.action !== 'redact') return -1;
+      if (b.action === 'redact' && a.action !== 'redact') return 1;
       return 0;
     });
   }
 
-  shouldShow(field: string): boolean {
+  /** Returns true when the field should be collapsed to a summary/word count. */
+  isRedacted(field: string): boolean {
     for (const rule of this.rules) {
       if (matches(rule.field, field)) {
-        return rule.action === 'show';
+        return rule.action === 'redact';
       }
     }
-    return this.isDefaultShown(field);
+    return !this.isDefaultShown(field);
   }
 
-  showFullThinking(): boolean {
-    return this.rules.some((r) => r.field === 'thinking' && r.action === 'show');
+  /** Returns true only when an explicit --expand rule matches. Defaults don't count. */
+  hasExplicitExpandRule(field: string): boolean {
+    for (const rule of this.rules) {
+      if (matches(rule.field, field)) {
+        return rule.action === 'expand';
+      }
+    }
+    return false;
   }
 
   private isDefaultShown(field: string): boolean {
@@ -72,6 +79,18 @@ export class ReadFieldFilter {
       if (matches(def, field)) return true;
     }
     return false;
+  }
+}
+
+export class SelectFilter {
+  private patterns: Array<string>;
+
+  constructor(patterns: Array<string>) {
+    this.patterns = patterns;
+  }
+
+  includes(blockType: string): boolean {
+    return this.patterns.some((p) => matches(p, blockType));
   }
 }
 
