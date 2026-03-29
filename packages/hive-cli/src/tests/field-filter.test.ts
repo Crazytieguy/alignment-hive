@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  READ_DEFAULT_SHOWN,
   ReadFieldFilter,
   SEARCH_DEFAULT_FIELDS,
   SearchFieldFilter,
@@ -36,30 +35,24 @@ describe('parseFieldList', () => {
 
 describe('ReadFieldFilter', () => {
   describe('default visibility', () => {
-    test('defaults are correct', () => {
-      expect(READ_DEFAULT_SHOWN).toEqual(new Set(['user', 'assistant', 'thinking', 'tool', 'system', 'summary']));
-    });
-
-    test('empty filter does not redact defaults', () => {
+    test('block types are not redacted by default', () => {
       const filter = new ReadFieldFilter([], []);
       expect(filter.isRedacted('user')).toBe(false);
       expect(filter.isRedacted('assistant')).toBe(false);
       expect(filter.isRedacted('thinking')).toBe(false);
-      expect(filter.isRedacted('tool')).toBe(false);
       expect(filter.isRedacted('system')).toBe(false);
       expect(filter.isRedacted('summary')).toBe(false);
     });
 
-    test('tool children inherit from tool default', () => {
+    test('defaultRedacted parameter overrides fallback', () => {
       const filter = new ReadFieldFilter([], []);
-      expect(filter.isRedacted('tool:Bash')).toBe(false);
-      expect(filter.isRedacted('tool:Bash:input')).toBe(false);
-      expect(filter.isRedacted('tool:Bash:result')).toBe(false);
+      expect(filter.isRedacted('tool:Bash:result', true)).toBe(true);
+      expect(filter.isRedacted('tool:Bash:result', false)).toBe(false);
     });
 
-    test('non-defaults are redacted', () => {
-      const filter = new ReadFieldFilter([], []);
-      expect(filter.isRedacted('unknown')).toBe(true);
+    test('explicit rules override defaultRedacted', () => {
+      const filter = new ReadFieldFilter(['tool:result'], []);
+      expect(filter.isRedacted('tool:Bash:result', true)).toBe(false);
     });
   });
 

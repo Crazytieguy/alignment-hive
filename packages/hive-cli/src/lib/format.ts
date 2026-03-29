@@ -61,7 +61,10 @@ function formatWordCount(text: string): string {
 function formatFieldValue(text: string): string {
   const count = countWords(text);
   if (count <= 1) {
-    return text.trim() || '""';
+    const trimmed = text.trim();
+    if (!trimmed) return '""';
+    if (trimmed.includes('|')) return `"${escapeQuotes(trimmed)}"`;
+    return trimmed;
   }
   return `${count}words`;
 }
@@ -364,9 +367,11 @@ function findMatchPositions(text: string, pattern: RegExp): Array<{ start: numbe
 export interface ToolField {
   name?: string;
   value: string;
-  summary?: string;
+  redactedForm?: string;
+  defaultRedacted: boolean;
+  /** When true, excluded from truncation and word budget. For short metadata like paths, offsets, counts. */
+  verbatim?: boolean;
   category: 'input' | 'result' | 'meta';
-  display: 'header' | 'body' | 'auto';
 }
 
 type ToolExtractor = (input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string) => Array<ToolField>;
@@ -379,63 +384,32 @@ function formatToolBlock(
   const { cwd, truncation, fieldFilter } = options;
   const parts = [...headerParts, 'tool', block.toolName];
   const resultInfo = block.toolResult ? { content: block.toolResult, agentId: block.agentId } : undefined;
-  const truncate = truncation ? truncation.type !== 'full' : false;
 
   const extractor = getToolExtractor(block.toolName);
   const fields = extractor(block.toolInput, resultInfo, cwd);
 
-  // Apply visibility: explicit redact, default summary collapse, or pass through
-  type ProcessedField = { name?: string; value: string; display: 'header' | 'body' | 'auto' };
-  const processed: Array<ProcessedField> = [];
-
-  for (const field of fields) {
-    const fieldPath = `tool:${block.toolName}:${field.category}`;
-    const redacted = fieldFilter?.isRedacted(fieldPath) ?? false;
-    const expanded = fieldFilter?.hasExplicitExpandRule(fieldPath) ?? false;
-
-    if (redacted) {
-      processed.push({ name: field.name, value: field.summary ?? formatFieldValue(field.value), display: 'header' });
-    } else if (field.summary && truncate && !expanded) {
-      processed.push({ name: field.name, value: field.summary, display: 'header' });
-    } else {
-      processed.push({ name: field.name, value: field.value, display: field.display });
-    }
-  }
-
-  // Truncate and render each field into header or body
   const headerValues: Array<string> = [];
   const bodyParts: Array<MultilineParam> = [];
   const effectiveTruncation = truncation ?? { type: 'full' as const };
 
-  for (const field of processed) {
-    if (field.display === 'header') {
-      headerValues.push(field.name ? `${field.name}=${field.value}` : field.value);
+  for (const field of fields) {
+    const redacted = isFieldRedacted(block.toolName, field, fieldFilter);
+
+    if (redacted) {
+      const defaultForm = field.name ? `${field.name}=${formatFieldValue(field.value)}` : formatFieldValue(field.value);
+      headerValues.push(field.redactedForm ?? defaultForm);
       continue;
     }
 
-    if (field.display === 'body') {
-      if (truncate) {
-        // Truncate body content with word limit
-        const formatted = formatToolText(field.value, effectiveTruncation);
-        if (formatted.isEmpty) continue;
-        if (formatted.isMultiline && field.name) {
-          bodyParts.push({
-            name: field.name,
-            content: formatted.blockContent,
-            prefix: formatted.blockPrefix || undefined,
-            suffix: formatted.blockSuffix || undefined,
-          });
-        } else if (field.name) {
-          // Truncated to single line — still show as body for explicit body fields
-          bodyParts.push({ name: field.name, content: formatted.blockContent });
-        }
-      } else if (field.name && field.value) {
+    if (field.verbatim) {
+      if (field.value.includes('\n') && field.name) {
         bodyParts.push({ name: field.name, content: field.value });
+      } else {
+        headerValues.push(field.name ? `${field.name}=${field.value}` : field.value);
       }
       continue;
     }
 
-    // display: 'auto' — use formatToolText to determine header vs body
     const formatted = formatToolText(field.value, effectiveTruncation);
     if (formatted.isEmpty) continue;
 
@@ -451,7 +425,6 @@ function formatToolBlock(
     }
   }
 
-  // Assemble output
   parts.push(...headerValues);
   const header = parts.join('|');
   const bodyLines = formatMultilineParams(bodyParts);
@@ -459,8 +432,13 @@ function formatToolBlock(
   return `${header}\n${bodyLines.join('\n')}`;
 }
 
-function defaultResultField(result: ToolResultInfo): ToolField {
-  return { name: 'result', value: result.content, summary: formatFieldValue(result.content), category: 'result', display: 'auto' };
+function defaultResultField(result: ToolResultInfo, defaultRedacted: boolean): ToolField {
+  return { name: 'result', value: result.content, defaultRedacted, category: 'result' };
+}
+
+function isFieldRedacted(toolName: string, field: ToolField, fieldFilter?: ReadFieldFilter): boolean {
+  const fieldPath = `tool:${toolName}:${field.category}`;
+  return fieldFilter?.isRedacted(fieldPath, field.defaultRedacted) ?? field.defaultRedacted;
 }
 
 // --- Tool extractors ---
@@ -480,6 +458,7 @@ function getToolExtractor(name: string): ToolExtractor {
     case 'Glob':
       return extractGlobTool;
     case 'Task':
+    case 'Agent':
       return extractTaskTool;
     case 'TodoWrite':
       return extractTodoWriteTool;
@@ -500,23 +479,23 @@ function extractEditTool(input: Record<string, unknown>, _result?: ToolResultInf
   const path = shortenPath(String(input.file_path || ''), cwd);
   const oldStr = String(input.old_string || '');
   const newStr = String(input.new_string || '');
-  const fields: Array<ToolField> = [{ value: path, category: 'meta', display: 'header' }];
+  const fields: Array<ToolField> = [{ value: path, defaultRedacted: false, category: 'meta', verbatim: true }];
   if (oldStr) {
     fields.push({
       name: 'old_string',
       value: oldStr,
-      summary: `-${countLines(oldStr)}`,
+      redactedForm: `-${countLines(oldStr)}`,
+      defaultRedacted: true,
       category: 'input',
-      display: 'body',
     });
   }
   if (newStr) {
     fields.push({
       name: 'new_string',
       value: newStr,
-      summary: `+${countLines(newStr)}`,
+      redactedForm: `+${countLines(newStr)}`,
+      defaultRedacted: true,
       category: 'input',
-      display: 'body',
     });
   }
   return fields;
@@ -524,42 +503,38 @@ function extractEditTool(input: Record<string, unknown>, _result?: ToolResultInf
 
 function extractReadTool(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): Array<ToolField> {
   const path = shortenPath(String(input.file_path || ''), cwd);
-  const fields: Array<ToolField> = [{ value: path, category: 'meta', display: 'header' }];
+  const fields: Array<ToolField> = [{ value: path, defaultRedacted: false, category: 'meta', verbatim: true }];
   if (input.offset !== undefined) {
-    fields.push({ name: 'offset', value: String(input.offset), category: 'meta', display: 'header' });
+    fields.push({ name: 'offset', value: String(input.offset), defaultRedacted: false, category: 'meta', verbatim: true });
   }
   if (input.limit !== undefined) {
-    fields.push({ name: 'limit', value: String(input.limit), category: 'meta', display: 'header' });
+    fields.push({ name: 'limit', value: String(input.limit), defaultRedacted: false, category: 'meta', verbatim: true });
   }
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, true));
   }
   return fields;
 }
 
-function extractWriteTool(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): Array<ToolField> {
+function extractWriteTool(input: Record<string, unknown>, _result?: ToolResultInfo, cwd?: string): Array<ToolField> {
   const path = shortenPath(String(input.file_path || ''), cwd);
   const content = String(input.content || '');
   const lineCount = countLines(content);
-  const fields: Array<ToolField> = [
-    { value: path, category: 'meta', display: 'header' },
-    { name: 'written', value: `${lineCount}lines`, category: 'meta', display: 'header' },
+  return [
+    { value: path, defaultRedacted: false, category: 'meta', verbatim: true },
+    { name: 'written', value: `${lineCount}lines`, defaultRedacted: false, category: 'meta', verbatim: true },
   ];
-  if (result) {
-    fields.push(defaultResultField(result));
-  }
-  return fields;
 }
 
 function extractBashTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
   const command = String(input.command || '').trim();
   const desc = input.description ? String(input.description) : undefined;
-  const fields: Array<ToolField> = [{ name: 'command', value: command, category: 'input', display: 'auto' }];
+  const fields: Array<ToolField> = [{ name: 'command', value: command, defaultRedacted: false, category: 'input' }];
   if (desc) {
-    fields.push({ name: 'description', value: desc, category: 'input', display: 'auto' });
+    fields.push({ name: 'description', value: desc, defaultRedacted: false, category: 'input' });
   }
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, false));
   }
   return fields;
 }
@@ -567,33 +542,33 @@ function extractBashTool(input: Record<string, unknown>, result?: ToolResultInfo
 function extractGrepTool(input: Record<string, unknown>, result?: ToolResultInfo, cwd?: string): Array<ToolField> {
   const pattern = String(input.pattern || '');
   const path = input.path ? shortenPath(String(input.path), cwd) : undefined;
-  const fields: Array<ToolField> = [{ name: 'pattern', value: pattern, category: 'input', display: 'auto' }];
+  const fields: Array<ToolField> = [{ name: 'pattern', value: pattern, defaultRedacted: false, category: 'input' }];
   if (path) {
-    fields.push({ value: path, category: 'meta', display: 'header' });
+    fields.push({ value: path, defaultRedacted: false, category: 'meta', verbatim: true });
   }
   if (input.output_mode) {
-    fields.push({ name: 'output_mode', value: String(input.output_mode), category: 'meta', display: 'header' });
+    fields.push({ name: 'output_mode', value: String(input.output_mode), defaultRedacted: false, category: 'meta', verbatim: true });
   }
   if (input.glob) {
-    fields.push({ name: 'glob', value: String(input.glob), category: 'input', display: 'auto' });
+    fields.push({ name: 'glob', value: String(input.glob), defaultRedacted: false, category: 'input' });
   }
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, true));
   }
   return fields;
 }
 
 function extractGlobTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
   const pattern = String(input.pattern || '');
-  const fields: Array<ToolField> = [{ name: 'pattern', value: pattern, category: 'input', display: 'auto' }];
+  const fields: Array<ToolField> = [{ name: 'pattern', value: pattern, defaultRedacted: false, category: 'input' }];
   if (result) {
     const files = result.content.split('\n').filter((l) => l.trim()).length;
     fields.push({
       name: 'result',
       value: result.content,
-      summary: `${files}files`,
+      redactedForm: `result=${files}files`,
+      defaultRedacted: true,
       category: 'result',
-      display: 'auto',
     });
   }
   return fields;
@@ -605,21 +580,20 @@ function extractTaskTool(input: Record<string, unknown>, result?: ToolResultInfo
   const subagentType = input.subagent_type ? String(input.subagent_type) : undefined;
   const fields: Array<ToolField> = [];
   if (subagentType) {
-    fields.push({ value: subagentType, category: 'meta', display: 'header' });
+    fields.push({ value: subagentType, defaultRedacted: false, category: 'meta', verbatim: true });
   }
   if (result?.agentId) {
-    fields.push({ value: `session=agent-${result.agentId}`, category: 'meta', display: 'header' });
+    fields.push({ value: `session=agent-${result.agentId}`, defaultRedacted: false, category: 'meta', verbatim: true });
   }
-  fields.push({ name: 'description', value: desc, category: 'input', display: 'auto' });
+  fields.push({ name: 'description', value: desc, defaultRedacted: false, category: 'input' });
   fields.push({
     name: 'prompt',
     value: prompt,
-    summary: formatFieldValue(prompt),
+    defaultRedacted: true,
     category: 'input',
-    display: 'body',
   });
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, true));
   }
   return fields;
 }
@@ -640,9 +614,9 @@ function extractTodoWriteTool(input: Record<string, unknown>): Array<ToolField> 
     {
       name: 'todos',
       value: content || `${todos.length} items`,
-      summary: String(todos.length),
+      redactedForm: `todos=${todos.length}`,
+      defaultRedacted: true,
       category: 'input',
-      display: 'body',
     },
   ];
 }
@@ -664,13 +638,13 @@ function extractAskUserQuestionTool(input: Record<string, unknown>, result?: Too
     {
       name: 'questions',
       value: content || `${questions.length} questions`,
-      summary: String(questions.length),
+      redactedForm: `questions=${questions.length}`,
+      defaultRedacted: true,
       category: 'input',
-      display: 'body',
     },
   ];
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, false));
   }
   return fields;
 }
@@ -682,27 +656,26 @@ function extractExitPlanModeTool(input: Record<string, unknown>): Array<ToolFiel
     {
       name: 'plan',
       value: plan,
-      summary: formatWordCount(plan),
+      defaultRedacted: true,
       category: 'input',
-      display: 'body',
     },
   ];
 }
 
 function extractWebFetchTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
   const url = String(input.url || '');
-  const fields: Array<ToolField> = [{ name: 'url', value: url, category: 'input', display: 'header' }];
+  const fields: Array<ToolField> = [{ name: 'url', value: url, defaultRedacted: false, category: 'input', verbatim: true }];
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, true));
   }
   return fields;
 }
 
 function extractWebSearchTool(input: Record<string, unknown>, result?: ToolResultInfo): Array<ToolField> {
   const query = String(input.query || '');
-  const fields: Array<ToolField> = [{ name: 'query', value: query, category: 'input', display: 'auto' }];
+  const fields: Array<ToolField> = [{ name: 'query', value: query, defaultRedacted: false, category: 'input' }];
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, true));
   }
   return fields;
 }
@@ -713,12 +686,12 @@ function extractGenericTool(input: Record<string, unknown>, result?: ToolResultI
   for (const [key, value] of Object.entries(input)) {
     if (value === null || value === undefined) continue;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
-    fields.push({ name: key, value: str, category: 'input', display: 'auto' });
+    fields.push({ name: key, value: str, defaultRedacted: false, category: 'input' });
     count++;
     if (count >= 5) break;
   }
   if (result) {
-    fields.push(defaultResultField(result));
+    fields.push(defaultResultField(result, true));
   }
   return fields;
 }
@@ -734,16 +707,17 @@ interface FormattedText {
   blockSuffix: string;
 }
 
+const EMPTY_FORMATTED: FormattedText = { isEmpty: true, isMultiline: false, inline: '', blockContent: '', blockPrefix: '', blockSuffix: '' };
+
 function formatToolText(text: string, truncation?: TruncationStrategy): FormattedText {
   if (truncation?.type === 'wordLimit') {
     const { content, prefix, suffix, isEmpty } = truncateContent(text, truncation.limit, truncation.skip ?? 0);
-    if (isEmpty) {
-      return { isEmpty: true, isMultiline: false, inline: '', blockContent: '', blockPrefix: '', blockSuffix: '' };
-    }
+    if (isEmpty) return EMPTY_FORMATTED;
 
     const isMultiline = content.includes('\n');
     const escaped = escapeQuotes(content);
-    const inline = prefix || suffix ? `${prefix}"${escaped}"${suffix}` : `"${escaped}"`;
+    const needsQuotes = !!prefix || !!suffix || content.includes(' ') || content.includes('|');
+    const inline = needsQuotes ? `${prefix}"${escaped}"${suffix}` : content;
 
     return {
       isEmpty: false,
@@ -758,9 +732,7 @@ function formatToolText(text: string, truncation?: TruncationStrategy): Formatte
   if (truncation?.type === 'matchContext') {
     const matchPositions = findMatchPositions(text, truncation.pattern);
     const contextOutput = formatMatchesWithContext(text, matchPositions, truncation.contextWords);
-    if (!contextOutput) {
-      return { isEmpty: true, isMultiline: false, inline: '', blockContent: '', blockPrefix: '', blockSuffix: '' };
-    }
+    if (!contextOutput) return EMPTY_FORMATTED;
 
     const isMultiline = contextOutput.includes('\n');
     return {
@@ -778,7 +750,7 @@ function formatToolText(text: string, truncation?: TruncationStrategy): Formatte
   return {
     isEmpty: false,
     isMultiline,
-    inline: `"${escapeQuotes(firstLine)}"`,
+    inline: firstLine.includes(' ') || firstLine.includes('|') ? `"${escapeQuotes(firstLine)}"` : firstLine,
     blockContent: text,
     blockPrefix: '',
     blockSuffix: '',
@@ -968,19 +940,19 @@ function collectWordCountsFromBlocks(
     if (selectFilter && !selectFilter.includes(getBlockTypeForFilter(block))) continue;
 
     if (block.type === 'tool') {
-      // Count tool input values (typically short — commands, paths, queries).
-      // Tool results are NOT counted: they're collapsed to summaries in truncated mode,
-      // so including them would make the word limit far too tight.
-      const inputRedacted = fieldFilter?.isRedacted(`tool:${block.toolName}:input`) ?? false;
-      if (!inputRedacted) {
-        for (const value of Object.values(block.toolInput)) {
-          if (typeof value === 'string') {
-            const words = countWords(value);
-            const afterSkip = Math.max(0, words - skipWords);
-            if (afterSkip > 0) {
-              counts.push(afterSkip);
-            }
-          }
+      // Run the extractor and count words for expanded (non-redacted) fields
+      const extractor = getToolExtractor(block.toolName);
+      const resultInfo = block.toolResult ? { content: block.toolResult, agentId: block.agentId } : undefined;
+      const fields = extractor(block.toolInput, resultInfo);
+
+      for (const field of fields) {
+        if (isFieldRedacted(block.toolName, field, fieldFilter)) continue;
+        if (field.verbatim) continue;
+
+        const words = countWords(field.value);
+        const afterSkip = Math.max(0, words - skipWords);
+        if (afterSkip > 0) {
+          counts.push(afterSkip);
         }
       }
     } else {

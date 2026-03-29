@@ -29,8 +29,6 @@ interface FieldRule {
   specificity: number;
 }
 
-export const READ_DEFAULT_SHOWN = new Set(['user', 'assistant', 'thinking', 'tool', 'system', 'summary']);
-
 export const SEARCH_DEFAULT_FIELDS = new Set(['user', 'assistant', 'thinking', 'tool:input', 'system', 'summary']);
 
 export class ReadFieldFilter {
@@ -54,14 +52,17 @@ export class ReadFieldFilter {
     });
   }
 
-  /** Returns true when the field should be collapsed to a summary/word count. */
-  isRedacted(field: string): boolean {
+  /** Returns true when the field should be collapsed to a word count / redactedForm. */
+  isRedacted(field: string, defaultRedacted?: boolean): boolean {
     for (const rule of this.rules) {
       if (matches(rule.field, field)) {
         return rule.action === 'redact';
       }
     }
-    return !this.isDefaultShown(field);
+    if (defaultRedacted !== undefined) return defaultRedacted;
+    // Non-tool block types (user, assistant, thinking, system, summary) are shown by default.
+    // Tool fields always provide defaultRedacted, so this fallback only applies to block types.
+    return false;
   }
 
   /** Returns true only when an explicit --expand rule matches. Defaults don't count. */
@@ -70,13 +71,6 @@ export class ReadFieldFilter {
       if (matches(rule.field, field)) {
         return rule.action === 'expand';
       }
-    }
-    return false;
-  }
-
-  private isDefaultShown(field: string): boolean {
-    for (const def of READ_DEFAULT_SHOWN) {
-      if (matches(def, field)) return true;
     }
     return false;
   }

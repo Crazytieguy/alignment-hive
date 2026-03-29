@@ -4,57 +4,9 @@
 2|03:13|thinking
 3|03:13|assistant
   Let me check WorkOS's status page.
-4|03:13|tool|ToolSearch|query="WebSearch"|max_results="1"
-5|03:13|tool|WebSearch|query="WorkOS status page availability issues March 2026"
-[result]
-  Web search results for query: "WorkOS status page availability issues March 2026"
-
-  Links: [{"title":"WorkOS Status","url":"https://status.workos.com/"},{"title":"WorkOS Status. Check if WorkOS is down or having an outage. | StatusGator","url":"https://statusgator.com/services/workos"},{"title":"Is WorkOS Down? Live Status, Outages & Alerts | IsDown","url":"https://isdown.app/status/workos"},{"title":"WorkOS AuthKit Status. Check if WorkOS AuthKit is down or having an outage. | StatusGator","url":"https://statusgator.com/services/workos/authkit"},{"title":"WorkOS Status: check for WorkOS outages and issues - StatusSight","url":"https://statussight.com/status/workos"},{"title":"Is WorkOS Dashboard Down? Live Status, Outages & Alerts | IsDown","url":"https://isdown.app/status/workos/dashboard"},{"title":"WorkOS Status - Incident History","url":"https://status.workos.com/history"},{"title":"WorkOS Down? WorkOS status and reported issues.","url":"https://www.saashub.com/workos-status"},{"title":"Is WorkOS down? WorkOS Outage current WorkOS status","url":"https://www.pagerly.io/is-it-down/workos-status"},{"title":"WorkOS Status. Check if WorkOS is down or having issues. | EagleStatus","url":"https://eaglestatus.io/services/workos"}]
-
-  Based on the search results, here's what I found regarding WorkOS status page availability issues in March 2026:
-
-  ## Recent Incident
-
-  On March 17, 2026, WorkOS experienced elevated API errors. The incident began at 11:28 EDT during investigation and was resolved by 12:57 EDT as services returned to normal operation.
-
-  ## Current Status
-
-  As of March 18, 2026, no incidents have been reported. WorkOS was confirmed to be operational on March 18, 2026 at 5:51 PM UTC, and there have been no user-submitted reports of outages in the past 24 hours.
-
-  ## Summary
-
-  The primary availability issue reported for WorkOS in March 2026 was the March 17th incident involving elevated API errors and latency, which was relatively short-lived and has since been resolved. The service has been stable since then.
-
-
-  REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
-6|03:13|tool|WebSearch|query="WorkOS magic link email delay slow 2026"
-[result]
-  Web search results for query: "WorkOS magic link email delay slow 2026"
-
-  Links: [{"title":"Magic Link – WorkOS Docs","url":"https://workos.com/docs/magic-link"},{"title":"How do magic links work and why should you use them? — WorkOS","url":"https://workos.com/blog/a-guide-to-magic-links"},{"title":"Email delivery – WorkOS Docs","url":"https://workos.com/docs/email"},{"title":"Magic Auth – AuthKit – WorkOS Docs","url":"https://workos.com/docs/authkit/magic-auth"},{"title":"Magic link Emails, Verification emails Fail Randomly and Throw Errors · nhost/nhost · Discussion #2740","url":"https://github.com/nhost/nhost/discussions/2740"},{"title":"Launch Checklist – Magic Link – WorkOS Docs","url":"https://workos.com/docs/magic-link/launch-checklist"},{"title":"Introducing WorkOS: Add SSO, Magic Auth, or Social Auth in Minutes ⚡️","url":"https://madza.hashnode.dev/introducing-workos-add-sso-magic-auth-or-social-auth-in-minutes"},{"title":"The beginner’s guide to magic links | Postmark","url":"https://postmarkapp.com/blog/magic-links"},{"title":"Example Apps – Magic Link – WorkOS Docs","url":"https://workos.com/docs/magic-link/example-apps"},{"title":"Email Magic Link Authentication Not Working anymore · outline/outline · Discussion #6996","url":"https://github.com/outline/outline/discussions/6996"}]
-
-  Based on the search results, here's what I found regarding WorkOS magic link email delivery:
-
-  ## WorkOS Magic Link Email Delays
-
-  Emails might be delayed when Enhanced Pre-delivery Message Scanning is enabled on a Google workspace or when a similar feature is enabled with other email providers.
-
-  ## General Email Delivery Factors
-
-  If issues exist for all users, it's most likely a matter of poor domain reputation. If the issue only exists for a subset of users, it may be because of specific settings used by an email provider or the IT department at a given organization.
-
-  ## WorkOS Recommendations
-
-  WorkOS follows industry best practices when sending email, with SPF and DKIM email authentication records configured automatically, email content continually refined to ensure it passes spam filters, and delivery of every email actively monitored.
-
-  ## Known Issues with Magic Links
-
-  It's worth noting that Magic Link is not recommended due to issues with email clients or other security software visiting the links and invalidating them. Instead, use Magic Auth, which provides a more secure passwordless authentication method.
-
-  If you're experiencing specific delays with WorkOS magic link emails in 2026, the documentation suggests checking your domain reputation and email provider settings, or contacting WorkOS support directly for assistance.
-
-
-  REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+4|03:13|tool|ToolSearch|query=WebSearch|max_results=1
+5|03:13|tool|WebSearch|query="WorkOS status page availability issues March 2026"|result=243words
+6|03:13|tool|WebSearch|query="WorkOS magic link email delay slow 2026"|result=320words
 7|03:14|thinking
 8|03:14|assistant
   No current WorkOS outages. The last incident was March 17 (elevated API errors, resolved within ~90 minutes). Service has been stable since.
@@ -88,52 +40,9 @@
   Want me to look at the WorkOS email delivery docs for specifics on setting up a custom email domain?
 12|03:15|user
   Will I be able to set up a custom email domain if I own alignment-hive.com through vercel and I'm on the free workos plan?
-13|03:15|tool|ToolSearch|query="select:WebFetch"|max_results="1"
-14|03:15|tool|WebFetch|url=https://workos.com/docs/email
-[result]
-  # Custom Email Domain Setup
-
-  Based on the provided documentation, here's what's required:
-
-  ## DNS Records Needed
-
-  To configure your own email domain with WorkOS, you need to set up **three CNAME records**:
-
-  1. One to "verify ownership of the domain"
-  2. Two additional records to "automatically configure SPF and DKIM email authentication using SendGrid's automated security feature"
-
-  The documentation also recommends setting up a **DMARC DNS TXT record** for additional authentication protection.
-
-  ## Additional Setup Steps
-
-  - Create inboxes for both `welcome@<your domain>` and `access@<your domain>` addresses
-  - Configure DMARC with your domain provider (required by Google, Apple, and Yahoo guidelines)
-
-  ## Plan Availability & Domain Provider Details
-
-  The documentation does **not specify** whether custom email domains are available on free plans, nor does it mention Vercel or provide domain provider-specific integration details.
-
-  For complete configuration instructions and plan eligibility, you would need to consult the WorkOS dashboard or contact their support team, as those details aren't covered in this content.
-15|03:15|tool|WebSearch|query="WorkOS custom email domain free plan pricing requirements 2026"
-[result]
-  Web search results for query: "WorkOS custom email domain free plan pricing requirements 2026"
-
-  Links: [{"title":"WorkOS Pricing 2026","url":"https://www.g2.com/products/workos/pricing"},{"title":"Email Domain – Custom Domains – WorkOS Docs","url":"https://workos.com/docs/custom-domains/email"},{"title":"Pricing — WorkOS","url":"https://workos.com/pricing"},{"title":"Custom Domains – WorkOS Docs","url":"https://workos.com/docs/custom-domains"},{"title":"WorkOS Pricing Calculator (2026) | BuildMVPFast","url":"https://www.buildmvpfast.com/tools/api-pricing-estimator/workos"},{"title":"WorkOS Review 2025: Features, Pricing, and Alternatives","url":"https://www.infisign.ai/reviews/workos"},{"title":"Bring your own email provider to WorkOS — WorkOS","url":"https://workos.com/blog/custom-email-providers"},{"title":"Email delivery – WorkOS Docs","url":"https://workos.com/docs/email"},{"title":"Custom Emails – AuthKit – WorkOS Docs","url":"https://workos.com/docs/user-management/custom-emails"},{"title":"I'm not a huge fan of all the VC stuff, but Clerk gets kind of a bad rap. I get ... | Hacker News","url":"https://news.ycombinator.com/item?id=41927236"}]
-
-  Based on the search results, here's what I found about WorkOS custom email domain pricing and free plan requirements in 2026:
-
-  ## Custom Email Domain Pricing
-
-  Using custom domains with CNAMEs for AuthKit, the Admin Portal, and transactional emails incurs a flat fee of $99 per month. Using the default WorkOS domains is free.
-
-  ## Free Plan Details
-
-  WorkOS User Management is free for up to 1 million monthly active users. Custom branding and custom domains can be applied for an additional monthly fee.
-
-  The key point is that while the base User Management product is free at 1M MAUs, **custom email domains are not included in the free plan** — they require a separate $99/month charge. This means if you want to use a custom email domain from your free plan, you'll need to pay this additional monthly fee.
-
-
-  REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+13|03:15|tool|ToolSearch|query=select:WebFetch|max_results=1
+14|03:15|tool|WebFetch|url=https://workos.com/docs/email|result=162words
+15|03:15|tool|WebSearch|query="WorkOS custom email domain free plan pricing requirements 2026"|result=239words
 16|03:16|assistant
   Custom email domains on WorkOS cost **$99/month** on top of any plan — they're not included in the free tier.
 

@@ -17,9 +17,9 @@
 6|20:28|assistant
   Let me try out the deno-sandbox with a few basic tests.
 
-7|20:28|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=57lines|result="File created successfully at: /Users/yoav/projects/alignment-hive/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts"
+7|20:28|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=57lines
 
-8|20:28|tool|Bash|command="deno-sandbox"|description="Run deno sandbox test script"
+8|20:28|tool|Bash|command=deno-sandbox|description="Run deno sandbox test script"
 [result]
   Hello from Deno sandbox!
   Fibonacci(10) = 55
@@ -45,7 +45,7 @@
 
   Now let me test stdin piping and npm imports.
 
-10|20:29|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=15lines|result="The file /Users/yoav/projects/alignment-hive/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts has been updated successfully."
+10|20:29|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=15lines
 
 11|20:29|tool|Bash|description="Test stdin piping with CSV parsing via npm import"
 [command]
@@ -77,9 +77,9 @@
 12|20:29|assistant
   Stdin piping and npm imports both work. Now let me test a few more things — reading files outside cwd and using Deno standard library.
 
-13|20:29|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=53lines|result="The file /Users/yoav/projects/alignment-hive/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts has been updated successfully."
+13|20:29|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=53lines
 
-14|20:29|tool|Bash|command="deno-sandbox"|description="Test file access boundaries, web APIs, crypto"
+14|20:29|tool|Bash|command=deno-sandbox|description="Test file access boundaries, web APIs, crypto"
 [result]
   Read outside cwd correctly blocked: NotCapable
 
@@ -133,9 +133,9 @@
     --allow-write=/tmp/deno-test
     --allow-net=example.com
 
-21|20:31|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=41lines|result="The file /Users/yoav/projects/alignment-hive/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts has been updated successfully."
+21|20:31|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=41lines
 
-22|20:31|tool|Bash|command="deno-sandbox"|description="Test granted permissions (write + net)"
+22|20:31|tool|Bash|command=deno-sandbox|description="Test granted permissions (write + net)"
 [result]
   Write failed: Requires read access to "/tmp/deno-test/hello.txt", run again with the --allow-read flag
   Write to non-granted path blocked: NotCapable
@@ -153,9 +153,9 @@
   Granted for this session:
     --allow-read=/tmp/deno-test
 
-25|20:31|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=12lines|result="The file /Users/yoav/projects/alignment-hive/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts has been updated successfully."
+25|20:31|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=12lines
 
-26|20:31|tool|Bash|command="deno-sandbox"|description="Test write+read with both permissions granted"
+26|20:31|tool|Bash|command=deno-sandbox|description="Test write+read with both permissions granted"
 [result]
   Write + read back: "Written from sandbox!"
   Cleanup done
@@ -163,9 +163,9 @@
 27|20:31|assistant
   Permission grants working correctly. Now let me enter a worktree and test there.
 
-28|20:31|tool|ToolSearch|query="select:EnterWorktree"|max_results="1"
+28|20:31|tool|ToolSearch|query=select:EnterWorktree|max_results=1
 
-29|20:31|tool|EnterWorktree|name="deno-sandbox-test"|result="Created worktree at /Users/yoav/projects/alignment-hive/.claude/worktrees/deno-sandbox-test on branch worktree-deno-sandbox-test. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
+29|20:31|tool|EnterWorktree|name=deno-sandbox-test|result=27words
 
 30|20:32|assistant
   Now in the worktree. Let me check the sandbox script path and try running it.
@@ -183,24 +183,11 @@
 32|20:32|assistant
   The sandbox script file exists in the worktree (it was committed or copied). But it has the old content. Let me write a fresh test and run `deno-sandbox`.
 
-33|20:32|tool|Write|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=43lines|result="<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
+33|20:32|tool|Write|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=43lines
 
-34|20:32|tool|Read|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts
-[result]
-       1→// Re-test with both read+write to /tmp/deno-test
-       2→await Deno.mkdir("/tmp/deno-test", { recursive: true });
-       3→await Deno.writeTextFile("/tmp/deno-test/hello.txt", "Written from sandbox!");
-       4→const readBack = await Deno.readTextFile("/tmp/deno-test/hello.txt");
-       5→console.log(`Write + read back: "${readBack}"`);
-       6→
-       7→// Cleanup
-       8→await Deno.remove("/tmp/deno-test", { recursive: true });
-       9→console.log("Cleanup done");
-      10→
-      11→export {};
-      12→
+34|20:32|tool|Read|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|result=43words
 
-35|20:32|tool|Write|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=43lines|result="The file /Users/yoav/projects/alignment-hive/.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts has been updated successfully."
+35|20:32|tool|Write|.claude/worktrees/deno-sandbox-test/.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=43lines
 
 36|20:34|user
   Just noting that this gave me a permission request. Carry on
@@ -210,7 +197,7 @@
 
   Good to know — that's probably the worktree plugin cache permission bug you've seen before. Let me run it.
 
-38|20:34|tool|Bash|command="deno-sandbox"|description="Run deno sandbox tests from worktree"
+38|20:34|tool|Bash|command=deno-sandbox|description="Run deno sandbox tests from worktree"
 [result]
   === Running in worktree ===
   Deno.cwd(): /Users/yoav/projects/alignment-hive/.claude/worktrees/deno-sandbox-test
@@ -235,9 +222,9 @@
 
   So the sandbox correctly re-scopes the default `--allow-read=.` to the worktree directory, and previously granted permissions persist across the worktree switch. Let me exit the worktree.
 
-40|20:34|tool|ToolSearch|query="select:ExitWorktree"|max_results="1"
+40|20:34|tool|ToolSearch|query=select:ExitWorktree|max_results=1
 
-41|20:34|tool|ExitWorktree|action="remove"|discard_changes="true"|result="Exited and removed worktree at /Users/yoav/projects/alignment-hive/.claude/worktrees/deno-sandbox-test. Session is now back in /Users/yoav/projects/alignment-hive."
+41|20:34|tool|ExitWorktree|action=remove|discard_changes=true|result=12words
 
 42|20:35|assistant
   Here's the full test summary:
@@ -274,21 +261,7 @@
 46|20:35|assistant
   I was referencing a memory I have about a worktree permission bug. Let me check if it actually applies here.
 
-47|20:35|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/memory/project_worktree_permission_bug.md
-[result]
-  <system-reminder>This memory is 2 days old. Memories are point-in-time observations, not live state — claims about code behavior or file:line citations may be outdated. Verify against current code before asserting as fact.</system-reminder>
-       1→---
-       2→name: worktree_permission_bug
-       3→description: Reading files from plugin cache in a worktree triggers unexpected permission requests — possible Claude Code bug to file
-       4→type: project
-       5→---
-       6→
-       7→Reading a file from the plugin cache (`~/.claude/plugins/cache/...`) while in a worktree triggered an unexpected permission request. May be a Claude Code bug.
-       8→
-       9→**Why:** Shouldn't need permission to read plugin skill reference files.
-      10→
-      11→**How to apply:** Check if there's an existing Claude Code issue for this at https://github.com/anthropics/claude-code/issues, and file one if not.
-      12→
+47|20:35|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/memory/project_worktree_permission_bug.md|result=115words
 
 48|20:35|assistant
   That memory is about reading **plugin cache files** triggering a permission request in worktrees. What you saw here was a permission request when I **wrote to the sandbox script file** in the worktree. Those are different things — I shouldn't have conflated them. My bad.
