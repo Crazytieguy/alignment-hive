@@ -6,15 +6,16 @@ set -euo pipefail
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'HELP'
 deno-sandbox — Run JS/TS in a sandboxed Deno environment.
-Reads code from .claude/deno-sandbox/$DENO_SANDBOX_SESSION_ID.ts
-(written by Claude via the Write tool). Stdin is free for data piping.
 
 Usage:
   # First, write code to the sandbox script file, then:
-  deno-sandbox
+  deno-sandbox path/to/script.ts
 
   # With stdin data:
-  cat data.csv | deno-sandbox
+  cat data.csv | deno-sandbox path/to/script.ts
+
+The script path can be absolute or relative (resolved to absolute).
+Must be under .claude/deno-sandbox/ in the project directory.
 
 Default: read-only access to current directory.
 Use deno-sandbox-grant to add permissions for the session.
@@ -29,14 +30,10 @@ if ! command -v deno >/dev/null 2>&1; then
   exit 1
 fi
 
-# Validate session ID
-sid="${DENO_SANDBOX_SESSION_ID:-}"
-if [ -z "$sid" ]; then
-  echo "error: sandbox is not available for this session." >&2
-  exit 1
-fi
-if [[ "$sid" =~ [/\\] ]]; then
-  echo "error: invalid session ID" >&2
+# Require a script path argument
+if [ $# -eq 0 ]; then
+  echo "error: missing script path argument." >&2
+  echo "Usage: deno-sandbox path/to/script.ts" >&2
   exit 1
 fi
 
@@ -45,11 +42,33 @@ if [ -z "$PROJECT_DIR" ]; then
   echo "error: sandbox is not configured for this session." >&2
   exit 1
 fi
-SCRIPT_FILE="$PROJECT_DIR/.claude/deno-sandbox/$sid.ts"
+SANDBOX_DIR="$PROJECT_DIR/.claude/deno-sandbox"
 
-if [ ! -f "$SCRIPT_FILE" ]; then
-  echo "error: no script found at $SCRIPT_FILE" >&2
+# Resolve the script path (realpath also confirms the file exists)
+SCRIPT_FILE=$(realpath "$1" 2>/dev/null) || {
+  echo "error: script not found: $1" >&2
   echo "Write your code to this file first, then run deno-sandbox." >&2
+  exit 1
+}
+
+# Validate resolved path is under the sandbox directory
+if [[ "$SCRIPT_FILE" != "$SANDBOX_DIR/"* ]]; then
+  echo "error: script must be under $SANDBOX_DIR/" >&2
+  exit 1
+fi
+if [[ "$SCRIPT_FILE" != *.ts ]]; then
+  echo "error: script must be a .ts file" >&2
+  exit 1
+fi
+
+# Read session ID for grant state file
+sid="${DENO_SANDBOX_SESSION_ID:-}"
+if [ -z "$sid" ]; then
+  echo "error: sandbox is not available for this session." >&2
+  exit 1
+fi
+if [[ "$sid" =~ [/\\] ]]; then
+  echo "error: invalid session ID" >&2
   exit 1
 fi
 

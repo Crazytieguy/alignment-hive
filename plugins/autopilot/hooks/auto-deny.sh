@@ -9,15 +9,8 @@ mkdir -p "$(dirname "$LOG_FILE")"
 trap 'echo "$0: line $LINENO: unexpected error" >> "$LOG_FILE" 2>/dev/null; echo "{\"systemMessage\":\"\u001b[1;32mautopilot:\u001b[0m hook error, autonomous mode disabled, see '$LOG_FILE'\"}"' ERR
 set -euo pipefail
 
-# Find jq: prefer global, fall back to bootstrapped
-if command -v jq >/dev/null 2>&1; then
-  JQ="jq"
-elif [ -x "$HOME/.cache/autopilot/jq" ]; then
-  JQ="$HOME/.cache/autopilot/jq"
-else
-  # No jq available — can't safely parse input, let normal prompt through
-  exit 0
-fi
+# shellcheck source=../scripts/find-jq.sh
+source "${CLAUDE_PLUGIN_ROOT}/scripts/find-jq.sh" || exit 0
 
 # Extract everything we need in a single jq call
 # Use .cwd from hook input (not $CLAUDE_PROJECT_DIR) — .cwd tracks the actual
@@ -45,8 +38,8 @@ if [ "$has_session_dest" -gt 0 ] && [ "$session_in_cwd" != "true" ]; then
   exit 0
 fi
 
-# Let deno-sandbox-grant through so the user can approve/deny
-if [[ "${rule_content%% *}" == "deno-sandbox-grant" ]]; then
+# Let deno-sandbox and deno-sandbox-grant through (sandbox-permissions.sh validates paths)
+if [[ "${rule_content%% *}" == "deno-sandbox-grant" ]] || [[ "${rule_content%% *}" == "deno-sandbox" ]]; then
   exit 0
 fi
 
