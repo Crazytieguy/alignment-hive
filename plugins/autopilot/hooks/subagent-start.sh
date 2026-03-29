@@ -28,24 +28,25 @@ if [ -z "$session_id" ] || [ -z "$agent_id" ]; then
   exit 0
 fi
 
-# Validate agent_id for safe filename characters
-if [[ "$agent_id" =~ [/\\] ]]; then
+# Validate agent_id: only alphanumeric and hyphens (UUIDs)
+if [[ ! "$agent_id" =~ ^[a-zA-Z0-9-]+$ ]]; then
   exit 0
 fi
 
 # Register agent ID for permission validation
-registry_dir="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions"
-mkdir -p "$registry_dir"
-registry_file="$registry_dir/$session_id.agents"
+data_dir="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions"
+mkdir -p "$data_dir"
+registry_file="$data_dir/$session_id.agents"
 if ! grep -qxF -- "$agent_id" "$registry_file" 2>/dev/null; then
   echo "$agent_id" >> "$registry_file"
 fi
 
-# Emit sandbox instructions
+# Emit sandbox instructions (with already-granted permissions from session)
 SANDBOX_DIR="$CLAUDE_PROJECT_DIR/.claude/deno-sandbox"
 sandbox_script="$SANDBOX_DIR/$agent_id.ts"
+grants_file="$data_dir/$session_id"
 # shellcheck source=../scripts/sandbox-instructions.sh
-additional_context=$(source "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-instructions.sh" "$sandbox_script" "$SANDBOX_DIR")
+additional_context=$(source "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-instructions.sh" "$sandbox_script" "$SANDBOX_DIR" "$grants_file")
 
 "$JQ" -n --arg ctx "$additional_context" '{
   hookSpecificOutput: {

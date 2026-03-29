@@ -38,7 +38,7 @@ if [ "$has_session_dest" -gt 0 ] && [ "$session_in_cwd" != "true" ]; then
   exit 0
 fi
 
-# Let deno-sandbox and deno-sandbox-grant through (sandbox-permissions.sh validates paths)
+# Let deno-sandbox and deno-sandbox-grant through (allowed via settings, validated at runtime)
 if [[ "${rule_content%% *}" == "deno-sandbox-grant" ]] || [[ "${rule_content%% *}" == "deno-sandbox" ]]; then
   exit 0
 fi

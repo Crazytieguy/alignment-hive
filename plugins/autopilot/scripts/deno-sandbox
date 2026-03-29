@@ -47,7 +47,6 @@ SANDBOX_DIR="$PROJECT_DIR/.claude/deno-sandbox"
 # Resolve the script path (realpath also confirms the file exists)
 SCRIPT_FILE=$(realpath "$1" 2>/dev/null) || {
   echo "error: script not found: $1" >&2
-  echo "Write your code to this file first, then run deno-sandbox." >&2
   exit 1
 }
 
@@ -77,7 +76,7 @@ FLAGS=(--allow-read=.)
 #   1. Relative (protects cwd)
 #   2. DENO_SANDBOX_PROJECT_DIR (protects the directory the session was started in)
 #   3. git toplevel (protects the repo root for the current cwd, if in a git repo)
-DENY_WRITE=(.claude .git "$PROJECT_DIR/.claude" "$PROJECT_DIR/.git" "$HOME/.claude" "$HOME/.deno" "${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}")
+DENY_WRITE=(.claude .git "$PROJECT_DIR/.claude" "$PROJECT_DIR/.git" "$HOME/.claude" "$HOME/.deno" "${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}")
 git_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [ -n "$git_toplevel" ] && [ "$git_toplevel" != "$PROJECT_DIR" ]; then
   DENY_WRITE+=("$git_toplevel/.claude" "$git_toplevel/.git")
@@ -85,7 +84,7 @@ fi
 
 # Merge same-type grants (Deno rejects duplicate flag types)
 grant_read="" grant_write="" grant_run="" grant_net="" grant_env="" grant_import=""
-STATE_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/$sid"
+STATE_FILE="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions/$sid"
 if [ -f "$STATE_FILE" ]; then
   while IFS= read -r flag; do
     if [[ "$flag" =~ ^--allow-(read|write|run|net|env|import)=(.+)$ ]]; then

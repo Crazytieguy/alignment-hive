@@ -3,9 +3,11 @@ set -euo pipefail
 
 # Auto-allow:
 # 1. deno-sandbox-grant help/no-args (read-only)
-# 2. deno-sandbox with a registered script path (session or agent)
-# 3. Read/Write/Edit to registered sandbox script files
-# 4. Read/Grep/Glob on directories granted via deno-sandbox-grant
+# 2. Read/Write/Edit to registered sandbox script files
+# 3. Read/Grep/Glob on directories granted via deno-sandbox-grant
+#
+# deno-sandbox execution is handled by the Bash(deno-sandbox *) permission rule
+# added during /autopilot:setup — not validated here.
 
 input=$(cat)
 
@@ -40,7 +42,7 @@ load_allowed_basenames() {
   _basenames_loaded=true
   if [ -n "$session_id" ]; then
     allowed_basenames+=("${session_id}.ts")
-    local registry="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/${session_id}.agents"
+    local registry="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions/${session_id}.agents"
     if [ -f "$registry" ]; then
       while IFS= read -r agent_id; do
         [ -n "$agent_id" ] && allowed_basenames+=("${agent_id}.ts")
@@ -63,33 +65,12 @@ is_allowed_script() {
 # --- Bash tool ---
 
 if [ "$tool_name" = "Bash" ]; then
-  # Auto-allow deno-sandbox and deno-sandbox-grant with no args or --help (read-only)
+  # Auto-allow deno-sandbox-grant with no args or --help (read-only)
   case "$bash_command" in
-    deno-sandbox-grant|"deno-sandbox-grant --help"|"deno-sandbox-grant -h"|\
-    "deno-sandbox --help"|"deno-sandbox -h")
+    deno-sandbox-grant|"deno-sandbox-grant --help"|"deno-sandbox-grant -h")
       emit_allow
       exit 0 ;;
   esac
-
-  # Auto-allow deno-sandbox with a registered script path.
-  # Matches: "deno-sandbox <path>" and "<stuff> | deno-sandbox <path>"
-  # Word boundary: require start-of-string or pipe/whitespace before "deno-sandbox"
-  if [[ "$bash_command" =~ (^|[|[:space:]])deno-sandbox[[:space:]]+([^|]+)$ ]]; then
-    script_arg="${BASH_REMATCH[2]}"
-    script_arg="${script_arg#"${script_arg%%[![:space:]]*}"}"
-    script_arg="${script_arg%"${script_arg##*[![:space:]]}"}"
-
-    # Check basename against allowed list. The deno-sandbox script itself
-    # does full path validation (realpath + sandbox dir check) at runtime.
-    script_basename=$(basename "$script_arg")
-    if is_allowed_script "$sandbox_dir/$script_basename"; then
-      emit_allow
-    else
-      emit_deny "Script path is not registered for this session. Use your assigned sandbox script file."
-    fi
-    exit 0
-  fi
-
   exit 0
 fi
 
@@ -129,7 +110,7 @@ if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
 fi
 
 # Load granted read paths from session state
-STATE_FILE="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}/sessions/${session_id}"
+STATE_FILE="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions/${session_id}"
 if [ ! -f "$STATE_FILE" ]; then
   exit 0
 fi

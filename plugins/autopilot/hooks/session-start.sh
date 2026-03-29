@@ -69,6 +69,10 @@ if [ "$sandbox" = "true" ]; then
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     echo "export DENO_SANDBOX_SESSION_ID=\"$session_id\"" >> "$CLAUDE_ENV_FILE"
     echo "export DENO_SANDBOX_PROJECT_DIR=\"$CLAUDE_PROJECT_DIR\"" >> "$CLAUDE_ENV_FILE"
+    # Export the plugin data dir so scripts (deno-sandbox, deno-sandbox-grant) use the
+    # same path as hooks. Without this, scripts fall back to ~/.cache/autopilot while
+    # hooks use the Claude Code-provided CLAUDE_PLUGIN_DATA, causing path mismatches.
+    echo "export AUTOPILOT_DATA_DIR=\"${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}\"" >> "$CLAUDE_ENV_FILE"
     echo "export PATH=\"\$HOME/.deno/bin:${CLAUDE_PLUGIN_ROOT}/scripts:\$PATH\"" >> "$CLAUDE_ENV_FILE"
   fi
 
