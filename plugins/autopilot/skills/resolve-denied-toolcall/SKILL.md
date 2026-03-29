@@ -1,6 +1,6 @@
 ---
 name: resolve-denied-toolcall
-description: This skill should be used when a tool call is denied and simple alternatives haven't worked. Helps find non-obvious permitted paths or propose a new permission rule.
+description: This skill should be used when a tool call is denied in autonomous mode. Guides through checking existing permissions for alternative paths, and if none exist, proposing well-scoped permission rules — without it, denied tool calls tend to either block on user input or cause subtasks to be silently skipped.
 ---
 
 # Resolve Denied Tool Call
