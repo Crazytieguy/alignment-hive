@@ -1,13 +1,12 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
-import { AccessList } from "@/components/consent/access-list";
+import { CollapsibleAccessList } from "@/components/consent/access-list";
 import {
   policySections,
   policyFooter,
-  sectionQuestions,
-  creditQuestionAfter,
   questionConfigs,
   type ConsentQuestion,
   type QuestionConfig,
+  type SectionContent,
 } from "@/components/consent/policy-content";
 import type { ConsentChoices } from "@/routes/_authenticated/consent";
 import { PolicyParagraph } from "@/components/consent/policy-paragraph";
@@ -57,30 +56,27 @@ export default function ConsentWizard({
     | {
         kind: "section";
         section: (typeof policySections)[number];
-        question: QuestionConfig | null;
-        creditQuestion: QuestionConfig | null;
+        questions: QuestionConfig[];
       }
     | { kind: "connect-github" }
     | { kind: "existing-projects" };
 
   const sectionSteps = useMemo(() => {
-    const result: Array<Step> = [];
-    for (const section of policySections) {
-      const qId = sectionQuestions[section.id];
-      const question = qId
-        ? questionConfigs.find((q) => q.id === qId) ?? null
-        : null;
-      const creditQuestion =
-        section.id === creditQuestionAfter
-          ? questionConfigs.find((q) => q.id === "creditByName") ?? null
-          : null;
-      result.push({ kind: "section", section, question, creditQuestion });
-    }
-    return result;
+    return policySections.map((section): Step => {
+      const questions = section.content
+        .filter(
+          (c): c is Extract<SectionContent, { kind: "question" }> =>
+            c.kind === "question",
+        )
+        .map((c) => questionConfigs.find((q) => q.id === c.id))
+        .filter((q): q is QuestionConfig => q != null);
+      return { kind: "section", section, questions };
+    });
   }, []);
 
   const sessionSharingStepIndex = sectionSteps.findIndex(
-    (s) => s.kind === "section" && s.question?.id === "sessionSharing",
+    (s) =>
+      s.kind === "section" && s.questions.some((q) => q.id === "sessionSharing"),
   );
 
   const declinedSharing = choices.sessionSharing === false;
@@ -141,13 +137,8 @@ export default function ConsentWizard({
 
   const canAdvance = useCallback(() => {
     if (!step) return false;
-    if (step.kind === "existing-projects") return true;
-    if (step.kind === "connect-github") return true;
-    const q = step.question;
-    const cq = step.creditQuestion;
-    if (q && choices[q.id] === null) return false;
-    if (cq && choices.sessionSharing && choices[cq.id] === null) return false;
-    return true;
+    if (step.kind !== "section") return true;
+    return step.questions.every((q) => choices[q.id] !== null);
   }, [step, choices]);
 
   const allAnswered =
@@ -281,8 +272,7 @@ function SectionStep({
   step: {
     kind: "section";
     section: (typeof policySections)[number];
-    question: QuestionConfig | null;
-    creditQuestion: QuestionConfig | null;
+    questions: QuestionConfig[];
   };
   currentStep: number;
   isLastStep: boolean;
@@ -303,32 +293,35 @@ function SectionStep({
         </h1>
       )}
 
-      <div className="space-y-4 text-[0.938rem] leading-relaxed text-foreground/90">
-        {step.section.paragraphs.map((p, i) => (
-          <PolicyParagraph key={i} text={p} />
-        ))}
-      </div>
+      {step.section.content.map((item, i) => {
+        const prev = step.section.content[i - 1];
+        if (item.kind === "paragraph") {
+          return (
+            <div
+              key={i}
+              className={cn(
+                "text-[0.938rem] leading-relaxed text-foreground/90",
+                i === 0 ? "" : prev?.kind === "paragraph" ? "mt-4" : "mt-6",
+              )}
+            >
+              <PolicyParagraph text={item.text} />
+            </div>
+          );
+        }
+        const config = step.questions.find((q) => q.id === item.id);
+        if (!config) return null;
+        return (
+          <QuestionBlock
+            key={i}
+            config={config}
+            value={choices[config.id]}
+            onChoice={onChoice}
+          />
+        );
+      })}
 
       {step.section.id === "access" && (
-        <div className="mt-6">
-          <AccessList accessList={accessList} />
-        </div>
-      )}
-
-      {step.question && (
-        <QuestionBlock
-          config={step.question}
-          value={choices[step.question.id]}
-          onChoice={onChoice}
-        />
-      )}
-
-      {step.creditQuestion && choices.sessionSharing && (
-        <QuestionBlock
-          config={step.creditQuestion}
-          value={choices[step.creditQuestion.id]}
-          onChoice={onChoice}
-        />
+        <CollapsibleAccessList accessList={accessList} className="mt-6" />
       )}
 
       {isLastStep && (
@@ -374,7 +367,7 @@ function ConnectGitHubStep() {
             <a href={GITHUB_APP_INSTALL_URL}>Grant repo access</a>
           </Button>
           <p className="text-sm text-muted-foreground">
-            You can also do this later from your project settings.
+            You can also do this later at alignment-hive.com/consent/projects.
           </p>
         </div>
       )}
@@ -486,7 +479,9 @@ function QuestionBlock({
 }) {
   return (
     <div className="mt-6 rounded-lg border-2 border-primary/15 bg-primary/[0.03] px-5 py-4">
-      <p className="font-medium text-sm mb-3">{config.label}</p>
+      {config.label && (
+        <p className="font-medium text-sm mb-3">{config.label}</p>
+      )}
       <div className="grid grid-cols-2 gap-2">
         <button
           type="button"

@@ -5,7 +5,7 @@ import {
   policyFooter,
   type ConsentQuestion,
 } from "@/components/consent/policy-content";
-import { AccessList } from "@/components/consent/access-list";
+import { CollapsibleAccessList } from "@/components/consent/access-list";
 import type { ConsentChoices } from "@/routes/_authenticated/consent";
 import { Button, cn } from "@alignment-hive/ui";
 
@@ -33,6 +33,9 @@ export default function ConsentSummary({
   accessList,
   existingConsent,
 }: ConsentSummaryProps) {
+  const sharingConfig = questionConfigs.find((q) => q.id === "sessionSharing")!;
+  const subConfigs = questionConfigs.filter((q) => q.id !== "sessionSharing");
+
   const allAnswered =
     choices.sessionSharing !== null &&
     (!choices.sessionSharing ||
@@ -89,18 +92,20 @@ export default function ConsentSummary({
 
         {/* Session sharing — always shown */}
         <div className="rounded-lg border p-4">
-          <p className="text-sm font-medium mb-3">{questionConfigs[0].label}</p>
+          {sharingConfig.label && (
+            <p className="text-sm font-medium mb-3">{sharingConfig.label}</p>
+          )}
           <div className="grid grid-cols-2 gap-2">
             <ChoiceButton
-              label={questionConfigs[0].yesLabel}
+              label={sharingConfig.yesLabel}
               selected={choices.sessionSharing === true}
-              onClick={() => onChoice(questionConfigs[0].id, true)}
+              onClick={() => onChoice(sharingConfig.id, true)}
               variant="positive"
             />
             <ChoiceButton
-              label={questionConfigs[0].noLabel}
+              label={sharingConfig.noLabel}
               selected={choices.sessionSharing === false}
-              onClick={() => onChoice(questionConfigs[0].id, false)}
+              onClick={() => onChoice(sharingConfig.id, false)}
               variant="negative"
             />
           </div>
@@ -109,7 +114,7 @@ export default function ConsentSummary({
         {/* Sub-preferences — grouped with left border */}
         {choices.sessionSharing && (
           <div className="mt-4 border-l-2 border-primary/30 pl-4 space-y-3">
-            {questionConfigs.slice(1).map((config) => (
+            {subConfigs.map((config) => (
               <div key={config.id} className="rounded-lg border p-4">
                 <p className="text-sm font-medium mb-3">{config.label}</p>
                 <div className="grid grid-cols-2 gap-2">
@@ -132,9 +137,7 @@ export default function ConsentSummary({
         )}
 
         {/* Access list */}
-        <div className="mt-6">
-          <AccessList accessList={accessList} />
-        </div>
+        <CollapsibleAccessList accessList={accessList} className="mt-6" />
 
         {/* Submit */}
         <div className="mt-8 flex flex-col items-stretch gap-2">

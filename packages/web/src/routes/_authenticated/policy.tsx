@@ -7,7 +7,7 @@ import {
   policyFooter,
 } from "@/components/consent/policy-content";
 import { PolicyParagraph } from "@/components/consent/policy-paragraph";
-import { AccessList } from "@/components/consent/access-list";
+import { CollapsibleAccessList } from "@/components/consent/access-list";
 
 export const Route = createFileRoute("/_authenticated/policy")({
   loader: async ({ context }) => {
@@ -52,15 +52,15 @@ function PolicyPage() {
                 </h2>
               )}
               <div className="space-y-3 text-[0.938rem] leading-relaxed text-foreground/90">
-                {section.paragraphs.map((p, i) => (
-                  <PolicyParagraph key={i} text={p} />
-                ))}
+                {section.content
+                  .filter((c) => c.kind === "paragraph")
+                  .map((c, i) => (
+                    <PolicyParagraph key={i} text={c.policyText ?? c.text} />
+                  ))}
               </div>
 
               {section.id === "access" && (
-                <div className="mt-4">
-                  <AccessList accessList={accessList} />
-                </div>
+                <CollapsibleAccessList accessList={accessList} className="mt-4" />
               )}
             </div>
           ))}

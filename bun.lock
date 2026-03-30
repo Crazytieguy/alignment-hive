@@ -7,7 +7,7 @@
     },
     "packages/hive-cli": {
       "name": "@alignment-hive/hive-cli",
-      "version": "0.1.10",
+      "version": "0.1.16",
       "dependencies": {
         "@alignment-hive/session-data": "workspace:*",
         "@inquirer/prompts": "^7",
@@ -62,6 +62,7 @@
         "@tanstack/react-virtual": "^3",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
+        "radix-ui": "^1.4.3",
         "tailwind-merge": "^3.4.0",
       },
       "peerDependencies": {
