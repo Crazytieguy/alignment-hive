@@ -640,19 +640,19 @@ Output the following explanation, then ask the question:
 
 **Explanation:**
 
-> The autopilot plugin includes an autonomous mode that changes how Claude handles permission requests when you're in `acceptEdits` mode:
->
-> - **Without autonomous mode:** Claude blocks on every unpermitted command, waiting for you to approve or deny each one.
-> - **With autonomous mode:** Unpermitted commands are automatically denied. Claude will try alternatives or propose adding a permission instead of blocking.
->
-> This means you can leave Claude running unattended in `acceptEdits` mode. If you need to approve a one-off command that isn't in your allow list, switch out of `acceptEdits` mode first (toggle with Shift+Tab).
+The autopilot plugin includes an autonomous mode that changes how Claude handles permission requests when you're in `acceptEdits` mode:
+
+- **Without autonomous mode:** Claude blocks on every unpermitted command, waiting for you to approve or deny each one.
+- **With autonomous mode:** Unpermitted commands are automatically denied. Claude will try alternatives or propose adding a permission instead of blocking.
+
+This means you can leave Claude running unattended in `acceptEdits` mode. If you need to approve a one-off command that isn't in your allow list, switch out of `acceptEdits` mode first (toggle with Shift+Tab).
 
 **Question:**
 
-> "Enable autonomous mode?"
->
-> - **Yes** - Enable autonomous mode
-> - **No** - Keep standard behavior (block on unpermitted commands)
+"Enable autonomous mode?"
+
+- **Yes** - Enable autonomous mode
+- **No** - Keep standard behavior (block on unpermitted commands)
 
 ### Q2: Deno Sandbox
 
@@ -660,24 +660,24 @@ Output the following explanation, then ask the question:
 
 **Explanation:**
 
-> The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the project directory — network, writes, env, and subprocess execution are all blocked.
->
-> When Claude needs additional capabilities, it will run `deno-sandbox-grant` to request a scoped permission. Each grant requires your approval and looks like this:
->
-> ```
-> deno-sandbox-grant --allow-net=api.example.com
-> deno-sandbox-grant --allow-write=./output
-> deno-sandbox-grant --allow-run=python3
-> ```
->
-> Review grants before approving — especially `--allow-run`, which gives unsandboxed subprocess execution. Grants persist for the session only.
+The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the project directory — network, writes, env, and subprocess execution are all blocked.
+
+When Claude needs additional capabilities, it will run `deno-sandbox-grant` to request a scoped permission. Each grant requires your approval and looks like this:
+
+```
+deno-sandbox-grant --allow-net=api.example.com
+deno-sandbox-grant --allow-write=./output
+deno-sandbox-grant --allow-run=python3
+```
+
+Review grants before approving — especially `--allow-run`, which gives unsandboxed subprocess execution. Grants persist for the session only.
 
 **Question:**
 
-> "Enable deno sandbox? (Recommended)"
->
-> - **Yes (Recommended)** - Enable the deno sandbox
-> - **No** - Disable the deno sandbox
+"Enable deno sandbox? (Recommended)"
+
+- **Yes (Recommended)** - Enable the deno sandbox
+- **No** - Disable the deno sandbox
 
 ### Action
 
@@ -708,4 +708,4 @@ If the user enabled the deno sandbox, also add sandbox permissions to the settin
 }
 ```
 
-Ensure `.claude/autopilot/` is gitignored — add to `.gitignore` if not already covered.
+Write a `.claude/autopilot/.gitignore` file with content `*` to keep the directory out of version control.
