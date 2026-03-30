@@ -1,5 +1,5 @@
 ---
-description: Set up session sharing and get tooling recommendations — plugins, documentation patterns, and dev environment setup. This command should also be used when the user asks about setting up their project, which plugins to install, or when the working directory appears empty or newly created.
+description: Set up session sharing and get tooling recommendations — plugins and dev environment setup. This command should also be used when the user asks about setting up their project, which plugins to install, or when the working directory appears empty or newly created.
 allowed-tools: Bash(hive consent status), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/align-status.sh)
 ---
 
@@ -45,7 +45,7 @@ State is **unsettled** (load the `manage-data-sharing` skill) when:
 
 ### hive-mind Migration
 
-If `hive-mind@alignment-hive` is in `.claude/settings.json` or `.claude/settings.local.json`, offer to remove it — hive handles session sharing now.
+If `hive-mind@alignment-hive` is in `.claude/settings.json` or `.claude/settings.local.json`, offer to remove it — hive handles session sharing now. If not found, skip silently — do not mention it.
 
 ### First-Time Setup (recommendations)
 
@@ -60,15 +60,11 @@ Walk through recommendations one at a time. For each item, check if it's already
 
 ## Checklist
 
-### Documentation
-
-- [ ] **CLAUDE.md** — Project instructions for Claude
-- [ ] **README.md** — Project documentation
-- [ ] **@README.md in CLAUDE.md** — Living documentation pattern (Claude keeps README updated)
-
 ### Plugins (based on project type)
 
-Check `.claude/settings.json` and `.claude/settings.local.json` for installed plugins. Infer from existing settings whether the user prefers local-only (`.claude/settings.local.json`) or shared (`.claude/settings.json`) — if unclear, ask once and use that for all installations.
+Check both global (`~/.claude/settings.json`, `~/.claude/settings.local.json`) and project-level (`.claude/settings.json`, `.claude/settings.local.json`) settings to discover already-installed plugins. A plugin installed at either level counts as installed — do not recommend it again.
+
+**Always install plugins to project-level settings files** (`.claude/settings.json` or `.claude/settings.local.json` in the working directory) unless the user explicitly asks for a global install. Infer from existing project-level settings whether the user prefers local-only (`.claude/settings.local.json`) or shared (`.claude/settings.json`) — if unclear, ask once and use that for all installations.
 
 Propose relevant plugins:
 
@@ -125,7 +121,7 @@ If a tool would be useful and isn't installed, ask if the user would like to ins
 
 Mention that some plugins have setup skills that will be available after reloading — each plugin's SessionStart hook will nudge about its own setup when the session starts.
 
-After all plugins are installed, tell the user to exit and restart Claude (`/exit` then `claude -c`).
+After all plugins are installed, tell the user to exit and start a fresh Claude session (`/exit` then `claude`).
 
 ## Completion
 
