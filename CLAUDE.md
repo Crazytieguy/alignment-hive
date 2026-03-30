@@ -68,10 +68,6 @@ The hive plugin has a `cli-version` file (`plugins/hive/cli-version`) that must 
 
 Use [uv](https://docs.astral.sh/uv/) with inline dependencies (PEP 723). Run scripts with `uv run script.py`.
 
-## Ad-hoc Scripts
-
-Only `/tmp/claude-execution-allowed/alignment-hive/` is approved for ad-hoc scripts. JavaScript/TypeScript scripts run with `bun /tmp/claude-execution-allowed/alignment-hive/<script-name>`. Bash scripts run with `bash /tmp/claude-execution-allowed/alignment-hive/<script-name>`.
-
 ## Codebase Exploration
 
 Always use `precis` for codebase exploration. Run `precis .` for a full overview, or `precis src/some/directory` to zoom into a specific area.

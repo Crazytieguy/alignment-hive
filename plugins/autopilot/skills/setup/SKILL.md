@@ -82,6 +82,8 @@ Bash(npm run *)       # runs arbitrary scripts (allow specific scripts instead)
 
 The general pattern: any command that takes another command or code string as an argument is a bypass vector.
 
+**Legacy tmp script pattern** - Look for `/tmp/claude-execution-allowed` rules in settings files and an "Ad-hoc Scripts" section in CLAUDE.md. This was an earlier approach to script execution that has been replaced by the deno sandbox. Remove both the settings rules (e.g., `Bash(bun /tmp/claude-execution-allowed/...)`) and the CLAUDE.md section if found.
+
 **Deprecated syntax** - Look for rules using `:*` instead of ` *` (space-star). The colon syntax is deprecated **except** for commands that use heredoc arguments (e.g., `git commit:*`). The ` *` pattern fails to match heredoc syntax, so `:*` is required there. For all other commands, replace `:*` with `cmd` + `cmd *` patterns (not `cmd*`).
 
 **Redundancy** - Check for duplicate rules, overly broad rules that subsume specific ones, or rules that conflict with the new configuration. Fix each issue individually - the user might have niche permissions they want to keep.
