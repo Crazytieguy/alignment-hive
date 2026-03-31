@@ -1,6 +1,4 @@
-# remote-kernels plugin
-
-Claude Code plugin for the remote-kernels MCP server.
+@README.md
 
 ## Publishing
 

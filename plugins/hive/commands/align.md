@@ -49,7 +49,7 @@ If `hive-mind@alignment-hive` is in `.claude/settings.json` or `.claude/settings
 
 ### First-Time Setup (recommendations)
 
-Walk through recommendations one at a time. For each item, check if it's already implemented. If not, use AskUserQuestion to offer it. Implement if accepted, note the reason in the rejected file if declined.
+Walk through the checklist below. For each item, check if it's already implemented. If not, offer it to the user. Implement if accepted, note the reason in the rejected file if declined.
 
 ### Follow-Up Runs
 
@@ -66,15 +66,27 @@ Check both global (`~/.claude/settings.json`, `~/.claude/settings.local.json`) a
 
 **Always install plugins to project-level settings files** (`.claude/settings.json` or `.claude/settings.local.json` in the working directory) unless the user explicitly asks for a global install. Infer from existing project-level settings whether the user prefers local-only (`.claude/settings.local.json`) or shared (`.claude/settings.json`) — if unclear, ask once and use that for all installations.
 
-Propose relevant plugins:
+Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin gets three options: **Yes** (install), **No** (skip), **Tell me more**. After the user responds, process "Tell me more" answers one plugin at a time in sequence: (1) fetch that plugin's README with `curl -sL <README URL>` from the table below, (2) summarize what the plugin does, (3) ask a fresh AskUserQuestion with only **Yes** / **No**. Do not advance to the next "Tell me more" plugin until the current one has a Yes/No answer.
+
+#### Plugin list
 
 - **Autopilot** (permissions, autonomous mode, sandboxed scripting): `autopilot@alignment-hive` — **Always recommend**
 - **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
-- **Documentation fetching**: `llms-fetch-mcp@alignment-hive` — Fetch docs with [llms.txt](https://llmstxt.org/) support
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
 - **TypeScript/JavaScript**: `frontend-design` (for web projects)
+
+#### README URLs for "Tell me more"
+
+| Plugin | README URL |
+|---|---|
+| autopilot | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/autopilot/README.md` |
+| github-action | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/github-action/README.md` |
+| mats | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/mats/README.md` |
+| remote-kernels | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/remote-kernels/README.md` |
+| precis | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
+| frontend-design | `https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/plugins/frontend-design/README.md` |
 
 For non-alignment-hive plugins:
 ```json

@@ -1,4 +1,4 @@
-# mats plugin
+@README.md
 
 ## Versioning
 
