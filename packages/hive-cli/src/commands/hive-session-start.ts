@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { getAuthData } from '../lib/auth';
@@ -103,6 +104,14 @@ export async function hiveSessionStart(): Promise<number> {
   getOrCreateCheckoutId(stateDir)
     .then((checkoutId) => pingCheckout(checkoutId))
     .catch(() => {});
+
+  // Sharing disabled for this project — show align nudge if any, skip everything else
+  if (existsSync(statePaths(stateDir).sharingDisabled)) {
+    if (messages.length > 0) {
+      hookOutput(formatHookMessages(messages, hookInput.hookEventName, hookInput.source));
+    }
+    return 0;
+  }
 
   // Auth must complete before Convex queries (refresh may update the token)
   let authData;

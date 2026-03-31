@@ -64,12 +64,6 @@ fi
 
 # --- Delegate to binary (handles version check, consent, uploads) ---
 
-DISABLE_FILE="$STATE_DIR/sharing-disabled"
-
-if [ -f "$DISABLE_FILE" ]; then
-  exit 0
-fi
-
 # Pass plugin version so binary can do its version check
 PLUGIN_VERSION=""
 if [ -f "$PLUGIN_JSON" ]; then
