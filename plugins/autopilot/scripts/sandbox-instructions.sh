@@ -12,6 +12,8 @@ cat <<INSTRUCTIONS
 
 \`deno-sandbox\` runs JavaScript/TypeScript in a secure Deno sandbox. Read access to current directory by default, other permissions need to be granted.
 
+This is the preferred way to run ad-hoc or throwaway code. Use it instead of \`python3 -c\`, \`node -e\`, or complex bash pipelines.
+
 ### Usage
 
 Your sandbox script file is $SCRIPT_PATH (use this exact path for the entire session). Write code to it using the Write or Edit tools, then run with \`Bash(deno-sandbox $SCRIPT_PATH)\` or \`Bash(cat data.csv | deno-sandbox $SCRIPT_PATH)\`
