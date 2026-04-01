@@ -45,7 +45,7 @@ fi
 
 # Build context-aware deny message
 if [ -n "$rule_content" ]; then
-  message="Command denied in autonomous mode. \`${rule_content}\` is not in the allow list. Consider /autopilot:resolve-denied-toolcall."
+  message="Command denied in autonomous mode. \`${rule_content}\` is not in the allow list. Use Skill(autopilot:resolve-denied-toolcall) to handle this."
 elif [ "$has_suggestions" = "true" ]; then
   message="Command denied in autonomous mode. Command likely contains variable references or field expressions that conflict with permission matching."
 else
