@@ -9,7 +9,7 @@ Proposing a permission is costly — it blocks progress until the user notices a
 
 ## Check for Alternatives First
 
-Read `.claude/settings.json` and `.claude/settings.local.json`. Look for permitted commands that accomplish the same thing — especially project scripts and allowed package manager invocations.
+Read `.claude/settings.json` and `.claude/settings.local.json` (in the working directory, not global). Look for permitted commands that accomplish the same thing — especially project scripts and allowed package manager invocations.
 
 If the deno sandbox is available, consider whether the task can be done by writing TypeScript in the sandbox instead.
 
