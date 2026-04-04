@@ -20,7 +20,8 @@ eval "$(echo "$input" | "$JQ" -r '.cwd as $cwd |
   "has_session_dest=" + ([.permission_suggestions // [] | .[] | select(.destination == "session")] | length | tostring),
   "session_in_cwd=" + ([.permission_suggestions // [] | .[] | select(.destination == "session") | .rules[]? | .ruleContent | gsub("^/+"; "/") | gsub("/\\*\\*$"; "") | startswith($cwd)] | any | tostring),
   "rule_content=" + ([.permission_suggestions // [] | .[] | select(.type == "addRules" and .destination != "session") | .rules[]? | .ruleContent] | first // "" | @sh),
-  "has_suggestions=" + (.permission_suggestions // [] | length > 0 | tostring)
+  "has_suggestions=" + (.permission_suggestions // [] | length > 0 | tostring),
+  "tool_name=" + (.tool_name // "" | @sh)
 ')"
 
 if [ "$permission_mode" != "acceptEdits" ]; then
@@ -48,6 +49,11 @@ if [ -n "$rule_content" ]; then
   message="Command denied in autonomous mode. \`${rule_content}\` is not in the allow list. Use Skill(autopilot:resolve-denied-toolcall) to handle this."
 elif [ "$has_suggestions" = "true" ]; then
   message="Command denied in autonomous mode. Command likely contains variable references or field expressions that conflict with permission matching."
+elif [ "$tool_name" != "Bash" ]; then
+  # No suggestions for a non-Bash tool — likely a Claude Code bug where
+  # permission_suggestions is empty (e.g. Write to .claude/ in acceptEdits mode).
+  # Denying could be risky for this unknown edge case.
+  exit 0
 else
   message="Command denied in autonomous mode. Command likely contains command substitution or ambiguous syntax that conflicts with permission matching."
 fi
