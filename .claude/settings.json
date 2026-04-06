@@ -147,7 +147,6 @@
       "Bash(tsc *)",
       "Bash(jest *)",
       "Bash(vitest *)",
-      "Bash(node *)",
       "Bash(npx *)",
       "Bash(npm *)",
       "Bash(pnpm *)",
