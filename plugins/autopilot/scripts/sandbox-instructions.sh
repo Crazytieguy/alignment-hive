@@ -7,6 +7,14 @@ SCRIPT_PATH="$1"
 SANDBOX_DIR="$2"
 GRANTS_FILE="${3:-}"
 
+# Detect deno version (best-effort, callers already verified deno is available)
+DENO_VERSION=""
+if command -v deno >/dev/null 2>&1; then
+  DENO_VERSION=$(deno --version 2>/dev/null | head -1 | awk '{print $2}') || true
+elif [ -x "$HOME/.deno/bin/deno" ]; then
+  DENO_VERSION=$("$HOME/.deno/bin/deno" --version 2>/dev/null | head -1 | awk '{print $2}') || true
+fi
+
 cat <<INSTRUCTIONS
 ## deno-sandbox
 
@@ -32,7 +40,8 @@ Available: \`--allow-{read,write,run,net,env,import}=<scope>\`. Follow the princ
 
 Request any necessary permissions as early as possible. The user is typically available to review grants at the start of a session and will want you to work without interruption afterward.
 
-Generated Deno API types are at \`$SANDBOX_DIR/deno.d.ts\`.
+Generated Deno API types are at \`$SANDBOX_DIR/deno.d.ts\`.${DENO_VERSION:+
+Deno version: $DENO_VERSION}
 INSTRUCTIONS
 
 # Append already-granted permissions if any exist
