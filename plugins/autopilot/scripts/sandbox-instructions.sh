@@ -30,7 +30,7 @@ Your sandbox script file is $SCRIPT_PATH (use this exact path for the entire ses
 
 ### Granting permissions
 
-Each grant requires user approval. \`--allow-read=.\` is included by default.
+Each grant requires user approval and only applies to deno-sandbox scripts. \`--allow-read=.\` is included by default.
 
 \`\`\`
 deno-sandbox-grant --allow-write=. --allow-net=api.example.com
