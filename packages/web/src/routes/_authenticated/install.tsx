@@ -38,10 +38,9 @@ function InstallPage() {
         </div>
 
         <div className="space-y-4">
-          <h2 className="text-lg font-medium">1. Install Claude Code</h2>
-          <p className="text-sm text-muted-foreground">
-            Skip this if you already have Claude Code installed.
-          </p>
+          <h2 className="text-lg font-medium">
+            1. Install Claude Code (if you haven't)
+          </h2>
           <pre className="relative p-3 bg-muted rounded-lg text-sm overflow-x-auto">
             curl -fsSL https://claude.ai/install.sh | bash
             <CopyButton text="curl -fsSL https://claude.ai/install.sh | bash" />
@@ -54,10 +53,6 @@ function InstallPage() {
             curl -fsSL https://alignment-hive.com/install.sh | bash
             <CopyButton text="curl -fsSL https://alignment-hive.com/install.sh | bash" />
           </pre>
-          <p className="text-sm text-muted-foreground">
-            This will authenticate you and let you select which projects to
-            share sessions from.
-          </p>
         </div>
 
         <div className="space-y-4">
@@ -77,8 +72,13 @@ function InstallPage() {
 
         <div className="pt-4 border-t text-sm text-muted-foreground space-y-2">
           <p>
-            Questions? Contact <strong>Yoav Tzfati</strong> on Slack in{" "}
-            <code className="bg-muted px-1 rounded text-xs">#ai-tools</code>.
+            Contact <strong>Yoav Tzfati</strong> for questions, email:{" "}
+            <a
+              href="mailto:yoav.tzfati@gmail.com"
+              className="text-primary underline underline-offset-4 hover:text-primary/80 transition-colors"
+            >
+              yoav.tzfati@gmail.com
+            </a>
           </p>
           <p>
             <Link

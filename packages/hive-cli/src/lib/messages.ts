@@ -10,7 +10,7 @@ export const errors = {
     `Failed to read transcripts directory ${dir}: ${error}`,
   statFailed: (path: string, error: string): string => `Failed to stat ${path}: ${error}`,
   parseSessionFailed: (sessionId: string, error: string): string => `Failed to parse session ${sessionId}: ${error}`,
-  noSessions: 'No sessions found yet. Sessions are extracted automatically when you start Claude Code.',
+  noSessions: 'No sessions found.',
   noSessionsIn: (dir: string): string => `No sessions in ${dir}`,
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
   multipleSessions: (prefix: string): string => `Multiple sessions match "${prefix}":`,
@@ -124,7 +124,6 @@ export const usage = {
       '',
       'List extracted sessions with statistics and summaries.',
       'Agent sessions are excluded (explore via Task tool calls in parent sessions).',
-      'Statistics include work from subagent sessions.',
       '',
       'Output columns:',
       '  ID                    Session ID prefix',
@@ -173,7 +172,7 @@ export const localCmd = {
     return [
       'Usage: hive local <search|read|index>',
       '',
-      'Search and read raw Claude Code session files (no extraction needed).',
+      'Search and read raw Claude Code session files.',
       '',
       'Commands:',
       '  search    Search sessions for a pattern',
@@ -193,7 +192,8 @@ export const reviewCmd = {
 
 // ── Hive plugin messages ──
 
-const NOT_AUTHENTICATED = 'Not authenticated. Run the install script to authenticate.';
+const NOT_AUTHENTICATED =
+  'Not authenticated. Run: curl -fsSL https://alignment-hive.com/install.sh | bash';
 
 export const hive = {
   consent: {
