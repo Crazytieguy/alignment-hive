@@ -4,6 +4,7 @@ node_modules
 .playwright-mcp/
 .env.local
 .claude/autopilot/
+.claude/scheduled_tasks.lock
 
 
 # Dev binary
