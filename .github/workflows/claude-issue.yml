@@ -98,7 +98,7 @@ jobs:
             actions: read
           prompt: ${{ steps.prompt.outputs.content }}
           claude_args: |
-            --model claude-opus-4-6
+            --model claude-opus-4-7
             --permission-mode acceptEdits
             --allowedTools "Bash(gh issue view:*),Bash(bash .github/scripts/update-comment.sh:*),Bash(gh pr create:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD)"
             --disallowedTools TodoWrite

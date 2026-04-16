@@ -1,5 +1,5 @@
 {
   "name": "github-action",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Set up Claude Code GitHub Action for autonomous issue and PR handling"
 }

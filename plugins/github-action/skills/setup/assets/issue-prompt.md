@@ -23,7 +23,7 @@ the feedback into your current work.
 
 **Path A — Ask questions:** If the issue is ambiguous, underspecified, or you
 hit blockers during implementation, update your tracking comment with your
-questions and stop. Do not guess or make assumptions about unclear requirements.
+questions and stop.
 
 **Path B — Implement:** If the issue is clear, implement the changes on the
 current branch. When done:

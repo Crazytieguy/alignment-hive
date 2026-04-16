@@ -27,11 +27,7 @@ Grep pattern="^#|<keyword>" path="/tmp/mats-handbook.md"
 
 ### Step 3: Read Broadly
 
-**Thoroughness is critical.** Read all potentially applicable sections, even tangentially related ones.
-
-- For broad or ambiguous questions, read the entire document
-- When in doubt, read more rather than less
-- Prefer over-reading to missing important context
+Read all applicable sections; for broad or ambiguous questions, read the full handbook.
 
 Use the Read tool to read the relevant sections (or the whole file if appropriate).
 

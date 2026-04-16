@@ -18,7 +18,7 @@ All available fields with defaults (generated from the MCP server source code):
 
 ## Workflow
 
-Walk through this interactively with the user using AskUserQuestion. Start by writing the config template to `remote-kernels.toml`, then go through **every area below** and edit the file based on their answers. Do not skip any area — even if the user seems experienced, confirm their preferences for each one. Adapt depth to what the user already knows: be brief when they're confident, explore when they have questions.
+Walk through this interactively with the user using AskUserQuestion. Start by writing the config template to `remote-kernels.toml`, then go through **every area below** and edit the file based on their answers.
 
 ### Areas to cover
 

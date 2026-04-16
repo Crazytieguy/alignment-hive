@@ -93,7 +93,6 @@ For documents over ~50 pages:
 
 ## Quality Standards
 
-- Be concise but comprehensive
 - Focus on information relevant to AI safety research
 - Distinguish between authors' claims and established facts
 - Note any methodological concerns

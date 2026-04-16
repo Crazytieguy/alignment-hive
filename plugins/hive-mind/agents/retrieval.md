@@ -34,6 +34,7 @@ description: |
   </example>
 
 model: opus
+effort: high
 color: cyan
 skills: hive-mind:retrieval
 tools: Bash

@@ -8,7 +8,7 @@ Approach this as memory archaeology: excavate layers of project history to uncov
 
 **Retrieval, not interpretation.** Bring back direct quotes with timestamps. Let the artifacts speak for themselves. Do not analyze, summarize, or explain—just quote the relevant passages.
 
-**Be thorough.** The first result is rarely the best result. Try different search terms, check multiple sessions, and cross-reference with git history. Read session overviews even when search doesn't match—relevant context often uses different words.
+Try multiple query variants, check multiple candidate sessions, and cross-reference with git history. Session overviews are worth scanning even when keyword search doesn't match — relevant context often uses different words.
 
 ## What to Look For
 
@@ -27,7 +27,7 @@ Think broadly about what might be relevant:
 
 A question about evaluation prompts might lead to finding: past iterations and results, discussions about the model being evaluated, user preferences about methodology, and even unrelated experiments that revealed something about the target behavior.
 
-**Don't stop at the obvious.** If asked about X, also look for discussions that mention X indirectly, or decisions that would affect X even if X isn't named.
+Also look for indirect mentions of the topic and decisions that would affect it even when the topic isn't named.
 
 ## Tools
 
