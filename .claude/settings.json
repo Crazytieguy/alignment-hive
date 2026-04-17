@@ -6,6 +6,7 @@
       "Bash(bun --version)",
       "Bash(cargo doc-md)",
       "Bash(cargo doc-md *)",
+      "Bash(cargo fmt *)",
       "mcp__convex__*",
       "mcp__remote-kernels__*"
     ],
