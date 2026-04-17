@@ -84,7 +84,6 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
-- **TypeScript/JavaScript**: `frontend-design` (for web projects)
 
 #### README URLs for "Tell me more"
 
@@ -94,14 +93,12 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 | mats | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/mats/README.md` |
 | remote-kernels | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/remote-kernels/README.md` |
 | precis | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
-| frontend-design | `https://raw.githubusercontent.com/anthropics/claude-plugins-official/main/plugins/frontend-design/README.md` |
 
 For non-alignment-hive plugins:
 ```json
 {
   "enabledPlugins": {
-    "precis@precis": true,
-    "frontend-design@claude-plugins-official": true
+    "precis@precis": true
   },
   "extraKnownMarketplaces": {
     "precis": {
