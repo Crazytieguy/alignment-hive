@@ -47,6 +47,16 @@ State is **unsettled** (load the `manage-data-sharing` skill) when:
 
 If `hive-mind@alignment-hive` is in `.claude/settings.json` or `.claude/settings.local.json`, offer to remove it — hive handles session sharing now. If not found, skip silently — do not mention it.
 
+### autopilot Deprecation
+
+If `autopilot@alignment-hive` is in `.claude/settings.json` or `.claude/settings.local.json`, note that Claude Code's built-in auto mode supersedes autopilot (except for the deno sandbox) — it uses a model-based classifier instead of a static allow-list.
+
+Ask whether to remove `autopilot@alignment-hive`. Pro users (no auto mode access yet) or users who rely on the deno sandbox may want to keep it.
+
+If the user chooses to keep it, record that in `.claude/hive/align-rejected.md` (e.g. "Kept autopilot") so we don't re-prompt on future runs.
+
+If not installed, skip silently — do not mention it.
+
 ### First-Time Setup (recommendations)
 
 Walk through the checklist below. For each item, check if it's already implemented. If not, offer it to the user. Implement if accepted, note the reason in the rejected file if declined.
@@ -70,7 +80,6 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 
 #### Plugin list
 
-- **Autopilot** (permissions, autonomous mode, sandboxed scripting): `autopilot@alignment-hive` — **Always recommend**
 - **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
@@ -81,7 +90,6 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 
 | Plugin | README URL |
 |---|---|
-| autopilot | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/autopilot/README.md` |
 | github-action | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/github-action/README.md` |
 | mats | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/mats/README.md` |
 | remote-kernels | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/remote-kernels/README.md` |
@@ -110,7 +118,7 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 ```json
 {
   "enabledPlugins": {
-    "autopilot@alignment-hive": true
+    "github-action@alignment-hive": true
   },
   "extraKnownMarketplaces": {
     "alignment-hive": {

@@ -30,7 +30,7 @@
     {
       "name": "autopilot",
       "source": "./plugins/autopilot",
-      "description": "Autonomous operation with permission management for Claude Code"
+      "description": "Deprecated: superseded by Claude Code's built-in auto mode. Autonomous operation with permission management."
     },
     {
       "name": "github-action",
