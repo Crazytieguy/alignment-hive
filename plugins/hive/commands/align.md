@@ -84,6 +84,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
+- **Cross-model review**: `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code
 
 #### README URLs for "Tell me more"
 
@@ -93,23 +94,28 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 | mats | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/mats/README.md` |
 | remote-kernels | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/remote-kernels/README.md` |
 | precis | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
+| codex | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
 
-For non-alignment-hive plugins:
+For non-alignment-hive plugins, write this block into the chosen settings file (shape is the same; values come from the table below):
+
 ```json
 {
-  "enabledPlugins": {
-    "precis@precis": true
-  },
+  "enabledPlugins": { "<plugin>": true },
   "extraKnownMarketplaces": {
-    "precis": {
-      "source": {
-        "source": "github",
-        "repo": "Crazytieguy/precis"
-      }
+    "<marketplace>": {
+      "source": { "source": "github", "repo": "<github-repo>" },
+      "autoUpdate": true
     }
   }
 }
 ```
+
+| Plugin | `<plugin>` (enabledPlugins key) | `<marketplace>` | `<github-repo>` |
+|---|---|---|---|
+| precis | `precis@precis` | `precis` | `Crazytieguy/precis` |
+| codex | `codex@codex-plugin-cc` | `codex-plugin-cc` | `Crazytieguy/codex-plugin-cc` |
+
+`autoUpdate: true` is included by default for recommended non-alignment-hive marketplaces — they iterate quickly and benefit from auto-refresh, and the user has already opted in by accepting the recommendation. Claude Code (v2.1.140+) propagates this field to `~/.claude/plugins/known_marketplaces.json` on next session start.
 
 For alignment-hive plugins (requires alignment-hive marketplace):
 ```json
@@ -128,6 +134,29 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 }
 ```
 
+#### Marketplace auto-update — retroactive sweep
+
+Recommended non-alignment-hive marketplaces (hardcoded): `precis`, `codex-plugin-cc`. Update this list whenever the plugin list above changes.
+
+Some users may have these marketplaces installed without `autoUpdate: true` (installed before this skill enabled it by default, or installed via the `/plugin` TUI). For each affected marketplace, ask once whether to enable auto-update; idempotent — skip anything already enabled or already declined.
+
+1. Read all four settings files (`~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude/settings.json`, `.claude/settings.local.json`) and `~/.claude/plugins/known_marketplaces.json`.
+2. For each settings file, record where each plugin is enabled (`enabledPlugins` keys with value `true` → extract `<plugin>@<marketplace>`) and where each marketplace is declared (`extraKnownMarketplaces.<marketplace>` and its `autoUpdate` value if any).
+3. For each candidate marketplace where: name ∈ `{precis, codex-plugin-cc}` AND at least one plugin from it is enabled in some settings file AND `autoUpdate` is not already `true` in **any** settings file's `extraKnownMarketplaces.<marketplace>.autoUpdate` AND `autoUpdate` is not already `true` in the registry entry AND not already recorded as declined in `.claude/hive/align-rejected.md` → include in the ask.
+4. Ask via `AskUserQuestion` using the same pattern as the plugin recommendations above: one `Question` per candidate marketplace, two options each (Yes / No), all questions batched in a single tool call.
+5. For Yes answers, determine the target settings file by walking this preference order until a match is found, then edit that file:
+   - The file that already declares the marketplace in its `extraKnownMarketplaces` (add `"autoUpdate": true` to the existing entry, preserve other fields). If multiple files declare it, prefer the most local: `.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.local.json` > `~/.claude/settings.json`.
+   - Otherwise, the file that enables the plugin (add a full `extraKnownMarketplaces.<marketplace>` entry with the source from the install mapping table above + `"autoUpdate": true`). Same preference order if multiple files enable it.
+
+   This keeps personal vs shared state aligned with the user's existing choices and never promotes a third-party marketplace declaration into a more-shared file than the user already chose for the plugin itself. The change takes effect on the next session start (Claude Code propagates `autoUpdate` to the registry then).
+6. For No answers: append to `.claude/hive/align-rejected.md` (e.g. "Declined auto-update for `precis` marketplace") so we don't re-prompt.
+
+Skip the sweep entirely if no candidates remain after filtering.
+
+#### alignment-hive auto-update verification
+
+Read the `alignment-hive` entry in `~/.claude/plugins/known_marketplaces.json`. If `autoUpdate` is not `true`, mention once that the install script (`curl -fsSL https://alignment-hive.com/install.sh | bash`) is supposed to set this and recommend re-running it. Do not auto-fix.
+
 ### Tooling (varies by project)
 
 Use your judgement to recommend modern, well-maintained tooling appropriate for the project. Consider dependency management, build tools, linters, typecheckers, formatters, and anything else that would improve the development workflow.
@@ -136,7 +165,7 @@ If a tool would be useful and isn't installed, ask if the user would like to ins
 
 ### Reload + Setup
 
-Mention that some plugins have setup skills that will be available after reloading — each plugin's SessionStart hook will nudge about its own setup when the session starts.
+Mention that some plugins have setup skills that will be available after reloading — each plugin's SessionStart hook will nudge about its own setup when the session starts. Also mention which marketplaces just had auto-update enabled, so the user understands those will refresh automatically on session start.
 
 After all plugins are installed, tell the user to exit and start a fresh Claude session (`/exit` then `claude`).
 
