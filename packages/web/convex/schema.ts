@@ -23,6 +23,10 @@ export default defineSchema({
     lastHeartbeat: v.number(),
     lastModified: v.optional(v.number()),
     parentSessionId: v.optional(v.string()),
+    // Agent metadata (subagent sessions only): the agent's type (e.g. "general-purpose",
+    // "Explore", "workflow-subagent") and, for workflow subagents, the wf_<id> run they belong to.
+    agentType: v.optional(v.string()),
+    workflowRunId: v.optional(v.string()),
     summary: v.optional(v.string()),
     sessionStartGitCommitHash: v.optional(v.string()),
     upload: v.optional(
@@ -35,6 +39,33 @@ export default defineSchema({
     .index("by_session_id", ["sessionId"])
     .index("by_user_doc_id", ["userDocId"])
     .index("by_parent_session_id", ["parentSessionId"]),
+
+  // Run-level metadata for a Workflow-tool run (wf_<id>). The full sanitized run JSON
+  // (script/result/logs/etc.) lives in storage (upload.storageId); these are the indexed
+  // scalars used to list/group a parent's runs. Inherits the parent session's consent.
+  workflowRuns: defineTable({
+    workflowRunId: v.string(), // wf_<id> dir name; join key with sessions.workflowRunId
+    runId: v.string(),
+    parentSessionId: v.string(),
+    userDocId: v.id("users"),
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
+    workflowName: v.optional(v.string()),
+    summary: v.optional(v.string()),
+    status: v.optional(v.string()),
+    totalTokens: v.optional(v.number()),
+    totalToolCalls: v.optional(v.number()),
+    agentCount: v.optional(v.number()),
+    durationMs: v.optional(v.number()),
+    lastModified: v.optional(v.number()),
+    upload: v.object({
+      storageId: v.id("_storage"),
+      uploadedAt: v.number(),
+    }),
+  })
+    .index("by_workflow_run_id", ["workflowRunId"])
+    .index("by_parent_session_id", ["parentSessionId"])
+    .index("by_user_doc_id", ["userDocId"]),
 
   checkouts: defineTable({
     checkoutId: v.string(),

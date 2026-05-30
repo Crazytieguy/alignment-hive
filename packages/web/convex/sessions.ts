@@ -105,6 +105,8 @@ async function upsertSession(
     lineCount: number;
     lastModified?: number;
     parentSessionId?: string;
+    agentType?: string;
+    workflowRunId?: string;
     sessionStartGitCommitHash?: string;
   },
 ): Promise<Id<"sessions">> {
@@ -129,6 +131,8 @@ async function upsertSession(
       ...(args.directory && { directory: args.directory }),
       ...(args.gitRemote && { gitRemote: args.gitRemote }),
       ...(args.parentSessionId && { parentSessionId: args.parentSessionId }),
+      ...(args.agentType && { agentType: args.agentType }),
+      ...(args.workflowRunId && { workflowRunId: args.workflowRunId }),
       ...(args.sessionStartGitCommitHash && {
         sessionStartGitCommitHash: args.sessionStartGitCommitHash,
       }),
@@ -146,6 +150,8 @@ async function upsertSession(
       lastHeartbeat: now,
       lastModified: args.lastModified,
       parentSessionId: args.parentSessionId,
+      agentType: args.agentType,
+      workflowRunId: args.workflowRunId,
       sessionStartGitCommitHash: args.sessionStartGitCommitHash,
     });
   }
@@ -187,6 +193,8 @@ export const generateUploadUrls = mutation({
   args: {
     sessionId: v.string(),
     agentSessionIds: v.array(v.string()),
+    // Workflow run ids (wf_<id>) whose sanitized run-metadata blobs need an upload URL.
+    workflowRunIds: v.optional(v.array(v.string())),
     directory: v.optional(v.string()),
     gitRemote: v.optional(v.string()),
     lastModified: v.optional(v.number()),
@@ -201,11 +209,13 @@ export const generateUploadUrls = mutation({
     const identifiers = extractIdentifiers(args);
     await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
 
-    // Generate upload URLs for all sessions
-    const allSessionIds = [args.sessionId, ...args.agentSessionIds];
+    // Generate upload URLs for the parent, its agents, and its workflow-run blobs.
+    // sessionIds (uuid / agent-<id>) and workflowRunIds (wf_<id>) live in disjoint namespaces,
+    // so a single keyed map is unambiguous.
+    const keys = [args.sessionId, ...args.agentSessionIds, ...(args.workflowRunIds ?? [])];
     const urls: Record<string, string> = {};
-    for (const sid of allSessionIds) {
-      urls[sid] = await ctx.storage.generateUploadUrl();
+    for (const key of keys) {
+      urls[key] = await ctx.storage.generateUploadUrl();
     }
     return urls;
   },
@@ -233,6 +243,8 @@ export const saveUploads = mutation({
       summary: v.optional(v.string()),
       lineCount: v.number(),
       parentSessionId: v.optional(v.string()),
+      agentType: v.optional(v.string()),
+      workflowRunId: v.optional(v.string()),
     })),
   },
   handler: async (ctx, args) => {
@@ -273,6 +285,8 @@ export const saveUploads = mutation({
         lineCount: upload.lineCount,
         lastModified: args.lastModified,
         parentSessionId: upload.parentSessionId,
+        agentType: upload.agentType,
+        workflowRunId: upload.workflowRunId,
         sessionStartGitCommitHash: upload.parentSessionId ? undefined : args.sessionStartGitCommitHash,
       });
 
@@ -283,6 +297,91 @@ export const saveUploads = mutation({
           uploadedAt: now,
         },
       });
+    }
+  },
+});
+
+/**
+ * Save Workflow run-metadata records for a parent session. The full sanitized run JSON has
+ * already been uploaded to storage; this links each blob and stores the indexed scalars.
+ * Consent is verified once for the parent — runs inherit the parent's consent/visibility,
+ * exactly like agent sessions.
+ */
+export const saveWorkflowRuns = mutation({
+  args: {
+    parentSessionId: v.string(),
+    directory: v.optional(v.string()),
+    gitRemote: v.optional(v.string()),
+    lastModified: v.optional(v.number()),
+    runs: v.array(v.object({
+      workflowRunId: v.string(),
+      runId: v.string(),
+      storageId: v.id("_storage"),
+      workflowName: v.optional(v.string()),
+      summary: v.optional(v.string()),
+      status: v.optional(v.string()),
+      totalTokens: v.optional(v.number()),
+      totalToolCalls: v.optional(v.number()),
+      agentCount: v.optional(v.number()),
+      durationMs: v.optional(v.number()),
+    })),
+  },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new ConvexError("Not authenticated");
+    }
+
+    const userDocId = await upsertUser(ctx, identity);
+    const identifiers = extractIdentifiers(args);
+    await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
+
+    // Runs inherit the parent's consent/visibility, so the parent session must already exist
+    // AND be owned by the caller. Fail closed when it's missing — never pin a run to a
+    // parentSessionId the caller doesn't own (the read path also owner-filters as defense in depth).
+    const existingParent = await ctx.db
+      .query("sessions")
+      .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))
+      .first();
+    if (!existingParent || !isSessionOwner(existingParent, userDocId)) {
+      throw new ConvexError("Parent session not found or belongs to a different user");
+    }
+
+    const now = Date.now();
+    for (const run of args.runs) {
+      const candidates = await ctx.db
+        .query("workflowRuns")
+        .withIndex("by_workflow_run_id", (q) => q.eq("workflowRunId", run.workflowRunId))
+        .collect();
+      const existing = candidates.find(
+        (r) => r.userDocId === userDocId && r.parentSessionId === args.parentSessionId,
+      );
+
+      // Conditional spreads (=== undefined, not falsy) so a sparser re-upload preserves
+      // previously-stored fields instead of clobbering them, and valid 0 values are kept.
+      const doc = {
+        workflowRunId: run.workflowRunId,
+        runId: run.runId,
+        parentSessionId: args.parentSessionId,
+        userDocId,
+        upload: { storageId: run.storageId, uploadedAt: now },
+        ...(args.directory !== undefined && { directory: args.directory }),
+        ...(args.gitRemote !== undefined && { gitRemote: args.gitRemote }),
+        ...(args.lastModified !== undefined && { lastModified: args.lastModified }),
+        ...(run.workflowName !== undefined && { workflowName: run.workflowName }),
+        ...(run.summary !== undefined && { summary: run.summary }),
+        ...(run.status !== undefined && { status: run.status }),
+        ...(run.totalTokens !== undefined && { totalTokens: run.totalTokens }),
+        ...(run.totalToolCalls !== undefined && { totalToolCalls: run.totalToolCalls }),
+        ...(run.agentCount !== undefined && { agentCount: run.agentCount }),
+        ...(run.durationMs !== undefined && { durationMs: run.durationMs }),
+      };
+
+      if (existing) {
+        await ctx.db.patch(existing._id, doc);
+      } else {
+        await ctx.db.insert("workflowRuns", doc);
+      }
     }
   },
 });

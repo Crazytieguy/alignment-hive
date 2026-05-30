@@ -50,7 +50,23 @@ export const agentSessionResponseSchema = z.object({
   lastHeartbeat: z.number().describe("Last activity timestamp, in ms since epoch"),
   summary: z.string().describe("Session summary or first user message").optional(),
   parentSessionId: z.string().describe("Session ID of the parent session that spawned this agent"),
+  agentType: z.string().describe('Agent type, e.g. "general-purpose", "Explore", "workflow-subagent"').optional(),
+  workflowRunId: z.string().describe("For workflow subagents, the wf_<id> run this agent belongs to").optional(),
   upload: uploadResponseSchema.optional(),
+});
+
+export const workflowRunResponseSchema = z.object({
+  workflowRunId: z.string().describe("The wf_<id> run id; join key with agent sessions' workflowRunId"),
+  runId: z.string().describe("Workflow run id as recorded in the run metadata"),
+  workflowName: z.string().describe("The workflow's name").optional(),
+  summary: z.string().describe("Run summary").optional(),
+  status: z.string().describe("Run status, e.g. completed").optional(),
+  totalTokens: z.number().describe("Total output tokens spent across the run").optional(),
+  totalToolCalls: z.number().describe("Total tool calls across the run").optional(),
+  agentCount: z.number().describe("Number of agents the run spawned").optional(),
+  durationMs: z.number().describe("Run wall-clock duration in ms").optional(),
+  contentUrl: z.string().describe("Signed URL to download the sanitized run-metadata JSON (script/result/logs)").optional(),
+  uploadedAt: z.number().describe("When the run metadata was uploaded, in ms since epoch"),
 });
 
 export const sessionResponseSchema = z.object({
@@ -63,6 +79,8 @@ export const sessionResponseSchema = z.object({
   summary: z.string().describe("Session summary or first user message").optional(),
   sessionStartGitCommitHash: z.string().describe("Git commit hash at session start").optional(),
   parentSessionId: z.string().describe("If this is an agent session, the parent session ID").optional(),
+  agentType: z.string().describe('If this is an agent session, its type (e.g. "workflow-subagent")').optional(),
+  workflowRunId: z.string().describe("If this is a workflow subagent, the wf_<id> run it belongs to").optional(),
   upload: uploadResponseSchema.optional(),
   user: userResponseSchema.nullable().describe("The user who created this session, or null if not yet migrated"),
   agentSessions: z.array(agentSessionResponseSchema).describe("Agent (child) sessions spawned during this session. Agents inherit the parent's consent visibility."),
@@ -76,6 +94,7 @@ export const paginatedSessionsResponseSchema = z.object({
 
 export const sessionDetailResponseSchema = sessionResponseSchema.extend({
   parentSession: parentSessionSchema.describe("The parent session, if this is an agent session").optional(),
+  workflowRuns: z.array(workflowRunResponseSchema).describe("Workflow-tool runs for this session, each grouping its workflow subagents. Inherit the parent's consent visibility.").optional(),
 });
 
 export const consentPreferencesSchema = z.object({
