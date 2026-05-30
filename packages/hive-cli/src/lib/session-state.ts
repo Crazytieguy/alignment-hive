@@ -1,9 +1,9 @@
 import { createReadStream } from 'node:fs';
-import { appendFile, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { appendFile, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { getClaudeProjectDir, statePaths  } from './config';
-import { findRawSessions } from './session-io';
+import { findRawSessions, scanSubagentDir } from './session-io';
 
 
 const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
@@ -34,6 +34,8 @@ export interface DiscoveredSession {
   mtime: Date;
   agentId?: string;
   parentSessionId?: string;
+  agentType?: string;
+  workflowRunId?: string;
 }
 
 /** Check if a session file contains at least one assistant message. Streams line-by-line to avoid reading large files fully. */
@@ -69,20 +71,23 @@ export async function discoverSessions(
   for (const rawSessions of dirResults) {
     for (const s of rawSessions) {
       const sessionId = basename(s.path, '.jsonl');
-      // Skip hasAssistantContent check for agent files — blank session filtering
-      // only applies to abandoned parent sessions, not agents
+      const build = (mtime: Date): DiscoveredSession => ({
+        sessionId,
+        path: s.path,
+        mtime,
+        agentId: s.agentId,
+        parentSessionId: s.parentSessionId,
+        agentType: s.agentType,
+        workflowRunId: s.workflowRunId,
+      });
+      // Skip the hasAssistantContent check for agent files — blank-session filtering
+      // only applies to abandoned parent sessions, not agents.
       if (s.agentId) {
-        promises.push(
-          stat(s.path)
-            .then((fileStat) => ({ sessionId, path: s.path, mtime: fileStat.mtime, agentId: s.agentId, parentSessionId: s.parentSessionId }))
-            .catch(() => null),
-        );
+        promises.push(stat(s.path).then((fileStat) => build(fileStat.mtime)).catch(() => null));
       } else {
         promises.push(
           Promise.all([stat(s.path), hasAssistantContent(s.path)])
-            .then(([fileStat, hasContent]) =>
-              hasContent ? { sessionId, path: s.path, mtime: fileStat.mtime, agentId: s.agentId, parentSessionId: s.parentSessionId } : null,
-            )
+            .then(([fileStat, hasContent]) => (hasContent ? build(fileStat.mtime) : null))
             .catch(() => null),
         );
       }
@@ -398,7 +403,9 @@ export async function runAgentMigration(
 
 /**
  * Find agent sessions spawned in worktrees by checking Claude project
- * directories corresponding to the given cwds.
+ * directories corresponding to the given cwds. Reuses the shared scanSubagentDir scanner
+ * (so worktree discovery covers workflow subagents identically to the main path), then adds
+ * each agent's mtime via stat.
  */
 export async function findWorktreeAgents(
   parentSessionId: string,
@@ -410,29 +417,28 @@ export async function findWorktreeAgents(
   for (const cwd of cwds) {
     const projectDir = getClaudeProjectDir(cwd);
     if (knownDirs.has(projectDir)) continue;
-
     const subagentsDir = join(projectDir, parentSessionId, 'subagents');
     promises.push(
-      readdir(subagentsDir)
-        .then((files) =>
-          Promise.all(
-            files
-              .filter((f) => f.endsWith('.jsonl') && f.startsWith('agent-'))
-              .map(async (f) => {
-                const agentPath = join(subagentsDir, f);
-                const fileStat = await stat(agentPath);
-                const sessionId = basename(f, '.jsonl');
-                return {
-                  sessionId,
-                  path: agentPath,
-                  mtime: fileStat.mtime,
-                  agentId: sessionId.slice('agent-'.length),
-                  parentSessionId,
-                } satisfies DiscoveredSession;
-              }),
-          ),
-        )
-        .catch(() => [] as Array<DiscoveredSession>),
+      scanSubagentDir(subagentsDir, parentSessionId).then((refs) =>
+        Promise.all(
+          refs.map(async (ref): Promise<DiscoveredSession | null> => {
+            try {
+              const fileStat = await stat(ref.path);
+              return {
+                sessionId: basename(ref.path, '.jsonl'),
+                path: ref.path,
+                mtime: fileStat.mtime,
+                agentId: ref.agentId,
+                parentSessionId: ref.parentSessionId,
+                ...(ref.agentType && { agentType: ref.agentType }),
+                ...(ref.workflowRunId && { workflowRunId: ref.workflowRunId }),
+              };
+            } catch {
+              return null;
+            }
+          }),
+        ).then((entries) => entries.filter((e): e is DiscoveredSession => e !== null)),
+      ),
     );
   }
 

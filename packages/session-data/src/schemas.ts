@@ -249,6 +249,8 @@ export const SessionMetaSchema = z.object({
   messageCount: z.number(),
   agentId: z.string().optional(),
   parentSessionId: z.string().optional(),
+  agentType: z.string().optional(),
+  workflowRunId: z.string().optional(),
   rawLineCount: z.number().optional(),
   schemaErrors: z.array(z.string()).optional(),
   excluded: z.boolean().optional(),
