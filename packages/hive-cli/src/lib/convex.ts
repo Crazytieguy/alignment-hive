@@ -74,6 +74,7 @@ export async function generateUploadUrls(
     gitRemote?: string;
     lastModified?: number;
   },
+  workflowRunIds: Array<string> = [],
 ): Promise<Record<string, string> | null> {
   try {
     const client = await getAuthenticatedClient();
@@ -82,6 +83,7 @@ export async function generateUploadUrls(
     return await client.mutation(api.sessions.generateUploadUrls, {
       sessionId,
       agentSessionIds,
+      workflowRunIds,
       ...consentIdentifiers,
     });
   } catch (error) {
@@ -99,7 +101,15 @@ export async function saveUploads(
     lastModified?: number;
     sessionStartGitCommitHash?: string;
   },
-  uploads: Array<{ sessionId: string; storageId: string; summary?: string; lineCount: number; parentSessionId?: string }>,
+  uploads: Array<{
+    sessionId: string;
+    storageId: string;
+    summary?: string;
+    lineCount: number;
+    parentSessionId?: string;
+    agentType?: string;
+    workflowRunId?: string;
+  }>,
 ): Promise<boolean> {
   try {
     const client = await getAuthenticatedClient();
@@ -116,6 +126,43 @@ export async function saveUploads(
     return true;
   } catch (error) {
     debugLog(`saveUploads failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+export interface WorkflowRunUpload {
+  workflowRunId: string;
+  runId: string;
+  storageId: string;
+  workflowName?: string;
+  summary?: string;
+  status?: string;
+  totalTokens?: number;
+  totalToolCalls?: number;
+  agentCount?: number;
+  durationMs?: number;
+}
+
+export async function saveWorkflowRuns(
+  parentSessionId: string,
+  meta: { directory?: string; gitRemote?: string; lastModified?: number },
+  runs: Array<WorkflowRunUpload>,
+): Promise<boolean> {
+  try {
+    const client = await getAuthenticatedClient();
+    if (!client) return false;
+
+    await client.mutation(api.sessions.saveWorkflowRuns, {
+      parentSessionId,
+      ...meta,
+      runs: runs.map((r) => ({
+        ...r,
+        storageId: r.storageId as unknown as Id<"_storage">,
+      })),
+    });
+    return true;
+  } catch (error) {
+    debugLog(`saveWorkflowRuns failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }

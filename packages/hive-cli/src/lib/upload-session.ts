@@ -1,11 +1,20 @@
-import { readFile } from 'node:fs/promises';
-import { computeConsentWindows, extractSessionSummary, isInConsentWindow } from '@alignment-hive/session-data';
-import { parseCwdFromLine, statePaths } from './config';
-import { generateUploadUrls, getConsentHistory, saveUploads } from './convex';
+import { readFile, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import {
+  WorkflowRunBlobSchema,
+  computeConsentWindows,
+  extractSessionSummary,
+  extractWorkflowRunRow,
+  isInConsentWindow,
+} from '@alignment-hive/session-data';
+import { getClaudeProjectDir, parseCwdFromLine, statePaths } from './config';
+import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
 import { sanitizeDeep } from './sanitize';
 import { loadSessionState, recordUploadedSessions, runAgentMigration } from './session-state';
-import type { KnownEntry } from '@alignment-hive/session-data';
+import type { WorkflowRunUpload } from './convex';
+import type { KnownEntry, WorkflowRunRow } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-state';
 
 async function readCommitHash(stateDir: string, sessionId: string): Promise<string | undefined> {
@@ -82,7 +91,7 @@ function buildUploadContent(
   sessionId: string,
   checkoutId: string,
   rawMtime: string,
-  parentSessionId?: string,
+  agent?: { parentSessionId?: string; agentType?: string; workflowRunId?: string },
 ) {
   const meta = {
     _type: 'session-meta' as const,
@@ -92,7 +101,9 @@ function buildUploadContent(
     extractedAt: new Date().toISOString(),
     rawMtime,
     messageCount: sanitizedEntries.length,
-    ...(parentSessionId && { parentSessionId }),
+    ...(agent?.parentSessionId && { parentSessionId: agent.parentSessionId }),
+    ...(agent?.agentType && { agentType: agent.agentType }),
+    ...(agent?.workflowRunId && { workflowRunId: agent.workflowRunId }),
   };
 
   const lines = [JSON.stringify(meta), ...sanitizedEntries.map((e) => JSON.stringify(e))];
@@ -152,18 +163,109 @@ export interface UploadParentOpts {
   stateDir: string;
 }
 
+/** Split into fixed-size chunks (bounds the per-mutation arg-array size for large workflows). */
+function chunk<T>(arr: Array<T>, size: number): Array<Array<T>> {
+  const out: Array<Array<T>> = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Upload a parent session and all its agents using the bulk backend endpoints.
- * Shared by upload-send.ts and review-router.ts.
+ * Replace the user's home dir with ~ in every string (object keys AND values) of the run blob —
+ * run metadata can embed absolute local paths. Boundary-aware: only matches `home` when it's not
+ * followed by a path-name char, so a sibling account whose name is a prefix (`jane` vs `janet`)
+ * is left intact rather than mangled.
+ */
+function redactHomePaths<T>(value: T, home: string): T {
+  if (!home) return value;
+  const re = new RegExp(escapeRegExp(home) + '(?![\\w-])', 'g');
+  const redact = (s: string): string => s.replace(re, '~');
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return redact(v);
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v)) out[redact(k)] = walk(val);
+      return out;
+    }
+    return v;
+  };
+  return walk(value) as T;
+}
+
+interface DiscoveredWorkflowRun {
+  row: WorkflowRunRow;
+  blob: unknown; // the full sanitized + home-redacted wf_<id>.json object
+}
+
+/**
+ * Find a parent session's workflow run-metadata files (`<session>/workflows/wf_*.json`), parse,
+ * sanitize (secret redaction + home-path normalization), and extract the indexed row. Looks in the
+ * parent's own project dir plus any worktree cwds the session touched; dedupes by workflowRunId.
+ */
+export async function discoverWorkflowRuns(
+  parent: DiscoveredSession,
+  cwds: Set<string>,
+): Promise<Array<DiscoveredWorkflowRun>> {
+  const sessionDirs = new Set<string>([join(dirname(parent.path), parent.sessionId)]);
+  for (const cwd of cwds) sessionDirs.add(join(getClaudeProjectDir(cwd), parent.sessionId));
+
+  const home = homedir();
+  const byRunId = new Map<string, DiscoveredWorkflowRun>();
+
+  for (const sessionDir of sessionDirs) {
+    const workflowsDir = join(sessionDir, 'workflows');
+    let files: Array<string>;
+    try {
+      files = await readdir(workflowsDir);
+    } catch {
+      continue; // no workflows/ dir here
+    }
+    for (const f of files) {
+      // Run metadata only: wf_<id>.json (skip the scripts/ subdir and any other files).
+      if (!f.startsWith('wf_') || !f.endsWith('.json')) continue;
+      const workflowRunId = basename(f, '.json');
+      if (byRunId.has(workflowRunId)) continue;
+      try {
+        const parsed = WorkflowRunBlobSchema.safeParse(JSON.parse(await readFile(join(workflowsDir, f), 'utf-8')));
+        if (!parsed.success) continue;
+        const blob = redactHomePaths(sanitizeDeep(parsed.data), home);
+        const row = extractWorkflowRunRow(workflowRunId, blob);
+        // Cap the row summary so the saveWorkflowRuns mutation args stay well under Convex limits
+        // (the full text remains in the storage blob).
+        if (row.summary && row.summary.length > MAX_ROW_SUMMARY) {
+          row.summary = `${row.summary.slice(0, MAX_ROW_SUMMARY)}…`;
+        }
+        byRunId.set(workflowRunId, { row, blob });
+      } catch {
+        // skip unreadable / malformed run metadata
+      }
+    }
+  }
+
+  return [...byRunId.values()];
+}
+
+const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
+const MAX_ROW_SUMMARY = 2000; // cap the indexed run-summary scalar (full text stays in the blob)
+
+/**
+ * Upload a parent session, all its agents (Task + workflow subagents), and its workflow
+ * run-metadata using the bulk backend endpoints. Shared by upload-send.ts and review-router.ts.
  *
- * Consent model: agents inherit their parent's consent. Consent is verified once
- * for the parent session (by the backend in generateUploadUrls/saveUploads).
- * Agents are not checked individually — they are part of the parent's session.
+ * Consent model: agents and runs inherit their parent's consent. Consent is verified once for the
+ * parent (by the backend in generateUploadUrls/saveUploads/saveWorkflowRuns). The parent is saved
+ * first so its record exists before agents/runs reference it. Large workflows are chunked across
+ * round trips; the local uploaded-sessions record is written only after everything succeeds, so a
+ * partial failure simply retries (all backend writes are idempotent upserts).
  */
 export async function uploadParentWithAgents(opts: UploadParentOpts) {
   const { parent, parentRead, agents, checkoutId, ids, stateDir } = opts;
 
-  // Parent sessions must have assistant content
   if (!parentRead.hasAssistant) {
     return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'No assistant messages' } as const;
   }
@@ -172,83 +274,106 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   const lastModified = new Date(rawMtime).getTime();
   const commitHash = await readCommitHash(stateDir, parent.sessionId);
   const validLastModified = isFinite(lastModified) ? lastModified : undefined;
+  const consentIds = { directory: ids.directory, gitRemote: ids.gitRemote, lastModified: validLastModified };
+  const sessionMeta = {
+    checkoutId,
+    directory: ids.directory,
+    gitRemote: ids.gitRemote,
+    lastModified: validLastModified,
+    sessionStartGitCommitHash: commitHash,
+  };
+  const fail = (error: string, agentFailures = 0) =>
+    ({ parentSuccess: false, agentSuccesses: 0, agentFailures, error } as const);
 
-  // 1. Get upload URLs for parent + agents in one round trip (consent check only, no record mutations)
-  const urls = await generateUploadUrls(
-    parent.sessionId,
-    agents.map((a) => a.sessionId),
-    { directory: ids.directory, gitRemote: ids.gitRemote, lastModified: validLastModified },
-  );
-  if (!urls) {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'Failed to get upload URLs' } as const;
-  }
-
-  // 2. Upload parent
-  const parentUrl = urls[parent.sessionId];
-  if (!parentUrl) {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'No URL for parent session' } as const;
-  }
-
-  const parentContent = buildUploadContent(parentRead.sanitizedEntries, parent.sessionId, checkoutId, rawMtime);
+  // 1. Upload + save the PARENT first, so its record exists before agents/runs reference it.
+  const parentUrls = await generateUploadUrls(parent.sessionId, [], consentIds);
+  const parentUrl = parentUrls?.[parent.sessionId];
+  if (!parentUrl) return fail('Failed to get upload URL for parent session');
   let parentStorageId: string;
   try {
-    parentStorageId = await uploadToStorage(parentUrl, parentContent);
-  } catch (err) {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: err instanceof Error ? err.message : 'Upload failed' } as const;
-  }
-
-  // 3. Upload agents in batches — all-or-nothing (if any fail, we don't save and retry next time)
-  const AGENT_UPLOAD_BATCH = 10;
-  const uploads: Array<{ sessionId: string; storageId: string; summary?: string; lineCount: number; parentSessionId?: string }> = [
-    { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary, lineCount: parentRead.sanitizedEntries.length },
-  ];
-
-  let agentFailures = 0;
-  for (let i = 0; i < agents.length; i += AGENT_UPLOAD_BATCH) {
-    const batch = agents.slice(i, i + AGENT_UPLOAD_BATCH);
-    const batchResults = await Promise.allSettled(
-      batch.map(async (agent) => {
-        const agentUrl = urls[agent.sessionId];
-        if (!agentUrl) throw new Error('No URL');
-
-        const agentMtime = agent.mtime.toISOString();
-        const agentRead = await readAndSanitizeSession(agent.path);
-        const agentContent = buildUploadContent(agentRead.sanitizedEntries, agent.sessionId, checkoutId, agentMtime, parent.sessionId);
-        const storageId = await uploadToStorage(agentUrl, agentContent);
-        return { sessionId: agent.sessionId, storageId, summary: agentRead.summary, lineCount: agentRead.sanitizedEntries.length, parentSessionId: parent.sessionId };
-      }),
+    parentStorageId = await uploadToStorage(
+      parentUrl,
+      buildUploadContent(parentRead.sanitizedEntries, parent.sessionId, checkoutId, rawMtime),
     );
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : 'Parent upload failed');
+  }
+  const parentSaved = await saveUploads(parent.sessionId, sessionMeta, [
+    { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary, lineCount: parentRead.sanitizedEntries.length },
+  ]);
+  if (!parentSaved) return fail('Failed to save parent upload');
 
-    for (const r of batchResults) {
-      if (r.status === 'rejected') agentFailures++;
-      else uploads.push(r.value);
+  // 2. Upload agents in chunks: one URL mint + N blob uploads + one save per chunk.
+  for (const batch of chunk(agents, UPLOAD_CHUNK)) {
+    const urls = await generateUploadUrls(parent.sessionId, batch.map((a) => a.sessionId), consentIds);
+    if (!urls) return fail('Failed to get upload URLs for agents');
+
+    const uploads: Parameters<typeof saveUploads>[2] = [];
+    for (const agent of batch) {
+      const url = urls[agent.sessionId];
+      if (!url) return fail('No upload URL for agent', 1);
+      try {
+        const agentRead = await readAndSanitizeSession(agent.path);
+        const content = buildUploadContent(agentRead.sanitizedEntries, agent.sessionId, checkoutId, agent.mtime.toISOString(), {
+          parentSessionId: parent.sessionId,
+          agentType: agent.agentType,
+          workflowRunId: agent.workflowRunId,
+        });
+        const storageId = await uploadToStorage(url, content);
+        uploads.push({
+          sessionId: agent.sessionId,
+          storageId,
+          summary: agentRead.summary,
+          lineCount: agentRead.sanitizedEntries.length,
+          parentSessionId: parent.sessionId,
+          ...(agent.agentType && { agentType: agent.agentType }),
+          ...(agent.workflowRunId && { workflowRunId: agent.workflowRunId }),
+        });
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : 'Agent upload failed', 1);
+      }
     }
-
-    if (agentFailures > 0) {
-      return { parentSuccess: false, agentSuccesses: 0, agentFailures, error: `${agentFailures} agent upload(s) failed` } as const;
+    if (uploads.length > 0 && !(await saveUploads(parent.sessionId, sessionMeta, uploads))) {
+      return fail('Failed to save agent uploads');
     }
   }
 
-  // 4. Save all uploads atomically — upserts session records + links storage blobs
-  const saved = await saveUploads(
-    parent.sessionId,
-    {
-      checkoutId,
-      directory: ids.directory,
-      gitRemote: ids.gitRemote,
-      lastModified: validLastModified,
-      sessionStartGitCommitHash: commitHash,
-    },
-    uploads,
-  );
-  if (!saved) {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'Failed to save upload metadata' } as const;
+  // 3. Upload workflow run-metadata blobs in chunks — BEST-EFFORT. The parent + agents (the primary
+  //    content) are already saved, so a run failure must not force a full re-upload loop. Any run
+  //    not in uploadedRunIds is reopened by the workflow-run backfill (Workstream H) on a later run.
+  const runs = await discoverWorkflowRuns(parent, parentRead.cwds);
+  const uploadedRunIds: Array<string> = [];
+  for (const batch of chunk(runs, UPLOAD_CHUNK)) {
+    const urls = await generateUploadUrls(parent.sessionId, [], consentIds, batch.map((r) => r.row.workflowRunId));
+    if (!urls) break;
+    const saveRuns: Array<WorkflowRunUpload> = [];
+    for (const run of batch) {
+      const url = urls[run.row.workflowRunId];
+      if (!url) break;
+      try {
+        saveRuns.push({ ...run.row, storageId: await uploadToStorage(url, JSON.stringify(run.blob)) });
+      } catch {
+        break;
+      }
+    }
+    // Only count a fully-uploaded-and-saved batch; stop on the first failure (backfill handles the rest).
+    if (saveRuns.length === batch.length && (await saveWorkflowRuns(parent.sessionId, consentIds, saveRuns))) {
+      uploadedRunIds.push(...saveRuns.map((r) => r.workflowRunId));
+    } else {
+      break;
+    }
   }
 
-  // 5. Record in local uploaded-sessions — parent only, with all agent IDs
-  const allAgentIds = agents.map((a) => a.sessionId);
+  // 4. Record the parent locally with its agents + the runs that actually uploaded. The parent +
+  //    agents are saved before this point, so this converges local state; runs missing from
+  //    uploadedRunIds are reopened by the backfill (Workstream H).
   await recordUploadedSessions(stateDir, [
-    { sessionId: parent.sessionId, rawMtime, agentSessionIds: allAgentIds },
+    {
+      sessionId: parent.sessionId,
+      rawMtime,
+      agentSessionIds: agents.map((a) => a.sessionId),
+      workflowRunIds: uploadedRunIds,
+    },
   ]);
 
   return { parentSuccess: true, agentSuccesses: agents.length, agentFailures: 0 } as const;
