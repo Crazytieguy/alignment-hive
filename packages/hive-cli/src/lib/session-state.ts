@@ -404,6 +404,78 @@ export async function runAgentMigration(
 }
 
 /**
+ * True if an uploaded parent has discovered agents missing from its recorded agentSessionIds — the
+ * signal that a pre-workflow-support upload now reveals workflow subagents (or any new agent) to
+ * backfill. Deliberately agent-only: a workflow run whose wf_<id>.json is missing/malformed can
+ * never be recorded, so keying reopen on run ids would loop forever. Agents always upload reliably,
+ * so this is self-healing — once a re-upload records them, it returns false. (Missing run metadata
+ * is captured on the agent-triggered re-upload, or on the next parent-mtime change.)
+ */
+export function needsWorkflowReopen(uploaded: UploadedEntry, agents: Array<DiscoveredSession>): boolean {
+  const recorded = new Set(uploaded.agentSessionIds ?? []);
+  return agents.some((a) => !recorded.has(a.sessionId));
+}
+
+/** Load the workflow-backfill migration timestamp. Returns null if not set. */
+export async function loadWorkflowMigrationTs(stateDir: string): Promise<number | null> {
+  try {
+    const ts = parseInt((await readFile(statePaths(stateDir).workflowMigrationTs, 'utf-8')).trim(), 10);
+    return isNaN(ts) ? null : ts;
+  } catch {
+    return null;
+  }
+}
+
+/** Write the workflow-backfill migration timestamp (first time this backfill reopens a session). */
+export async function writeWorkflowMigrationTs(stateDir: string): Promise<number> {
+  const now = Date.now();
+  await writeFile(statePaths(stateDir).workflowMigrationTs, String(now));
+  return now;
+}
+
+/**
+ * Backfill: reopen already-uploaded parents that now reveal workflow subagents missing from their
+ * recorded agentSessionIds (sessions uploaded before workflow support). Reopened parents are
+ * invalidated in-memory (agentSessionIds dropped) onto the review-window path so they re-upload
+ * under the normal consent delay, not immediately. Mutates state.uploadedMap.
+ *
+ * Uses a DEDICATED, persisted workflow timestamp (written once) so reopened sessions get a fresh
+ * review window independent of any stale agent-migration timestamp, and so a permanently-blocked
+ * reopen (e.g. a consent-gap session that can never upload) doesn't keep resetting the window each
+ * run. Returns the later of the agent-migration and workflow timestamps so neither window is
+ * shortened. The re-upload (uploadParentWithAgents -> findAgentsForParent) captures worktree agents.
+ *
+ * NOTE: detection uses the already-discovered in-place agent set (agentsByParent), which covers
+ * agents under any project dir in the transcripts-dirs list (including discovered worktrees).
+ * Workflow agents that live only under a never-listed cwd are not auto-detected here.
+ */
+export async function runWorkflowBackfill(
+  state: SessionState,
+  stateDir: string,
+  migrationTimestamp: number | null,
+): Promise<number | null> {
+  let reopened = 0;
+  for (const parent of state.parentSessions) {
+    if (state.excludedSet.has(parent.sessionId)) continue;
+    const uploaded = state.uploadedMap.get(parent.sessionId);
+    // Only fully-recorded uploads are our concern; agentSessionIds===undefined is the agent migration's job.
+    if (!uploaded || uploaded.rawMtime !== parent.mtime.toISOString() || uploaded.agentSessionIds === undefined) {
+      continue;
+    }
+    const agents = state.agentsByParent.get(parent.sessionId) ?? [];
+    if (needsWorkflowReopen(uploaded, agents)) {
+      state.uploadedMap.set(parent.sessionId, { ...uploaded, agentSessionIds: undefined });
+      reopened++;
+    }
+  }
+  if (reopened === 0) return migrationTimestamp;
+
+  let workflowTs = await loadWorkflowMigrationTs(stateDir);
+  if (workflowTs == null) workflowTs = await writeWorkflowMigrationTs(stateDir);
+  return migrationTimestamp != null ? Math.max(migrationTimestamp, workflowTs) : workflowTs;
+}
+
+/**
  * Find agent sessions spawned in worktrees by checking Claude project
  * directories corresponding to the given cwds. Reuses the shared scanSubagentDir scanner
  * (so worktree discovery covers workflow subagents identically to the main path), then adds

@@ -214,6 +214,7 @@ export function statePaths(stateDir: string) {
     uploadedSessions: join(stateDir, 'uploaded-sessions'),
     excludedSessions: join(stateDir, 'excluded-sessions'),
     agentMigrationTs: join(stateDir, 'agent-upload-migration-ts'),
+    workflowMigrationTs: join(stateDir, 'workflow-upload-migration-ts'),
     snoozeUntil: join(stateDir, 'snooze-until'),
     uploadScheduled: join(stateDir, 'upload-scheduled'),
     uploadLock: join(stateDir, 'upload-lock'),
