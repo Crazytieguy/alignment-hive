@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   canExclude,
   canUpload,
@@ -6,8 +9,10 @@ import {
   formatSessionStatus,
   getStatusColor,
   isEligibleForAutoUpload,
+  needsWorkflowReopen,
+  runWorkflowBackfill,
 } from '../lib/session-state';
-import type { DiscoveredSession, StatusContext, UploadedEntry } from '../lib/session-state';
+import type { DiscoveredSession, SessionState, StatusContext, UploadedEntry } from '../lib/session-state';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -218,5 +223,115 @@ describe('status helper functions', () => {
     expect(getStatusColor({ type: 'pending', remainingMs: 1000 })).toBe('yellow');
     expect(getStatusColor({ type: 'snoozed' })).toBe('yellow');
     expect(getStatusColor({ type: 'excluded' })).toBe('default');
+  });
+});
+
+function agentSession(sessionId: string, workflowRunId?: string): DiscoveredSession {
+  return {
+    sessionId,
+    path: `/fake/${sessionId}.jsonl`,
+    mtime: new Date(),
+    agentId: sessionId.replace('agent-', ''),
+    ...(workflowRunId && { workflowRunId }),
+  };
+}
+
+describe('needsWorkflowReopen (agent-only — no run-id loop)', () => {
+  test('reopens when a discovered agent is not in the recorded agentSessionIds', () => {
+    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x'] };
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')])).toBe(true);
+  });
+
+  test('does NOT reopen when all agents are recorded even if a run id is missing (unrecordable run metadata must not loop)', () => {
+    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: [] };
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')])).toBe(false);
+  });
+
+  test('does not reopen a parent with no agents', () => {
+    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: [] };
+    expect(needsWorkflowReopen(uploaded, [])).toBe(false);
+  });
+});
+
+describe('runWorkflowBackfill', () => {
+  let stateDir: string;
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'hive-h-'));
+  });
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  function makeState(uploaded: UploadedEntry, parentMtime: Date, agents: Array<DiscoveredSession>): SessionState {
+    const parent: DiscoveredSession = { sessionId: 'p', path: '/fake/p.jsonl', mtime: parentMtime };
+    return {
+      parentSessions: [parent],
+      agentsByParent: new Map([['p', agents]]),
+      sessionById: new Map(),
+      uploadedMap: new Map([['p', uploaded]]),
+      excludedSet: new Set(),
+      migrationTimestamp: null,
+    };
+  }
+
+  const uploadedMissingAgent = (mtime: Date): UploadedEntry => ({
+    sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't', agentSessionIds: ['agent-x'],
+  });
+  const withWorkflowAgent = (): Array<DiscoveredSession> => [agentSession('agent-x'), agentSession('agent-y', 'wf_1')];
+
+  test('reopens an uploaded parent missing a workflow agent and routes it off the uploaded path', async () => {
+    const mtime = new Date(Date.now() - 5 * DAY_MS);
+    const state = makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent());
+
+    const ts = await runWorkflowBackfill(state, stateDir, null);
+    expect(typeof ts).toBe('number');
+    expect(state.uploadedMap.get('p')!.agentSessionIds).toBeUndefined();
+
+    const status = computeSessionStatus(state.parentSessions[0], {
+      uploadedMap: state.uploadedMap,
+      excludedSet: state.excludedSet,
+      consentMtime: Date.now() - 5 * DAY_MS,
+      snoozeUntil: null,
+      migrationTimestamp: ts,
+    });
+    expect(status.type).toBe('pending');
+  });
+
+  test('writes a FRESH review window even when a stale agent-migration timestamp exists', async () => {
+    const mtime = new Date(Date.now() - 5 * DAY_MS);
+    const state = makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent());
+    const staleAgentTs = Date.now() - 30 * DAY_MS; // long-expired agent-migration window
+
+    const ts = await runWorkflowBackfill(state, stateDir, staleAgentTs);
+    expect(ts).toBeGreaterThan(Date.now() - DAY_MS); // fresh, not the stale agent ts
+
+    const status = computeSessionStatus(state.parentSessions[0], {
+      uploadedMap: state.uploadedMap,
+      excludedSet: state.excludedSet,
+      consentMtime: Date.now() - 5 * DAY_MS,
+      snoozeUntil: null,
+      migrationTimestamp: ts,
+    });
+    expect(status.type).toBe('pending'); // within the fresh window, NOT immediately ready
+  });
+
+  test('reuses the persisted window on a later run (stable; no reset each run)', async () => {
+    const mtime = new Date(Date.now() - 5 * DAY_MS);
+    const first = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null);
+    const second = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null);
+    expect(second).toBe(first);
+  });
+
+  test('leaves a fully-recorded upload untouched', async () => {
+    const mtime = new Date(Date.now() - 5 * DAY_MS);
+    const uploaded: UploadedEntry = {
+      sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: ['wf_1'],
+    };
+    const state = makeState(uploaded, mtime, withWorkflowAgent());
+
+    const ts = await runWorkflowBackfill(state, stateDir, null);
+    expect(ts).toBeNull();
+    expect(state.uploadedMap.get('p')!.agentSessionIds).toEqual(['agent-x', 'agent-y']);
   });
 });

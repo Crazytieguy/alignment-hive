@@ -12,7 +12,7 @@ import { getClaudeProjectDir, parseCwdFromLine, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
 import { sanitizeDeep } from './sanitize';
-import { loadSessionState, recordUploadedSessions, runAgentMigration } from './session-state';
+import { loadSessionState, recordUploadedSessions, runAgentMigration, runWorkflowBackfill } from './session-state';
 import type { WorkflowRunUpload } from './convex';
 import type { KnownEntry, WorkflowRunRow } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-state';
@@ -82,7 +82,9 @@ export async function loadSessionStateWithAgentMigration(stateDir: string, trans
     state, stateDir, transcriptsDirs,
     readSessionCwds,
   );
-  return { ...state, migrationTimestamp };
+  // Reopen already-uploaded parents that are missing newly-discovered workflow subagents/runs.
+  const effectiveMigrationTs = await runWorkflowBackfill(state, stateDir, migrationTimestamp);
+  return { ...state, migrationTimestamp: effectiveMigrationTs };
 }
 
 /** Build NDJSON upload content from sanitized entries. */
