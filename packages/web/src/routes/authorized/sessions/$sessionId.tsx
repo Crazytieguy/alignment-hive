@@ -14,6 +14,21 @@ export const Route = createFileRoute("/authorized/sessions/$sessionId")({
   component: SessionDetail,
 });
 
+function AgentLink({ child }: { child: { sessionId: string; agentType?: string } }) {
+  return (
+    <Link
+      to="/authorized/sessions/$sessionId"
+      params={{ sessionId: child.sessionId }}
+      className="font-mono text-sm text-primary hover:underline"
+    >
+      {formatSessionId(child.sessionId)}
+      {child.agentType ? (
+        <span className="ml-2 font-sans text-xs text-muted-foreground">{child.agentType}</span>
+      ) : null}
+    </Link>
+  );
+}
+
 function SessionDetail() {
   const { sessionId } = Route.useParams();
   const { data } = useSuspenseQuery(convexQuery(api.authorized.getSession, { sessionId }));
@@ -131,26 +146,74 @@ function SessionDetail() {
             </div>
           )}
 
-          {data.agentSessions.length > 0 && (
-            <div className="rounded-lg border border-border bg-card p-4">
-              <h2 className="mb-3 text-sm font-medium text-foreground">
-                Agent Sessions ({data.agentSessions.length})
-              </h2>
-              <ul className="space-y-1">
-                {data.agentSessions.map((child) => (
-                  <li key={child.sessionId}>
-                    <Link
-                      to="/authorized/sessions/$sessionId"
-                      params={{ sessionId: child.sessionId }}
-                      className="font-mono text-sm text-primary hover:underline"
-                    >
-                      {formatSessionId(child.sessionId)}
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {(data.agentSessions.length > 0 || (data.workflowRuns?.length ?? 0) > 0) && (() => {
+            const agents = data.agentSessions;
+            const runs = data.workflowRuns ?? [];
+
+            // Group agents by workflowRunId; undefined => Task / non-workflow agents.
+            const byRun = new Map<string | undefined, typeof agents>();
+            for (const a of agents) {
+              const list = byRun.get(a.workflowRunId) ?? [];
+              list.push(a);
+              byRun.set(a.workflowRunId, list);
+            }
+            const taskAgents = byRun.get(undefined) ?? [];
+            // Union of run ids from agents AND run metadata, sorted, so the header count matches cards.
+            const runIds = [
+              ...new Set<string>([
+                ...[...byRun.keys()].filter((k): k is string => k !== undefined),
+                ...runs.map((r) => r.workflowRunId),
+              ]),
+            ].sort();
+
+            return (
+              <div className="space-y-4 rounded-lg border border-border bg-card p-4">
+                <h2 className="text-sm font-medium text-foreground">
+                  Agent Sessions ({agents.length}
+                  {runIds.length > 0 ? ` · ${runIds.length} workflow run${runIds.length === 1 ? "" : "s"}` : ""})
+                </h2>
+
+                {runIds.map((runId) => {
+                  const meta = runs.find((r) => r.workflowRunId === runId);
+                  const runAgents = byRun.get(runId) ?? [];
+                  const stats = [
+                    meta?.status,
+                    meta?.agentCount != null ? `${meta.agentCount} agents` : null,
+                    meta?.totalTokens != null ? `${meta.totalTokens.toLocaleString()} tok` : null,
+                  ].filter(Boolean);
+                  return (
+                    <div key={runId} className="rounded border border-border/60 p-2">
+                      <div className="text-xs font-medium text-foreground">
+                        {meta?.workflowName ?? "Workflow"} · {runId}
+                      </div>
+                      {stats.length > 0 && (
+                        <div className="text-xs text-muted-foreground">{stats.join(" · ")}</div>
+                      )}
+                      {runAgents.length > 0 && (
+                        <ul className="mt-1 space-y-1">
+                          {runAgents.map((child) => (
+                            <li key={child.sessionId}>
+                              <AgentLink child={child} />
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {taskAgents.length > 0 && (
+                  <ul className="space-y-1">
+                    {taskAgents.map((child) => (
+                      <li key={child.sessionId}>
+                        <AgentLink child={child} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

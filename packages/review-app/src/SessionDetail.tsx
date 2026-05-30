@@ -188,7 +188,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
               </div>
             )}
 
-            {data.agents.length > 0 && onSelectAgent && (() => {
+            {(data.agents.length > 0 || (data.workflowRuns?.length ?? 0) > 0) && onSelectAgent && (() => {
               const agents = data.agents;
               const runs = data.workflowRuns ?? [];
 
@@ -222,7 +222,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
                     const stats = [
                       meta?.status,
                       meta?.agentCount != null ? `${meta.agentCount} agents` : null,
-                      meta?.totalTokens != null ? `${meta.totalTokens} tok` : null,
+                      meta?.totalTokens != null ? `${meta.totalTokens.toLocaleString()} tok` : null,
                     ].filter(Boolean);
                     return (
                       <div key={runId} className="rounded border border-border/60 p-2">
@@ -232,13 +232,15 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
                         {stats.length > 0 && (
                           <div className="text-xs text-muted-foreground">{stats.join(" · ")}</div>
                         )}
-                        <ul className="mt-1 space-y-1">
-                          {runAgents.map((agent) => (
-                            <li key={agent.sessionId}>
-                              <AgentButton agent={agent} viewingAgentId={viewingAgentId} onSelect={onSelectAgent} />
-                            </li>
-                          ))}
-                        </ul>
+                        {runAgents.length > 0 && (
+                          <ul className="mt-1 space-y-1">
+                            {runAgents.map((agent) => (
+                              <li key={agent.sessionId}>
+                                <AgentButton agent={agent} viewingAgentId={viewingAgentId} onSelect={onSelectAgent} />
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
                     );
                   })}

@@ -10,6 +10,7 @@ interface SessionUser {
 
 interface AgentSession {
   sessionId: string;
+  workflowRunId?: string;
   upload?: { contentUrl: string; uploadedAt: number };
 }
 
@@ -142,7 +143,14 @@ export function SessionsTable({
                   {session.lineCount}
                 </td>
                 <td className="px-4 py-3 text-sm tabular-nums text-muted-foreground">
-                  {session.agentSessions.length || "\u2014"}
+                  {(() => {
+                    const n = session.agentSessions.length;
+                    if (n === 0) return "\u2014";
+                    const runs = new Set(
+                      session.agentSessions.map((a) => a.workflowRunId).filter(Boolean),
+                    ).size;
+                    return runs > 0 ? `${n} \u00b7 ${runs}wf` : `${n}`;
+                  })()}
                 </td>
                 <td className="px-4 py-3 text-sm text-muted-foreground">
                   {formatRelativeTime(session.lastHeartbeat)}
