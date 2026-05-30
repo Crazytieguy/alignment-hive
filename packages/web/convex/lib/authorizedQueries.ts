@@ -46,6 +46,8 @@ function formatSessionBase(
     summary: session.summary,
     sessionStartGitCommitHash: session.sessionStartGitCommitHash,
     parentSessionId: session.parentSessionId,
+    agentType: session.agentType,
+    workflowRunId: session.workflowRunId,
     upload,
   };
 }
@@ -68,7 +70,48 @@ async function formatAgentSessions(ctx: QueryCtx, parentSessionId: string) {
         lastHeartbeat: child.lastHeartbeat,
         summary: child.summary,
         parentSessionId: child.parentSessionId!,
+        agentType: child.agentType,
+        workflowRunId: child.workflowRunId,
         upload: childUpload,
+      };
+    }),
+  );
+}
+
+/**
+ * Workflow run-metadata records for a parent. Runs inherit the parent's consent visibility
+ * (the caller only invokes this after the parent passes consentFilter) AND must belong to the
+ * parent's owner — never expose a run row pinned to this parentSessionId by a different user.
+ */
+async function formatWorkflowRuns(
+  ctx: QueryCtx,
+  parentSessionId: string,
+  ownerDocId: Id<"users">,
+) {
+  const runs = await ctx.db
+    .query("workflowRuns")
+    .withIndex("by_parent_session_id", (q) =>
+      q.eq("parentSessionId", parentSessionId),
+    )
+    .collect();
+
+  const owned = runs.filter((run) => run.userDocId === ownerDocId);
+
+  return await Promise.all(
+    owned.map(async (run) => {
+      const contentUrl = await ctx.storage.getUrl(run.upload.storageId);
+      return {
+        workflowRunId: run.workflowRunId,
+        runId: run.runId,
+        workflowName: run.workflowName,
+        summary: run.summary,
+        status: run.status,
+        totalTokens: run.totalTokens,
+        totalToolCalls: run.totalToolCalls,
+        agentCount: run.agentCount,
+        durationMs: run.durationMs,
+        contentUrl: contentUrl ?? undefined,
+        uploadedAt: run.upload.uploadedAt,
       };
     }),
   );
@@ -263,11 +306,16 @@ export async function getSessionImpl(
   const upload = await formatUpload(ctx, session.upload);
   const user = await resolveSessionUser(ctx, session);
   const agentSessions = await formatAgentSessions(ctx, session.sessionId);
+  // Workflow runs are keyed to the top-level parent; agent-session views never have any.
+  const workflowRuns = session.parentSessionId
+    ? []
+    : await formatWorkflowRuns(ctx, session.sessionId, session.userDocId);
 
   return {
     ...formatSessionBase(session, upload),
     user: user ? formatUser(user) : null,
     agentSessions,
+    workflowRuns,
     parentSession: parentSession
       ? {
           sessionId: parentSession.sessionId,
