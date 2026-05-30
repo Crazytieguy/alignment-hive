@@ -77,7 +77,7 @@ export const usage = {
   search: (): string => {
     return [
       'Usage: search <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]',
-      '                        [--after <time>] [--before <time>]',
+      '                        [--after <time>] [--before <time>] [--agents]',
       '',
       'Search sessions for a pattern (JavaScript regex).',
       'Use -- to separate options from pattern if needed.',
@@ -92,6 +92,8 @@ export const usage = {
       '  --in <fields>   Search only specified fields (comma-separated)',
       '  --after <time>  Include only results after this time',
       '  --before <time> Include only results before this time',
+      '  --agents        Also search agent transcripts (Task + workflow subagents),',
+      '                  labelling each hit with its agent type, workflow run, and parent',
       '',
       'Time formats:',
       '  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)',
