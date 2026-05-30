@@ -21,3 +21,4 @@ target/
 /remote-kernels/
 /remote-kernels.log
 .playwright-mcp/
+.playwright-cli/
