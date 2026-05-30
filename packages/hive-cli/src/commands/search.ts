@@ -21,6 +21,7 @@ interface SearchOptions {
   sessionFilter: string | null;
   afterTime: Date | null;
   beforeTime: Date | null;
+  agents: boolean;
 }
 
 function printUsage(): void {
@@ -93,7 +94,10 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     const prefix = options.sessionFilter;
     files = files.filter((f) => {
       const name = basename(f, '.jsonl');
-      return name.startsWith(prefix) || name === `agent-${prefix}`;
+      if (name.startsWith(prefix) || name === `agent-${prefix}`) return true;
+      // With --agents, keep agent files here: their parent (parentSessionId) isn't in the filename,
+      // so a `-s <parent>` scope is applied per-agent at read time below.
+      return options.agents && name.startsWith('agent-');
     });
     if (files.length === 0) {
       printError(errors.sessionNotFound(prefix));
@@ -101,9 +105,12 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     }
   }
 
-  // Compute prefixes from filenames (no I/O needed — session ID = filename)
-  const mainFiles = files.filter((f) => !basename(f, '.jsonl').startsWith('agent-'));
-  const allSessionIds = mainFiles.map((f) => basename(f, '.jsonl'));
+  // Compute prefixes from filenames (no I/O needed — session ID = filename). With --agents,
+  // include agent sessions so their hits get a resolvable prefix (for `hive local read <id>`).
+  const prefixFiles = options.agents
+    ? files
+    : files.filter((f) => !basename(f, '.jsonl').startsWith('agent-'));
+  const allSessionIds = prefixFiles.map((f) => basename(f, '.jsonl'));
   const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
 
   let totalMatches = 0;
@@ -114,7 +121,17 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     if (options.maxMatches !== null && totalMatches >= options.maxMatches) break;
 
     const sessionResult = await source.readSession(file);
-    if (!sessionResult || 'error' in sessionResult || sessionResult.meta.agentId) continue;
+    // Agent transcripts are skipped unless --agents is passed (keeps the default fast + noise-free).
+    if (!sessionResult || 'error' in sessionResult || (!options.agents && sessionResult.meta.agentId)) continue;
+
+    // With `-s <prefix> --agents`, scope agents to the selected parent (parent id is only in
+    // parentSessionId), or to an agent's own id if the prefix targets it directly.
+    if (options.sessionFilter && sessionResult.meta.agentId) {
+      const p = options.sessionFilter;
+      const parent = sessionResult.meta.parentSessionId ?? '';
+      const self = sessionResult.meta.sessionId; // 'agent-<id>'
+      if (!parent.startsWith(p) && !self.startsWith(p) && self !== `agent-${p}`) continue;
+    }
 
     const sessionId = sessionResult.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
@@ -153,6 +170,14 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     sessionCounts.push({ sessionId: sessionPrefix, count: sessionMatchCount });
 
     if (!options.countOnly && !options.listOnly) {
+      // Attribute agent hits: label by agentType + workflow run + parent so the result is traceable.
+      if (sessionResult.meta.agentId) {
+        const m = sessionResult.meta;
+        const bits = [m.agentType ?? 'agent'];
+        if (m.workflowRunId) bits.push(m.workflowRunId);
+        if (m.parentSessionId) bits.push(`parent ${m.parentSessionId.slice(0, 8)}`);
+        console.log(`# ${sessionPrefix} (${bits.join(' · ')})`);
+      }
       const output = formatBlocks(blocks, {
         sessionPrefix,
         cwd,
@@ -187,14 +212,21 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
 }
 
 function parseSearchOptions(args: Array<string>): SearchOptions | null {
+  // Everything before `--` is options; the first token after `--` is taken as a literal pattern
+  // (so flag-like patterns such as `--agents` are searchable: `search -- --agents`).
+  const ddIdx = args.indexOf('--');
+  const opt = ddIdx === -1 ? args : args.slice(0, ddIdx);
+  const literalPattern = ddIdx !== -1 ? args[ddIdx + 1] : undefined;
+
   function getFlagValue(flag: string): string | undefined {
-    const idx = args.indexOf(flag);
-    return idx !== -1 ? args[idx + 1] : undefined;
+    const idx = opt.indexOf(flag);
+    return idx !== -1 ? opt[idx + 1] : undefined;
   }
 
-  const caseInsensitive = args.includes('-i');
-  const countOnly = args.includes('-c');
-  const listOnly = args.includes('-l');
+  const caseInsensitive = opt.includes('-i');
+  const countOnly = opt.includes('-c');
+  const listOnly = opt.includes('-l');
+  const agents = opt.includes('--agents');
 
   // Parse -m N (max matches)
   let maxMatches: number | null = null;
@@ -244,17 +276,19 @@ function parseSearchOptions(args: Array<string>): SearchOptions | null {
   }
 
   const flagsWithValues = new Set(['-m', '-C', '-s', '--in', '--after', '--before']);
-  const flags = new Set(['-i', '-c', '-l', '-m', '-C', '-s', '--in', '--after', '--before']);
-  let patternStr: string | null = null;
+  const flags = new Set(['-i', '-c', '-l', '--agents', '-m', '-C', '-s', '--in', '--after', '--before']);
+  let patternStr: string | null = literalPattern ?? null;
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (flags.has(arg)) {
-      if (flagsWithValues.has(arg)) i++;
-      continue;
+  if (patternStr === null) {
+    for (let i = 0; i < opt.length; i++) {
+      const arg = opt[i];
+      if (flags.has(arg)) {
+        if (flagsWithValues.has(arg)) i++;
+        continue;
+      }
+      patternStr = arg;
+      break;
     }
-    patternStr = arg;
-    break;
   }
 
   if (!patternStr) {
@@ -280,5 +314,6 @@ function parseSearchOptions(args: Array<string>): SearchOptions | null {
     sessionFilter,
     afterTime,
     beforeTime,
+    agents,
   };
 }

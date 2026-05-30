@@ -15,7 +15,11 @@ import type { ReadSessionResult } from '../lib/session-format';
 import type { SessionSource } from '../lib/session-io';
 
 // Test session data
-function createTestSession(sessionId: string, entries: Array<object>, options?: { agentId?: string }): string {
+function createTestSession(
+  sessionId: string,
+  entries: Array<object>,
+  options?: { agentId?: string; agentType?: string; workflowRunId?: string; parentSessionId?: string },
+): string {
   const meta = {
     _type: 'session-meta',
     version: '0.1',
@@ -25,6 +29,9 @@ function createTestSession(sessionId: string, entries: Array<object>, options?: 
     rawMtime: '2025-01-01T00:00:00Z',
     messageCount: entries.length,
     ...(options?.agentId && { agentId: options.agentId }),
+    ...(options?.agentType && { agentType: options.agentType }),
+    ...(options?.workflowRunId && { workflowRunId: options.workflowRunId }),
+    ...(options?.parentSessionId && { parentSessionId: options.parentSessionId }),
   };
   return [JSON.stringify(meta), ...entries.map((e) => JSON.stringify(e))].join('\n');
 }
@@ -149,6 +156,64 @@ describe('search command', () => {
     expect(consoleOutput.some((line) => line.includes('TODO'))).toBe(true);
     // Uses minimal prefix - "test" is unique enough
     expect(consoleOutput.some((line) => line.includes('test'))).toBe(true);
+  });
+
+  test('--agents searches agent transcripts (attributed); default excludes them', async () => {
+    sessions.set('parent-1.jsonl', createTestSession('parent-1', [userEntry('1', 'parent only text')]));
+    sessions.set(
+      'agent-wf001.jsonl',
+      createTestSession('agent-wf001', [userEntry('1', 'NEEDLE_IN_AGENT here')], {
+        agentId: 'wf001',
+        agentType: 'workflow-subagent',
+        workflowRunId: 'wf_run1',
+      }),
+    );
+    const { searchCore } = await import('../commands/search');
+
+    // Default: agent content is not searched.
+    process.argv = ['node', 'cli', 'search', 'NEEDLE_IN_AGENT'];
+    consoleOutput = [];
+    await searchCore(source, process.argv.slice(3));
+    expect(consoleOutput.join('\n')).not.toContain('NEEDLE_IN_AGENT');
+
+    // --agents: agent content is searched and attributed by type + run.
+    process.argv = ['node', 'cli', 'search', 'NEEDLE_IN_AGENT', '--agents'];
+    consoleOutput = [];
+    await searchCore(source, process.argv.slice(3));
+    const out = consoleOutput.join('\n');
+    expect(out).toContain('NEEDLE_IN_AGENT');
+    expect(out).toContain('workflow-subagent');
+    expect(out).toContain('wf_run1');
+  });
+
+  test("-s <parent> --agents scopes agents by their parentSessionId (not their filename)", async () => {
+    sessions.set('parent-abc.jsonl', createTestSession('parent-abc', [userEntry('1', 'parent body')]));
+    // In-scope agent: parent matches the -s prefix.
+    sessions.set('agent-9f7.jsonl', createTestSession('agent-9f7', [userEntry('1', 'SCOPED_NEEDLE here')], {
+      agentId: '9f7', parentSessionId: 'parent-abc', agentType: 'workflow-subagent', workflowRunId: 'wf_x',
+    }));
+    // Out-of-scope agent: same needle, different parent — must be excluded.
+    sessions.set('agent-aaa.jsonl', createTestSession('agent-aaa', [userEntry('1', 'SCOPED_NEEDLE elsewhere')], {
+      agentId: 'aaa', parentSessionId: 'other-parent',
+    }));
+    const { searchCore } = await import('../commands/search');
+
+    process.argv = ['node', 'cli', 'search', 'SCOPED_NEEDLE', '-s', 'parent-abc', '--agents'];
+    consoleOutput = [];
+    await searchCore(source, process.argv.slice(3));
+    const out = consoleOutput.join('\n');
+    expect(out).toContain('here'); // the in-scope agent's match
+    expect(out).not.toContain('elsewhere'); // the out-of-scope agent was excluded by parent scope
+  });
+
+  test("search -- <token> treats the token after -- as a literal pattern (e.g. --agents)", async () => {
+    sessions.set('s1.jsonl', createTestSession('s1', [userEntry('1', 'this mentions --agents literally')]));
+    const { searchCore } = await import('../commands/search');
+
+    process.argv = ['node', 'cli', 'search', '--', '--agents'];
+    consoleOutput = [];
+    await searchCore(source, process.argv.slice(3));
+    expect(consoleOutput.join('\n')).toContain('--agents');
   });
 
   test('case insensitive search with -i flag', async () => {

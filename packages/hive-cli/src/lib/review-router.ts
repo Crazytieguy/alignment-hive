@@ -17,7 +17,7 @@ import {
   recordExcludedSession,
 } from './session-state';
 import { clearSnooze, getSnoozeUntil, parseDuration, setSnooze } from './snooze';
-import { isInConsentWindows, loadConsentWindows, loadSessionStateWithAgentMigration, readAndSanitizeSession, readSessionSummary, uploadParentWithAgents } from './upload-session';
+import { discoverWorkflowRuns, isInConsentWindows, loadConsentWindows, loadSessionStateWithAgentMigration, readAndSanitizeSession, readSessionSummary, uploadParentWithAgents } from './upload-session';
 
 const t = initTRPC.create();
 
@@ -99,6 +99,8 @@ export function createReviewRouter(stateDir: string, cwd: string) {
                 return {
                   sessionId: agent.sessionId,
                   agentId: agent.agentId,
+                  ...(agent.agentType && { agentType: agent.agentType }),
+                  ...(agent.workflowRunId && { workflowRunId: agent.workflowRunId }),
                   entries: agentRead.sanitizedEntries,
                   messageCount: agentRead.sanitizedEntries.length,
                 };
@@ -106,6 +108,14 @@ export function createReviewRouter(stateDir: string, cwd: string) {
             );
             agents.push(...batchResults);
           }
+
+          // Workflow run metadata (indexed scalars) for the parent — same sanitize pipeline as upload.
+          // Best-effort: never fail the whole content query if run discovery hiccups.
+          const workflowRuns = session.agentId
+            ? []
+            : await discoverWorkflowRuns(session, sessionRead.cwds)
+                .then((rs) => rs.map((r) => r.row))
+                .catch(() => []);
 
           return {
             meta: {
@@ -119,6 +129,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
             },
             entries: sessionRead.sanitizedEntries,
             agents,
+            workflowRuns,
           };
         }),
 

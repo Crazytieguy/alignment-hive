@@ -34,6 +34,30 @@ function canUpload(status: Status) {
   return status.type === "ready" || status.type === "pending";
 }
 
+function AgentButton({
+  agent,
+  viewingAgentId,
+  onSelect,
+}: {
+  agent: { sessionId: string; agentType?: string };
+  viewingAgentId?: string;
+  onSelect: (sessionId: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSelect(agent.sessionId)}
+      className={`font-mono text-sm hover:underline ${
+        agent.sessionId === viewingAgentId ? "text-foreground font-medium" : "text-primary"
+      }`}
+    >
+      {formatSessionId(agent.sessionId)}
+      {agent.agentType ? (
+        <span className="ml-2 font-sans text-xs text-muted-foreground">{agent.agentType}</span>
+      ) : null}
+    </button>
+  );
+}
+
 export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent }: SessionDetailProps) {
   const queryClient = useQueryClient();
 
@@ -164,29 +188,73 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
               </div>
             )}
 
-            {data.agents.length > 0 && onSelectAgent && (
-              <div className="rounded-lg border border-border bg-card p-4">
-                <h2 className="mb-3 text-sm font-medium text-foreground">
-                  Agent Sessions ({data.agents.length})
-                </h2>
-                <ul className="space-y-1">
-                  {data.agents.map((agent) => (
-                    <li key={agent.sessionId}>
-                      <button
-                        onClick={() => onSelectAgent(agent.sessionId)}
-                        className={`font-mono text-sm hover:underline ${
-                          agent.sessionId === viewingAgentId
-                            ? "text-foreground font-medium"
-                            : "text-primary"
-                        }`}
-                      >
-                        {formatSessionId(agent.sessionId)}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            {data.agents.length > 0 && onSelectAgent && (() => {
+              const agents = data.agents;
+              const runs = data.workflowRuns ?? [];
+
+              // Group agents by workflowRunId; undefined => Task / non-workflow agents.
+              const byRun = new Map<string | undefined, typeof agents>();
+              for (const a of agents) {
+                const list = byRun.get(a.workflowRunId) ?? [];
+                list.push(a);
+                byRun.set(a.workflowRunId, list);
+              }
+              const taskAgents = byRun.get(undefined) ?? [];
+              // Union of run ids from agents AND run metadata, sorted for a stable order — so the
+              // header count matches the rendered cards (the two sources are discovered independently).
+              const runIds = [
+                ...new Set<string>([
+                  ...[...byRun.keys()].filter((k): k is string => k !== undefined),
+                  ...runs.map((r) => r.workflowRunId),
+                ]),
+              ].sort();
+
+              return (
+                <div className="space-y-4 rounded-lg border border-border bg-card p-4">
+                  <h2 className="text-sm font-medium text-foreground">
+                    Agent Sessions ({agents.length}
+                    {runIds.length > 0 ? ` · ${runIds.length} workflow run${runIds.length === 1 ? "" : "s"}` : ""})
+                  </h2>
+
+                  {runIds.map((runId) => {
+                    const meta = runs.find((r) => r.workflowRunId === runId);
+                    const runAgents = byRun.get(runId) ?? [];
+                    const stats = [
+                      meta?.status,
+                      meta?.agentCount != null ? `${meta.agentCount} agents` : null,
+                      meta?.totalTokens != null ? `${meta.totalTokens} tok` : null,
+                    ].filter(Boolean);
+                    return (
+                      <div key={runId} className="rounded border border-border/60 p-2">
+                        <div className="text-xs font-medium text-foreground">
+                          {meta?.workflowName ?? "Workflow"} · {runId}
+                        </div>
+                        {stats.length > 0 && (
+                          <div className="text-xs text-muted-foreground">{stats.join(" · ")}</div>
+                        )}
+                        <ul className="mt-1 space-y-1">
+                          {runAgents.map((agent) => (
+                            <li key={agent.sessionId}>
+                              <AgentButton agent={agent} viewingAgentId={viewingAgentId} onSelect={onSelectAgent} />
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  })}
+
+                  {taskAgents.length > 0 && (
+                    <ul className="space-y-1">
+                      {taskAgents.map((agent) => (
+                        <li key={agent.sessionId}>
+                          <AgentButton agent={agent} viewingAgentId={viewingAgentId} onSelect={onSelectAgent} />
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
       </div>

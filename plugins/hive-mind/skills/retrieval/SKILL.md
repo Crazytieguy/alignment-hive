@@ -37,6 +37,10 @@ Use Bash to run CLI commands and git. Cross-reference between them—commits and
 
 Run commands via: !`command -v hive-mind >/dev/null 2>&1 && echo '\x60hive-mind <command>\x60' || echo '\x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60'`
 
+By default `search` covers top-level sessions only. Add `--agents` to also search subagent
+transcripts (Task agents and Workflow-tool subagents) when the relevant work was done by a
+delegated agent — each hit is labelled with its agent type, workflow run, and parent session.
+
 `search --help`:
 ```
 !`hive-mind search --help 2>/dev/null || bun ${CLAUDE_PLUGIN_ROOT}/cli.js search --help 2>/dev/null || echo "(cli unavailable - install bun: https://bun.sh)"`
