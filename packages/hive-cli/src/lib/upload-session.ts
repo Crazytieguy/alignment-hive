@@ -305,16 +305,17 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   ]);
   if (!parentSaved) return fail('Failed to save parent upload');
 
-  // 2. Upload agents in chunks: one URL mint + N blob uploads + one save per chunk.
+  // 2. Upload agents in chunks: one URL mint + blob uploads run CONCURRENTLY within the chunk + one
+  //    save per chunk. (Read+sanitize+network per agent is independent; serializing them made large
+  //    workflows take minutes.)
   for (const batch of chunk(agents, UPLOAD_CHUNK)) {
     const urls = await generateUploadUrls(parent.sessionId, batch.map((a) => a.sessionId), consentIds);
     if (!urls) return fail('Failed to get upload URLs for agents');
 
-    const uploads: Parameters<typeof saveUploads>[2] = [];
-    for (const agent of batch) {
-      const url = urls[agent.sessionId];
-      if (!url) return fail('No upload URL for agent', 1);
-      try {
+    const settled = await Promise.allSettled(
+      batch.map(async (agent): Promise<Parameters<typeof saveUploads>[2][number]> => {
+        const url = urls[agent.sessionId];
+        if (!url) throw new Error('No upload URL for agent');
         const agentRead = await readAndSanitizeSession(agent.path);
         const content = buildUploadContent(agentRead.sanitizedEntries, agent.sessionId, checkoutId, agent.mtime.toISOString(), {
           parentSessionId: parent.sessionId,
@@ -322,7 +323,7 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
           workflowRunId: agent.workflowRunId,
         });
         const storageId = await uploadToStorage(url, content);
-        uploads.push({
+        return {
           sessionId: agent.sessionId,
           storageId,
           summary: agentRead.summary,
@@ -330,11 +331,17 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
           parentSessionId: parent.sessionId,
           ...(agent.agentType && { agentType: agent.agentType }),
           ...(agent.workflowRunId && { workflowRunId: agent.workflowRunId }),
-        });
-      } catch (err) {
-        return fail(err instanceof Error ? err.message : 'Agent upload failed', 1);
-      }
+        };
+      }),
+    );
+
+    const uploads: Parameters<typeof saveUploads>[2] = [];
+    let failed = 0;
+    for (const r of settled) {
+      if (r.status === 'fulfilled') uploads.push(r.value);
+      else failed++;
     }
+    if (failed > 0) return fail(`${failed} agent upload(s) failed`, failed);
     if (uploads.length > 0 && !(await saveUploads(parent.sessionId, sessionMeta, uploads))) {
       return fail('Failed to save agent uploads');
     }
@@ -348,22 +355,22 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   for (const batch of chunk(runs, UPLOAD_CHUNK)) {
     const urls = await generateUploadUrls(parent.sessionId, [], consentIds, batch.map((r) => r.row.workflowRunId));
     if (!urls) break;
-    const saveRuns: Array<WorkflowRunUpload> = [];
-    for (const run of batch) {
-      const url = urls[run.row.workflowRunId];
-      if (!url) break;
-      try {
-        saveRuns.push({ ...run.row, storageId: await uploadToStorage(url, JSON.stringify(run.blob)) });
-      } catch {
-        break;
-      }
-    }
-    // Only count a fully-uploaded-and-saved batch; stop on the first failure (backfill handles the rest).
-    if (saveRuns.length === batch.length && (await saveWorkflowRuns(parent.sessionId, consentIds, saveRuns))) {
-      uploadedRunIds.push(...saveRuns.map((r) => r.workflowRunId));
-    } else {
+
+    const settled = await Promise.allSettled(
+      batch.map(async (run): Promise<WorkflowRunUpload> => {
+        const url = urls[run.row.workflowRunId];
+        if (!url) throw new Error('No upload URL for workflow run');
+        return { ...run.row, storageId: await uploadToStorage(url, JSON.stringify(run.blob)) };
+      }),
+    );
+    // Best-effort: only a fully-successful batch is saved/recorded; stop on the first failure
+    // (the backfill reopens any runs we didn't record).
+    if (settled.some((r) => r.status === 'rejected')) break;
+    const saveRuns = settled.map((r) => (r as PromiseFulfilledResult<WorkflowRunUpload>).value);
+    if (saveRuns.length > 0 && !(await saveWorkflowRuns(parent.sessionId, consentIds, saveRuns))) {
       break;
     }
+    uploadedRunIds.push(...saveRuns.map((r) => r.workflowRunId));
   }
 
   // 4. Record the parent locally with its agents + the runs that actually uploaded. The parent +
