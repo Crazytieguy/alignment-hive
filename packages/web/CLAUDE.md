@@ -42,6 +42,10 @@ Defined in `packages/session-data/src/consent-windows.ts` (shared between CLI an
 
 Child (agent) sessions inherit their parent's consent — they are never checked individually. See `uploadParentWithAgents` (CLI) and `generateUploadUrls`/`saveUploads` (backend) for the implementation and rationale.
 
+This covers both regular Task subagents and **Workflow-tool subagents** (`<session>/subagents/workflows/wf_<id>/agent-*.jsonl`). Each agent row carries an optional `agentType` (e.g. `general-purpose`, `Explore`, `workflow-subagent`) and, for workflow subagents, a `workflowRunId` (`wf_<id>`).
+
+A workflow run's **run metadata** (`<session>/workflows/wf_<id>.json` — orchestration script, result, totals) is uploaded as a sanitized blob into the `workflowRuns` table via `saveWorkflowRuns`, keyed to the parent and grouped with its subagents by `workflowRunId`. Runs inherit the parent's consent the same way agents do, so `saveWorkflowRuns` requires the parent session to exist and be owned by the caller, and `formatWorkflowRuns` only returns runs belonging to the parent's owner (never expose a run pinned to a parentSessionId by a different user).
+
 ### Rules for modifying this code
 
 - **Never add a new public query/mutation in `convex/` that returns cross-user session data without calling `requireAuthorized()` and applying `buildConsentFilter()`.** Internal queries/mutations/actions are exempt (not externally callable).
