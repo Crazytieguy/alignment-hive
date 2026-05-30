@@ -26,6 +26,7 @@ export interface UploadedEntry {
   rawMtime: string;
   uploadedAt: string;
   agentSessionIds?: Array<string>;
+  workflowRunIds?: Array<string>;
 }
 
 export interface DiscoveredSession {
@@ -225,7 +226,7 @@ export function isSessionUploaded(
 /** Record sessions as uploaded in a single write. Includes agent entries and parent entries with agentSessionIds. */
 export async function recordUploadedSessions(
   stateDir: string,
-  sessions: Array<{ sessionId: string; rawMtime: string; agentSessionIds?: Array<string> }>,
+  sessions: Array<{ sessionId: string; rawMtime: string; agentSessionIds?: Array<string>; workflowRunIds?: Array<string> }>,
 ): Promise<void> {
   if (sessions.length === 0) return;
   const now = new Date().toISOString();
@@ -234,6 +235,7 @@ export async function recordUploadedSessions(
     rawMtime: s.rawMtime,
     uploadedAt: now,
     ...(s.agentSessionIds !== undefined && { agentSessionIds: s.agentSessionIds }),
+    ...(s.workflowRunIds !== undefined && { workflowRunIds: s.workflowRunIds }),
   } satisfies UploadedEntry) + '\n');
   await appendFile(statePaths(stateDir).uploadedSessions, lines.join(''));
 }
