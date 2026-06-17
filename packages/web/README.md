@@ -8,6 +8,7 @@ A TanStack Start + React web application for alignment researchers to share sess
 - **Consent**: Data sharing preferences wizard and management
 - **Dashboard**: Admin dashboard for sessions and users
 - **Integration**: Backend for the hive CLI (session uploads, consent, heartbeats)
+- **Booking**: Public per-office pages (`/book/<office>`) to book in-person meetings with Yoav, backed by Google Calendar (see `src/lib/booking/` and `src/routes/booking/`; env vars in `scripts/google-calendar-auth.ts`).
 
 ## Local Development
 
