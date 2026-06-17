@@ -2,6 +2,7 @@
 .venv
 node_modules
 .playwright-mcp/
+.playwright-cli/
 .env.local
 .claude/autopilot/
 .claude/scheduled_tasks.lock

@@ -12,11 +12,7 @@ import {
   type OfficeSlug,
   isOfficeSlug,
 } from "@/lib/booking/offices";
-
-interface Slot {
-  startUtc: number;
-  endUtc: number;
-}
+import { type BusyInterval, type Slot, generateSlots } from "@/lib/booking/slots";
 
 export const Route = createFileRoute("/book/$office")({
   component: BookOfficeRoute,
@@ -41,11 +37,39 @@ function BookOfficeRoute() {
   return <Booking office={office} />;
 }
 
+const inputClass =
+  "w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-slate-900 dark:text-slate-100";
+
 function fmtTime(ms: number, zone: string): string {
   return DateTime.fromMillis(ms, { zone }).toFormat("h:mm a ZZZZ");
 }
 function fmtDate(ms: number, zone: string): string {
   return DateTime.fromMillis(ms, { zone }).toFormat("cccc, LLLL d");
+}
+/** Visitor-tz time, plus the office time when the visitor isn't already on office time. */
+function timeLabel(ms: number, visitorZone: string, officeZone: string): string {
+  const visitor = fmtTime(ms, visitorZone);
+  const office = fmtTime(ms, officeZone);
+  return visitor === office ? visitor : `${visitor} (${office} at the office)`;
+}
+
+interface Availability {
+  busy: BusyInterval[];
+  nowUtc: number;
+}
+
+async function fetchBusy(office: string): Promise<Availability> {
+  await ensureBotId();
+  const res = await fetch("/booking/availability", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ office }),
+  });
+  const data = (await res.json().catch(() => null)) as
+    | { busy?: BusyInterval[]; nowUtc?: number; error?: string }
+    | null;
+  if (!res.ok) throw new Error(data?.error ?? "Couldn't load availability.");
+  return { busy: data?.busy ?? [], nowUtc: data?.nowUtc ?? Date.now() };
 }
 
 function Booking({ office }: { office: OfficeSlug }) {
@@ -55,45 +79,63 @@ function Booking({ office }: { office: OfficeSlug }) {
     [],
   );
 
-  const [duration, setDuration] = useState<Duration>(90);
-  const [slots, setSlots] = useState<Slot[] | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [avail, setAvail] = useState<Availability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-  const [selected, setSelected] = useState<Slot | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [duration, setDuration] = useState<Duration>(90);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [selectedStartUtc, setSelectedStartUtc] = useState<number | null>(null);
   const [cancelUrl, setCancelUrl] = useState<string | null>(null);
 
+  // Fetch the host's busy intervals once. Availability is duration-independent, so switching
+  // duration just recomputes start times locally — no refetch.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    setAvail(null);
     setLoadError(null);
-    ensureBotId()
-      .then(() =>
-        fetch("/booking/availability", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ office, durationMin: duration }),
-        }),
-      )
-      .then(async (res) => {
-        const data = (await res.json().catch(() => null)) as { slots?: Slot[]; error?: string } | null;
-        if (!res.ok) throw new Error(data?.error ?? "Couldn't load availability.");
-        return data?.slots ?? [];
-      })
-      .then((next) => !cancelled && setSlots(next))
-      .catch((err: Error) => !cancelled && setLoadError(err.message))
-      .finally(() => !cancelled && setLoading(false));
+    fetchBusy(office)
+      .then((next) => !cancelled && setAvail(next))
+      .catch((err: Error) => !cancelled && setLoadError(err.message));
     return () => {
       cancelled = true;
     };
-  }, [office, duration, reloadKey]);
+  }, [office]);
 
-  if (cancelUrl && selected) {
+  const byDate = useMemo(() => {
+    const map = new Map<string, Slot[]>();
+    if (!avail) return map;
+    for (const slot of generateSlots(config, duration, avail.busy, avail.nowUtc)) {
+      const key = DateTime.fromMillis(slot.startUtc, { zone: config.timezone }).toISODate() ?? "";
+      const arr = map.get(key);
+      if (arr) arr.push(slot);
+      else map.set(key, [slot]);
+    }
+    return map;
+  }, [avail, duration, config]);
+
+  const dates = useMemo(() => [...byDate.keys()], [byDate]);
+  const times = selectedDate ? (byDate.get(selectedDate) ?? []) : [];
+
+  // Keep the date selection valid as availability/duration change.
+  useEffect(() => {
+    if (dates.length === 0) {
+      if (selectedDate !== null) setSelectedDate(null);
+    } else if (!selectedDate || !dates.includes(selectedDate)) {
+      setSelectedDate(dates[0]);
+    }
+  }, [dates, selectedDate]);
+
+  // The set of times changes with the date or duration, so clear any stale time pick.
+  useEffect(() => {
+    setSelectedStartUtc(null);
+  }, [selectedDate, duration]);
+
+  const selectedSlot = times.find((t) => t.startUtc === selectedStartUtc) ?? null;
+
+  if (cancelUrl && selectedSlot) {
     return (
       <Confirmation
         config={config}
-        slot={selected}
+        slot={selectedSlot}
         duration={duration}
         visitorZone={visitorZone}
         cancelUrl={cancelUrl}
@@ -103,192 +145,93 @@ function Booking({ office }: { office: OfficeSlug }) {
 
   return (
     <BookingShell>
-      <a className="text-sm text-slate-500 underline hover:text-slate-700 dark:hover:text-slate-300" href="/book">
+      <a
+        className="text-sm text-slate-500 underline hover:text-slate-700 dark:hover:text-slate-300"
+        href="/book"
+      >
         ← All offices
       </a>
       <h1 className="mt-3 text-3xl font-serif font-bold text-slate-900 dark:text-slate-100">
-        {config.label}
+        Book a consulting session with Yoav
       </h1>
-      <p className="mt-1 text-slate-600 dark:text-slate-400">In-person meeting with Yoav.</p>
+      <p className="mt-1 text-slate-600 dark:text-slate-400">In-person at {config.label}.</p>
 
-      {selected ? (
-        <BookingForm
+      {loadError ? (
+        <p className="mt-6 text-red-600 dark:text-red-400">{loadError}</p>
+      ) : !avail ? (
+        <p className="mt-6 text-slate-500">Loading availability…</p>
+      ) : (
+        <Form
           office={office}
           config={config}
-          duration={duration}
-          slot={selected}
           visitorZone={visitorZone}
-          onClose={() => setSelected(null)}
+          duration={duration}
+          onDuration={setDuration}
+          dates={dates}
+          byDate={byDate}
+          times={times}
+          selectedDate={selectedDate}
+          onDate={setSelectedDate}
+          selectedStartUtc={selectedStartUtc}
+          onTime={setSelectedStartUtc}
+          selectedSlot={selectedSlot}
           onBooked={setCancelUrl}
           onSlotTaken={() => {
-            setSelected(null);
-            setNotice("That time was just taken — here's the latest availability.");
-            setReloadKey((k) => k + 1);
+            setSelectedStartUtc(null);
+            setAvail(null);
+            fetchBusy(office)
+              .then(setAvail)
+              .catch(() => setAvail({ busy: [], nowUtc: Date.now() }));
           }}
         />
-      ) : (
-        <>
-          <DurationPicker value={duration} onChange={setDuration} />
-          <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
-            Times are shown in your timezone ({visitorZone}); the office is on Pacific time.
-          </p>
-          {notice && (
-            <p className="mt-3 rounded-md bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
-              {notice}
-            </p>
-          )}
-          {loading ? (
-            <p className="mt-6 text-slate-500">Loading availability…</p>
-          ) : loadError ? (
-            <p className="mt-6 text-red-600 dark:text-red-400">{loadError}</p>
-          ) : slots && slots.length === 0 ? (
-            <p className="mt-6 text-slate-500">No open times in the next few weeks.</p>
-          ) : slots ? (
-            <SlotList
-              slots={slots}
-              visitorZone={visitorZone}
-              officeZone={config.timezone}
-              onPick={(s) => {
-                setNotice(null);
-                setSelected(s);
-              }}
-            />
-          ) : null}
-        </>
       )}
     </BookingShell>
   );
 }
 
-function DurationPicker({ value, onChange }: { value: Duration; onChange: (d: Duration) => void }) {
-  return (
-    <div className="mt-6">
-      <span className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-        Meeting length
-      </span>
-      <div className="mt-2 flex gap-2">
-        {DURATIONS.map((d) => (
-          <button
-            key={d}
-            type="button"
-            onClick={() => onChange(d)}
-            className={
-              d === value
-                ? "rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"
-                : "rounded-md border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-            }
-          >
-            {d} min
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SlotList({
-  slots,
-  visitorZone,
-  officeZone,
-  onPick,
-}: {
-  slots: Slot[];
-  visitorZone: string;
-  officeZone: string;
-  onPick: (s: Slot) => void;
-}) {
-  const groups = useMemo(() => {
-    const map = new Map<string, Slot[]>();
-    for (const s of slots) {
-      const key = DateTime.fromMillis(s.startUtc, { zone: visitorZone }).toISODate() ?? "";
-      const arr = map.get(key);
-      if (arr) arr.push(s);
-      else map.set(key, [s]);
-    }
-    return [...map.values()];
-  }, [slots, visitorZone]);
-
-  return (
-    <div className="mt-6 space-y-6">
-      {groups.map((daySlots) => (
-        <div key={daySlots[0].startUtc}>
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-            {fmtDate(daySlots[0].startUtc, visitorZone)}
-          </h3>
-          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {daySlots.map((s) => (
-              <button
-                key={s.startUtc}
-                type="button"
-                onClick={() => onPick(s)}
-                className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-left hover:border-slate-900 dark:hover:border-slate-300"
-              >
-                <span className="block text-sm font-medium text-slate-900 dark:text-slate-100">
-                  {fmtTime(s.startUtc, visitorZone)}
-                </span>
-                <span className="block text-xs text-slate-500">
-                  {fmtTime(s.startUtc, officeZone)} at the office
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SlotSummary({
-  config,
-  slot,
-  duration,
-  visitorZone,
-}: {
-  config: OfficeConfig;
-  slot: Slot;
-  duration: Duration;
-  visitorZone: string;
-}) {
-  return (
-    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
-      <p className="font-medium text-slate-900 dark:text-slate-100">{config.label}</p>
-      <p className="text-slate-700 dark:text-slate-300">{fmtDate(slot.startUtc, visitorZone)}</p>
-      <p className="text-slate-700 dark:text-slate-300">
-        {fmtTime(slot.startUtc, visitorZone)} ({duration} min)
-      </p>
-      <p className="text-xs text-slate-500">{fmtTime(slot.startUtc, config.timezone)} at the office</p>
-    </div>
-  );
-}
-
-function BookingForm({
+function Form({
   office,
   config,
-  duration,
-  slot,
   visitorZone,
-  onClose,
+  duration,
+  onDuration,
+  dates,
+  byDate,
+  times,
+  selectedDate,
+  onDate,
+  selectedStartUtc,
+  onTime,
+  selectedSlot,
   onBooked,
   onSlotTaken,
 }: {
   office: OfficeSlug;
   config: OfficeConfig;
-  duration: Duration;
-  slot: Slot;
   visitorZone: string;
-  onClose: () => void;
+  duration: Duration;
+  onDuration: (d: Duration) => void;
+  dates: string[];
+  byDate: Map<string, Slot[]>;
+  times: Slot[];
+  selectedDate: string | null;
+  onDate: (d: string) => void;
+  selectedStartUtc: number | null;
+  onTime: (ms: number | null) => void;
+  selectedSlot: Slot | null;
   onBooked: (cancelUrl: string) => void;
   onSlotTaken: () => void;
 }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [participants, setParticipants] = useState<string[]>([]);
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (submitting) return; // guard against double-submit
+    if (submitting || !selectedSlot) return; // guard against double-submit
     setSubmitting(true);
     setError(null);
     try {
@@ -296,13 +239,24 @@ function BookingForm({
       const res = await fetch("/booking/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ office, durationMin: duration, slotStartUtc: slot.startUtc, name, email, note }),
+        body: JSON.stringify({
+          office,
+          durationMin: duration,
+          slotStartUtc: selectedSlot.startUtc,
+          name,
+          email,
+          participants: participants.map((p) => p.trim()).filter(Boolean),
+          note,
+        }),
       });
       if (res.status === 409) {
         onSlotTaken();
+        setError("That time was just taken — please pick another.");
         return;
       }
-      const data = (await res.json().catch(() => null)) as { cancelUrl?: string; error?: string } | null;
+      const data = (await res.json().catch(() => null)) as
+        | { cancelUrl?: string; error?: string }
+        | null;
       if (!res.ok || !data?.cancelUrl) {
         setError(data?.error ?? "Something went wrong. Please try again.");
         return;
@@ -315,12 +269,73 @@ function BookingForm({
     }
   }
 
-  const inputClass =
-    "w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-slate-900 dark:text-slate-100";
-
   return (
-    <form onSubmit={submit} className="mt-6 space-y-4">
-      <SlotSummary config={config} slot={slot} duration={duration} visitorZone={visitorZone} />
+    <form onSubmit={submit} className="mt-6 space-y-5">
+      {/* Duration */}
+      <div>
+        <span className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+          Meeting length
+        </span>
+        <div className="mt-2 flex gap-2">
+          {DURATIONS.map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => onDuration(d)}
+              className={
+                d === duration
+                  ? "rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"
+                  : "rounded-md border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              }
+            >
+              {d} min
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {dates.length === 0 ? (
+        <p className="text-slate-500">No open times in the next few weeks.</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Date</span>
+            <select
+              className={inputClass}
+              value={selectedDate ?? ""}
+              onChange={(e) => onDate(e.target.value)}
+            >
+              {dates.map((d) => (
+                <option key={d} value={d}>
+                  {fmtDate(byDate.get(d)![0].startUtc, config.timezone)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Time</span>
+            <select
+              className={inputClass}
+              value={selectedStartUtc ?? ""}
+              onChange={(e) => onTime(e.target.value ? Number(e.target.value) : null)}
+            >
+              <option value="">Select a time…</option>
+              {times.map((t) => (
+                <option key={t.startUtc} value={t.startUtc}>
+                  {timeLabel(t.startUtc, visitorZone, config.timezone)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        Times are shown in your timezone ({visitorZone}); the office is on Pacific time.
+      </p>
+
+      <hr className="border-slate-200 dark:border-slate-800" />
+
       <label className="block">
         <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Your name</span>
         <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} required />
@@ -335,26 +350,60 @@ function BookingForm({
           required
         />
       </label>
+
+      {/* Additional participants — optional group booking */}
+      <div>
+        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Participants</span>
+        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+          By default this is a 1:1 with Yoav. Booking as a group? Add the others' emails and they'll be
+          invited too.
+        </p>
+        <div className="mt-2 space-y-2">
+          {participants.map((p, i) => (
+            <div key={i} className="flex gap-2">
+              <input
+                className={inputClass}
+                type="email"
+                placeholder="participant@email.com"
+                value={p}
+                onChange={(e) =>
+                  setParticipants(participants.map((v, j) => (j === i ? e.target.value : v)))
+                }
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setParticipants(participants.filter((_, j) => j !== i))}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => setParticipants([...participants, ""])}
+          className="mt-2 text-sm font-medium text-slate-700 underline dark:text-slate-300"
+        >
+          + Add participant
+        </button>
+      </div>
+
       <label className="block">
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-          What would you like to chat about? (optional)
-        </span>
+        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Notes (optional)</span>
         <textarea
           className={inputClass}
           rows={3}
+          placeholder="Anything you'd like to share ahead of time."
           value={note}
           onChange={(e) => setNote(e.target.value)}
         />
       </label>
+
       {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-      <div className="flex gap-3">
-        <Button type="submit" disabled={submitting}>
-          {submitting ? "Booking…" : "Confirm booking"}
-        </Button>
-        <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
-          Back
-        </Button>
-      </div>
+      <Button type="submit" disabled={submitting || !selectedSlot}>
+        {submitting ? "Booking…" : "Confirm booking"}
+      </Button>
     </form>
   );
 }
@@ -377,12 +426,13 @@ function Confirmation({
       <h1 className="text-3xl font-serif font-bold text-slate-900 dark:text-slate-100">
         You're booked
       </h1>
-      <p className="mt-2 text-slate-600 dark:text-slate-400">
-        A calendar invite is on its way to your email.
+      <p className="mt-2 text-slate-700 dark:text-slate-300">
+        {fmtDate(slot.startUtc, config.timezone)} · {fmtTime(slot.startUtc, visitorZone)} ({duration}{" "}
+        min) · {config.label}
       </p>
-      <div className="mt-6">
-        <SlotSummary config={config} slot={slot} duration={duration} visitorZone={visitorZone} />
-      </div>
+      <p className="mt-4 text-slate-600 dark:text-slate-400">
+        Calendar invites are on their way to everyone's email.
+      </p>
       <p className="mt-6 text-sm text-slate-600 dark:text-slate-400">
         Need to cancel?{" "}
         <a className="underline" href={cancelUrl}>

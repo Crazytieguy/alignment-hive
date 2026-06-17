@@ -4,6 +4,9 @@ import { GoogleApiError } from "@/lib/booking/google";
 import { isDuration, isOfficeSlug } from "@/lib/booking/offices";
 import { book } from "@/lib/booking/server";
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_PARTICIPANTS = 20; // bound the invite fan-out from this public endpoint
+
 export const Route = createFileRoute("/booking/create")({
   server: {
     handlers: {
@@ -18,6 +21,19 @@ export const Route = createFileRoute("/booking/create")({
         const name = typeof body?.name === "string" ? body.name.trim() : "";
         const email = typeof body?.email === "string" ? body.email.trim() : "";
         const note = typeof body?.note === "string" ? body.note.trim() : "";
+        // Validate, lowercase, dedupe, drop the primary booker, and cap — so an anonymous caller
+        // can't turn this into an unbounded invite fan-out.
+        const rawParticipants = Array.isArray(body?.participants)
+          ? (body.participants as unknown[])
+          : [];
+        const participantEmails = [
+          ...new Set(
+            rawParticipants
+              .filter((p): p is string => typeof p === "string")
+              .map((p) => p.trim().toLowerCase())
+              .filter((p) => EMAIL_RE.test(p) && p !== email.toLowerCase()),
+          ),
+        ].slice(0, MAX_PARTICIPANTS);
 
         if (typeof office !== "string" || !isOfficeSlug(office)) {
           return Response.json({ error: "Unknown office" }, { status: 400 });
@@ -39,6 +55,7 @@ export const Route = createFileRoute("/booking/create")({
             slotStartUtc,
             name,
             email,
+            participantEmails,
             note: note || undefined,
           });
           if (!result.ok) {

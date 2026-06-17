@@ -99,8 +99,7 @@ export interface CreateEventParams {
   description: string;
   startIso: string;
   endIso: string;
-  attendeeEmail: string;
-  attendeeName: string;
+  attendees: { email: string; displayName?: string }[];
 }
 
 const eventResponseSchema = z.object({ id: z.string() });
@@ -116,7 +115,7 @@ export async function createEvent(accessToken: string, params: CreateEventParams
       description: params.description,
       start: { dateTime: params.startIso },
       end: { dateTime: params.endIso },
-      attendees: [{ email: params.attendeeEmail, displayName: params.attendeeName }],
+      attendees: params.attendees,
     }),
   });
 

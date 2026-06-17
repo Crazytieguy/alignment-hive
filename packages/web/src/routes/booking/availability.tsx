@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { checkBotId } from "botid/server";
-import { isDuration, isOfficeSlug } from "@/lib/booking/offices";
-import { getOpenSlots } from "@/lib/booking/server";
+import { isOfficeSlug } from "@/lib/booking/offices";
+import { getBusy } from "@/lib/booking/server";
 
 export const Route = createFileRoute("/booking/availability")({
   server: {
@@ -12,16 +12,14 @@ export const Route = createFileRoute("/booking/availability")({
 
         const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
         const office = body?.office;
-        const durationMin = body?.durationMin;
         if (typeof office !== "string" || !isOfficeSlug(office)) {
           return Response.json({ error: "Unknown office" }, { status: 400 });
         }
-        if (typeof durationMin !== "number" || !isDuration(durationMin)) {
-          return Response.json({ error: "Unsupported duration" }, { status: 400 });
-        }
 
-        const slots = await getOpenSlots(office, durationMin);
-        return Response.json({ slots });
+        // Duration-independent: the client computes 30-min start times for any duration from these,
+        // using the server's nowUtc so display and booking-time revalidation can't diverge on clock skew.
+        const { busy, nowUtc } = await getBusy(office);
+        return Response.json({ busy, nowUtc });
       },
     },
   },

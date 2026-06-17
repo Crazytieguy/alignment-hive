@@ -4,6 +4,9 @@ import { HORIZON_DAYS, MIN_NOTICE_HOURS, type OfficeConfig } from "./offices";
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
+/** Bookers can start a meeting on any 30-minute boundary within office hours. */
+export const SLOT_STEP_MINUTES = 30;
+
 /** A busy interval as returned by Google FreeBusy (RFC3339 strings). */
 export interface BusyInterval {
   start: string;
@@ -41,9 +44,12 @@ export function availabilityWindowUtc(nowUtc: number): { fromUtc: number; toUtc:
  * or not DST is in effect). Days are iterated with calendar arithmetic (`plus({ days })`),
  * never by adding a fixed number of milliseconds, so DST transitions don't drift the time.
  *
- * A slot is excluded if it overlaps any `busy` interval (this is how lunch, days off, and
- * existing meetings disappear — Yoav blocks them on his calendar) or falls outside the
- * [now + MIN_NOTICE_HOURS, now + HORIZON_DAYS] window.
+ * Start times are offered on every SLOT_STEP_MINUTES (30-min) boundary within office hours,
+ * for a meeting of `durationMin` that fully fits before closing. A slot is excluded if it
+ * overlaps any `busy` interval (this is how lunch, days off, and existing meetings disappear —
+ * Yoav blocks them on his calendar) or falls outside the [now + MIN_NOTICE_HOURS,
+ * now + HORIZON_DAYS] window. This one function backs both the on-page time picker and the
+ * server-side revalidation at booking time.
  */
 export function generateSlots(
   office: OfficeConfig,
@@ -85,11 +91,76 @@ export function generateSlots(
             slots.push({ startUtc, endUtc });
           }
         }
-        slotStart = slotEnd; // back-to-back slots
+        slotStart = slotStart.plus({ minutes: SLOT_STEP_MINUTES }); // 30-min start increments
       }
     }
     day = day.plus({ days: 1 });
   }
 
   return slots;
+}
+
+/** The [open, close] window (UTC ms) for each office day inside the booking window. */
+export function officeOpenWindows(
+  office: OfficeConfig,
+  nowUtc: number,
+): { startUtc: number; endUtc: number }[] {
+  const zone = office.timezone;
+  const { hour: startH, minute: startM } = parseHm(office.start);
+  const { hour: endH, minute: endM } = parseHm(office.end);
+  const { fromUtc, toUtc } = availabilityWindowUtc(nowUtc);
+
+  const windows: { startUtc: number; endUtc: number }[] = [];
+  let day = DateTime.fromMillis(fromUtc, { zone }).startOf("day");
+  const lastDay = DateTime.fromMillis(toUtc, { zone }).startOf("day");
+  while (day <= lastDay) {
+    if (office.weekdays.includes(day.weekday)) {
+      const open = day.set({ hour: startH, minute: startM }).toUTC().toMillis();
+      const close = day.set({ hour: endH, minute: endM }).toUTC().toMillis();
+      const startUtc = Math.max(open, fromUtc);
+      const endUtc = Math.min(close, toUtc);
+      if (startUtc < endUtc) windows.push({ startUtc, endUtc });
+    }
+    day = day.plus({ days: 1 });
+  }
+  return windows;
+}
+
+/**
+ * Round busy intervals outward to the 30-min slot grid before they leave the server. Slots start
+ * on 30-min boundaries, so any busy time touching a 30-min block already blocks every slot covering
+ * that block — quantizing therefore leaves computed slots unchanged while hiding the host's exact
+ * event start/end times from the public endpoint. (Assumes whole/half-hour office tz offsets.)
+ */
+export function quantizeBusyToGrid(busy: BusyInterval[]): BusyInterval[] {
+  const grid = SLOT_STEP_MINUTES * 60_000;
+  return busy.map((b) => {
+    const start = Math.floor(DateTime.fromISO(b.start).toMillis() / grid) * grid;
+    const end = Math.ceil(DateTime.fromISO(b.end).toMillis() / grid) * grid;
+    return { start: new Date(start).toISOString(), end: new Date(end).toISOString() };
+  });
+}
+
+/**
+ * Intersect busy intervals with the office-open windows. The public availability endpoint returns
+ * this rather than raw FreeBusy, so it never leaks the host's calendar outside office hours. It
+ * doesn't change computed slots (out-of-hours busy can't overlap an in-hours slot anyway).
+ */
+export function clipBusyToWindows(
+  busy: BusyInterval[],
+  windows: { startUtc: number; endUtc: number }[],
+): BusyInterval[] {
+  const clipped: BusyInterval[] = [];
+  for (const b of busy) {
+    const bStart = DateTime.fromISO(b.start).toMillis();
+    const bEnd = DateTime.fromISO(b.end).toMillis();
+    for (const w of windows) {
+      const start = Math.max(bStart, w.startUtc);
+      const end = Math.min(bEnd, w.endUtc);
+      if (start < end) {
+        clipped.push({ start: new Date(start).toISOString(), end: new Date(end).toISOString() });
+      }
+    }
+  }
+  return clipped;
 }
