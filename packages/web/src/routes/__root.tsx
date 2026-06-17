@@ -7,6 +7,8 @@ import {
 import { createServerFn } from "@tanstack/react-start";
 import { getAuth } from "@workos/authkit-tanstack-react-start";
 import appCssUrl from "../app.css?url";
+import { useEffect } from "react";
+import { ensureBotId } from "@/lib/booking/botid-client";
 import type { QueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import type { ConvexReactClient } from "convex/react";
@@ -58,6 +60,12 @@ export const Route = createRootRouteWithContext<{
 });
 
 function RootComponent() {
+  // Kick off Vercel BotID early so its fetch patch is in place for the protected booking
+  // endpoints. Booking fetches also await ensureBotId() so a direct page load can't race it.
+  useEffect(() => {
+    void ensureBotId();
+  }, []);
+
   return (
     <RootDocument>
       <Outlet />

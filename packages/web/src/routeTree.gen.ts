@@ -13,7 +13,13 @@ import { Route as CallbackRouteImport } from './routes/callback'
 import { Route as AuthorizedRouteImport } from './routes/authorized'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as BookIndexRouteImport } from './routes/book/index'
 import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
+import { Route as BookingCreateRouteImport } from './routes/booking/create'
+import { Route as BookingCancelRouteImport } from './routes/booking/cancel'
+import { Route as BookingAvailabilityRouteImport } from './routes/booking/availability'
+import { Route as BookCancelRouteImport } from './routes/book/cancel'
+import { Route as BookOfficeRouteImport } from './routes/book/$office'
 import { Route as AuthorizedAgreementRouteImport } from './routes/authorized/agreement'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
 import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
@@ -46,10 +52,40 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BookIndexRoute = BookIndexRouteImport.update({
+  id: '/book/',
+  path: '/book/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthorizedIndexRoute = AuthorizedIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => AuthorizedRoute,
+} as any)
+const BookingCreateRoute = BookingCreateRouteImport.update({
+  id: '/booking/create',
+  path: '/booking/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookingCancelRoute = BookingCancelRouteImport.update({
+  id: '/booking/cancel',
+  path: '/booking/cancel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookingAvailabilityRoute = BookingAvailabilityRouteImport.update({
+  id: '/booking/availability',
+  path: '/booking/availability',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookCancelRoute = BookCancelRouteImport.update({
+  id: '/book/cancel',
+  path: '/book/cancel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookOfficeRoute = BookOfficeRouteImport.update({
+  id: '/book/$office',
+  path: '/book/$office',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const AuthorizedAgreementRoute = AuthorizedAgreementRouteImport.update({
   id: '/agreement',
@@ -124,7 +160,13 @@ export interface FileRoutesByFullPath {
   '/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
+  '/book/$office': typeof BookOfficeRoute
+  '/book/cancel': typeof BookCancelRoute
+  '/booking/availability': typeof BookingAvailabilityRoute
+  '/booking/cancel': typeof BookingCancelRoute
+  '/booking/create': typeof BookingCreateRoute
   '/authorized/': typeof AuthorizedIndexRoute
+  '/book': typeof BookIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
@@ -141,7 +183,13 @@ export interface FileRoutesByTo {
   '/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
+  '/book/$office': typeof BookOfficeRoute
+  '/book/cancel': typeof BookCancelRoute
+  '/booking/availability': typeof BookingAvailabilityRoute
+  '/booking/cancel': typeof BookingCancelRoute
+  '/booking/create': typeof BookingCreateRoute
   '/authorized': typeof AuthorizedIndexRoute
+  '/book': typeof BookIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
@@ -161,7 +209,13 @@ export interface FileRoutesById {
   '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
+  '/book/$office': typeof BookOfficeRoute
+  '/book/cancel': typeof BookCancelRoute
+  '/booking/availability': typeof BookingAvailabilityRoute
+  '/booking/cancel': typeof BookingCancelRoute
+  '/booking/create': typeof BookingCreateRoute
   '/authorized/': typeof AuthorizedIndexRoute
+  '/book/': typeof BookIndexRoute
   '/_authenticated/consent_/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
@@ -181,7 +235,13 @@ export interface FileRouteTypes {
     | '/welcome'
     | '/auth/sign-out'
     | '/authorized/agreement'
+    | '/book/$office'
+    | '/book/cancel'
+    | '/booking/availability'
+    | '/booking/cancel'
+    | '/booking/create'
     | '/authorized/'
+    | '/book'
     | '/consent/projects'
     | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
@@ -198,7 +258,13 @@ export interface FileRouteTypes {
     | '/welcome'
     | '/auth/sign-out'
     | '/authorized/agreement'
+    | '/book/$office'
+    | '/book/cancel'
+    | '/booking/availability'
+    | '/booking/cancel'
+    | '/booking/create'
     | '/authorized'
+    | '/book'
     | '/consent/projects'
     | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
@@ -217,7 +283,13 @@ export interface FileRouteTypes {
     | '/_authenticated/welcome'
     | '/auth/sign-out'
     | '/authorized/agreement'
+    | '/book/$office'
+    | '/book/cancel'
+    | '/booking/availability'
+    | '/booking/cancel'
+    | '/booking/create'
     | '/authorized/'
+    | '/book/'
     | '/_authenticated/consent_/projects'
     | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
@@ -232,6 +304,12 @@ export interface RootRouteChildren {
   AuthorizedRoute: typeof AuthorizedRouteWithChildren
   CallbackRoute: typeof CallbackRoute
   AuthSignOutRoute: typeof AuthSignOutRoute
+  BookOfficeRoute: typeof BookOfficeRoute
+  BookCancelRoute: typeof BookCancelRoute
+  BookingAvailabilityRoute: typeof BookingAvailabilityRoute
+  BookingCancelRoute: typeof BookingCancelRoute
+  BookingCreateRoute: typeof BookingCreateRoute
+  BookIndexRoute: typeof BookIndexRoute
   ApiGithubInstalledRoute: typeof ApiGithubInstalledRoute
 }
 
@@ -265,12 +343,54 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/book/': {
+      id: '/book/'
+      path: '/book'
+      fullPath: '/book'
+      preLoaderRoute: typeof BookIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/authorized/': {
       id: '/authorized/'
       path: '/'
       fullPath: '/authorized/'
       preLoaderRoute: typeof AuthorizedIndexRouteImport
       parentRoute: typeof AuthorizedRoute
+    }
+    '/booking/create': {
+      id: '/booking/create'
+      path: '/booking/create'
+      fullPath: '/booking/create'
+      preLoaderRoute: typeof BookingCreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/booking/cancel': {
+      id: '/booking/cancel'
+      path: '/booking/cancel'
+      fullPath: '/booking/cancel'
+      preLoaderRoute: typeof BookingCancelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/booking/availability': {
+      id: '/booking/availability'
+      path: '/booking/availability'
+      fullPath: '/booking/availability'
+      preLoaderRoute: typeof BookingAvailabilityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/book/cancel': {
+      id: '/book/cancel'
+      path: '/book/cancel'
+      fullPath: '/book/cancel'
+      preLoaderRoute: typeof BookCancelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/book/$office': {
+      id: '/book/$office'
+      path: '/book/$office'
+      fullPath: '/book/$office'
+      preLoaderRoute: typeof BookOfficeRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/authorized/agreement': {
       id: '/authorized/agreement'
@@ -407,6 +527,12 @@ const rootRouteChildren: RootRouteChildren = {
   AuthorizedRoute: AuthorizedRouteWithChildren,
   CallbackRoute: CallbackRoute,
   AuthSignOutRoute: AuthSignOutRoute,
+  BookOfficeRoute: BookOfficeRoute,
+  BookCancelRoute: BookCancelRoute,
+  BookingAvailabilityRoute: BookingAvailabilityRoute,
+  BookingCancelRoute: BookingCancelRoute,
+  BookingCreateRoute: BookingCreateRoute,
+  BookIndexRoute: BookIndexRoute,
   ApiGithubInstalledRoute: ApiGithubInstalledRoute,
 }
 export const routeTree = rootRouteImport
