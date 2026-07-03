@@ -226,3 +226,163 @@ impl AppState {
         serde_json::from_str(&content).ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pod_state(pod_id: &str, cost_per_hr: f64, running_for: std::time::Duration) -> PodState {
+        PodState {
+            pod_id: pod_id.to_string(),
+            gpu_name: "Test GPU".to_string(),
+            cost_per_hr,
+            started_at: std::time::Instant::now().checked_sub(running_for).unwrap(),
+            jupyter: JupyterClient::new(pod_id, "test-token"),
+            jupyter_token: "test-token".to_string(),
+            session_id: "test-session".to_string(),
+            kernel_ids: Vec::new(),
+            kernel_connections: HashMap::new(),
+            notebooks: HashMap::new(),
+            ssh_key_path: PathBuf::from("/tmp/test-key"),
+            public_ip: None,
+            ssh_port: None,
+            heartbeat: None,
+            pending_executions: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.pod = Some(pod_state("pod-123", 0.5, std::time::Duration::ZERO));
+
+        state.save(Cleanup::Stop).unwrap();
+
+        let persisted = AppState::load_persisted(dir.path()).unwrap();
+        assert_eq!(persisted.pod_id.as_deref(), Some("pod-123"));
+        assert_eq!(persisted.cleanup.as_deref(), Some("stop"));
+        assert_eq!(persisted.jupyter_token.as_deref(), Some("test-token"));
+        assert_eq!(persisted.ssh_key_path.as_deref(), Some("/tmp/test-key"));
+        assert_eq!(persisted.gpu_name.as_deref(), Some("Test GPU"));
+        assert_eq!(
+            AppState::load_existing(dir.path()).as_deref(),
+            Some("pod-123")
+        );
+    }
+
+    #[test]
+    fn state_dir_gets_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        state.save(Cleanup::Terminate).unwrap();
+
+        let gitignore = dir.path().join(".claude/remote-kernels/.gitignore");
+        assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "*\n");
+    }
+
+    #[test]
+    fn clear_removes_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        state.save(Cleanup::Terminate).unwrap();
+        assert!(AppState::load_persisted(dir.path()).is_some());
+
+        state.clear().unwrap();
+        assert!(AppState::load_persisted(dir.path()).is_none());
+        // Clearing twice is fine.
+        state.clear().unwrap();
+    }
+
+    #[test]
+    fn save_with_pod_id_falls_back_to_disk_for_reconnection_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.pod = Some(pod_state("pod-123", 0.5, std::time::Duration::ZERO));
+        state.save(Cleanup::Stop).unwrap();
+
+        // Simulate stop(): pod taken out of memory, but reconnection details
+        // must survive via the state file.
+        state.pod = None;
+        state
+            .save_with_pod_id(Some("pod-123"), Cleanup::Stop)
+            .unwrap();
+
+        let persisted = AppState::load_persisted(dir.path()).unwrap();
+        assert_eq!(persisted.pod_id.as_deref(), Some("pod-123"));
+        assert_eq!(persisted.jupyter_token.as_deref(), Some("test-token"));
+        assert_eq!(persisted.gpu_name.as_deref(), Some("Test GPU"));
+    }
+
+    #[test]
+    fn spend_is_monotonic_across_pods() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        assert!(state.total_spend().abs() < f64::EPSILON);
+
+        // One hour at $0.50/hr.
+        state.pod = Some(pod_state(
+            "pod-1",
+            0.5,
+            std::time::Duration::from_secs(3600),
+        ));
+        let with_pod = state.total_spend();
+        assert!((with_pod - 0.5).abs() < 0.01, "spend was {with_pod}");
+
+        // Snapshot on stop/terminate folds the pod cost into the accumulated total.
+        state.snapshot_spend();
+        state.pod = None;
+        let after_snapshot = state.total_spend();
+        assert!((after_snapshot - with_pod).abs() < 0.01);
+
+        // A second pod adds on top; the total never resets.
+        state.pod = Some(pod_state(
+            "pod-2",
+            1.0,
+            std::time::Duration::from_secs(1800),
+        ));
+        let with_second = state.total_spend();
+        assert!((with_second - (after_snapshot + 0.5)).abs() < 0.01);
+        assert!(with_second >= after_snapshot);
+    }
+
+    /// Characterizes current behavior: a fresh `AppState` (new MCP server process)
+    /// does NOT hydrate `accumulated_spend` from the state file — spend tracking is
+    /// per server lifetime, and a mid-session server restart forgets prior spend
+    /// even though it was persisted. The multi-instance state refactor must decide
+    /// this explicitly (and preserve persisted spend across restarts) rather than
+    /// inherit it silently.
+    #[test]
+    fn fresh_app_state_does_not_hydrate_persisted_spend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.pod = Some(pod_state(
+            "pod-1",
+            2.0,
+            std::time::Duration::from_secs(3600),
+        ));
+        state.save(Cleanup::Stop).unwrap();
+
+        // Simulate an MCP server restart in the same project.
+        let restarted = AppState::new(dir.path().to_path_buf());
+        assert!(restarted.total_spend().abs() < f64::EPSILON);
+        // The persisted value is still on disk, just not loaded.
+        let persisted = AppState::load_persisted(dir.path()).unwrap();
+        assert!((persisted.accumulated_spend - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn persisted_spend_survives_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.pod = Some(pod_state(
+            "pod-1",
+            2.0,
+            std::time::Duration::from_secs(3600),
+        ));
+        state.save(Cleanup::Terminate).unwrap();
+
+        let persisted = AppState::load_persisted(dir.path()).unwrap();
+        assert!((persisted.accumulated_spend - 2.0).abs() < 0.01);
+    }
+}

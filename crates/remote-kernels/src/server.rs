@@ -905,12 +905,8 @@ impl RemoteKernelsServer {
         if let Some(extra) = params.include {
             includes.extend(extra);
         }
-        for path in &includes {
-            if path.starts_with('/') || path.contains("..") {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid include path: {path:?}. Paths must be relative to the project root. Absolute paths and '..' are not allowed.",
-                ))]));
-            }
+        if let Err(msg) = crate::sync::validate_include_paths(&includes) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
         let (project_dir, ssh_key_path) = {

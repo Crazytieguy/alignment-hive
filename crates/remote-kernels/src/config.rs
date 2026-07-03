@@ -57,7 +57,7 @@ pub struct Config {
 
 /// RunPod-specific configuration. Known fields are typed; unknown fields are passed
 /// through transparently to the `RunPod` pod creation API (camelCase conversion applied).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RunpodConfig {
     /// Number of GPUs to attach.
@@ -86,6 +86,16 @@ pub struct RunpodConfig {
     /// Extra fields passed through to the `RunPod` API.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
+}
+
+/// `#[serde(default)]` on `Config.runpod` uses this impl when the `[runpod]` section is
+/// absent, while the per-field serde defaults only apply when the section exists with
+/// fields missing. Deserializing an empty document keeps the two paths identical by
+/// construction (a derived `Default` would silently produce zeros/empty strings instead).
+impl Default for RunpodConfig {
+    fn default() -> Self {
+        toml::from_str("").expect("every RunpodConfig field must have a serde default")
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -247,5 +257,157 @@ impl Config {
             default_volume_mount_path = default_volume_mount_path(),
             default_cloud_type = default_cloud_type(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_toml_yields_documented_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.gpu_type_ids, vec!["NVIDIA GeForce RTX 4090"]);
+        assert_eq!(
+            config.image_name,
+            "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+        );
+        assert_eq!(config.cleanup, Cleanup::Terminate);
+        assert_eq!(config.name, "remote-kernels");
+        assert!(config.budget_cap.is_none());
+        assert!(config.inherit_env.is_empty());
+        assert!(config.env_file.is_none());
+        assert!(config.env.is_empty());
+        assert_eq!(config.notebook_dir, PathBuf::from("remote-kernels"));
+        assert!(config.sync_include.is_empty());
+        assert!(config.startup_commands.is_empty());
+        assert_eq!(config.runpod.gpu_count, 1);
+        assert_eq!(config.runpod.container_disk_gb, 50);
+        assert_eq!(config.runpod.volume_gb, 20);
+        assert_eq!(config.runpod.volume_mount_path, "/workspace");
+        assert!(config.runpod.network_volume_id.is_none());
+        assert_eq!(config.runpod.cloud_type, "SECURE");
+        assert!(config.runpod.extra.is_empty());
+    }
+
+    #[test]
+    fn full_config_parses_kebab_case() {
+        let config: Config = toml::from_str(
+            r#"
+            gpu-type-ids = ["NVIDIA A100 80GB PCIe", "NVIDIA GeForce RTX 4090"]
+            image-name = "my/image:latest"
+            cleanup = "stop"
+            name = "my-project"
+            budget-cap = 12.5
+            inherit-env = ["HF_TOKEN"]
+            env-file = ".env.pod"
+            notebook-dir = "notebooks"
+            sync-include = ["data/small/"]
+            startup-commands = ["pip install foo"]
+
+            [env]
+            MY_VAR = "value"
+
+            [runpod]
+            gpu-count = 2
+            container-disk-gb = 100
+            volume-gb = 0
+            volume-mount-path = "/data"
+            network-volume-id = "vol_abc123"
+            cloud-type = "COMMUNITY"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.gpu_type_ids.len(), 2);
+        assert_eq!(config.cleanup, Cleanup::Stop);
+        assert_eq!(config.budget_cap, Some(12.5));
+        assert_eq!(config.env_file, Some(PathBuf::from(".env.pod")));
+        assert_eq!(config.env["MY_VAR"], "value");
+        assert_eq!(config.runpod.gpu_count, 2);
+        assert_eq!(config.runpod.volume_gb, 0);
+        assert_eq!(
+            config.runpod.network_volume_id.as_deref(),
+            Some("vol_abc123")
+        );
+        assert_eq!(config.runpod.cloud_type, "COMMUNITY");
+    }
+
+    #[test]
+    fn unknown_runpod_fields_pass_through_via_extra() {
+        let config: Config = toml::from_str(
+            r"
+            [runpod]
+            gpu-count = 1
+            min-vcpu-count = 8
+            support-public-ip = true
+            ",
+        )
+        .unwrap();
+        assert_eq!(
+            config.runpod.extra.get("min-vcpu-count"),
+            Some(&toml::Value::Integer(8))
+        );
+        assert_eq!(
+            config.runpod.extra.get("support-public-ip"),
+            Some(&toml::Value::Boolean(true))
+        );
+        // Typed fields must not leak into the passthrough map — that would
+        // double-send them in the pod-create API payload.
+        assert_eq!(config.runpod.gpu_count, 1);
+        assert!(!config.runpod.extra.contains_key("gpu-count"));
+    }
+
+    #[test]
+    fn invalid_cleanup_value_is_rejected() {
+        assert!(toml::from_str::<Config>(r#"cleanup = "pause""#).is_err());
+    }
+
+    #[test]
+    fn load_returns_defaults_when_no_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(dir.path()).unwrap();
+        assert_eq!(config.cleanup, Cleanup::Terminate);
+    }
+
+    #[test]
+    fn load_reads_config_file_from_project_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("remote-kernels.toml"),
+            r#"name = "from-file""#,
+        )
+        .unwrap();
+        let config = Config::load(dir.path()).unwrap();
+        assert_eq!(config.name, "from-file");
+    }
+
+    /// The template is the single source of truth the setup skill reads.
+    /// Every commented-out `key = value` line in it must actually parse.
+    #[test]
+    fn template_uncommented_lines_parse() {
+        let template = Config::template();
+        let uncommented: String = template
+            .lines()
+            .map(|line| {
+                let stripped = line.strip_prefix("# ").unwrap_or(line);
+                // Keep only lines that look like `key = value` or `[section]`.
+                let is_assignment = stripped
+                    .split_once(" = ")
+                    .is_some_and(|(k, _)| !k.is_empty() && !k.contains(' '));
+                let is_section = stripped.starts_with('[') && stripped.ends_with(']');
+                if is_assignment || is_section {
+                    format!("{stripped}\n")
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+        let config: Config = toml::from_str(&uncommented)
+            .unwrap_or_else(|e| panic!("template lines failed to parse: {e}\n{uncommented}"));
+        // Uncommenting the defaults must reproduce the defaults.
+        assert_eq!(config.cleanup, Cleanup::Terminate);
+        assert_eq!(config.gpu_type_ids, default_gpu_type_ids());
+        assert_eq!(config.image_name, default_image_name());
+        assert_eq!(config.runpod.gpu_count, default_gpu_count());
     }
 }

@@ -1,0 +1,43 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-ci.yml'
+
+jobs:
+  check:
+    name: Check crates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+        working-directory: crates/remote-kernels
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: crates/remote-kernels
+
+      - name: Test
+        run: cargo test
+        working-directory: crates/remote-kernels

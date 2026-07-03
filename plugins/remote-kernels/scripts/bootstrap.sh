@@ -8,10 +8,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Read version from plugin.json (no jq dependency)
-VERSION=$(grep '"version"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+# Read the binary release version from binary-version. This is deliberately
+# decoupled from plugin.json's version: the plugin version bumps on any content
+# change (skills, scripts), while binary-version only changes when a new crate
+# binary is released. Same pattern as plugins/hive/cli-version.
+VERSION=$(tr -d '[:space:]' < "$PLUGIN_ROOT/binary-version")
 if [ -z "$VERSION" ]; then
-  echo "Failed to read version from plugin.json" >&2
+  echo "Failed to read version from binary-version" >&2
   exit 1
 fi
 

@@ -106,25 +106,6 @@ impl JupyterClient {
         unreachable!()
     }
 
-    /// List all running kernels.
-    pub async fn list_kernels(&self) -> anyhow::Result<Vec<KernelInfo>> {
-        let url = format!("{}/api/kernels", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("token {}", self.token))
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to list kernels ({status}): {body}");
-        }
-
-        Ok(resp.json().await?)
-    }
-
     /// Delete (shut down) a kernel.
     pub async fn delete_kernel(&self, kernel_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/api/kernels/{kernel_id}", self.base_url);

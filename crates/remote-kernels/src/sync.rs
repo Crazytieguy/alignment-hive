@@ -3,6 +3,20 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
+/// Validate sync include paths: must be relative to the project root, with no `..`
+/// components. Rejecting absolute paths and `..` is a security requirement — includes
+/// take priority over `.gitignore` filtering and must not reach outside the project.
+pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
+    for path in includes {
+        if path.starts_with('/') || path.contains("..") {
+            return Err(format!(
+                "Invalid include path: {path:?}. Paths must be relative to the project root. Absolute paths and '..' are not allowed.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// rsync local project files to the pod.
 ///
 /// Uses the ephemeral SSH key generated at pod creation.
@@ -167,4 +181,32 @@ pub async fn download_from_pod(
     }
 
     Ok(format!("Downloaded to {destination}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_include_paths;
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn relative_paths_are_accepted() {
+        assert!(validate_include_paths(&paths(&["data/", "models/small.pt", ".env.pod"])).is_ok());
+        assert!(validate_include_paths(&[]).is_ok());
+    }
+
+    #[test]
+    fn absolute_and_parent_traversal_paths_are_rejected() {
+        for bad in ["/etc/passwd", "../secrets", "data/../../up", "a/.."] {
+            let err = validate_include_paths(&paths(&[bad])).unwrap_err();
+            assert!(err.contains(bad), "error should name the path: {err}");
+        }
+    }
+
+    #[test]
+    fn one_bad_path_rejects_the_whole_set() {
+        assert!(validate_include_paths(&paths(&["fine/", "../bad"])).is_err());
+    }
 }
