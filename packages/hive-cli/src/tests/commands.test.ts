@@ -206,6 +206,19 @@ describe('search command', () => {
     expect(out).not.toContain('elsewhere'); // the out-of-scope agent was excluded by parent scope
   });
 
+  test("-s <typo> --agents exits 1 with a not-found error instead of silently matching nothing", async () => {
+    sessions.set('parent-abc.jsonl', createTestSession('parent-abc', [userEntry('1', 'parent body')]));
+    sessions.set('agent-9f7.jsonl', createTestSession('agent-9f7', [userEntry('1', 'needle here')], {
+      agentId: '9f7', parentSessionId: 'parent-abc',
+    }));
+    const { searchCore } = await import('../commands/search');
+
+    // Agent files pass the filename prefilter, so without the scoped-session check this used to
+    // exit 0 with no output — retrieval agents would misread that as "no matches".
+    process.argv = ['node', 'cli', 'search', 'needle', '-s', 'nonexistent', '--agents'];
+    expect(await searchCore(source, process.argv.slice(3))).toBe(1);
+  });
+
   test("search -- <token> treats the token after -- as a literal pattern (e.g. --agents)", async () => {
     sessions.set('s1.jsonl', createTestSession('s1', [userEntry('1', 'this mentions --agents literally')]));
     const { searchCore } = await import('../commands/search');

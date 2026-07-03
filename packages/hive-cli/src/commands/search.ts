@@ -114,6 +114,9 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
   const sessionPrefixes = computeMinimalPrefixes(allSessionIds);
 
   let totalMatches = 0;
+  // With --agents, a `-s <typo>` passes the filename filter above (agent files are kept for
+  // per-agent scoping below), so track whether anything actually fell inside the scope.
+  let scopedSessions = 0;
   const sessionCounts: Array<{ sessionId: string; count: number }> = [];
   const matchingSessions: Array<string> = [];
 
@@ -132,6 +135,7 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
       const self = sessionResult.meta.sessionId; // 'agent-<id>'
       if (!parent.startsWith(p) && !self.startsWith(p) && self !== `agent-${p}`) continue;
     }
+    if (options.sessionFilter) scopedSessions++;
 
     const sessionId = sessionResult.meta.sessionId;
     const sessionPrefix = sessionPrefixes.get(sessionId) ?? sessionId.slice(0, 8);
@@ -196,6 +200,11 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
         if (line) console.log(line);
       }
     }
+  }
+
+  if (options.sessionFilter && scopedSessions === 0) {
+    printError(errors.sessionNotFound(options.sessionFilter));
+    return 1;
   }
 
   if (options.countOnly) {

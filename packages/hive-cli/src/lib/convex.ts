@@ -83,7 +83,9 @@ export async function generateUploadUrls(
     return await client.mutation(api.sessions.generateUploadUrls, {
       sessionId,
       agentSessionIds,
-      workflowRunIds,
+      // Omit when empty (the arg is optional server-side): during a deploy-skew window an old
+      // backend rejects unknown args, which would break EVERY upload instead of workflow ones.
+      ...(workflowRunIds.length > 0 && { workflowRunIds }),
       ...consentIdentifiers,
     });
   } catch (error) {
