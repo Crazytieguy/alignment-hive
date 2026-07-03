@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
+  MAX_RUN_UPLOAD_ATTEMPTS,
   canExclude,
   canUpload,
   computeSessionStatus,
@@ -284,20 +285,53 @@ describe('excludeSessionChecked', () => {
     await rm(stateDir, { recursive: true, force: true });
   });
 
+  const mtime = new Date(Date.now() - 2 * DAY_MS);
+  const session = (): DiscoveredSession => makeSession({ sessionId: 'sess-1', mtime });
+  const emptyState = () => ({
+    uploadedMap: new Map<string, UploadedEntry>(),
+    excludedSet: new Set<string>(),
+    startedMap: new Map<string, number>(),
+    migrationTimestamp: null,
+  });
+  const uploadedEntry = (): UploadedEntry => ({
+    sessionId: 'sess-1',
+    rawMtime: mtime.toISOString(),
+    uploadedAt: new Date().toISOString(),
+    agentSessionIds: [],
+  });
+
   test('records exclusion for an excludable session', async () => {
-    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'ready' }, false)).toBe('excluded');
+    const outcome = await excludeSessionChecked(stateDir, emptyState(), session());
+    expect(outcome).toEqual({ result: 'excluded', hadPriorUpload: false });
     const content = await readFile(join(stateDir, 'excluded-sessions'), 'utf-8');
     expect(content).toBe('sess-1\n');
   });
 
   test('refuses uploaded and partial sessions without writing', async () => {
-    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'uploaded' }, false)).toBe('denied-uploaded');
-    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'ready' }, true)).toBe('denied-partial');
+    const uploadedState = { ...emptyState(), uploadedMap: new Map([['sess-1', uploadedEntry()]]) };
+    expect((await excludeSessionChecked(stateDir, uploadedState, session())).result).toBe('denied-uploaded');
+
+    const partialState = { ...emptyState(), startedMap: new Map([['sess-1', Date.now()]]) };
+    expect((await excludeSessionChecked(stateDir, partialState, session())).result).toBe('denied-partial');
+
     expect(readFile(join(stateDir, 'excluded-sessions'), 'utf-8')).rejects.toThrow();
   });
 
   test('reports already-excluded sessions', async () => {
-    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'excluded' }, false)).toBe('already-excluded');
+    const state = { ...emptyState(), excludedSet: new Set(['sess-1']) };
+    expect((await excludeSessionChecked(stateDir, state, session())).result).toBe('already-excluded');
+  });
+
+  test('excluding a reopened session succeeds but reports the prior upload', async () => {
+    // A backfill reopen drops agentSessionIds in-memory; the entry (and the server data) remain.
+    const reopened: UploadedEntry = { ...uploadedEntry(), agentSessionIds: undefined };
+    const state = {
+      ...emptyState(),
+      uploadedMap: new Map([['sess-1', reopened]]),
+      migrationTimestamp: Date.now() - 2 * DAY_MS,
+    };
+    const outcome = await excludeSessionChecked(stateDir, state, session());
+    expect(outcome).toEqual({ result: 'excluded', hadPriorUpload: true });
   });
 });
 
@@ -335,6 +369,27 @@ describe('needsWorkflowReopen (parse-gated — no run-id loop)', () => {
   test('does not reopen a parent with no agents and no runs', () => {
     const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: [] };
     expect(needsWorkflowReopen(uploaded, [], [])).toBe(false);
+  });
+
+  test('reopens for a worktree-only run via recorded discoveredRunIds (invisible to parent-dir discovery)', () => {
+    const uploaded: UploadedEntry = {
+      sessionId: 'p', rawMtime: 'm', uploadedAt: 't',
+      agentSessionIds: ['agent-x'], workflowRunIds: ['wf_1'], discoveredRunIds: ['wf_1', 'wf_worktree'],
+    };
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x')], ['wf_1'])).toBe(true);
+  });
+
+  test('run-keyed reopen stops after MAX_RUN_UPLOAD_ATTEMPTS; agent-keyed reopen is unaffected', () => {
+    const capped: UploadedEntry = {
+      sessionId: 'p', rawMtime: 'm', uploadedAt: 't',
+      agentSessionIds: ['agent-x'], workflowRunIds: [], runUploadAttempts: MAX_RUN_UPLOAD_ATTEMPTS,
+    };
+    expect(needsWorkflowReopen(capped, [agentSession('agent-x')], ['wf_stuck'])).toBe(false);
+    // A missing agent still reopens even at the cap.
+    expect(needsWorkflowReopen(capped, [agentSession('agent-x'), agentSession('agent-y')], ['wf_stuck'])).toBe(true);
+    // Below the cap, the stuck run still retries.
+    const belowCap: UploadedEntry = { ...capped, runUploadAttempts: MAX_RUN_UPLOAD_ATTEMPTS - 1 };
+    expect(needsWorkflowReopen(belowCap, [agentSession('agent-x')], ['wf_stuck'])).toBe(true);
   });
 });
 

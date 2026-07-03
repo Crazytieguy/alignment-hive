@@ -12,9 +12,9 @@ import { getClaudeProjectDir, parseCwdFromLine, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
 import { sanitizeDeep } from './sanitize';
-import { loadSessionState, recordUploadStarted, recordUploadedSessions, runAgentMigration, runWorkflowBackfill } from './session-state';
+import { isSessionExcluded, loadSessionState, loadUploadedSessions, recordUploadStarted, recordUploadedSessions, runAgentMigration, runWorkflowBackfill } from './session-state';
 import type { WorkflowRunUpload } from './convex';
-import type { KnownEntry, WorkflowRunRow } from '@alignment-hive/session-data';
+import type { KnownEntry, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-state';
 
 async function readCommitHash(stateDir: string, sessionId: string): Promise<string | undefined> {
@@ -84,10 +84,12 @@ export async function loadSessionStateWithAgentMigration(stateDir: string, trans
   );
   // Reopen already-uploaded parents that are missing newly-discovered workflow subagents or
   // parseable-but-unrecorded run metadata. Run discovery checks the parent's own project dir
-  // only (empty cwd set) — see runWorkflowBackfill for the worktree caveat.
+  // only (empty cwd set): parsing every uploaded parent session for worktree cwds on each state
+  // load would be prohibitive — worktree runs are covered by the discoveredRunIds recorded at
+  // upload time (see needsWorkflowReopen).
   const effectiveMigrationTs = await runWorkflowBackfill(
     state, stateDir, migrationTimestamp,
-    (parent) => discoverWorkflowRuns(parent, new Set()).then((runs) => runs.map((r) => r.row.workflowRunId)),
+    (parent) => discoverParseableRunIds(parent, new Set()),
   );
   return { ...state, migrationTimestamp: effectiveMigrationTs };
 }
@@ -210,20 +212,19 @@ interface DiscoveredWorkflowRun {
 }
 
 /**
- * Find a parent session's workflow run-metadata files (`<session>/workflows/wf_*.json`), parse,
- * sanitize (secret redaction + home-path normalization), and extract the indexed row. Looks in the
- * parent's own project dir plus any worktree cwds the session touched; dedupes by workflowRunId.
+ * readdir + parse + schema-gate a parent's run-metadata files (`<session>/workflows/wf_*.json`)
+ * in its own project dir plus any worktree cwds; dedupes by workflowRunId. The parse gate is
+ * what keeps the backfill loop-safe (malformed files never count as runs), so both discovery
+ * flavors below must share it.
  */
-export async function discoverWorkflowRuns(
+async function readParseableRunBlobs(
   parent: DiscoveredSession,
   cwds: Set<string>,
-): Promise<Array<DiscoveredWorkflowRun>> {
+): Promise<Map<string, WorkflowRunBlob>> {
   const sessionDirs = new Set<string>([join(dirname(parent.path), parent.sessionId)]);
   for (const cwd of cwds) sessionDirs.add(join(getClaudeProjectDir(cwd), parent.sessionId));
 
-  const home = homedir();
-  const byRunId = new Map<string, DiscoveredWorkflowRun>();
-
+  const byRunId = new Map<string, WorkflowRunBlob>();
   for (const sessionDir of sessionDirs) {
     const workflowsDir = join(sessionDir, 'workflows');
     let files: Array<string>;
@@ -240,27 +241,55 @@ export async function discoverWorkflowRuns(
       try {
         const parsed = WorkflowRunBlobSchema.safeParse(JSON.parse(await readFile(join(workflowsDir, f), 'utf-8')));
         if (!parsed.success) continue;
-        // Strict: run blobs are arbitrary script-built JSON, so keys and SAFE_KEYS-named values
-        // (name, cwd, ...) must be scanned too — unlike schema-shaped transcript entries.
-        const blob = redactHomePaths(sanitizeDeep(parsed.data, { strict: true }), home);
-        const row = extractWorkflowRunRow(workflowRunId, blob);
-        // Cap the row summary so the saveWorkflowRuns mutation args stay well under Convex limits
-        // (the full text remains in the storage blob).
-        if (row.summary && row.summary.length > MAX_ROW_SUMMARY) {
-          row.summary = `${row.summary.slice(0, MAX_ROW_SUMMARY)}…`;
-        }
-        byRunId.set(workflowRunId, { row, blob });
+        byRunId.set(workflowRunId, parsed.data);
       } catch {
         // skip unreadable / malformed run metadata
       }
     }
   }
+  return byRunId;
+}
 
-  return [...byRunId.values()];
+/** Parseable run ids only — no sanitization (the backfill calls this on every state load). */
+export async function discoverParseableRunIds(parent: DiscoveredSession, cwds: Set<string>): Promise<Array<string>> {
+  return [...(await readParseableRunBlobs(parent, cwds)).keys()];
+}
+
+/**
+ * Find a parent session's workflow runs, sanitize each blob (secret redaction + home-path
+ * normalization), and extract the indexed row.
+ */
+export async function discoverWorkflowRuns(
+  parent: DiscoveredSession,
+  cwds: Set<string>,
+): Promise<Array<DiscoveredWorkflowRun>> {
+  const home = homedir();
+  const runs: Array<DiscoveredWorkflowRun> = [];
+  for (const [workflowRunId, data] of await readParseableRunBlobs(parent, cwds)) {
+    // Strict: run blobs are arbitrary script-built JSON, so keys and SAFE_KEYS-named values
+    // (name, cwd, ...) must be scanned too — unlike schema-shaped transcript entries.
+    const blob = redactHomePaths(sanitizeDeep(data, { strict: true }), home);
+    const row = extractWorkflowRunRow(workflowRunId, blob);
+    // Cap every indexed scalar so the saveWorkflowRuns mutation args stay well under Convex
+    // limits regardless of blob contents (full text remains in the storage blob) — an over-long
+    // field would fail the save on EVERY retry, burning the backfill's bounded reopen attempts.
+    if (row.summary && row.summary.length > MAX_ROW_SUMMARY) {
+      row.summary = `${row.summary.slice(0, MAX_ROW_SUMMARY)}…`;
+    }
+    if (row.workflowName && row.workflowName.length > MAX_ROW_FIELD) {
+      row.workflowName = `${row.workflowName.slice(0, MAX_ROW_FIELD)}…`;
+    }
+    if (row.status && row.status.length > MAX_ROW_FIELD) {
+      row.status = `${row.status.slice(0, MAX_ROW_FIELD)}…`;
+    }
+    runs.push({ row, blob });
+  }
+  return runs;
 }
 
 const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
 const MAX_ROW_SUMMARY = 2000; // cap the indexed run-summary scalar (full text stays in the blob)
+const MAX_ROW_FIELD = 500; // cap the short indexed scalars (workflowName, status)
 
 /**
  * Upload a parent session, all its agents (Task + workflow subagents), and its workflow
@@ -298,6 +327,16 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   const parentUrls = await generateUploadUrls(parent.sessionId, [], consentIds);
   const parentUrl = parentUrls?.[parent.sessionId];
   if (!parentUrl) return fail('Failed to get upload URL for parent session');
+  // Record the attempt before the first byte reaches the backend: a mid-flight failure must
+  // leave a local trace — the exclusion veto is refused for such sessions (hasIncompleteUpload)
+  // because the partial data may already have been downloaded. Fail closed if the trace can't
+  // be written. (Deliberately after the URL mint, so an offline/auth failure — which sends
+  // nothing — doesn't spuriously block exclusion.)
+  try {
+    await recordUploadStarted(stateDir, parent.sessionId, rawMtime);
+  } catch {
+    return fail('Failed to record upload start');
+  }
   let parentStorageId: string;
   try {
     parentStorageId = await uploadToStorage(
@@ -307,14 +346,12 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   } catch (err) {
     return fail(err instanceof Error ? err.message : 'Parent upload failed');
   }
-  // Record the attempt before the first backend save: from here on, session data becomes
-  // visible on the backend, so a mid-flight failure must leave a local trace — the exclusion
-  // veto is refused for such sessions (hasIncompleteUpload) because the partial data may
-  // already have been downloaded. Fail closed if the trace can't be written.
-  try {
-    await recordUploadStarted(stateDir, parent.sessionId, rawMtime);
-  } catch {
-    return fail('Failed to record upload start');
+  // An exclusion may have been recorded since the caller loaded its state snapshot (the review
+  // UI's upload and exclude are independent requests). Re-check fresh from disk before the
+  // first accessor-visible write; a write landing inside the remaining ms-scale window loses
+  // the race, but the recorded exclusion still stops all future uploads.
+  if (await isSessionExcluded(stateDir, parent.sessionId)) {
+    return fail('Session was excluded during upload');
   }
   const parentSaved = await saveUploads(parent.sessionId, sessionMeta, [
     { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary, lineCount: parentRead.sanitizedEntries.length },
@@ -390,15 +427,24 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
     uploadedRunIds.push(...saveRuns.map((r) => r.workflowRunId));
   }
 
-  // 4. Record the parent locally with its agents + the runs that actually uploaded. The parent +
-  //    agents are saved before this point, so this converges local state; the backfill compares
-  //    workflowRunIds against the parseable run files on disk and reopens if any is missing.
+  // 4. Record the parent locally with its agents + runs. workflowRunIds = what actually saved;
+  //    discoveredRunIds = every parseable run seen this attempt (cwd-aware, covers worktree runs
+  //    the backfill's parent-dir-only discovery can't see); runUploadAttempts counts consecutive
+  //    attempts with a failed run so the backfill's reopen stays bounded — a fully-recorded
+  //    attempt resets it.
+  const discoveredRunIds = runs.map((r) => r.row.workflowRunId);
+  const allRunsRecorded = uploadedRunIds.length === discoveredRunIds.length;
+  const prevAttempts = allRunsRecorded
+    ? 0
+    : ((await loadUploadedSessions(stateDir)).get(parent.sessionId)?.runUploadAttempts ?? 0);
   await recordUploadedSessions(stateDir, [
     {
       sessionId: parent.sessionId,
       rawMtime,
       agentSessionIds: agents.map((a) => a.sessionId),
       workflowRunIds: uploadedRunIds,
+      ...(discoveredRunIds.length > 0 && { discoveredRunIds }),
+      ...(!allRunsRecorded && { runUploadAttempts: prevAttempts + 1 }),
     },
   ]);
 

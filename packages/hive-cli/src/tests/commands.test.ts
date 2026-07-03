@@ -217,6 +217,11 @@ describe('search command', () => {
     // exit 0 with no output — retrieval agents would misread that as "no matches".
     process.argv = ['node', 'cli', 'search', 'needle', '-s', 'nonexistent', '--agents'];
     expect(await searchCore(source, process.argv.slice(3))).toBe(1);
+
+    // But a valid -s whose file simply contains no pattern match is a normal empty result, not
+    // a not-found error.
+    process.argv = ['node', 'cli', 'search', 'NO_SUCH_PATTERN', '-s', 'parent-abc', '--agents'];
+    expect(await searchCore(source, process.argv.slice(3))).toBe(0);
   });
 
   test("search -- <token> treats the token after -- as a literal pattern (e.g. --agents)", async () => {

@@ -258,6 +258,8 @@ export const hive = {
       `Session ${id} is already uploaded and cannot be excluded.`,
     cannotExcludePartial: (id: string): string =>
       `Session ${id} has an incomplete upload — some of its data may already be on the server, so it cannot be excluded. A later upload will complete it.`,
+    excludedPriorUploadNote: (id: string): string =>
+      `Note: a previously uploaded version of session ${id} remains on the server — exclusion prevents future uploads only.`,
     excluded: (id: string): string => `Excluded session ${id}`,
     excludedCount: (count: number): string =>
       `Excluded ${count} session${count === 1 ? '' : 's'}`,
