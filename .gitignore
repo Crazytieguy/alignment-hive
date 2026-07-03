@@ -6,6 +6,7 @@ node_modules
 .env.local
 .claude/autopilot/
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 
 
 # Presentation (slides + generators; built artifacts, kept local)
