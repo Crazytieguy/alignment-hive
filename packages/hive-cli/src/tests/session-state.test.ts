@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -6,8 +6,10 @@ import {
   canExclude,
   canUpload,
   computeSessionStatus,
+  excludeSessionChecked,
   formatSessionStatus,
   getStatusColor,
+  hasIncompleteUpload,
   isEligibleForAutoUpload,
   needsWorkflowReopen,
   runWorkflowBackfill,
@@ -184,11 +186,17 @@ describe('computeSessionStatus', () => {
 
 describe('status helper functions', () => {
   test('canExclude', () => {
-    expect(canExclude({ type: 'ready' })).toBe(true);
-    expect(canExclude({ type: 'pending', remainingMs: 1000 })).toBe(true);
-    expect(canExclude({ type: 'snoozed' })).toBe(true);
-    expect(canExclude({ type: 'excluded' })).toBe(false);
-    expect(canExclude({ type: 'uploaded' })).toBe(false);
+    expect(canExclude({ type: 'ready' }, false)).toBe(true);
+    expect(canExclude({ type: 'pending', remainingMs: 1000 }, false)).toBe(true);
+    expect(canExclude({ type: 'snoozed' }, false)).toBe(true);
+    expect(canExclude({ type: 'excluded' }, false)).toBe(false);
+    expect(canExclude({ type: 'uploaded' }, false)).toBe(false);
+  });
+
+  test('canExclude refuses any state with a partial upload (data may already be on the server)', () => {
+    expect(canExclude({ type: 'ready' }, true)).toBe(false);
+    expect(canExclude({ type: 'pending', remainingMs: 1000 }, true)).toBe(false);
+    expect(canExclude({ type: 'snoozed' }, true)).toBe(false);
   });
 
   test('canUpload', () => {
@@ -217,12 +225,79 @@ describe('status helper functions', () => {
     expect(formatSessionStatus({ type: 'pending', remainingMs: 0 })).toBe('pending (0h)');
   });
 
+  test('formatSessionStatus surfaces a partial upload for pre-upload states only', () => {
+    expect(formatSessionStatus({ type: 'ready' }, true)).toBe('partially uploaded');
+    expect(formatSessionStatus({ type: 'pending', remainingMs: 1000 }, true)).toBe('partially uploaded');
+    expect(formatSessionStatus({ type: 'snoozed' }, true)).toBe('partially uploaded');
+    expect(formatSessionStatus({ type: 'uploaded' }, true)).toBe('uploaded');
+    expect(formatSessionStatus({ type: 'excluded' }, true)).toBe('excluded');
+  });
+
   test('getStatusColor', () => {
     expect(getStatusColor({ type: 'ready' })).toBe('green');
     expect(getStatusColor({ type: 'uploaded' })).toBe('blue');
     expect(getStatusColor({ type: 'pending', remainingMs: 1000 })).toBe('yellow');
     expect(getStatusColor({ type: 'snoozed' })).toBe('yellow');
     expect(getStatusColor({ type: 'excluded' })).toBe('default');
+    expect(getStatusColor({ type: 'ready' }, true)).toBe('yellow');
+  });
+});
+
+describe('hasIncompleteUpload', () => {
+  const uploadedEntry = (uploadedAt: string): UploadedEntry => ({
+    sessionId: 's', rawMtime: 'm', uploadedAt, agentSessionIds: [],
+  });
+
+  test('false with no started marker', () => {
+    expect(hasIncompleteUpload('s', new Map(), new Map())).toBe(false);
+  });
+
+  test('true when an attempt started but nothing completed', () => {
+    expect(hasIncompleteUpload('s', new Map(), new Map([['s', Date.now()]]))).toBe(true);
+  });
+
+  test('false when the completed record is newer than the attempt', () => {
+    const uploaded = new Map([['s', uploadedEntry(new Date().toISOString())]]);
+    const started = new Map([['s', Date.now() - 60_000]]);
+    expect(hasIncompleteUpload('s', uploaded, started)).toBe(false);
+  });
+
+  test('true when a newer attempt started after the last completed upload', () => {
+    const uploaded = new Map([['s', uploadedEntry(new Date(Date.now() - 60_000).toISOString())]]);
+    const started = new Map([['s', Date.now()]]);
+    expect(hasIncompleteUpload('s', uploaded, started)).toBe(true);
+  });
+
+  test('fails closed on an unparseable completion timestamp', () => {
+    const uploaded = new Map([['s', uploadedEntry('not-a-date')]]);
+    const started = new Map([['s', Date.now()]]);
+    expect(hasIncompleteUpload('s', uploaded, started)).toBe(true);
+  });
+});
+
+describe('excludeSessionChecked', () => {
+  let stateDir: string;
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'hive-excl-'));
+  });
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  test('records exclusion for an excludable session', async () => {
+    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'ready' }, false)).toBe('excluded');
+    const content = await readFile(join(stateDir, 'excluded-sessions'), 'utf-8');
+    expect(content).toBe('sess-1\n');
+  });
+
+  test('refuses uploaded and partial sessions without writing', async () => {
+    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'uploaded' }, false)).toBe('denied-uploaded');
+    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'ready' }, true)).toBe('denied-partial');
+    expect(readFile(join(stateDir, 'excluded-sessions'), 'utf-8')).rejects.toThrow();
+  });
+
+  test('reports already-excluded sessions', async () => {
+    expect(await excludeSessionChecked(stateDir, 'sess-1', { type: 'excluded' }, false)).toBe('already-excluded');
   });
 });
 
@@ -270,6 +345,7 @@ describe('runWorkflowBackfill', () => {
       sessionById: new Map(),
       uploadedMap: new Map([['p', uploaded]]),
       excludedSet: new Set(),
+      startedMap: new Map(),
       migrationTimestamp: null,
     };
   }

@@ -12,7 +12,7 @@ import { getClaudeProjectDir, parseCwdFromLine, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
 import { sanitizeDeep } from './sanitize';
-import { loadSessionState, recordUploadedSessions, runAgentMigration, runWorkflowBackfill } from './session-state';
+import { loadSessionState, recordUploadStarted, recordUploadedSessions, runAgentMigration, runWorkflowBackfill } from './session-state';
 import type { WorkflowRunUpload } from './convex';
 import type { KnownEntry, WorkflowRunRow } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-state';
@@ -299,6 +299,15 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
     );
   } catch (err) {
     return fail(err instanceof Error ? err.message : 'Parent upload failed');
+  }
+  // Record the attempt before the first backend save: from here on, session data becomes
+  // visible on the backend, so a mid-flight failure must leave a local trace — the exclusion
+  // veto is refused for such sessions (hasIncompleteUpload) because the partial data may
+  // already have been downloaded. Fail closed if the trace can't be written.
+  try {
+    await recordUploadStarted(stateDir, parent.sessionId, rawMtime);
+  } catch {
+    return fail('Failed to record upload start');
   }
   const parentSaved = await saveUploads(parent.sessionId, sessionMeta, [
     { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary, lineCount: parentRead.sanitizedEntries.length },

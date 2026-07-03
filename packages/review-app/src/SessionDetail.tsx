@@ -4,6 +4,9 @@ import { Alert, SessionViewer, Button, formatSessionId } from "@alignment-hive/u
 import {
   parseSession,
   parseKnownEntry,
+  // Shared status rules — the exclusion veto is privacy-critical and must match the CLI exactly.
+  canExclude,
+  canUpload,
   type KnownEntry,
 } from "@alignment-hive/session-data";
 
@@ -24,15 +27,6 @@ interface SessionDetailProps {
 }
 
 type SessionsResult = Awaited<ReturnType<typeof trpc.sessions.list.query>>;
-type Status = SessionsResult["sessions"][number]["status"];
-
-function canExclude(status: Status) {
-  return status.type !== "excluded" && status.type !== "uploaded";
-}
-
-function canUpload(status: Status) {
-  return status.type === "ready" || status.type === "pending";
-}
 
 function AgentButton({
   agent,
@@ -63,7 +57,9 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
 
   // Read cached session status from list query
   const sessionsData = queryClient.getQueryData<SessionsResult>(["sessions"]);
-  const sessionStatus = sessionsData?.sessions.find((s) => s.sessionId === sessionId)?.status;
+  const cachedSession = sessionsData?.sessions.find((s) => s.sessionId === sessionId);
+  const sessionStatus = cachedSession?.status;
+  const partialUpload = cachedSession?.partialUpload ?? false;
 
   // Always fetch the parent's content (includes all agent contents)
   const { data, isLoading, error } = useQuery({
@@ -140,7 +136,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
                 Upload now
               </Button>
             )}
-            {canExclude(sessionStatus) && (
+            {canExclude(sessionStatus, partialUpload) && (
               <Button
                 size="sm"
                 variant="destructive"

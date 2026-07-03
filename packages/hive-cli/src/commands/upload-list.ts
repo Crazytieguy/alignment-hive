@@ -11,6 +11,7 @@ import {
   computeSessionStatus,
   formatSessionStatus,
   getStatusColor,
+  hasIncompleteUpload,
 } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
 
@@ -36,7 +37,7 @@ export async function uploadList(args: Array<string>): Promise<number> {
     return 0;
   }
 
-  const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
+  const { parentSessions, uploadedMap, excludedSet, startedMap, migrationTimestamp } =
     await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
   if (parentSessions.length === 0) {
@@ -62,10 +63,11 @@ export async function uploadList(args: Array<string>): Promise<number> {
 
   // First pass: compute statuses (no file reads)
   const statusCtx = { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp };
-  const sessionStatuses: Array<{ session: typeof parentSessions[0]; status: ReturnType<typeof computeSessionStatus>; statusColor: 'green' | 'blue' | 'yellow' | 'default' }> = [];
+  const sessionStatuses: Array<{ session: typeof parentSessions[0]; status: ReturnType<typeof computeSessionStatus>; partialUpload: boolean; statusColor: 'green' | 'blue' | 'yellow' | 'default' }> = [];
 
   for (const session of parentSessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())) {
     const status = computeSessionStatus(session, statusCtx);
+    const partialUpload = hasIncompleteUpload(session.sessionId, uploadedMap, startedMap);
 
     switch (status.type) {
       case 'excluded': excludedCount++; break;
@@ -74,7 +76,7 @@ export async function uploadList(args: Array<string>): Promise<number> {
       case 'ready': readyCount++; break;
     }
 
-    sessionStatuses.push({ session, status, statusColor: getStatusColor(status) });
+    sessionStatuses.push({ session, status, partialUpload, statusColor: getStatusColor(status, partialUpload) });
   }
 
   // Filter: only show actionable sessions unless --all
@@ -95,11 +97,11 @@ export async function uploadList(args: Array<string>): Promise<number> {
     );
 
     for (let j = 0; j < batch.length; j++) {
-      const { session, status, statusColor } = batch[j];
+      const { session, status, partialUpload, statusColor } = batch[j];
       rows.push({
         id: session.sessionId.slice(0, 12),
         date: session.mtime.toLocaleDateString(),
-        status: formatSessionStatus(status),
+        status: formatSessionStatus(status, partialUpload),
         statusColor,
         summary: summaries[j].slice(0, 60),
       });

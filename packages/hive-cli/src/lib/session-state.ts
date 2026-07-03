@@ -2,8 +2,21 @@ import { createReadStream } from 'node:fs';
 import { appendFile, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { canExclude } from '@alignment-hive/session-data';
 import { getClaudeProjectDir, statePaths  } from './config';
 import { findRawSessions, scanSubagentDir } from './session-io';
+import type { SessionStatus } from '@alignment-hive/session-data';
+
+// Status eligibility rules live in session-data so the review UI shares the exact same
+// implementation (the exclusion veto is privacy-critical — never fork it).
+export {
+  canExclude,
+  canUpload,
+  formatSessionStatus,
+  getStatusColor,
+  isEligibleForAutoUpload,
+} from '@alignment-hive/session-data';
+export type { SessionStatus } from '@alignment-hive/session-data';
 
 
 const SESSION_REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000; // 24h
@@ -128,14 +141,65 @@ async function loadExcludedSessions(stateDir: string): Promise<Set<string>> {
   return set;
 }
 
-// --- Session status ---
+// --- Started (possibly partial) uploads ---
 
-export type SessionStatus =
-  | { type: 'excluded' }
-  | { type: 'uploaded' }
-  | { type: 'pending'; remainingMs: number }
-  | { type: 'snoozed' }
-  | { type: 'ready' };
+interface StartedEntry {
+  sessionId: string;
+  rawMtime: string;
+  startedAt: string;
+}
+
+/**
+ * Record that an upload attempt is about to write to the backend. Written before the first
+ * backend save, so a mid-flight failure leaves a local trace: a session whose latest started
+ * attempt has no later completed record may already have data live on the server
+ * (see hasIncompleteUpload).
+ */
+export async function recordUploadStarted(stateDir: string, sessionId: string, rawMtime: string): Promise<void> {
+  const entry: StartedEntry = { sessionId, rawMtime, startedAt: new Date().toISOString() };
+  await appendFile(statePaths(stateDir).startedUploads, JSON.stringify(entry) + '\n');
+}
+
+/** Load the latest upload-attempt start time (ms) per session. */
+async function loadStartedUploads(stateDir: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  try {
+    const content = await readFile(statePaths(stateDir).startedUploads, 'utf-8');
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as StartedEntry;
+        const ts = Date.parse(entry.startedAt);
+        if (isNaN(ts)) continue;
+        const prev = map.get(entry.sessionId);
+        if (prev === undefined || ts > prev) map.set(entry.sessionId, ts);
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } catch {}
+  return map;
+}
+
+/**
+ * True when the session's most recent upload attempt started but never completed — the backend
+ * may already hold part of its data while local state says "not uploaded". Unparseable
+ * completion timestamps count as incomplete (fail closed: the exclusion veto stays off).
+ */
+export function hasIncompleteUpload(
+  sessionId: string,
+  uploadedMap: Map<string, UploadedEntry>,
+  startedMap: Map<string, number>,
+): boolean {
+  const startedAt = startedMap.get(sessionId);
+  if (startedAt === undefined) return false;
+  const uploaded = uploadedMap.get(sessionId);
+  if (!uploaded) return true;
+  const uploadedAt = Date.parse(uploaded.uploadedAt);
+  return isNaN(uploadedAt) || startedAt > uploadedAt;
+}
+
+// --- Session status ---
 
 export interface StatusContext {
   uploadedMap: Map<string, UploadedEntry>;
@@ -180,40 +244,6 @@ export function computeSessionStatus(
   return snoozeUntil ? { type: 'snoozed' } : { type: 'ready' };
 }
 
-export function canExclude(status: SessionStatus): boolean {
-  return status.type !== 'excluded' && status.type !== 'uploaded';
-}
-
-export function canUpload(status: SessionStatus): boolean {
-  return status.type === 'ready' || status.type === 'pending';
-}
-
-export function isEligibleForAutoUpload(status: SessionStatus): boolean {
-  return status.type === 'ready';
-}
-
-export function formatSessionStatus(status: SessionStatus): string {
-  switch (status.type) {
-    case 'excluded': return 'excluded';
-    case 'uploaded': return 'uploaded';
-    case 'ready': return 'ready';
-    case 'snoozed': return 'snoozed';
-    case 'pending': {
-      const remainingHours = Math.max(0, Math.ceil(status.remainingMs / (60 * 60 * 1000)));
-      return `pending (${remainingHours}h)`;
-    }
-  }
-}
-
-export function getStatusColor(status: SessionStatus): 'green' | 'blue' | 'yellow' | 'default' {
-  switch (status.type) {
-    case 'ready': return 'green';
-    case 'uploaded': return 'blue';
-    case 'pending': case 'snoozed': return 'yellow';
-    default: return 'default';
-  }
-}
-
 /** Check if a session has been uploaded with its current mtime. */
 export function isSessionUploaded(
   session: DiscoveredSession,
@@ -245,12 +275,34 @@ export async function recordExcludedSession(stateDir: string, sessionId: string)
   await appendFile(statePaths(stateDir).excludedSessions, sessionId + '\n');
 }
 
+export type ExcludeCheckResult = 'excluded' | 'already-excluded' | 'denied-uploaded' | 'denied-partial';
+
+/**
+ * The single exclusion path (CLI command and review UI both go through here). Applies the
+ * status-based veto before recording: uploaded and partially-uploaded sessions are refused —
+ * their data may already be on the backend, so exclusion could not deliver what it promises.
+ */
+export async function excludeSessionChecked(
+  stateDir: string,
+  sessionId: string,
+  status: SessionStatus,
+  hasPartialUpload: boolean,
+): Promise<ExcludeCheckResult> {
+  if (!canExclude(status, hasPartialUpload)) {
+    if (status.type === 'excluded') return 'already-excluded';
+    return status.type === 'uploaded' ? 'denied-uploaded' : 'denied-partial';
+  }
+  await recordExcludedSession(stateDir, sessionId);
+  return 'excluded';
+}
+
 export interface SessionState {
   parentSessions: Array<DiscoveredSession>;
   agentsByParent: Map<string, Array<DiscoveredSession>>;
   sessionById: Map<string, DiscoveredSession>;
   uploadedMap: Map<string, UploadedEntry>;
   excludedSet: Set<string>;
+  startedMap: Map<string, number>;
   migrationTimestamp: number | null;
 }
 
@@ -259,10 +311,11 @@ export async function loadSessionState(
   stateDir: string,
   transcriptsDirs: Array<string>,
 ): Promise<SessionState> {
-  const [allSessions, uploadedMap, excludedSet, migrationTimestamp] = await Promise.all([
+  const [allSessions, uploadedMap, excludedSet, startedMap, migrationTimestamp] = await Promise.all([
     discoverSessions(transcriptsDirs),
     loadUploadedSessions(stateDir),
     loadExcludedSessions(stateDir),
+    loadStartedUploads(stateDir),
     loadAgentMigrationTs(stateDir),
   ]);
 
@@ -286,7 +339,7 @@ export async function loadSessionState(
     }
   }
 
-  return { parentSessions, agentsByParent, sessionById, uploadedMap, excludedSet, migrationTimestamp };
+  return { parentSessions, agentsByParent, sessionById, uploadedMap, excludedSet, startedMap, migrationTimestamp };
 }
 
 /** Find agents for a parent session from pre-built map and worktree dirs. */
