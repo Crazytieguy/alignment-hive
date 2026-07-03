@@ -52,3 +52,4 @@ A workflow run's **run metadata** (`<session>/workflows/wf_<id>.json` — orches
 - **Never bypass `verifyConsent()` in session write mutations.**
 - **Never filter sessions after Convex pagination** — this breaks page sizes. Use `stream().filterWith()` from `convex-helpers/server/stream` for pre-pagination filtering.
 - If adding a new way to access session content (API endpoint, download, etc.), it must go through the same authorization and consent checks.
+- **Never return a raw `storageId` from any query** — storage access is only ever through short-lived signed URLs. Save mutations take storageIds from the client, so a leaked id could otherwise be linked to an attacker's own row and read through their signed-URL path. `assertStorageIdUnclaimed` (first-claim: a blob may only ever be linked to one row) backstops this in `saveUploads`/`saveWorkflowRuns`; don't weaken it, and apply it in any new mutation that links a client-provided storageId.

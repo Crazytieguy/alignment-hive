@@ -38,7 +38,10 @@ export default defineSchema({
   })
     .index("by_session_id", ["sessionId"])
     .index("by_user_doc_id", ["userDocId"])
-    .index("by_parent_session_id", ["parentSessionId"]),
+    .index("by_parent_session_id", ["parentSessionId"])
+    // First-claim enforcement: a storage blob may only ever be linked to one row (see
+    // assertStorageIdUnclaimed in sessions.ts).
+    .index("by_storage_id", ["upload.storageId"]),
 
   // Run-level metadata for a Workflow-tool run (wf_<id>). The full sanitized run JSON
   // (script/result/logs/etc.) lives in storage (upload.storageId); these are the indexed
@@ -65,7 +68,10 @@ export default defineSchema({
   })
     .index("by_workflow_run_id", ["workflowRunId"])
     .index("by_parent_session_id", ["parentSessionId"])
-    .index("by_user_doc_id", ["userDocId"]),
+    .index("by_user_doc_id", ["userDocId"])
+    // First-claim enforcement: a storage blob may only ever be linked to one row (see
+    // assertStorageIdUnclaimed in sessions.ts).
+    .index("by_storage_id", ["upload.storageId"]),
 
   checkouts: defineTable({
     checkoutId: v.string(),
