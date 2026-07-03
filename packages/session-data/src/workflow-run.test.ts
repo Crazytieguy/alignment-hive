@@ -22,8 +22,29 @@ describe('WorkflowRunBlobSchema', () => {
     expect((blob as Record<string, unknown>).futureField).toBe('kept');
   });
 
-  test('requires runId', () => {
-    expect(WorkflowRunBlobSchema.safeParse({ status: 'completed' }).success).toBe(false);
+  test('type drift in a cosmetic field degrades to a missing stat, not a dropped run', () => {
+    const parsed = WorkflowRunBlobSchema.safeParse({
+      runId: 'wf_abc123',
+      status: { state: 'completed' }, // drifted: object instead of string
+      summary: null, // drifted: null instead of absent
+      totalTokens: '1000', // drifted: string instead of number
+      agentCount: 5,
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.status).toBeUndefined();
+      expect(parsed.data.summary).toBeUndefined();
+      expect(parsed.data.totalTokens).toBeUndefined();
+      expect(parsed.data.agentCount).toBe(5);
+    }
+  });
+
+  test('a missing or drifted runId still parses (identity comes from the filename)', () => {
+    const parsed = WorkflowRunBlobSchema.safeParse({ status: 'completed' });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.runId).toBe('');
+    }
   });
 });
 
@@ -45,5 +66,10 @@ describe('extractWorkflowRunRow', () => {
     // Absent scalars are omitted, not set to undefined.
     expect('totalTokens' in row).toBe(false);
     expect('durationMs' in row).toBe(false);
+  });
+
+  test('falls back to the path-derived id when runId was caught to empty', () => {
+    const row = extractWorkflowRunRow('wf_run1', { runId: '' });
+    expect(row.runId).toBe('wf_run1');
   });
 });
