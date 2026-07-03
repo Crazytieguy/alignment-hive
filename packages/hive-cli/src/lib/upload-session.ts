@@ -240,7 +240,9 @@ export async function discoverWorkflowRuns(
       try {
         const parsed = WorkflowRunBlobSchema.safeParse(JSON.parse(await readFile(join(workflowsDir, f), 'utf-8')));
         if (!parsed.success) continue;
-        const blob = redactHomePaths(sanitizeDeep(parsed.data), home);
+        // Strict: run blobs are arbitrary script-built JSON, so keys and SAFE_KEYS-named values
+        // (name, cwd, ...) must be scanned too — unlike schema-shaped transcript entries.
+        const blob = redactHomePaths(sanitizeDeep(parsed.data, { strict: true }), home);
         const row = extractWorkflowRunRow(workflowRunId, blob);
         // Cap the row summary so the saveWorkflowRuns mutation args stay well under Convex limits
         // (the full text remains in the storage blob).

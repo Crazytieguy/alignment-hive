@@ -116,7 +116,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
   const blocks = parseAndBuildBlocks(viewingAgent ? viewingAgent.entries : data.entries);
 
   const displayId = viewingAgent ? viewingAgent.sessionId : sessionId;
-  const hasSidebar = data.agents.length > 0 || viewingAgent;
+  const hasSidebar = data.agents.length > 0 || (data.workflowRuns?.length ?? 0) > 0 || viewingAgent;
 
   return (
     <div className="space-y-4">
@@ -227,6 +227,16 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
                         </div>
                         {stats.length > 0 && (
                           <div className="text-xs text-muted-foreground">{stats.join(" · ")}</div>
+                        )}
+                        {meta && (
+                          <details className="mt-1">
+                            <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                              Run metadata to upload (script, result, stats)
+                            </summary>
+                            <pre className="mt-1 max-h-64 overflow-auto rounded bg-muted p-2 text-[10px] leading-snug">
+                              {JSON.stringify(meta.blob, null, 2)}
+                            </pre>
+                          </details>
                         )}
                         {runAgents.length > 0 && (
                           <ul className="mt-1 space-y-1">

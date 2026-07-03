@@ -111,12 +111,14 @@ export function createReviewRouter(stateDir: string, cwd: string) {
             agents.push(...batchResults);
           }
 
-          // Workflow run metadata (indexed scalars) for the parent — same sanitize pipeline as upload.
+          // Workflow run metadata for the parent — same sanitize pipeline as upload. Includes the
+          // full sanitized blob (script/result/stats) so the review UI can show exactly what the
+          // upload would send, not just the indexed scalars.
           // Best-effort: never fail the whole content query if run discovery hiccups.
           const workflowRuns = session.agentId
             ? []
             : await discoverWorkflowRuns(session, sessionRead.cwds)
-                .then((rs) => rs.map((r) => r.row))
+                .then((rs) => rs.map((r) => ({ ...r.row, blob: r.blob })))
                 .catch(() => []);
 
           return {
