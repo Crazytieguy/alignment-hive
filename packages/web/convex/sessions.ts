@@ -92,6 +92,37 @@ function isSessionOwner(
   return session.userDocId === userDocId;
 }
 
+/**
+ * First-claim enforcement for storage blobs: a storageId may only ever be linked to a single
+ * row. The save mutations take storageIds from the client without any way to verify who
+ * uploaded the blob — accepting an already-claimed id would let a caller who somehow learned
+ * another user's storageId link it to their own consented row and read the victim's blob
+ * through their own signed-URL read path. Every legitimate upload mints a fresh blob
+ * (re-uploads included), so a claimed id can never come from this caller's upload. The self
+ * params exempt the row being upserted, keeping retries of the same save idempotent.
+ * Defense-in-depth companion rule: no query may ever return a raw storageId (see CLAUDE.md).
+ */
+async function assertStorageIdUnclaimed(
+  ctx: MutationCtx,
+  storageId: Id<"_storage">,
+  self: { sessionDocId?: Id<"sessions">; runDocId?: Id<"workflowRuns"> },
+): Promise<void> {
+  const sessionClaim = await ctx.db
+    .query("sessions")
+    .withIndex("by_storage_id", (q) => q.eq("upload.storageId", storageId))
+    .first();
+  if (sessionClaim && sessionClaim._id !== self.sessionDocId) {
+    throw new ConvexError("Storage blob is already linked to another record");
+  }
+  const runClaim = await ctx.db
+    .query("workflowRuns")
+    .withIndex("by_storage_id", (q) => q.eq("upload.storageId", storageId))
+    .first();
+  if (runClaim && runClaim._id !== self.runDocId) {
+    throw new ConvexError("Storage blob is already linked to another record");
+  }
+}
+
 /** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the document ID. */
 async function upsertSession(
   ctx: MutationCtx,
@@ -290,6 +321,7 @@ export const saveUploads = mutation({
         sessionStartGitCommitHash: upload.parentSessionId ? undefined : args.sessionStartGitCommitHash,
       });
 
+      await assertStorageIdUnclaimed(ctx, upload.storageId, { sessionDocId });
       await ctx.db.patch(sessionDocId, {
         ...(upload.summary !== undefined && { summary: upload.summary }),
         upload: {
@@ -356,6 +388,8 @@ export const saveWorkflowRuns = mutation({
       const existing = candidates.find(
         (r) => r.userDocId === userDocId && r.parentSessionId === args.parentSessionId,
       );
+
+      await assertStorageIdUnclaimed(ctx, run.storageId, { runDocId: existing?._id });
 
       // Conditional spreads (=== undefined, not falsy) so a sparser re-upload preserves
       // previously-stored fields instead of clobbering them, and valid 0 values are kept.
