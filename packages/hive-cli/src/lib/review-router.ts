@@ -143,10 +143,9 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
           // Backfill-aware state, same as list — a reopened session must gate as pending
           // (excludable), not as uploaded.
-          const { sessionById, uploadedMap, excludedSet, startedMap, migrationTimestamp } =
-            await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+          const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
-          const session = sessionById.get(input.sessionId);
+          const session = state.sessionById.get(input.sessionId);
           if (!session) {
             throw new Error(`No session matching "${input.sessionId}"`);
           }
@@ -155,20 +154,17 @@ export function createReviewRouter(stateDir: string, cwd: string) {
             throw new Error(hive.upload.agentCannotExclude);
           }
 
-          // consentMtime/snooze don't affect excludability — see uploadExclude.
-          const status = computeSessionStatus(session, { uploadedMap, excludedSet, consentMtime: 0, snoozeUntil: null, migrationTimestamp });
-          const partial = hasIncompleteUpload(session.sessionId, uploadedMap, startedMap);
           const id = session.sessionId.slice(0, 8);
-
-          switch (await excludeSessionChecked(stateDir, session.sessionId, status, partial)) {
+          const outcome = await excludeSessionChecked(stateDir, state, session);
+          switch (outcome.result) {
             case 'already-excluded':
-              return { alreadyExcluded: true };
+              return { alreadyExcluded: true, hadPriorUpload: outcome.hadPriorUpload };
             case 'denied-uploaded':
               throw new Error(hive.upload.cannotExcludeUploaded(id));
             case 'denied-partial':
               throw new Error(hive.upload.cannotExcludePartial(id));
             case 'excluded':
-              return { alreadyExcluded: false };
+              return { alreadyExcluded: false, hadPriorUpload: outcome.hadPriorUpload };
           }
         }),
 

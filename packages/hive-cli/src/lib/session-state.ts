@@ -4,6 +4,7 @@ import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { canExclude } from '@alignment-hive/session-data';
 import { getClaudeProjectDir, statePaths  } from './config';
+import { parseJsonl } from './session-format';
 import { findRawSessions, scanSubagentDir } from './session-io';
 import type { SessionStatus } from '@alignment-hive/session-data';
 
@@ -39,7 +40,19 @@ export interface UploadedEntry {
   rawMtime: string;
   uploadedAt: string;
   agentSessionIds?: Array<string>;
+  /** Run ids whose metadata blob was successfully uploaded + saved. */
   workflowRunIds?: Array<string>;
+  /**
+   * ALL parseable run ids discovered at upload time (cwd-aware, so it covers worktree runs the
+   * backfill's parent-dir-only discovery can't see). The backfill reopens when any of these is
+   * missing from workflowRunIds.
+   */
+  discoveredRunIds?: Array<string>;
+  /**
+   * Consecutive upload attempts in which some parseable run failed to record. Bounds the
+   * reopen loop for a parseable-but-persistently-unuploadable run (see needsWorkflowReopen).
+   */
+  runUploadAttempts?: number;
 }
 
 export interface DiscoveredSession {
@@ -112,18 +125,13 @@ export async function discoverSessions(
   return results.filter((r): r is DiscoveredSession => r !== null);
 }
 
-async function loadUploadedSessions(stateDir: string): Promise<Map<string, UploadedEntry>> {
+export async function loadUploadedSessions(stateDir: string): Promise<Map<string, UploadedEntry>> {
   const map = new Map<string, UploadedEntry>();
   try {
     const content = await readFile(statePaths(stateDir).uploadedSessions, 'utf-8');
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line) as UploadedEntry;
-        map.set(entry.sessionId, entry);
-      } catch {
-        // skip malformed lines
-      }
+    for (const raw of parseJsonl(content)) {
+      const entry = raw as UploadedEntry;
+      map.set(entry.sessionId, entry);
     }
   } catch {}
   return map;
@@ -165,17 +173,12 @@ async function loadStartedUploads(stateDir: string): Promise<Map<string, number>
   const map = new Map<string, number>();
   try {
     const content = await readFile(statePaths(stateDir).startedUploads, 'utf-8');
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line) as StartedEntry;
-        const ts = Date.parse(entry.startedAt);
-        if (isNaN(ts)) continue;
-        const prev = map.get(entry.sessionId);
-        if (prev === undefined || ts > prev) map.set(entry.sessionId, ts);
-      } catch {
-        // skip malformed lines
-      }
+    for (const raw of parseJsonl(content)) {
+      const entry = raw as StartedEntry;
+      const ts = Date.parse(entry.startedAt);
+      if (isNaN(ts)) continue;
+      const prev = map.get(entry.sessionId);
+      if (prev === undefined || ts > prev) map.set(entry.sessionId, ts);
     }
   } catch {}
   return map;
@@ -256,7 +259,7 @@ export function isSessionUploaded(
 /** Record sessions as uploaded in a single write. Includes agent entries and parent entries with agentSessionIds. */
 export async function recordUploadedSessions(
   stateDir: string,
-  sessions: Array<{ sessionId: string; rawMtime: string; agentSessionIds?: Array<string>; workflowRunIds?: Array<string> }>,
+  sessions: Array<Omit<UploadedEntry, 'uploadedAt'>>,
 ): Promise<void> {
   if (sessions.length === 0) return;
   const now = new Date().toISOString();
@@ -266,6 +269,8 @@ export async function recordUploadedSessions(
     uploadedAt: now,
     ...(s.agentSessionIds !== undefined && { agentSessionIds: s.agentSessionIds }),
     ...(s.workflowRunIds !== undefined && { workflowRunIds: s.workflowRunIds }),
+    ...(s.discoveredRunIds !== undefined && { discoveredRunIds: s.discoveredRunIds }),
+    ...(s.runUploadAttempts !== undefined && { runUploadAttempts: s.runUploadAttempts }),
   } satisfies UploadedEntry) + '\n');
   await appendFile(statePaths(stateDir).uploadedSessions, lines.join(''));
 }
@@ -275,25 +280,50 @@ export async function recordExcludedSession(stateDir: string, sessionId: string)
   await appendFile(statePaths(stateDir).excludedSessions, sessionId + '\n');
 }
 
+/** Re-read the excluded set fresh from disk (not from a possibly-stale loaded state snapshot). */
+export async function isSessionExcluded(stateDir: string, sessionId: string): Promise<boolean> {
+  return (await loadExcludedSessions(stateDir)).has(sessionId);
+}
+
 export type ExcludeCheckResult = 'excluded' | 'already-excluded' | 'denied-uploaded' | 'denied-partial';
 
+export interface ExcludeOutcome {
+  result: ExcludeCheckResult;
+  /** A completed upload record exists for this session (any mtime) — some version of its
+   * content is already on the server, so a successful exclusion only stops future uploads. */
+  hadPriorUpload: boolean;
+}
+
 /**
- * The single exclusion path (CLI command and review UI both go through here). Applies the
- * status-based veto before recording: uploaded and partially-uploaded sessions are refused —
- * their data may already be on the backend, so exclusion could not deliver what it promises.
+ * The single exclusion path (CLI command and review UI both go through here). Owns every input
+ * to its own veto — status and partial-upload state are computed here, not by callers, so no
+ * call site can weaken the check by assembling them wrong. Uploaded and partially-uploaded
+ * sessions are refused: their data may already be on the backend, so exclusion could not
+ * deliver what it promises.
  */
 export async function excludeSessionChecked(
   stateDir: string,
-  sessionId: string,
-  status: SessionStatus,
-  hasPartialUpload: boolean,
-): Promise<ExcludeCheckResult> {
-  if (!canExclude(status, hasPartialUpload)) {
-    if (status.type === 'excluded') return 'already-excluded';
-    return status.type === 'uploaded' ? 'denied-uploaded' : 'denied-partial';
+  state: Pick<SessionState, 'uploadedMap' | 'excludedSet' | 'startedMap' | 'migrationTimestamp'>,
+  session: DiscoveredSession,
+): Promise<ExcludeOutcome> {
+  // consentMtime/snooze only shift sessions between pending/snoozed/ready — all equally
+  // excludable — so exclusion stays offline-capable with placeholder values.
+  const status = computeSessionStatus(session, {
+    uploadedMap: state.uploadedMap,
+    excludedSet: state.excludedSet,
+    consentMtime: 0,
+    snoozeUntil: null,
+    migrationTimestamp: state.migrationTimestamp,
+  });
+  const hasPartial = hasIncompleteUpload(session.sessionId, state.uploadedMap, state.startedMap);
+  const hadPriorUpload = state.uploadedMap.has(session.sessionId);
+
+  if (!canExclude(status, hasPartial)) {
+    if (status.type === 'excluded') return { result: 'already-excluded', hadPriorUpload };
+    return { result: status.type === 'uploaded' ? 'denied-uploaded' : 'denied-partial', hadPriorUpload };
   }
-  await recordExcludedSession(stateDir, sessionId);
-  return 'excluded';
+  await recordExcludedSession(stateDir, session.sessionId);
+  return { result: 'excluded', hadPriorUpload };
 }
 
 export interface SessionState {
@@ -456,13 +486,18 @@ export async function runAgentMigration(
   return null;
 }
 
+/** Max consecutive failed run-upload attempts before the backfill stops reopening a parent. */
+export const MAX_RUN_UPLOAD_ATTEMPTS = 3;
+
 /**
  * True if an uploaded parent needs reopening to capture workflow data its recorded upload
  * missed: a discovered agent absent from agentSessionIds, or a PARSEABLE run-metadata file
- * absent from workflowRunIds. Keying runs on parseable files only (discoverWorkflowRuns drops
- * malformed ones) is what makes this loop-safe: a wf_<id>.json that can never upload can never
- * trigger a reopen, while a parseable-but-unrecorded run (e.g. a transient failure in the
- * best-effort run-upload step) reopens until a re-upload records it, then converges.
+ * absent from workflowRunIds. Two guards keep the run branch loop-safe: keying on parseable
+ * files only (malformed wf_<id>.json can never upload, so it never reopens), and the
+ * runUploadAttempts cap — a run that parses but persistently fails to upload stops forcing
+ * re-uploads after MAX_RUN_UPLOAD_ATTEMPTS (accepting that run's loss instead of re-uploading
+ * the parent forever). discoveredRunIds (recorded cwd-aware at upload time) is unioned in so
+ * worktree-only runs the parent-dir-only discovery can't see still trigger a retry.
  */
 export function needsWorkflowReopen(
   uploaded: UploadedEntry,
@@ -471,8 +506,10 @@ export function needsWorkflowReopen(
 ): boolean {
   const recordedAgents = new Set(uploaded.agentSessionIds ?? []);
   if (agents.some((a) => !recordedAgents.has(a.sessionId))) return true;
+  if ((uploaded.runUploadAttempts ?? 0) >= MAX_RUN_UPLOAD_ATTEMPTS) return false;
   const recordedRuns = new Set(uploaded.workflowRunIds ?? []);
-  return parseableRunIds.some((id) => !recordedRuns.has(id));
+  const knownRunIds = new Set([...parseableRunIds, ...(uploaded.discoveredRunIds ?? [])]);
+  return [...knownRunIds].some((id) => !recordedRuns.has(id));
 }
 
 /** Load the workflow-backfill migration timestamp. Returns null if not set. */
@@ -519,19 +556,28 @@ export async function runWorkflowBackfill(
   migrationTimestamp: number | null,
   discoverRunIds: (parent: DiscoveredSession) => Promise<Array<string>>,
 ): Promise<number | null> {
-  let reopened = 0;
-  for (const parent of state.parentSessions) {
-    if (state.excludedSet.has(parent.sessionId)) continue;
+  // Only fully-recorded uploads are our concern; agentSessionIds===undefined is the agent migration's job.
+  const candidates = state.parentSessions.flatMap((parent) => {
+    if (state.excludedSet.has(parent.sessionId)) return [];
     const uploaded = state.uploadedMap.get(parent.sessionId);
-    // Only fully-recorded uploads are our concern; agentSessionIds===undefined is the agent migration's job.
     if (!uploaded || uploaded.rawMtime !== parent.mtime.toISOString() || uploaded.agentSessionIds === undefined) {
-      continue;
+      return [];
     }
+    return [{ parent, uploaded }];
+  });
+
+  // Discovery is one readdir per parent when no workflows/ dir exists, parsing only files that
+  // are there — run it concurrently across parents. Best-effort: a discovery error must not
+  // break state loading.
+  const discovered = await Promise.all(
+    candidates.map(({ parent }) => discoverRunIds(parent).catch(() => [] as Array<string>)),
+  );
+
+  let reopened = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const { parent, uploaded } = candidates[i];
     const agents = state.agentsByParent.get(parent.sessionId) ?? [];
-    // One readdir per parent when no workflows/ dir exists; parsing only happens for sessions
-    // that actually have run files. Best-effort: a discovery error must not break state loading.
-    const runIds = await discoverRunIds(parent).catch(() => [] as Array<string>);
-    if (needsWorkflowReopen(uploaded, agents, runIds)) {
+    if (needsWorkflowReopen(uploaded, agents, discovered[i])) {
       state.uploadedMap.set(parent.sessionId, { ...uploaded, agentSessionIds: undefined });
       reopened++;
     }

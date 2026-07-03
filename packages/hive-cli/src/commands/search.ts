@@ -90,15 +90,17 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
   }
 
   // Filter to specific session if -s flag provided
+  let prefixMatchedFile = false;
   if (options.sessionFilter) {
     const prefix = options.sessionFilter;
-    files = files.filter((f) => {
+    const matchesPrefix = (f: string) => {
       const name = basename(f, '.jsonl');
-      if (name.startsWith(prefix) || name === `agent-${prefix}`) return true;
-      // With --agents, keep agent files here: their parent (parentSessionId) isn't in the filename,
-      // so a `-s <parent>` scope is applied per-agent at read time below.
-      return options.agents && name.startsWith('agent-');
-    });
+      return name.startsWith(prefix) || name === `agent-${prefix}`;
+    };
+    prefixMatchedFile = files.some(matchesPrefix);
+    // With --agents, also keep agent files: their parent (parentSessionId) isn't in the filename,
+    // so a `-s <parent>` scope is applied per-agent at read time below.
+    files = files.filter((f) => matchesPrefix(f) || (options.agents && basename(f, '.jsonl').startsWith('agent-')));
     if (files.length === 0) {
       printError(errors.sessionNotFound(prefix));
       return 1;
@@ -202,7 +204,9 @@ export async function searchCore(source: SessionSource, args: Array<string>): Pr
     }
   }
 
-  if (options.sessionFilter && scopedSessions === 0) {
+  // Only a scope that matched NOTHING — no filename, no read-time parent — is a bad session id.
+  // A prefix-matched file whose read failed or matched no pattern must stay a normal empty result.
+  if (options.sessionFilter && scopedSessions === 0 && !prefixMatchedFile) {
     printError(errors.sessionNotFound(options.sessionFilter));
     return 1;
   }

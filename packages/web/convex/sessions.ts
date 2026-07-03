@@ -107,19 +107,18 @@ async function assertStorageIdUnclaimed(
   storageId: Id<"_storage">,
   self: { sessionDocId?: Id<"sessions">; runDocId?: Id<"workflowRuns"> },
 ): Promise<void> {
-  const sessionClaim = await ctx.db
-    .query("sessions")
-    .withIndex("by_storage_id", (q) => q.eq("upload.storageId", storageId))
-    .first();
-  if (sessionClaim && sessionClaim._id !== self.sessionDocId) {
-    throw new ConvexError("Storage blob is already linked to another record");
-  }
-  const runClaim = await ctx.db
-    .query("workflowRuns")
-    .withIndex("by_storage_id", (q) => q.eq("upload.storageId", storageId))
-    .first();
-  if (runClaim && runClaim._id !== self.runDocId) {
-    throw new ConvexError("Storage blob is already linked to another record");
+  const tables = [
+    { table: "sessions", selfId: self.sessionDocId },
+    { table: "workflowRuns", selfId: self.runDocId },
+  ] as const;
+  for (const { table, selfId } of tables) {
+    const claim = await ctx.db
+      .query(table)
+      .withIndex("by_storage_id", (q) => q.eq("upload.storageId", storageId))
+      .first();
+    if (claim && claim._id !== selfId) {
+      throw new ConvexError("Storage blob is already linked to another record");
+    }
   }
 }
 
