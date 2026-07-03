@@ -9,12 +9,12 @@ import { resolveProjectConsent } from './convex';
 import { hive } from './messages';
 import {
   computeSessionStatus,
+  excludeSessionChecked,
   findAgentsForParent,
   formatSessionStatus,
+  hasIncompleteUpload,
   isEligibleForAutoUpload,
-  isSessionUploaded,
   loadSessionState,
-  recordExcludedSession,
 } from './session-state';
 import { clearSnooze, getSnoozeUntil, parseDuration, setSnooze } from './snooze';
 import { discoverWorkflowRuns, isInConsentWindows, loadConsentWindows, loadSessionStateWithAgentMigration, readAndSanitizeSession, readSessionSummary, uploadParentWithAgents } from './upload-session';
@@ -26,7 +26,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
     sessions: t.router({
       list: t.procedure.query(async () => {
         const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-        const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
+        const { parentSessions, uploadedMap, excludedSet, startedMap, migrationTimestamp } =
           await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
         const consentResult = await resolveProjectConsent(cwd);
         if ('error' in consentResult) {
@@ -56,11 +56,13 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           );
           for (let j = 0; j < batch.length; j++) {
             const { session, status } = batch[j];
+            const partialUpload = hasIncompleteUpload(session.sessionId, uploadedMap, startedMap);
             sessions.push({
               sessionId: session.sessionId,
               date: session.mtime.toISOString(),
               status,
-              statusLabel: formatSessionStatus(status),
+              partialUpload,
+              statusLabel: formatSessionStatus(status, partialUpload),
               summary: summaries[j].slice(0, 120),
             });
           }
@@ -137,7 +139,10 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         .input(z.object({ sessionId: z.string() }))
         .mutation(async ({ input }) => {
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-          const { sessionById, excludedSet, uploadedMap } = await loadSessionState(stateDir, transcriptsDirs);
+          // Backfill-aware state, same as list — a reopened session must gate as pending
+          // (excludable), not as uploaded.
+          const { sessionById, uploadedMap, excludedSet, startedMap, migrationTimestamp } =
+            await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
 
           const session = sessionById.get(input.sessionId);
           if (!session) {
@@ -148,16 +153,21 @@ export function createReviewRouter(stateDir: string, cwd: string) {
             throw new Error(hive.upload.agentCannotExclude);
           }
 
-          if (excludedSet.has(session.sessionId)) {
-            return { alreadyExcluded: true };
-          }
+          // consentMtime/snooze don't affect excludability — see uploadExclude.
+          const status = computeSessionStatus(session, { uploadedMap, excludedSet, consentMtime: 0, snoozeUntil: null, migrationTimestamp });
+          const partial = hasIncompleteUpload(session.sessionId, uploadedMap, startedMap);
+          const id = session.sessionId.slice(0, 8);
 
-          if (isSessionUploaded(session, uploadedMap)) {
-            throw new Error('Cannot exclude an already uploaded session');
+          switch (await excludeSessionChecked(stateDir, session.sessionId, status, partial)) {
+            case 'already-excluded':
+              return { alreadyExcluded: true };
+            case 'denied-uploaded':
+              throw new Error(hive.upload.cannotExcludeUploaded(id));
+            case 'denied-partial':
+              throw new Error(hive.upload.cannotExcludePartial(id));
+            case 'excluded':
+              return { alreadyExcluded: false };
           }
-
-          await recordExcludedSession(stateDir, session.sessionId);
-          return { alreadyExcluded: false };
         }),
 
       upload: t.procedure

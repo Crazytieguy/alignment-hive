@@ -4,10 +4,12 @@ import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
 import {
-  isSessionUploaded,
-  loadSessionState,
-  recordExcludedSession,
+  canExclude,
+  computeSessionStatus,
+  excludeSessionChecked,
+  hasIncompleteUpload,
 } from '../lib/session-state';
+import { loadSessionStateWithAgentMigration } from '../lib/upload-session';
 
 export async function uploadExclude(args: Array<string>): Promise<number> {
   const config = getConfig();
@@ -21,19 +23,26 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
     return 0;
   }
 
-  const { parentSessions, sessionById, excludedSet, uploadedMap } = await loadSessionState(stateDir, transcriptsDirs);
+  // Backfill-aware state, same as the list/review paths — a reopened session must gate as
+  // pending (excludable), not as uploaded.
+  const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+  const { parentSessions, sessionById, uploadedMap, excludedSet, startedMap, migrationTimestamp } = state;
 
   if (parentSessions.length === 0) {
     printInfo(hive.upload.noSessions);
     return 0;
   }
 
+  // consentMtime/snooze only shift sessions between pending/snoozed/ready — all equally
+  // excludable — so exclusion stays offline-capable with placeholder values.
+  const statusCtx = { uploadedMap, excludedSet, consentMtime: 0, snoozeUntil: null, migrationTimestamp };
+
   if (args.includes('--all')) {
     let count = 0;
     const lines: Array<string> = [];
     for (const session of parentSessions) {
-      if (excludedSet.has(session.sessionId)) continue;
-      if (isSessionUploaded(session, uploadedMap)) continue;
+      const status = computeSessionStatus(session, statusCtx);
+      if (!canExclude(status, hasIncompleteUpload(session.sessionId, uploadedMap, startedMap))) continue;
       lines.push(session.sessionId + '\n');
       count++;
     }
@@ -72,18 +81,21 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
 
   const session = result.session;
   const id = session.sessionId.slice(0, 8);
+  const status = computeSessionStatus(session, statusCtx);
+  const partial = hasIncompleteUpload(session.sessionId, uploadedMap, startedMap);
 
-  if (excludedSet.has(session.sessionId)) {
-    printInfo(hive.upload.alreadyExcluded(id));
-    return 0;
+  switch (await excludeSessionChecked(stateDir, session.sessionId, status, partial)) {
+    case 'already-excluded':
+      printInfo(hive.upload.alreadyExcluded(id));
+      return 0;
+    case 'denied-uploaded':
+      printError(hive.upload.cannotExcludeUploaded(id));
+      return 1;
+    case 'denied-partial':
+      printError(hive.upload.cannotExcludePartial(id));
+      return 1;
+    case 'excluded':
+      printSuccess(hive.upload.excluded(id));
+      return 0;
   }
-
-  if (isSessionUploaded(session, uploadedMap)) {
-    printError(hive.upload.cannotExcludeUploaded(id));
-    return 1;
-  }
-
-  await recordExcludedSession(stateDir, session.sessionId);
-  printSuccess(hive.upload.excluded(id));
-  return 0;
 }
