@@ -82,8 +82,13 @@ export async function loadSessionStateWithAgentMigration(stateDir: string, trans
     state, stateDir, transcriptsDirs,
     readSessionCwds,
   );
-  // Reopen already-uploaded parents that are missing newly-discovered workflow subagents/runs.
-  const effectiveMigrationTs = await runWorkflowBackfill(state, stateDir, migrationTimestamp);
+  // Reopen already-uploaded parents that are missing newly-discovered workflow subagents or
+  // parseable-but-unrecorded run metadata. Run discovery checks the parent's own project dir
+  // only (empty cwd set) — see runWorkflowBackfill for the worktree caveat.
+  const effectiveMigrationTs = await runWorkflowBackfill(
+    state, stateDir, migrationTimestamp,
+    (parent) => discoverWorkflowRuns(parent, new Set()).then((runs) => runs.map((r) => r.row.workflowRunId)),
+  );
   return { ...state, migrationTimestamp: effectiveMigrationTs };
 }
 
@@ -357,8 +362,9 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   }
 
   // 3. Upload workflow run-metadata blobs in chunks — BEST-EFFORT. The parent + agents (the primary
-  //    content) are already saved, so a run failure must not force a full re-upload loop. Any run
-  //    not in uploadedRunIds is reopened by the workflow-run backfill (Workstream H) on a later run.
+  //    content) are already saved, so a run failure must not force a full re-upload loop. Any
+  //    parseable run not in uploadedRunIds reopens this parent via the workflow backfill on a later
+  //    state load (malformed run files never reopen — they can never upload).
   const runs = await discoverWorkflowRuns(parent, parentRead.cwds);
   const uploadedRunIds: Array<string> = [];
   for (const batch of chunk(runs, UPLOAD_CHUNK)) {
@@ -383,8 +389,8 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
   }
 
   // 4. Record the parent locally with its agents + the runs that actually uploaded. The parent +
-  //    agents are saved before this point, so this converges local state; runs missing from
-  //    uploadedRunIds are reopened by the backfill (Workstream H).
+  //    agents are saved before this point, so this converges local state; the backfill compares
+  //    workflowRunIds against the parseable run files on disk and reopens if any is missing.
   await recordUploadedSessions(stateDir, [
     {
       sessionId: parent.sessionId,

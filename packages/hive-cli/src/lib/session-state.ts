@@ -457,16 +457,22 @@ export async function runAgentMigration(
 }
 
 /**
- * True if an uploaded parent has discovered agents missing from its recorded agentSessionIds — the
- * signal that a pre-workflow-support upload now reveals workflow subagents (or any new agent) to
- * backfill. Deliberately agent-only: a workflow run whose wf_<id>.json is missing/malformed can
- * never be recorded, so keying reopen on run ids would loop forever. Agents always upload reliably,
- * so this is self-healing — once a re-upload records them, it returns false. (Missing run metadata
- * is captured on the agent-triggered re-upload, or on the next parent-mtime change.)
+ * True if an uploaded parent needs reopening to capture workflow data its recorded upload
+ * missed: a discovered agent absent from agentSessionIds, or a PARSEABLE run-metadata file
+ * absent from workflowRunIds. Keying runs on parseable files only (discoverWorkflowRuns drops
+ * malformed ones) is what makes this loop-safe: a wf_<id>.json that can never upload can never
+ * trigger a reopen, while a parseable-but-unrecorded run (e.g. a transient failure in the
+ * best-effort run-upload step) reopens until a re-upload records it, then converges.
  */
-export function needsWorkflowReopen(uploaded: UploadedEntry, agents: Array<DiscoveredSession>): boolean {
-  const recorded = new Set(uploaded.agentSessionIds ?? []);
-  return agents.some((a) => !recorded.has(a.sessionId));
+export function needsWorkflowReopen(
+  uploaded: UploadedEntry,
+  agents: Array<DiscoveredSession>,
+  parseableRunIds: Array<string>,
+): boolean {
+  const recordedAgents = new Set(uploaded.agentSessionIds ?? []);
+  if (agents.some((a) => !recordedAgents.has(a.sessionId))) return true;
+  const recordedRuns = new Set(uploaded.workflowRunIds ?? []);
+  return parseableRunIds.some((id) => !recordedRuns.has(id));
 }
 
 /** Load the workflow-backfill migration timestamp. Returns null if not set. */
@@ -487,10 +493,12 @@ export async function writeWorkflowMigrationTs(stateDir: string): Promise<number
 }
 
 /**
- * Backfill: reopen already-uploaded parents that now reveal workflow subagents missing from their
- * recorded agentSessionIds (sessions uploaded before workflow support). Reopened parents are
- * invalidated in-memory (agentSessionIds dropped) onto the review-window path so they re-upload
- * under the normal consent delay, not immediately. Mutates state.uploadedMap.
+ * Backfill: reopen already-uploaded parents whose recorded upload is missing workflow data —
+ * workflow subagents absent from agentSessionIds (sessions uploaded before workflow support) or
+ * parseable run-metadata files absent from workflowRunIds (the best-effort run-upload step
+ * failed). Reopened parents are invalidated in-memory (agentSessionIds dropped) onto the
+ * review-window path so they re-upload under the normal consent delay, not immediately. Mutates
+ * state.uploadedMap.
  *
  * Uses a DEDICATED, persisted workflow timestamp (written once) so reopened sessions get a fresh
  * review window independent of any stale agent-migration timestamp, and so a permanently-blocked
@@ -500,12 +508,16 @@ export async function writeWorkflowMigrationTs(stateDir: string): Promise<number
  *
  * NOTE: detection uses the already-discovered in-place agent set (agentsByParent), which covers
  * agents under any project dir in the transcripts-dirs list (including discovered worktrees).
- * Workflow agents that live only under a never-listed cwd are not auto-detected here.
+ * Workflow agents that live only under a never-listed cwd are not auto-detected here, and
+ * discoverRunIds only reads the parent's own project dir (parsing every uploaded parent for
+ * worktree cwds on each state load would be prohibitive) — both are captured by the next
+ * agent-triggered re-upload or parent-mtime change.
  */
 export async function runWorkflowBackfill(
   state: SessionState,
   stateDir: string,
   migrationTimestamp: number | null,
+  discoverRunIds: (parent: DiscoveredSession) => Promise<Array<string>>,
 ): Promise<number | null> {
   let reopened = 0;
   for (const parent of state.parentSessions) {
@@ -516,7 +528,10 @@ export async function runWorkflowBackfill(
       continue;
     }
     const agents = state.agentsByParent.get(parent.sessionId) ?? [];
-    if (needsWorkflowReopen(uploaded, agents)) {
+    // One readdir per parent when no workflows/ dir exists; parsing only happens for sessions
+    // that actually have run files. Best-effort: a discovery error must not break state loading.
+    const runIds = await discoverRunIds(parent).catch(() => [] as Array<string>);
+    if (needsWorkflowReopen(uploaded, agents, runIds)) {
       state.uploadedMap.set(parent.sessionId, { ...uploaded, agentSessionIds: undefined });
       reopened++;
     }

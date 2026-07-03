@@ -311,20 +311,30 @@ function agentSession(sessionId: string, workflowRunId?: string): DiscoveredSess
   };
 }
 
-describe('needsWorkflowReopen (agent-only — no run-id loop)', () => {
+describe('needsWorkflowReopen (parse-gated — no run-id loop)', () => {
   test('reopens when a discovered agent is not in the recorded agentSessionIds', () => {
     const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x'] };
-    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')])).toBe(true);
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')], [])).toBe(true);
   });
 
-  test('does NOT reopen when all agents are recorded even if a run id is missing (unrecordable run metadata must not loop)', () => {
+  test('reopens when a parseable run file is not in the recorded workflowRunIds', () => {
+    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: ['wf_1'] };
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')], ['wf_1', 'wf_2'])).toBe(true);
+  });
+
+  test('reopens a legacy upload (no workflowRunIds field) that has a parseable run file', () => {
+    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x'] };
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x')], ['wf_1'])).toBe(true);
+  });
+
+  test('does NOT reopen when agents and parseable runs are all recorded — a malformed run file (absent from parseableRunIds) must not loop', () => {
     const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: [] };
-    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')])).toBe(false);
+    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')], [])).toBe(false);
   });
 
-  test('does not reopen a parent with no agents', () => {
+  test('does not reopen a parent with no agents and no runs', () => {
     const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: [] };
-    expect(needsWorkflowReopen(uploaded, [])).toBe(false);
+    expect(needsWorkflowReopen(uploaded, [], [])).toBe(false);
   });
 });
 
@@ -354,12 +364,13 @@ describe('runWorkflowBackfill', () => {
     sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't', agentSessionIds: ['agent-x'],
   });
   const withWorkflowAgent = (): Array<DiscoveredSession> => [agentSession('agent-x'), agentSession('agent-y', 'wf_1')];
+  const noRuns = (): Promise<Array<string>> => Promise.resolve([]);
 
   test('reopens an uploaded parent missing a workflow agent and routes it off the uploaded path', async () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
     const state = makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent());
 
-    const ts = await runWorkflowBackfill(state, stateDir, null);
+    const ts = await runWorkflowBackfill(state, stateDir, null, noRuns);
     expect(typeof ts).toBe('number');
     expect(state.uploadedMap.get('p')!.agentSessionIds).toBeUndefined();
 
@@ -378,7 +389,7 @@ describe('runWorkflowBackfill', () => {
     const state = makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent());
     const staleAgentTs = Date.now() - 30 * DAY_MS; // long-expired agent-migration window
 
-    const ts = await runWorkflowBackfill(state, stateDir, staleAgentTs);
+    const ts = await runWorkflowBackfill(state, stateDir, staleAgentTs, noRuns);
     expect(ts).toBeGreaterThan(Date.now() - DAY_MS); // fresh, not the stale agent ts
 
     const status = computeSessionStatus(state.parentSessions[0], {
@@ -393,8 +404,8 @@ describe('runWorkflowBackfill', () => {
 
   test('reuses the persisted window on a later run (stable; no reset each run)', async () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
-    const first = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null);
-    const second = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null);
+    const first = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null, noRuns);
+    const second = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null, noRuns);
     expect(second).toBe(first);
   });
 
@@ -406,7 +417,33 @@ describe('runWorkflowBackfill', () => {
     };
     const state = makeState(uploaded, mtime, withWorkflowAgent());
 
-    const ts = await runWorkflowBackfill(state, stateDir, null);
+    const ts = await runWorkflowBackfill(state, stateDir, null, () => Promise.resolve(['wf_1']));
+    expect(ts).toBeNull();
+    expect(state.uploadedMap.get('p')!.agentSessionIds).toEqual(['agent-x', 'agent-y']);
+  });
+
+  test('reopens when a parseable run file is missing from the recorded workflowRunIds', async () => {
+    const mtime = new Date(Date.now() - 5 * DAY_MS);
+    const uploaded: UploadedEntry = {
+      sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: ['wf_1'],
+    };
+    const state = makeState(uploaded, mtime, withWorkflowAgent());
+
+    const ts = await runWorkflowBackfill(state, stateDir, null, () => Promise.resolve(['wf_1', 'wf_2']));
+    expect(typeof ts).toBe('number');
+    expect(state.uploadedMap.get('p')!.agentSessionIds).toBeUndefined();
+  });
+
+  test('a run-discovery error is best-effort — no reopen, state loading unaffected', async () => {
+    const mtime = new Date(Date.now() - 5 * DAY_MS);
+    const uploaded: UploadedEntry = {
+      sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: [],
+    };
+    const state = makeState(uploaded, mtime, withWorkflowAgent());
+
+    const ts = await runWorkflowBackfill(state, stateDir, null, () => Promise.reject(new Error('boom')));
     expect(ts).toBeNull();
     expect(state.uploadedMap.get('p')!.agentSessionIds).toEqual(['agent-x', 'agent-y']);
   });
