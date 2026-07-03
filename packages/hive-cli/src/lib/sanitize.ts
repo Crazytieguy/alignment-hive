@@ -219,19 +219,31 @@ export function sanitizeString(content: string): string {
   return result;
 }
 
-export function sanitizeDeep<T>(value: T, depth = 0): T {
+export interface SanitizeDeepOptions {
+  /**
+   * Also scan object keys and disable the SAFE_KEYS value skip. Transcript entries are
+   * schema-shaped (keys are field names; SAFE_KEYS values are ids/paths), so the default walk
+   * skips them — but arbitrary script-built structures like workflow run blobs can carry a
+   * secret as a key or under a SAFE_KEYS name, so they must be walked strictly.
+   */
+  strict?: boolean;
+}
+
+export function sanitizeDeep<T>(value: T, opts: SanitizeDeepOptions = {}, depth = 0): T {
   if (depth > MAX_SANITIZE_DEPTH) return value;
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return sanitizeString(value) as T;
-  if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, depth + 1)) as T;
+  if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, opts, depth + 1)) as T;
 
   if (typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      if (SAFE_KEYS.has(key) && typeof val === 'string') {
+      if (!opts.strict && SAFE_KEYS.has(key) && typeof val === 'string') {
         result[key] = val;
       } else {
-        result[key] = sanitizeDeep(val, depth + 1);
+        // In strict mode two keys redacting to the same placeholder collide (last one wins) —
+        // acceptable: secrets must not survive as keys in the first place.
+        result[opts.strict ? sanitizeString(key) : key] = sanitizeDeep(val, opts, depth + 1);
       }
     }
     return result as T;

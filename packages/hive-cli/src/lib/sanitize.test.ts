@@ -176,6 +176,42 @@ describe('SAFE_KEYS optimization', () => {
     expect(sanitized.content).not.toContain('ghp_');
   });
 
+  test('strict mode disables the SAFE_KEYS skip (workflow run blobs carry arbitrary values)', async () => {
+    const input = {
+      name: TEST_GITHUB_TOKEN, // SAFE_KEYS-named, but the value is a secret
+      cwd: '/home/user/project',
+    };
+
+    const sanitized = await sanitizeDeep(input, { strict: true });
+
+    expect(sanitized.name).toContain('[REDACTED:');
+    expect(sanitized.name).not.toContain('ghp_');
+    expect(sanitized.cwd).toBe('/home/user/project');
+  });
+
+  test('strict mode sanitizes object keys; the default walk leaves them untouched', async () => {
+    const input = { [TEST_GITHUB_TOKEN]: 'value', normalKey: 'other' };
+
+    const strict = await sanitizeDeep(input, { strict: true });
+    const strictKeys = Object.keys(strict);
+    expect(strictKeys.some((k) => k.includes('[REDACTED:'))).toBe(true);
+    expect(strictKeys.some((k) => k.includes('ghp_'))).toBe(false);
+    expect(strict.normalKey).toBe('other');
+
+    const lax = await sanitizeDeep(input);
+    expect(Object.keys(lax)).toContain(TEST_GITHUB_TOKEN);
+  });
+
+  test('strict mode sanitizes keys in nested structures', async () => {
+    const input = { result: { items: [{ [TEST_GITHUB_TOKEN]: 'nested' }] } };
+
+    const sanitized = await sanitizeDeep(input, { strict: true });
+
+    const nestedKeys = Object.keys(sanitized.result.items[0]);
+    expect(nestedKeys.some((k) => k.includes('[REDACTED:'))).toBe(true);
+    expect(nestedKeys.some((k) => k.includes('ghp_'))).toBe(false);
+  });
+
   test('sanitizes non-string safe key values', async () => {
     // If a safe key has a non-string value (like an object), it should still
     // be recursively processed
