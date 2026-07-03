@@ -3,19 +3,18 @@ import { getProjectIdentifiers, matchesProject } from '../lib/config';
 import { getConsentStatus, getProjectSharing, getRepoLinkStatus } from '../lib/convex';
 import { checkRepoVisibility } from '../lib/github';
 import { hive } from '../lib/messages';
-import { printError } from '../lib/output';
 
 export async function consentStatus(): Promise<number> {
   const authData = await getAuthData();
   if (!authData) {
-    printError(hive.consent.statusNotAuthenticated);
-    return 1;
+    console.log(hive.consent.statusNotAuthenticated);
+    return 0;
   }
 
   const consent = await getConsentStatus();
   if (consent === null) {
-    printError(hive.consent.statusFetchFailed);
-    return 1;
+    console.log(hive.consent.statusFetchFailed);
+    return 0;
   }
 
   if (!consent.hasConsent) {

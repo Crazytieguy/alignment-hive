@@ -12,7 +12,7 @@ allowed-tools: Bash(hive consent status), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/ali
 ## Consent Status
 
 ```
-!`hive consent status 2>/dev/null || echo 'error: binary not found'`
+!`hive consent status 2>&1 || true`
 ```
 
 ## Previously Rejected
@@ -25,9 +25,11 @@ allowed-tools: Bash(hive consent status), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/ali
 
 Read the consent status output above. Handle errors first, then check if data sharing needs attention.
 
-**If "error: binary not found"**: Direct user to run `curl -fsSL https://alignment-hive.com/install.sh | bash`, then restart Claude Code.
+**If the output looks like a shell error** (e.g. `command not found`, `No such file or directory`) rather than one of the statuses below: the `hive` binary is missing. Direct the user to run `curl -fsSL https://alignment-hive.com/install.sh | bash`, then restart Claude Code.
 
-**If "Not authenticated"**: Direct user to run `curl -fsSL https://alignment-hive.com/install.sh | bash`.
+**If "Not authenticated"**: Not a problem — authentication is optional and only needed to opt into session data sharing. Mention in passing that running `curl -fsSL https://alignment-hive.com/install.sh | bash` enables it later if the user wants. Move on to recommendations.
+
+**If "Failed to fetch consent status"**: Note briefly that sharing status couldn't be checked (offline or API issue). Move on to recommendations.
 
 **If "Data sharing preferences: not set"**: Direct user to `https://alignment-hive.com/consent`. Move on to recommendations.
 
