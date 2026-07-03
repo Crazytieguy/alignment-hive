@@ -8,6 +8,9 @@ node_modules
 .claude/scheduled_tasks.lock
 
 
+# Presentation (slides + generators; built artifacts, kept local)
+presentation/
+
 # Dev binary
 .dev/
 
