@@ -85,6 +85,7 @@ fn offer_search_filter_fields_exist_in_spec() {
         "gpu_name",
         "dph_total",
         "vms_enabled",
+        "direct_port_count",
         "type",
         "rentable",
         "limit",

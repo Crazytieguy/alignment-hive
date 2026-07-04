@@ -34,11 +34,12 @@ area below** and edit the file based on their answers.
   - RunPod: simplest, reliable stop/resume, MATS default
   - vast.ai: cheapest; stopped instances may not resume (GPU can be rented
     out) so treat machines as ephemeral; set `vm = true` for anything that
-    needs Docker inside (Inspect sandboxes). KNOWN ISSUE (2026-07): vast VM
-    SSH-key injection appears broken vendor-side (VMs boot but reject all
-    account keys, even via vast's own template flow) — verify VM SSH works
-    on the user's account before relying on `vm = true`; containers are
-    solid
+    needs Docker inside (Inspect sandboxes) — VM images ship Docker
+    preinstalled. Two vendor traps the runtime handles automatically
+    (relevant only when creating VMs by hand): the image must be
+    registry-qualified (`docker.io/vastai/kvm:...`) or vast silently
+    creates a container instead of a VM, and vast's SSH proxy can't reach
+    VMs — only direct-port hosts work
   - Kubernetes: for lab clusters; needs a pod template YAML from the lab
 - **API key(s)** — per runtime, in `.env.local` (gitignored):
   - RunPod: `RUNPOD_API_KEY` — https://docs.runpod.io/get-started/api-keys
@@ -57,9 +58,12 @@ area below** and edit the file based on their answers.
   vast: `[vast] gpu-name` + `max-dph` price ceiling; Kubernetes: GPU
   resources live in the pod template
 - **Image** — RunPod default `runpod/pytorch` works for most ML; vast default
-  is `vastai/base-image` (VMs: `vastai/kvm:ubuntu_terminal` + onstart to
-  install tooling); Kubernetes images come from the template (must provide
-  `sh`, `tar`, Python with `jupyter-server` + `ipykernel`)
+  is `vastai/base-image` (VMs: `vastai/kvm:ubuntu_terminal`, which ships
+  Docker + CUDA; onstart installs anything else, e.g. uv — for
+  Docker-dependent workloads add a guard onstart line:
+  `docker info >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh)`);
+  Kubernetes images come from the template (must provide `sh`, `tar`, Python
+  with `jupyter-server` + `ipykernel`)
 - **Kubernetes pod template** — if using k8s, the lab owns a pod YAML
   (resources, tolerations, volumes, Kueue `queue-name` label). Point
   `[kubernetes] pod-template` at it. `start(priority="high")` sets the Kueue

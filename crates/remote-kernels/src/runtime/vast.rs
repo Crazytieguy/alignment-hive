@@ -4,12 +4,17 @@
 //! accepted cheapest-first — if one offer is snapped up by someone else, the
 //! next is tried. `vm = true` creates a KVM virtual machine instead of a
 //! container; VMs support Docker inside (required for Inspect's sandboxes),
-//! containers do not (vast bans Docker-in-Docker platform-wide).
+//! containers do not (vast bans Docker-in-Docker platform-wide). Two
+//! undocumented vendor traps, both observed live 2026-07: the VM image must
+//! be registry-qualified (`docker.io/vastai/kvm:...`) or vast silently
+//! provisions a *container* running that image, and vast's SSH proxy cannot
+//! tunnel into a KVM guest, so VMs are placed on direct-port hosts and
+//! reached via the host's mapped port only. `provision` handles both.
 //!
 //! Connectivity: SSH only (direct to the host's public IP when it has open
-//! ports, else vast's `sshN.vast.ai` proxy). Jupyter is launched over SSH and
-//! reached through a local `ssh -N -L` tunnel process. File sync is rsync over
-//! the same SSH, identical to `RunPod`.
+//! ports, else vast's `sshN.vast.ai` proxy; VMs direct-only). Jupyter is
+//! launched over SSH and reached through a local `ssh -N -L` tunnel process.
+//! File sync is rsync over the same SSH, identical to `RunPod`.
 //!
 //! Stop/resume is officially unreliable on vast (a stopped instance stays
 //! bound to its GPU and can wait in "scheduling" forever if someone else rents
@@ -78,6 +83,12 @@ impl VastRuntime {
         }
         if self.vast.vm {
             filters.insert("vms_enabled".to_string(), json!({"eq": true}));
+            // VMs are reachable via direct SSH only: vast's SSH proxy never
+            // opens a working tunnel to a KVM guest (observed live 2026-07 —
+            // connection refused at the proxy long after cloud-init finished
+            // inside the VM, while the direct-mapped port worked instantly).
+            // One port suffices: jupyter tunnels over the SSH connection.
+            filters.insert("direct_port_count".to_string(), json!({"gte": 1}));
         }
         for (key, value) in &self.vast.query {
             let json_value = toml_value_to_json(value);
@@ -96,17 +107,20 @@ impl VastRuntime {
     /// lines. Key injection via onstart needs no account-key API permission —
     /// vast restricts SSH-key management to 2FA-authenticated keys.
     ///
-    /// On CONTAINERS the append is re-asserted in a background loop for the
-    /// first 10 minutes: vast's image entrypoint rewrites `authorized_keys`
-    /// from the instance's attached keys on a schedule of its own, and on
-    /// some hosts that clobbers a one-shot append (observed live 2026-07 via
-    /// container sshd logs — auth happens in the container, reached over
-    /// loopback from vast's proxy). The loop wins any ordering race.
-    ///
-    /// On VMs the loop is omitted: onstart is delivered via cloud-init
-    /// user-data, where a lingering background process can wedge boot-time
-    /// provisioning (and there is no entrypoint rewriting `authorized_keys`
-    /// to race against — cloud-init injects the attached keys once).
+    /// The append is re-asserted in a background loop for the first 10
+    /// minutes (an inline first assert runs synchronously; the loop covers
+    /// later clobbers): vast's container entrypoint rewrites
+    /// `authorized_keys` from the instance's attached keys on a schedule of
+    /// its own, and on some hosts that clobbers a one-shot append (observed
+    /// live 2026-07 via container sshd logs). Each pass also repairs
+    /// ownership/modes, which matters on the container *fallback* — when
+    /// vast quietly runs the `vastai/kvm` image as a container (see module
+    /// docs), that image's entrypoint writes `authorized_keys` owned by a
+    /// non-root build uid (117:1001 observed live 2026-07), and sshd's
+    /// `StrictModes` then rejects every key until the file is root-owned.
+    /// Real KVM VMs need none of this (cloud-init injects account keys
+    /// correctly), but the same script runs there harmlessly and keeps the
+    /// fallback diagnosable over SSH instead of bricked.
     ///
     /// The orphan watchdog is the last-resort money guard for the window
     /// before the real watchdog installs (which requires working SSH): if no
@@ -116,23 +130,30 @@ impl VastRuntime {
     /// no credentials live on the machine, so halting is all it can do.
     fn onstart_script(&self, ssh_public_key: &str) -> String {
         let key = ssh_public_key.trim();
+        let assert_key = format!(
+            "grep -qF '{key}' ~/.ssh/authorized_keys 2>/dev/null \
+             || echo '{key}' >> ~/.ssh/authorized_keys; \
+             chown -R root:root ~/.ssh; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys"
+        );
         let mut lines = vec![
             "#!/bin/bash".to_string(), // VMs require an explicit shebang
             "mkdir -p ~/.ssh".to_string(),
-            format!("echo '{key}' >> ~/.ssh/authorized_keys"),
-            "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys".to_string(),
+            assert_key.clone(),
             "nohup sh -c 'sleep 2700; [ -f /tmp/heartbeat ] || shutdown -h now || kill -9 1' \
              </dev/null >/dev/null 2>&1 &"
                 .to_string(),
+            format!(
+                "(for _ in $(seq 120); do {assert_key}; sleep 5; done) </dev/null >/dev/null 2>&1 &"
+            ),
         ];
-        if !self.vast.vm {
-            lines.push(format!(
-                "(for _ in $(seq 120); do grep -qF '{key}' ~/.ssh/authorized_keys 2>/dev/null \
-                 || echo '{key}' >> ~/.ssh/authorized_keys; sleep 5; done) \
-                 </dev/null >/dev/null 2>&1 &"
-            ));
-        }
         lines.extend(self.vast.onstart.iter().cloned());
+        // Completion marker, AFTER the user lines: `open()` delays the
+        // jupyter launch until this appears, because user onstart lines
+        // often install the very tooling the jupyter command needs (uv,
+        // conda envs) — SSH can come up minutes before they finish. It lives
+        // in /var/tmp because /tmp is cleared on a VM reboot and cloud-init
+        // does not re-run onstart on resume.
+        lines.push("touch /var/tmp/rk_onstart_done".to_string());
         lines.join("\n") + "\n"
     }
 }
@@ -151,6 +172,16 @@ fn handle_for_offer(contract: i64, offer: &crate::vast::types::Offer) -> Instanc
 
 fn toml_value_to_json(value: &toml::Value) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// Whether an image reference names its registry (`docker.io/vastai/kvm:...`).
+/// True when the first path component looks like a host (contains `.` or `:`,
+/// or is `localhost` — mirroring Docker's own reference parsing).
+fn image_registry_qualified(image: &str) -> bool {
+    image
+        .split('/')
+        .next()
+        .is_some_and(|first| first.contains('.') || first.contains(':') || first == "localhost")
 }
 
 impl Runtime for VastRuntime {
@@ -202,7 +233,16 @@ impl Runtime for VastRuntime {
             );
         }
 
-        let image = req.image.clone().unwrap_or_else(|| self.vast.image.clone());
+        let mut image = req.image.clone().unwrap_or_else(|| self.vast.image.clone());
+        if self.vast.vm && !image_registry_qualified(&image) {
+            // Load-bearing, observed live 2026-07: with vm=true and an image
+            // that is not registry-qualified, vast SILENTLY provisions a
+            // container running the image instead of a KVM VM (the create
+            // API accepts the vm flag either way). The container fallback is
+            // useless for the VM use case — Docker-in-Docker is banned.
+            image = format!("docker.io/{image}");
+            tracing::info!(%image, "registry-qualified the VM image (unqualified images silently create containers)");
+        }
 
         let filters = self.offer_filters(req.gpu_type.as_deref());
         let offers = self.client.search_offers(filters, 10).await?;
@@ -420,7 +460,7 @@ impl Runtime for VastRuntime {
                 // over a network blip. Only definitive auth failures escape.
                 match self.client.get_instance(id).await {
                     Ok(Some(instance)) => {
-                        if let Some(ep) = instance.ssh_endpoint() {
+                        if let Some(ep) = instance.ssh_endpoint(self.vast.vm) {
                             endpoint = Some(ep);
                             break;
                         }
@@ -447,6 +487,45 @@ impl Runtime for VastRuntime {
 
         self.wait_ssh_reachable(id, ctx, &user, &ssh_host, ssh_port)
             .await?;
+
+        // SSH readiness no longer implies onstart completion (the key
+        // re-assert makes SSH usable within seconds of boot), and user
+        // onstart lines often install what the jupyter command runs (uv,
+        // docker, envs). Block on the marker our generated onstart touches
+        // last — one remote wait, not a local poll (each ssh_cmd is a full
+        // handshake, and per-attempt timeouts would stretch the bound).
+        // Machines up over 30 minutes skip the wait: their onstart is long
+        // settled, and the marker may structurally never appear (instances
+        // created before the marker existed; a resumed VM, whose cloud-init
+        // does not re-run onstart — the marker lives in /var/tmp to survive
+        // that reboot). Blocking reconnects here would also delay the
+        // heartbeat restart. On timeout, warn and proceed — the jupyter
+        // launch's liveness check surfaces the real error if tooling is
+        // genuinely missing.
+        let wait_onstart = "i=0; s=rk-timeout; while [ \"$i\" -lt 180 ]; do \
+             if [ -f /var/tmp/rk_onstart_done ]; then s=rk-done; break; fi; \
+             if [ \"$(cut -d. -f1 /proc/uptime)\" -ge 1800 ]; then s=rk-skip; break; fi; \
+             sleep 5; i=$((i+1)); done; echo \"$s\"";
+        match crate::ssh_exec::ssh_cmd(
+            &ctx.ssh_key_path,
+            &user,
+            &ssh_host,
+            ssh_port,
+            wait_onstart,
+            Duration::from_secs(1000),
+        )
+        .await
+        {
+            Ok(out) if out.contains("rk-timeout") => {
+                tracing::warn!(
+                    "onstart has not finished after 15 minutes; launching jupyter anyway"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("onstart-completion wait failed ({e}); launching jupyter anyway");
+            }
+        }
 
         // Launch Jupyter (idempotent) with the token passed via environment.
         let launch = format!(
@@ -714,5 +793,24 @@ impl Connection for VastConnection {
         )
         .await
         .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_registry_qualified;
+
+    #[test]
+    fn image_qualification() {
+        // Unqualified VM images get docker.io/ prepended by provision().
+        assert!(!image_registry_qualified("vastai/kvm:ubuntu_terminal"));
+        assert!(!image_registry_qualified(
+            "vastai/base-image:@vastai-automatic-tag"
+        ));
+        assert!(image_registry_qualified(
+            "docker.io/vastai/kvm:ubuntu_terminal"
+        ));
+        assert!(image_registry_qualified("nvcr.io/nvidia/pytorch:24.01-py3"));
+        assert!(image_registry_qualified("localhost:5000/x/y"));
     }
 }

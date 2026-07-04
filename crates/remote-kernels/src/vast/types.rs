@@ -140,8 +140,11 @@ pub struct Instance {
 
 impl Instance {
     /// Best SSH endpoint: direct (public IP + mapped port 22) when available,
-    /// else vast's SSH proxy.
-    pub fn ssh_endpoint(&self) -> Option<(String, u16)> {
+    /// else vast's SSH proxy. With `direct_only` the proxy is never returned —
+    /// VMs need this, because the proxy cannot tunnel into a KVM guest
+    /// (observed live 2026-07: connection refused at the proxy indefinitely
+    /// while the direct-mapped port worked).
+    pub fn ssh_endpoint(&self, direct_only: bool) -> Option<(String, u16)> {
         if let (Some(ip), Some(ports)) = (&self.public_ipaddr, &self.ports)
             && !ip.is_empty()
             && let Some(mappings) = ports.get("22/tcp").and_then(|v| v.as_array())
@@ -165,6 +168,9 @@ impl Instance {
                     );
                 }
             }
+        }
+        if direct_only {
+            return None;
         }
         match (&self.ssh_host, self.ssh_port) {
             (Some(host), Some(port)) if !host.is_empty() => Some((host.clone(), port)),

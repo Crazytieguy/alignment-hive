@@ -77,7 +77,9 @@ pub struct VastConfig {
     pub gpu_name: Vec<String>,
 
     /// Docker image (containers) or VM image (vm = true; must be a
-    /// `vastai/kvm:*` image, e.g. "`vastai/kvm:ubuntu_terminal`").
+    /// `vastai/kvm:*` image, e.g. "`vastai/kvm:ubuntu_terminal`" — the
+    /// runtime registry-qualifies it to `docker.io/...`, without which vast
+    /// silently creates a container instead of a VM).
     #[serde(default = "default_vast_image")]
     pub image: String,
 
@@ -426,7 +428,8 @@ impl Config {
 # Default: {default_vast_disk_gb}
 # disk-gb = {default_vast_disk_gb}
 # Create a KVM virtual machine instead of a container. Required for Docker-in-
-# Docker workloads (e.g. Inspect's sandboxed evals) — containers can't run Docker.
+# Docker workloads (e.g. Inspect's sandboxed evals) — containers can't run
+# Docker. VM images ship Docker preinstalled; VMs run on direct-port hosts.
 # vm = false
 # Price ceiling in $/hr for offer search.
 # max-dph = 0.5

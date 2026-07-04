@@ -286,8 +286,15 @@ vm = true
 max-dph = 0.60
 workdir = "/root/workspace"
 jupyter-command = "/root/.local/bin/uv run --with jupyter-server --with ipykernel jupyter server"
+# Real VMs boot systemd with Docker preinstalled and running; the docker
+# lines are belt-and-braces for image variants (`docker info` covers both a
+# missing CLI and a stopped daemon — get.docker.com under systemd installs
+# and starts it). The log makes a failed boot diagnosable. uv is the one
+# thing ubuntu_terminal genuinely lacks.
 onstart = [
-    "command -v docker >/dev/null || (curl -fsSL https://get.docker.com | sh)",
+    "exec > /var/tmp/rk-onstart-user.log 2>&1; date; ps -p 1 -o comm=",
+    "docker info >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh)",
+    "for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 2; done",
     "command -v /root/.local/bin/uv >/dev/null || (curl -LsSf https://astral.sh/uv/install.sh | sh)",
 ]
 
@@ -408,23 +415,29 @@ def hello():
     let logs_dir = dir.path().join("fetched-logs");
     let result = server
         .download(Parameters(remote_kernels::server::DownloadParams {
-            remote_path: "logs".to_string(),
+            remote_path: "/root/workspace/logs".to_string(),
             local_path: logs_dir.display().to_string(),
             instance: None,
         }))
         .await
         .unwrap();
     assert!(!is_error(&result), "download failed: {}", text_of(&result));
-    let has_eval_log = std::fs::read_dir(&logs_dir)
-        .map(|entries| {
+    // rsync of a directory source lands as a subdirectory of the
+    // destination — search recursively.
+    fn has_eval_log(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
             entries.flatten().any(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "eval" || ext == "json")
+                let p = e.path();
+                p.is_dir() && has_eval_log(&p)
+                    || p.extension()
+                        .is_some_and(|ext| ext == "eval" || ext == "json")
             })
         })
-        .unwrap_or(false);
-    assert!(has_eval_log, "no .eval log downloaded to {logs_dir:?}");
+    }
+    assert!(
+        has_eval_log(&logs_dir),
+        "no .eval log downloaded to {logs_dir:?}"
+    );
 
     guard.disarm(&server, None).await;
 }
