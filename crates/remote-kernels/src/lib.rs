@@ -3,6 +3,13 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
 
+/// Install the process-wide rustls crypto provider. kube and tungstenite link
+/// rustls with different provider features (aws-lc-rs vs ring), and rustls
+/// requires an explicit choice when both are present. Idempotent.
+pub fn init_tls() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub mod config;
 pub mod descriptions;
 pub mod heartbeat;

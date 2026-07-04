@@ -3,6 +3,31 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
+/// The shared rsync argument set for project uploads: archive mode, delete,
+/// explicit includes (which take priority), `.gitignore` semantics, and the
+/// standard excludes. Every runtime's upload path MUST build its args from
+/// this so filtering behavior is identical across backends.
+pub fn rsync_upload_args(extra_includes: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "-az".to_string(),
+        "--no-owner".to_string(),
+        "--no-group".to_string(),
+        "--delete".to_string(),
+    ];
+    // Include paths go before the gitignore filter so they take priority.
+    for include in extra_includes {
+        args.push(format!("--include={include}"));
+    }
+    args.extend([
+        "--filter=:- .gitignore".to_string(),
+        "--exclude=.git".to_string(),
+        "--exclude=.claude".to_string(),
+        "--exclude=target".to_string(),
+        "--exclude=node_modules".to_string(),
+    ]);
+    args
+}
+
 /// Validate sync include paths: must be relative to the project root, with no `..`
 /// components. Rejecting absolute paths and `..` is a security requirement — includes
 /// take priority over `.gitignore` filtering and must not reach outside the project.
@@ -42,29 +67,8 @@ pub async fn sync_to_pod(
 
     tracing::info!(%destination, "Syncing files to pod");
 
-    let mut args = vec![
-        "-az".to_string(),
-        "--no-owner".to_string(),
-        "--no-group".to_string(),
-        "--delete".to_string(),
-    ];
-
-    // Include paths go before the gitignore filter so they take priority.
-    for include in extra_includes {
-        args.push(format!("--include={include}"));
-    }
-
-    args.extend([
-        "--filter=:- .gitignore".to_string(),
-        "--exclude=.git".to_string(),
-        "--exclude=.claude".to_string(),
-        "--exclude=target".to_string(),
-        "--exclude=node_modules".to_string(),
-        "-e".to_string(),
-        ssh_cmd,
-        source,
-        destination,
-    ]);
+    let mut args = rsync_upload_args(extra_includes);
+    args.extend(["-e".to_string(), ssh_cmd, source, destination]);
 
     let output = Command::new("rsync")
         .args(&args)

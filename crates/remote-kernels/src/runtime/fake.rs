@@ -278,19 +278,8 @@ impl Connection for FakeConnection {
         project_dir: &Path,
         extra_includes: &[String],
     ) -> anyhow::Result<String> {
-        let mut args = vec![
-            "-az".to_string(),
-            "--no-owner".to_string(),
-            "--no-group".to_string(),
-            "--delete".to_string(),
-        ];
-        for include in extra_includes {
-            args.push(format!("--include={include}"));
-        }
+        let mut args = crate::sync::rsync_upload_args(extra_includes);
         args.extend([
-            "--filter=:- .gitignore".to_string(),
-            "--exclude=.git".to_string(),
-            "--exclude=.claude".to_string(),
             format!("{}/", project_dir.display()),
             format!("{}/", self.workdir.display()),
         ]);

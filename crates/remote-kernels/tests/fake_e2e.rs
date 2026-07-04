@@ -51,6 +51,7 @@ async fn start_machine(server: &RemoteKernelsServer, name: Option<&str>) -> Stri
             runtime: None,
             gpu_type: None,
             image: None,
+            priority: None,
             wait: Some(true),
         }))
         .await
@@ -292,6 +293,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
                 runtime: None,
                 gpu_type: None,
                 image: None,
+                priority: None,
                 wait: Some(false),
             }))
             .await
@@ -337,6 +339,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
             runtime: None,
             gpu_type: None,
             image: None,
+            priority: None,
             wait: Some(true),
         }))
         .await

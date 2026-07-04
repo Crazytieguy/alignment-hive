@@ -1,0 +1,831 @@
+//! Kubernetes backend: pods created from a lab-owned template.
+//!
+//! Cluster specifics (GPU resources, tolerations, queue labels, volumes) live
+//! in the template — the plugin only injects identity labels, the Jupyter
+//! token, an `activeDeadlineSeconds` safety net, and an optional priority
+//! label (Kueue's workload priority by default, so `start(priority="high")`
+//! maps to the lab's queue without any Job wrapper).
+//!
+//! Connectivity: Jupyter is launched inside the pod via exec and reached
+//! through a local listener that opens a fresh API-server port-forward per TCP
+//! connection (long-lived shared port-forwards are known-flaky upstream; a
+//! per-connection forward makes every reconnect a clean slate). File sync is
+//! tar-over-exec, the same mechanism as `kubectl cp` — the image must provide
+//! `tar` and `sh`.
+//!
+//! There is no stop/resume (pods can't be stopped) and no cost metering —
+//! `activeDeadlineSeconds` bounds forgotten pods instead of a budget.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, DeleteParams, PostParams};
+use kube::runtime::wait::{await_condition, conditions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::OnceCell;
+
+use crate::config::KubernetesConfig;
+
+use super::{
+    Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
+    ProvisionRequest, Runtime, StopSupport, WatchdogPolicy,
+};
+
+pub struct KubernetesRuntime {
+    config: KubernetesConfig,
+    project_dir: PathBuf,
+    /// Pod name prefix (from the top-level `name` config).
+    name_prefix: String,
+    client: OnceCell<kube::Client>,
+}
+
+impl KubernetesRuntime {
+    pub fn new(config: KubernetesConfig, project_dir: PathBuf, name_prefix: String) -> Self {
+        Self {
+            config,
+            project_dir,
+            name_prefix,
+            client: OnceCell::new(),
+        }
+    }
+
+    async fn client(&self) -> anyhow::Result<kube::Client> {
+        let client = self
+            .client
+            .get_or_try_init(|| async {
+                let options = kube::config::KubeConfigOptions {
+                    context: self.config.context.clone(),
+                    ..Default::default()
+                };
+                let kube_config = kube::Config::from_kubeconfig(&options).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to load kubeconfig (context: {:?}): {e}",
+                        self.config.context
+                    )
+                })?;
+                kube::Client::try_from(kube_config)
+                    .map_err(|e| anyhow::anyhow!("Failed to build Kubernetes client: {e}"))
+            })
+            .await?;
+        Ok(client.clone())
+    }
+
+    fn namespace(&self) -> String {
+        self.config
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    async fn pods(&self) -> anyhow::Result<Api<Pod>> {
+        Ok(Api::namespaced(self.client().await?, &self.namespace()))
+    }
+
+    /// Load the lab template and specialize it for one instance.
+    fn build_pod(&self, req: &ProvisionRequest) -> anyhow::Result<Pod> {
+        let template_path = self.project_dir.join(&self.config.pod_template);
+        let content = std::fs::read_to_string(&template_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read pod template {}: {e}. The kubernetes runtime requires \
+                 pod-template in the [kubernetes] config section.",
+                template_path.display()
+            )
+        })?;
+        let mut pod: Pod = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Invalid pod template YAML: {e}"))?;
+
+        let pod_name = pod_name(&self.name_prefix, &req.name);
+        pod.metadata.name = Some(pod_name);
+        pod.metadata.generate_name = None;
+
+        let labels = pod.metadata.labels.get_or_insert_with(BTreeMap::new);
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "remote-kernels".to_string(),
+        );
+        labels.insert("remote-kernels/instance".to_string(), req.name.clone());
+        if let Some(priority) = &req.priority {
+            labels.insert(self.config.priority_label.clone(), priority.clone());
+        }
+
+        let spec = pod
+            .spec
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Pod template has no spec"))?;
+
+        // Safety net for forgotten pods (only when the template doesn't set one).
+        if spec.active_deadline_seconds.is_none() && self.config.max_lifetime_secs > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                spec.active_deadline_seconds = Some(self.config.max_lifetime_secs as i64);
+            }
+        }
+
+        // Inject env (user env + the Jupyter token) into the first container —
+        // the template contract designates it as the workload container.
+        let container = spec
+            .containers
+            .first_mut()
+            .ok_or_else(|| anyhow::anyhow!("Pod template has no containers"))?;
+        let env = container.env.get_or_insert_with(Vec::new);
+        for (key, value) in &req.env {
+            env.push(k8s_openapi::api::core::v1::EnvVar {
+                name: key.clone(),
+                value: Some(value.clone()),
+                value_from: None,
+            });
+        }
+        env.push(k8s_openapi::api::core::v1::EnvVar {
+            name: "REMOTE_KERNELS_JUPYTER_TOKEN".to_string(),
+            value: Some(req.jupyter_token.clone()),
+            value_from: None,
+        });
+
+        Ok(pod)
+    }
+}
+
+/// DNS-1123-safe pod name for an instance.
+fn pod_name(prefix: &str, instance: &str) -> String {
+    let sanitized: String = format!("{prefix}-{instance}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    sanitized.trim_matches('-').chars().take(63).collect()
+}
+
+fn handle_for(pod: &Pod) -> InstanceHandle {
+    let gpu_name = pod
+        .spec
+        .as_ref()
+        .and_then(|s| s.containers.first())
+        .and_then(|c| c.resources.as_ref())
+        .and_then(|r| r.limits.as_ref())
+        .and_then(|l| l.get("nvidia.com/gpu"))
+        .map_or_else(
+            || "no GPU requested".to_string(),
+            |q| format!("{} x nvidia.com/gpu", q.0),
+        );
+    InstanceHandle {
+        external_id: pod.metadata.name.clone().unwrap_or_default(),
+        gpu_name,
+        cost_per_hr: None,
+    }
+}
+
+fn is_not_found(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(e) if e.code == 404)
+}
+
+impl Runtime for KubernetesRuntime {
+    type Conn = K8sConnection;
+
+    fn name(&self) -> &'static str {
+        "kubernetes"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            stop_resume: StopSupport::Unsupported,
+            metered: false,
+        }
+    }
+
+    async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
+        if req.gpu_type.is_some() || req.image.is_some() {
+            anyhow::bail!(
+                "The kubernetes runtime takes GPU/image settings from the pod template \
+                 ({}), not from start() overrides. Edit the template instead.",
+                self.config.pod_template.display()
+            );
+        }
+        let pod = self.build_pod(req)?;
+        let pods = self.pods().await?;
+        let created = pods
+            .create(&PostParams::default(), &pod)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create pod {:?} in namespace {:?}: {e}",
+                    pod.metadata.name.as_deref().unwrap_or("?"),
+                    self.namespace()
+                )
+            })?;
+        tracing::info!(pod = %created.metadata.name.as_deref().unwrap_or("?"), "Pod created");
+        Ok(handle_for(&created))
+    }
+
+    async fn get_handle(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
+        let pods = self.pods().await?;
+        Ok(handle_for(&pods.get(external_id).await?))
+    }
+
+    async fn describe(&self, external_id: &str) -> anyhow::Result<InstanceStatus> {
+        let pods = self.pods().await?;
+        match pods.get(external_id).await {
+            Ok(pod) => {
+                let phase = pod
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.phase.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                Ok(match phase.as_str() {
+                    // Pending covers scheduling, image pull, and Kueue's
+                    // admission gate — all "on its way".
+                    "Pending" => InstanceStatus::Provisioning,
+                    "Running" => InstanceStatus::Running,
+                    // Pods can't be resumed; a finished pod is only useful to
+                    // terminate. Unknown keeps the record until the user does.
+                    other => InstanceStatus::Unknown(other.to_string()),
+                })
+            }
+            Err(e) if is_not_found(&e) => Ok(InstanceStatus::Gone),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Wait for the pod to be Running. Kueue-gated or capacity-starved pods
+    /// can legitimately pend far longer than any reasonable tool-call timeout;
+    /// when the wait expires while the pod is still Pending, this returns
+    /// [`StillProvisioning`] so the caller keeps the machine and continues
+    /// waiting in the background instead of terminating a queued pod.
+    async fn wait_running(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
+        let pods = self.pods().await?;
+        let wait = await_condition(pods.clone(), external_id, conditions::is_pod_running());
+        match tokio::time::timeout(Duration::from_secs(300), wait).await {
+            Ok(result) => {
+                result.map_err(|e| anyhow::anyhow!("Error while waiting for pod: {e}"))?;
+            }
+            Err(_timeout) => {
+                return match self.describe(external_id).await? {
+                    InstanceStatus::Running => self.get_handle(external_id).await,
+                    InstanceStatus::Provisioning => Err(super::StillProvisioning.into()),
+                    other => Err(anyhow::anyhow!(
+                        "Pod {external_id} did not reach Running (state: {other:?})"
+                    )),
+                };
+            }
+        }
+        self.get_handle(external_id).await
+    }
+
+    async fn stop(&self, _external_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!(
+            "Kubernetes pods cannot be stopped/resumed — only terminated. Persistent state \
+             belongs on a volume in the pod template."
+        )
+    }
+
+    async fn resume(&self, _external_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Kubernetes pods cannot be resumed — start a new machine.")
+    }
+
+    async fn terminate(&self, external_id: &str) -> anyhow::Result<()> {
+        let pods = self.pods().await?;
+        match pods.delete(external_id, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            // Already gone = success for termination purposes.
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn open(
+        &self,
+        external_id: &str,
+        ctx: &ConnectionContext,
+    ) -> anyhow::Result<K8sConnection> {
+        let pods = self.pods().await?;
+
+        let conn = K8sConnection::new(
+            pods,
+            external_id.to_string(),
+            self.config.workdir.clone(),
+            self.config.jupyter_command.clone(),
+            ctx.jupyter_token.clone(),
+        )
+        .await?;
+        Ok(conn)
+    }
+}
+
+pub struct K8sConnection {
+    pods: Api<Pod>,
+    pod_name: String,
+    workdir: String,
+    jupyter: JupyterEndpoint,
+    /// Local listener task forwarding to the pod's Jupyter port. Aborted on
+    /// drop (a detached task would leak the listener for the process lifetime).
+    forwarder: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for K8sConnection {
+    fn drop(&mut self) {
+        self.forwarder.abort();
+    }
+}
+
+const JUPYTER_PORT: u16 = 8888;
+
+/// Config strings that get interpolated into `sh -c` are wrapped in single
+/// quotes on use; reject values that would break out of them.
+fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !value.contains('\''),
+        "[kubernetes] {what} must not contain single quotes: {value:?}"
+    );
+    Ok(())
+}
+
+impl K8sConnection {
+    async fn new(
+        pods: Api<Pod>,
+        pod_name: String,
+        workdir: String,
+        jupyter_command: String,
+        token: String,
+    ) -> anyhow::Result<Self> {
+        validate_shell_safe("workdir", &workdir)?;
+        validate_shell_safe("jupyter-command", &jupyter_command)?;
+
+        // Launch Jupyter inside the pod (idempotent across reconnects). The
+        // only shell-interpolated values are the two validated config strings
+        // above (single-quoted) — never tool parameters.
+        let launch = format!(
+            "mkdir -p '{workdir}' && cd '{workdir}' && \
+             if [ -f /tmp/jupyter.pid ] && kill -0 \"$(cat /tmp/jupyter.pid)\" 2>/dev/null; then \
+             echo already-running; else \
+             nohup {jupyter_command} --no-browser --ip=0.0.0.0 --port={JUPYTER_PORT} \
+             --ServerApp.token=\"$REMOTE_KERNELS_JUPYTER_TOKEN\" \
+             --ServerApp.disable_check_xsrf=True --ServerApp.root_dir='{workdir}' \
+             >/tmp/jupyter.log 2>&1 & echo $! > /tmp/jupyter.pid; fi"
+        );
+        exec_capture(&pods, &pod_name, &launch, Duration::from_secs(60)).await?;
+
+        // Local listener: each accepted TCP connection gets its own fresh
+        // API-server port-forward. Long-lived shared forwards drop under load
+        // (kubernetes#74551 and friends); per-connection forwards make every
+        // HTTP request / WS connect a clean tunnel with no shared state.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let local_port = listener.local_addr()?.port();
+        let fwd_pods = pods.clone();
+        let fwd_pod_name = pod_name.clone();
+        let forwarder = tokio::spawn(async move {
+            loop {
+                let Ok((mut local_stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let pods = fwd_pods.clone();
+                let pod_name = fwd_pod_name.clone();
+                tokio::spawn(async move {
+                    match pods.portforward(&pod_name, &[JUPYTER_PORT]).await {
+                        Ok(mut pf) => {
+                            let Some(mut upstream) = pf.take_stream(JUPYTER_PORT) else {
+                                tracing::warn!("port-forward stream unavailable");
+                                return;
+                            };
+                            if let Err(e) =
+                                tokio::io::copy_bidirectional(&mut local_stream, &mut upstream)
+                                    .await
+                            {
+                                tracing::debug!("port-forward connection ended: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(pod = %pod_name, "port-forward failed: {e}");
+                        }
+                    }
+                });
+            }
+        });
+
+        Ok(Self {
+            pods,
+            pod_name,
+            workdir,
+            jupyter: JupyterEndpoint {
+                http_base: format!("http://127.0.0.1:{local_port}"),
+                ws_base: format!("ws://127.0.0.1:{local_port}"),
+                token,
+            },
+            forwarder,
+        })
+    }
+}
+
+/// Read a remote stream to completion (empty when absent). Draining both
+/// streams concurrently prevents buffer-fill deadlocks during transfers.
+async fn drain(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> String {
+    let mut s = String::new();
+    if let Some(r) = stream.as_mut() {
+        let _ = r.read_to_string(&mut s).await;
+    }
+    s
+}
+
+/// Run a command in the pod, capturing stdout. Errors when the command exits
+/// non-zero. `argv` form — no shell interpretation of any argument.
+async fn exec_argv_capture<I, S>(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    argv: I,
+    timeout: Duration,
+) -> anyhow::Result<String>
+where
+    I: IntoIterator<Item = S> + std::fmt::Debug,
+    S: Into<String>,
+{
+    let label = format!("{argv:?}");
+    let ap = kube::api::AttachParams::default().stdout(true).stderr(true);
+    let run = async {
+        let mut process = pods
+            .exec(pod_name, argv, &ap)
+            .await
+            .map_err(|e| anyhow::anyhow!("exec failed: {e}"))?;
+
+        // Drain both streams concurrently — sequential reads can deadlock when
+        // the unread stream's buffer fills.
+        let mut out = process.stdout();
+        let mut err = process.stderr();
+        let (stdout, stderr) = tokio::join!(
+            async {
+                let mut s = String::new();
+                if let Some(out) = out.as_mut() {
+                    let _ = out.read_to_string(&mut s).await;
+                }
+                s
+            },
+            async {
+                let mut s = String::new();
+                if let Some(err) = err.as_mut() {
+                    let _ = err.read_to_string(&mut s).await;
+                }
+                s
+            }
+        );
+
+        let status = process
+            .take_status()
+            .ok_or_else(|| anyhow::anyhow!("exec status unavailable"))?
+            .await;
+        if let Some(status) = status
+            && status.status.as_deref() == Some("Failure")
+        {
+            anyhow::bail!(
+                "command {label} failed: {} — {stderr}",
+                status.message.unwrap_or_default()
+            );
+        }
+        Ok::<String, anyhow::Error>(stdout)
+    };
+    tokio::time::timeout(timeout, run)
+        .await
+        .map_err(|_| anyhow::anyhow!("exec timed out ({}s)", timeout.as_secs()))?
+}
+
+/// Run a shell command line in the pod (for infra scripts that need `&&`/env
+/// expansion — interpolated values must be validated config, never tool params).
+async fn exec_capture(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    command: &str,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    exec_argv_capture(pods, pod_name, ["sh", "-c", command], timeout).await
+}
+
+impl Connection for K8sConnection {
+    fn jupyter(&self) -> &JupyterEndpoint {
+        &self.jupyter
+    }
+
+    async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
+        exec_capture(&self.pods, &self.pod_name, command, timeout).await
+    }
+
+    async fn wait_reachable(&self) -> anyhow::Result<()> {
+        // open() already exec'd successfully; nothing further to wait for.
+        Ok(())
+    }
+
+    /// tar-over-exec upload, staged through a local rsync so `.gitignore`
+    /// semantics match the SSH runtimes exactly.
+    async fn upload(
+        &self,
+        project_dir: &Path,
+        extra_includes: &[String],
+    ) -> anyhow::Result<String> {
+        let staging = tempfile::tempdir()?;
+        let mut args = crate::sync::rsync_upload_args(extra_includes);
+        args.extend([
+            format!("{}/", project_dir.display()),
+            format!("{}/", staging.path().display()),
+        ]);
+        let rsync = tokio::process::Command::new("rsync")
+            .args(&args)
+            .output()
+            .await?;
+        if !rsync.status.success() {
+            anyhow::bail!(
+                "local staging rsync failed: {}",
+                String::from_utf8_lossy(&rsync.stderr)
+            );
+        }
+
+        // Ensure the workdir exists, then stream `tar cf -` of the staging dir
+        // into `tar xmf -` in the pod (argv form — no shell).
+        exec_argv_capture(
+            &self.pods,
+            &self.pod_name,
+            ["mkdir", "-p", &self.workdir],
+            Duration::from_secs(30),
+        )
+        .await?;
+
+        let mut local_tar = tokio::process::Command::new("tar")
+            .args(["cf", "-", "-C"])
+            .arg(staging.path())
+            .arg(".")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        let mut tar_out = local_tar.stdout.take().expect("piped stdout");
+
+        let ap = kube::api::AttachParams::default()
+            .stdin(true)
+            .stdout(true)
+            .stderr(true);
+        let transfer = async {
+            let mut process = self
+                .pods
+                .exec(
+                    &self.pod_name,
+                    ["tar", "xmf", "-", "-C", &self.workdir],
+                    &ap,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("exec for upload failed: {e}"))?;
+            let mut remote_stdin = process
+                .stdin()
+                .ok_or_else(|| anyhow::anyhow!("exec stdin unavailable"))?;
+            let mut remote_stdout = process.stdout();
+            let mut remote_stderr = process.stderr();
+
+            // Feed stdin while draining the remote streams — an unread stream
+            // whose buffer fills would deadlock the transfer.
+            let (copied, _, stderr) = tokio::join!(
+                async {
+                    let res = tokio::io::copy(&mut tar_out, &mut remote_stdin).await;
+                    let _ = remote_stdin.shutdown().await;
+                    drop(remote_stdin);
+                    res
+                },
+                drain(&mut remote_stdout),
+                drain(&mut remote_stderr),
+            );
+            copied?;
+
+            let status = process
+                .take_status()
+                .ok_or_else(|| anyhow::anyhow!("exec status unavailable"))?
+                .await;
+            if let Some(status) = status
+                && status.status.as_deref() == Some("Failure")
+            {
+                anyhow::bail!(
+                    "remote tar extract failed: {} — {stderr}",
+                    status.message.unwrap_or_default()
+                );
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(600), transfer)
+            .await
+            .map_err(|_| anyhow::anyhow!("upload timed out (600s)"))??;
+
+        let tar_status = local_tar.wait().await?;
+        if !tar_status.success() {
+            anyhow::bail!("local tar failed");
+        }
+
+        Ok("Files synced successfully.".to_string())
+    }
+
+    /// tar-over-exec download of one file or directory.
+    async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
+        // Resolve relative paths against the workdir, like the SSH runtimes'
+        // rsync against the remote home/workdir.
+        let full = if remote_path.starts_with('/') {
+            remote_path.trim_end_matches('/').to_string()
+        } else {
+            format!("{}/{}", self.workdir, remote_path.trim_end_matches('/'))
+        };
+        let (parent, base) = match full.rsplit_once('/') {
+            Some((p, b)) if !p.is_empty() && !b.is_empty() => (p.to_string(), b.to_string()),
+            Some(("", b)) if !b.is_empty() => ("/".to_string(), b.to_string()),
+            _ => anyhow::bail!("Invalid remote path: {remote_path:?}"),
+        };
+
+        // argv form: paths are never shell-interpreted.
+        let ap = kube::api::AttachParams::default().stdout(true).stderr(true);
+        let staging = tempfile::tempdir()?;
+        let mut local_tar = tokio::process::Command::new("tar")
+            .args(["xmf", "-", "-C"])
+            .arg(staging.path())
+            .stdin(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        let mut tar_in = local_tar.stdin.take().expect("piped stdin");
+
+        let transfer = async {
+            let mut process = self
+                .pods
+                .exec(
+                    &self.pod_name,
+                    ["tar", "cf", "-", "-C", &parent, &base],
+                    &ap,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("exec for download failed: {e}"))?;
+            let mut remote_stdout = process
+                .stdout()
+                .ok_or_else(|| anyhow::anyhow!("exec stdout unavailable"))?;
+            let mut remote_stderr = process.stderr();
+
+            let (copied, stderr) = tokio::join!(
+                async {
+                    let res = tokio::io::copy(&mut remote_stdout, &mut tar_in).await;
+                    let _ = tar_in.shutdown().await;
+                    drop(tar_in);
+                    res
+                },
+                drain(&mut remote_stderr),
+            );
+            copied?;
+
+            // A remote tar that errored (missing path, permissions) can still
+            // have emitted a valid partial archive — never report success then.
+            let status = process
+                .take_status()
+                .ok_or_else(|| anyhow::anyhow!("exec status unavailable"))?
+                .await;
+            if let Some(status) = status
+                && status.status.as_deref() == Some("Failure")
+            {
+                anyhow::bail!(
+                    "remote tar failed (does {remote_path:?} exist?): {} — {stderr}",
+                    status.message.unwrap_or_default()
+                );
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(600), transfer)
+            .await
+            .map_err(|_| anyhow::anyhow!("download timed out (600s)"))??;
+
+        let tar_status = local_tar.wait().await?;
+        if !tar_status.success() {
+            anyhow::bail!("local tar extract failed");
+        }
+
+        let extracted = staging.path().join(&base);
+        if !extracted.exists() {
+            anyhow::bail!("remote path {remote_path:?} produced no output");
+        }
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Rename fails across filesystems; fall back to a copy via `cp -R`.
+        if std::fs::rename(&extracted, local_path).is_err() {
+            let cp = tokio::process::Command::new("cp")
+                .arg("-R")
+                .arg(&extracted)
+                .arg(local_path)
+                .output()
+                .await?;
+            if !cp.status.success() {
+                anyhow::bail!("copy failed: {}", String::from_utf8_lossy(&cp.stderr));
+            }
+        }
+
+        Ok(format!("Downloaded to {}", local_path.display()))
+    }
+
+    /// The pod's `activeDeadlineSeconds` (set at provision) is the safety net;
+    /// there is no additional on-machine watchdog to install.
+    async fn install_watchdog(&self, _policy: WatchdogPolicy) -> anyhow::Result<()> {
+        tracing::info!(
+            "kubernetes: activeDeadlineSeconds is the safety net; no watchdog to install"
+        );
+        Ok(())
+    }
+
+    async fn heartbeat(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn set_budget_deadline(&self, _secs_from_now: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pod_names_are_dns_safe() {
+        assert_eq!(pod_name("remote-kernels", "main"), "remote-kernels-main");
+        assert_eq!(pod_name("My_Proj", "GPU_2"), "my-proj-gpu-2");
+        assert_eq!(pod_name("x", &"y".repeat(100)).len(), 63);
+        assert!(!pod_name("-x-", "-y-").starts_with('-'));
+    }
+
+    #[test]
+    fn template_specialization_injects_identity_and_safety_net() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pod.yaml"),
+            r"
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    team: far-ai
+spec:
+  containers:
+    - name: workload
+      image: python:3.12-slim
+      command: ['sleep', 'infinity']
+",
+        )
+        .unwrap();
+
+        let config: KubernetesConfig = toml::from_str(r#"pod-template = "pod.yaml""#).unwrap();
+        let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
+        let req = ProvisionRequest {
+            name: "main".to_string(),
+            gpu_type: None,
+            image: None,
+            priority: Some("high".to_string()),
+            env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            ssh_public_key: String::new(),
+            jupyter_token: "tok123".to_string(),
+        };
+
+        let pod = rt.build_pod(&req).unwrap();
+        assert_eq!(pod.metadata.name.as_deref(), Some("rk-main"));
+        let labels = pod.metadata.labels.unwrap();
+        assert_eq!(labels["team"], "far-ai"); // template labels preserved
+        assert_eq!(labels["remote-kernels/instance"], "main");
+        assert_eq!(labels["kueue.x-k8s.io/priority-class"], "high");
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.active_deadline_seconds, Some(43200));
+        let env = spec.containers[0].env.as_ref().unwrap();
+        assert!(env.iter().any(|e| e.name == "FOO"));
+        assert!(
+            env.iter().any(|e| e.name == "REMOTE_KERNELS_JUPYTER_TOKEN"
+                && e.value.as_deref() == Some("tok123"))
+        );
+    }
+
+    #[test]
+    fn template_active_deadline_not_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pod.yaml"),
+            r"
+apiVersion: v1
+kind: Pod
+spec:
+  activeDeadlineSeconds: 100
+  containers:
+    - name: workload
+      image: python:3.12-slim
+",
+        )
+        .unwrap();
+        let config: KubernetesConfig = toml::from_str(r#"pod-template = "pod.yaml""#).unwrap();
+        let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
+        let req = ProvisionRequest {
+            name: "main".to_string(),
+            gpu_type: None,
+            image: None,
+            priority: None,
+            env: std::collections::HashMap::new(),
+            ssh_public_key: String::new(),
+            jupyter_token: "t".to_string(),
+        };
+        let pod = rt.build_pod(&req).unwrap();
+        assert_eq!(pod.spec.unwrap().active_deadline_seconds, Some(100));
+    }
+}

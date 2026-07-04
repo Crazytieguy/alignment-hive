@@ -57,6 +57,66 @@ pub struct Config {
     /// any extra fields are passed through to the pod creation API as-is.
     #[serde(default)]
     pub runpod: RunpodConfig,
+
+    /// Kubernetes runtime configuration. Absent unless the project uses the
+    /// kubernetes runtime.
+    pub kubernetes: Option<KubernetesConfig>,
+}
+
+/// Kubernetes-specific configuration. Cluster-specific details (GPU resources,
+/// tolerations, queue labels, volumes) live in the lab-owned pod template —
+/// this section only points at it and sets the plugin-level knobs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct KubernetesConfig {
+    /// kubeconfig context to use (default: the current context).
+    pub context: Option<String>,
+
+    /// Namespace for pods (default: the context's default namespace).
+    pub namespace: Option<String>,
+
+    /// Path to the pod template YAML, relative to the project root. Required.
+    /// Template contract: first container is the workload; its image provides
+    /// `sh`, `tar`, and Python with `jupyter-server` + `ipykernel`; the pod
+    /// stays alive on its own (e.g. `command: ["sleep", "infinity"]`).
+    pub pod_template: PathBuf,
+
+    /// Label that `start(priority=...)` sets on the pod. Default is Kueue's
+    /// workload priority label; plain clusters can set this to any label their
+    /// tooling reads, or use a `priorityClassName` in the template instead.
+    #[serde(default = "default_priority_label")]
+    pub priority_label: String,
+
+    /// Safety net applied as the pod's `activeDeadlineSeconds` when the
+    /// template doesn't set one (seconds). Kubernetes has no budget/billing —
+    /// this bounds forgotten pods instead. Set to 0 to disable.
+    #[serde(default = "default_max_lifetime_secs")]
+    pub max_lifetime_secs: u64,
+
+    /// Directory in the pod that files sync to and kernels run in.
+    #[serde(default = "default_k8s_workdir")]
+    pub workdir: String,
+
+    /// Command that launches Jupyter inside the pod (standard server flags are
+    /// appended). Override e.g. to a venv path.
+    #[serde(default = "default_jupyter_command")]
+    pub jupyter_command: String,
+}
+
+fn default_priority_label() -> String {
+    "kueue.x-k8s.io/priority-class".to_string()
+}
+
+fn default_max_lifetime_secs() -> u64 {
+    43200 // 12h
+}
+
+fn default_k8s_workdir() -> String {
+    "/workspace".to_string()
+}
+
+fn default_jupyter_command() -> String {
+    "jupyter server".to_string()
 }
 
 /// RunPod-specific configuration. Known fields are typed; unknown fields are passed
@@ -174,7 +234,7 @@ impl Config {
     /// Generate a commented TOML config template with all fields and their defaults.
     /// This is the single source of truth — the setup skill reads this output
     /// instead of duplicating field knowledge.
-    #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn template() -> String {
         format!(
             r#"# remote-kernels configuration
@@ -257,6 +317,31 @@ impl Config {
 # COMMUNITY is cheaper but may have less reliable availability.
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
+
+# Kubernetes runtime configuration (only needed when using
+# start(runtime="kubernetes") or default-runtime = "kubernetes").
+# Cluster specifics (GPU resources, tolerations, queue labels, volumes) live
+# in a pod template YAML that you own. Template contract: the first container
+# is the workload; its image provides sh, tar, and Python with jupyter-server
+# + ipykernel; the pod keeps itself alive (e.g. command: ["sleep", "infinity"]).
+# [kubernetes]
+# Path to the pod template YAML, relative to the project root. Required.
+# pod-template = "k8s/dev-pod.yaml"
+# kubeconfig context (default: current context).
+# context = "my-cluster"
+# Namespace for pods (default: the context's default namespace).
+# namespace = "research"
+# Label set by start(priority=...). Default: Kueue's workload priority label.
+# priority-label = "{default_priority_label}"
+# activeDeadlineSeconds applied when the template doesn't set one (0 disables).
+# Default: {default_max_lifetime_secs} (12h)
+# max-lifetime-secs = {default_max_lifetime_secs}
+# Directory in the pod that files sync to and kernels run in.
+# Default: "{default_k8s_workdir}"
+# workdir = "{default_k8s_workdir}"
+# Command that launches Jupyter inside the pod.
+# Default: "{default_jupyter_command}"
+# jupyter-command = "{default_jupyter_command}"
 "#,
             default_runtime = default_runtime(),
             default_gpu = default_gpu_type_ids()[0],
@@ -269,6 +354,10 @@ impl Config {
             default_volume_gb = default_volume_gb(),
             default_volume_mount_path = default_volume_mount_path(),
             default_cloud_type = default_cloud_type(),
+            default_priority_label = default_priority_label(),
+            default_max_lifetime_secs = default_max_lifetime_secs(),
+            default_k8s_workdir = default_k8s_workdir(),
+            default_jupyter_command = default_jupyter_command(),
         )
     }
 }

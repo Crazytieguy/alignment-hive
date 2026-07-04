@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    remote_kernels::init_tls();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

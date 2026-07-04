@@ -94,6 +94,10 @@ pub struct StartParams {
     pub gpu_type: Option<String>,
     /// Override image for this machine.
     pub image: Option<String>,
+    /// Scheduling priority. On Kubernetes this sets the configured priority
+    /// label (Kueue workload priority by default) so the machine is scheduled
+    /// sooner. Ignored by runtimes without a queue.
+    pub priority: Option<String>,
     /// If false, return as soon as the machine is allocated and finish setup in
     /// the background — poll `status()` for readiness. Useful when starting
     /// several machines at once. Default: true (wait until ready).
@@ -296,6 +300,7 @@ impl RemoteKernelsServer {
             name: name.clone(),
             gpu_type: params.gpu_type,
             image: params.image,
+            priority: params.priority,
             env: self.build_env(&project_dir),
             ssh_public_key: ssh_keypair.public_key_openssh,
             jupyter_token: jupyter_token.clone(),
@@ -333,6 +338,18 @@ impl RemoteKernelsServer {
                 Ok(summary) => Ok(CallToolResult::success(vec![Content::text(format!(
                     "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel."
                 ))])),
+                Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
+                    // Not a failure — the machine is queued/waiting for
+                    // capacity. Keep it and keep finalizing in the background.
+                    self.spawn_background_finalize(&name, &handle.external_id, &runtime_name);
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Machine {name:?} (id: {}) is still queued or waiting for capacity. \
+                         It was NOT cleaned up — setup continues in the background. Poll \
+                         status() until it shows running, or terminate(instance=\"{name}\") \
+                         to give up.",
+                        handle.external_id
+                    ))]))
+                }
                 Err(e) => {
                     self.cleanup_failed_start(&name, &handle.external_id, &runtime_name)
                         .await;
@@ -344,21 +361,7 @@ impl RemoteKernelsServer {
             }
         } else {
             // Finish setup in the background; failures are reported via status().
-            let server = self.clone();
-            let bg_name = name.clone();
-            let bg_external_id = handle.external_id.clone();
-            let bg_runtime = runtime_name.clone();
-            tokio::spawn(async move {
-                if let Err(e) = server.finalize_start(&bg_name, &bg_external_id).await {
-                    tracing::warn!(instance = %bg_name, "Background start failed: {e}");
-                    server
-                        .cleanup_failed_start(&bg_name, &bg_external_id, &bg_runtime)
-                        .await;
-                    server.start_failures.lock().await.push(format!(
-                        "Machine {bg_name:?} failed to start: {e} (it has been cleaned up)"
-                    ));
-                }
-            });
+            self.spawn_background_finalize(&name, &handle.external_id, &runtime_name);
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Machine {name:?} is provisioning (id: {}, GPU: {}). Setup continues in the \
                  background — poll status() until it shows running before creating kernels.",
@@ -1147,7 +1150,8 @@ impl RemoteKernelsServer {
         if let Some(rt) = runtimes.get(name) {
             return Ok(Arc::clone(rt));
         }
-        let rt = AnyRuntime::build(name, &self.config)
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let rt = AnyRuntime::build(name, &self.config, &project_dir)
             .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
         let rt = Arc::new(rt);
         runtimes.insert(name.to_string(), Arc::clone(&rt));
@@ -1329,6 +1333,14 @@ impl RemoteKernelsServer {
             Ok(summary) => Some(Ok(CallToolResult::success(vec![Content::text(format!(
                 "Reconnected to existing machine!\n{summary}\n\nUse create_kernel() to start a kernel."
             ))]))),
+            Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
+                self.spawn_background_finalize(name, &record.external_id, &record.runtime);
+                Some(Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Machine {name:?} (id: {}) from the previous session is still queued or \
+                     waiting for capacity. Setup continues in the background — poll status().",
+                    record.external_id
+                ))])))
+            }
             Err(e) => {
                 self.cleanup_failed_start(name, &record.external_id, &record.runtime)
                     .await;
@@ -1457,6 +1469,36 @@ impl RemoteKernelsServer {
         }
 
         Ok(summary)
+    }
+
+    /// Finish machine setup in the background, retrying while the machine is
+    /// still legitimately provisioning (Kueue queue, capacity wait). Real
+    /// failures clean up the machine and surface via `status()`.
+    fn spawn_background_finalize(&self, name: &str, external_id: &str, runtime_name: &str) {
+        let server = self.clone();
+        let name = name.to_string();
+        let external_id = external_id.to_string();
+        let runtime_name = runtime_name.to_string();
+        tokio::spawn(async move {
+            loop {
+                match server.finalize_start(&name, &external_id).await {
+                    Ok(_) => return,
+                    Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
+                        tracing::info!(instance = %name, "Still provisioning, continuing to wait...");
+                    }
+                    Err(e) => {
+                        tracing::warn!(instance = %name, "Background start failed: {e}");
+                        server
+                            .cleanup_failed_start(&name, &external_id, &runtime_name)
+                            .await;
+                        server.start_failures.lock().await.push(format!(
+                            "Machine {name:?} failed to start: {e} (it has been cleaned up)"
+                        ));
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// Clean up after a failed start/reconnect: terminate the machine and

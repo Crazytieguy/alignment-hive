@@ -12,6 +12,7 @@
 //! Traits use native `async fn` (not dyn-compatible), so heterogeneous
 //! instances are held via the closed [`AnyRuntime`]/[`AnyConnection`] enums.
 
+pub mod kubernetes;
 pub mod runpod;
 
 #[cfg(feature = "fake-runtime")]
@@ -65,6 +66,10 @@ pub struct ProvisionRequest {
     pub gpu_type: Option<String>,
     /// Override the configured image.
     pub image: Option<String>,
+    /// Scheduling priority — on Kubernetes this becomes the configured
+    /// priority label (Kueue workload priority by default). Ignored by
+    /// runtimes without a queue.
+    pub priority: Option<String>,
     /// Environment variables to set on the machine.
     pub env: HashMap<String, String>,
     /// OpenSSH public key to authorize on the machine.
@@ -81,6 +86,17 @@ pub struct InstanceHandle {
     /// Hourly cost in dollars. `None` for unmetered runtimes.
     pub cost_per_hr: Option<f64>,
 }
+
+/// Marker error: the machine is still legitimately coming up (e.g. a
+/// Kueue-queued pod waiting for quota) — the wait timed out, but this is NOT
+/// a failed start and the machine must not be cleaned up. Callers keep the
+/// instance and continue waiting in the background.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "machine is still provisioning (queued or waiting for capacity) — setup continues in the \
+     background; poll status()"
+)]
+pub struct StillProvisioning;
 
 /// Normalized machine status across providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +238,7 @@ macro_rules! dispatch {
     ($self:ident, $inner:ident => $body:expr) => {
         match $self {
             Self::Runpod($inner) => $body,
+            Self::Kubernetes($inner) => $body,
             #[cfg(feature = "fake-runtime")]
             Self::Fake($inner) => $body,
         }
@@ -230,6 +247,7 @@ macro_rules! dispatch {
 
 pub enum AnyRuntime {
     Runpod(runpod::RunPodRuntime),
+    Kubernetes(kubernetes::KubernetesRuntime),
     #[cfg(feature = "fake-runtime")]
     Fake(fake::FakeRuntime),
 }
@@ -239,6 +257,7 @@ impl AnyRuntime {
     pub fn known_names() -> &'static [&'static str] {
         &[
             "runpod",
+            "kubernetes",
             #[cfg(feature = "fake-runtime")]
             "fake",
         ]
@@ -247,7 +266,11 @@ impl AnyRuntime {
     /// Build a runtime by name, reading its credentials from the environment.
     /// Credentials are checked here — at first use — not at server startup, so
     /// runtimes you don't use don't need keys configured.
-    pub fn build(name: &str, config: &Config) -> anyhow::Result<Self> {
+    pub fn build(
+        name: &str,
+        config: &Config,
+        project_dir: &std::path::Path,
+    ) -> anyhow::Result<Self> {
         match name {
             "runpod" => {
                 let api_key = std::env::var("RUNPOD_API_KEY").map_err(|_| {
@@ -258,6 +281,19 @@ impl AnyRuntime {
                     )
                 })?;
                 Ok(Self::Runpod(runpod::RunPodRuntime::new(api_key, config)))
+            }
+            "kubernetes" => {
+                let k8s = config.kubernetes.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "The kubernetes runtime requires a [kubernetes] section in \
+                         remote-kernels.toml (at minimum: pod-template = \"path/to/pod.yaml\")."
+                    )
+                })?;
+                Ok(Self::Kubernetes(kubernetes::KubernetesRuntime::new(
+                    k8s,
+                    project_dir.to_path_buf(),
+                    config.name.clone(),
+                )))
             }
             #[cfg(feature = "fake-runtime")]
             "fake" => Ok(Self::Fake(fake::FakeRuntime::new())),
@@ -315,6 +351,7 @@ impl Runtime for AnyRuntime {
     ) -> anyhow::Result<AnyConnection> {
         match self {
             Self::Runpod(r) => Ok(AnyConnection::Runpod(r.open(external_id, ctx).await?)),
+            Self::Kubernetes(r) => Ok(AnyConnection::Kubernetes(r.open(external_id, ctx).await?)),
             #[cfg(feature = "fake-runtime")]
             Self::Fake(r) => Ok(AnyConnection::Fake(r.open(external_id, ctx).await?)),
         }
@@ -323,6 +360,7 @@ impl Runtime for AnyRuntime {
 
 pub enum AnyConnection {
     Runpod(runpod::RunPodConnection),
+    Kubernetes(kubernetes::K8sConnection),
     #[cfg(feature = "fake-runtime")]
     Fake(fake::FakeConnection),
 }
