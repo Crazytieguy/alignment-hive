@@ -23,8 +23,8 @@ pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
 /// Respects `.gitignore` via rsync's `--filter=':- .gitignore'`.
 /// Extra include paths are added before the gitignore filter so they take priority.
 ///
-/// Ensures rsync is available on the pod before syncing (the heartbeat installs
-/// it in the background, but sync may be called before that completes).
+/// Ensures rsync is available on the pod before syncing (installed lazily
+/// here — it is not part of the base `runpod/pytorch` image).
 pub async fn sync_to_pod(
     project_dir: &Path,
     ssh_key_path: &Path,
@@ -35,10 +35,7 @@ pub async fn sync_to_pod(
 ) -> anyhow::Result<String> {
     ensure_rsync_on_pod(ssh_key_path, public_ip, ssh_port).await?;
 
-    let ssh_cmd = format!(
-        "ssh -i {} -p {ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
-        ssh_key_path.display()
-    );
+    let ssh_cmd = crate::ssh_exec::rsync_transport(ssh_key_path, ssh_port);
 
     let source = format!("{}/", project_dir.display());
     let destination = format!("root@{public_ip}:{remote_path}/");
@@ -96,41 +93,15 @@ async fn ensure_rsync_on_pod(
     public_ip: &str,
     ssh_port: u16,
 ) -> anyhow::Result<()> {
-    let key_path = ssh_key_path.display().to_string();
-    let port = ssh_port.to_string();
-    let host = format!("root@{public_ip}");
-
-    let output = tokio::time::timeout(
+    crate::ssh_exec::ssh_cmd(
+        ssh_key_path,
+        public_ip,
+        ssh_port,
+        "which rsync || (apt-get update -qq && apt-get install -y -qq rsync)",
         std::time::Duration::from_secs(120),
-        Command::new("ssh")
-            .args([
-                "-i",
-                &key_path,
-                "-p",
-                &port,
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
-                &host,
-                "which rsync || (apt-get update -qq && apt-get install -y -qq rsync)",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Timed out ensuring rsync is installed on pod"))??;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to ensure rsync is installed on pod: {stderr}");
-    }
+    .map_err(|e| anyhow::anyhow!("Failed to ensure rsync is installed on pod: {e}"))?;
     Ok(())
 }
 
@@ -144,10 +115,7 @@ pub async fn download_from_pod(
 ) -> anyhow::Result<String> {
     ensure_rsync_on_pod(ssh_key_path, public_ip, ssh_port).await?;
 
-    let ssh_cmd = format!(
-        "ssh -i {} -p {ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
-        ssh_key_path.display()
-    );
+    let ssh_cmd = crate::ssh_exec::rsync_transport(ssh_key_path, ssh_port);
 
     let source = format!("root@{public_ip}:{remote_path}");
     let destination = local_path.display().to_string();

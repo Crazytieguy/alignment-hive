@@ -35,9 +35,15 @@ jobs:
         working-directory: crates/remote-kernels
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features fake-runtime -- -D warnings
         working-directory: crates/remote-kernels
 
       - name: Test
-        run: cargo test
+        run: cargo test --features fake-runtime
+        working-directory: crates/remote-kernels
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: E2E (fake runtime, local Jupyter)
+        run: cargo test --features fake-runtime --test fake_e2e -- --ignored --test-threads=1
         working-directory: crates/remote-kernels

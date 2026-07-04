@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -12,38 +13,105 @@ use tokio::sync::Mutex;
 use crate::config::{Cleanup, Config};
 use crate::descriptions;
 use crate::jupyter::rest::JupyterClient;
-use crate::runpod::client::RunPodClient;
-use crate::runpod::types::PodCreateInput;
-use crate::state::AppState;
+use crate::runtime::{
+    AnyRuntime, Connection, ConnectionContext, InstanceStatus, ProvisionRequest, Runtime,
+};
+use crate::state::{AppState, InstanceRecord, InstanceState, Phase, validate_instance_name};
 
 #[derive(Clone)]
 pub struct RemoteKernelsServer {
     config: Arc<Config>,
-    runpod: Arc<RunPodClient>,
     state: Arc<Mutex<AppState>>,
+    /// Lazily built runtimes, keyed by name. Credentials are only required
+    /// when a runtime is actually used.
+    runtimes: Arc<Mutex<HashMap<String, Arc<AnyRuntime>>>>,
     /// Effective budget cap (env var overrides config).
     budget: Option<f64>,
+    /// Failure messages from background (wait=false) starts, drained by `status()`.
+    start_failures: Arc<Mutex<Vec<String>>>,
+    /// Names currently being provisioned — closes the window between `start()`'s
+    /// "already active" check and the instance insert, where two concurrent
+    /// `start()` calls could otherwise both provision (and one machine would
+    /// leak untracked). Sync mutex: never held across an await.
+    starting: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+}
+
+/// Coordinates for cleaning up one machine, pinned to its provider identity.
+struct CleanupTarget {
+    name: String,
+    external_id: String,
+    runtime: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupAction {
+    Stop,
+    Terminate,
+}
+
+impl CleanupAction {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Terminate => "terminate",
+        }
+    }
+
+    fn past_tense(self) -> &'static str {
+        match self {
+            Self::Stop => "stopped",
+            Self::Terminate => "terminated",
+        }
+    }
+}
+
+/// RAII reservation of an instance name during `start()`.
+struct StartReservation {
+    names: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for StartReservation {
+    fn drop(&mut self) {
+        if let Ok(mut names) = self.names.lock() {
+            names.remove(&self.name);
+        }
+    }
 }
 
 // --- Tool parameter types ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StartParams {
-    /// Override GPU type for this session.
+    /// Name for this machine (default: "main"). Use distinct names to run
+    /// multiple machines concurrently.
+    pub name: Option<String>,
+    /// Runtime to start the machine on (default: the configured default-runtime).
+    pub runtime: Option<String>,
+    /// Override GPU type for this machine.
     pub gpu_type: Option<String>,
-    /// Override image for this session.
+    /// Override image for this machine.
     pub image: Option<String>,
+    /// If false, return as soon as the machine is allocated and finish setup in
+    /// the background — poll `status()` for readiness. Useful when starting
+    /// several machines at once. Default: true (wait until ready).
+    pub wait: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct EmptyParams {}
+pub struct InstanceParams {
+    /// Which machine to operate on. Optional when exactly one is active.
+    pub instance: Option<String>,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateKernelParams {
     /// Human-readable name for the kernel (used in notebook filename).
     pub name: Option<String>,
+    /// Which machine to create the kernel on. Optional when exactly one is active.
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -81,14 +149,18 @@ pub struct SyncParams {
     /// Extra paths to include in the sync, even if they would be excluded by .gitignore.
     /// Paths must be relative to the project root. Absolute paths and ".." are not allowed.
     pub include: Option<Vec<String>>,
+    /// Which machine to sync to. Optional when exactly one is active.
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DownloadParams {
-    /// Remote path on the pod to download.
+    /// Remote path on the machine to download.
     pub remote_path: String,
     /// Local path to save to.
     pub local_path: String,
+    /// Which machine to download from. Optional when exactly one is active.
+    pub instance: Option<String>,
 }
 
 fn generate_token() -> String {
@@ -103,500 +175,462 @@ fn generate_token() -> String {
     })
 }
 
+/// Expected/recoverable conditions reach Claude as a `CallToolResult` error
+/// (not a protocol-level `McpError`). Wrapped in `Result` so call sites can
+/// uniformly `return err_text(...)`.
+#[allow(clippy::unnecessary_wraps)]
+fn err_text(msg: impl Into<String>) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::error(vec![Content::text(msg.into())]))
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
 impl RemoteKernelsServer {
-    pub fn new(config: Config, api_key: String, state: AppState, budget: Option<f64>) -> Self {
+    pub fn new(config: Config, state: AppState, budget: Option<f64>) -> Self {
         Self {
             config: Arc::new(config),
-            runpod: Arc::new(RunPodClient::new(api_key)),
             state: Arc::new(Mutex::new(state)),
+            runtimes: Arc::new(Mutex::new(HashMap::new())),
             budget,
+            start_failures: Arc::new(Mutex::new(Vec::new())),
+            starting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Spin up a GPU pod. Uses settings from remote-kernels.toml, with optional overrides.
-    /// Returns pod info.
+    /// Spin up a GPU machine. Uses settings from remote-kernels.toml, with optional overrides.
     ///
-    /// If a pod from a previous session exists (stopped or running), reconnects to it
-    /// instead of creating a new one. Use `terminate()` first if you want a fresh pod.
+    /// If a machine with this name exists from a previous session (stopped or running),
+    /// reconnects to it instead of creating a new one. Use `terminate()` first for a fresh
+    /// machine. To run several machines concurrently, call `start()` with distinct names
+    /// (consider wait=false to start them in parallel, then poll `status()`).
     #[tool(name = "start")]
-    async fn start(&self, params: Parameters<StartParams>) -> Result<CallToolResult, McpError> {
+    pub async fn start(&self, params: Parameters<StartParams>) -> Result<CallToolResult, McpError> {
+        self.check_budget().await?;
         let params = params.0;
 
-        // Check if a pod is already active in memory.
+        let name = params.name.unwrap_or_else(|| "main".to_string());
+        if let Err(msg) = validate_instance_name(&name) {
+            return err_text(msg);
+        }
+        let wait = params.wait.unwrap_or(true);
+
+        // Reserve the name for the duration of this call (released on return).
+        let _reservation = {
+            let mut starting = self
+                .starting
+                .lock()
+                .map_err(|_| McpError::internal_error("start reservation poisoned", None))?;
+            if !starting.insert(name.clone()) {
+                return err_text(format!(
+                    "Machine {name:?} is already being started by a concurrent call."
+                ));
+            }
+            StartReservation {
+                names: Arc::clone(&self.starting),
+                name: name.clone(),
+            }
+        };
+
+        // Already active in memory?
         {
             let state = self.state.lock().await;
-            if let Some(ref pod) = state.pod {
+            if let Some(inst) = state.instances.get(&name) {
+                let phase = match inst.phase {
+                    Phase::Provisioning => "still provisioning — poll status()",
+                    Phase::Running => "running",
+                    Phase::Stopped => "stopped",
+                };
                 return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "A pod is already running (id: {}). Use status() to check it, or stop()/terminate() first.",
-                    pod.pod_id
+                    "Machine {name:?} is already {phase} (id: {}). Use status() to check it, \
+                     or stop()/terminate() first. To run an additional machine, pass a \
+                     different name to start().",
+                    inst.external_id
                 ))]));
             }
         }
 
-        // Try to reconnect to a pod from a previous session.
-        // Skip if the user passed explicit overrides — they want a specific config.
-        let has_overrides = params.gpu_type.is_some() || params.image.is_some();
-        if has_overrides {
-            // User wants specific settings — don't silently reconnect to a different pod.
-            let project_dir = self.state.lock().await.project_dir.clone();
-            if let Some(pod_id) = AppState::load_existing(&project_dir) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "An existing pod ({pod_id}) was found from a previous session. \
-                     Use terminate() to delete it before starting a pod with different settings."
-                ))]));
+        // A record from a previous session?
+        let record = {
+            let state = self.state.lock().await;
+            crate::state::load_instance_record(&state.project_dir, &name)
+        };
+        if let Some(record) = record {
+            if params.gpu_type.is_some() || params.image.is_some() {
+                // Don't silently reconnect to a machine with different settings.
+                return err_text(format!(
+                    "An existing machine ({}) named {name:?} was found from a previous session. \
+                     Use terminate() to delete it before starting one with different settings.",
+                    record.external_id
+                ));
             }
-        } else if let Some(result) = self.try_reconnect().await {
-            return result;
+            if let Some(result) = self.try_reconnect(&name, record).await {
+                return result;
+            }
         }
 
-        // No existing pod — create a new one.
-        let project_dir = self.state.lock().await.project_dir.clone();
-        let ssh_keypair = crate::ssh::generate_keypair(&project_dir).map_err(|e| {
+        // New machine.
+        let runtime_name = params
+            .runtime
+            .clone()
+            .unwrap_or_else(|| self.config.default_runtime.clone());
+        let runtime = self.runtime_for(&runtime_name).await?;
+
+        if let Err(msg) = runtime.capabilities().validate_cleanup(self.config.cleanup) {
+            return err_text(format!(
+                "Configuration error for runtime {runtime_name:?}: {msg}"
+            ));
+        }
+
+        let (project_dir, ssh_key_path) = {
+            let state = self.state.lock().await;
+            (state.project_dir.clone(), state.ssh_key_path(&name))
+        };
+        let ssh_keypair = crate::ssh::generate_keypair(&ssh_key_path).map_err(|e| {
             McpError::internal_error(format!("Failed to generate SSH keypair: {e}"), None)
         })?;
         let jupyter_token = generate_token();
 
-        let gpu_type_ids = if let Some(ref gpu) = params.gpu_type {
-            vec![gpu.clone()]
-        } else {
-            self.config.gpu_type_ids.clone()
+        let req = ProvisionRequest {
+            name: name.clone(),
+            gpu_type: params.gpu_type,
+            image: params.image,
+            env: self.build_env(&project_dir),
+            ssh_public_key: ssh_keypair.public_key_openssh,
+            jupyter_token: jupyter_token.clone(),
         };
 
-        let image_name = params
-            .image
-            .unwrap_or_else(|| self.config.image_name.clone());
+        tracing::info!(instance = %name, runtime = %runtime_name, "Provisioning machine...");
+        let handle = runtime
+            .provision(&req)
+            .await
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
 
-        // Build pod environment variables from all sources (later overrides earlier):
-        // 1. env-file (dotenv file)
-        // 2. inherit-env (forward from local environment)
-        // 3. [env] section (explicit key-value pairs)
-        // 4. Required vars (PUBLIC_KEY, JUPYTER_PASSWORD)
-        let mut env = std::collections::HashMap::new();
-
-        if let Some(ref env_file) = self.config.env_file {
-            let path = project_dir.join(env_file);
-            match dotenvy::from_path_iter(&path) {
-                Ok(iter) => {
-                    for (key, val) in iter.flatten() {
-                        env.insert(key, val);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(?path, "Failed to load env-file: {e}");
-                }
-            }
-        }
-
-        for var_name in &self.config.inherit_env {
-            if let Ok(val) = std::env::var(var_name) {
-                env.insert(var_name.clone(), val);
-            }
-        }
-
-        env.extend(self.config.env.clone());
-        env.insert("PUBLIC_KEY".to_string(), ssh_keypair.public_key_openssh);
-        env.insert("JUPYTER_PASSWORD".to_string(), jupyter_token.clone());
-
-        tracing::info!("Creating pod...");
-
-        // Try each GPU type in order. For each GPU type:
-        // - Availability errors (parsed from 500 body) → skip to next GPU type immediately
-        // - Other 500 errors → retry up to 3 times with 1s delay, then move to next GPU type
-        // - Non-500 errors → fail immediately
-        let created_pod = {
-            let mut failures: Vec<(String, String)> = Vec::new();
-            let mut result_pod = None;
-
-            for gpu_type in &gpu_type_ids {
-                let runpod = &self.config.runpod;
-                let extra = runpod
-                    .extra
-                    .iter()
-                    .map(|(k, v)| {
-                        let json_val = toml_to_json(v);
-                        (to_camel_case(k), json_val)
-                    })
-                    .collect();
-
-                let input = PodCreateInput {
-                    name: self.config.name.clone(),
-                    image_name: image_name.clone(),
-                    gpu_type_ids: vec![gpu_type.clone()],
-                    gpu_count: Some(runpod.gpu_count),
-                    cloud_type: Some(runpod.cloud_type.clone()),
-                    container_disk_in_gb: Some(runpod.container_disk_gb),
-                    volume_in_gb: if runpod.volume_gb > 0 {
-                        Some(runpod.volume_gb)
-                    } else {
-                        None
-                    },
-                    volume_mount_path: Some(runpod.volume_mount_path.clone()),
-                    network_volume_id: runpod.network_volume_id.clone(),
-                    ports: Some(vec!["8888/http".to_string(), "22/tcp".to_string()]),
-                    env: Some(env.clone()),
-                    // NOTE: dockerStartCmd is NOT used — it replaces the container's
-                    // CMD which prevents RunPod images from starting services (Jupyter,
-                    // SSH). Startup commands (rsync install, user commands) run via SSH
-                    // in the heartbeat pipeline instead.
-                    docker_start_cmd: None,
-                    extra,
-                };
-
-                tracing::info!(gpu_type = %gpu_type, "Trying GPU type...");
-
-                let mut succeeded = false;
-                for attempt in 1..=3 {
-                    match self.runpod.create_pod(&input).await {
-                        Ok(p) => {
-                            result_pod = Some(p);
-                            succeeded = true;
-                            break;
-                        }
-                        Err(e) if e.is_availability_error() => {
-                            tracing::info!(gpu_type = %gpu_type, error = %e, "No availability, skipping to next GPU type");
-                            failures.push((gpu_type.clone(), format!("no availability: {e}")));
-                            break;
-                        }
-                        Err(e) if e.is_server_error() && attempt < 3 => {
-                            tracing::info!(gpu_type = %gpu_type, attempt, error = %e, "Server error, retrying...");
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        }
-                        Err(e) if e.is_server_error() => {
-                            // Final retry attempt failed
-                            tracing::info!(gpu_type = %gpu_type, error = %e, "Server error on final attempt, moving to next GPU type");
-                            failures.push((
-                                gpu_type.clone(),
-                                format!("server error after {attempt} attempts: {e}"),
-                            ));
-                            break;
-                        }
-                        Err(e) => {
-                            // Non-server error (e.g. 4xx, network) — fail immediately
-                            return Err(McpError::internal_error(
-                                format!("Failed to create pod: {e}"),
-                                None,
-                            ));
-                        }
-                    }
-                }
-
-                if succeeded {
-                    break;
-                }
-            }
-
-            result_pod.ok_or_else(|| {
-                let mut msg = String::from("Failed to create pod — all GPU types exhausted:\n");
-                for (gpu, reason) in &failures {
-                    let _ = writeln!(msg, "  - {gpu}: {reason}");
-                }
-                msg.push_str("\nConsider editing gpu-type-ids in remote-kernels.toml to try different GPU types.");
-                McpError::internal_error(msg, None)
-            })?
-        };
-
-        tracing::info!(pod_id = %created_pod.id, gpu = %created_pod.gpu_display_name(), "Pod created");
-
-        let gpu_name = created_pod.gpu_display_name().to_string();
-        let cost = created_pod.cost_per_hr.unwrap_or(0.0);
-        let jupyter = JupyterClient::new(&created_pod.id, &jupyter_token);
-
-        // Save state immediately so we can clean up even if polling fails.
+        // Record the instance durably the moment it exists at the provider —
+        // a crash from here on must not orphan a paid machine.
         {
             let mut state = self.state.lock().await;
-            state.set_pod(
-                &created_pod,
-                jupyter,
+            let inst = InstanceState::provisioning(
+                name.clone(),
+                runtime_name.clone(),
+                handle.external_id.clone(),
+                handle.gpu_name.clone(),
+                handle.cost_per_hr.unwrap_or(0.0),
+                self.config.cleanup,
                 jupyter_token.clone(),
                 ssh_keypair.private_key_path,
             );
-            if let Err(e) = state.save(self.config.cleanup) {
-                tracing::warn!("Failed to persist state: {e}");
+            let record = inst.record();
+            state.instances.insert(name.clone(), inst);
+            if let Err(e) = state.save_record(&name, &record) {
+                tracing::warn!("Failed to persist instance record: {e}");
             }
         }
 
-        // Wait for pod to be running, start heartbeat, wait for Jupyter.
-        // If anything fails, clean up the pod so we don't leave a zombie.
-        if let Err(e) = self.wait_for_running(&created_pod.id).await {
-            self.cleanup_failed_start(&created_pod.id).await;
-            return Err(McpError::internal_error(
-                format!("Pod failed to start: {e}"),
-                None,
-            ));
+        if wait {
+            match self.finalize_start(&name, &handle.external_id).await {
+                Ok(summary) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel."
+                ))])),
+                Err(e) => {
+                    self.cleanup_failed_start(&name, &handle.external_id, &runtime_name)
+                        .await;
+                    Err(McpError::internal_error(
+                        format!("Machine failed to start: {e}"),
+                        None,
+                    ))
+                }
+            }
+        } else {
+            // Finish setup in the background; failures are reported via status().
+            let server = self.clone();
+            let bg_name = name.clone();
+            let bg_external_id = handle.external_id.clone();
+            let bg_runtime = runtime_name.clone();
+            tokio::spawn(async move {
+                if let Err(e) = server.finalize_start(&bg_name, &bg_external_id).await {
+                    tracing::warn!(instance = %bg_name, "Background start failed: {e}");
+                    server
+                        .cleanup_failed_start(&bg_name, &bg_external_id, &bg_runtime)
+                        .await;
+                    server.start_failures.lock().await.push(format!(
+                        "Machine {bg_name:?} failed to start: {e} (it has been cleaned up)"
+                    ));
+                }
+            });
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Machine {name:?} is provisioning (id: {}, GPU: {}). Setup continues in the \
+                 background — poll status() until it shows running before creating kernels.",
+                handle.external_id, handle.gpu_name
+            ))]))
         }
-        if let Err(e) = self
-            .start_heartbeat_and_wait_for_jupyter(&created_pod.id, cost)
-            .await
-        {
-            self.cleanup_failed_start(&created_pod.id).await;
-            return Err(e);
-        }
-
-        let mut msg = format!(
-            "Pod started successfully!\n\
-             - ID: {}\n\
-             - GPU: {gpu_name}\n\
-             - Cost: ${cost:.2}/hr\n\
-             - Status: RUNNING",
-            created_pod.id,
-        );
-        if let Some(budget) = self.budget {
-            let total_spend = self.state.lock().await.total_spend();
-            let remaining = budget - total_spend;
-            let _ = write!(
-                msg,
-                "\n- Budget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
-            );
-        }
-        msg.push_str("\n\nUse create_kernel() to start a kernel.");
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    /// Stop the running pod. The pod is preserved (storage costs still apply).
-    /// Call `start()` to resume it, or `terminate()` to delete it.
+    /// Stop a machine. It is preserved and can be resumed with `start()`, but storage
+    /// costs may still apply. Use `terminate()` to delete it entirely.
     #[tool(name = "stop")]
-    async fn stop(&self, _params: Parameters<EmptyParams>) -> Result<CallToolResult, McpError> {
-        let pod_id = {
-            let state = self.state.lock().await;
-            match &state.pod {
-                Some(pod) => pod.pod_id.clone(),
-                None => {
-                    // Check if there's a stopped pod on disk.
-                    match AppState::load_existing(&state.project_dir) {
-                        Some(id) => {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Pod {id} is already stopped. Use terminate() to delete it, \
-                                 or restart it from the RunPod dashboard."
-                            ))]));
-                        }
-                        None => {
-                            return Ok(CallToolResult::error(vec![Content::text(
-                                "No pod is running. Call start() first.",
-                            )]));
-                        }
-                    }
-                }
-            }
-        };
-
-        tracing::info!(pod_id = %pod_id, "Stopping pod...");
-
-        self.runpod
-            .stop_pod(&pod_id)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to stop pod: {e}"), None))?;
-
-        let mut state = self.state.lock().await;
-        state.snapshot_spend();
-        if let Some(mut pod) = state.pod.take()
-            && let Some(hb) = pod.heartbeat.take()
-        {
-            hb.stop();
-        }
-        // total_spend() after take(): accumulated_spend (includes snapshot) + 0 = correct.
-        let total = state.total_spend();
-        // Preserve pod_id on disk so status() and terminate() can find stopped pods.
-        if let Err(e) = state.save_with_pod_id(Some(&pod_id), self.config.cleanup) {
-            tracing::warn!("Failed to save state: {e}");
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Pod {pod_id} stopped. Session cost: ${total:.2}. \
-             Use terminate() to delete it, or restart it from the RunPod dashboard.",
-        ))]))
-    }
-
-    /// Terminate (delete) the running pod. All data on the pod is lost.
-    /// Network volumes are preserved.
-    #[tool(name = "terminate")]
-    async fn terminate(
+    pub async fn stop(
         &self,
-        _params: Parameters<EmptyParams>,
+        params: Parameters<InstanceParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (pod_id, from_disk) = {
+        let requested = params.0.instance;
+
+        let name = {
             let state = self.state.lock().await;
-            match &state.pod {
-                Some(pod) => (pod.pod_id.clone(), false),
-                None => {
-                    // Fallback: check persisted state for a stopped pod.
-                    match AppState::load_existing(&state.project_dir) {
-                        Some(id) => (id, true),
-                        None => {
-                            return Ok(CallToolResult::error(vec![Content::text(
-                                "No pod is running. Call start() first.",
-                            )]));
-                        }
+            match state.resolve_instance(requested.as_deref()) {
+                Ok(name) => name,
+                Err(msg) => {
+                    // Maybe it's a stopped machine known only on disk.
+                    if let Some(name) = self.resolve_record_only(requested.as_deref()).await {
+                        return err_text(format!(
+                            "Machine {name:?} is already stopped. Use start(name=\"{name}\") to \
+                             resume it or terminate(instance=\"{name}\") to delete it."
+                        ));
                     }
+                    return err_text(msg);
                 }
             }
         };
 
-        tracing::info!(pod_id = %pod_id, from_disk, "Terminating pod...");
+        let Some(target) = self.live_target(&name).await else {
+            return err_text(format!("Machine {name:?} is no longer active."));
+        };
 
-        self.runpod
-            .terminate_pod(&pod_id)
+        tracing::info!(instance = %name, external_id = %target.external_id, "Stopping machine...");
+        self.cleanup_instance(&target, CleanupAction::Stop)
             .await
-            .map_err(|e| McpError::internal_error(format!("Failed to terminate pod: {e}"), None))?;
+            .map_err(|e| McpError::internal_error(format!("Failed to stop machine: {e}"), None))?;
 
-        let mut state = self.state.lock().await;
-        if !from_disk {
-            state.snapshot_spend();
-        }
-        if let Some(mut pod) = state.pod.take()
-            && let Some(hb) = pod.heartbeat.take()
-        {
-            hb.stop();
-        }
-        // total_spend() after take(): accumulated_spend (includes snapshot) + 0 = correct.
-        let total = state.total_spend();
-        // Pod is fully deleted — clear state file.
-        if let Err(e) = state.clear() {
-            tracing::warn!("Failed to clear state: {e}");
-        }
-
+        let total = self.state.lock().await.total_spend();
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Pod {pod_id} terminated. Session cost: ${total:.2}. All pod data has been deleted.",
+            "Machine {name:?} stopped. Session cost: ${total:.2}. \
+             Use start(name=\"{name}\") to resume it or terminate(instance=\"{name}\") to delete it.",
         ))]))
     }
 
-    /// Get the current pod status including GPU, cost, and uptime.
-    #[tool(name = "status")]
-    async fn status(&self, _params: Parameters<EmptyParams>) -> Result<CallToolResult, McpError> {
-        // First check in-memory state (active pod).
-        let state = self.state.lock().await;
-        if let Some(ref pod_state) = state.pod {
-            let pod_id = pod_state.pod_id.clone();
-            let cost_per_hr = pod_state.cost_per_hr;
-            let uptime_mins = pod_state.started_at.elapsed().as_secs() / 60;
-            let total_spend = state.total_spend();
-            let gpu_name = pod_state.gpu_name.clone();
-            let kernel_ids = pod_state.kernel_ids.clone();
-            drop(state);
+    /// Terminate (delete) a machine. All data on it is lost. Network volumes are preserved.
+    #[tool(name = "terminate")]
+    pub async fn terminate(
+        &self,
+        params: Parameters<InstanceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let requested = params.0.instance;
 
-            let pod = self.runpod.get_pod(&pod_id).await.map_err(|e| {
-                McpError::internal_error(format!("Failed to get pod status: {e}"), None)
+        // Live instance, or a record-only (stopped/crashed) machine.
+        let live_name = {
+            let state = self.state.lock().await;
+            state.resolve_instance(requested.as_deref()).ok()
+        };
+        let target = if let Some(name) = live_name {
+            self.live_target(&name).await
+        } else if let Some(name) = self.resolve_record_only(requested.as_deref()).await {
+            let state = self.state.lock().await;
+            crate::state::load_instance_record(&state.project_dir, &name).map(|record| {
+                CleanupTarget {
+                    name,
+                    external_id: record.external_id,
+                    runtime: record.runtime,
+                }
+            })
+        } else {
+            return err_text("No machine is running. Call start() first.");
+        };
+        let Some(target) = target else {
+            return err_text("No machine is running. Call start() first.");
+        };
+
+        tracing::info!(instance = %target.name, external_id = %target.external_id, "Terminating machine...");
+        self.cleanup_instance(&target, CleanupAction::Terminate)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to terminate machine: {e}"), None)
             })?;
 
-            let cleanup_mode = match self.config.cleanup {
-                Cleanup::Stop => "stop",
-                Cleanup::Terminate => "terminate",
-                Cleanup::Disabled => "disabled",
-            };
-
-            let mut info = format!(
-                "Pod: {}\n\
-                 Status: {}\n\
-                 GPU: {gpu_name}\n\
-                 Cost: ${cost_per_hr:.2}/hr\n\
-                 Uptime: {uptime_mins} minutes\n\
-                 Session cost: ${total_spend:.2}\n\
-                 Cleanup: {cleanup_mode}\n\
-                 Kernels: {}",
-                pod.id,
-                pod.desired_status.as_deref().unwrap_or("unknown"),
-                if kernel_ids.is_empty() {
-                    "none".to_string()
-                } else {
-                    kernel_ids.join(", ")
-                },
-            );
-
-            if let Some(budget) = self.budget {
-                let remaining = budget - total_spend;
-                let _ = write!(
-                    info,
-                    "\nBudget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
-                );
-            }
-
-            return Ok(CallToolResult::success(vec![Content::text(info)]));
-        }
-
-        // Fallback: check persisted state for a stopped pod.
-        let project_dir = state.project_dir.clone();
-        let accumulated_spend = state.accumulated_spend;
-        drop(state);
-
-        let Some(persisted) = AppState::load_persisted(&project_dir) else {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No pod is currently running.",
-            )]));
-        };
-        let Some(pod_id) = persisted.pod_id else {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No pod is currently running.",
-            )]));
-        };
-
-        // Query RunPod for the stopped pod's status.
-        match self.runpod.get_pod(&pod_id).await {
-            Ok(pod) => {
-                let status = pod.desired_status.as_deref().unwrap_or("unknown");
-                let gpu_name = match pod.gpu_display_name() {
-                    "unknown" => persisted.gpu_name.as_deref().unwrap_or("unknown"),
-                    name => name,
-                };
-                let mut info = format!(
-                    "Pod: {}\n\
-                     Status: {status}\n\
-                     GPU: {gpu_name}\n\
-                     Session cost: ${accumulated_spend:.2}\n\
-                     Note: Pod was stopped. Use terminate() to delete it.",
-                    pod.id,
-                );
-
-                if let Some(budget) = self.budget {
-                    let remaining = budget - accumulated_spend;
-                    let _ = write!(
-                        info,
-                        "\nBudget: ${accumulated_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
-                    );
-                }
-
-                Ok(CallToolResult::success(vec![Content::text(info)]))
-            }
-            Err(e) => {
-                // Pod might have been terminated externally.
-                tracing::warn!(pod_id, error = %e, "Failed to query stopped pod");
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Pod {pod_id} was previously stopped but could not be queried: {e}\n\
-                     It may have been terminated externally.",
-                ))]))
-            }
-        }
+        let total = self.state.lock().await.total_spend();
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Machine {:?} terminated. Session cost: ${total:.2}. All machine data has been deleted.",
+            target.name
+        ))]))
     }
 
-    /// Spin up an additional kernel on the running pod. Returns the new kernel ID.
+    /// Get the status of all machines (or one, via `instance`): phase, GPU, cost,
+    /// uptime, kernels, and session spend.
+    #[tool(name = "status")]
+    pub async fn status(
+        &self,
+        params: Parameters<InstanceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        struct LiveSnapshot {
+            name: String,
+            runtime: String,
+            external_id: String,
+            gpu: String,
+            cost_per_hr: f64,
+            uptime_mins: u64,
+            kernels: Vec<String>,
+            phase: Phase,
+            cleanup: Cleanup,
+        }
+
+        let only = params.0.instance;
+        let mut sections: Vec<String> = Vec::new();
+
+        // Background start failures are one-shot notifications.
+        {
+            let mut failures = self.start_failures.lock().await;
+            sections.extend(failures.drain(..));
+        }
+
+        // Live instances.
+        let live: Vec<LiveSnapshot> = {
+            let state = self.state.lock().await;
+            state
+                .instances
+                .values()
+                .filter(|inst| only.as_deref().is_none_or(|o| o == inst.name))
+                .map(|inst| LiveSnapshot {
+                    name: inst.name.clone(),
+                    runtime: inst.runtime.clone(),
+                    external_id: inst.external_id.clone(),
+                    gpu: inst.gpu_name.clone(),
+                    cost_per_hr: inst.cost_per_hr,
+                    uptime_mins: inst.started_at.elapsed().as_secs() / 60,
+                    kernels: inst.kernel_ids.clone(),
+                    phase: inst.phase,
+                    cleanup: inst.cleanup,
+                })
+                .collect()
+        };
+        let live_names: Vec<String> = live.iter().map(|i| i.name.clone()).collect();
+
+        for inst in live {
+            let provider_status = match self.runtime_for(&inst.runtime).await {
+                Ok(rt) => match rt.describe(&inst.external_id).await {
+                    Ok(status) => format!("{status:?}"),
+                    Err(e) => format!("query failed: {e}"),
+                },
+                Err(_) => "unknown (runtime unavailable)".to_string(),
+            };
+            let phase_note = match inst.phase {
+                Phase::Provisioning => " (provisioning — not ready yet)",
+                _ => "",
+            };
+            sections.push(format!(
+                "Machine: {} ({}, id {}){phase_note}\n\
+                 Status: {provider_status}\n\
+                 GPU: {}\n\
+                 Cost: ${:.2}/hr\n\
+                 Uptime: {} minutes\n\
+                 Cleanup: {}\n\
+                 Kernels: {}",
+                inst.name,
+                inst.runtime,
+                inst.external_id,
+                inst.gpu,
+                inst.cost_per_hr,
+                inst.uptime_mins,
+                match inst.cleanup {
+                    Cleanup::Stop => "stop",
+                    Cleanup::Terminate => "terminate",
+                    Cleanup::Disabled => "disabled",
+                },
+                if inst.kernels.is_empty() {
+                    "none".to_string()
+                } else {
+                    inst.kernels.join(", ")
+                },
+            ));
+        }
+
+        // Record-only machines (stopped, or from a previous session).
+        let records = {
+            let state = self.state.lock().await;
+            crate::state::list_instance_records(&state.project_dir)
+        };
+        for (name, record) in records {
+            if live_names.contains(&name) || only.as_deref().is_some_and(|o| o != name) {
+                continue;
+            }
+            let provider_status = match self.runtime_for(&record.runtime).await {
+                Ok(rt) => match rt.describe(&record.external_id).await {
+                    Ok(status) => format!("{status:?}"),
+                    Err(e) => format!("query failed: {e}"),
+                },
+                Err(e) => format!("unknown ({e})"),
+            };
+            sections.push(format!(
+                "Machine: {name} ({}, id {}) — from a previous session\n\
+                 Status: {provider_status}\n\
+                 GPU: {}\n\
+                 Note: use start(name=\"{name}\") to reconnect or terminate(instance=\"{name}\") to delete.",
+                record.runtime,
+                record.external_id,
+                record.gpu_name.as_deref().unwrap_or("unknown"),
+            ));
+        }
+
+        if sections.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No machine is currently running.",
+            )]));
+        }
+
+        let total_spend = self.state.lock().await.total_spend();
+        let mut info = sections.join("\n\n");
+        let _ = write!(info, "\n\nSession cost: ${total_spend:.2}");
+        if let Some(budget) = self.budget {
+            let remaining = budget - total_spend;
+            let _ = write!(
+                info,
+                "\nBudget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
+            );
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(info)]))
+    }
+
+    /// Spin up a kernel on a running machine. Returns the new kernel ID.
     #[tool(name = "create_kernel")]
-    async fn create_kernel(
+    pub async fn create_kernel(
         &self,
         params: Parameters<CreateKernelParams>,
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
-        let name = params.0.name;
+        let params = params.0;
 
-        let state = self.state.lock().await;
-        let Some(pod_state) = &state.pod else {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "No pod is running. Call start() first.",
-            )]));
+        let (instance_name, jupyter, ws_base, token) = {
+            let state = self.state.lock().await;
+            let name = match state.resolve_instance(params.instance.as_deref()) {
+                Ok(n) => n,
+                Err(msg) => return err_text(msg),
+            };
+            let inst = &state.instances[&name];
+            if inst.phase != Phase::Running {
+                return err_text(format!(
+                    "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
+                ));
+            }
+            let conn = inst
+                .connection
+                .as_ref()
+                .ok_or_else(|| McpError::internal_error("Machine has no connection", None))?;
+            (
+                name,
+                inst.jupyter.clone(),
+                conn.jupyter().ws_base.clone(),
+                inst.jupyter_token.clone(),
+            )
         };
 
-        let kernel =
-            pod_state.jupyter.create_kernel().await.map_err(|e| {
-                McpError::internal_error(format!("Failed to create kernel: {e}"), None)
-            })?;
-
+        // HTTP call happens outside the state lock.
+        let kernel = jupyter
+            .create_kernel()
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to create kernel: {e}"), None))?;
         let kernel_id = kernel.id;
-        let pod_id = pod_state.pod_id.clone();
-        let token = pod_state.jupyter_token.clone();
-        drop(state);
 
-        let conn = crate::jupyter::ws::KernelConnection::connect(&pod_id, &kernel_id, &token)
+        let conn = crate::jupyter::ws::KernelConnection::connect(&ws_base, &kernel_id, &token)
             .await
             .map_err(|e| {
                 McpError::internal_error(
@@ -609,25 +643,27 @@ impl RemoteKernelsServer {
             let mut state = self.state.lock().await;
             let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
             let mut nb_path = None;
-            if let Some(ref mut pod) = state.pod {
-                pod.kernel_ids.push(kernel_id.clone());
-                pod.kernel_connections.insert(kernel_id.clone(), conn);
+            if let Some(inst) = state.instances.get_mut(&instance_name) {
+                inst.kernel_ids.push(kernel_id.clone());
+                inst.kernel_connections.insert(kernel_id.clone(), conn);
 
-                if let Ok(nb) =
-                    crate::notebook::Notebook::new(&notebook_dir, &kernel_id, name.as_deref())
-                {
+                if let Ok(nb) = crate::notebook::Notebook::new(
+                    &notebook_dir,
+                    &kernel_id,
+                    params.name.as_deref(),
+                ) {
                     nb_path = Some(nb.path().to_path_buf());
-                    pod.notebooks.insert(kernel_id.clone(), nb);
+                    inst.notebooks.insert(kernel_id.clone(), nb);
                 }
             }
             nb_path
         };
 
-        let label = match &name {
+        let label = match &params.name {
             Some(n) => format!("{kernel_id} ({n})"),
             None => kernel_id.clone(),
         };
-        let mut msg = format!("Kernel created: {label}");
+        let mut msg = format!("Kernel created: {label} (machine: {instance_name})");
         if let Some(path) = notebook_path {
             let _ = write!(msg, "\nNotebook: {}", path.display());
         }
@@ -637,43 +673,43 @@ impl RemoteKernelsServer {
     /// Execute Python code in a Jupyter kernel. Returns the output (stdout, stderr, result, errors).
     /// For long-running code, consider using a reasonable timeout.
     #[tool(name = "execute")]
-    async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
+    pub async fn execute(
+        &self,
+        params: Parameters<ExecuteParams>,
+    ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
 
         let params = params.0;
         let timeout_secs = params.timeout.unwrap_or(30);
         let queue = params.queue.unwrap_or(false);
 
-        let (mut result_rx, cell_number, kernel_id) = {
+        let (mut result_rx, cell_number, kernel_id, instance_name, cleanup) = {
             let mut state = self.state.lock().await;
-            let Some(pod_state) = &mut state.pod else {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "No pod is running. Call start() first.",
-                )]));
+            let Some(instance_name) = state
+                .instance_for_kernel(&params.kernel_id)
+                .map(String::from)
+            else {
+                return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
+            let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            let cleanup = inst.cleanup;
 
-            let Some(conn) = pod_state.kernel_connections.get(&params.kernel_id) else {
-                let available: Vec<_> = pod_state.kernel_ids.clone();
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Kernel {} not found. Available kernels: {}",
-                    params.kernel_id,
-                    if available.is_empty() {
-                        "none".to_string()
-                    } else {
-                        available.join(", ")
-                    }
-                ))]));
+            let Some(conn) = inst.kernel_connections.get(&params.kernel_id) else {
+                return err_text(format!(
+                    "Kernel {} exists but its connection was lost. Use restart_kernel().",
+                    params.kernel_id
+                ));
             };
 
             // Check if kernel is busy.
             if conn.is_busy() && !queue {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return err_text(
                     "Kernel is busy. Use queue=true to wait, or interrupt() to cancel the current execution.",
-                )]));
+                );
             }
 
             // Create notebook cell placeholder.
-            let cell_number = if let Some(nb) = pod_state.notebooks.get_mut(&params.kernel_id) {
+            let cell_number = if let Some(nb) = inst.notebooks.get_mut(&params.kernel_id) {
                 match nb.append_cell_placeholder(&params.code) {
                     Ok(n) => Some(n),
                     Err(e) => {
@@ -685,8 +721,9 @@ impl RemoteKernelsServer {
                 None
             };
 
-            let session_id = pod_state.session_id.clone();
+            let session_id = inst.session_id.clone();
             let kernel_id = params.kernel_id.clone();
+            let conn = inst.kernel_connections.get(&kernel_id).expect("checked");
 
             let rx = conn
                 .start_execution(&session_id, &params.code)
@@ -696,8 +733,7 @@ impl RemoteKernelsServer {
             // Fire-and-forget: store receiver and return immediately.
             if timeout_secs == 0 {
                 if let Some(cell_num) = cell_number {
-                    pod_state
-                        .pending_executions
+                    inst.pending_executions
                         .insert((kernel_id.clone(), cell_num), rx);
                 }
 
@@ -711,7 +747,7 @@ impl RemoteKernelsServer {
                 return Ok(CallToolResult::success(vec![Content::text(msg)]));
             }
 
-            (rx, cell_number, kernel_id)
+            (rx, cell_number, kernel_id, instance_name, cleanup)
         };
         // State lock dropped here — we can await freely.
 
@@ -734,9 +770,8 @@ impl RemoteKernelsServer {
             // Store receiver for get_output().
             if let Some(cell_num) = cell_number {
                 let mut state = self.state.lock().await;
-                if let Some(pod_state) = &mut state.pod {
-                    pod_state
-                        .pending_executions
+                if let Some(inst) = state.instances.get_mut(&instance_name) {
+                    inst.pending_executions
                         .insert((kernel_id.clone(), cell_num), result_rx);
                 }
             }
@@ -773,9 +808,9 @@ impl RemoteKernelsServer {
         if let Some(spend_line) = self.format_spend_line(total_spend) {
             formatted.push_str(&spend_line);
         }
-        if self.config.cleanup == Cleanup::Disabled {
+        if cleanup == Cleanup::Disabled {
             formatted.push_str(
-                "\nNote: automatic cleanup is disabled. Remember to stop/terminate the pod when done.",
+                "\nNote: automatic cleanup is disabled. Remember to stop/terminate the machine when done.",
             );
         }
 
@@ -789,7 +824,7 @@ impl RemoteKernelsServer {
     /// Check on or wait for a previously started execution that timed out.
     /// The `cell_number` is returned by `execute()` when it times out or when timeout=0 is used.
     #[tool(name = "get_output")]
-    async fn get_output(
+    pub async fn get_output(
         &self,
         params: Parameters<GetOutputParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -797,22 +832,24 @@ impl RemoteKernelsServer {
         let wait = params.wait.unwrap_or(true);
         let timeout_secs = params.timeout.unwrap_or(30);
 
-        let mut result_rx = {
+        let (mut result_rx, instance_name) = {
             let mut state = self.state.lock().await;
-            let Some(pod_state) = &mut state.pod else {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "No pod is running.",
-                )]));
+            let Some(instance_name) = state
+                .instance_for_kernel(&params.kernel_id)
+                .map(String::from)
+            else {
+                return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
+            let inst = state.instances.get_mut(&instance_name).expect("resolved");
 
             let key = (params.kernel_id.clone(), params.cell_number);
-            let Some(rx) = pod_state.pending_executions.remove(&key) else {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+            let Some(rx) = inst.pending_executions.remove(&key) else {
+                return err_text(format!(
                     "No pending execution found for kernel {} cell {}. It may have already completed.",
                     params.kernel_id, params.cell_number
-                ))]));
+                ));
             };
-            rx
+            (rx, instance_name)
         };
 
         if wait {
@@ -834,9 +871,8 @@ impl RemoteKernelsServer {
             if timed_out {
                 // Put it back.
                 let mut state = self.state.lock().await;
-                if let Some(pod_state) = &mut state.pod {
-                    pod_state
-                        .pending_executions
+                if let Some(inst) = state.instances.get_mut(&instance_name) {
+                    inst.pending_executions
                         .insert((params.kernel_id, params.cell_number), result_rx);
                 }
                 return Ok(CallToolResult::success(vec![Content::text(format!(
@@ -856,9 +892,7 @@ impl RemoteKernelsServer {
                         Ok(CallToolResult::success(vec![Content::text(formatted)]))
                     }
                 }
-                None => Ok(CallToolResult::error(vec![Content::text(
-                    "Kernel connection was lost.",
-                )])),
+                None => err_text("Kernel connection was lost."),
             }
         } else {
             // Non-blocking check.
@@ -877,26 +911,24 @@ impl RemoteKernelsServer {
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     // Put it back.
                     let mut state = self.state.lock().await;
-                    if let Some(pod_state) = &mut state.pod {
-                        pod_state
-                            .pending_executions
+                    if let Some(inst) = state.instances.get_mut(&instance_name) {
+                        inst.pending_executions
                             .insert((params.kernel_id, params.cell_number), result_rx);
                     }
                     Ok(CallToolResult::success(vec![Content::text(
                         "Execution is still running.",
                     )]))
                 }
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Ok(
-                    CallToolResult::error(vec![Content::text("Kernel connection was lost.")]),
-                ),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    err_text("Kernel connection was lost.")
+                }
             }
         }
     }
 
-    /// Sync local project files to the running pod via rsync over SSH. Respects .gitignore.
-    /// Requires the pod to have a public IP (may not work on all community cloud machines).
+    /// Sync local project files to a machine. Respects .gitignore.
     #[tool(name = "sync")]
-    async fn sync(&self, params: Parameters<SyncParams>) -> Result<CallToolResult, McpError> {
+    pub async fn sync(&self, params: Parameters<SyncParams>) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
         let params = params.0;
 
@@ -906,101 +938,94 @@ impl RemoteKernelsServer {
             includes.extend(extra);
         }
         if let Err(msg) = crate::sync::validate_include_paths(&includes) {
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            return err_text(msg);
         }
 
-        let (project_dir, ssh_key_path) = {
+        let (project_dir, conn) = {
             let state = self.state.lock().await;
-            let Some(pod_state) = &state.pod else {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "No pod is running. Call start() first.",
-                )]));
+            let name = match state.resolve_instance(params.instance.as_deref()) {
+                Ok(n) => n,
+                Err(msg) => return err_text(msg),
             };
-            (state.project_dir.clone(), pod_state.ssh_key_path.clone())
+            let inst = &state.instances[&name];
+            let Some(conn) = inst.connection.clone() else {
+                return err_text(format!(
+                    "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
+                ));
+            };
+            (state.project_dir.clone(), conn)
         };
 
-        let (public_ip, ssh_port) = self.get_ssh_info().await?;
-        let volume_mount = self.config.runpod.volume_mount_path.clone();
-
-        let result = crate::sync::sync_to_pod(
-            &project_dir,
-            &ssh_key_path,
-            &public_ip,
-            ssh_port,
-            &volume_mount,
-            &includes,
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("Sync failed: {e}"), None))?;
+        let result = conn
+            .upload(&project_dir, &includes)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Sync failed: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    /// Download a file or directory from the pod to a local path.
+    /// Download a file or directory from a machine to a local path.
     #[tool(name = "download")]
-    async fn download(
+    pub async fn download(
         &self,
         params: Parameters<DownloadParams>,
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
         let params = params.0;
 
-        let ssh_key_path = {
+        let conn = {
             let state = self.state.lock().await;
-            let Some(pod_state) = &state.pod else {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "No pod is running. Call start() first.",
-                )]));
+            let name = match state.resolve_instance(params.instance.as_deref()) {
+                Ok(n) => n,
+                Err(msg) => return err_text(msg),
             };
-            pod_state.ssh_key_path.clone()
+            let inst = &state.instances[&name];
+            let Some(conn) = inst.connection.clone() else {
+                return err_text(format!(
+                    "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
+                ));
+            };
+            conn
         };
 
-        let (public_ip, ssh_port) = self.get_ssh_info().await?;
-
-        let result = crate::sync::download_from_pod(
-            &ssh_key_path,
-            &public_ip,
-            ssh_port,
-            &params.remote_path,
-            std::path::Path::new(&params.local_path),
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("Download failed: {e}"), None))?;
+        let result = conn
+            .download(
+                &params.remote_path,
+                std::path::Path::new(&params.local_path),
+            )
+            .await
+            .map_err(|e| McpError::internal_error(format!("Download failed: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
     /// Shut down a kernel and free its resources.
     #[tool(name = "shutdown_kernel")]
-    async fn shutdown_kernel(
+    pub async fn shutdown_kernel(
         &self,
         params: Parameters<KernelIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let kernel_id = &params.0.kernel_id;
+        let kernel_id = params.0.kernel_id;
 
-        let state = self.state.lock().await;
-        let Some(pod_state) = &state.pod else {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "No pod is running. Call start() first.",
-            )]));
+        let (instance_name, jupyter) = {
+            let state = self.state.lock().await;
+            let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
+                return err_text(Self::unknown_kernel_message(&state, &kernel_id));
+            };
+            let jupyter = state.instances[&name].jupyter.clone();
+            (name, jupyter)
         };
 
-        pod_state
-            .jupyter
-            .delete_kernel(kernel_id)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to shut down kernel: {e}"), None)
-            })?;
-
-        let kernel_id = kernel_id.clone();
-        drop(state);
+        // HTTP call happens outside the state lock.
+        jupyter.delete_kernel(&kernel_id).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to shut down kernel: {e}"), None)
+        })?;
 
         {
             let mut state = self.state.lock().await;
-            if let Some(ref mut pod) = state.pod {
-                pod.kernel_ids.retain(|id| *id != kernel_id);
-                pod.kernel_connections.remove(&kernel_id);
+            if let Some(inst) = state.instances.get_mut(&instance_name) {
+                inst.kernel_ids.retain(|id| *id != kernel_id);
+                inst.kernel_connections.remove(&kernel_id);
             }
         }
 
@@ -1011,26 +1036,24 @@ impl RemoteKernelsServer {
 
     /// Interrupt the currently running execution in a kernel.
     #[tool(name = "interrupt")]
-    async fn interrupt(
+    pub async fn interrupt(
         &self,
         params: Parameters<KernelIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let kernel_id = &params.0.kernel_id;
+        let kernel_id = params.0.kernel_id;
 
-        let state = self.state.lock().await;
-        let Some(pod_state) = &state.pod else {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "No pod is running. Call start() first.",
-            )]));
+        let jupyter = {
+            let state = self.state.lock().await;
+            let Some(name) = state.instance_for_kernel(&kernel_id) else {
+                return err_text(Self::unknown_kernel_message(&state, &kernel_id));
+            };
+            state.instances[name].jupyter.clone()
         };
 
-        pod_state
-            .jupyter
-            .interrupt_kernel(kernel_id)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to interrupt kernel: {e}"), None)
-            })?;
+        // HTTP call happens outside the state lock.
+        jupyter.interrupt_kernel(&kernel_id).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to interrupt kernel: {e}"), None)
+        })?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Kernel {kernel_id} interrupted."
@@ -1039,45 +1062,40 @@ impl RemoteKernelsServer {
 
     /// Restart a kernel (clears all state but preserves the kernel ID).
     #[tool(name = "restart_kernel")]
-    async fn restart_kernel(
+    pub async fn restart_kernel(
         &self,
         params: Parameters<KernelIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let kernel_id = &params.0.kernel_id;
+        let kernel_id = params.0.kernel_id;
 
-        let (pod_id, token) = {
+        let (instance_name, jupyter, ws_base, token) = {
             let state = self.state.lock().await;
-            let Some(pod_state) = &state.pod else {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "No pod is running. Call start() first.",
-                )]));
+            let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
+                return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
-            if !pod_state.kernel_ids.contains(&kernel_id.clone()) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Kernel {kernel_id} not found.",
-                ))]));
-            }
-            (pod_state.pod_id.clone(), pod_state.jupyter_token.clone())
+            let inst = &state.instances[&name];
+            let Some(conn) = inst.connection.as_ref() else {
+                return err_text("Machine connection is not available.");
+            };
+            (
+                name,
+                inst.jupyter.clone(),
+                conn.jupyter().ws_base.clone(),
+                inst.jupyter_token.clone(),
+            )
         };
 
-        // Restart via REST API (lock dropped so we don't hold it during the HTTP call).
-        {
-            let state = self.state.lock().await;
-            let pod_state = state.pod.as_ref().expect("pod exists");
-            pod_state
-                .jupyter
-                .restart_kernel(kernel_id)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(format!("Failed to restart kernel: {e}"), None)
-                })?;
-        }
+        // Restart via REST API — outside the state lock.
+        jupyter.restart_kernel(&kernel_id).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to restart kernel: {e}"), None)
+        })?;
 
         // Reconnect WebSocket — restarting a kernel invalidates the old connection.
         // Retry a few times since the kernel needs time to restart.
         let mut conn = None;
         for attempt in 1..=5 {
-            match crate::jupyter::ws::KernelConnection::connect(&pod_id, kernel_id, &token).await {
+            match crate::jupyter::ws::KernelConnection::connect(&ws_base, &kernel_id, &token).await
+            {
                 Ok(c) => {
                     conn = Some(c);
                     break;
@@ -1100,11 +1118,11 @@ impl RemoteKernelsServer {
         let mut state = self.state.lock().await;
         let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
         let mut notebook_path = None;
-        if let Some(ref mut pod) = state.pod {
-            pod.kernel_connections.insert(kernel_id.clone(), conn);
-            if let Ok(nb) = crate::notebook::Notebook::new(&notebook_dir, kernel_id, None) {
+        if let Some(inst) = state.instances.get_mut(&instance_name) {
+            inst.kernel_connections.insert(kernel_id.clone(), conn);
+            if let Ok(nb) = crate::notebook::Notebook::new(&notebook_dir, &kernel_id, None) {
                 notebook_path = Some(nb.path().to_path_buf());
-                pod.notebooks.insert(kernel_id.clone(), nb);
+                inst.notebooks.insert(kernel_id.clone(), nb);
             }
         }
 
@@ -1117,228 +1135,384 @@ impl RemoteKernelsServer {
 }
 
 impl RemoteKernelsServer {
-    /// Get a clone of the shared state for use outside the MCP server (e.g. graceful shutdown).
+    /// Get a clone of the shared state for use outside the MCP server.
     pub fn shared_state(&self) -> Arc<Mutex<AppState>> {
         Arc::clone(&self.state)
     }
 
-    /// Try to reconnect to a pod from a previous session/crash.
-    ///
-    /// Returns `Some(Ok(...))` if reconnection succeeded, `Some(Err(...))` if
-    /// reconnection was attempted but failed, or `None` if there's no pod to
-    /// reconnect to (caller should create a new pod).
-    async fn try_reconnect(&self) -> Option<Result<CallToolResult, McpError>> {
-        let project_dir = self.state.lock().await.project_dir.clone();
-        let persisted = AppState::load_persisted(&project_dir)?;
-        let pod_id = persisted.pod_id.as_deref()?;
-        let jupyter_token = persisted.jupyter_token.as_deref()?;
-        let ssh_key_path_str = persisted.ssh_key_path.as_deref()?;
-        let ssh_key_path = std::path::PathBuf::from(ssh_key_path_str);
-        let persisted_gpu_name = persisted.gpu_name;
-
-        // Verify the SSH key file still exists.
-        if !ssh_key_path.exists() {
-            tracing::info!("Previous pod found but SSH key is missing, creating new pod");
-            return None;
+    /// Get (building lazily) the runtime with the given name. Credentials are
+    /// resolved here, at first use.
+    async fn runtime_for(&self, name: &str) -> Result<Arc<AnyRuntime>, McpError> {
+        let mut runtimes = self.runtimes.lock().await;
+        if let Some(rt) = runtimes.get(name) {
+            return Ok(Arc::clone(rt));
         }
+        let rt = AnyRuntime::build(name, &self.config)
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+        let rt = Arc::new(rt);
+        runtimes.insert(name.to_string(), Arc::clone(&rt));
+        Ok(rt)
+    }
 
-        // Check the pod's current status on RunPod.
-        let pod = match self.runpod.get_pod(pod_id).await {
-            Ok(pod) => pod,
-            Err(e) => {
-                // Pod doesn't exist anymore (terminated externally, etc.)
-                tracing::info!(pod_id, error = %e, "Previous pod not found on RunPod, creating new pod");
-                let state = self.state.lock().await;
-                let _ = state.clear();
-                return None;
-            }
-        };
+    /// Build machine environment variables from all sources (later overrides
+    /// earlier): env-file, inherit-env, `[env]` section.
+    fn build_env(&self, project_dir: &std::path::Path) -> HashMap<String, String> {
+        let mut env = HashMap::new();
 
-        let status = pod.desired_status.as_deref().unwrap_or("unknown");
-        tracing::info!(pod_id, status, "Found existing pod from previous session");
-
-        match status {
-            "RUNNING" => {
-                // Pod is already running — just reconnect.
-                Some(
-                    self.reconnect_to_pod(
-                        pod_id,
-                        &pod,
-                        jupyter_token,
-                        ssh_key_path,
-                        persisted_gpu_name,
-                    )
-                    .await,
-                )
-            }
-            "EXITED" => {
-                // Pod is stopped — restart it.
-                tracing::info!(pod_id, "Restarting stopped pod...");
-                match self.runpod.resume_pod(pod_id).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Some(Err(McpError::internal_error(
-                            format!("Failed to restart pod {pod_id}: {e}"),
-                            None,
-                        )));
+        if let Some(ref env_file) = self.config.env_file {
+            let path = project_dir.join(env_file);
+            match dotenvy::from_path_iter(&path) {
+                Ok(iter) => {
+                    for (key, val) in iter.flatten() {
+                        env.insert(key, val);
                     }
                 }
-
-                // Wait for it to reach RUNNING status.
-                match self.wait_for_running(pod_id).await {
-                    Ok(running_pod) => Some(
-                        self.reconnect_to_pod(
-                            pod_id,
-                            &running_pod,
-                            jupyter_token,
-                            ssh_key_path,
-                            persisted_gpu_name,
-                        )
-                        .await,
-                    ),
-                    Err(e) => Some(Err(McpError::internal_error(
-                        format!("Pod failed to restart: {e}"),
-                        None,
-                    ))),
+                Err(e) => {
+                    tracing::warn!(?path, "Failed to load env-file: {e}");
                 }
             }
-            _ => {
-                // Unknown status — can't reconnect, clear state and create new.
-                tracing::info!(pod_id, status, "Pod in unexpected state, creating new pod");
-                let state = self.state.lock().await;
-                let _ = state.clear();
-                None
+        }
+
+        for var_name in &self.config.inherit_env {
+            if let Ok(val) = std::env::var(var_name) {
+                env.insert(var_name.clone(), val);
             }
+        }
+
+        env.extend(self.config.env.clone());
+        env
+    }
+
+    /// Find a record-only instance (on disk but not in memory) by name, or the
+    /// sole record when unnamed.
+    async fn resolve_record_only(&self, requested: Option<&str>) -> Option<String> {
+        let state = self.state.lock().await;
+        let records = crate::state::list_instance_records(&state.project_dir);
+        let candidates: Vec<String> = records
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| !state.instances.contains_key(name))
+            .collect();
+        match requested {
+            Some(name) => candidates
+                .contains(&name.to_string())
+                .then(|| name.to_string()),
+            None if candidates.len() == 1 => Some(candidates[0].clone()),
+            None => None,
         }
     }
 
-    /// Reconnect to a running pod: set up state, start heartbeat, wait for Jupyter.
-    async fn reconnect_to_pod(
-        &self,
-        pod_id: &str,
-        pod: &crate::runpod::types::Pod,
-        jupyter_token: &str,
-        ssh_key_path: std::path::PathBuf,
-        persisted_gpu_name: Option<String>,
-    ) -> Result<CallToolResult, McpError> {
-        // Prefer API response, fall back to persisted name from creation.
-        let gpu_name = match pod.gpu_display_name() {
-            "unknown" => persisted_gpu_name.unwrap_or_else(|| "unknown".to_string()),
-            name => name.to_string(),
-        };
-        let cost = pod.cost_per_hr.unwrap_or(0.0);
-        let jupyter = JupyterClient::new(pod_id, jupyter_token);
+    fn unknown_kernel_message(state: &AppState, kernel_id: &str) -> String {
+        let all_kernels: Vec<String> = state
+            .instances
+            .values()
+            .flat_map(|i| i.kernel_ids.iter().cloned())
+            .collect();
+        format!(
+            "Kernel {kernel_id} not found. Available kernels: {}",
+            if all_kernels.is_empty() {
+                "none".to_string()
+            } else {
+                all_kernels.join(", ")
+            }
+        )
+    }
 
-        // Set up in-memory state.
+    /// Try to reconnect to a machine recorded from a previous session/crash.
+    ///
+    /// Returns `Some(Ok(...))` if reconnection succeeded, `Some(Err(...))` if
+    /// it was attempted but failed, or `None` if there's nothing to reconnect
+    /// to (caller should create a new machine).
+    async fn try_reconnect(
+        &self,
+        name: &str,
+        record: InstanceRecord,
+    ) -> Option<Result<CallToolResult, McpError>> {
+        let runtime = match self.runtime_for(&record.runtime).await {
+            Ok(rt) => rt,
+            Err(e) => return Some(Err(e)),
+        };
+
+        // A record whose credentials are unusable still points at a possibly
+        // billing machine — never silently replace it (the new machine's
+        // record would overwrite this one and the old machine is forgotten).
+        let credentials = record.jupyter_token.clone().zip(
+            record
+                .ssh_key_path
+                .clone()
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.exists()),
+        );
+        let Some((jupyter_token, ssh_key_path)) = credentials else {
+            return Some(err_text(format!(
+                "A machine ({}) named {name:?} exists from a previous session, but its \
+                 credentials (SSH key / Jupyter token) are missing, so it can't be reconnected. \
+                 Use terminate(instance=\"{name}\") to delete it, then start() again.",
+                record.external_id
+            )));
+        };
+
+        let status = match runtime.describe(&record.external_id).await {
+            Ok(status) => status,
+            Err(e) => {
+                // A transient provider error is NOT proof the machine is gone
+                // — clearing the record here would abandon a possibly-billing
+                // machine. Surface the error and keep the record; the user can
+                // retry or terminate() explicitly. (describe() maps a real
+                // 404 to InstanceStatus::Gone, handled below.)
+                return Some(Err(McpError::internal_error(
+                    format!(
+                        "Could not verify the previous machine {} ({}): {e}. \
+                         Its record was kept — retry start(), or terminate(instance=\"{name}\") \
+                         to delete it.",
+                        record.external_id, record.runtime
+                    ),
+                    None,
+                )));
+            }
+        };
+
+        tracing::info!(external_id = %record.external_id, ?status, "Found existing machine from previous session");
+
+        match status {
+            // Running now, or still coming up (e.g. crash mid-provision) —
+            // finalize_start's wait_running handles both.
+            InstanceStatus::Running | InstanceStatus::Provisioning => {}
+            InstanceStatus::Stopped => {
+                tracing::info!(external_id = %record.external_id, "Resuming stopped machine...");
+                if let Err(e) = runtime.resume(&record.external_id).await {
+                    return Some(Err(McpError::internal_error(
+                        format!("Failed to resume machine {}: {e}", record.external_id),
+                        None,
+                    )));
+                }
+            }
+            InstanceStatus::Gone => {
+                // Definitive: the provider no longer knows this machine.
+                tracing::info!(external_id = %record.external_id, "Previous machine is gone, creating new machine");
+                let state = self.state.lock().await;
+                let _ = state.clear_record(name);
+                return None;
+            }
+            InstanceStatus::Unknown(s) => {
+                // NOT proof the machine is gone — it may still be billing.
+                // Keep the record; the user decides.
+                return Some(err_text(format!(
+                    "The previous machine {} named {name:?} is in an unexpected state ({s}). \
+                     Its record was kept — retry start(), or terminate(instance=\"{name}\") \
+                     to delete it.",
+                    record.external_id
+                )));
+            }
+        }
+
+        // Register the instance and finish setup through the shared path.
         {
             let mut state = self.state.lock().await;
-            state.set_pod(pod, jupyter, jupyter_token.to_string(), ssh_key_path);
-            if let Err(e) = state.save(self.config.cleanup) {
-                tracing::warn!("Failed to persist state: {e}");
+            let inst = InstanceState::provisioning(
+                name.to_string(),
+                record.runtime.clone(),
+                record.external_id.clone(),
+                record
+                    .gpu_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                record.cost_per_hr,
+                record.cleanup,
+                jupyter_token.clone(),
+                ssh_key_path,
+            );
+            state.instances.insert(name.to_string(), inst);
+        }
+
+        match self.finalize_start(name, &record.external_id).await {
+            Ok(summary) => Some(Ok(CallToolResult::success(vec![Content::text(format!(
+                "Reconnected to existing machine!\n{summary}\n\nUse create_kernel() to start a kernel."
+            ))]))),
+            Err(e) => {
+                self.cleanup_failed_start(name, &record.external_id, &record.runtime)
+                    .await;
+                Some(Err(McpError::internal_error(
+                    format!("Failed to reconnect: {e}"),
+                    None,
+                )))
+            }
+        }
+    }
+
+    /// Shared post-allocation path for new machines and reconnects: wait for
+    /// running, open the connection, start the heartbeat, wait for Jupyter,
+    /// then mark the instance Running. Returns a human-readable summary.
+    ///
+    /// `external_id` pins the machine generation: if the named instance is
+    /// terminated and recreated while this runs (background start), all
+    /// write-backs bail instead of clobbering the new machine's state.
+    #[allow(clippy::too_many_lines)]
+    async fn finalize_start(&self, name: &str, external_id: &str) -> anyhow::Result<String> {
+        fn same_generation<'a>(
+            state: &'a mut AppState,
+            name: &str,
+            external_id: &str,
+        ) -> anyhow::Result<&'a mut InstanceState> {
+            state
+                .instances
+                .get_mut(name)
+                .filter(|i| i.external_id == external_id)
+                .ok_or_else(|| anyhow::anyhow!("instance was removed or replaced during start"))
+        }
+
+        let (runtime_name, jupyter_token, ssh_key_path, cleanup) = {
+            let mut state = self.state.lock().await;
+            let inst = same_generation(&mut state, name, external_id)?;
+            (
+                inst.runtime.clone(),
+                inst.jupyter_token.clone(),
+                inst.ssh_key_path.clone(),
+                inst.cleanup,
+            )
+        };
+        let runtime = self
+            .runtime_for(&runtime_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        let handle = runtime.wait_running(external_id).await?;
+
+        let conn = runtime
+            .open(
+                external_id,
+                &ConnectionContext {
+                    ssh_key_path,
+                    jupyter_token: jupyter_token.clone(),
+                },
+            )
+            .await?;
+        let conn = Arc::new(conn);
+        let endpoint = conn.jupyter().clone();
+        let jupyter = JupyterClient::new(&endpoint.http_base, &jupyter_token);
+
+        // Update instance details.
+        {
+            let mut state = self.state.lock().await;
+            let inst = same_generation(&mut state, name, external_id)?;
+            inst.gpu_name.clone_from(&handle.gpu_name);
+            inst.cost_per_hr = handle.cost_per_hr.unwrap_or(inst.cost_per_hr);
+            inst.jupyter = jupyter.clone();
+            inst.connection = Some(Arc::clone(&conn));
+        }
+
+        // Heartbeat + on-machine watchdog with the shared budget feed.
+        let hb = crate::heartbeat::start(
+            Arc::clone(&conn),
+            name.to_string(),
+            cleanup,
+            self.config.startup_commands.clone(),
+            Arc::clone(&self.state),
+            self.budget,
+        );
+        {
+            let mut state = self.state.lock().await;
+            match same_generation(&mut state, name, external_id) {
+                Ok(inst) => inst.heartbeat = Some(hb),
+                Err(e) => {
+                    hb.stop();
+                    return Err(e);
+                }
             }
         }
 
-        // Start heartbeat, wait for Jupyter. Clean up on failure.
-        if let Err(e) = self
-            .start_heartbeat_and_wait_for_jupyter(pod_id, cost)
+        // Wait for Jupyter to be ready — without holding the state lock (this
+        // can poll for minutes; other instances must stay operable meanwhile).
+        jupyter
+            .wait_until_ready()
             .await
-        {
-            self.cleanup_failed_start(pod_id).await;
-            return Err(e);
-        }
+            .map_err(|e| anyhow::anyhow!("Jupyter failed to start: {e}"))?;
 
-        let mut msg = format!(
-            "Reconnected to existing pod!\n\
-             - ID: {pod_id}\n\
-             - GPU: {gpu_name}\n\
-             - Cost: ${cost:.2}/hr\n\
-             - Status: RUNNING",
-        );
-        if let Some(budget) = self.budget {
-            let total_spend = self.state.lock().await.total_spend();
-            let remaining = budget - total_spend;
-            let _ = write!(
-                msg,
-                "\n- Budget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
+        // Mark Running and persist. The billing clock deliberately keeps its
+        // provisioning start time — providers bill from allocation.
+        let (summary, record) = {
+            let mut state = self.state.lock().await;
+            let inst = same_generation(&mut state, name, external_id)?;
+            inst.phase = Phase::Running;
+            let record = inst.record();
+            let mut summary = format!(
+                "- Name: {name}\n- ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Status: RUNNING",
+                inst.external_id, inst.runtime, inst.gpu_name, inst.cost_per_hr
             );
-        }
-        msg.push_str("\n\nUse create_kernel() to start a kernel.");
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
-    }
-
-    /// Start heartbeat and wait for Jupyter to become ready. Returns an MCP
-    /// error if Jupyter never comes up.
-    async fn start_heartbeat_and_wait_for_jupyter(
-        &self,
-        pod_id: &str,
-        cost_per_hr: f64,
-    ) -> Result<(), McpError> {
-        self.start_heartbeat(pod_id, cost_per_hr).await;
-
+            if let Some(budget) = self.budget {
+                let total_spend = state.total_spend();
+                let remaining = budget - total_spend;
+                let _ = write!(
+                    summary,
+                    "\n- Budget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
+                );
+            }
+            (summary, record)
+        };
         {
             let state = self.state.lock().await;
-            let pod_state = state.pod.as_ref().expect("pod state exists");
-            pod_state.jupyter.wait_until_ready().await.map_err(|e| {
-                McpError::internal_error(format!("Jupyter failed to start: {e}"), None)
-            })?;
-        }
-
-        Ok(())
-    }
-
-    /// Clean up after a failed `start()` or `reconnect_to_pod()`.
-    /// Terminates the pod on `RunPod` and removes it from in-memory state.
-    async fn cleanup_failed_start(&self, pod_id: &str) {
-        tracing::warn!(pod_id, "Cleaning up after failed start");
-
-        // Stop heartbeat if it was started.
-        {
-            let mut state = self.state.lock().await;
-            if let Some(mut pod) = state.pod.take()
-                && let Some(hb) = pod.heartbeat.take()
-            {
-                hb.stop();
+            if let Err(e) = state.save_record(name, &record) {
+                tracing::warn!("Failed to persist instance record: {e}");
             }
         }
 
-        // Terminate the pod on RunPod.
-        if let Err(e) = self.runpod.terminate_pod(pod_id).await {
-            tracing::warn!(pod_id, error = %e, "Failed to terminate pod after failed start");
+        Ok(summary)
+    }
+
+    /// Clean up after a failed start/reconnect: terminate the machine and
+    /// remove its state. Only touches state belonging to `external_id` — if
+    /// the name was already reused for a new machine, that machine is left
+    /// alone (but the failed machine is still terminated at the provider).
+    ///
+    /// The durable record is cleared only after a *confirmed* provider
+    /// termination; otherwise it is kept so `status()`/`terminate()` can still
+    /// see and retry the possibly-billing machine.
+    async fn cleanup_failed_start(&self, name: &str, external_id: &str, runtime_name: &str) {
+        tracing::warn!(instance = %name, external_id, "Cleaning up after failed start");
+
+        {
+            let mut state = self.state.lock().await;
+            if state
+                .instances
+                .get(name)
+                .is_some_and(|i| i.external_id == external_id)
+            {
+                // Snapshot before removing — the failed provisioning time was
+                // still billed.
+                state.snapshot_spend_for(name);
+                if let Some(mut inst) = state.instances.remove(name) {
+                    inst.stop_heartbeat();
+                }
+            }
         }
 
-        // Clear persisted state.
-        let state = self.state.lock().await;
-        if let Err(e) = state.clear() {
-            tracing::warn!("Failed to clear state after failed start: {e}");
+        let terminated = match self.runtime_for(runtime_name).await {
+            Ok(runtime) => match runtime.terminate(external_id).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(external_id, error = %e, "Failed to terminate machine after failed start — record kept; terminate() to retry");
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::warn!(external_id, "Runtime unavailable for cleanup: {e:?}");
+                false
+            }
+        };
+
+        if terminated {
+            let state = self.state.lock().await;
+            if crate::state::load_instance_record(&state.project_dir, name)
+                .is_some_and(|r| r.external_id == external_id)
+                && let Err(e) = state.clear_record(name)
+            {
+                tracing::warn!("Failed to clear instance record after failed start: {e}");
+            }
         }
     }
 
-    /// Start the heartbeat for the current pod. Shared by create and reconnect paths.
-    async fn start_heartbeat(&self, pod_id: &str, cost_per_hr: f64) {
-        let mut state = self.state.lock().await;
-        let accumulated_spend = state.accumulated_spend;
-        if let Some(ref mut pod_state) = state.pod {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let budget_remaining_secs = self.budget.map(|budget| {
-                let remaining_dollars = budget - accumulated_spend;
-                let secs = (remaining_dollars / cost_per_hr) * 3600.0;
-                secs.max(0.0) as u64
-            });
-
-            let hb = crate::heartbeat::start(
-                Arc::clone(&self.runpod),
-                pod_id.to_string(),
-                pod_state.ssh_key_path.clone(),
-                self.config.cleanup,
-                budget_remaining_secs,
-                self.config.startup_commands.clone(),
-            );
-            pod_state.heartbeat = Some(hb);
-        }
-    }
-
-    /// Check if the session budget has been exceeded. If so, stop/terminate the pod
-    /// and return an error. Returns Ok(()) if within budget or no budget is set.
+    /// Check if the session budget has been exceeded. If so, clean up ALL
+    /// machines (per their cleanup policies) and return an error.
     async fn check_budget(&self) -> Result<(), McpError> {
         let Some(budget) = self.budget else {
             return Ok(());
@@ -1349,58 +1523,149 @@ impl RemoteKernelsServer {
             return Ok(());
         }
 
-        // Budget exceeded — actively clean up the pod.
-        let action = self.cleanup_pod_for_budget().await;
+        let action = self.cleanup_all_for_budget().await;
         Err(McpError::internal_error(
             format!("Session budget of ${budget:.2} reached (spent ${total_spend:.2}). {action}"),
             None,
         ))
     }
 
-    /// Stop or terminate the pod due to budget being exceeded.
-    /// Returns a human-readable description of what happened.
-    async fn cleanup_pod_for_budget(&self) -> String {
-        let pod_id = {
-            let state = self.state.lock().await;
-            match &state.pod {
-                Some(p) => p.pod_id.clone(),
-                None => return "No pod was running.".to_string(),
-            }
-        };
+    /// Snapshot a live instance's cleanup coordinates under one lock.
+    async fn live_target(&self, name: &str) -> Option<CleanupTarget> {
+        let state = self.state.lock().await;
+        state.instances.get(name).map(|inst| CleanupTarget {
+            name: inst.name.clone(),
+            external_id: inst.external_id.clone(),
+            runtime: inst.runtime.clone(),
+        })
+    }
 
-        // Budget + Disabled is rejected at startup, so Disabled is unreachable here.
-        let cleanup = self.config.cleanup;
-        let result = match cleanup {
-            Cleanup::Terminate | Cleanup::Disabled => self.runpod.terminate_pod(&pod_id).await,
-            Cleanup::Stop => self.runpod.stop_pod(&pod_id).await,
-        };
+    /// The single implementation of "stop or terminate one machine": provider
+    /// call first, then (only on success) spend snapshot, heartbeat stop, and
+    /// record update — all pinned to the target's `external_id` so a machine
+    /// recreated under the same name concurrently is never touched.
+    ///
+    /// On provider failure nothing is forgotten: memory and records stay, so
+    /// the machine remains visible and cleanup can be retried.
+    async fn cleanup_instance(
+        &self,
+        target: &CleanupTarget,
+        action: CleanupAction,
+    ) -> anyhow::Result<()> {
+        let runtime = self
+            .runtime_for(&target.runtime)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-        let action_word = match cleanup {
-            Cleanup::Stop => "stopped",
-            _ => "terminated",
-        };
+        match action {
+            CleanupAction::Stop => runtime.stop(&target.external_id).await?,
+            CleanupAction::Terminate => runtime.terminate(&target.external_id).await?,
+        }
 
         let mut state = self.state.lock().await;
-        state.snapshot_spend();
-        if let Some(mut pod) = state.pod.take()
-            && let Some(hb) = pod.heartbeat.take()
-        {
-            hb.stop();
+        let is_current_generation = state
+            .instances
+            .get(&target.name)
+            .is_some_and(|i| i.external_id == target.external_id);
+        if is_current_generation {
+            state.snapshot_spend_for(&target.name);
+            if let Some(mut inst) = state.instances.remove(&target.name) {
+                inst.stop_heartbeat();
+                if action == CleanupAction::Stop {
+                    inst.phase = Phase::Stopped;
+                    let record = inst.record();
+                    if let Err(e) = state.save_record(&target.name, &record) {
+                        tracing::warn!("Failed to save instance record: {e}");
+                    }
+                }
+            }
         }
-        // For stop: preserve pod_id on disk so it can be terminated later.
-        // For terminate: clear state since the pod is gone.
-        let save_result = match cleanup {
-            Cleanup::Stop => state.save_with_pod_id(Some(&pod_id), cleanup),
-            _ => state.clear(),
-        };
-        if let Err(e) = save_result {
-            tracing::warn!("Failed to save state after budget cleanup: {e}");
+        if action == CleanupAction::Terminate
+            && crate::state::load_instance_record(&state.project_dir, &target.name)
+                .is_some_and(|r| r.external_id == target.external_id)
+            && let Err(e) = state.clear_record(&target.name)
+        {
+            tracing::warn!("Failed to clear instance record: {e}");
+        }
+        Ok(())
+    }
+
+    /// Stop or terminate every machine due to budget exhaustion.
+    /// Returns a human-readable description of what happened.
+    async fn cleanup_all_for_budget(&self) -> String {
+        let targets = self.all_live_targets().await;
+        if targets.is_empty() {
+            return "No machine was running.".to_string();
         }
 
-        match result {
-            Ok(()) => format!("Pod has been {action_word}."),
-            Err(e) => format!("Attempted to {action_word} pod but failed: {e}"),
+        let mut actions = Vec::new();
+        for (target, cleanup) in targets {
+            // Budget + Disabled is rejected at startup, so Disabled is unreachable here.
+            let action = match cleanup {
+                Cleanup::Stop => CleanupAction::Stop,
+                Cleanup::Terminate | Cleanup::Disabled => CleanupAction::Terminate,
+            };
+            match self.cleanup_instance(&target, action).await {
+                Ok(()) => actions.push(format!("{}: {}", target.name, action.past_tense())),
+                Err(e) => actions.push(format!(
+                    "{}: attempted to {} but failed: {e} — it is still tracked; retry or check the provider dashboard",
+                    target.name,
+                    action.verb()
+                )),
+            }
         }
+
+        format!("Machines cleaned up — {}.", actions.join("; "))
+    }
+
+    /// Graceful-shutdown cleanup: apply each live instance's cleanup policy.
+    /// Called by `main()` when the MCP transport disconnects.
+    pub async fn shutdown_cleanup(&self) {
+        for (target, cleanup) in self.all_live_targets().await {
+            let action = match cleanup {
+                Cleanup::Disabled => {
+                    tracing::info!(instance = %target.name, external_id = %target.external_id, "Cleanup disabled, leaving machine running");
+                    // Keep the record (phase Running) so the next session reconnects.
+                    let mut state = self.state.lock().await;
+                    state.snapshot_spend_for(&target.name);
+                    if let Some(mut inst) = state.instances.remove(&target.name) {
+                        inst.stop_heartbeat();
+                        inst.phase = Phase::Running;
+                        let record = inst.record();
+                        let _ = state.save_record(&target.name, &record);
+                    }
+                    continue;
+                }
+                Cleanup::Stop => CleanupAction::Stop,
+                Cleanup::Terminate => CleanupAction::Terminate,
+            };
+            match self.cleanup_instance(&target, action).await {
+                Ok(()) => {
+                    tracing::info!(instance = %target.name, external_id = %target.external_id, ?cleanup, "Machine cleaned up");
+                }
+                Err(e) => {
+                    tracing::warn!(instance = %target.name, external_id = %target.external_id, "Failed to clean up machine: {e}");
+                }
+            }
+        }
+    }
+
+    async fn all_live_targets(&self) -> Vec<(CleanupTarget, Cleanup)> {
+        let state = self.state.lock().await;
+        state
+            .instances
+            .values()
+            .map(|i| {
+                (
+                    CleanupTarget {
+                        name: i.name.clone(),
+                        external_id: i.external_id.clone(),
+                        runtime: i.runtime.clone(),
+                    },
+                    i.cleanup,
+                )
+            })
+            .collect()
     }
 
     /// Update a notebook cell with the final execution output.
@@ -1411,8 +1676,11 @@ impl RemoteKernelsServer {
         output: &crate::jupyter::messages::ExecutionOutput,
     ) {
         let mut state = self.state.lock().await;
-        if let Some(pod_state) = &mut state.pod
-            && let Some(nb) = pod_state.notebooks.get_mut(kernel_id)
+        let Some(name) = state.instance_for_kernel(kernel_id).map(String::from) else {
+            return;
+        };
+        if let Some(inst) = state.instances.get_mut(&name)
+            && let Some(nb) = inst.notebooks.get_mut(kernel_id)
             && let Err(e) = nb.update_cell_output(cell_number, output)
         {
             tracing::warn!("Failed to update notebook cell: {e}");
@@ -1428,132 +1696,6 @@ impl RemoteKernelsServer {
             )
         })
     }
-
-    /// Poll until the pod reaches RUNNING status.
-    async fn wait_for_running(&self, pod_id: &str) -> anyhow::Result<crate::runpod::types::Pod> {
-        let mut attempts = 0;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            attempts += 1;
-
-            let pod = self.runpod.get_pod(pod_id).await?;
-            tracing::debug!(
-                pod_id,
-                status = ?pod.desired_status,
-                attempt = attempts,
-                "Polling pod status"
-            );
-
-            if pod.is_running() {
-                return Ok(pod);
-            }
-
-            if attempts > 60 {
-                anyhow::bail!(
-                    "Pod did not reach RUNNING status after 3 minutes (current: {:?})",
-                    pod.desired_status
-                );
-            }
-        }
-    }
-
-    /// Poll the GraphQL API until the pod has SSH connection info.
-    ///
-    /// Runtime port mappings may lag behind the RUNNING status by a few seconds.
-    async fn wait_for_ssh_info(&self, pod_id: &str) -> anyhow::Result<(String, u16)> {
-        for attempt in 1..=20 {
-            match self.runpod.get_ssh_info(pod_id).await {
-                Ok(Some((ip, port))) => {
-                    tracing::info!(attempt, %ip, port, "SSH info available");
-                    return Ok((ip, port));
-                }
-                Ok(None) => {
-                    tracing::debug!(attempt, "SSH info not yet available");
-                }
-                Err(e) => {
-                    tracing::debug!(attempt, error = %e, "Failed to query SSH info");
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        }
-
-        anyhow::bail!(
-            "Pod does not have a public IP or SSH port after 60s. \
-             This is required for heartbeat, sync, and download. \
-             Try starting again — a different machine may be assigned."
-        )
-    }
-
-    /// Get SSH connection info from cached state. Refreshes from API if not cached.
-    async fn get_ssh_info(&self) -> Result<(String, u16), McpError> {
-        {
-            let state = self.state.lock().await;
-            if let Some(ref pod) = state.pod
-                && let (Some(ip), Some(port)) = (&pod.public_ip, pod.ssh_port)
-            {
-                return Ok((ip.clone(), port));
-            }
-        }
-
-        // Not cached — this shouldn't happen after start() succeeds, but handle it.
-        let pod_id = {
-            let state = self.state.lock().await;
-            state
-                .pod
-                .as_ref()
-                .map(|p| p.pod_id.clone())
-                .ok_or_else(|| McpError::internal_error("No pod running", None))?
-        };
-
-        let (ip, port) = self
-            .wait_for_ssh_info(&pod_id)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to get SSH info: {e}"), None))?;
-
-        let mut state = self.state.lock().await;
-        if let Some(ref mut pod_state) = state.pod {
-            pod_state.public_ip = Some(ip.clone());
-            pod_state.ssh_port = Some(port);
-        }
-
-        Ok((ip, port))
-    }
-}
-
-/// Convert a TOML value to a JSON value for API passthrough.
-fn toml_to_json(value: &toml::Value) -> serde_json::Value {
-    match value {
-        toml::Value::String(s) => serde_json::Value::String(s.clone()),
-        toml::Value::Integer(i) => serde_json::json!(i),
-        toml::Value::Float(f) => serde_json::json!(f),
-        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        toml::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_to_json).collect()),
-        toml::Value::Table(table) => {
-            let map = table
-                .iter()
-                .map(|(k, v)| (to_camel_case(k), toml_to_json(v)))
-                .collect();
-            serde_json::Value::Object(map)
-        }
-        toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
-    }
-}
-
-/// Convert kebab-case to camelCase for `RunPod` API field names.
-fn to_camel_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut capitalize_next = false;
-    for c in s.chars() {
-        if c == '-' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.extend(c.to_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 #[tool_handler]

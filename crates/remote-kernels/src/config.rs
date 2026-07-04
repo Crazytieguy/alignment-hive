@@ -6,7 +6,11 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
-    /// GPU types to try, in order of preference.
+    /// Which runtime `start()` uses when none is specified.
+    #[serde(default = "default_runtime")]
+    pub default_runtime: String,
+
+    /// GPU types to try, in order of preference (runpod runtime).
     #[serde(default = "default_gpu_type_ids")]
     pub gpu_type_ids: Vec<String>,
 
@@ -57,7 +61,7 @@ pub struct Config {
 
 /// RunPod-specific configuration. Known fields are typed; unknown fields are passed
 /// through transparently to the `RunPod` pod creation API (camelCase conversion applied).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RunpodConfig {
     /// Number of GPUs to attach.
@@ -98,7 +102,7 @@ impl Default for RunpodConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Cleanup {
     /// Stop the pod (preserves state, can be restarted, still incurs storage costs).
@@ -108,6 +112,10 @@ pub enum Cleanup {
     Terminate,
     /// Disabled: no automatic cleanup. User must stop/terminate manually.
     Disabled,
+}
+
+fn default_runtime() -> String {
+    "runpod".to_string()
 }
 
 fn default_gpu_type_ids() -> Vec<String> {
@@ -172,7 +180,11 @@ impl Config {
             r#"# remote-kernels configuration
 # https://github.com/Crazytieguy/alignment-hive
 
-# GPU types to try, in order of preference.
+# Runtime used by start() when none is specified.
+# Default: "{default_runtime}"
+# default-runtime = "{default_runtime}"
+
+# GPU types to try, in order of preference (runpod runtime).
 # Default: ["{default_gpu}"]
 # gpu-type-ids = ["{default_gpu}"]
 
@@ -246,6 +258,7 @@ impl Config {
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 "#,
+            default_runtime = default_runtime(),
             default_gpu = default_gpu_type_ids()[0],
             default_image = default_image_name(),
             default_cleanup = "terminate",
@@ -267,6 +280,7 @@ mod tests {
     #[test]
     fn empty_toml_yields_documented_defaults() {
         let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.default_runtime, "runpod");
         assert_eq!(config.gpu_type_ids, vec!["NVIDIA GeForce RTX 4090"]);
         assert_eq!(
             config.image_name,

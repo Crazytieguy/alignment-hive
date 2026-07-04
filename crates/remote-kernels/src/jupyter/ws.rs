@@ -23,10 +23,13 @@ struct ExecuteCommand {
 }
 
 impl KernelConnection {
-    /// Connect to a kernel's WebSocket channels endpoint.
-    pub async fn connect(pod_id: &str, kernel_id: &str, token: &str) -> anyhow::Result<Self> {
+    /// Connect to a kernel's WebSocket channels endpoint. `ws_base` is the
+    /// machine's Jupyter WebSocket endpoint from the runtime's
+    /// [`crate::runtime::JupyterEndpoint`].
+    pub async fn connect(ws_base: &str, kernel_id: &str, token: &str) -> anyhow::Result<Self> {
         let url = format!(
-            "wss://{pod_id}-8888.proxy.runpod.net/api/kernels/{kernel_id}/channels?token={token}"
+            "{}/api/kernels/{kernel_id}/channels?token={token}",
+            ws_base.trim_end_matches('/')
         );
 
         tracing::debug!(%kernel_id, "Connecting to kernel WebSocket");

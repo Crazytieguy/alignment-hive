@@ -1,7 +1,10 @@
 use reqwest::Client;
 use serde::Deserialize;
 
-/// Client for the Jupyter Server REST API.
+/// Client for the Jupyter Server REST API. Cheap to clone (the inner reqwest
+/// client is reference-counted) — clone it out of the state lock rather than
+/// holding the lock across HTTP calls.
+#[derive(Clone)]
 pub struct JupyterClient {
     client: Client,
     base_url: String,
@@ -19,10 +22,13 @@ pub struct KernelInfo {
 }
 
 impl JupyterClient {
-    pub fn new(pod_id: &str, token: &str) -> Self {
+    /// `http_base` is the machine's Jupyter HTTP endpoint, provided by the
+    /// runtime's [`crate::runtime::JupyterEndpoint`] (`RunPod` proxy URL, SSH
+    /// tunnel, port-forward, ...).
+    pub fn new(http_base: &str, token: &str) -> Self {
         Self {
             client: Client::new(),
-            base_url: format!("https://{pod_id}-8888.proxy.runpod.net"),
+            base_url: http_base.trim_end_matches('/').to_string(),
             token: token.to_string(),
         }
     }

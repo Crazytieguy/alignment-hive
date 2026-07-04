@@ -1,8 +1,18 @@
-use std::collections::HashMap;
+//! In-memory and on-disk state for the MCP server.
+//!
+//! Multiple concurrent machines are supported: each named instance has its own
+//! state dir at `.claude/remote-kernels/instances/<name>/` holding its
+//! `state.json` (the durable record) and SSH key. Session spend is tracked
+//! globally and persisted to `.claude/remote-kernels/spend.json` — it is
+//! rehydrated at startup only while instance records exist, so a mid-session
+//! server restart keeps budget enforcement intact, while a fresh session after
+//! a clean terminate starts from zero (budget is per session, monotonic).
+
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-
 use tokio::sync::oneshot;
 
 use crate::config::Cleanup;
@@ -11,42 +21,56 @@ use crate::jupyter::messages::ExecutionOutput;
 use crate::jupyter::rest::JupyterClient;
 use crate::jupyter::ws::KernelConnection;
 use crate::notebook::Notebook;
-use crate::runpod::types::Pod;
+use crate::runtime::AnyConnection;
 
-/// Persisted state — written to `.claude/remote-kernels/state.json` so the stop hook can read it.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct PersistedState {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pod_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cleanup: Option<String>,
-    /// Accumulated session spend in dollars. Monotonically increasing, never resets.
-    #[serde(default)]
-    pub accumulated_spend: f64,
-    /// Jupyter token for reconnecting to a pod across sessions/crashes.
+/// Lifecycle phase of an instance, as recorded durably.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    /// Allocated at the provider but not yet ready. Recorded immediately after
+    /// allocation so a crash mid-provision can never orphan a paid machine.
+    Provisioning,
+    Running,
+    Stopped,
+}
+
+/// The durable per-instance record (`instances/<name>/state.json`).
+///
+/// Contains everything needed to reconnect to — or terminate — the machine
+/// from a fresh process: provider identity, resolved cleanup policy, and
+/// connection credentials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceRecord {
+    pub runtime: String,
+    pub external_id: String,
+    pub phase: Phase,
+    /// Cleanup policy resolved (and capability-validated) at start time.
+    pub cleanup: Cleanup,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jupyter_token: Option<String>,
-    /// Path to the SSH private key for reconnecting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_key_path: Option<String>,
-    /// GPU name for display on reconnection (REST `get_pod` doesn't always include machine info).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_name: Option<String>,
+    #[serde(default)]
+    pub cost_per_hr: f64,
 }
 
-/// Runtime state held in memory by the MCP server.
-pub struct AppState {
-    pub project_dir: PathBuf,
-    pub pod: Option<PodState>,
-    /// Accumulated spend from previous pods in this session. Monotonically increasing.
-    pub accumulated_spend: f64,
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedSpend {
+    accumulated_spend: f64,
 }
 
-pub struct PodState {
-    pub pod_id: String,
+/// Live state for one machine.
+pub struct InstanceState {
+    pub name: String,
+    pub runtime: String,
+    pub external_id: String,
+    pub phase: Phase,
     pub gpu_name: String,
     pub cost_per_hr: f64,
     pub started_at: std::time::Instant,
+    pub cleanup: Cleanup,
     pub jupyter: JupyterClient,
     pub jupyter_token: String,
     pub session_id: String,
@@ -54,176 +78,387 @@ pub struct PodState {
     pub kernel_connections: HashMap<String, KernelConnection>,
     pub notebooks: HashMap<String, Notebook>,
     pub ssh_key_path: PathBuf,
-    pub public_ip: Option<String>,
-    pub ssh_port: Option<u16>,
+    pub connection: Option<Arc<AnyConnection>>,
     pub heartbeat: Option<HeartbeatState>,
     /// Pending executions that timed out. Keyed by (`kernel_id`, `cell_number`).
     pub pending_executions: HashMap<(String, u32), oneshot::Receiver<ExecutionOutput>>,
 }
 
-impl PodState {
-    /// Cost incurred by the current pod since it started.
-    pub fn current_pod_cost(&self) -> f64 {
-        self.cost_per_hr * self.started_at.elapsed().as_secs_f64() / 3600.0
-    }
-}
-
-impl AppState {
-    pub fn new(project_dir: PathBuf) -> Self {
-        Self {
-            project_dir,
-            pod: None,
-            // Budget is per Claude session (MCP server lifetime), not per pod.
-            // Each session starts fresh.
-            accumulated_spend: 0.0,
-        }
-    }
-
-    fn state_dir(&self) -> PathBuf {
-        self.project_dir.join(".claude/remote-kernels")
-    }
-
-    fn state_path(&self) -> PathBuf {
-        self.state_dir().join("state.json")
-    }
-
-    /// Total session spend: accumulated from previous pods + current pod's running cost.
-    pub fn total_spend(&self) -> f64 {
-        self.accumulated_spend + self.pod.as_ref().map_or(0.0, PodState::current_pod_cost)
-    }
-
-    /// Persist the current state to disk.
-    pub fn save(&self, cleanup: Cleanup) -> anyhow::Result<()> {
-        let pod = self.pod.as_ref();
-        self.write_persisted(
-            pod.map(|p| p.pod_id.as_str()),
-            cleanup,
-            pod.map(|p| p.jupyter_token.as_str()),
-            pod.map(|p| p.ssh_key_path.display().to_string()),
-            pod.map(|p| p.gpu_name.clone()),
-        )
-    }
-
-    /// Persist state to disk with an explicit `pod_id`.
-    ///
-    /// Used by `stop()` and graceful shutdown which need to clear the in-memory
-    /// `PodState` (to stop spend accumulation) while preserving the `pod_id` and
-    /// reconnection details on disk.
-    pub fn save_with_pod_id(&self, pod_id: Option<&str>, cleanup: Cleanup) -> anyhow::Result<()> {
-        // If the pod is still in memory, grab its reconnection details.
-        // If already taken, fall back to whatever we have from state.json.
-        let (jupyter_token, ssh_key_path, gpu_name) = if let Some(p) = &self.pod {
-            (
-                Some(p.jupyter_token.clone()),
-                Some(p.ssh_key_path.display().to_string()),
-                Some(p.gpu_name.clone()),
-            )
-        } else {
-            // Pod already taken — load reconnection details from disk.
-            let existing = Self::load_persisted(&self.project_dir);
-            (
-                existing.as_ref().and_then(|s| s.jupyter_token.clone()),
-                existing.as_ref().and_then(|s| s.ssh_key_path.clone()),
-                existing.as_ref().and_then(|s| s.gpu_name.clone()),
-            )
-        };
-        self.write_persisted(
-            pod_id,
-            cleanup,
-            jupyter_token.as_deref(),
-            ssh_key_path,
-            gpu_name,
-        )
-    }
-
-    fn write_persisted(
-        &self,
-        pod_id: Option<&str>,
+impl InstanceState {
+    /// Fresh instance in the Provisioning phase (empty kernel state).
+    /// The single construction point for both new machines and reconnects.
+    #[allow(clippy::too_many_arguments)]
+    pub fn provisioning(
+        name: String,
+        runtime: String,
+        external_id: String,
+        gpu_name: String,
+        cost_per_hr: f64,
         cleanup: Cleanup,
-        jupyter_token: Option<&str>,
-        ssh_key_path: Option<String>,
-        gpu_name: Option<String>,
-    ) -> anyhow::Result<()> {
-        let dir = self.state_dir();
-        std::fs::create_dir_all(&dir)?;
-
-        let gitignore = dir.join(".gitignore");
-        if !gitignore.exists() {
-            let _ = std::fs::write(&gitignore, "*\n");
-        }
-
-        let persisted = PersistedState {
-            pod_id: pod_id.map(String::from),
-            cleanup: Some(match cleanup {
-                Cleanup::Stop => "stop".to_string(),
-                Cleanup::Terminate => "terminate".to_string(),
-                Cleanup::Disabled => "disabled".to_string(),
-            }),
-            accumulated_spend: self.total_spend(),
-            jupyter_token: jupyter_token.map(String::from),
-            ssh_key_path,
-            gpu_name,
-        };
-
-        let json = serde_json::to_string_pretty(&persisted)?;
-        std::fs::write(self.state_path(), json)?;
-        Ok(())
-    }
-
-    /// Snapshot accumulated spend (adds current pod cost to accumulated total).
-    /// Called when a pod is stopped/terminated so the spend persists.
-    pub fn snapshot_spend(&mut self) {
-        if let Some(ref pod) = self.pod {
-            self.accumulated_spend += pod.current_pod_cost();
-        }
-    }
-
-    /// Clear persisted state (called after pod is stopped/terminated).
-    pub fn clear(&self) -> anyhow::Result<()> {
-        let path = self.state_path();
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        Ok(())
-    }
-
-    /// Record that a pod has started.
-    pub fn set_pod(
-        &mut self,
-        pod: &Pod,
-        jupyter: JupyterClient,
         jupyter_token: String,
         ssh_key_path: PathBuf,
-    ) {
-        self.pod = Some(PodState {
-            pod_id: pod.id.clone(),
-            gpu_name: pod.gpu_display_name().to_string(),
-            cost_per_hr: pod.cost_per_hr.unwrap_or(0.0),
+    ) -> Self {
+        Self {
+            name,
+            runtime,
+            external_id,
+            phase: Phase::Provisioning,
+            gpu_name,
+            cost_per_hr,
             started_at: std::time::Instant::now(),
-            jupyter,
+            cleanup,
+            // Placeholder until the runtime's connection provides the real
+            // endpoint; all tool paths gate on phase == Running first.
+            jupyter: JupyterClient::new("http://pending.invalid", &jupyter_token),
             jupyter_token,
             session_id: uuid::Uuid::new_v4().to_string(),
             kernel_ids: Vec::new(),
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
             ssh_key_path,
-            public_ip: None,
-            ssh_port: None,
+            connection: None,
             heartbeat: None,
             pending_executions: HashMap::new(),
-        });
+        }
     }
 
-    /// Load the `pod_id` from a previous state file (if any).
-    pub fn load_existing(project_dir: &Path) -> Option<String> {
-        Self::load_persisted(project_dir).and_then(|s| s.pod_id)
+    /// Cost incurred by this instance since it started (this process).
+    /// Provisioning time counts — providers bill from allocation, not from
+    /// when Jupyter becomes ready.
+    pub fn current_cost(&self) -> f64 {
+        if self.phase == Phase::Stopped {
+            0.0
+        } else {
+            self.cost_per_hr * self.started_at.elapsed().as_secs_f64() / 3600.0
+        }
     }
 
-    /// Load the full persisted state from disk.
-    pub fn load_persisted(project_dir: &Path) -> Option<PersistedState> {
-        let path = project_dir.join(".claude/remote-kernels/state.json");
-        let content = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&content).ok()
+    pub fn record(&self) -> InstanceRecord {
+        InstanceRecord {
+            runtime: self.runtime.clone(),
+            external_id: self.external_id.clone(),
+            phase: self.phase,
+            cleanup: self.cleanup,
+            jupyter_token: Some(self.jupyter_token.clone()),
+            ssh_key_path: Some(self.ssh_key_path.display().to_string()),
+            gpu_name: Some(self.gpu_name.clone()),
+            cost_per_hr: self.cost_per_hr,
+        }
+    }
+
+    pub fn stop_heartbeat(&mut self) {
+        if let Some(hb) = self.heartbeat.take() {
+            hb.stop();
+        }
+    }
+}
+
+/// Runtime state held in memory by the MCP server.
+pub struct AppState {
+    pub project_dir: PathBuf,
+    pub instances: BTreeMap<String, InstanceState>,
+    /// Spend from instances that have been stopped/terminated (or accrued
+    /// before a server restart). Monotonically increasing, never resets
+    /// within a session.
+    pub accumulated_spend: f64,
+}
+
+fn state_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join(".claude/remote-kernels")
+}
+
+fn instance_dir(project_dir: &Path, name: &str) -> PathBuf {
+    state_dir(project_dir).join("instances").join(name)
+}
+
+fn ensure_gitignore(project_dir: &Path) {
+    let gitignore = state_dir(project_dir).join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(&gitignore, "*\n");
+    }
+}
+
+/// Validate an instance name for filesystem safety.
+pub fn validate_instance_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err("Instance name must be 1-64 characters".to_string());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Invalid instance name {name:?}: only alphanumerics, '-' and '_' are allowed"
+        ));
+    }
+    Ok(())
+}
+
+impl AppState {
+    /// Create the state for a project, hydrating persisted spend if any
+    /// instance records exist (machines may still be running/billed — a fresh
+    /// server must not forget the spend they already accrued).
+    pub fn new(project_dir: PathBuf) -> Self {
+        migrate_legacy_state(&project_dir);
+
+        let has_records = !list_instance_records(&project_dir).is_empty();
+        let accumulated_spend = if has_records {
+            load_spend(&project_dir)
+        } else {
+            // No machines left over — budget is per session, start fresh.
+            let _ = std::fs::remove_file(state_dir(&project_dir).join("spend.json"));
+            0.0
+        };
+
+        Self {
+            project_dir,
+            instances: BTreeMap::new(),
+            accumulated_spend,
+        }
+    }
+
+    /// Total session spend: accumulated + all running instances' current cost.
+    pub fn total_spend(&self) -> f64 {
+        self.accumulated_spend
+            + self
+                .instances
+                .values()
+                .map(InstanceState::current_cost)
+                .sum::<f64>()
+    }
+
+    /// Aggregate hourly burn rate across billing (provisioning or running)
+    /// metered instances.
+    pub fn aggregate_cost_per_hr(&self) -> f64 {
+        self.instances
+            .values()
+            .filter(|i| i.phase != Phase::Stopped)
+            .map(|i| i.cost_per_hr)
+            .sum()
+    }
+
+    /// Fold one instance's running cost into the accumulated total (called
+    /// when it is stopped/terminated so the spend persists).
+    pub fn snapshot_spend_for(&mut self, name: &str) {
+        let cost = self
+            .instances
+            .get(name)
+            .map_or(0.0, InstanceState::current_cost);
+        self.accumulated_spend += cost;
+        if let Some(inst) = self.instances.get_mut(name) {
+            // Restart the cost clock so the cost isn't double-counted if the
+            // instance keeps running (e.g. snapshot on stop then resume).
+            inst.started_at = std::time::Instant::now();
+        }
+        self.persist_spend();
+    }
+
+    /// Fold every instance's running cost into the accumulated total.
+    pub fn snapshot_spend_all(&mut self) {
+        let names: Vec<String> = self.instances.keys().cloned().collect();
+        for name in names {
+            self.snapshot_spend_for(&name);
+        }
+    }
+
+    pub fn persist_spend(&self) {
+        let dir = state_dir(&self.project_dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        ensure_gitignore(&self.project_dir);
+        let spend = PersistedSpend {
+            accumulated_spend: self.total_spend(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&spend) {
+            let _ = std::fs::write(dir.join("spend.json"), json);
+        }
+    }
+
+    /// Write an instance's durable record. Called immediately after provider
+    /// allocation (phase = Provisioning) and on every phase change.
+    pub fn save_record(&self, name: &str, record: &InstanceRecord) -> anyhow::Result<()> {
+        let dir = instance_dir(&self.project_dir, name);
+        std::fs::create_dir_all(&dir)?;
+        ensure_gitignore(&self.project_dir);
+        let json = serde_json::to_string_pretty(record)?;
+        std::fs::write(dir.join("state.json"), json)?;
+        self.persist_spend();
+        Ok(())
+    }
+
+    /// Remove an instance's durable record (after terminate).
+    pub fn clear_record(&self, name: &str) -> anyhow::Result<()> {
+        let dir = instance_dir(&self.project_dir, name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        // Last machine gone → spend file's job is done; keep it while records
+        // remain so a restart hydrates correctly.
+        if list_instance_records(&self.project_dir).is_empty() {
+            let _ = std::fs::remove_file(state_dir(&self.project_dir).join("spend.json"));
+        }
+        Ok(())
+    }
+
+    /// The per-instance SSH key path.
+    pub fn ssh_key_path(&self, name: &str) -> PathBuf {
+        instance_dir(&self.project_dir, name).join("id_ed25519")
+    }
+
+    /// Resolve which instance a tool call targets: an explicit name must
+    /// exist; otherwise the sole live instance is used.
+    pub fn resolve_instance(&self, requested: Option<&str>) -> Result<String, String> {
+        if let Some(name) = requested {
+            return if self.instances.contains_key(name) {
+                Ok(name.to_string())
+            } else {
+                Err(format!(
+                    "No instance named {name:?}. Active instances: {}",
+                    self.instance_names_display()
+                ))
+            };
+        }
+        let mut names = self.instances.keys();
+        match (names.next(), names.next()) {
+            (None, _) => Err("No machine is running. Call start() first.".to_string()),
+            (Some(sole), None) => Ok(sole.clone()),
+            (Some(_), Some(_)) => Err(format!(
+                "Multiple instances are active — specify one with the `instance` parameter. \
+                 Active instances: {}",
+                self.instance_names_display()
+            )),
+        }
+    }
+
+    /// Find the instance owning a kernel (kernel IDs are UUIDs, unique across
+    /// instances), so kernel-scoped tools need no instance parameter.
+    pub fn instance_for_kernel(&self, kernel_id: &str) -> Option<&str> {
+        self.instances
+            .values()
+            .find(|i| i.kernel_ids.iter().any(|k| k == kernel_id))
+            .map(|i| i.name.as_str())
+    }
+
+    pub fn instance_names_display(&self) -> String {
+        if self.instances.is_empty() {
+            "none".to_string()
+        } else {
+            self.instances
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
+/// List all persisted instance records for a project.
+pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)> {
+    let instances_dir = state_dir(project_dir).join("instances");
+    let Ok(entries) = std::fs::read_dir(&instances_dir) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(record) = load_instance_record(project_dir, &name) {
+            records.push((name, record));
+        }
+    }
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    records
+}
+
+pub fn load_instance_record(project_dir: &Path, name: &str) -> Option<InstanceRecord> {
+    let path = instance_dir(project_dir, name).join("state.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn load_spend(project_dir: &Path) -> f64 {
+    let path = state_dir(project_dir).join("spend.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<PersistedSpend>(&c).ok())
+        .map_or(0.0, |s| s.accumulated_spend)
+}
+
+/// Pre-multi-instance layout: a single `state.json` + `id_ed25519` directly in
+/// the state dir. Migrate it to `instances/main/` so existing machines can
+/// still be reconnected to or terminated.
+fn migrate_legacy_state(project_dir: &Path) {
+    #[derive(Deserialize)]
+    struct LegacyState {
+        pod_id: Option<String>,
+        cleanup: Option<String>,
+        #[serde(default)]
+        accumulated_spend: f64,
+        jupyter_token: Option<String>,
+        ssh_key_path: Option<String>,
+        gpu_name: Option<String>,
+    }
+
+    let legacy_path = state_dir(project_dir).join("state.json");
+    let Ok(content) = std::fs::read_to_string(&legacy_path) else {
+        return;
+    };
+    let Ok(legacy) = serde_json::from_str::<LegacyState>(&content) else {
+        let _ = std::fs::remove_file(&legacy_path);
+        return;
+    };
+
+    let Some(pod_id) = legacy.pod_id else {
+        let _ = std::fs::remove_file(&legacy_path);
+        return;
+    };
+
+    tracing::info!(
+        pod_id,
+        "Migrating legacy single-instance state to instances/main"
+    );
+
+    let cleanup = match legacy.cleanup.as_deref() {
+        Some("stop") => Cleanup::Stop,
+        Some("disabled") => Cleanup::Disabled,
+        _ => Cleanup::Terminate,
+    };
+
+    // Move the SSH key into the instance dir so the per-instance path
+    // convention holds (the record still stores the actual path used).
+    let new_dir = instance_dir(project_dir, "main");
+    let _ = std::fs::create_dir_all(&new_dir);
+    let ssh_key_path = legacy.ssh_key_path.map(|old| {
+        let old_path = PathBuf::from(&old);
+        let new_path = new_dir.join("id_ed25519");
+        if old_path.exists() && std::fs::rename(&old_path, &new_path).is_ok() {
+            new_path.display().to_string()
+        } else {
+            old
+        }
+    });
+
+    let record = InstanceRecord {
+        runtime: "runpod".to_string(),
+        external_id: pod_id,
+        phase: Phase::Stopped, // conservative: reconnect logic re-queries the provider
+        cleanup,
+        jupyter_token: legacy.jupyter_token,
+        ssh_key_path,
+        gpu_name: legacy.gpu_name,
+        cost_per_hr: 0.0,
+    };
+
+    if let Ok(json) = serde_json::to_string_pretty(&record)
+        && std::fs::write(new_dir.join("state.json"), json).is_ok()
+    {
+        let spend = PersistedSpend {
+            accumulated_spend: legacy.accumulated_spend,
+        };
+        if let Ok(spend_json) = serde_json::to_string_pretty(&spend) {
+            let _ = std::fs::write(state_dir(project_dir).join("spend.json"), spend_json);
+        }
+        let _ = std::fs::remove_file(&legacy_path);
     }
 }
 
@@ -231,158 +466,208 @@ impl AppState {
 mod tests {
     use super::*;
 
-    fn pod_state(pod_id: &str, cost_per_hr: f64, running_for: std::time::Duration) -> PodState {
-        PodState {
-            pod_id: pod_id.to_string(),
+    fn instance(name: &str, cost_per_hr: f64, running_for: std::time::Duration) -> InstanceState {
+        InstanceState {
+            name: name.to_string(),
+            runtime: "runpod".to_string(),
+            external_id: format!("pod-{name}"),
+            phase: Phase::Running,
             gpu_name: "Test GPU".to_string(),
             cost_per_hr,
             started_at: std::time::Instant::now().checked_sub(running_for).unwrap(),
-            jupyter: JupyterClient::new(pod_id, "test-token"),
+            cleanup: Cleanup::Terminate,
+            jupyter: JupyterClient::new("http://127.0.0.1:1", "test-token"),
             jupyter_token: "test-token".to_string(),
             session_id: "test-session".to_string(),
             kernel_ids: Vec::new(),
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
             ssh_key_path: PathBuf::from("/tmp/test-key"),
-            public_ip: None,
-            ssh_port: None,
+            connection: None,
             heartbeat: None,
             pending_executions: HashMap::new(),
         }
     }
 
     #[test]
-    fn save_and_load_roundtrip() {
+    fn record_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        state.pod = Some(pod_state("pod-123", 0.5, std::time::Duration::ZERO));
+        let inst = instance("main", 0.5, std::time::Duration::ZERO);
+        let record = inst.record();
+        state.instances.insert("main".to_string(), inst);
 
-        state.save(Cleanup::Stop).unwrap();
+        state.save_record("main", &record).unwrap();
 
-        let persisted = AppState::load_persisted(dir.path()).unwrap();
-        assert_eq!(persisted.pod_id.as_deref(), Some("pod-123"));
-        assert_eq!(persisted.cleanup.as_deref(), Some("stop"));
-        assert_eq!(persisted.jupyter_token.as_deref(), Some("test-token"));
-        assert_eq!(persisted.ssh_key_path.as_deref(), Some("/tmp/test-key"));
-        assert_eq!(persisted.gpu_name.as_deref(), Some("Test GPU"));
-        assert_eq!(
-            AppState::load_existing(dir.path()).as_deref(),
-            Some("pod-123")
-        );
+        let loaded = load_instance_record(dir.path(), "main").unwrap();
+        assert_eq!(loaded.external_id, "pod-main");
+        assert_eq!(loaded.runtime, "runpod");
+        assert_eq!(loaded.phase, Phase::Running);
+        assert_eq!(loaded.cleanup, Cleanup::Terminate);
+        assert_eq!(loaded.jupyter_token.as_deref(), Some("test-token"));
+
+        let all = list_instance_records(dir.path());
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "main");
     }
 
     #[test]
     fn state_dir_gets_gitignore() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(dir.path().to_path_buf());
-        state.save(Cleanup::Terminate).unwrap();
+        let inst = instance("main", 0.0, std::time::Duration::ZERO);
+        state.save_record("main", &inst.record()).unwrap();
 
         let gitignore = dir.path().join(".claude/remote-kernels/.gitignore");
         assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "*\n");
     }
 
     #[test]
-    fn clear_removes_state_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        state.save(Cleanup::Terminate).unwrap();
-        assert!(AppState::load_persisted(dir.path()).is_some());
-
-        state.clear().unwrap();
-        assert!(AppState::load_persisted(dir.path()).is_none());
-        // Clearing twice is fine.
-        state.clear().unwrap();
-    }
-
-    #[test]
-    fn save_with_pod_id_falls_back_to_disk_for_reconnection_details() {
+    fn clear_record_removes_instance_dir_and_spend_when_last() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        state.pod = Some(pod_state("pod-123", 0.5, std::time::Duration::ZERO));
-        state.save(Cleanup::Stop).unwrap();
+        let inst = instance("main", 1.0, std::time::Duration::from_secs(3600));
+        let record = inst.record();
+        state.instances.insert("main".to_string(), inst);
+        state.save_record("main", &record).unwrap();
+        assert!(
+            dir.path()
+                .join(".claude/remote-kernels/spend.json")
+                .exists()
+        );
 
-        // Simulate stop(): pod taken out of memory, but reconnection details
-        // must survive via the state file.
-        state.pod = None;
-        state
-            .save_with_pod_id(Some("pod-123"), Cleanup::Stop)
-            .unwrap();
-
-        let persisted = AppState::load_persisted(dir.path()).unwrap();
-        assert_eq!(persisted.pod_id.as_deref(), Some("pod-123"));
-        assert_eq!(persisted.jupyter_token.as_deref(), Some("test-token"));
-        assert_eq!(persisted.gpu_name.as_deref(), Some("Test GPU"));
+        state.clear_record("main").unwrap();
+        assert!(load_instance_record(dir.path(), "main").is_none());
+        assert!(
+            !dir.path()
+                .join(".claude/remote-kernels/spend.json")
+                .exists()
+        );
+        // Clearing twice is fine.
+        state.clear_record("main").unwrap();
     }
 
     #[test]
-    fn spend_is_monotonic_across_pods() {
+    fn spend_is_monotonic_across_instances() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
         assert!(state.total_spend().abs() < f64::EPSILON);
 
-        // One hour at $0.50/hr.
-        state.pod = Some(pod_state(
-            "pod-1",
-            0.5,
-            std::time::Duration::from_secs(3600),
-        ));
-        let with_pod = state.total_spend();
-        assert!((with_pod - 0.5).abs() < 0.01, "spend was {with_pod}");
+        state.instances.insert(
+            "a".to_string(),
+            instance("a", 0.5, std::time::Duration::from_secs(3600)),
+        );
+        state.instances.insert(
+            "b".to_string(),
+            instance("b", 1.0, std::time::Duration::from_secs(1800)),
+        );
 
-        // Snapshot on stop/terminate folds the pod cost into the accumulated total.
-        state.snapshot_spend();
-        state.pod = None;
-        let after_snapshot = state.total_spend();
-        assert!((after_snapshot - with_pod).abs() < 0.01);
+        // $0.50 (1h @ 0.5) + $0.50 (0.5h @ 1.0)
+        let total = state.total_spend();
+        assert!((total - 1.0).abs() < 0.01, "total was {total}");
+        assert!((state.aggregate_cost_per_hr() - 1.5).abs() < f64::EPSILON);
 
-        // A second pod adds on top; the total never resets.
-        state.pod = Some(pod_state(
-            "pod-2",
-            1.0,
-            std::time::Duration::from_secs(1800),
-        ));
-        let with_second = state.total_spend();
-        assert!((with_second - (after_snapshot + 0.5)).abs() < 0.01);
-        assert!(with_second >= after_snapshot);
+        state.snapshot_spend_for("a");
+        state.instances.remove("a");
+        let after = state.total_spend();
+        assert!((after - total).abs() < 0.01);
+        assert!(after >= total - 0.01, "spend never decreases");
     }
 
-    /// Characterizes current behavior: a fresh `AppState` (new MCP server process)
-    /// does NOT hydrate `accumulated_spend` from the state file — spend tracking is
-    /// per server lifetime, and a mid-session server restart forgets prior spend
-    /// even though it was persisted. The multi-instance state refactor must decide
-    /// this explicitly (and preserve persisted spend across restarts) rather than
-    /// inherit it silently.
     #[test]
-    fn fresh_app_state_does_not_hydrate_persisted_spend() {
+    fn spend_hydrates_on_restart_while_records_exist() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        state.pod = Some(pod_state(
-            "pod-1",
-            2.0,
-            std::time::Duration::from_secs(3600),
-        ));
-        state.save(Cleanup::Stop).unwrap();
+        let inst = instance("main", 2.0, std::time::Duration::from_secs(3600));
+        let record = inst.record();
+        state.instances.insert("main".to_string(), inst);
+        state.save_record("main", &record).unwrap();
 
-        // Simulate an MCP server restart in the same project.
+        // Server restart with the machine still recorded: spend is hydrated
+        // so budget enforcement can't be reset by a crash.
         let restarted = AppState::new(dir.path().to_path_buf());
-        assert!(restarted.total_spend().abs() < f64::EPSILON);
-        // The persisted value is still on disk, just not loaded.
-        let persisted = AppState::load_persisted(dir.path()).unwrap();
-        assert!((persisted.accumulated_spend - 2.0).abs() < 0.01);
+        assert!(
+            (restarted.accumulated_spend - 2.0).abs() < 0.01,
+            "was {}",
+            restarted.accumulated_spend
+        );
+
+        // After the machine is gone, a fresh session starts from zero.
+        restarted.clear_record("main").unwrap();
+        let fresh = AppState::new(dir.path().to_path_buf());
+        assert!(fresh.accumulated_spend.abs() < f64::EPSILON);
     }
 
     #[test]
-    fn persisted_spend_survives_roundtrip() {
+    fn legacy_single_instance_state_migrates_to_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join(".claude/remote-kernels");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let key_path = state_dir.join("id_ed25519");
+        std::fs::write(&key_path, "fake-key").unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::json!({
+                "pod_id": "legacy-pod",
+                "cleanup": "stop",
+                "accumulated_spend": 1.25,
+                "jupyter_token": "tok",
+                "ssh_key_path": key_path.display().to_string(),
+                "gpu_name": "RTX 4090"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let state = AppState::new(dir.path().to_path_buf());
+
+        let record = load_instance_record(dir.path(), "main").unwrap();
+        assert_eq!(record.external_id, "legacy-pod");
+        assert_eq!(record.cleanup, Cleanup::Stop);
+        assert_eq!(record.gpu_name.as_deref(), Some("RTX 4090"));
+        // SSH key moved into the instance dir.
+        let new_key = dir
+            .path()
+            .join(".claude/remote-kernels/instances/main/id_ed25519");
+        assert!(new_key.exists());
+        assert_eq!(
+            record.ssh_key_path.as_deref(),
+            Some(new_key.to_str().unwrap())
+        );
+        // Old state file is gone; spend carried over.
+        assert!(!state_dir.join("state.json").exists());
+        assert!((state.accumulated_spend - 1.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn resolve_instance_rules() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        state.pod = Some(pod_state(
-            "pod-1",
-            2.0,
-            std::time::Duration::from_secs(3600),
-        ));
-        state.save(Cleanup::Terminate).unwrap();
 
-        let persisted = AppState::load_persisted(dir.path()).unwrap();
-        assert!((persisted.accumulated_spend - 2.0).abs() < 0.01);
+        assert!(state.resolve_instance(None).is_err());
+        state.instances.insert(
+            "main".to_string(),
+            instance("main", 0.0, std::time::Duration::ZERO),
+        );
+        assert_eq!(state.resolve_instance(None).unwrap(), "main");
+        assert_eq!(state.resolve_instance(Some("main")).unwrap(), "main");
+        assert!(state.resolve_instance(Some("nope")).is_err());
+
+        state.instances.insert(
+            "gpu-2".to_string(),
+            instance("gpu-2", 0.0, std::time::Duration::ZERO),
+        );
+        let err = state.resolve_instance(None).unwrap_err();
+        assert!(err.contains("gpu-2") && err.contains("main"), "{err}");
+    }
+
+    #[test]
+    fn instance_names_validated() {
+        assert!(validate_instance_name("main").is_ok());
+        assert!(validate_instance_name("gpu-2_test").is_ok());
+        assert!(validate_instance_name("").is_err());
+        assert!(validate_instance_name("has space").is_err());
+        assert!(validate_instance_name("../escape").is_err());
+        assert!(validate_instance_name(&"x".repeat(65)).is_err());
     }
 }

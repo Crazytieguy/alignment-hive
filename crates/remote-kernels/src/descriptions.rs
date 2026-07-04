@@ -3,9 +3,12 @@
 //! (rmcp's #[tool] macro reads them automatically).
 
 pub const SERVER_INSTRUCTIONS: &str = "\
-MCP server for spinning up cloud GPU instances (RunPod) and interacting with persistent Jupyter kernels. \
-Use start() to create a pod, execute() to run Python code, and stop()/terminate() to clean up.\n\
-start() automatically reconnects to a pod from a previous session if one exists \
-(resumes stopped pods, reconnects to running pods). You'll need to create new kernels after reconnecting.\n\
+MCP server for spinning up cloud GPU machines and interacting with persistent Jupyter kernels. \
+Use start() to create a machine, execute() to run Python code, and stop()/terminate() to clean up.\n\
+Multiple machines can run concurrently: give each a name via start(name=...) and pass `instance` \
+to machine-scoped tools (with a single machine, `instance` can be omitted; kernel-scoped tools \
+never need it — kernels are routed automatically). \
+start() automatically reconnects to a machine from a previous session if one exists \
+(resumes stopped machines where the runtime supports it). You'll need to create new kernels after reconnecting.\n\
 All executions are auto-saved as .ipynb notebook files (path shown in create_kernel output). \
 Read these notebooks to recover context after conversation compaction.";

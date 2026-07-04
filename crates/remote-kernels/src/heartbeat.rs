@@ -1,44 +1,60 @@
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
+//! Per-instance background heartbeat: bootstrap the machine, install the
+//! on-machine watchdog, and keep it fed.
+//!
+//! The heartbeat pipeline is runtime-agnostic — all machine specifics go
+//! through the instance's [`Connection`]:
+//! 1. Wait for the command transport (SSH / exec) to become reachable
+//! 2. Run startup commands (user commands from config)
+//! 3. Install the watchdog: self-cleanup on stale heartbeat (>5 min) or on a
+//!    passed budget deadline
+//! 4. Every 60s: signal liveness, refresh the budget deadline from the shared
+//!    spend model (aggregate burn rate across ALL running metered instances,
+//!    so concurrent machines can't collectively exceed the session budget)
 
-use tokio::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Mutex;
 
 use crate::config::Cleanup;
-use crate::runpod::client::RunPodClient;
+use crate::runtime::{AnyConnection, Connection, WatchdogPolicy};
+use crate::state::AppState;
 
-/// Start the heartbeat system in the background.
-///
-/// Spawns a background task that:
-/// 1. Resolves SSH connection info via the `RunPod` GraphQL API
-/// 2. Waits for SSH to become reachable on the pod
-/// 3. Runs startup commands (rsync install + user commands) via SSH
-/// 4. Injects a watchdog process that checks `/tmp/heartbeat` every 30s
-///    and cleans up the pod if stale (>5 min)
-/// 5. Periodically touches `/tmp/heartbeat` via SSH to keep the watchdog alive
-///
-/// Returns immediately without blocking. If SSH info never becomes available
-/// (e.g. the machine has no public IP), the task logs a warning and exits.
+/// Computes the remaining budget as seconds-until-deadline at the current
+/// aggregate burn rate. Shared across all instance heartbeats.
+#[derive(Clone)]
+pub struct BudgetFeed {
+    pub state: Arc<Mutex<AppState>>,
+    pub budget: f64,
+}
+
+impl BudgetFeed {
+    /// Seconds until the session budget is exhausted if every running metered
+    /// instance keeps burning. `None` when nothing is currently metered.
+    pub async fn remaining_secs(&self) -> Option<u64> {
+        let state = self.state.lock().await;
+        let rate = state.aggregate_cost_per_hr();
+        if rate <= 0.0 {
+            return None;
+        }
+        let remaining_dollars = self.budget - state.total_spend();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(((remaining_dollars / rate) * 3600.0).max(0.0) as u64)
+    }
+}
+
+/// Start the heartbeat pipeline for one instance. Returns immediately.
 pub fn start(
-    runpod: Arc<RunPodClient>,
-    pod_id: String,
-    ssh_key_path: PathBuf,
+    conn: Arc<AnyConnection>,
+    instance: String,
     cleanup: Cleanup,
-    budget_remaining_secs: Option<u64>,
     startup_commands: Vec<String>,
+    state: Arc<Mutex<AppState>>,
+    budget: Option<f64>,
 ) -> HeartbeatState {
     let handle = tokio::spawn(async move {
-        if let Err(e) = run(
-            &runpod,
-            &pod_id,
-            &ssh_key_path,
-            cleanup,
-            budget_remaining_secs,
-            &startup_commands,
-        )
-        .await
-        {
-            tracing::warn!("Heartbeat task failed: {e}");
+        if let Err(e) = run(&conn, &instance, cleanup, &startup_commands, &state, budget).await {
+            tracing::warn!(instance, "Heartbeat task failed: {e}");
         }
     });
 
@@ -47,282 +63,81 @@ pub fn start(
     }
 }
 
-/// The main heartbeat pipeline: resolve SSH info, wait for SSH, run startup
-/// commands, inject watchdog, then send heartbeats.
 async fn run(
-    runpod: &RunPodClient,
-    pod_id: &str,
-    ssh_key_path: &Path,
+    conn: &AnyConnection,
+    instance: &str,
     cleanup: Cleanup,
-    budget_remaining_secs: Option<u64>,
     startup_commands: &[String],
+    state: &Arc<Mutex<AppState>>,
+    budget: Option<f64>,
 ) -> anyhow::Result<()> {
-    let (ip, port) = resolve_ssh_info(runpod, pod_id).await?;
-    wait_for_ssh(ssh_key_path, &ip, port).await?;
+    let budget = budget.map(|budget| BudgetFeed {
+        state: Arc::clone(state),
+        budget,
+    });
+    conn.wait_reachable().await?;
 
-    // Run startup commands (rsync install + user commands) via SSH.
-    // These run after the pod is fully up with services started.
-    run_startup_commands(ssh_key_path, &ip, port, startup_commands).await;
+    // Startup commands run after the machine is fully up with services started.
+    // rsync (needed by sync()) is ensured lazily by the sync path itself; user
+    // commands run here so they're ready before the first execute().
+    run_startup_commands(conn, instance, startup_commands).await;
 
+    let initial_budget_secs = match &budget {
+        Some(feed) => feed.remaining_secs().await,
+        None => None,
+    };
     if cleanup == Cleanup::Disabled {
-        tracing::info!("Heartbeat: cleanup disabled, skipping watchdog injection");
-    } else {
-        inject_watchdog(ssh_key_path, &ip, port, cleanup).await?;
-        if let Some(secs) = budget_remaining_secs {
-            inject_budget_enforcer(ssh_key_path, &ip, port, cleanup, secs).await?;
-        }
+        tracing::info!(instance, "Cleanup disabled, skipping watchdog");
+    } else if let Err(e) = conn
+        .install_watchdog(WatchdogPolicy {
+            cleanup,
+            initial_budget_secs,
+        })
+        .await
+    {
+        tracing::warn!(instance, "Failed to install watchdog: {e}");
     }
 
-    tracing::info!("Heartbeat: starting heartbeat loop");
+    tracing::info!(instance, "Starting heartbeat loop");
 
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
         interval.tick().await;
-        match ssh_cmd(ssh_key_path, &ip, port, "touch /tmp/heartbeat").await {
-            Ok(_) => tracing::debug!("Heartbeat sent"),
-            Err(e) => tracing::warn!("Heartbeat failed: {e}"),
+        match conn.heartbeat().await {
+            Ok(()) => tracing::debug!(instance, "Heartbeat sent"),
+            Err(e) => tracing::warn!(instance, "Heartbeat failed: {e}"),
+        }
+        // Persist spend every tick — a crash must not lose hours of accrual
+        // (hydration on restart reads this file).
+        state.lock().await.persist_spend();
+        // Refresh the on-machine budget deadline: rates change as instances
+        // start/stop, so the deadline must track the aggregate, not a one-shot
+        // value computed at instance start.
+        if cleanup != Cleanup::Disabled
+            && let Some(feed) = &budget
+            && let Some(secs) = feed.remaining_secs().await
+            && let Err(e) = conn.set_budget_deadline(secs).await
+        {
+            tracing::warn!(instance, "Failed to refresh budget deadline: {e}");
         }
     }
 }
 
-/// Poll the GraphQL API until SSH connection info is available.
-async fn resolve_ssh_info(runpod: &RunPodClient, pod_id: &str) -> anyhow::Result<(String, u16)> {
-    for attempt in 1..=40 {
-        match runpod.get_ssh_info(pod_id).await {
-            Ok(Some((ip, port))) => {
-                tracing::info!(attempt, %ip, port, "Heartbeat: SSH info resolved");
-                return Ok((ip, port));
-            }
-            Ok(None) => {
-                tracing::debug!(attempt, "Heartbeat: SSH info not yet available");
-            }
-            Err(e) => {
-                tracing::debug!(attempt, error = %e, "Heartbeat: failed to query SSH info");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+/// Run startup commands on the machine. Failures are logged but not fatal —
+/// the machine is still usable even if a startup command fails.
+async fn run_startup_commands(conn: &AnyConnection, instance: &str, commands: &[String]) {
+    if commands.is_empty() {
+        return;
     }
-    anyhow::bail!(
-        "SSH info not available after 2 minutes — heartbeat not started. \
-         sync() and download() may still work (they resolve SSH info on demand)."
-    )
-}
-
-/// Wait for SSH to become reachable, retrying up to ~2 minutes.
-async fn wait_for_ssh(ssh_key_path: &Path, public_ip: &str, ssh_port: u16) -> anyhow::Result<()> {
-    for attempt in 1..=24 {
-        match ssh_cmd(ssh_key_path, public_ip, ssh_port, "echo ok").await {
-            Ok(_) => {
-                tracing::info!(attempt, "Heartbeat: SSH is reachable");
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::debug!(attempt, error = %e, "Heartbeat: SSH not ready yet");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        }
-    }
-    anyhow::bail!("SSH did not become reachable after 2 minutes")
-}
-
-/// Run startup commands on the pod via SSH.
-///
-/// Always installs rsync (needed for `sync()`). Then runs any user-specified
-/// startup commands from the config.
-///
-/// Failures are logged but not fatal — the pod is still usable even if a
-/// startup command fails (sync just won't work without rsync).
-async fn run_startup_commands(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    user_commands: &[String],
-) {
-    // Install rsync (not included in runpod/pytorch images).
-    let mut parts = vec!["apt-get update -qq && apt-get install -y -qq rsync".to_string()];
-    parts.extend(user_commands.iter().cloned());
-    let combined = parts.join(" && ");
-
-    tracing::info!("Heartbeat: running startup commands via SSH");
-    match ssh_cmd_long(ssh_key_path, public_ip, ssh_port, &combined).await {
-        Ok(_) => tracing::info!("Heartbeat: startup commands completed"),
-        Err(e) => tracing::warn!("Heartbeat: startup commands failed: {e}"),
+    let combined = commands.join(" && ");
+    tracing::info!(instance, "Running startup commands");
+    match conn.exec(&combined, Duration::from_secs(300)).await {
+        Ok(_) => tracing::info!(instance, "Startup commands completed"),
+        Err(e) => tracing::warn!(instance, "Startup commands failed: {e}"),
     }
 }
 
-/// Execute a potentially long-running command on the pod via SSH (120s timeout).
-async fn ssh_cmd_long(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    command: &str,
-) -> anyhow::Result<String> {
-    let key_path = ssh_key_path.display().to_string();
-    let port = ssh_port.to_string();
-    let host = format!("root@{public_ip}");
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        Command::new("ssh")
-            .args([
-                "-i",
-                &key_path,
-                "-p",
-                &port,
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
-                &host,
-                command,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("SSH command timed out (120s)"))?;
-
-    let output = output?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("SSH command failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Inject the watchdog process on the pod via SSH.
-///
-/// The watchdog runs as a detached background process that monitors `/tmp/heartbeat`.
-/// If the file is stale for >5 minutes, it cleans up the pod to prevent runaway costs.
-async fn inject_watchdog(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    cleanup: Cleanup,
-) -> anyhow::Result<()> {
-    let runpodctl_cmd = match cleanup {
-        Cleanup::Stop => "runpodctl stop pod $RUNPOD_POD_ID",
-        Cleanup::Terminate => "runpodctl remove pod $RUNPOD_POD_ID",
-        Cleanup::Disabled => {
-            unreachable!("inject_watchdog should not be called when cleanup is disabled")
-        }
-    };
-
-    // The script is wrapped in single quotes for bash -c, so $ expansions happen
-    // inside the inner bash (which inherits the pod's environment including RUNPOD_POD_ID).
-    // {{age}} is Rust format escaping that produces ${age} in the output.
-    let watchdog = format!(
-        concat!(
-            "nohup bash -c '",
-            "touch /tmp/heartbeat; ",
-            "while true; do ",
-            "sleep 30; ",
-            "age=$(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))); ",
-            r#"if [ "$age" -gt 300 ]; then "#,
-            r#"echo "Heartbeat stale (${{age}}s), cleaning up pod..." >> /tmp/watchdog.log; "#,
-            "{cmd}; ",
-            "exit 0; ",
-            "fi; ",
-            "done' </dev/null >/dev/null 2>&1 &",
-        ),
-        cmd = runpodctl_cmd
-    );
-
-    ssh_cmd(ssh_key_path, public_ip, ssh_port, &watchdog).await?;
-    tracing::info!("Heartbeat: watchdog injected on pod");
-    Ok(())
-}
-
-/// Inject a budget enforcement script on the pod via SSH.
-///
-/// Sleeps for the given number of seconds, then runs the cleanup action.
-/// This is a safety net — the MCP server also checks budget before each tool call.
-async fn inject_budget_enforcer(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    cleanup: Cleanup,
-    remaining_secs: u64,
-) -> anyhow::Result<()> {
-    let runpodctl_cmd = match cleanup {
-        Cleanup::Stop => "runpodctl stop pod $RUNPOD_POD_ID",
-        Cleanup::Terminate => "runpodctl remove pod $RUNPOD_POD_ID",
-        Cleanup::Disabled => {
-            unreachable!("budget enforcer should not be called when cleanup is disabled")
-        }
-    };
-
-    let script = format!(
-        concat!(
-            "nohup bash -c '",
-            "sleep {secs}; ",
-            r#"echo "Budget time limit reached ({secs}s), cleaning up pod..." >> /tmp/watchdog.log; "#,
-            "{cmd}",
-            "' </dev/null >/dev/null 2>&1 &",
-        ),
-        secs = remaining_secs,
-        cmd = runpodctl_cmd
-    );
-
-    ssh_cmd(ssh_key_path, public_ip, ssh_port, &script).await?;
-    tracing::info!(remaining_secs, "Heartbeat: budget enforcer injected on pod");
-    Ok(())
-}
-
-/// Execute a command on the pod via SSH.
-async fn ssh_cmd(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    command: &str,
-) -> anyhow::Result<String> {
-    let key_path = ssh_key_path.display().to_string();
-    let port = ssh_port.to_string();
-    let host = format!("root@{public_ip}");
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        Command::new("ssh")
-            .args([
-                "-i",
-                &key_path,
-                "-p",
-                &port,
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
-                &host,
-                command,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("SSH command timed out"))??;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("SSH command failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Cleanup state for graceful shutdown.
+/// Handle for stopping an instance's heartbeat on shutdown.
 pub struct HeartbeatState {
     pub task_handle: tokio::task::JoinHandle<()>,
 }
