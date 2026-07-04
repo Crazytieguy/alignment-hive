@@ -412,8 +412,9 @@ impl Config {
 
 # vast.ai runtime configuration (only needed when using
 # start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY
-# (create at https://cloud.vast.ai/manage-keys/ — instance creation requires
-# a key from a 2FA-enabled login).
+# (create at https://cloud.vast.ai/manage-keys/ — on 2FA accounts the key
+# must be elevated once via POST /api/v0/tfa/ with a TOTP code; store the
+# returned session_key).
 # [vast]
 # GPU names to search for (vast naming).
 # Default: ["{default_vast_gpu}"]

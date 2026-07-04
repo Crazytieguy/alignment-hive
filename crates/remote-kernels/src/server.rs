@@ -1480,25 +1480,106 @@ impl RemoteKernelsServer {
         let external_id = external_id.to_string();
         let runtime_name = runtime_name.to_string();
         tokio::spawn(async move {
+            // Consecutive non-StillProvisioning failures. A single transient
+            // error (rate limit exhausting its backoff, network blip, flaky
+            // SSH) must not terminate a healthy billing machine, so hard
+            // errors are retried while the provider still reports the
+            // machine as existing — but deterministic failures (e.g. jupyter
+            // crashing on startup every time) shouldn't burn the full
+            // provision timeout either, hence the small cap.
+            let mut hard_failures = 0;
             loop {
-                match server.finalize_start(&name, &external_id).await {
+                let error = match server.finalize_start(&name, &external_id).await {
                     Ok(_) => return,
                     Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
-                        tracing::info!(instance = %name, "Still provisioning, continuing to wait...");
+                        // Bounded patience: metered machines bill while
+                        // provisioning and have no on-machine watchdog yet
+                        // (it installs after SSH), so a host stuck "loading"
+                        // must eventually be cut loose, not waited on forever.
+                        let Some(elapsed) = server.provisioning_overdue(&name, &external_id).await
+                        else {
+                            tracing::info!(instance = %name, "Still provisioning, continuing to wait...");
+                            continue;
+                        };
+                        anyhow::anyhow!(
+                            "machine still not ready (running + reachable) after {} \
+                             minutes — giving up on this host",
+                            elapsed.as_secs() / 60
+                        )
                     }
                     Err(e) => {
-                        tracing::warn!(instance = %name, "Background start failed: {e}");
-                        server
-                            .cleanup_failed_start(&name, &external_id, &runtime_name)
-                            .await;
-                        server.start_failures.lock().await.push(format!(
-                            "Machine {name:?} failed to start: {e} (it has been cleaned up)"
-                        ));
-                        return;
+                        hard_failures += 1;
+                        let overdue = server
+                            .provisioning_overdue(&name, &external_id)
+                            .await
+                            .is_some();
+                        if hard_failures < 3
+                            && !overdue
+                            && server.machine_exists(&external_id, &runtime_name).await
+                        {
+                            tracing::warn!(
+                                instance = %name, hard_failures,
+                                "Background start hit an error but the machine still exists — retrying: {e}"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                            continue;
+                        }
+                        e
                     }
-                }
+                };
+                tracing::warn!(instance = %name, "Background start failed: {error}");
+                let terminated = server
+                    .cleanup_failed_start(&name, &external_id, &runtime_name)
+                    .await;
+                let outcome = if terminated {
+                    "it has been cleaned up — start() again to try a different machine"
+                } else {
+                    "cleanup could NOT be confirmed — the machine may still exist and bill; \
+                     check status() or the provider console before starting another"
+                };
+                server.start_failures.lock().await.push(format!(
+                    "Machine {name:?} failed to start: {error} ({outcome})"
+                ));
+                return;
             }
         });
+    }
+
+    /// Best-effort "does the provider still know this machine" — used to
+    /// distinguish a machine-is-broken failure from a we-couldn't-ask
+    /// failure. Query errors count as existing: when in doubt, don't
+    /// terminate.
+    async fn machine_exists(&self, external_id: &str, runtime_name: &str) -> bool {
+        match self.runtime_for(runtime_name).await {
+            Ok(rt) => !matches!(rt.describe(external_id).await, Ok(InstanceStatus::Gone)),
+            Err(_) => true,
+        }
+    }
+
+    /// How long instance `name` (generation `external_id`) has been
+    /// provisioning, if that exceeds its runtime's provision timeout.
+    /// `None` = keep waiting (no timeout, not overdue, or state changed).
+    async fn provisioning_overdue(
+        &self,
+        name: &str,
+        external_id: &str,
+    ) -> Option<std::time::Duration> {
+        let (started_at, runtime_name) = {
+            let state = self.state.lock().await;
+            let inst = state
+                .instances
+                .get(name)
+                .filter(|i| i.external_id == external_id)?;
+            (inst.started_at, inst.runtime.clone())
+        };
+        let timeout = self
+            .runtime_for(&runtime_name)
+            .await
+            .ok()?
+            .capabilities()
+            .provision_timeout?;
+        let elapsed = started_at.elapsed();
+        (elapsed > timeout).then_some(elapsed)
     }
 
     /// Clean up after a failed start/reconnect: terminate the machine and
@@ -1509,7 +1590,13 @@ impl RemoteKernelsServer {
     /// The durable record is cleared only after a *confirmed* provider
     /// termination; otherwise it is kept so `status()`/`terminate()` can still
     /// see and retry the possibly-billing machine.
-    async fn cleanup_failed_start(&self, name: &str, external_id: &str, runtime_name: &str) {
+    /// Returns whether the provider termination was confirmed.
+    async fn cleanup_failed_start(
+        &self,
+        name: &str,
+        external_id: &str,
+        runtime_name: &str,
+    ) -> bool {
         tracing::warn!(instance = %name, external_id, "Cleaning up after failed start");
 
         {
@@ -1551,6 +1638,7 @@ impl RemoteKernelsServer {
                 tracing::warn!("Failed to clear instance record after failed start: {e}");
             }
         }
+        terminated
     }
 
     /// Check if the session budget has been exceeded. If so, clean up ALL

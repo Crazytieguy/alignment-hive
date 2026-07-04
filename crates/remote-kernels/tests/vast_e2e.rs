@@ -48,6 +48,16 @@ fn vast_project(config: &str) -> tempfile::TempDir {
 }
 
 fn server_in(dir: &std::path::Path) -> RemoteKernelsServer {
+    // Live-debugging aid: RUST_LOG=remote_kernels=debug surfaces the
+    // provision/SSH/jupyter progress that background finalization otherwise
+    // retries silently.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "remote_kernels=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     remote_kernels::init_tls();
     let config = Config::load(dir).unwrap();
     RemoteKernelsServer::new(config, AppState::new(dir.to_path_buf()), None)
@@ -56,14 +66,13 @@ fn server_in(dir: &std::path::Path) -> RemoteKernelsServer {
 /// Terminates the instance on drop, so a panicking test can't leak a paid
 /// machine (best effort — runs a blocking terminate on a fresh runtime).
 struct TerminateGuard {
-    server: RemoteKernelsServer,
+    dir: std::path::PathBuf,
     done: bool,
 }
 
 impl TerminateGuard {
-    async fn disarm(&mut self, instance: Option<&str>) {
-        let result = self
-            .server
+    async fn disarm(&mut self, server: &RemoteKernelsServer, instance: Option<&str>) {
+        let result = server
             .terminate(Parameters(remote_kernels::server::InstanceParams {
                 instance: instance.map(String::from),
             }))
@@ -74,23 +83,57 @@ impl TerminateGuard {
     }
 }
 
+/// Wait until status() reports the sole machine fully running (poll-status
+/// contract for a start() whose wait window expired). Panics on background
+/// start failure or at `deadline`.
+async fn wait_until_running(server: &RemoteKernelsServer, deadline_secs: u64) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let result = server
+            .status(Parameters(remote_kernels::server::InstanceParams {
+                instance: None,
+            }))
+            .await
+            .unwrap();
+        let text = text_of(&result);
+        assert!(!text.contains("failed to start"), "{text}");
+        if text.contains("Status: Running") && !text.contains("provisioning") {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "machine never became ready: {text}"
+        );
+    }
+}
+
 impl Drop for TerminateGuard {
     fn drop(&mut self) {
         if self.done {
             return;
         }
         eprintln!("TerminateGuard: cleaning up leaked vast instance...");
-        let server = self.server.clone();
+        let dir = self.dir.clone();
         // Block in place: Drop can't be async. A dedicated runtime avoids
         // nesting into the test's runtime (which is shutting down on panic).
+        // A FRESH server is required, not a clone: the original's pooled HTTP
+        // connections are driven by the panicking test runtime, which is no
+        // longer polled — a request through them would hang. The fresh server
+        // finds the machine via its durable on-disk record.
         let _ = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("cleanup runtime");
             rt.block_on(async move {
-                let _ = server
+                let server = server_in(&dir);
+                match server
                     .terminate(Parameters(remote_kernels::server::InstanceParams {
                         instance: None,
                     }))
-                    .await;
+                    .await
+                {
+                    Ok(result) => eprintln!("TerminateGuard: {}", text_of(&result)),
+                    Err(e) => eprintln!("TerminateGuard: terminate failed: {e}"),
+                }
             });
         })
         .join();
@@ -112,11 +155,20 @@ name = "rk-e2e"
 gpu-name = ["RTX 3090", "RTX 3090 Ti", "RTX 4090"]
 disk-gb = 30.0
 max-dph = 0.45
+
+# Cheapest hosts are often duds (slow pull, stuck loading, broken DNS). The
+# e2e wants a deterministic-ish host: fast pipe, top reliability tier, and a
+# price FLOOR — the bottom of the market is where the broken hosts live.
+# (dph_total here overrides the max-dph filter; keep the ceiling in sync.)
+[vast.query]
+inet_down = { gte = 800 }
+reliability = { gte = 0.98 }
+dph_total = { gte = 0.268, lte = 0.45 }
 "#,
     );
     let server = server_in(dir.path());
     let mut guard = TerminateGuard {
-        server: server.clone(),
+        dir: dir.path().to_path_buf(),
         done: false,
     };
 
@@ -131,9 +183,15 @@ max-dph = 0.45
         }))
         .await
         .expect("start protocol error");
-    let text = text_of(&result);
+    let mut text = text_of(&result);
     assert!(!is_error(&result), "start failed: {text}");
-    assert!(text.contains("RUNNING"), "{text}");
+    // A slow host (image pull, queued capacity) exhausts start's wait window;
+    // setup continues in the background — follow the documented contract and
+    // poll status(), like a real agent would.
+    if !text.contains("RUNNING") {
+        eprintln!("still provisioning, polling status: {text}");
+        text = wait_until_running(&server, 600).await;
+    }
     eprintln!("started: {text}");
 
     let result = server
@@ -203,7 +261,7 @@ max-dph = 0.45
     assert!(!is_error(&result), "download failed: {}", text_of(&result));
     assert_eq!(std::fs::read_to_string(&download_to).unwrap(), "gpu output");
 
-    guard.disarm(None).await;
+    guard.disarm(&server, None).await;
 }
 
 /// VM-instance lifecycle validating the Inspect (UK AISI) story: a KVM VM
@@ -232,11 +290,20 @@ onstart = [
     "command -v docker >/dev/null || (curl -fsSL https://get.docker.com | sh)",
     "command -v /root/.local/bin/uv >/dev/null || (curl -LsSf https://astral.sh/uv/install.sh | sh)",
 ]
+
+# VM image is also multi-GB; avoid dud hosts (see container test). The
+# cheapest VM offer was a CN host where the image never finished loading
+# (2x38min burned); a Quebec host booted the same VM in 90s.
+[vast.query]
+inet_down = { gte = 800 }
+reliability = { gte = 0.98 }
+dph_total = { gte = 0.268, lte = 0.60 }
+geolocation = { notin = ["CN"] }
 "#,
     );
     let server = server_in(dir.path());
     let mut guard = TerminateGuard {
-        server: server.clone(),
+        dir: dir.path().to_path_buf(),
         done: false,
     };
 
@@ -256,24 +323,9 @@ onstart = [
     assert!(!is_error(&result), "start failed: {text}");
     if !text.contains("RUNNING") {
         eprintln!("VM still provisioning, polling status: {text}");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            let result = server
-                .status(Parameters(remote_kernels::server::InstanceParams {
-                    instance: None,
-                }))
-                .await
-                .unwrap();
-            text = text_of(&result);
-            if text.contains("Status: Running") && !text.contains("provisioning") {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "VM never became ready: {text}"
-            );
-        }
+        // Match the runtime's VM provision timeout (35 min) — a full disk
+        // image pull + kernel boot can legitimately take 20+.
+        text = wait_until_running(&server, 2100).await;
     }
     eprintln!("VM up: {text}");
 
@@ -374,5 +426,5 @@ def hello():
         .unwrap_or(false);
     assert!(has_eval_log, "no .eval log downloaded to {logs_dir:?}");
 
-    guard.disarm(None).await;
+    guard.disarm(&server, None).await;
 }

@@ -34,7 +34,7 @@ pub struct VastClient {
 impl VastClient {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::api_http_client(),
             api_key,
         }
     }
@@ -66,12 +66,13 @@ impl VastClient {
         filters.insert("order".to_string(), json!([["dph_total", "asc"]]));
 
         let body = Self::check(
-            self.client
-                .post(format!("{BASE_URL}/api/v0/bundles/"))
-                .bearer_auth(&self.api_key)
-                .json(&serde_json::Value::Object(filters))
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .post(format!("{BASE_URL}/api/v0/bundles/"))
+                    .bearer_auth(&self.api_key)
+                    .json(&serde_json::Value::Object(filters)),
+            )
+            .await?,
             "offer search",
         )
         .await?;
@@ -87,12 +88,13 @@ impl VastClient {
     ) -> anyhow::Result<i64> {
         tracing::debug!(request = %serde_json::to_string(req).unwrap_or_default(), offer_id, "Creating vast instance");
         let body = Self::check(
-            self.client
-                .put(format!("{BASE_URL}/api/v0/asks/{offer_id}/"))
-                .bearer_auth(&self.api_key)
-                .json(req)
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .put(format!("{BASE_URL}/api/v0/asks/{offer_id}/"))
+                    .bearer_auth(&self.api_key)
+                    .json(req),
+            )
+            .await?,
             "instance creation",
         )
         .await?;
@@ -107,12 +109,13 @@ impl VastClient {
     pub async fn get_instance(&self, id: i64) -> anyhow::Result<Option<Instance>> {
         let filters = json!({"id": {"eq": id}}).to_string();
         let body = Self::check(
-            self.client
-                .get(format!("{BASE_URL}/api/v1/instances/"))
-                .bearer_auth(&self.api_key)
-                .query(&[("select_filters", filters.as_str())])
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .get(format!("{BASE_URL}/api/v1/instances/"))
+                    .bearer_auth(&self.api_key)
+                    .query(&[("select_filters", filters.as_str())]),
+            )
+            .await?,
             "instance query",
         )
         .await?;
@@ -120,16 +123,41 @@ impl VastClient {
         Ok(parsed.instances.into_iter().find(|i| i.id == id))
     }
 
+    /// Find an instance by its (unique per machine name) label. Used to
+    /// reconcile a create whose response was lost: the instance may exist
+    /// server-side even though we never saw the contract id. Filters
+    /// client-side — accounts have few instances and label filtering
+    /// server-side is not documented.
+    pub async fn find_instance_by_label(&self, label: &str) -> anyhow::Result<Option<i64>> {
+        let body = Self::check(
+            crate::send_429_retry(
+                self.client
+                    .get(format!("{BASE_URL}/api/v1/instances/"))
+                    .bearer_auth(&self.api_key),
+            )
+            .await?,
+            "instance list",
+        )
+        .await?;
+        let parsed: InstancesResponse = serde_json::from_str(&body)?;
+        Ok(parsed
+            .instances
+            .into_iter()
+            .find(|i| i.label.as_deref() == Some(label))
+            .map(|i| i.id))
+    }
+
     /// `PUT /api/v0/instances/{id}/` — drive the instance to a state
     /// ("running" or "stopped").
     pub async fn set_state(&self, id: i64, state: &str) -> anyhow::Result<()> {
         Self::check(
-            self.client
-                .put(format!("{BASE_URL}/api/v0/instances/{id}/"))
-                .bearer_auth(&self.api_key)
-                .json(&json!({ "state": state }))
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .put(format!("{BASE_URL}/api/v0/instances/{id}/"))
+                    .bearer_auth(&self.api_key)
+                    .json(&json!({ "state": state })),
+            )
+            .await?,
             "state change",
         )
         .await?;
@@ -138,12 +166,12 @@ impl VastClient {
 
     /// `DELETE /api/v0/instances/{id}/` — destroy the instance (irreversible).
     pub async fn destroy_instance(&self, id: i64) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .delete(format!("{BASE_URL}/api/v0/instances/{id}/"))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .delete(format!("{BASE_URL}/api/v0/instances/{id}/"))
+                .bearer_auth(&self.api_key),
+        )
+        .await?;
         // 404 = already gone; success for termination purposes.
         if resp.status().as_u16() == 404 {
             return Ok(());
@@ -155,11 +183,12 @@ impl VastClient {
     /// `GET /api/v0/users/current/` — account info (balance in dollars).
     pub async fn balance(&self) -> anyhow::Result<Option<f64>> {
         let body = Self::check(
-            self.client
-                .get(format!("{BASE_URL}/api/v0/users/current/"))
-                .bearer_auth(&self.api_key)
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .get(format!("{BASE_URL}/api/v0/users/current/"))
+                    .bearer_auth(&self.api_key),
+            )
+            .await?,
             "account query",
         )
         .await?;
@@ -180,12 +209,13 @@ impl VastClient {
             return Ok(key.id);
         }
         let body = Self::check(
-            self.client
-                .post(format!("{BASE_URL}/api/v0/ssh/"))
-                .bearer_auth(&self.api_key)
-                .json(&json!({ "ssh_key": public_key }))
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .post(format!("{BASE_URL}/api/v0/ssh/"))
+                    .bearer_auth(&self.api_key)
+                    .json(&json!({ "ssh_key": public_key })),
+            )
+            .await?,
             "ssh key registration",
         )
         .await?;
@@ -204,26 +234,47 @@ impl VastClient {
 
     pub async fn list_ssh_keys(&self) -> anyhow::Result<Vec<super::types::SshKey>> {
         let body = Self::check(
-            self.client
-                .get(format!("{BASE_URL}/api/v0/ssh/"))
-                .bearer_auth(&self.api_key)
-                .send()
-                .await?,
+            crate::send_429_retry(
+                self.client
+                    .get(format!("{BASE_URL}/api/v0/ssh/"))
+                    .bearer_auth(&self.api_key),
+            )
+            .await?,
             "ssh key list",
         )
         .await?;
-        let parsed: SshKeysResponse = serde_json::from_str(&body)?;
-        Ok(parsed.ssh_keys)
+        let parsed: SshKeysResponse = serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("unexpected ssh key list response ({e}): {body}"))?;
+        Ok(parsed.into_keys())
+    }
+
+    /// `POST /api/v0/instances/{id}/ssh/` — attach an SSH public key to a
+    /// specific instance. Account-level registration alone does NOT grant
+    /// proxy-SSH access to an instance (observed live, 2026-07): the proxy
+    /// authenticates against keys attached to the instance.
+    pub async fn attach_ssh_key(&self, instance_id: i64, public_key: &str) -> anyhow::Result<()> {
+        Self::check(
+            crate::send_429_retry(
+                self.client
+                    .post(format!("{BASE_URL}/api/v0/instances/{instance_id}/ssh/"))
+                    .bearer_auth(&self.api_key)
+                    .json(&json!({ "ssh_key": public_key })),
+            )
+            .await?,
+            "ssh key attach",
+        )
+        .await?;
+        Ok(())
     }
 
     /// `DELETE /api/v0/ssh/{id}/` — remove an account SSH key.
     pub async fn delete_ssh_key(&self, id: i64) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .delete(format!("{BASE_URL}/api/v0/ssh/{id}/"))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .delete(format!("{BASE_URL}/api/v0/ssh/{id}/"))
+                .bearer_auth(&self.api_key),
+        )
+        .await?;
         if resp.status().as_u16() == 404 {
             return Ok(());
         }

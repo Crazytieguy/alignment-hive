@@ -113,6 +113,7 @@ impl Runtime for FakeRuntime {
         Capabilities {
             stop_resume: StopSupport::Full,
             metered: self.cost_per_hr > 0.0,
+            provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
         }
     }
 

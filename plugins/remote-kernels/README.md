@@ -44,6 +44,7 @@ outlive a crashed session are reconnected or reaped on the next start.
 ## Requirements
 
 - An API key for the runtime(s) you use: `RUNPOD_API_KEY` and/or
-  `VAST_API_KEY` (vast instance creation requires a key from a 2FA-enabled
-  login), or a kubeconfig for Kubernetes.
+  `VAST_API_KEY` (on 2FA-enabled vast accounts, instance creation needs the
+  key elevated once with a 2FA code — the setup skill walks through it), or
+  a kubeconfig for Kubernetes.
 - Run the `setup` skill to configure interactively.

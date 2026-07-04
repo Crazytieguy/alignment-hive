@@ -27,7 +27,7 @@ impl JupyterClient {
     /// tunnel, port-forward, ...).
     pub fn new(http_base: &str, token: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::api_http_client(),
             base_url: http_base.trim_end_matches('/').to_string(),
             token: token.to_string(),
         }

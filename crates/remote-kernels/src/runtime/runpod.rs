@@ -81,6 +81,7 @@ impl Runtime for RunPodRuntime {
         Capabilities {
             stop_resume: StopSupport::Full,
             metered: true,
+            provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
         }
     }
 
@@ -194,23 +195,30 @@ impl Runtime for RunPodRuntime {
     }
 
     /// Poll until the pod reaches RUNNING (up to 3 minutes).
+    /// Poll until running (~3 minutes per pass). At the deadline this
+    /// returns [`StillProvisioning`] — the pod is kept and the background
+    /// finalizer keeps waiting, bounded by the runtime's `provision_timeout`
+    /// — and transient query failures are skipped attempts, not machine
+    /// failures.
     async fn wait_running(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
         let mut attempts = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
             attempts += 1;
 
-            let pod = self.client.get_pod(external_id).await?;
-            tracing::debug!(external_id, status = ?pod.desired_status, attempts, "Polling pod status");
-
-            if pod.is_running() {
-                return Ok(Self::handle_from_pod(&pod));
+            match self.client.get_pod(external_id).await {
+                Ok(pod) => {
+                    tracing::debug!(external_id, status = ?pod.desired_status, attempts, "Polling pod status");
+                    if pod.is_running() {
+                        return Ok(Self::handle_from_pod(&pod));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(external_id, attempts, "pod query failed transiently: {e}");
+                }
             }
             if attempts > 60 {
-                anyhow::bail!(
-                    "Pod did not reach RUNNING status after 3 minutes (current: {:?})",
-                    pod.desired_status
-                );
+                return Err(crate::runtime::StillProvisioning.into());
             }
         }
     }

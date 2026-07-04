@@ -10,7 +10,7 @@ use tokio::process::Command;
 /// machines are short-lived with fresh IPs, and the client side is already
 /// authenticated by the per-instance ephemeral key. The single source of
 /// truth for both direct `ssh` invocations and rsync's `-e` transport.
-pub const SSH_OPTS: [&str; 8] = [
+pub const SSH_OPTS: [&str; 10] = [
     "-o",
     "StrictHostKeyChecking=no",
     "-o",
@@ -19,6 +19,10 @@ pub const SSH_OPTS: [&str; 8] = [
     "LogLevel=ERROR",
     "-o",
     "ConnectTimeout=5",
+    // Offer only the -i key: default identities pollute the machine's auth
+    // log and can trip MaxAuthTries before the right key is tried.
+    "-o",
+    "IdentitiesOnly=yes",
 ];
 
 /// The `-e` transport string for rsync: `ssh -i <key> -p <port> <SSH_OPTS>`.
@@ -74,15 +78,35 @@ pub fn watchdog_script(cleanup_cmd: &str) -> String {
 /// `$REMOTE_KERNELS_JUPYTER_TOKEN` in the environment of the invocation.
 /// `workdir` and `jupyter_command` must be validated shell-safe (no single
 /// quotes) by the caller.
+///
+/// PATH: non-interactive SSH shells miss the venv/conda/user-tool dirs that
+/// interactive logins get (vast base images keep jupyter in `/venv/main`), so
+/// the common ones are prepended for the default `jupyter server` to resolve.
+///
+/// The post-start liveness check (fresh-launch branch only — a live pid file
+/// has already proven the server) exists because nohup makes failure silent:
+/// without it, a missing binary or instantly-crashing server means minutes of
+/// dead tunnel polling instead of an immediate error carrying the real log.
+/// A stale pid file with a live server (bind failure in the log) is treated
+/// as running — terminating a healthy machine over a lost pid file would be
+/// absurd.
 pub fn jupyter_launch_script(workdir: &str, jupyter_command: &str, port: u16) -> String {
     format!(
-        "mkdir -p '{workdir}' && cd '{workdir}' && \
+        "export PATH=\"/venv/main/bin:/opt/conda/bin:$HOME/.local/bin:$PATH\"; \
+         mkdir -p '{workdir}' && cd '{workdir}' && \
          if [ -f /tmp/jupyter.pid ] && kill -0 \"$(cat /tmp/jupyter.pid)\" 2>/dev/null; then \
          echo already-running; else \
          nohup {jupyter_command} --no-browser --ip=127.0.0.1 --port={port} \
          --ServerApp.token=\"$REMOTE_KERNELS_JUPYTER_TOKEN\" \
          --ServerApp.disable_check_xsrf=True --ServerApp.root_dir='{workdir}' \
-         >/tmp/jupyter.log 2>&1 & echo $! > /tmp/jupyter.pid; fi"
+         --allow-root \
+         >/tmp/jupyter.log 2>&1 & echo $! > /tmp/jupyter.pid; \
+         sleep 3; \
+         if ! kill -0 \"$(cat /tmp/jupyter.pid)\" 2>/dev/null; then \
+         if grep -qi 'address already in use' /tmp/jupyter.log; then \
+         echo 'port already served — assuming an existing jupyter'; else \
+         echo 'jupyter exited during startup; its log:' >&2; \
+         tail -n 50 /tmp/jupyter.log >&2; exit 1; fi; fi; fi"
     )
 }
 

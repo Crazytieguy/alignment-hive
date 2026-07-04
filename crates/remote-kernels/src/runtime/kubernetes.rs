@@ -197,6 +197,9 @@ impl Runtime for KubernetesRuntime {
         Capabilities {
             stop_resume: StopSupport::Unsupported,
             metered: false,
+            // Queued pods can wait hours for capacity; activeDeadlineSeconds
+            // bounds runtime instead.
+            provision_timeout: None,
         }
     }
 

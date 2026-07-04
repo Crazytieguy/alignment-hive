@@ -45,7 +45,7 @@ pub struct RunPodClient {
 impl RunPodClient {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::api_http_client(),
             api_key,
         }
     }
@@ -55,14 +55,14 @@ impl RunPodClient {
     pub async fn create_pod(&self, input: &PodCreateInput) -> Result<Pod, RunPodError> {
         tracing::debug!(request = %serde_json::to_string_pretty(input).unwrap_or_default(), "Creating pod");
 
-        let resp = self
-            .client
-            .post(format!("{REST_URL}/pods"))
-            .bearer_auth(&self.api_key)
-            .json(input)
-            .send()
-            .await
-            .map_err(|e| RunPodError::Other(e.into()))?;
+        let resp = crate::send_429_retry(
+            self.client
+                .post(format!("{REST_URL}/pods"))
+                .bearer_auth(&self.api_key)
+                .json(input),
+        )
+        .await
+        .map_err(RunPodError::Other)?;
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -78,12 +78,12 @@ impl RunPodClient {
     }
 
     pub async fn get_pod(&self, pod_id: &str) -> anyhow::Result<Pod> {
-        let resp = self
-            .client
-            .get(format!("{REST_URL}/pods/{pod_id}"))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .get(format!("{REST_URL}/pods/{pod_id}"))
+                .bearer_auth(&self.api_key),
+        )
+        .await?;
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -96,12 +96,12 @@ impl RunPodClient {
     }
 
     pub async fn stop_pod(&self, pod_id: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .post(format!("{REST_URL}/pods/{pod_id}/stop"))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .post(format!("{REST_URL}/pods/{pod_id}/stop"))
+                .bearer_auth(&self.api_key),
+        )
+        .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -116,12 +116,12 @@ impl RunPodClient {
     ///
     /// Note: `/start` resumes a stopped pod. `/restart` reboots a running pod.
     pub async fn resume_pod(&self, pod_id: &str) -> anyhow::Result<Pod> {
-        let resp = self
-            .client
-            .post(format!("{REST_URL}/pods/{pod_id}/start"))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .post(format!("{REST_URL}/pods/{pod_id}/start"))
+                .bearer_auth(&self.api_key),
+        )
+        .await?;
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -134,12 +134,12 @@ impl RunPodClient {
     }
 
     pub async fn terminate_pod(&self, pod_id: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .delete(format!("{REST_URL}/pods/{pod_id}"))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .delete(format!("{REST_URL}/pods/{pod_id}"))
+                .bearer_auth(&self.api_key),
+        )
+        .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -163,13 +163,13 @@ impl RunPodClient {
             )
         });
 
-        let resp = self
-            .client
-            .post(GRAPHQL_URL)
-            .bearer_auth(&self.api_key)
-            .json(&query)
-            .send()
-            .await?;
+        let resp = crate::send_429_retry(
+            self.client
+                .post(GRAPHQL_URL)
+                .bearer_auth(&self.api_key)
+                .json(&query),
+        )
+        .await?;
 
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

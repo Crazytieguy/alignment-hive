@@ -34,13 +34,24 @@ area below** and edit the file based on their answers.
   - RunPod: simplest, reliable stop/resume, MATS default
   - vast.ai: cheapest; stopped instances may not resume (GPU can be rented
     out) so treat machines as ephemeral; set `vm = true` for anything that
-    needs Docker inside (Inspect sandboxes)
+    needs Docker inside (Inspect sandboxes). KNOWN ISSUE (2026-07): vast VM
+    SSH-key injection appears broken vendor-side (VMs boot but reject all
+    account keys, even via vast's own template flow) — verify VM SSH works
+    on the user's account before relying on `vm = true`; containers are
+    solid
   - Kubernetes: for lab clusters; needs a pod template YAML from the lab
 - **API key(s)** — per runtime, in `.env.local` (gitignored):
   - RunPod: `RUNPOD_API_KEY` — https://docs.runpod.io/get-started/api-keys
   - vast.ai: `VAST_API_KEY` — https://docs.vast.ai/api-reference (create at
-    https://cloud.vast.ai/manage-keys/). Instance creation requires a key
-    from a **2FA-enabled** vast login — have the user enable 2FA first
+    https://cloud.vast.ai/manage-keys/). If the account has 2FA enabled,
+    write operations (instance creation) reject plain keys with a 401
+    mentioning Two Factor Authentication — console-created keys are NOT
+    2FA-privileged, no matter how the user logged in. The key must be
+    elevated once: `POST https://console.vast.ai/api/v0/tfa/` with the key
+    as Bearer and body `{"tfa_method": "totp", "code": "<6-digit code>"}`;
+    the returned `session_key` is the credential to store (never echo keys
+    into the chat — write a script that swaps `.env.local` in place, and
+    have the user run it with a fresh code from their authenticator app)
   - Kubernetes: no key; uses kubeconfig (`context` in `[kubernetes]`)
 - **GPU selection** — what workload? RunPod: `gpu-type-ids` (fallback list);
   vast: `[vast] gpu-name` + `max-dph` price ceiling; Kubernetes: GPU

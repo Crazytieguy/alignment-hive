@@ -62,6 +62,9 @@ impl VastRuntime {
         filters.insert("verified".to_string(), json!({"eq": true}));
         filters.insert("reliability".to_string(), json!({"gte": 0.95}));
         filters.insert("num_gpus".to_string(), json!({"gte": 1}));
+        // Image pull dominates startup; slow-link hosts can sit in "loading"
+        // past the provision timeout — spend with nothing to show for it.
+        filters.insert("inet_down".to_string(), json!({"gte": 200.0}));
 
         let gpu_names: Vec<String> = match gpu_override {
             Some(gpu) => vec![gpu.to_string()],
@@ -92,15 +95,57 @@ impl VastRuntime {
     /// before any SSH attempt succeeds) and then runs the user's startup
     /// lines. Key injection via onstart needs no account-key API permission —
     /// vast restricts SSH-key management to 2FA-authenticated keys.
+    ///
+    /// On CONTAINERS the append is re-asserted in a background loop for the
+    /// first 10 minutes: vast's image entrypoint rewrites `authorized_keys`
+    /// from the instance's attached keys on a schedule of its own, and on
+    /// some hosts that clobbers a one-shot append (observed live 2026-07 via
+    /// container sshd logs — auth happens in the container, reached over
+    /// loopback from vast's proxy). The loop wins any ordering race.
+    ///
+    /// On VMs the loop is omitted: onstart is delivered via cloud-init
+    /// user-data, where a lingering background process can wedge boot-time
+    /// provisioning (and there is no entrypoint rewriting `authorized_keys`
+    /// to race against — cloud-init injects the attached keys once).
+    ///
+    /// The orphan watchdog is the last-resort money guard for the window
+    /// before the real watchdog installs (which requires working SSH): if no
+    /// heartbeat file has EVER appeared 45 minutes after boot — the server
+    /// that provisioned this machine died, lost its key, or never got in —
+    /// the machine halts itself. Halt stops GPU billing (storage remains);
+    /// no credentials live on the machine, so halting is all it can do.
     fn onstart_script(&self, ssh_public_key: &str) -> String {
+        let key = ssh_public_key.trim();
         let mut lines = vec![
             "#!/bin/bash".to_string(), // VMs require an explicit shebang
             "mkdir -p ~/.ssh".to_string(),
-            format!("echo '{}' >> ~/.ssh/authorized_keys", ssh_public_key.trim()),
+            format!("echo '{key}' >> ~/.ssh/authorized_keys"),
             "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys".to_string(),
+            "nohup sh -c 'sleep 2700; [ -f /tmp/heartbeat ] || shutdown -h now || kill -9 1' \
+             </dev/null >/dev/null 2>&1 &"
+                .to_string(),
         ];
+        if !self.vast.vm {
+            lines.push(format!(
+                "(for _ in $(seq 120); do grep -qF '{key}' ~/.ssh/authorized_keys 2>/dev/null \
+                 || echo '{key}' >> ~/.ssh/authorized_keys; sleep 5; done) \
+                 </dev/null >/dev/null 2>&1 &"
+            ));
+        }
         lines.extend(self.vast.onstart.iter().cloned());
         lines.join("\n") + "\n"
+    }
+}
+
+fn handle_for_offer(contract: i64, offer: &crate::vast::types::Offer) -> InstanceHandle {
+    InstanceHandle {
+        external_id: contract.to_string(),
+        gpu_name: format!(
+            "{} x{}",
+            offer.gpu_name.as_deref().unwrap_or("unknown"),
+            offer.num_gpus.unwrap_or(1)
+        ),
+        cost_per_hr: offer.dph_total,
     }
 }
 
@@ -119,26 +164,41 @@ impl Runtime for VastRuntime {
         Capabilities {
             stop_resume: StopSupport::Unreliable,
             metered: true,
+            // VMs pull a full disk image and boot a kernel — legitimately
+            // slower than containers.
+            provision_timeout: Some(std::time::Duration::from_secs(if self.vast.vm {
+                35 * 60
+            } else {
+                20 * 60
+            })),
         }
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
-        // Account-level key registration: best-effort for containers (onstart
-        // injection covers access), REQUIRED for VMs — the create API rejects
-        // vm=true without an account SSH key (`no_ssh_key_for_vm`), and key
-        // management needs a 2FA-authenticated API key.
+        // Account-level key registration BEFORE creation is load-bearing:
+        // vast auto-attaches account keys to the instance at create time, and
+        // the SSH proxy (sshN.vast.ai) only honors create-time attached keys
+        // reliably (observed live 2026-07: keys attached after create show in
+        // the API but the proxy keeps rejecting them). VMs additionally
+        // require it — the create API rejects vm=true without an account key
+        // (`no_ssh_key_for_vm`). Downside: per-instance keys accumulate on
+        // the account (see docs).
         if let Err(e) = self.client.ensure_ssh_key(&req.ssh_public_key).await {
             if self.vast.vm {
                 anyhow::bail!(
                     "VM instances require an SSH key registered on the vast.ai account \
                      before creation, and this API key can't manage keys ({e}). Either \
-                     enable 2FA on your vast login and create a new API key, or add any \
-                     SSH key once by hand at https://cloud.vast.ai/manage-keys/ — the \
-                     per-instance key is still injected via the startup script."
+                     elevate the key with a 2FA code (POST /api/v0/tfa/ with the key as \
+                     Bearer and {{\"tfa_method\":\"totp\",\"code\":\"<code>\"}}; store the \
+                     returned session_key as VAST_API_KEY), or add any SSH key once by \
+                     hand at https://cloud.vast.ai/manage-keys/ — the per-instance key \
+                     is still injected via the startup script."
                 );
             }
             tracing::warn!(
-                "vast account SSH key registration failed ({e}); relying on onstart injection"
+                "vast account SSH key registration failed ({e}); onstart injection \
+                 still covers direct-port hosts, but proxy-SSH hosts will reject \
+                 the connection"
             );
         }
 
@@ -156,11 +216,12 @@ impl Runtime for VastRuntime {
             );
         }
 
+        let label = format!("{}-{}", self.name_prefix, req.name);
         let create = CreateInstanceRequest {
             image: image.clone(),
             disk: self.vast.disk_gb,
             runtype: "ssh".to_string(),
-            label: Some(format!("{}-{}", self.name_prefix, req.name)),
+            label: Some(label.clone()),
             env: crate::vast::types::docker_env_flags(&req.env)?,
             onstart: Some(self.onstart_script(&req.ssh_public_key)),
             vm: self.vast.vm.then_some(true),
@@ -186,20 +247,40 @@ impl Runtime for VastRuntime {
             match self.client.create_instance(offer.id, &create).await {
                 Ok(contract) => {
                     tracing::info!(instance_id = contract, "vast.ai instance created");
-                    return Ok(InstanceHandle {
-                        external_id: contract.to_string(),
-                        gpu_name: format!(
-                            "{} x{}",
-                            offer.gpu_name.as_deref().unwrap_or("unknown"),
-                            offer.num_gpus.unwrap_or(1)
-                        ),
-                        cost_per_hr: offer.dph_total,
-                    });
+                    // Best-effort belt-and-braces: attach the key to this
+                    // instance too. Observed to race the instance's own
+                    // registration (a create-time attach can be dropped), so
+                    // the account-level registration above remains the
+                    // load-bearing mechanism; this occasionally helps and
+                    // never hurts.
+                    if let Err(e) = self
+                        .client
+                        .attach_ssh_key(contract, &req.ssh_public_key)
+                        .await
+                    {
+                        tracing::warn!("attaching SSH key to vast instance failed: {e}");
+                    }
+                    return Ok(handle_for_offer(contract, offer));
                 }
                 Err(e) if crate::vast::client::ApiStatusError::is_permanent(&e) => {
                     return Err(e);
                 }
                 Err(e) => {
+                    // A transport-level failure (timeout, lost response) is
+                    // ambiguous: vast may have created the instance and we
+                    // never saw the contract id. Reconcile by our unique
+                    // label before trying another offer — otherwise a paid
+                    // machine could exist with no record anywhere.
+                    if e.downcast_ref::<crate::vast::client::ApiStatusError>()
+                        .is_none()
+                        && let Ok(Some(orphan)) = self.client.find_instance_by_label(&label).await
+                    {
+                        tracing::warn!(
+                            instance_id = orphan,
+                            "create response was lost but the instance exists — adopting it"
+                        );
+                        return Ok(handle_for_offer(orphan, offer));
+                    }
                     tracing::info!(offer_id = offer.id, "Offer failed, trying next: {e}");
                     last_err = Some(e);
                 }
@@ -228,7 +309,20 @@ impl Runtime for VastRuntime {
 
     async fn describe(&self, external_id: &str) -> anyhow::Result<InstanceStatus> {
         let id: i64 = external_id.parse()?;
-        let Some(instance) = self.client.get_instance(id).await? else {
+        // Query failures must not become hard errors here — callers treat
+        // describe() failures as machine problems (the background finalizer
+        // would terminate a healthy machine over a rate limit or a local
+        // network blip). Only definitive auth failures propagate; everything
+        // else degrades to Unknown, which keeps the record and keeps polling
+        // (the provision timeout bounds total patience).
+        let instance = match self.client.get_instance(id).await {
+            Ok(i) => i,
+            Err(e) if crate::vast::client::ApiStatusError::is_permanent(&e) => return Err(e),
+            Err(e) => {
+                return Ok(InstanceStatus::Unknown(format!("query failed: {e}")));
+            }
+        };
+        let Some(instance) = instance else {
             return Ok(InstanceStatus::Gone);
         };
         Ok(match instance.actual_status.as_deref() {
@@ -260,16 +354,28 @@ impl Runtime for VastRuntime {
         let deadline = std::time::Instant::now() + Duration::from_secs(300);
         loop {
             match self.describe(external_id).await? {
-                InstanceStatus::Running => return self.get_handle(external_id).await,
+                InstanceStatus::Running => match self.get_handle(external_id).await {
+                    Ok(handle) => return Ok(handle),
+                    // A transient query failure at the moment the machine
+                    // turns Running must not become a hard error (the
+                    // finalizer would terminate a machine that just finished
+                    // its image pull). Keep polling instead.
+                    Err(e) if crate::vast::client::ApiStatusError::is_permanent(&e) => {
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        tracing::warn!(external_id, "handle query failed transiently: {e}");
+                    }
+                },
                 InstanceStatus::Gone => {
                     anyhow::bail!("vast.ai instance disappeared while starting")
                 }
                 other => {
                     tracing::debug!(external_id, ?other, "vast instance not running yet");
-                    if std::time::Instant::now() > deadline {
-                        return Err(StillProvisioning.into());
-                    }
                 }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(StillProvisioning.into());
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -309,14 +415,28 @@ impl Runtime for VastRuntime {
         let (ssh_host, ssh_port) = {
             let mut endpoint = None;
             for attempt in 1..=40 {
-                if let Some(instance) = self.client.get_instance(id).await?
-                    && let Some(ep) = instance.ssh_endpoint()
-                {
-                    endpoint = Some(ep);
-                    break;
+                // Transient query errors are just a skipped attempt — a hard
+                // error here would make the finalizer terminate the machine
+                // over a network blip. Only definitive auth failures escape.
+                match self.client.get_instance(id).await {
+                    Ok(Some(instance)) => {
+                        if let Some(ep) = instance.ssh_endpoint() {
+                            endpoint = Some(ep);
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) if crate::vast::client::ApiStatusError::is_permanent(&e) => {
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        tracing::warn!(attempt, "instance query failed transiently: {e}");
+                    }
                 }
                 tracing::debug!(attempt, "vast SSH endpoint not yet available");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                // Gentle cadence — this endpoint is shared with describe()
+                // polling and vast rate-limits around 1 req/s per endpoint.
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             match endpoint {
                 Some(ep) => ep,
@@ -325,35 +445,8 @@ impl Runtime for VastRuntime {
         };
         tracing::info!(%ssh_host, ssh_port, "vast SSH endpoint resolved");
 
-        // Wait for SSH before launching Jupyter — the endpoint must be live
-        // when this returns (finalize_start builds the client from it).
-        // Slow boots (VM first boot, onstart installs) are StillProvisioning.
-        let mut reachable = false;
-        for attempt in 1..=36 {
-            match crate::ssh_exec::ssh_cmd(
-                &ctx.ssh_key_path,
-                &user,
-                &ssh_host,
-                ssh_port,
-                "echo ok",
-                Duration::from_secs(10),
-            )
-            .await
-            {
-                Ok(_) => {
-                    tracing::info!(attempt, "vast SSH is reachable");
-                    reachable = true;
-                    break;
-                }
-                Err(e) => {
-                    tracing::debug!(attempt, error = %e, "vast SSH not ready yet");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-        if !reachable {
-            return Err(StillProvisioning.into());
-        }
+        self.wait_ssh_reachable(id, ctx, &user, &ssh_host, ssh_port)
+            .await?;
 
         // Launch Jupyter (idempotent) with the token passed via environment.
         let launch = format!(
@@ -396,6 +489,71 @@ impl Runtime for VastRuntime {
             local_port,
             tunnel: tokio::sync::Mutex::new(tunnel),
         })
+    }
+}
+
+impl VastRuntime {
+    /// Wait for SSH before launching Jupyter — the endpoint must be live when
+    /// `open` returns (`finalize_start` builds the client from it).
+    ///
+    /// vast's SSH proxy answers "Permission denied" while the instance is
+    /// still loading (image pull — can be many minutes), and for a while
+    /// after it runs on some proxy hosts (attached-key propagation latency
+    /// varies per host: ssh3 accepted within seconds of Running, ssh9 was
+    /// still rejecting minutes later — observed live 2026-07). So denial is
+    /// never treated as fatal here: sustained denial triggers one key
+    /// re-attach per call (attach-at-create can race the instance's proxy
+    /// registration; attaching to a still-loading instance is harmless), then
+    /// the loop keeps waiting and returns [`StillProvisioning`] at the end
+    /// for the background finalizer to retry. The runtime's
+    /// `provision_timeout` is the money-safety backstop that eventually
+    /// terminates a machine that never accepts us.
+    async fn wait_ssh_reachable(
+        &self,
+        id: i64,
+        ctx: &ConnectionContext,
+        user: &str,
+        ssh_host: &str,
+        ssh_port: u16,
+    ) -> anyhow::Result<()> {
+        let mut denials = 0;
+        for attempt in 1..=36 {
+            match crate::ssh_exec::ssh_cmd(
+                &ctx.ssh_key_path,
+                user,
+                ssh_host,
+                ssh_port,
+                "echo ok",
+                Duration::from_secs(10),
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!(attempt, "vast SSH is reachable");
+                    return Ok(());
+                }
+                Err(e) => {
+                    denials += i32::from(e.to_string().contains("Permission denied"));
+                    if denials == 12 {
+                        tracing::warn!(
+                            "vast SSH keeps rejecting our key; re-attaching it and retrying"
+                        );
+                        match crate::ssh::public_key_for(&ctx.ssh_key_path) {
+                            Ok(pubkey) => {
+                                if let Err(e) = self.client.attach_ssh_key(id, &pubkey).await {
+                                    tracing::warn!("SSH key re-attach failed: {e}");
+                                }
+                            }
+                            Err(e) => tracing::warn!("could not re-derive public key: {e}"),
+                        }
+                        denials += 1; // one re-attach per pass
+                    }
+                    tracing::debug!(attempt, error = %e, "vast SSH not ready yet");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+        Err(StillProvisioning.into())
     }
 }
 

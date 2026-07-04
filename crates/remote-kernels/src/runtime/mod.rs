@@ -42,6 +42,16 @@ pub struct Capabilities {
     pub stop_resume: StopSupport,
     /// Whether machines have an hourly cost (budget applies).
     pub metered: bool,
+    /// Give up on a machine that still isn't running after this long since
+    /// start, and terminate it. Metered runtimes bill during provisioning,
+    /// and the on-machine watchdog can only be installed once the machine is
+    /// reachable — without a deadline, a machine stuck "loading" bills until
+    /// a human notices. `None` = wait indefinitely (Kubernetes: queued pods
+    /// can legitimately wait hours for cluster capacity).
+    ///
+    /// Enforced between background-finalization passes, so a stuck machine
+    /// can overshoot by up to one pass (minutes) before termination.
+    pub provision_timeout: Option<std::time::Duration>,
 }
 
 impl Capabilities {

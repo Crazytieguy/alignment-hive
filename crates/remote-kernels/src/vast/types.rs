@@ -192,8 +192,23 @@ pub struct SshKey {
     pub public_key: Option<String>,
 }
 
+/// `GET /api/v0/ssh/` returns a bare array in practice (observed live,
+/// 2026-07); older docs show an `{"ssh_keys": [...]}` wrapper. Accept both.
 #[derive(Debug, Deserialize)]
-pub struct SshKeysResponse {
-    #[serde(default)]
-    pub ssh_keys: Vec<SshKey>,
+#[serde(untagged)]
+pub enum SshKeysResponse {
+    Bare(Vec<SshKey>),
+    // No `#[serde(default)]` here: it would make ANY object parse as zero
+    // keys (error-shaped 200 bodies included), silently defeating the
+    // loud-unexpected-response error in `list_ssh_keys`.
+    Wrapped { ssh_keys: Vec<SshKey> },
+}
+
+impl SshKeysResponse {
+    pub fn into_keys(self) -> Vec<SshKey> {
+        match self {
+            Self::Bare(keys) => keys,
+            Self::Wrapped { ssh_keys } => ssh_keys,
+        }
+    }
 }

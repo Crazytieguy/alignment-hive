@@ -108,6 +108,7 @@ fn instance_endpoints_exist_in_spec() {
         ("/api/v0/ssh/", "post"),
         ("/api/v0/ssh/", "get"),
         ("/api/v0/ssh/{id}/", "delete"),
+        ("/api/v0/instances/{id}/ssh/", "post"),
     ] {
         assert!(
             !spec["paths"][path][method].is_null(),

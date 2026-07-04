@@ -8,6 +8,13 @@ pub struct SshKeypair {
     pub private_key_path: PathBuf,
 }
 
+/// Re-derive the OpenSSH public key from a private key written by
+/// [`generate_keypair`] (no `.pub` file is kept on disk).
+pub fn public_key_for(key_path: &Path) -> anyhow::Result<String> {
+    let private = PrivateKey::read_openssh_file(key_path)?;
+    Ok(private.public_key().to_openssh()?)
+}
+
 /// Generate an ephemeral Ed25519 SSH keypair for machine access.
 ///
 /// The private key is written to `key_path` (one key per instance, inside its
