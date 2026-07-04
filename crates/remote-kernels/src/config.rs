@@ -61,6 +61,98 @@ pub struct Config {
     /// Kubernetes runtime configuration. Absent unless the project uses the
     /// kubernetes runtime.
     pub kubernetes: Option<KubernetesConfig>,
+
+    /// vast.ai runtime configuration. Absent = defaults.
+    pub vast: Option<VastConfig>,
+}
+
+/// vast.ai-specific configuration. Known fields are typed; `[vast.query]`
+/// passes through to the offer search, and unknown `[vast]` keys pass through
+/// to the instance-creation API body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct VastConfig {
+    /// GPU names to search for (vast naming, e.g. "RTX 3090").
+    #[serde(default = "default_vast_gpu_names")]
+    pub gpu_name: Vec<String>,
+
+    /// Docker image (containers) or VM image (vm = true; must be a
+    /// `vastai/kvm:*` image, e.g. "`vastai/kvm:ubuntu_terminal`").
+    #[serde(default = "default_vast_image")]
+    pub image: String,
+
+    /// Disk size in GB.
+    #[serde(default = "default_vast_disk_gb")]
+    pub disk_gb: f64,
+
+    /// Create a KVM virtual machine instead of a container. Required for
+    /// workloads that run Docker inside (e.g. Inspect's sandboxed evals) —
+    /// vast bans Docker-in-Docker on container instances.
+    #[serde(default)]
+    pub vm: bool,
+
+    /// Price ceiling in $/hr for offer search.
+    pub max_dph: Option<f64>,
+
+    /// vast template hash to base the instance on (optional).
+    pub template_hash: Option<String>,
+
+    /// Startup script lines (VMs: run via a bash shebang script; containers:
+    /// vast's onstart mechanism).
+    #[serde(default)]
+    pub onstart: Vec<String>,
+
+    /// Directory on the machine that files sync to and kernels run in.
+    #[serde(default = "default_vast_workdir")]
+    pub workdir: String,
+
+    /// SSH login user. Containers use root; some VM images use a different
+    /// default user.
+    #[serde(default = "default_vast_ssh_user")]
+    pub ssh_user: String,
+
+    /// Command that launches Jupyter on the machine.
+    #[serde(default = "default_jupyter_command")]
+    pub jupyter_command: String,
+
+    /// Extra offer-search filters, passed through to the vast query object.
+    /// Table values are operator objects (e.g. `{ gte = 0.99 }`); scalars
+    /// become equality filters.
+    #[serde(default)]
+    pub query: HashMap<String, toml::Value>,
+
+    /// Extra fields passed through to the instance-creation API body.
+    #[serde(flatten)]
+    pub extra: HashMap<String, toml::Value>,
+}
+
+/// Same single-source-of-truth pattern as [`RunpodConfig`]'s `Default`.
+impl Default for VastConfig {
+    fn default() -> Self {
+        toml::from_str("").expect("every VastConfig field must have a serde default")
+    }
+}
+
+fn default_vast_gpu_names() -> Vec<String> {
+    vec!["RTX 3090".to_string()]
+}
+
+fn default_vast_image() -> String {
+    // vast's official base image; the tag macro resolves server-side to the
+    // recommended CUDA build. Includes SSH + Jupyter tooling.
+    "vastai/base-image:@vastai-automatic-tag".to_string()
+}
+
+fn default_vast_disk_gb() -> f64 {
+    40.0
+}
+
+fn default_vast_workdir() -> String {
+    "/workspace".to_string()
+}
+
+fn default_vast_ssh_user() -> String {
+    "root".to_string()
 }
 
 /// Kubernetes-specific configuration. Cluster-specific details (GPU resources,
@@ -318,6 +410,32 @@ impl Config {
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 
+# vast.ai runtime configuration (only needed when using
+# start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY
+# (create at https://cloud.vast.ai/manage-keys/ — instance creation requires
+# a key from a 2FA-enabled login).
+# [vast]
+# GPU names to search for (vast naming).
+# Default: ["{default_vast_gpu}"]
+# gpu-name = ["{default_vast_gpu}"]
+# Docker image, or a vastai/kvm:* image when vm = true.
+# Default: "{default_vast_image}"
+# image = "{default_vast_image}"
+# Disk size in GB. Stopped instances keep billing for storage — prefer terminate.
+# Default: {default_vast_disk_gb}
+# disk-gb = {default_vast_disk_gb}
+# Create a KVM virtual machine instead of a container. Required for Docker-in-
+# Docker workloads (e.g. Inspect's sandboxed evals) — containers can't run Docker.
+# vm = false
+# Price ceiling in $/hr for offer search.
+# max-dph = 0.5
+# Startup script lines (run as root at first boot).
+# onstart = ["curl -LsSf https://astral.sh/uv/install.sh | sh"]
+# Extra offer-search filters (vast query operators; scalars mean equality).
+# [vast.query]
+# geolocation = {{ in = ["US", "CA"] }}
+# direct_port_count = {{ gte = 1 }}
+
 # Kubernetes runtime configuration (only needed when using
 # start(runtime="kubernetes") or default-runtime = "kubernetes").
 # Cluster specifics (GPU resources, tolerations, queue labels, volumes) live
@@ -354,6 +472,9 @@ impl Config {
             default_volume_gb = default_volume_gb(),
             default_volume_mount_path = default_volume_mount_path(),
             default_cloud_type = default_cloud_type(),
+            default_vast_gpu = default_vast_gpu_names()[0],
+            default_vast_image = default_vast_image(),
+            default_vast_disk_gb = default_vast_disk_gb(),
             default_priority_label = default_priority_label(),
             default_max_lifetime_secs = default_max_lifetime_secs(),
             default_k8s_workdir = default_k8s_workdir(),

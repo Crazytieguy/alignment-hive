@@ -336,15 +336,7 @@ impl Drop for K8sConnection {
 
 const JUPYTER_PORT: u16 = 8888;
 
-/// Config strings that get interpolated into `sh -c` are wrapped in single
-/// quotes on use; reject values that would break out of them.
-fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !value.contains('\''),
-        "[kubernetes] {what} must not contain single quotes: {value:?}"
-    );
-    Ok(())
-}
+use crate::ssh_exec::validate_shell_safe;
 
 impl K8sConnection {
     async fn new(
@@ -359,16 +351,10 @@ impl K8sConnection {
 
         // Launch Jupyter inside the pod (idempotent across reconnects). The
         // only shell-interpolated values are the two validated config strings
-        // above (single-quoted) — never tool parameters.
-        let launch = format!(
-            "mkdir -p '{workdir}' && cd '{workdir}' && \
-             if [ -f /tmp/jupyter.pid ] && kill -0 \"$(cat /tmp/jupyter.pid)\" 2>/dev/null; then \
-             echo already-running; else \
-             nohup {jupyter_command} --no-browser --ip=0.0.0.0 --port={JUPYTER_PORT} \
-             --ServerApp.token=\"$REMOTE_KERNELS_JUPYTER_TOKEN\" \
-             --ServerApp.disable_check_xsrf=True --ServerApp.root_dir='{workdir}' \
-             >/tmp/jupyter.log 2>&1 & echo $! > /tmp/jupyter.pid; fi"
-        );
+        // above (single-quoted) — never tool parameters. The token comes from
+        // the pod env (injected at provision).
+        let launch =
+            crate::ssh_exec::jupyter_launch_script(&workdir, &jupyter_command, JUPYTER_PORT);
         exec_capture(&pods, &pod_name, &launch, Duration::from_secs(60)).await?;
 
         // Local listener: each accepted TCP connection gets its own fresh

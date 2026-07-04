@@ -297,7 +297,15 @@ impl Connection for RunPodConnection {
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
         let (public_ip, ssh_port) = self.ssh_info()?;
-        crate::ssh_exec::ssh_cmd(&self.ssh_key_path, public_ip, ssh_port, command, timeout).await
+        crate::ssh_exec::ssh_cmd(
+            &self.ssh_key_path,
+            "root",
+            public_ip,
+            ssh_port,
+            command,
+            timeout,
+        )
+        .await
     }
 
     /// Wait for SSH to become reachable, retrying up to ~2 minutes.
@@ -329,6 +337,7 @@ impl Connection for RunPodConnection {
         crate::sync::sync_to_pod(
             project_dir,
             &self.ssh_key_path,
+            "root",
             public_ip,
             ssh_port,
             &self.remote_workdir,
@@ -341,6 +350,7 @@ impl Connection for RunPodConnection {
         let (public_ip, ssh_port) = self.ssh_info()?;
         crate::sync::download_from_pod(
             &self.ssh_key_path,
+            "root",
             public_ip,
             ssh_port,
             remote_path,
@@ -365,29 +375,7 @@ impl Connection for RunPodConnection {
             self.set_budget_deadline(secs).await?;
         }
 
-        // Wrapped in single quotes for bash -c: $ expansions happen on the pod
-        // (which has RUNPOD_POD_ID set). {{...}} is Rust format escaping.
-        let watchdog = format!(
-            concat!(
-                "nohup bash -c '",
-                "touch /tmp/heartbeat; ",
-                "while true; do ",
-                "sleep 30; ",
-                "now=$(date +%s); ",
-                "age=$((now - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))); ",
-                r#"if [ "$age" -gt 300 ]; then "#,
-                r#"echo "Heartbeat stale (${{age}}s), cleaning up pod..." >> /tmp/watchdog.log; "#,
-                "{cmd}; exit 0; fi; ",
-                "if [ -f /tmp/budget_deadline ]; then ",
-                "deadline=$(cat /tmp/budget_deadline 2>/dev/null || echo 0); ",
-                r#"if [ "$now" -gt "$deadline" ]; then "#,
-                r#"echo "Budget deadline passed, cleaning up pod..." >> /tmp/watchdog.log; "#,
-                "{cmd}; exit 0; fi; fi; ",
-                "done' </dev/null >/dev/null 2>&1 &",
-            ),
-            cmd = cmd
-        );
-
+        let watchdog = crate::ssh_exec::watchdog_script(cmd);
         self.exec(&watchdog, Duration::from_secs(10)).await?;
         tracing::info!("Watchdog installed on pod");
         Ok(())

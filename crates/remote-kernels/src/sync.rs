@@ -53,17 +53,18 @@ pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
 pub async fn sync_to_pod(
     project_dir: &Path,
     ssh_key_path: &Path,
+    user: &str,
     public_ip: &str,
     ssh_port: u16,
     remote_path: &str,
     extra_includes: &[String],
 ) -> anyhow::Result<String> {
-    ensure_rsync_on_pod(ssh_key_path, public_ip, ssh_port).await?;
+    ensure_rsync_on_pod(ssh_key_path, user, public_ip, ssh_port).await?;
 
     let ssh_cmd = crate::ssh_exec::rsync_transport(ssh_key_path, ssh_port);
 
     let source = format!("{}/", project_dir.display());
-    let destination = format!("root@{public_ip}:{remote_path}/");
+    let destination = format!("{user}@{public_ip}:{remote_path}/");
 
     tracing::info!(%destination, "Syncing files to pod");
 
@@ -94,11 +95,13 @@ pub async fn sync_to_pod(
 /// Ensure rsync is installed on the pod. No-op if already present.
 async fn ensure_rsync_on_pod(
     ssh_key_path: &Path,
+    user: &str,
     public_ip: &str,
     ssh_port: u16,
 ) -> anyhow::Result<()> {
     crate::ssh_exec::ssh_cmd(
         ssh_key_path,
+        user,
         public_ip,
         ssh_port,
         "which rsync || (apt-get update -qq && apt-get install -y -qq rsync)",
@@ -112,16 +115,17 @@ async fn ensure_rsync_on_pod(
 /// Download a file or directory from the pod to a local path.
 pub async fn download_from_pod(
     ssh_key_path: &Path,
+    user: &str,
     public_ip: &str,
     ssh_port: u16,
     remote_path: &str,
     local_path: &Path,
 ) -> anyhow::Result<String> {
-    ensure_rsync_on_pod(ssh_key_path, public_ip, ssh_port).await?;
+    ensure_rsync_on_pod(ssh_key_path, user, public_ip, ssh_port).await?;
 
     let ssh_cmd = crate::ssh_exec::rsync_transport(ssh_key_path, ssh_port);
 
-    let source = format!("root@{public_ip}:{remote_path}");
+    let source = format!("{user}@{public_ip}:{remote_path}");
     let destination = local_path.display().to_string();
 
     // Ensure parent directory exists.

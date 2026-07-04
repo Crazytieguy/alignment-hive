@@ -14,6 +14,7 @@
 
 pub mod kubernetes;
 pub mod runpod;
+pub mod vast;
 
 #[cfg(feature = "fake-runtime")]
 pub mod fake;
@@ -238,6 +239,7 @@ macro_rules! dispatch {
     ($self:ident, $inner:ident => $body:expr) => {
         match $self {
             Self::Runpod($inner) => $body,
+            Self::Vast($inner) => $body,
             Self::Kubernetes($inner) => $body,
             #[cfg(feature = "fake-runtime")]
             Self::Fake($inner) => $body,
@@ -247,6 +249,7 @@ macro_rules! dispatch {
 
 pub enum AnyRuntime {
     Runpod(runpod::RunPodRuntime),
+    Vast(vast::VastRuntime),
     Kubernetes(kubernetes::KubernetesRuntime),
     #[cfg(feature = "fake-runtime")]
     Fake(fake::FakeRuntime),
@@ -257,6 +260,7 @@ impl AnyRuntime {
     pub fn known_names() -> &'static [&'static str] {
         &[
             "runpod",
+            "vast",
             "kubernetes",
             #[cfg(feature = "fake-runtime")]
             "fake",
@@ -281,6 +285,16 @@ impl AnyRuntime {
                     )
                 })?;
                 Ok(Self::Runpod(runpod::RunPodRuntime::new(api_key, config)))
+            }
+            "vast" => {
+                let api_key = std::env::var("VAST_API_KEY").map_err(|_| {
+                    anyhow::anyhow!(
+                        "VAST_API_KEY environment variable not set (required for the vast \
+                         runtime). Create a key at https://cloud.vast.ai/manage-keys/ and add \
+                         it to .env.local or the environment."
+                    )
+                })?;
+                Ok(Self::Vast(vast::VastRuntime::new(api_key, config)))
             }
             "kubernetes" => {
                 let k8s = config.kubernetes.clone().ok_or_else(|| {
@@ -351,6 +365,7 @@ impl Runtime for AnyRuntime {
     ) -> anyhow::Result<AnyConnection> {
         match self {
             Self::Runpod(r) => Ok(AnyConnection::Runpod(r.open(external_id, ctx).await?)),
+            Self::Vast(r) => Ok(AnyConnection::Vast(r.open(external_id, ctx).await?)),
             Self::Kubernetes(r) => Ok(AnyConnection::Kubernetes(r.open(external_id, ctx).await?)),
             #[cfg(feature = "fake-runtime")]
             Self::Fake(r) => Ok(AnyConnection::Fake(r.open(external_id, ctx).await?)),
@@ -360,6 +375,7 @@ impl Runtime for AnyRuntime {
 
 pub enum AnyConnection {
     Runpod(runpod::RunPodConnection),
+    Vast(vast::VastConnection),
     Kubernetes(kubernetes::K8sConnection),
     #[cfg(feature = "fake-runtime")]
     Fake(fake::FakeConnection),
