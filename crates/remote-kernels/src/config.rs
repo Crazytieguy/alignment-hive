@@ -117,9 +117,23 @@ pub struct VastConfig {
     #[serde(default = "default_jupyter_command")]
     pub jupyter_command: String,
 
+    /// Offers fetched per search (cheapest first).
+    #[serde(default = "default_vast_search_limit")]
+    pub search_limit: u32,
+
+    /// Offers attempted per auto-selected `start()` before giving up (an
+    /// offer can be rented out between search and accept).
+    #[serde(default = "default_vast_attempt_limit")]
+    pub attempt_limit: u32,
+
+    /// Extra host-picking criteria surfaced to Claude by
+    /// `search_vast_offers()`, appended to the built-in advice.
+    pub selection_guidance: Option<String>,
+
     /// Extra offer-search filters, passed through to the vast query object.
     /// Table values are operator objects (e.g. `{ gte = 0.99 }`); scalars
-    /// become equality filters.
+    /// become equality filters. Entries override the baseline filters the
+    /// runtime injects (see the config template).
     #[serde(default)]
     pub query: HashMap<String, toml::Value>,
 
@@ -151,6 +165,14 @@ fn default_vast_disk_gb() -> f64 {
 
 fn default_vast_workdir() -> String {
     "/workspace".to_string()
+}
+
+fn default_vast_search_limit() -> u32 {
+    10
+}
+
+fn default_vast_attempt_limit() -> u32 {
+    3
 }
 
 fn default_vast_ssh_user() -> String {
@@ -437,10 +459,11 @@ impl Config {
 # image-start-cmd = "{default_image_start_cmd}"
 
 # vast.ai runtime configuration (only needed when using
-# start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY
-# (create at https://cloud.vast.ai/manage-keys/ — on 2FA accounts the key
-# must be elevated once via POST /api/v0/tfa/ with a TOTP code; store the
-# returned session_key).
+# start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY —
+# a plain console key from https://cloud.vast.ai/manage-keys/. Accounts with
+# 2FA enabled reject API writes: disable 2FA on the account (recommended;
+# plain keys then never expire), or mint a short-lived session key with a
+# TOTP code (POST /api/v0/tfa/; expires after ~1-2 days).
 # [vast]
 # GPU names to search for (vast naming).
 # Default: ["{default_vast_gpu}"]
@@ -459,10 +482,28 @@ impl Config {
 # max-dph = 0.5
 # Startup script lines (run as root at first boot).
 # onstart = ["curl -LsSf https://astral.sh/uv/install.sh | sh"]
+# Offers fetched per search, cheapest first.
+# Default: {default_vast_search_limit}
+# search-limit = {default_vast_search_limit}
+# Offers attempted per auto-selected start() before giving up.
+# Default: {default_vast_attempt_limit}
+# attempt-limit = {default_vast_attempt_limit}
+# Extra host-picking criteria for Claude, shown by search_vast_offers()
+# after the built-in advice. Filled in during setup.
+# selection-guidance = "Prefer datacenter hosts in the EU. Avoid hosts under 500 Mbps."
+# Every offer search injects these baseline filters; a [vast.query] entry
+# with the same key overrides the baseline (per-call tool arguments override
+# both):
+#   verified    = {{ eq = true }}     machine passed vast verification
+#   reliability = {{ gte = 0.95 }}    host uptime score
+#   num_gpus    = {{ gte = 1 }}       excludes fractional-GPU offers
+#   inet_down   = {{ gte = 200.0 }}   slow image pulls stall provisioning
+# Setting vm to true also forces direct_port_count = {{ gte = 1 }}: vast's
+# SSH proxy cannot reach KVM guests, so changing that one breaks VM SSH.
 # Extra offer-search filters (vast query operators; scalars mean equality).
 # [vast.query]
 # geolocation = {{ in = ["US", "CA"] }}
-# direct_port_count = {{ gte = 1 }}
+# static_ip = {{ eq = true }}
 
 # Kubernetes runtime configuration (only needed when using
 # start(runtime="kubernetes") or default-runtime = "kubernetes").
@@ -504,6 +545,8 @@ impl Config {
             default_vast_gpu = default_vast_gpu_names()[0],
             default_vast_image = default_vast_image(),
             default_vast_disk_gb = default_vast_disk_gb(),
+            default_vast_search_limit = default_vast_search_limit(),
+            default_vast_attempt_limit = default_vast_attempt_limit(),
             default_priority_label = default_priority_label(),
             default_max_lifetime_secs = default_max_lifetime_secs(),
             default_k8s_workdir = default_k8s_workdir(),
@@ -541,6 +584,10 @@ mod tests {
         assert!(config.runpod.network_volume_id.is_none());
         assert_eq!(config.runpod.cloud_type, "SECURE");
         assert!(config.runpod.extra.is_empty());
+        let vast = VastConfig::default();
+        assert_eq!(vast.search_limit, 10);
+        assert_eq!(vast.attempt_limit, 3);
+        assert!(vast.selection_guidance.is_none());
     }
 
     #[test]

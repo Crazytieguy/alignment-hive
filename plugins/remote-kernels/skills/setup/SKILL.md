@@ -43,20 +43,34 @@ area below** and edit the file based on their answers.
   - Kubernetes: for lab clusters; needs a pod template YAML from the lab
 - **API key(s)** — per runtime, in `.env.local` (gitignored):
   - RunPod: `RUNPOD_API_KEY` — https://docs.runpod.io/get-started/api-keys
-  - vast.ai: `VAST_API_KEY` — https://docs.vast.ai/api-reference (create at
-    https://cloud.vast.ai/manage-keys/). If the account has 2FA enabled,
-    write operations (instance creation) reject plain keys with a 401
-    mentioning Two Factor Authentication — console-created keys are NOT
-    2FA-privileged, no matter how the user logged in. The key must be
-    elevated once: `POST https://console.vast.ai/api/v0/tfa/` with the key
-    as Bearer and body `{"tfa_method": "totp", "code": "<6-digit code>"}`;
-    the returned `session_key` is the credential to store (never echo keys
-    into the chat — write a script that swaps `.env.local` in place, and
-    have the user run it with a fresh code from their authenticator app)
+  - vast.ai: `VAST_API_KEY` — a plain console key from
+    https://cloud.vast.ai/manage-keys/ (plain keys never expire). The plugin
+    does not support 2FA-enabled vast accounts: with 2FA on, API writes
+    (instance creation) fail with a 401 mentioning Two Factor Authentication.
+    If the user hits that, have them disable 2FA on the vast account
+    (cloud.vast.ai → Account → Security) — warn that the vast UI makes it
+    easy to enable 2FA accidentally. A user who insists on keeping 2FA can
+    mint a session key by hand (`POST /api/v0/tfa/` with the console key as
+    Bearer and a fresh TOTP code; store the returned `session_key`), but it
+    expires after ~1-2 days and needs re-minting each time — say so before
+    they choose
   - Kubernetes: no key; uses kubeconfig (`context` in `[kubernetes]`)
 - **GPU selection** — what workload? RunPod: `gpu-type-ids` (fallback list);
   vast: `[vast] gpu-name` + `max-dph` price ceiling; Kubernetes: GPU
   resources live in the pod template
+- **Host selection (vast)** — two modes, both worth explaining:
+  - *Claude picks*: `search_vast_offers()` returns a table of hosts plus
+    picking advice; Claude ranks a shortlist and passes it to
+    `start(vast_offers=[...])`. The user can just say "pick a host for me" /
+    "find me a good deal" in any session
+  - *Automatic*: plain `start()` takes the cheapest offers that pass the
+    configured filters — zero friction, but cheapest-first can land on
+    slower hosts
+  Ask what the user tends to care about when picking GPUs (price, locality,
+  bandwidth, host quality) and write it into `selection-guidance` — it is
+  appended to the advice Claude sees on every search. Power users: the
+  baseline search filters are documented in the `[vast]` template section
+  and every one can be overridden via `[vast.query]`
 - **Image** — RunPod default `runpod/pytorch` works for most ML; vast default
   is `vastai/base-image` (VMs: `vastai/kvm:ubuntu_terminal`, which ships
   Docker + CUDA; onstart installs anything else, e.g. uv — for

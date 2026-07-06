@@ -10,5 +10,7 @@ to machine-scoped tools (with a single machine, `instance` can be omitted; kerne
 never need it — kernels are routed automatically). \
 start() automatically reconnects to a machine from a previous session if one exists \
 (resumes stopped machines where the runtime supports it). You'll need to create new kernels after reconnecting.\n\
+On vast.ai, search_vast_offers() lists marketplace hosts with picking advice — rank a shortlist \
+and pass it as start(vast_offers=[...]), or omit it to auto-pick the cheapest qualifying host.\n\
 All executions are auto-saved as .ipynb notebook files (path shown in create_kernel output). \
 Read these notebooks to recover context after conversation compaction.";

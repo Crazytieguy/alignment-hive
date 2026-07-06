@@ -102,6 +102,7 @@ async fn k8s_full_lifecycle_via_kueue() {
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))
@@ -224,6 +225,7 @@ async fn k8s_priority_label_and_capability_validation() {
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: Some("high".to_string()),
             wait: Some(false),
         }))
@@ -279,6 +281,7 @@ pod-template = "pod-template.yaml"
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))

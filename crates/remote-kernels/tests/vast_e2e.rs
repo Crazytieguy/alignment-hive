@@ -178,6 +178,81 @@ async fn vast_stable_key_registration_is_idempotent() {
     );
 }
 
+/// Live offer search — FREE (read-only, no instance is created). Verifies the
+/// search_vast_offers path end-to-end against the real marketplace: the
+/// curated table renders with real offers and the advice text is attached.
+#[tokio::test]
+#[ignore = "hits the live vast.ai API (requires VAST_API_KEY); creates no instance"]
+async fn vast_live_offer_search_renders_table() {
+    load_key();
+    remote_kernels::init_tls();
+    let config: Config = toml::from_str(
+        r#"
+        [vast]
+        gpu-name = []
+        selection-guidance = "e2e: prefer nothing in particular"
+        "#,
+    )
+    .unwrap();
+    let rt = remote_kernels::runtime::vast::VastRuntime::new(
+        std::env::var("VAST_API_KEY").unwrap(),
+        &config,
+    );
+    let report = rt
+        .search_offers_report(&remote_kernels::runtime::vast::OfferQueryOverrides {
+            max_dph: Some(2.0),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    eprintln!("{report}");
+    assert!(report.contains("| offer_id |"), "table header missing");
+    assert!(
+        report.lines().filter(|l| l.starts_with("| ")).count() > 2,
+        "no offer rows: {report}"
+    );
+    assert!(report.contains("Picking a host"), "advice missing");
+    assert!(
+        report.contains("e2e: prefer nothing in particular"),
+        "user guidance missing"
+    );
+
+    // The shortlist path resolves ids via an {"id": {"in": [...]}} search —
+    // money-load-bearing (price re-validation), so verify the vendor
+    // actually honors that filter shape: re-search by two ids from the
+    // table and expect exactly those offers back.
+    let client =
+        remote_kernels::vast::client::VastClient::new(std::env::var("VAST_API_KEY").unwrap());
+    let ids: Vec<i64> = report
+        .lines()
+        .filter(|l| l.starts_with("| ") && !l.starts_with("| offer_id"))
+        .filter_map(|l| l.split('|').nth(1)?.trim().parse().ok())
+        .take(2)
+        .collect();
+    assert_eq!(ids.len(), 2, "need two ids from the table");
+    let mut filters = serde_json::Map::new();
+    // ask_contract_id, NOT id — vast silently ignores an `id` filter
+    // (vendor trap, observed live 2026-07); this is what resolve_shortlist
+    // sends, so this assertion guards the shortlist money-rail.
+    filters.insert(
+        "ask_contract_id".to_string(),
+        serde_json::json!({"in": ids}),
+    );
+    let found = client.search_offers(filters, 10).await.unwrap();
+    let found_ids: std::collections::HashSet<i64> = found.iter().map(|o| o.id).collect();
+    for id in &ids {
+        assert!(
+            found_ids.contains(id),
+            "id filter did not return offer {id} (got {found_ids:?}) — the \
+             shortlist resolve path depends on this vendor behavior"
+        );
+    }
+    assert!(
+        found.iter().all(|o| ids.contains(&o.id)),
+        "id filter returned offers outside the requested set: {found_ids:?}"
+    );
+}
+
 /// Container-instance lifecycle on the cheapest matching RTX 3090: start →
 /// kernel → execute → sync → download → terminate. Total cost: a few cents.
 #[tokio::test]
@@ -216,6 +291,7 @@ dph_total = { gte = 0.268, lte = 0.45 }
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))
@@ -359,6 +435,7 @@ geolocation = { notin = ["CN"] }
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))

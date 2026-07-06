@@ -94,6 +94,12 @@ pub struct StartParams {
     pub gpu_type: Option<String>,
     /// Override image for this machine.
     pub image: Option<String>,
+    /// Ranked shortlist of vast.ai offer ids from `search_vast_offers()`,
+    /// tried in order (vast runtime only; not combinable with `gpu_type`).
+    /// Each id is re-validated before renting: it must still be rentable,
+    /// have a known price within the configured `max-dph`, and be VM-capable
+    /// when `vm = true`. Omit to auto-pick the cheapest qualifying offers.
+    pub vast_offers: Option<Vec<i64>>,
     /// Scheduling priority. On Kubernetes this sets the configured priority
     /// label (Kueue workload priority by default) so the machine is scheduled
     /// sooner. Ignored by runtimes without a queue.
@@ -187,6 +193,38 @@ fn err_text(msg: impl Into<String>) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::error(vec![Content::text(msg.into())]))
 }
 
+/// Validate `start(vast_offers=...)` against the rest of the request.
+/// `runtime_name` is the effective runtime after default resolution.
+fn validate_vast_offers(
+    offers: Option<&[i64]>,
+    has_gpu_type: bool,
+    runtime_name: &str,
+) -> Result<(), String> {
+    let Some(offers) = offers else {
+        return Ok(());
+    };
+    if offers.is_empty() {
+        return Err("vast_offers is empty — pass at least one offer id from \
+                    search_vast_offers(), or omit it to auto-pick."
+            .to_string());
+    }
+    if has_gpu_type {
+        return Err(
+            "vast_offers cannot be combined with gpu_type — the chosen offers \
+                    already determine the GPU. Filter the search instead \
+                    (search_vast_offers(gpu_name=[...]))."
+                .to_string(),
+        );
+    }
+    if runtime_name != "vast" {
+        return Err(format!(
+            "vast_offers only applies to the vast runtime, but this start() resolves to \
+             runtime {runtime_name:?}. Pass runtime=\"vast\" or drop vast_offers."
+        ));
+    }
+    Ok(())
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -219,6 +257,17 @@ impl RemoteKernelsServer {
             return err_text(msg);
         }
         let wait = params.wait.unwrap_or(true);
+        let runtime_name = params
+            .runtime
+            .clone()
+            .unwrap_or_else(|| self.config.default_runtime.clone());
+        if let Err(msg) = validate_vast_offers(
+            params.vast_offers.as_deref(),
+            params.gpu_type.is_some(),
+            &runtime_name,
+        ) {
+            return err_text(msg);
+        }
 
         // Reserve the name for the duration of this call (released on return).
         let _reservation = {
@@ -261,7 +310,7 @@ impl RemoteKernelsServer {
             crate::state::load_instance_record(&state.project_dir, &name)
         };
         if let Some(record) = record {
-            if params.gpu_type.is_some() || params.image.is_some() {
+            if params.gpu_type.is_some() || params.image.is_some() || params.vast_offers.is_some() {
                 // Don't silently reconnect to a machine with different settings.
                 return err_text(format!(
                     "An existing machine ({}) named {name:?} was found from a previous session. \
@@ -275,10 +324,6 @@ impl RemoteKernelsServer {
         }
 
         // New machine.
-        let runtime_name = params
-            .runtime
-            .clone()
-            .unwrap_or_else(|| self.config.default_runtime.clone());
         let runtime = self.runtime_for(&runtime_name).await?;
 
         if let Err(msg) = runtime.capabilities().validate_cleanup(self.config.cleanup) {
@@ -308,6 +353,7 @@ impl RemoteKernelsServer {
             name: name.clone(),
             gpu_type: params.gpu_type,
             image: params.image,
+            vast_offers: params.vast_offers,
             priority: params.priority,
             env: self.build_env(&project_dir),
             ssh_public_key: ssh_keypair.public_key_openssh,
@@ -385,6 +431,31 @@ impl RemoteKernelsServer {
                 handle.external_id, handle.gpu_name
             ))]))
         }
+    }
+
+    /// Search vast.ai marketplace offers: returns a comparison table of hosts plus
+    /// picking advice. Free, read-only, creates nothing. Use it to choose hosts by
+    /// judgment instead of the automatic cheapest-first pick: rank the best 2-3
+    /// offers and pass their ids to `start(vast_offers=[...])` (offers churn, so
+    /// include runners-up). All parameters are optional overrides layered on the
+    /// configured search (e.g. `num_gpus=2` for a task needing two GPUs).
+    #[tool(name = "search_vast_offers")]
+    pub async fn search_vast_offers(
+        &self,
+        params: Parameters<crate::runtime::vast::OfferQueryOverrides>,
+    ) -> Result<CallToolResult, McpError> {
+        let runtime = self.runtime_for("vast").await?;
+        let AnyRuntime::Vast(vast) = runtime.as_ref() else {
+            return Err(McpError::internal_error(
+                "runtime_for(\"vast\") returned a non-vast runtime",
+                None,
+            ));
+        };
+        let report = vast
+            .search_offers_report(&params.0)
+            .await
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(report)]))
     }
 
     /// Stop a machine. It is preserved and can be resumed with `start()`, but storage
@@ -1854,5 +1925,28 @@ impl ServerHandler for RemoteKernelsServer {
             instructions: Some(descriptions::SERVER_INSTRUCTIONS.to_string()),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_vast_offers;
+
+    #[test]
+    fn vast_offers_validation() {
+        // Absent: always fine.
+        assert!(validate_vast_offers(None, true, "runpod").is_ok());
+        // Happy path.
+        assert!(validate_vast_offers(Some(&[1, 2]), false, "vast").is_ok());
+        // Empty shortlist.
+        assert!(validate_vast_offers(Some(&[]), false, "vast").is_err_and(|e| e.contains("empty")));
+        // Offers already encode the GPU choice.
+        assert!(
+            validate_vast_offers(Some(&[1]), true, "vast").is_err_and(|e| e.contains("gpu_type"))
+        );
+        // Wrong runtime, including the default-runtime resolution case.
+        assert!(
+            validate_vast_offers(Some(&[1]), false, "runpod").is_err_and(|e| e.contains("runtime"))
+        );
     }
 }

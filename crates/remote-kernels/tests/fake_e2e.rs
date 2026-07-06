@@ -51,6 +51,7 @@ async fn start_machine(server: &RemoteKernelsServer, name: Option<&str>) -> Stri
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))
@@ -293,6 +294,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
                 runtime: None,
                 gpu_type: None,
                 image: None,
+                vast_offers: None,
                 priority: None,
                 wait: Some(false),
             }))
@@ -339,6 +341,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))

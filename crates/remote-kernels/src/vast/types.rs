@@ -79,19 +79,47 @@ pub struct CreateInstanceResponse {
 }
 
 /// One offer from `POST /api/v0/bundles/`. Fields are tolerant — the
-/// marketplace adds/omits fields freely.
-#[derive(Debug, Clone, Deserialize)]
+/// marketplace adds/omits fields freely. Field names follow the response
+/// example in the vendored spec (tests/vast-openapi.yaml).
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Offer {
     pub id: i64,
     #[serde(default)]
     pub gpu_name: Option<String>,
     #[serde(default)]
     pub num_gpus: Option<u32>,
+    /// GPU RAM per GPU in MB.
+    #[serde(default)]
+    pub gpu_ram: Option<f64>,
     /// On-demand price, $/hr (GPU + base machine).
     #[serde(default)]
     pub dph_total: Option<f64>,
     #[serde(default)]
     pub reliability2: Option<f64>,
+    /// Deep-learning performance score (vast's synthetic benchmark).
+    #[serde(default)]
+    pub dlperf: Option<f64>,
+    /// `DLPerf` per $/hr — vast's own value-for-money metric.
+    #[serde(default)]
+    pub dlperf_per_dphtotal: Option<f64>,
+    /// Download bandwidth in Mbps.
+    #[serde(default)]
+    pub inet_down: Option<f64>,
+    /// Upload bandwidth in Mbps.
+    #[serde(default)]
+    pub inet_up: Option<f64>,
+    /// Disk read bandwidth in MB/s.
+    #[serde(default)]
+    pub disk_bw: Option<f64>,
+    /// Maximum supported CUDA version.
+    #[serde(default)]
+    pub cuda_max_good: Option<f64>,
+    /// Whether the host's IP is static/stable.
+    #[serde(default)]
+    pub static_ip: Option<bool>,
+    /// "verified" / "unverified" / "deverified".
+    #[serde(default)]
+    pub verification: Option<String>,
     #[serde(default)]
     pub geolocation: Option<String>,
     #[serde(default)]

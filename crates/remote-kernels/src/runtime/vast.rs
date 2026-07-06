@@ -23,6 +23,7 @@
 //! there is no credential-free API to destroy from inside); the server-side
 //! budget/heartbeat supervision is the primary enforcement.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -31,7 +32,7 @@ use serde_json::json;
 
 use crate::config::{Config, VastConfig};
 use crate::vast::client::VastClient;
-use crate::vast::types::CreateInstanceRequest;
+use crate::vast::types::{CreateInstanceRequest, Offer};
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
@@ -39,6 +40,45 @@ use super::{
 };
 
 const JUPYTER_PORT: u16 = 18888;
+
+/// Baseline host-picking advice shown by `search_vast_offers()`, ahead of the
+/// user's `[vast] selection-guidance`.
+const SELECTION_ADVICE: &str = "\
+    Picking a host: prefer verified hosts with reliability >= 0.98 — the \
+    cheapest offer is often cheap because the host is flaky (dead SSH, \
+    glacial image pulls). Static-IP hosts fail less. dlperf_per_dph is \
+    vast's value-for-money score: a slightly pricier host with much higher \
+    dlperf/$ usually wins. High inet_down speeds up image pull and sync \
+    (min 200 Mbps is already enforced by default); prefer geographic \
+    proximity when moving a lot of data. VMs (vm = true) run only on hosts \
+    with direct ports — already filtered. Rank 2-3 candidates and pass them \
+    to start(vast_offers=[...]); offers churn, so the runner-up matters.";
+
+/// Per-call overrides for the offer search, layered over the config the same
+/// way `start(gpu_type=...)` overrides `gpu-type-ids`. Precedence:
+/// baseline filters < `[vast.query]` < these.
+#[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
+pub struct OfferQueryOverrides {
+    /// GPU names to search instead of the configured `gpu-name` list (vast
+    /// naming, e.g. "RTX 4090").
+    pub gpu_name: Option<Vec<String>>,
+    /// Exact GPU count per offer.
+    pub num_gpus: Option<u32>,
+    /// Price ceiling in $/hr (overrides `max-dph`).
+    pub max_dph: Option<f64>,
+    /// Search VM-capable hosts (overrides `[vast] vm` for this search ONLY —
+    /// whether `start()` actually creates a VM is still governed by the
+    /// `[vast] vm` config; set that before starting from a VM shortlist).
+    pub vm: Option<bool>,
+    /// Minimum available disk space in GB.
+    pub min_disk_gb: Option<f64>,
+    /// Max offers to return (overrides `search-limit`).
+    pub limit: Option<u32>,
+    /// Any other vast query filter, e.g. `{"geolocation": {"in": ["US"]}}`
+    /// or `{"static_ip": true}` (scalars mean equality). Same semantics as
+    /// `[vast.query]` in the config.
+    pub query: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
 
 pub struct VastRuntime {
     client: VastClient,
@@ -56,14 +96,30 @@ impl VastRuntime {
         }
     }
 
-    /// Build the offer-search filter object: config defaults, the passthrough
-    /// `query` table (scalars become `eq`), GPU list, price ceiling, VM flag.
+    /// Test-only: inject a client pointed at a local fake API server.
+    #[cfg(test)]
+    fn new_with_client(client: VastClient, config: &Config) -> Self {
+        Self {
+            client,
+            vast: config.vast.clone().unwrap_or_default(),
+            name_prefix: config.name.clone(),
+        }
+    }
+
+    /// Build the offer-search filter object in explicit precedence stages,
+    /// where later stages overwrite same-key entries from earlier ones:
+    /// baseline filters, then vm-derived connectivity constraints, then
+    /// config `gpu-name`/`max-dph`, then `[vast.query]`, then per-call typed
+    /// overrides, then per-call `query`. The baselines are documented in the
+    /// config template — keep the two in sync.
     fn offer_filters(
         &self,
         gpu_override: Option<&str>,
+        overrides: &OfferQueryOverrides,
     ) -> serde_json::Map<String, serde_json::Value> {
         let mut filters = serde_json::Map::new();
-        // Defaults tuned for reliability; all overridable via [vast] query.
+        // Stage 1 — baselines tuned for reliability; each overridable via
+        // [vast.query] or per-call query.
         filters.insert("verified".to_string(), json!({"eq": true}));
         filters.insert("reliability".to_string(), json!({"gte": 0.95}));
         filters.insert("num_gpus".to_string(), json!({"gte": 1}));
@@ -71,17 +127,10 @@ impl VastRuntime {
         // past the provision timeout — spend with nothing to show for it.
         filters.insert("inet_down".to_string(), json!({"gte": 200.0}));
 
-        let gpu_names: Vec<String> = match gpu_override {
-            Some(gpu) => vec![gpu.to_string()],
-            None => self.vast.gpu_name.clone(),
-        };
-        if !gpu_names.is_empty() {
-            filters.insert("gpu_name".to_string(), json!({"in": gpu_names}));
-        }
-        if let Some(max) = self.vast.max_dph {
-            filters.insert("dph_total".to_string(), json!({"lte": max}));
-        }
-        if self.vast.vm {
+        // Stage 2 — vm-derived constraints. The per-call vm flag only toggles
+        // WHETHER these are inserted; they sit below [vast.query] so an
+        // explicit query entry (e.g. a higher direct_port_count) still wins.
+        if overrides.vm.unwrap_or(self.vast.vm) {
             filters.insert("vms_enabled".to_string(), json!({"eq": true}));
             // VMs are reachable via direct SSH only: vast's SSH proxy never
             // opens a working tunnel to a KVM guest (observed live 2026-07 —
@@ -90,16 +139,204 @@ impl VastRuntime {
             // One port suffices: jupyter tunnels over the SSH connection.
             filters.insert("direct_port_count".to_string(), json!({"gte": 1}));
         }
+
+        // Stage 3 — config-level typed fields.
+        if !self.vast.gpu_name.is_empty() {
+            filters.insert("gpu_name".to_string(), json!({"in": self.vast.gpu_name}));
+        }
+        if let Some(max) = self.vast.max_dph {
+            filters.insert("dph_total".to_string(), json!({"lte": max}));
+        }
+
+        // Stage 4 — [vast.query] passthrough beats everything config-derived.
         for (key, value) in &self.vast.query {
             let json_value = toml_value_to_json(value);
-            let wrapped = if json_value.is_object() {
-                json_value
+            filters.insert(key.clone(), wrap_eq(json_value));
+        }
+
+        // Stage 5 — per-call typed overrides beat config AND [vast.query].
+        // An explicit empty gpu_name list removes the GPU filter entirely.
+        let gpu_names: Option<Vec<String>> = match (&overrides.gpu_name, gpu_override) {
+            (Some(names), _) => Some(names.clone()),
+            (None, Some(gpu)) => Some(vec![gpu.to_string()]),
+            (None, None) => None,
+        };
+        if let Some(names) = gpu_names {
+            if names.is_empty() {
+                filters.remove("gpu_name");
             } else {
-                json!({ "eq": json_value })
-            };
-            filters.insert(key.clone(), wrapped);
+                filters.insert("gpu_name".to_string(), json!({"in": names}));
+            }
+        }
+        if let Some(max) = overrides.max_dph {
+            filters.insert("dph_total".to_string(), json!({"lte": max}));
+        }
+        if let Some(n) = overrides.num_gpus {
+            filters.insert("num_gpus".to_string(), json!({"eq": n}));
+        }
+        if let Some(disk) = overrides.min_disk_gb {
+            filters.insert("disk_space".to_string(), json!({"gte": disk}));
+        }
+
+        // Stage 6 — per-call raw query is the final word.
+        if let Some(query) = &overrides.query {
+            for (key, value) in query {
+                filters.insert(key.clone(), wrap_eq(value.clone()));
+            }
         }
         filters
+    }
+
+    /// Search offers and render the curated table + picking advice for
+    /// `search_vast_offers()`.
+    pub async fn search_offers_report(
+        &self,
+        overrides: &OfferQueryOverrides,
+    ) -> anyhow::Result<String> {
+        let filters = self.offer_filters(None, overrides);
+        let limit = overrides.limit.unwrap_or(self.vast.search_limit);
+        let offers = self.client.search_offers(filters, limit).await?;
+        if offers.is_empty() {
+            return Ok(
+                "No vast.ai offers matched. Loosen the filters: raise max_dph, drop \
+                 gpu_name constraints, or override the baseline filters (see the \
+                 [vast] section of remote-kernels.toml) via the query parameter."
+                    .to_string(),
+            );
+        }
+
+        let mut out = String::from(
+            "| offer_id | $/hr | GPU | n | VRAM_GB | reliability | dlperf | dlperf/$ \
+             | net_down | net_up | disk_MBps | CUDA | static_ip | ports | geo | verified |\n\
+             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        );
+        for o in &offers {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                o.id,
+                fmt_f64(o.dph_total, 4),
+                o.gpu_name.as_deref().unwrap_or("?"),
+                o.num_gpus.map_or("?".into(), |n| n.to_string()),
+                fmt_f64(o.gpu_ram.map(|mb| mb / 1024.0), 0),
+                fmt_f64(o.reliability2, 4),
+                fmt_f64(o.dlperf, 0),
+                fmt_f64(o.dlperf_per_dphtotal, 0),
+                fmt_f64(o.inet_down, 0),
+                fmt_f64(o.inet_up, 0),
+                fmt_f64(o.disk_bw, 0),
+                fmt_f64(o.cuda_max_good, 1),
+                o.static_ip.map_or("?".into(), |b| b.to_string()),
+                o.direct_port_count.map_or("?".into(), |n| n.to_string()),
+                o.geolocation.as_deref().unwrap_or("?"),
+                o.verification.as_deref().unwrap_or("?"),
+            );
+        }
+        let _ = write!(out, "\n{SELECTION_ADVICE}");
+        if let Some(guidance) = &self.vast.selection_guidance {
+            let _ = write!(out, "\n\nUser criteria: {guidance}");
+        }
+        Ok(out)
+    }
+
+    /// Candidates for the provision attempt loop: Claude's ranked shortlist
+    /// (resolved and validated), or a fresh search taken cheapest-first. Both
+    /// flow through the same loop — the money guards (fail-fast on auth,
+    /// lost-response reconciliation) must not depend on how the offers were
+    /// chosen.
+    async fn offer_candidates(&self, req: &ProvisionRequest) -> anyhow::Result<Vec<Offer>> {
+        if let Some(ids) = &req.vast_offers {
+            anyhow::ensure!(!ids.is_empty(), "vast_offers is empty");
+            return self.resolve_shortlist(ids).await;
+        }
+        let filters = self.offer_filters(req.gpu_type.as_deref(), &OfferQueryOverrides::default());
+        let offers = self
+            .client
+            .search_offers(filters, self.vast.search_limit)
+            .await?;
+        if offers.is_empty() {
+            anyhow::bail!(
+                "No vast.ai offers matched the filters (gpu-name {:?}, vm={}, max-dph {:?}). \
+                 Loosen [vast] settings in remote-kernels.toml, try a different gpu_type, or \
+                 pick hosts explicitly via search_vast_offers().",
+                self.vast.gpu_name,
+                self.vast.vm,
+                self.vast.max_dph
+            );
+        }
+        Ok(offers
+            .into_iter()
+            .take(self.vast.attempt_limit as usize)
+            .collect())
+    }
+
+    /// Resolve a ranked shortlist of offer ids into live, validated offers,
+    /// preserving the caller's order. Bare ids are never trusted with money:
+    /// each is re-fetched from the marketplace (a stale/typo'd id simply
+    /// doesn't resolve), must still satisfy the vm-mode connectivity
+    /// constraints, must have a known price, and must respect the configured
+    /// `max-dph` ceiling — the shortlist path gets the exact same money rails
+    /// as the automatic path. Unusable ids are skipped (with reasons in the
+    /// error if ALL are unusable); resolving also restores full offer
+    /// metadata, so the durable record never starts at $0/hr.
+    async fn resolve_shortlist(&self, ids: &[i64]) -> anyhow::Result<Vec<Offer>> {
+        let mut filters = serde_json::Map::new();
+        // Vendor trap, observed live 2026-07: filtering bundles by `id`
+        // silently returns nothing — the working filter key is
+        // `ask_contract_id`, even though the response calls the same value
+        // `id` (the response carries both, equal). Not in the spec's
+        // documented filter properties; validated by the live e2e search
+        // test, which round-trips real ids through this exact filter.
+        filters.insert("ask_contract_id".to_string(), json!({"in": ids}));
+        if self.vast.vm {
+            filters.insert("vms_enabled".to_string(), json!({"eq": true}));
+            filters.insert("direct_port_count".to_string(), json!({"gte": 1}));
+        }
+        let limit = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        let found = self.client.search_offers(filters, limit).await?;
+        let by_id: std::collections::HashMap<i64, &Offer> =
+            found.iter().map(|o| (o.id, o)).collect();
+
+        let mut offers = Vec::new();
+        let mut skipped = Vec::new();
+        for id in ids {
+            let Some(offer) = by_id.get(id) else {
+                skipped.push(format!(
+                    "{id}: not rentable anymore{}",
+                    if self.vast.vm {
+                        " (or not VM-capable/direct-port)"
+                    } else {
+                        ""
+                    }
+                ));
+                continue;
+            };
+            let Some(dph) = offer.dph_total else {
+                // No price, no rental — spend tracking and the budget
+                // supervisor need a burn rate.
+                skipped.push(format!("{id}: price unknown"));
+                continue;
+            };
+            if let Some(max) = self.vast.max_dph
+                && dph > max
+            {
+                skipped.push(format!("{id}: ${dph}/hr exceeds max-dph {max}"));
+                continue;
+            }
+            offers.push((*offer).clone());
+        }
+        if !skipped.is_empty() {
+            tracing::warn!(?skipped, "some vast_offers entries were skipped");
+        }
+        anyhow::ensure!(
+            !offers.is_empty(),
+            "None of the {} offers in vast_offers are usable: {}. Offers churn quickly — \
+             call search_vast_offers() again and pass a fresh shortlist (max-dph and vm \
+             constraints from remote-kernels.toml still apply).",
+            ids.len(),
+            skipped.join("; ")
+        );
+        Ok(offers)
     }
 
     /// The onstart script authorizes our per-instance SSH key (as root,
@@ -172,6 +409,20 @@ fn toml_value_to_json(value: &toml::Value) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
+/// Operator objects pass through; scalars become equality filters — the
+/// shared convention for `[vast.query]` and per-call query maps.
+fn wrap_eq(value: serde_json::Value) -> serde_json::Value {
+    if value.is_object() {
+        value
+    } else {
+        json!({ "eq": value })
+    }
+}
+
+fn fmt_f64(v: Option<f64>, decimals: usize) -> String {
+    v.map_or("?".to_string(), |v| format!("{v:.decimals$}"))
+}
+
 /// Whether an image reference names its registry (`docker.io/vastai/kvm:...`).
 /// True when the first path component looks like a host (contains `.` or `:`,
 /// or is `localhost` — mirroring Docker's own reference parsing).
@@ -220,12 +471,12 @@ impl Runtime for VastRuntime {
             if self.vast.vm {
                 anyhow::bail!(
                     "VM instances require an SSH key registered on the vast.ai account \
-                     before creation, and this API key can't manage keys ({e}). Either \
-                     elevate the key with a 2FA code (POST /api/v0/tfa/ with the key as \
-                     Bearer and {{\"tfa_method\":\"totp\",\"code\":\"<code>\"}}; store the \
-                     returned session_key as VAST_API_KEY), or add any SSH key once by \
-                     hand at https://cloud.vast.ai/manage-keys/ — the per-instance key \
-                     is still injected via the startup script."
+                     before creation, and this API key can't manage keys ({e}). If the \
+                     account has 2FA enabled, disable it (cloud.vast.ai → Account → \
+                     Security) and use a plain console key — the plugin does not support \
+                     2FA accounts. Otherwise add any SSH key once by hand at \
+                     https://cloud.vast.ai/manage-keys/ — the plugin key is still \
+                     injected via the startup script."
                 );
             }
             tracing::warn!(
@@ -246,17 +497,7 @@ impl Runtime for VastRuntime {
             tracing::info!(%image, "registry-qualified the VM image (unqualified images silently create containers)");
         }
 
-        let filters = self.offer_filters(req.gpu_type.as_deref());
-        let offers = self.client.search_offers(filters, 10).await?;
-        if offers.is_empty() {
-            anyhow::bail!(
-                "No vast.ai offers matched the filters (gpu-name {:?}, vm={}, max-dph {:?}). \
-                 Loosen [vast] settings in remote-kernels.toml or try a different gpu_type.",
-                self.vast.gpu_name,
-                self.vast.vm,
-                self.vast.max_dph
-            );
-        }
+        let candidates = self.offer_candidates(req).await?;
 
         let label = format!("{}-{}", self.name_prefix, req.name);
         let create = CreateInstanceRequest {
@@ -276,10 +517,10 @@ impl Runtime for VastRuntime {
                 .collect(),
         };
 
-        // Cheapest-first; an offer can be rented out between search and accept.
-        // Auth/permission errors fail fast — no offer will fix those.
+        // Tried in order; an offer can be rented out between search/pick and
+        // accept. Auth/permission errors fail fast — no offer will fix those.
         let mut last_err = None;
-        for offer in offers.iter().take(3) {
+        for offer in &candidates {
             tracing::info!(
                 offer_id = offer.id,
                 gpu = offer.gpu_name.as_deref().unwrap_or("?"),
@@ -327,6 +568,15 @@ impl Runtime for VastRuntime {
                     last_err = Some(e);
                 }
             }
+        }
+        if req.vast_offers.is_some() {
+            let detail = last_err.map_or(String::new(), |e| format!(" Last error: {e}"));
+            anyhow::bail!(
+                "None of the {} offers in vast_offers could be rented — offers churn quickly \
+                 and these may have been taken. Call search_vast_offers() again and pass a \
+                 fresh shortlist.{detail}",
+                candidates.len()
+            );
         }
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all offers failed")))
     }
@@ -801,7 +1051,14 @@ impl Connection for VastConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::image_registry_qualified;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+
+    use serde_json::json;
+
+    use super::{OfferQueryOverrides, Runtime, VastRuntime, image_registry_qualified};
+    use crate::config::Config;
+    use crate::vast::client::VastClient;
 
     #[test]
     fn image_qualification() {
@@ -815,5 +1072,403 @@ mod tests {
         ));
         assert!(image_registry_qualified("nvcr.io/nvidia/pytorch:24.01-py3"));
         assert!(image_registry_qualified("localhost:5000/x/y"));
+    }
+
+    fn runtime_from(config_toml: &str) -> VastRuntime {
+        let config: Config = toml::from_str(config_toml).unwrap();
+        VastRuntime::new("test-key".to_string(), &config)
+    }
+
+    #[test]
+    fn filter_precedence_baseline_config_query_per_call() {
+        let rt = runtime_from(
+            r#"
+            [vast]
+            gpu-name = ["RTX 3090"]
+            max-dph = 0.5
+
+            [vast.query]
+            reliability = { gte = 0.8 }
+            geolocation = "US"
+            "#,
+        );
+
+        // Baselines present unless overridden; [vast.query] wins over them.
+        let f = rt.offer_filters(None, &OfferQueryOverrides::default());
+        assert_eq!(f["verified"], json!({"eq": true}));
+        assert_eq!(f["reliability"], json!({"gte": 0.8})); // config beat baseline
+        assert_eq!(f["num_gpus"], json!({"gte": 1}));
+        assert_eq!(f["inet_down"], json!({"gte": 200.0}));
+        assert_eq!(f["geolocation"], json!({"eq": "US"})); // scalar wrapped as eq
+        assert_eq!(f["gpu_name"], json!({"in": ["RTX 3090"]}));
+        assert_eq!(f["dph_total"], json!({"lte": 0.5}));
+        assert!(!f.contains_key("vms_enabled"));
+
+        // start(gpu_type=...) beats config gpu-name.
+        let f = rt.offer_filters(Some("H100 SXM"), &OfferQueryOverrides::default());
+        assert_eq!(f["gpu_name"], json!({"in": ["H100 SXM"]}));
+
+        // Per-call overrides beat everything, including [vast.query] and the
+        // gpu_type override.
+        let overrides = OfferQueryOverrides {
+            gpu_name: Some(vec!["RTX 4090".to_string()]),
+            num_gpus: Some(2),
+            max_dph: Some(1.5),
+            vm: Some(true),
+            min_disk_gb: Some(200.0),
+            limit: None,
+            query: Some(HashMap::from([
+                ("reliability".to_string(), json!({"gte": 0.99})),
+                ("static_ip".to_string(), json!(true)),
+            ])),
+        };
+        let f = rt.offer_filters(Some("H100 SXM"), &overrides);
+        assert_eq!(f["gpu_name"], json!({"in": ["RTX 4090"]}));
+        assert_eq!(f["num_gpus"], json!({"eq": 2}));
+        assert_eq!(f["dph_total"], json!({"lte": 1.5}));
+        assert_eq!(f["disk_space"], json!({"gte": 200.0}));
+        assert_eq!(f["reliability"], json!({"gte": 0.99}));
+        assert_eq!(f["static_ip"], json!({"eq": true})); // scalar wrapped
+        // vm=true (per-call) forces the VM connectivity constraints.
+        assert_eq!(f["vms_enabled"], json!({"eq": true}));
+        assert_eq!(f["direct_port_count"], json!({"gte": 1}));
+    }
+
+    /// Same-key conflicts across layers (the codex-flagged cases): per-call
+    /// typed overrides must beat `[vast.query]`, and explicit `[vast.query]`
+    /// entries must beat the vm-derived constraints.
+    #[test]
+    fn same_key_conflicts_resolve_by_layer() {
+        let rt = runtime_from(
+            r#"
+            [vast]
+            vm = true
+            max-dph = 0.5
+
+            [vast.query]
+            dph_total = { lte = 5.0 }
+            gpu_name = { in = ["A100 PCIE"] }
+            direct_port_count = { gte = 4 }
+            "#,
+        );
+
+        // [vast.query] beats config typed fields and vm-derived constraints.
+        let f = rt.offer_filters(None, &OfferQueryOverrides::default());
+        assert_eq!(f["dph_total"], json!({"lte": 5.0}));
+        assert_eq!(f["gpu_name"], json!({"in": ["A100 PCIE"]}));
+        assert_eq!(f["direct_port_count"], json!({"gte": 4}));
+
+        // Per-call typed overrides beat [vast.query] on the same keys.
+        let f = rt.offer_filters(
+            None,
+            &OfferQueryOverrides {
+                max_dph: Some(1.0),
+                gpu_name: Some(vec!["RTX 4090".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(f["dph_total"], json!({"lte": 1.0}));
+        assert_eq!(f["gpu_name"], json!({"in": ["RTX 4090"]}));
+
+        // An explicit empty per-call gpu list clears the filter entirely.
+        let f = rt.offer_filters(
+            Some("H100 SXM"),
+            &OfferQueryOverrides {
+                gpu_name: Some(vec![]),
+                ..Default::default()
+            },
+        );
+        assert!(!f.contains_key("gpu_name"));
+    }
+
+    #[test]
+    fn per_call_vm_false_beats_config_vm_true() {
+        let rt = runtime_from("[vast]\nvm = true");
+        let f = rt.offer_filters(None, &OfferQueryOverrides::default());
+        assert!(f.contains_key("vms_enabled"));
+        let f = rt.offer_filters(
+            None,
+            &OfferQueryOverrides {
+                vm: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!f.contains_key("vms_enabled"));
+        assert!(!f.contains_key("direct_port_count"));
+    }
+
+    /// Minimal HTTP/1.1 responder for exercising the provision loop against
+    /// canned vast API responses. Closes each connection after one response
+    /// (`Connection: close`) so reqwest never reuses a socket.
+    struct FakeVast {
+        base_url: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl FakeVast {
+        /// `routes`: (method-and-path prefix, status, body).
+        fn spawn(routes: Vec<(&'static str, u16, String)>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = std::sync::Arc::clone(&requests);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    // Read headers.
+                    let header_end = loop {
+                        use std::io::Read;
+                        let Ok(n) = stream.read(&mut tmp) else {
+                            break 0;
+                        };
+                        if n == 0 {
+                            break 0;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    if header_end == 0 {
+                        continue;
+                    }
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    // Drain the body so the write isn't racing the request.
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        let Ok(n) = stream.read(&mut tmp) else { break };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let request_line = head.lines().next().unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(request_line.clone());
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(prefix, _, _)| request_line.starts_with(prefix))
+                        .map_or((404, "{}".to_string()), |(_, s, b)| (*s, b.clone()));
+                    let reason = if status < 400 { "OK" } else { "ERR" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { base_url, requests }
+        }
+
+        fn asks_tried(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("/api/v0/asks/"))
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn shortlist_request(offers: Vec<i64>) -> super::ProvisionRequest {
+        super::ProvisionRequest {
+            name: "main".to_string(),
+            gpu_type: None,
+            image: None,
+            vast_offers: Some(offers),
+            priority: None,
+            cleanup: crate::config::Cleanup::Terminate,
+            env: HashMap::new(),
+            ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY test".to_string(),
+            jupyter_token: "tok".to_string(),
+        }
+    }
+
+    /// Bundles response resolving ids 111 (cheap) and 222 (pricier). Returned
+    /// cheapest-first, i.e. the OPPOSITE of the ranked order the tests pass —
+    /// order preservation is what's under test.
+    const RESOLVE_BODY: &str = r#"{"offers": [
+        {"id": 111, "gpu_name": "RTX 3090", "num_gpus": 1, "dph_total": 0.30},
+        {"id": 222, "gpu_name": "RTX 4090", "num_gpus": 2, "dph_total": 0.51}
+    ]}"#;
+
+    #[tokio::test]
+    async fn shortlist_falls_through_taken_offers_in_ranked_order() {
+        let fake = FakeVast::spawn(vec![
+            ("GET /api/v0/ssh/", 200, "[]".to_string()),
+            ("POST /api/v0/ssh/", 200, "{}".to_string()),
+            ("POST /api/v0/bundles/", 200, RESOLVE_BODY.to_string()),
+            // Ranked-first offer 222 was rented out in the meantime; the
+            // runner-up 111 succeeds.
+            (
+                "PUT /api/v0/asks/222/",
+                400,
+                r#"{"success": false, "error": "no_such_ask"}"#.to_string(),
+            ),
+            (
+                "PUT /api/v0/asks/111/",
+                200,
+                r#"{"success": true, "new_contract": 999}"#.to_string(),
+            ),
+            ("POST /api/v0/instances/999/ssh/", 200, "{}".to_string()),
+        ]);
+        let config: Config = toml::from_str("").unwrap();
+        let rt = VastRuntime::new_with_client(
+            VastClient::new_with_base_url("k".to_string(), fake.base_url.clone()),
+            &config,
+        );
+
+        let handle = rt
+            .provision(&shortlist_request(vec![222, 111]))
+            .await
+            .unwrap();
+        assert_eq!(handle.external_id, "999");
+        // Metadata comes from the RESOLVED offer, not a post-create query.
+        assert_eq!(handle.gpu_name, "RTX 3090 x1");
+        assert_eq!(handle.cost_per_hr, Some(0.30));
+        // Claude's ranked order respected (NOT the API's cheapest-first
+        // order): 222 attempted before 111.
+        let asks = fake.asks_tried();
+        assert_eq!(asks.len(), 2, "{asks:?}");
+        assert!(asks[0].contains("/asks/222/"), "{asks:?}");
+        assert!(asks[1].contains("/asks/111/"), "{asks:?}");
+        // Exactly one bundles call: the resolve — no auto-search fallback.
+        let bundles = fake
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains("/bundles/"))
+            .count();
+        assert_eq!(bundles, 1);
+    }
+
+    #[tokio::test]
+    async fn shortlist_enforces_max_dph_and_skips_stale_ids_before_renting() {
+        let fake = FakeVast::spawn(vec![
+            ("GET /api/v0/ssh/", 200, "[]".to_string()),
+            ("POST /api/v0/ssh/", 200, "{}".to_string()),
+            // Only 222 still exists — and it violates the price ceiling.
+            (
+                "POST /api/v0/bundles/",
+                200,
+                r#"{"offers": [{"id": 222, "gpu_name": "RTX 4090", "num_gpus": 2, "dph_total": 0.51}]}"#
+                    .to_string(),
+            ),
+        ]);
+        let config: Config = toml::from_str("[vast]\nmax-dph = 0.4").unwrap();
+        let rt = VastRuntime::new_with_client(
+            VastClient::new_with_base_url("k".to_string(), fake.base_url.clone()),
+            &config,
+        );
+
+        let err = rt
+            .provision(&shortlist_request(vec![111, 222]))
+            .await
+            .unwrap_err()
+            .to_string();
+        // Fail closed: nothing may be rented when every id is stale or
+        // over the configured ceiling — and the reasons are spelled out.
+        assert_eq!(fake.asks_tried().len(), 0, "{err}");
+        assert!(err.contains("not rentable"), "{err}");
+        assert!(err.contains("exceeds max-dph"), "{err}");
+        assert!(err.contains("search_vast_offers"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn shortlist_exhaustion_says_re_search() {
+        let fake = FakeVast::spawn(vec![
+            ("GET /api/v0/ssh/", 200, "[]".to_string()),
+            ("POST /api/v0/ssh/", 200, "{}".to_string()),
+            ("POST /api/v0/bundles/", 200, RESOLVE_BODY.to_string()),
+            (
+                "PUT /api/v0/asks/",
+                400,
+                r#"{"success": false, "error": "no_such_ask"}"#.to_string(),
+            ),
+            (
+                "GET /api/v1/instances/",
+                200,
+                r#"{"instances": []}"#.to_string(),
+            ),
+        ]);
+        let config: Config = toml::from_str("").unwrap();
+        let rt = VastRuntime::new_with_client(
+            VastClient::new_with_base_url("k".to_string(), fake.base_url.clone()),
+            &config,
+        );
+
+        let err = rt
+            .provision(&shortlist_request(vec![111, 222]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("search_vast_offers"), "{err}");
+        assert_eq!(fake.asks_tried().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn shortlist_auth_error_fails_fast() {
+        let fake = FakeVast::spawn(vec![
+            ("GET /api/v0/ssh/", 200, "[]".to_string()),
+            ("POST /api/v0/ssh/", 200, "{}".to_string()),
+            ("POST /api/v0/bundles/", 200, RESOLVE_BODY.to_string()),
+            (
+                "PUT /api/v0/asks/",
+                401,
+                r#"{"error": "Two Factor Authentication required"}"#.to_string(),
+            ),
+        ]);
+        let config: Config = toml::from_str("").unwrap();
+        let rt = VastRuntime::new_with_client(
+            VastClient::new_with_base_url("k".to_string(), fake.base_url.clone()),
+            &config,
+        );
+
+        let err = rt
+            .provision(&shortlist_request(vec![111, 222]))
+            .await
+            .unwrap_err()
+            .to_string();
+        // Fail-fast: the second offer must not be attempted on an auth error,
+        // and the error carries the 2FA guidance.
+        assert_eq!(fake.asks_tried().len(), 1);
+        assert!(err.contains("disable"), "{err}");
+    }
+
+    /// A 404 on DELETE means "already gone" (success) — EXCEPT vast's
+    /// session-expired auth 404, which must stay an error: treating it as
+    /// gone would falsely confirm termination of a machine that keeps
+    /// billing.
+    #[tokio::test]
+    async fn destroy_404_gone_ok_but_session_expired_errors() {
+        let fake = FakeVast::spawn(vec![
+            (
+                "DELETE /api/v0/instances/5/",
+                404,
+                r#"{"error": "auth_error", "msg": "Session expired. Please log in again."}"#
+                    .to_string(),
+            ),
+            (
+                "DELETE /api/v0/instances/6/",
+                404,
+                r#"{"error": "no_such_instance"}"#.to_string(),
+            ),
+        ]);
+        let client = VastClient::new_with_base_url("k".to_string(), fake.base_url.clone());
+        let err = client.destroy_instance(5).await.unwrap_err().to_string();
+        assert!(err.contains("Session expired"), "{err}");
+        assert!(err.contains("disable"), "guidance missing: {err}");
+        client.destroy_instance(6).await.unwrap();
     }
 }

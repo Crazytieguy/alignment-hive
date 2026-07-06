@@ -83,6 +83,10 @@ pub struct ProvisionRequest {
     pub gpu_type: Option<String>,
     /// Override the configured image.
     pub image: Option<String>,
+    /// Ranked shortlist of vast.ai offer ids to try in order (from
+    /// `search_vast_offers()`). vast-only — the server rejects it for other
+    /// runtimes before provisioning; they never see it set.
+    pub vast_offers: Option<Vec<i64>>,
     /// Scheduling priority — on Kubernetes this becomes the configured
     /// priority label (Kueue workload priority by default). Ignored by
     /// runtimes without a queue.

@@ -8,27 +8,65 @@ use super::types::{
 
 const BASE_URL: &str = "https://console.vast.ai";
 
+/// Guidance appended to auth-shaped API errors. 2FA is deliberately
+/// unsupported by the plugin (decided 2026-07): vast has no refresh endpoint,
+/// session keys expire after ~1-2 days, and even vast's own CLI just asks the
+/// human to re-login. Plain console keys on non-2FA accounts never expire.
+const AUTH_GUIDANCE: &str = "\
+    This usually means the vast.ai account has (or had) 2FA enabled: 2FA \
+    accounts reject API write operations from plain console keys, and \
+    2FA-minted session keys expire after ~1-2 days. Recommended fix: disable \
+    2FA on the vast account (cloud.vast.ai → Account → Security — note it is \
+    easy to enable accidentally in that UI), then use a plain console key \
+    from https://cloud.vast.ai/manage-keys/ as VAST_API_KEY — those never \
+    expire. To keep 2FA instead, mint a fresh short-lived session key: POST \
+    https://console.vast.ai/api/v0/tfa/ with the console key as Bearer and \
+    body {\"tfa_method\":\"totp\",\"code\":\"<6-digit code>\"}, and store the \
+    returned session_key as VAST_API_KEY.";
+
 /// Non-2xx API response with its status code, so callers can discriminate
 /// permanent failures (auth/config) from per-offer availability issues.
 #[derive(Debug, thiserror::Error)]
-#[error("vast.ai API error during {what} ({status}): {body}")]
 pub struct ApiStatusError {
     pub status: u16,
     pub what: String,
     pub body: String,
 }
 
+impl std::fmt::Display for ApiStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "vast.ai API error during {} ({}): {}",
+            self.what, self.status, self.body
+        )?;
+        if self.is_auth() {
+            write!(f, "\n{AUTH_GUIDANCE}")?;
+        }
+        Ok(())
+    }
+}
+
 impl ApiStatusError {
+    /// Auth-shaped failures. vast expires 2FA session keys with a **404**
+    /// `auth_error "Session expired. Please log in again."` (observed live
+    /// 2026-07, matching vast-cli's own handling) — that must be permanent
+    /// too, or the offer-retry loop would burn attempts on a dead credential.
+    fn is_auth(&self) -> bool {
+        matches!(self.status, 401 | 403)
+            || (self.status == 404 && self.body.contains("Session expired"))
+    }
+
     /// Errors that no amount of retrying with a different offer will fix.
     pub fn is_permanent(err: &anyhow::Error) -> bool {
-        err.downcast_ref::<Self>()
-            .is_some_and(|e| matches!(e.status, 401 | 403))
+        err.downcast_ref::<Self>().is_some_and(Self::is_auth)
     }
 }
 
 pub struct VastClient {
     client: Client,
     api_key: String,
+    base_url: String,
 }
 
 impl VastClient {
@@ -36,6 +74,17 @@ impl VastClient {
         Self {
             client: crate::api_http_client(),
             api_key,
+            base_url: BASE_URL.to_string(),
+        }
+    }
+
+    /// Test-only: point the client at a local fake API server.
+    #[cfg(test)]
+    pub(crate) fn new_with_base_url(api_key: String, base_url: String) -> Self {
+        Self {
+            client: crate::api_http_client(),
+            api_key,
+            base_url,
         }
     }
 
@@ -68,7 +117,7 @@ impl VastClient {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
-                    .post(format!("{BASE_URL}/api/v0/bundles/"))
+                    .post(format!("{}/api/v0/bundles/", self.base_url))
                     .bearer_auth(&self.api_key)
                     .json(&serde_json::Value::Object(filters)),
             )
@@ -90,7 +139,7 @@ impl VastClient {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
-                    .put(format!("{BASE_URL}/api/v0/asks/{offer_id}/"))
+                    .put(format!("{}/api/v0/asks/{offer_id}/", self.base_url))
                     .bearer_auth(&self.api_key)
                     .json(req),
             )
@@ -111,7 +160,7 @@ impl VastClient {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
-                    .get(format!("{BASE_URL}/api/v1/instances/"))
+                    .get(format!("{}/api/v1/instances/", self.base_url))
                     .bearer_auth(&self.api_key)
                     .query(&[("select_filters", filters.as_str())]),
             )
@@ -132,7 +181,7 @@ impl VastClient {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
-                    .get(format!("{BASE_URL}/api/v1/instances/"))
+                    .get(format!("{}/api/v1/instances/", self.base_url))
                     .bearer_auth(&self.api_key),
             )
             .await?,
@@ -153,7 +202,7 @@ impl VastClient {
         Self::check(
             crate::send_429_retry(
                 self.client
-                    .put(format!("{BASE_URL}/api/v0/instances/{id}/"))
+                    .put(format!("{}/api/v0/instances/{id}/", self.base_url))
                     .bearer_auth(&self.api_key)
                     .json(&json!({ "state": state })),
             )
@@ -168,16 +217,36 @@ impl VastClient {
     pub async fn destroy_instance(&self, id: i64) -> anyhow::Result<()> {
         let resp = crate::send_429_retry(
             self.client
-                .delete(format!("{BASE_URL}/api/v0/instances/{id}/"))
+                .delete(format!("{}/api/v0/instances/{id}/", self.base_url))
                 .bearer_auth(&self.api_key),
         )
         .await?;
-        // 404 = already gone; success for termination purposes.
-        if resp.status().as_u16() == 404 {
+        Self::check_delete_gone_ok(resp, "instance destroy").await
+    }
+
+    /// Like [`Self::check`], but a 404 counts as success — the resource is
+    /// already gone, which is what a delete wants. EXCEPT the session-expired
+    /// 404 (vast reports expired 2FA session keys as 404 `auth_error`,
+    /// observed live 2026-07): treating that as "already gone" would falsely
+    /// confirm a termination that never happened, clearing the durable record
+    /// of a machine that keeps billing. Auth-shaped 404s stay errors.
+    async fn check_delete_gone_ok(resp: reqwest::Response, what: &str) -> anyhow::Result<()> {
+        let status = resp.status();
+        if status.as_u16() != 404 {
+            Self::check(resp, what).await?;
             return Ok(());
         }
-        Self::check(resp, "instance destroy").await?;
-        Ok(())
+        let body = resp.text().await.unwrap_or_default();
+        let err = ApiStatusError {
+            status: 404,
+            what: what.to_string(),
+            body,
+        };
+        if err.is_auth() {
+            Err(err.into())
+        } else {
+            Ok(())
+        }
     }
 
     /// `GET /api/v0/users/current/` — account info (balance in dollars).
@@ -185,7 +254,7 @@ impl VastClient {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
-                    .get(format!("{BASE_URL}/api/v0/users/current/"))
+                    .get(format!("{}/api/v0/users/current/", self.base_url))
                     .bearer_auth(&self.api_key),
             )
             .await?,
@@ -210,7 +279,7 @@ impl VastClient {
         }
         let registration = match crate::send_429_retry(
             self.client
-                .post(format!("{BASE_URL}/api/v0/ssh/"))
+                .post(format!("{}/api/v0/ssh/", self.base_url))
                 .bearer_auth(&self.api_key)
                 .json(&json!({ "ssh_key": public_key })),
         )
@@ -241,7 +310,7 @@ impl VastClient {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
-                    .get(format!("{BASE_URL}/api/v0/ssh/"))
+                    .get(format!("{}/api/v0/ssh/", self.base_url))
                     .bearer_auth(&self.api_key),
             )
             .await?,
@@ -261,7 +330,10 @@ impl VastClient {
         Self::check(
             crate::send_429_retry(
                 self.client
-                    .post(format!("{BASE_URL}/api/v0/instances/{instance_id}/ssh/"))
+                    .post(format!(
+                        "{}/api/v0/instances/{instance_id}/ssh/",
+                        self.base_url
+                    ))
                     .bearer_auth(&self.api_key)
                     .json(&json!({ "ssh_key": public_key })),
             )
@@ -276,14 +348,10 @@ impl VastClient {
     pub async fn delete_ssh_key(&self, id: i64) -> anyhow::Result<()> {
         let resp = crate::send_429_retry(
             self.client
-                .delete(format!("{BASE_URL}/api/v0/ssh/{id}/"))
+                .delete(format!("{}/api/v0/ssh/{id}/", self.base_url))
                 .bearer_auth(&self.api_key),
         )
         .await?;
-        if resp.status().as_u16() == 404 {
-            return Ok(());
-        }
-        Self::check(resp, "ssh key delete").await?;
-        Ok(())
+        Self::check_delete_gone_ok(resp, "ssh key delete").await
     }
 }

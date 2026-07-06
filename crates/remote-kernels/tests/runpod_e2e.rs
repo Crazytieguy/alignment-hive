@@ -98,6 +98,7 @@ async fn start_machine(server: &RemoteKernelsServer) -> CallToolResult {
             runtime: None,
             gpu_type: None,
             image: None,
+            vast_offers: None,
             priority: None,
             wait: Some(true),
         }))
