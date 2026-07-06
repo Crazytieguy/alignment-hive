@@ -51,6 +51,38 @@ enum CleanupAction {
     Terminate,
 }
 
+/// How a failed start/reconnect was resolved, per the machine's cleanup
+/// policy — used to tell the user what happened to the machine.
+#[derive(Clone, Copy)]
+enum FailedStartCleanup {
+    Terminated,
+    Stopped,
+    LeftRunning,
+    Unconfirmed,
+}
+
+impl FailedStartCleanup {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Terminated => {
+                "the machine was terminated — start() again to try a different machine"
+            }
+            Self::Stopped => {
+                "per its cleanup policy the machine was stopped, not terminated — storage \
+                 keeps billing; start() resumes it, terminate() deletes it"
+            }
+            Self::LeftRunning => {
+                "cleanup is disabled for this machine, so it was left as-is and may still \
+                 bill — start() retries it, stop()/terminate() ends it"
+            }
+            Self::Unconfirmed => {
+                "cleanup could NOT be confirmed — the machine may still exist and bill; \
+                 check status() or the provider console before starting another"
+            }
+        }
+    }
+}
+
 impl CleanupAction {
     fn verb(self) -> &'static str {
         match self {
@@ -326,7 +358,8 @@ impl RemoteKernelsServer {
         // New machine.
         let runtime = self.runtime_for(&runtime_name).await?;
 
-        if let Err(msg) = runtime.capabilities().validate_cleanup(self.config.cleanup) {
+        let cleanup = self.config.cleanup_for(&runtime_name);
+        if let Err(msg) = runtime.capabilities().validate_cleanup(cleanup) {
             return err_text(format!(
                 "Configuration error for runtime {runtime_name:?}: {msg}"
             ));
@@ -358,7 +391,7 @@ impl RemoteKernelsServer {
             env: self.build_env(&project_dir),
             ssh_public_key: ssh_keypair.public_key_openssh,
             jupyter_token: jupyter_token.clone(),
-            cleanup: self.config.cleanup,
+            cleanup,
         };
 
         tracing::info!(instance = %name, runtime = %runtime_name, "Provisioning machine...");
@@ -377,7 +410,7 @@ impl RemoteKernelsServer {
                 handle.external_id.clone(),
                 handle.gpu_name.clone(),
                 handle.cost_per_hr.unwrap_or(0.0),
-                self.config.cleanup,
+                cleanup,
                 jupyter_token.clone(),
                 ssh_keypair.private_key_path,
             );
@@ -414,10 +447,11 @@ impl RemoteKernelsServer {
                     ))]))
                 }
                 Err(e) => {
-                    self.cleanup_failed_start(&name, &handle.external_id, &runtime_name)
+                    let outcome = self
+                        .cleanup_failed_start(&name, &handle.external_id, &runtime_name, false)
                         .await;
                     Err(McpError::internal_error(
-                        format!("Machine failed to start: {e}"),
+                        format!("Machine failed to start: {e} ({})", outcome.describe()),
                         None,
                     ))
                 }
@@ -1315,6 +1349,7 @@ impl RemoteKernelsServer {
     /// Returns `Some(Ok(...))` if reconnection succeeded, `Some(Err(...))` if
     /// it was attempted but failed, or `None` if there's nothing to reconnect
     /// to (caller should create a new machine).
+    #[allow(clippy::too_many_lines)] // sequential status dispositions; splitting hurts readability
     async fn try_reconnect(
         &self,
         name: &str,
@@ -1430,10 +1465,11 @@ impl RemoteKernelsServer {
                 ))])))
             }
             Err(e) => {
-                self.cleanup_failed_start(name, &record.external_id, &record.runtime)
+                let outcome = self
+                    .cleanup_failed_start(name, &record.external_id, &record.runtime, false)
                     .await;
                 Some(Err(McpError::internal_error(
-                    format!("Failed to reconnect: {e}"),
+                    format!("Failed to reconnect: {e} ({})", outcome.describe()),
                     None,
                 )))
             }
@@ -1616,17 +1652,20 @@ impl RemoteKernelsServer {
                     }
                 };
                 tracing::warn!(instance = %name, "Background start failed: {error}");
-                let terminated = server
-                    .cleanup_failed_start(&name, &external_id, &runtime_name)
+                // Overshooting the provisioning timeout forces termination
+                // regardless of cleanup policy — the timeout is the money
+                // backstop for hosts that bill without becoming usable.
+                // Computed before cleanup drops the in-memory instance.
+                let force = server
+                    .provisioning_overdue(&name, &external_id)
+                    .await
+                    .is_some();
+                let outcome = server
+                    .cleanup_failed_start(&name, &external_id, &runtime_name, force)
                     .await;
-                let outcome = if terminated {
-                    "it has been cleaned up — start() again to try a different machine"
-                } else {
-                    "cleanup could NOT be confirmed — the machine may still exist and bill; \
-                     check status() or the provider console before starting another"
-                };
                 server.start_failures.lock().await.push(format!(
-                    "Machine {name:?} failed to start: {error} ({outcome})"
+                    "Machine {name:?} failed to start: {error} ({})",
+                    outcome.describe()
                 ));
                 return;
             }
@@ -1670,63 +1709,122 @@ impl RemoteKernelsServer {
         (elapsed > timeout).then_some(elapsed)
     }
 
-    /// Clean up after a failed start/reconnect: terminate the machine and
-    /// remove its state. Only touches state belonging to `external_id` — if
-    /// the name was already reused for a new machine, that machine is left
-    /// alone (but the failed machine is still terminated at the provider).
+    /// Clean up after a failed start/reconnect, honoring the machine's
+    /// cleanup policy: terminate (default), stop (keep the record so the
+    /// machine can be resumed — a reconnected machine may hold real data),
+    /// or disabled (leave the machine as-is; keep the record). A machine
+    /// that overshot its runtime's provisioning timeout is terminated
+    /// regardless of policy (`force_terminate`): that timeout is the money
+    /// backstop cutting loose a stuck host that bills without ever becoming
+    /// usable.
     ///
-    /// The durable record is cleared only after a *confirmed* provider
-    /// termination; otherwise it is kept so `status()`/`terminate()` can still
-    /// see and retry the possibly-billing machine.
-    /// Returns whether the provider termination was confirmed.
+    /// Only touches state belonging to `external_id` — if the name was
+    /// already reused for a new machine, that machine is left alone (but the
+    /// failed machine is still cleaned up at the provider).
+    ///
+    /// On terminate, the durable record is cleared only after a *confirmed*
+    /// provider termination; otherwise it is kept so `status()`/`terminate()`
+    /// can still see and retry the possibly-billing machine.
     async fn cleanup_failed_start(
         &self,
         name: &str,
         external_id: &str,
         runtime_name: &str,
-    ) -> bool {
+        force_terminate: bool,
+    ) -> FailedStartCleanup {
         tracing::warn!(instance = %name, external_id, "Cleaning up after failed start");
 
-        {
+        // Drop the in-memory instance (snapshotting the billed provisioning
+        // time) and capture its record for the policy decision, falling back
+        // to the durable record for a generation no longer in memory.
+        let record = {
             let mut state = self.state.lock().await;
+            let mut record = None;
             if state
                 .instances
                 .get(name)
                 .is_some_and(|i| i.external_id == external_id)
             {
-                // Snapshot before removing — the failed provisioning time was
-                // still billed.
                 state.snapshot_spend_for(name);
                 if let Some(mut inst) = state.instances.remove(name) {
                     inst.stop_heartbeat();
+                    record = Some(inst.record());
                 }
             }
-        }
+            record.or_else(|| {
+                crate::state::load_instance_record(&state.project_dir, name)
+                    .filter(|r| r.external_id == external_id)
+            })
+        };
 
-        let terminated = match self.runtime_for(runtime_name).await {
-            Ok(runtime) => match runtime.terminate(external_id).await {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(external_id, error = %e, "Failed to terminate machine after failed start — record kept; terminate() to retry");
-                    false
-                }
-            },
+        let policy = if force_terminate {
+            Cleanup::Terminate
+        } else {
+            record.as_ref().map_or(Cleanup::Terminate, |r| r.cleanup)
+        };
+
+        let runtime = match self.runtime_for(runtime_name).await {
+            Ok(rt) => rt,
             Err(e) => {
                 tracing::warn!(external_id, "Runtime unavailable for cleanup: {e:?}");
-                false
+                return FailedStartCleanup::Unconfirmed;
             }
         };
 
-        if terminated {
-            let state = self.state.lock().await;
-            if crate::state::load_instance_record(&state.project_dir, name)
-                .is_some_and(|r| r.external_id == external_id)
-                && let Err(e) = state.clear_record(name)
-            {
-                tracing::warn!("Failed to clear instance record after failed start: {e}");
+        match policy {
+            Cleanup::Terminate => match runtime.terminate(external_id).await {
+                Ok(()) => {
+                    let state = self.state.lock().await;
+                    if crate::state::load_instance_record(&state.project_dir, name)
+                        .is_some_and(|r| r.external_id == external_id)
+                        && let Err(e) = state.clear_record(name)
+                    {
+                        tracing::warn!("Failed to clear instance record after failed start: {e}");
+                    }
+                    FailedStartCleanup::Terminated
+                }
+                Err(e) => {
+                    tracing::warn!(external_id, error = %e, "Failed to terminate machine after failed start — record kept; terminate() to retry");
+                    FailedStartCleanup::Unconfirmed
+                }
+            },
+            Cleanup::Stop => match runtime.stop(external_id).await {
+                Ok(()) => {
+                    self.persist_failed_start_record(name, external_id, record, Phase::Stopped)
+                        .await;
+                    FailedStartCleanup::Stopped
+                }
+                Err(e) => {
+                    tracing::warn!(external_id, error = %e, "Failed to stop machine after failed start — record kept; stop()/terminate() to retry");
+                    FailedStartCleanup::Unconfirmed
+                }
+            },
+            Cleanup::Disabled => {
+                self.persist_failed_start_record(name, external_id, record, Phase::Running)
+                    .await;
+                FailedStartCleanup::LeftRunning
             }
         }
-        terminated
+    }
+
+    /// Persist the kept record of a failed-start machine with its new phase,
+    /// guarding against the name having been reused by a newer generation.
+    async fn persist_failed_start_record(
+        &self,
+        name: &str,
+        external_id: &str,
+        record: Option<InstanceRecord>,
+        phase: Phase,
+    ) {
+        let Some(mut record) = record else { return };
+        record.phase = phase;
+        let state = self.state.lock().await;
+        if crate::state::load_instance_record(&state.project_dir, name)
+            .is_some_and(|r| r.external_id == external_id)
+            && let Err(e) = state.save_record(name, &record)
+        {
+            tracing::warn!("Failed to save instance record after failed start: {e}");
+        }
     }
 
     /// Check if the session budget has been exceeded. If so, clean up ALL
@@ -1817,8 +1915,23 @@ impl RemoteKernelsServer {
         }
 
         let mut actions = Vec::new();
-        for (target, cleanup) in targets {
-            // Budget + Disabled is rejected at startup, so Disabled is unreachable here.
+        for (target, cleanup, cost_per_hr) in targets {
+            // Unmetered machines don't consume budget — exhaustion is not a
+            // reason to touch them (their own cleanup still applies at
+            // session end). A machine counts as metered if it reports an
+            // hourly cost OR its runtime is metered by nature — the latter
+            // catches a paid machine whose provider omitted the price
+            // (recorded as 0.0); when in doubt, clean up (money-safety).
+            let runtime_metered =
+                crate::runtime::AnyRuntime::static_capabilities(&target.runtime, &self.config)
+                    .is_none_or(|caps| caps.metered);
+            if cost_per_hr <= 0.0 && !runtime_metered {
+                tracing::info!(instance = %target.name, runtime = %target.runtime, "Unmetered machine left alone on budget exhaustion");
+                continue;
+            }
+            // Budget + Disabled on metered runtimes is rejected at startup;
+            // a Disabled record from an older session still maps to Terminate
+            // — budget enforcement must be able to end the billing.
             let action = match cleanup {
                 Cleanup::Stop => CleanupAction::Stop,
                 Cleanup::Terminate | Cleanup::Disabled => CleanupAction::Terminate,
@@ -1833,13 +1946,16 @@ impl RemoteKernelsServer {
             }
         }
 
+        if actions.is_empty() {
+            return "No metered machine was running.".to_string();
+        }
         format!("Machines cleaned up — {}.", actions.join("; "))
     }
 
     /// Graceful-shutdown cleanup: apply each live instance's cleanup policy.
     /// Called by `main()` when the MCP transport disconnects.
     pub async fn shutdown_cleanup(&self) {
-        for (target, cleanup) in self.all_live_targets().await {
+        for (target, cleanup, _cost_per_hr) in self.all_live_targets().await {
             let action = match cleanup {
                 Cleanup::Disabled => {
                     tracing::info!(instance = %target.name, external_id = %target.external_id, "Cleanup disabled, leaving machine running");
@@ -1868,7 +1984,9 @@ impl RemoteKernelsServer {
         }
     }
 
-    async fn all_live_targets(&self) -> Vec<(CleanupTarget, Cleanup)> {
+    /// Snapshot of every live instance: cleanup coordinates, effective
+    /// cleanup mode, and hourly cost (0.0 = unmetered).
+    async fn all_live_targets(&self) -> Vec<(CleanupTarget, Cleanup, f64)> {
         let state = self.state.lock().await;
         state
             .instances
@@ -1881,6 +1999,7 @@ impl RemoteKernelsServer {
                         runtime: i.runtime.clone(),
                     },
                     i.cleanup,
+                    i.cost_per_hr,
                 )
             })
             .collect()
@@ -1948,5 +2067,93 @@ mod tests {
         assert!(
             validate_vast_offers(Some(&[1]), false, "runpod").is_err_and(|e| e.contains("runtime"))
         );
+    }
+}
+
+/// Failed-start cleanup dispositions, driven by the per-machine cleanup
+/// policy. Uses the fake runtime, whose `terminate` is idempotent (Ok for
+/// unknown ids) while `stop` errors on unknown ids — exercising both the
+/// confirmed and unconfirmed provider outcomes without spawning processes.
+#[cfg(all(test, feature = "fake-runtime"))]
+mod failed_start_tests {
+    use super::*;
+
+    async fn server_with_instance(cleanup: Cleanup) -> (RemoteKernelsServer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str(r#"default-runtime = "fake""#).unwrap();
+        let server =
+            RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
+        {
+            let mut state = server.state.lock().await;
+            let inst = InstanceState::provisioning(
+                "main".to_string(),
+                "fake".to_string(),
+                "fake-test-id".to_string(),
+                "GPU".to_string(),
+                1.0,
+                cleanup,
+                "token".to_string(),
+                dir.path().join("id_ed25519"),
+            );
+            let record = inst.record();
+            state.instances.insert("main".to_string(), inst);
+            state.save_record("main", &record).unwrap();
+        }
+        (server, dir)
+    }
+
+    async fn record_of(server: &RemoteKernelsServer) -> Option<InstanceRecord> {
+        let state = server.state.lock().await;
+        crate::state::load_instance_record(&state.project_dir, "main")
+    }
+
+    #[tokio::test]
+    async fn failed_start_terminate_policy_clears_record() {
+        let (server, _dir) = server_with_instance(Cleanup::Terminate).await;
+        let outcome = server
+            .cleanup_failed_start("main", "fake-test-id", "fake", false)
+            .await;
+        assert!(matches!(outcome, FailedStartCleanup::Terminated));
+        assert!(record_of(&server).await.is_none(), "record must be cleared");
+        assert!(server.state.lock().await.instances.is_empty());
+    }
+
+    /// Stop policy: the machine must NOT be terminated. Here the provider
+    /// stop is unconfirmed (fake stop errors on unknown ids), so the record
+    /// must survive for retry — nothing is forgotten on provider failure.
+    #[tokio::test]
+    async fn failed_start_stop_policy_never_terminates_and_keeps_record() {
+        let (server, _dir) = server_with_instance(Cleanup::Stop).await;
+        let outcome = server
+            .cleanup_failed_start("main", "fake-test-id", "fake", false)
+            .await;
+        assert!(matches!(outcome, FailedStartCleanup::Unconfirmed));
+        let record = record_of(&server).await.expect("record must be kept");
+        assert_eq!(record.external_id, "fake-test-id");
+    }
+
+    #[tokio::test]
+    async fn failed_start_disabled_policy_leaves_machine_and_record() {
+        let (server, _dir) = server_with_instance(Cleanup::Disabled).await;
+        let outcome = server
+            .cleanup_failed_start("main", "fake-test-id", "fake", false)
+            .await;
+        assert!(matches!(outcome, FailedStartCleanup::LeftRunning));
+        let record = record_of(&server).await.expect("record must be kept");
+        assert_eq!(record.phase, Phase::Running);
+    }
+
+    /// Provision-timeout overshoot forces termination even under a stop or
+    /// disabled policy — the timeout is the money backstop for stuck hosts.
+    #[tokio::test]
+    async fn failed_start_force_terminate_overrides_policy() {
+        for cleanup in [Cleanup::Stop, Cleanup::Disabled] {
+            let (server, _dir) = server_with_instance(cleanup).await;
+            let outcome = server
+                .cleanup_failed_start("main", "fake-test-id", "fake", true)
+                .await;
+            assert!(matches!(outcome, FailedStartCleanup::Terminated));
+            assert!(record_of(&server).await.is_none(), "record must be cleared");
+        }
     }
 }

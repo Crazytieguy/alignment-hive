@@ -102,6 +102,19 @@ impl Default for FakeRuntime {
     }
 }
 
+/// Runtime capabilities, exposed credential-free so config validation can
+/// consult them at load time (see [`super::validate_config`]). Meteredness is
+/// per-instance for the fake runtime (e2e tests simulate billing); validation
+/// treats it as unmetered since fake machines never cost real money.
+pub(crate) fn capabilities(metered: bool) -> Capabilities {
+    Capabilities {
+        stop_resume: StopSupport::Full,
+        metered,
+        provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
+        account_ssh_keys: false,
+    }
+}
+
 impl Runtime for FakeRuntime {
     type Conn = FakeConnection;
 
@@ -110,12 +123,7 @@ impl Runtime for FakeRuntime {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            stop_resume: StopSupport::Full,
-            metered: self.cost_per_hr > 0.0,
-            provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
-            account_ssh_keys: false,
-        }
+        capabilities(self.cost_per_hr > 0.0)
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {

@@ -74,6 +74,34 @@ impl Capabilities {
     }
 }
 
+/// Validate the config's cleanup settings against runtime capabilities at
+/// load time: an explicit per-runtime `cleanup` key must be supported by its
+/// runtime, and a budget requires every metered runtime's effective cleanup
+/// to be enforceable (not "disabled"). The deprecated global `cleanup` is
+/// only validated per-runtime lazily at `start()` — a global value may be a
+/// leftover that never applies to the runtime it would conflict with.
+pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
+    for &name in AnyRuntime::known_names() {
+        let Some(caps) = AnyRuntime::static_capabilities(name, config) else {
+            continue;
+        };
+        if let Some(explicit) = config.explicit_cleanup_for(name) {
+            caps.validate_cleanup(explicit)
+                .map_err(|msg| format!("[{name}] cleanup: {msg}"))?;
+        }
+        if has_budget && caps.metered && config.cleanup_for(name) == Cleanup::Disabled {
+            return Err(format!(
+                "budget-cap (or REMOTE_KERNELS_BUDGET) cannot be used while cleanup resolves \
+                 to \"disabled\" for the metered runtime {name:?} — budget enforcement \
+                 requires the ability to stop/terminate machines. Set cleanup = \"stop\" or \
+                 \"terminate\" under [{name}]. (Unmetered runtimes like kubernetes may keep \
+                 \"disabled\".)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Request to provision a new machine.
 #[derive(Debug)]
 pub struct ProvisionRequest {
@@ -296,6 +324,27 @@ impl AnyRuntime {
         ]
     }
 
+    /// Capabilities looked up by runtime name without credentials — the
+    /// load-time counterpart of [`Runtime::capabilities`], for validating
+    /// config before any runtime is built. Same source functions as the
+    /// instance methods, so the two can't drift. `None` for unknown names
+    /// (those fail later in [`AnyRuntime::build`] with the full name list).
+    pub fn static_capabilities(name: &str, config: &Config) -> Option<Capabilities> {
+        match name {
+            "runpod" => Some(runpod::capabilities()),
+            "vast" => Some(vast::capabilities(
+                config.vast.as_ref().is_some_and(|v| v.vm),
+            )),
+            "kubernetes" => Some(kubernetes::capabilities()),
+            // Meteredness is per-instance for the fake runtime (e2e tests
+            // simulate billing), but no fake machine ever costs real money —
+            // for config validation it counts as unmetered.
+            #[cfg(feature = "fake-runtime")]
+            "fake" => Some(fake::capabilities(false)),
+            _ => None,
+        }
+    }
+
     /// Build a runtime by name, reading its credentials from the environment.
     /// Credentials are checked here — at first use — not at server startup, so
     /// runtimes you don't use don't need keys configured.
@@ -449,5 +498,67 @@ impl Connection for AnyConnection {
 
     async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
         dispatch!(self, c => c.set_budget_deadline(secs_from_now).await)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(toml: &str) -> Config {
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn explicit_kubernetes_stop_is_rejected_at_load() {
+        let cfg = config("[kubernetes]\npod-template = \"pod.yaml\"\ncleanup = \"stop\"");
+        let err = validate_config(&cfg, false).unwrap_err();
+        assert!(err.contains("[kubernetes] cleanup"), "{err}");
+        assert!(err.contains("not supported"), "{err}");
+    }
+
+    /// A global "stop" that would apply to kubernetes stays lazy: it errors at
+    /// `start()` (`validate_cleanup` on the effective value), not at load —
+    /// the key may be a leftover on a config that never starts kubernetes pods.
+    #[test]
+    fn global_stop_with_kubernetes_section_loads_but_fails_at_start() {
+        let cfg = config("cleanup = \"stop\"\n\n[kubernetes]\npod-template = \"pod.yaml\"");
+        assert!(validate_config(&cfg, false).is_ok());
+        let caps = AnyRuntime::static_capabilities("kubernetes", &cfg).unwrap();
+        assert!(
+            caps.validate_cleanup(cfg.cleanup_for("kubernetes"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_vast_stop_is_allowed() {
+        let cfg = config("[vast]\ncleanup = \"stop\"");
+        assert!(validate_config(&cfg, false).is_ok());
+    }
+
+    #[test]
+    fn budget_rejects_disabled_cleanup_on_metered_runtimes_only() {
+        // Global disabled: every metered runtime resolves to disabled → error
+        // (matches the old global check's behavior).
+        let cfg = config("cleanup = \"disabled\"");
+        assert!(validate_config(&cfg, true).unwrap_err().contains("metered"));
+        // ... but without a budget it's fine.
+        assert!(validate_config(&cfg, false).is_ok());
+
+        // Explicit disabled on one metered runtime is enough to error.
+        let cfg = config("[vast]\ncleanup = \"disabled\"");
+        assert!(validate_config(&cfg, true).is_err());
+
+        // Disabled only on unmetered kubernetes is compatible with a budget.
+        let cfg = config("[kubernetes]\npod-template = \"pod.yaml\"\ncleanup = \"disabled\"");
+        assert!(validate_config(&cfg, true).is_ok());
+
+        // Global disabled overridden to enforceable modes on all metered
+        // runtimes is compatible, even though kubernetes stays disabled.
+        let cfg = config(
+            "cleanup = \"disabled\"\n\n[runpod]\ncleanup = \"stop\"\n\n[vast]\ncleanup = \"terminate\"",
+        );
+        assert!(validate_config(&cfg, true).is_ok());
     }
 }

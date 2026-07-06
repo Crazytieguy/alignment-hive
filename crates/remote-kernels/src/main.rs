@@ -64,13 +64,11 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<f64>().ok())
         .or(config.budget_cap);
 
-    // Budget and cleanup:disabled are incompatible — disabled means the user wants the
-    // machine to keep running, which conflicts with budget enforcement stopping/terminating it.
-    if budget.is_some() && config.cleanup == config::Cleanup::Disabled {
-        return Err(
-            "Configuration error: budget-cap (or REMOTE_KERNELS_BUDGET) cannot be used with cleanup = \"disabled\". \
-             Budget enforcement requires the ability to stop/terminate the machine.".into()
-        );
+    // Cleanup modes are validated against each runtime's capabilities:
+    // explicit per-runtime keys eagerly, plus the budget/"disabled"
+    // incompatibility on metered runtimes.
+    if let Err(msg) = remote_kernels::runtime::validate_config(&config, budget.is_some()) {
+        return Err(format!("Configuration error: {msg}").into());
     }
 
     let app_state = state::AppState::new(project_dir);

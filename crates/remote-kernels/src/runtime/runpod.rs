@@ -202,6 +202,18 @@ impl RunPodRuntime {
     }
 }
 
+/// Runtime capabilities, exposed credential-free so config validation can
+/// consult them at load time (see [`super::validate_config`]).
+pub(crate) fn capabilities() -> Capabilities {
+    Capabilities {
+        stop_resume: StopSupport::Full,
+        metered: true,
+        provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
+        // Keys are per-pod env (`PUBLIC_KEY`), not account-registered.
+        account_ssh_keys: false,
+    }
+}
+
 impl Runtime for RunPodRuntime {
     type Conn = RunPodConnection;
 
@@ -210,13 +222,7 @@ impl Runtime for RunPodRuntime {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            stop_resume: StopSupport::Full,
-            metered: true,
-            provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
-            // Keys are per-pod env (`PUBLIC_KEY`), not account-registered.
-            account_ssh_keys: false,
-        }
+        capabilities()
     }
 
     /// Try each configured GPU type in order:

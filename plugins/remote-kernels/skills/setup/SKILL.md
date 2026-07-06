@@ -112,13 +112,19 @@ area below** and edit the file based on their answers.
   PVCs in the template; a bucket the user manages (sync via
   `startup-commands`/onstart, e.g. rclone/s5cmd). RunPod volumes have no
   snapshots — recommend external backup (HF Hub, W&B, S3) for anything precious
-- **Cleanup mode** — stop (preserve machine; RunPod only, unreliable on
-  vast, unsupported on k8s) / terminate (delete) / disabled (manual)
+- **Cleanup mode** — per-runtime: set `cleanup` under `[runpod]` / `[vast]` /
+  `[kubernetes]` (the top-level `cleanup` key is deprecated; existing configs
+  still work, it acts as a fallback). Modes: stop (preserve machine) /
+  terminate (delete) / disabled (manual). Kubernetes accepts
+  terminate/disabled only — pods have no stop. If vast is configured and the
+  user considers `stop`, explain the tradeoff: stop on vast is unreliable —
+  the GPU can be re-rented to someone else while stopped so resume may hang
+  forever, and storage keeps billing until the instance is terminated
 - **Budget** — goes in `.claude/settings.json` `env` section as
   `REMOTE_KERNELS_BUDGET` (not in remote-kernels.toml, so Claude can't modify
-  it). Enforced across ALL concurrent machines. Incompatible with
-  cleanup=disabled. Kubernetes is unmetered — `max-lifetime-secs` bounds pods
-  instead
+  it). Enforced across ALL concurrent machines. Requires cleanup !=
+  "disabled" on every metered runtime (runpod, vast); Kubernetes is unmetered
+  and exempt — `max-lifetime-secs` bounds pods instead
 - **Environment variables** — what needs to be available on the machine?
   `inherit-env` forwards vars from the local environment (including
   `.env`/`.env.local` files). Explicit vars go in the `[env]` section

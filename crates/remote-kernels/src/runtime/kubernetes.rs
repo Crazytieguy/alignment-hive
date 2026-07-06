@@ -187,6 +187,19 @@ fn is_not_found(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(e) if e.code == 404)
 }
 
+/// Runtime capabilities, exposed credential-free so config validation can
+/// consult them at load time (see [`super::validate_config`]).
+pub(crate) fn capabilities() -> Capabilities {
+    Capabilities {
+        stop_resume: StopSupport::Unsupported,
+        metered: false,
+        // Queued pods can wait hours for capacity; activeDeadlineSeconds
+        // bounds runtime instead.
+        provision_timeout: None,
+        account_ssh_keys: false,
+    }
+}
+
 impl Runtime for KubernetesRuntime {
     type Conn = K8sConnection;
 
@@ -195,14 +208,7 @@ impl Runtime for KubernetesRuntime {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            stop_resume: StopSupport::Unsupported,
-            metered: false,
-            // Queued pods can wait hours for capacity; activeDeadlineSeconds
-            // bounds runtime instead.
-            provision_timeout: None,
-            account_ssh_keys: false,
-        }
+        capabilities()
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {

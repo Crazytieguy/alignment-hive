@@ -433,6 +433,25 @@ fn image_registry_qualified(image: &str) -> bool {
         .is_some_and(|first| first.contains('.') || first.contains(':') || first == "localhost")
 }
 
+/// Runtime capabilities, exposed credential-free so config validation can
+/// consult them at load time (see [`super::validate_config`]).
+pub(crate) fn capabilities(vm: bool) -> Capabilities {
+    Capabilities {
+        stop_resume: StopSupport::Unreliable,
+        metered: true,
+        // VMs pull a full disk image and boot a kernel — legitimately
+        // slower than containers.
+        provision_timeout: Some(std::time::Duration::from_secs(if vm {
+            35 * 60
+        } else {
+            20 * 60
+        })),
+        // vast registers authorized keys account-wide and bakes every
+        // account key into new instances — use the stable plugin key.
+        account_ssh_keys: true,
+    }
+}
+
 impl Runtime for VastRuntime {
     type Conn = VastConnection;
 
@@ -441,20 +460,7 @@ impl Runtime for VastRuntime {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            stop_resume: StopSupport::Unreliable,
-            metered: true,
-            // VMs pull a full disk image and boot a kernel — legitimately
-            // slower than containers.
-            provision_timeout: Some(std::time::Duration::from_secs(if self.vast.vm {
-                35 * 60
-            } else {
-                20 * 60
-            })),
-            // vast registers authorized keys account-wide and bakes every
-            // account key into new instances — use the stable plugin key.
-            account_ssh_keys: true,
-        }
+        capabilities(self.vast.vm)
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {

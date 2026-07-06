@@ -18,10 +18,11 @@ pub struct Config {
     #[serde(default = "default_image_name")]
     pub image_name: String,
 
-    /// What to do when cleaning up: "stop" preserves the pod, "terminate" deletes it,
-    /// "disabled" skips automatic cleanup entirely.
-    #[serde(default = "default_cleanup")]
-    pub cleanup: Cleanup,
+    /// DEPRECATED: global cleanup mode, kept as a fallback for existing
+    /// configs. Use the per-runtime `cleanup` keys instead ("stop" preserves
+    /// the machine, "terminate" deletes it, "disabled" skips automatic
+    /// cleanup). Resolution: `[<runtime>] cleanup` > this key > "terminate".
+    pub cleanup: Option<Cleanup>,
 
     /// Custom name prefix for pods.
     #[serde(default = "default_name")]
@@ -72,6 +73,12 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct VastConfig {
+    /// Cleanup mode for vast machines when the session ends. Note stop is
+    /// unreliable on vast: the GPU may be re-rented while stopped (resume can
+    /// hang forever) and storage bills until terminated.
+    /// Default: the deprecated global `cleanup` key, else "terminate".
+    pub cleanup: Option<Cleanup>,
+
     /// GPU names to search for (vast naming, e.g. "RTX 3090").
     #[serde(default = "default_vast_gpu_names")]
     pub gpu_name: Vec<String>,
@@ -185,6 +192,11 @@ fn default_vast_ssh_user() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct KubernetesConfig {
+    /// Cleanup mode for kubernetes pods when the session ends. "stop" is
+    /// rejected (pods have no stop concept) — "terminate" or "disabled" only.
+    /// Default: the deprecated global `cleanup` key, else "terminate".
+    pub cleanup: Option<Cleanup>,
+
     /// kubeconfig context to use (default: the current context).
     pub context: Option<String>,
 
@@ -240,6 +252,11 @@ fn default_jupyter_command() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RunpodConfig {
+    /// Cleanup mode for `RunPod` machines when the session ends: "stop"
+    /// (reliable on `RunPod`; storage costs apply), "terminate", or "disabled".
+    /// Default: the deprecated global `cleanup` key, else "terminate".
+    pub cleanup: Option<Cleanup>,
+
     /// Number of GPUs to attach.
     #[serde(default = "default_gpu_count")]
     pub gpu_count: u32,
@@ -330,10 +347,6 @@ fn default_volume_mount_path() -> String {
     "/workspace".to_string()
 }
 
-fn default_cleanup() -> Cleanup {
-    Cleanup::Terminate
-}
-
 fn default_cloud_type() -> String {
     "SECURE".to_string()
 }
@@ -355,8 +368,35 @@ impl Config {
         }
         let content = std::fs::read_to_string(&config_path)?;
         let config: Self = toml::from_str(&content)?;
+        if config.cleanup.is_some() {
+            tracing::warn!(
+                "The top-level `cleanup` key is deprecated and now acts only as a fallback — \
+                 set `cleanup` under [runpod] / [vast] / [kubernetes] instead (each runtime \
+                 has different stop/resume semantics)."
+            );
+        }
         tracing::info!(?config_path, "Loaded config");
         Ok(config)
+    }
+
+    /// The `cleanup` key explicitly set for a runtime's config section, if
+    /// any. Runtime names match [`crate::runtime::AnyRuntime::known_names`]
+    /// (they are the section names).
+    pub fn explicit_cleanup_for(&self, runtime: &str) -> Option<Cleanup> {
+        match runtime {
+            "runpod" => self.runpod.cleanup,
+            "vast" => self.vast.as_ref().and_then(|v| v.cleanup),
+            "kubernetes" => self.kubernetes.as_ref().and_then(|k| k.cleanup),
+            _ => None,
+        }
+    }
+
+    /// Effective cleanup mode for machines on the given runtime:
+    /// per-runtime key > deprecated global key > "terminate".
+    pub fn cleanup_for(&self, runtime: &str) -> Cleanup {
+        self.explicit_cleanup_for(runtime)
+            .or(self.cleanup)
+            .unwrap_or_default()
     }
 
     /// Generate a commented TOML config template with all fields and their defaults.
@@ -380,20 +420,15 @@ impl Config {
 # Default: "{default_image}"
 # image-name = "{default_image}"
 
-# Cleanup mode when the session ends:
-#   "stop"      — preserve pod (can restart later, storage costs apply)
-#   "terminate" — delete pod (all non-volume data lost, no ongoing costs)
-#   "disabled"  — no automatic cleanup (user manages pod lifecycle manually)
-# Default: "{default_cleanup}"
-# cleanup = "{default_cleanup}"
-
 # Custom name prefix for pods.
 # Default: "{default_name}"
 # name = "{default_name}"
 
 # Per-session budget cap in dollars. Prefer setting REMOTE_KERNELS_BUDGET
 # in .claude/settings.json (Claude can't edit that) over this field.
-# Incompatible with cleanup = "disabled".
+# Requires cleanup != "disabled" on every metered runtime (runpod, vast) —
+# budget enforcement must be able to stop/terminate machines. Kubernetes is
+# unmetered and exempt.
 # budget-cap = 5.0
 
 # Environment variable names to forward from the local environment to the pod.
@@ -421,6 +456,13 @@ impl Config {
 # RunPod API configuration. Known fields are typed; any extra fields
 # are passed through to the RunPod pod creation API (camelCase conversion applied).
 [runpod]
+# Cleanup mode for RunPod machines when the session ends:
+#   "stop"      — preserve machine (reliable on RunPod; storage costs apply)
+#   "terminate" — delete machine (all non-volume data lost, no ongoing costs)
+#   "disabled"  — no automatic cleanup (manual lifecycle)
+# Default: "{default_cleanup}"
+# cleanup = "{default_cleanup}"
+
 # Number of GPUs.
 # Default: {default_gpu_count}
 # gpu-count = {default_gpu_count}
@@ -465,6 +507,11 @@ impl Config {
 # plain keys then never expire), or mint a short-lived session key with a
 # TOTP code (POST /api/v0/tfa/; expires after ~1-2 days).
 # [vast]
+# Cleanup mode for vast machines when the session ends. "stop" is UNRELIABLE
+# on vast: the GPU may be re-rented while stopped (resume can hang forever)
+# and storage bills until terminated — prefer "terminate".
+# Default: "{default_cleanup}"
+# cleanup = "{default_cleanup}"
 # GPU names to search for (vast naming).
 # Default: ["{default_vast_gpu}"]
 # gpu-name = ["{default_vast_gpu}"]
@@ -512,6 +559,10 @@ impl Config {
 # is the workload; its image provides sh, tar, and Python with jupyter-server
 # + ipykernel; the pod keeps itself alive (e.g. command: ["sleep", "infinity"]).
 # [kubernetes]
+# Cleanup mode when the session ends: "terminate" or "disabled" only (pods
+# have no stop concept; "stop" is rejected).
+# Default: "{default_cleanup}"
+# cleanup = "{default_cleanup}"
 # Path to the pod template YAML, relative to the project root. Required.
 # pod-template = "k8s/dev-pod.yaml"
 # kubeconfig context (default: current context).
@@ -568,7 +619,11 @@ mod tests {
             config.image_name,
             "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
         );
-        assert_eq!(config.cleanup, Cleanup::Terminate);
+        assert_eq!(config.cleanup, None);
+        assert_eq!(config.runpod.cleanup, None);
+        for runtime in ["runpod", "vast", "kubernetes"] {
+            assert_eq!(config.cleanup_for(runtime), Cleanup::Terminate);
+        }
         assert_eq!(config.name, "remote-kernels");
         assert!(config.budget_cap.is_none());
         assert!(config.inherit_env.is_empty());
@@ -619,7 +674,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.gpu_type_ids.len(), 2);
-        assert_eq!(config.cleanup, Cleanup::Stop);
+        // Deprecated global key still parses and acts as the fallback.
+        assert_eq!(config.cleanup, Some(Cleanup::Stop));
+        assert_eq!(config.cleanup_for("runpod"), Cleanup::Stop);
         assert_eq!(config.budget_cap, Some(12.5));
         assert_eq!(config.env_file, Some(PathBuf::from(".env.pod")));
         assert_eq!(config.env["MY_VAR"], "value");
@@ -686,7 +743,42 @@ mod tests {
     fn load_returns_defaults_when_no_config_file() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(dir.path()).unwrap();
-        assert_eq!(config.cleanup, Cleanup::Terminate);
+        assert_eq!(config.cleanup, None);
+        assert_eq!(config.cleanup_for("runpod"), Cleanup::Terminate);
+    }
+
+    /// Per-runtime `cleanup` beats the deprecated global key, which beats the
+    /// built-in default — and each runtime resolves independently.
+    #[test]
+    fn cleanup_resolution_precedence() {
+        let config: Config = toml::from_str(
+            r#"
+            cleanup = "stop"
+
+            [vast]
+            cleanup = "terminate"
+
+            [kubernetes]
+            pod-template = "pod.yaml"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.cleanup_for("vast"), Cleanup::Terminate); // explicit
+        assert_eq!(config.cleanup_for("runpod"), Cleanup::Stop); // global fallback
+        assert_eq!(config.cleanup_for("kubernetes"), Cleanup::Stop); // global fallback
+        assert_eq!(config.explicit_cleanup_for("runpod"), None);
+        assert_eq!(config.explicit_cleanup_for("kubernetes"), None);
+
+        // Without the global key, unset runtimes fall to the default.
+        let config: Config = toml::from_str("[runpod]\ncleanup = \"disabled\"").unwrap();
+        assert_eq!(config.cleanup_for("runpod"), Cleanup::Disabled);
+        assert_eq!(config.cleanup_for("vast"), Cleanup::Terminate);
+    }
+
+    #[test]
+    fn invalid_per_runtime_cleanup_value_is_rejected() {
+        assert!(toml::from_str::<Config>("[runpod]\ncleanup = \"pause\"").is_err());
+        assert!(toml::from_str::<Config>("[vast]\ncleanup = \"pause\"").is_err());
     }
 
     #[test]
@@ -724,8 +816,14 @@ mod tests {
             .collect();
         let config: Config = toml::from_str(&uncommented)
             .unwrap_or_else(|e| panic!("template lines failed to parse: {e}\n{uncommented}"));
-        // Uncommenting the defaults must reproduce the defaults.
-        assert_eq!(config.cleanup, Cleanup::Terminate);
+        // Uncommenting the defaults must reproduce the defaults. The global
+        // cleanup key is deprecated and gone from the template; uncommenting
+        // the per-runtime lines yields the same effective mode as unset.
+        assert_eq!(config.cleanup, None);
+        assert_eq!(config.runpod.cleanup, Some(Cleanup::Terminate));
+        assert_eq!(config.cleanup_for("runpod"), Cleanup::Terminate);
+        assert_eq!(config.cleanup_for("vast"), Cleanup::Terminate);
+        assert_eq!(config.cleanup_for("kubernetes"), Cleanup::Terminate);
         assert_eq!(config.gpu_type_ids, default_gpu_type_ids());
         assert_eq!(config.image_name, default_image_name());
         assert_eq!(config.runpod.gpu_count, default_gpu_count());
