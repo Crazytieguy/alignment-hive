@@ -200,6 +200,9 @@ impl Runtime for VastRuntime {
             } else {
                 20 * 60
             })),
+            // vast registers authorized keys account-wide and bakes every
+            // account key into new instances — use the stable plugin key.
+            account_ssh_keys: true,
         }
     }
 
@@ -210,8 +213,9 @@ impl Runtime for VastRuntime {
         // reliably (observed live 2026-07: keys attached after create show in
         // the API but the proxy keeps rejecting them). VMs additionally
         // require it — the create API rejects vm=true without an account key
-        // (`no_ssh_key_for_vm`). Downside: per-instance keys accumulate on
-        // the account (see docs).
+        // (`no_ssh_key_for_vm`). The key is the plugin's stable keypair
+        // (`Capabilities::account_ssh_keys`), so this registers exactly one
+        // key ever; `ensure_ssh_key` is a no-op once it exists.
         if let Err(e) = self.client.ensure_ssh_key(&req.ssh_public_key).await {
             if self.vast.vm {
                 anyhow::bail!(

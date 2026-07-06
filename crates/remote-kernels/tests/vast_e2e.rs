@@ -140,6 +140,44 @@ impl Drop for TerminateGuard {
     }
 }
 
+/// Account key registration — FREE (no instance is created). Verifies the
+/// stable-key model live: registration is idempotent (a second ensure reuses
+/// the existing key instead of adding one). The account key list is restored
+/// to its starting state on the way out.
+#[tokio::test]
+#[ignore = "hits the live vast.ai API (requires VAST_API_KEY); creates no instance"]
+async fn vast_stable_key_registration_is_idempotent() {
+    load_key();
+    remote_kernels::init_tls();
+    let client =
+        remote_kernels::vast::client::VastClient::new(std::env::var("VAST_API_KEY").unwrap());
+
+    let keys_before = client.list_ssh_keys().await.unwrap();
+
+    // Stable key: two ensures, one registration.
+    let key_dir = tempfile::tempdir().unwrap();
+    let stable = remote_kernels::ssh::ensure_keypair(&key_dir.path().join("id_ed25519")).unwrap();
+    let id1 = client
+        .ensure_ssh_key(&stable.public_key_openssh)
+        .await
+        .unwrap();
+    let id2 = client
+        .ensure_ssh_key(&stable.public_key_openssh)
+        .await
+        .unwrap();
+    assert_eq!(id1, id2, "second ensure must reuse the registered key");
+    let keys_mid = client.list_ssh_keys().await.unwrap();
+    assert_eq!(keys_mid.len(), keys_before.len() + 1);
+
+    // Leave the account exactly as found (the test key is throwaway; a real
+    // stable key stays registered for the lifetime of the project).
+    client.delete_ssh_key(id1).await.unwrap();
+    assert_eq!(
+        client.list_ssh_keys().await.unwrap().len(),
+        keys_before.len()
+    );
+}
+
 /// Container-instance lifecycle on the cheapest matching RTX 3090: start →
 /// kernel → execute → sync → download → terminate. Total cost: a few cents.
 #[tokio::test]

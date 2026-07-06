@@ -52,6 +52,12 @@ pub struct Capabilities {
     /// Enforced between background-finalization passes, so a stuck machine
     /// can overshoot by up to one pass (minutes) before termination.
     pub provision_timeout: Option<std::time::Duration>,
+    /// Whether the provider registers authorized SSH keys account-wide
+    /// (vast.ai). Such runtimes get the plugin's single stable keypair
+    /// instead of a fresh per-instance one: per-instance keys would pile up
+    /// on the account forever, and since the provider bakes ALL account keys
+    /// into every new machine they add no isolation anyway.
+    pub account_ssh_keys: bool,
 }
 
 impl Capabilities {

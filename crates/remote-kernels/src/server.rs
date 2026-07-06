@@ -287,13 +287,21 @@ impl RemoteKernelsServer {
             ));
         }
 
-        let (project_dir, ssh_key_path) = {
+        let (project_dir, ssh_keypair) = {
             let state = self.state.lock().await;
-            (state.project_dir.clone(), state.ssh_key_path(&name))
+            // Account-registry runtimes (vast) share the stable plugin key —
+            // created under the state lock so concurrent starts can't race
+            // the key file; everything else gets a fresh per-instance key.
+            let keypair = if runtime.capabilities().account_ssh_keys {
+                crate::ssh::ensure_keypair(&state.stable_ssh_key_path())
+            } else {
+                crate::ssh::generate_keypair(&state.ssh_key_path(&name))
+            }
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to prepare SSH keypair: {e}"), None)
+            })?;
+            (state.project_dir.clone(), keypair)
         };
-        let ssh_keypair = crate::ssh::generate_keypair(&ssh_key_path).map_err(|e| {
-            McpError::internal_error(format!("Failed to generate SSH keypair: {e}"), None)
-        })?;
         let jupyter_token = generate_token();
 
         let req = ProvisionRequest {

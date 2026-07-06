@@ -306,6 +306,14 @@ impl AppState {
         instance_dir(&self.project_dir, name).join("id_ed25519")
     }
 
+    /// The plugin's stable SSH key path, shared by all instances of runtimes
+    /// with account-level key registries (vast.ai). Lives at the state-dir
+    /// root, outside any instance dir, so terminating an instance
+    /// ([`Self::clear_record`]) never deletes it.
+    pub fn stable_ssh_key_path(&self) -> PathBuf {
+        state_dir(&self.project_dir).join("id_ed25519")
+    }
+
     /// Resolve which instance a tool call targets: an explicit name must
     /// exist; otherwise the sole live instance is used.
     pub fn resolve_instance(&self, requested: Option<&str>) -> Result<String, String> {
@@ -545,6 +553,24 @@ mod tests {
         );
         // Clearing twice is fine.
         state.clear_record("main").unwrap();
+    }
+
+    #[test]
+    fn stable_ssh_key_is_outside_instance_dirs_and_survives_clear_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        let stable = state.stable_ssh_key_path();
+        assert_ne!(stable, state.ssh_key_path("main"));
+
+        let inst = instance("main", 0.0, std::time::Duration::ZERO);
+        let record = inst.record();
+        state.instances.insert("main".to_string(), inst);
+        state.save_record("main", &record).unwrap();
+
+        std::fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        std::fs::write(&stable, "fake key").unwrap();
+        state.clear_record("main").unwrap();
+        assert!(stable.exists());
     }
 
     #[test]

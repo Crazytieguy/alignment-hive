@@ -214,6 +214,8 @@ impl Runtime for RunPodRuntime {
             stop_resume: StopSupport::Full,
             metered: true,
             provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
+            // Keys are per-pod env (`PUBLIC_KEY`), not account-registered.
+            account_ssh_keys: false,
         }
     }
 

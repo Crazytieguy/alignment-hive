@@ -201,6 +201,7 @@ impl Runtime for KubernetesRuntime {
             // Queued pods can wait hours for capacity; activeDeadlineSeconds
             // bounds runtime instead.
             provision_timeout: None,
+            account_ssh_keys: false,
         }
     }
 

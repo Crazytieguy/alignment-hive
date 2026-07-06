@@ -204,32 +204,37 @@ impl VastClient {
         if let Some(key) = existing.iter().find(|k| {
             k.public_key
                 .as_deref()
-                .is_some_and(|p| p.trim() == public_key.trim())
+                .is_some_and(|p| crate::ssh::same_key_material(p, public_key))
         }) {
             return Ok(key.id);
         }
-        let body = Self::check(
-            crate::send_429_retry(
-                self.client
-                    .post(format!("{BASE_URL}/api/v0/ssh/"))
-                    .bearer_auth(&self.api_key)
-                    .json(&json!({ "ssh_key": public_key })),
-            )
-            .await?,
-            "ssh key registration",
+        let registration = match crate::send_429_retry(
+            self.client
+                .post(format!("{BASE_URL}/api/v0/ssh/"))
+                .bearer_auth(&self.api_key)
+                .json(&json!({ "ssh_key": public_key })),
         )
-        .await?;
-        // Response shape varies; re-list to find our key.
-        let _ = body;
+        .await
+        {
+            Ok(resp) => Self::check(resp, "ssh key registration").await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        // Response shape varies on success; re-list to find our key. On
+        // failure the re-list doubles as a race check: a concurrent first
+        // provision (another session sharing the account) may have registered
+        // the same key while our POST was rejected as a duplicate.
         let keys = self.list_ssh_keys().await?;
         keys.iter()
             .find(|k| {
                 k.public_key
                     .as_deref()
-                    .is_some_and(|p| p.trim() == public_key.trim())
+                    .is_some_and(|p| crate::ssh::same_key_material(p, public_key))
             })
             .map(|k| k.id)
-            .ok_or_else(|| anyhow::anyhow!("SSH key registration did not stick"))
+            .ok_or_else(|| match registration {
+                Ok(()) => anyhow::anyhow!("SSH key registration did not stick"),
+                Err(e) => e,
+            })
     }
 
     pub async fn list_ssh_keys(&self) -> anyhow::Result<Vec<super::types::SshKey>> {
