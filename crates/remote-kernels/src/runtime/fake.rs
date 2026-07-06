@@ -138,6 +138,7 @@ impl Runtime for FakeRuntime {
             external_id,
             gpu_name: "Fake GPU".to_string(),
             cost_per_hr: Some(self.cost_per_hr),
+            note: None,
         })
     }
 
@@ -148,6 +149,7 @@ impl Runtime for FakeRuntime {
             external_id: external_id.to_string(),
             gpu_name: "Fake GPU".to_string(),
             cost_per_hr: Some(self.cost_per_hr),
+            note: None,
         })
     }
 

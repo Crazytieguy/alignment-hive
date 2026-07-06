@@ -64,6 +64,28 @@ area below** and edit the file based on their answers.
   `docker info >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh)`);
   Kubernetes images come from the template (must provide `sh`, `tar`, Python
   with `jupyter-server` + `ipykernel`)
+- **RunPod custom image → `image-start-cmd`** — pods carry a pre-SSH orphan
+  guard: if the server that created a pod dies before ever reaching it (crash
+  in the first minutes of provisioning), the pod cleans itself up after 45
+  minutes instead of billing until someone notices. The guard wraps the
+  image's own start command via dockerStartCmd, so it needs to know that
+  command. The default image is handled automatically; for a custom RunPod
+  image, find its Dockerfile `CMD` (check the image's Dockerfile or docs, run
+  `docker inspect --format '{{.Config.Entrypoint}} {{.Config.Cmd}}' <image>`
+  locally if available, or ask the user) and set `[runpod] image-start-cmd`
+  to it. A wrong value keeps SSH/Jupyter from starting (the pod is then
+  terminated by the provision timeout — bounded cost, but a broken start).
+  Images that define an ENTRYPOINT keep it (the wrapper only replaces CMD) —
+  if the ENTRYPOINT is the workload and CMD is just its arguments, leave
+  `image-start-cmd` unset. When the CMD can't be determined confidently, set
+  `image-start-cmd = ""` and warn the user explicitly: a crash during the
+  first minutes of provisioning leaves the pod billing until stopped by hand
+  (RunPod console or `start()` from a later session, which reconnects and
+  resumes supervision). The guard is also skipped — with a note at start() —
+  on community cloud unless `support-public-ip = true` (no SSH heartbeat to
+  disarm it), and silently when `cleanup = "disabled"` (that mode promises no
+  automatic cleanup). A raw `docker-start-cmd` passthrough conflicts with the
+  guard; migrate it to `image-start-cmd`
 - **Kubernetes pod template** — if using k8s, the lab owns a pod YAML
   (resources, tolerations, volumes, Kueue `queue-name` label). Point
   `[kubernetes] pod-template` at it. `start(priority="high")` sets the Kueue

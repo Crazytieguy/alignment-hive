@@ -87,6 +87,11 @@ pub struct ProvisionRequest {
     pub ssh_public_key: String,
     /// Token the machine's Jupyter server must require.
     pub jupyter_token: String,
+    /// Cleanup policy for this machine — the same server-computed value that
+    /// is persisted in the instance record and later handed to
+    /// `install_watchdog`, so provision-time guards (`RunPod`'s orphan
+    /// guard) can't diverge from the watchdog's policy.
+    pub cleanup: crate::config::Cleanup,
 }
 
 /// Provider-assigned identity and pricing of a machine.
@@ -96,6 +101,10 @@ pub struct InstanceHandle {
     pub gpu_name: String,
     /// Hourly cost in dollars. `None` for unmetered runtimes.
     pub cost_per_hr: Option<f64>,
+    /// Provisioning caveat to surface in the `start()` result (e.g. a
+    /// money-safety guard that could not be applied). Only set by
+    /// [`Runtime::provision`]; `None` on handles from status queries.
+    pub note: Option<String>,
 }
 
 /// Marker error: the machine is still legitimately coming up (e.g. a

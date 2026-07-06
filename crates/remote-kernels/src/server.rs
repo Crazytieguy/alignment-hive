@@ -304,6 +304,7 @@ impl RemoteKernelsServer {
             env: self.build_env(&project_dir),
             ssh_public_key: ssh_keypair.public_key_openssh,
             jupyter_token: jupyter_token.clone(),
+            cleanup: self.config.cleanup,
         };
 
         tracing::info!(instance = %name, runtime = %runtime_name, "Provisioning machine...");
@@ -333,10 +334,18 @@ impl RemoteKernelsServer {
             }
         }
 
+        // Provisioning caveats (e.g. a money-safety guard that could not be
+        // applied) must reach the user on every success path.
+        let note = handle
+            .note
+            .as_ref()
+            .map(|n| format!("\n\nNote: {n}"))
+            .unwrap_or_default();
+
         if wait {
             match self.finalize_start(&name, &handle.external_id).await {
                 Ok(summary) => Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel."
+                    "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel.{note}"
                 ))])),
                 Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
                     // Not a failure — the machine is queued/waiting for
@@ -346,7 +355,7 @@ impl RemoteKernelsServer {
                         "Machine {name:?} (id: {}) is still queued or waiting for capacity. \
                          It was NOT cleaned up — setup continues in the background. Poll \
                          status() until it shows running, or terminate(instance=\"{name}\") \
-                         to give up.",
+                         to give up.{note}",
                         handle.external_id
                     ))]))
                 }
@@ -364,7 +373,7 @@ impl RemoteKernelsServer {
             self.spawn_background_finalize(&name, &handle.external_id, &runtime_name);
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Machine {name:?} is provisioning (id: {}, GPU: {}). Setup continues in the \
-                 background — poll status() until it shows running before creating kernels.",
+                 background — poll status() until it shows running before creating kernels.{note}",
                 handle.external_id, handle.gpu_name
             ))]))
         }

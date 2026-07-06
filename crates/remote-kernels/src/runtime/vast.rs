@@ -122,12 +122,11 @@ impl VastRuntime {
     /// correctly), but the same script runs there harmlessly and keeps the
     /// fallback diagnosable over SSH instead of bricked.
     ///
-    /// The orphan watchdog is the last-resort money guard for the window
-    /// before the real watchdog installs (which requires working SSH): if no
-    /// heartbeat file has EVER appeared 45 minutes after boot — the server
-    /// that provisioned this machine died, lost its key, or never got in —
-    /// the machine halts itself. Halt stops GPU billing (storage remains);
-    /// no credentials live on the machine, so halting is all it can do.
+    /// The orphan guard ([`crate::ssh_exec::orphan_guard_line`]) is the
+    /// last-resort money guard for the window before the real watchdog
+    /// installs (which requires working SSH). Halt stops GPU billing
+    /// (storage remains); no credentials live on the machine, so halting is
+    /// all it can do.
     fn onstart_script(&self, ssh_public_key: &str) -> String {
         let key = ssh_public_key.trim();
         let assert_key = format!(
@@ -139,9 +138,7 @@ impl VastRuntime {
             "#!/bin/bash".to_string(), // VMs require an explicit shebang
             "mkdir -p ~/.ssh".to_string(),
             assert_key.clone(),
-            "nohup sh -c 'sleep 2700; [ -f /tmp/heartbeat ] || shutdown -h now || kill -9 1' \
-             </dev/null >/dev/null 2>&1 &"
-                .to_string(),
+            crate::ssh_exec::orphan_guard_line("shutdown -h now || kill -9 1", None),
             format!(
                 "(for _ in $(seq 120); do {assert_key}; sleep 5; done) </dev/null >/dev/null 2>&1 &"
             ),
@@ -167,6 +164,7 @@ fn handle_for_offer(contract: i64, offer: &crate::vast::types::Offer) -> Instanc
             offer.num_gpus.unwrap_or(1)
         ),
         cost_per_hr: offer.dph_total,
+        note: None,
     }
 }
 
@@ -344,6 +342,7 @@ impl Runtime for VastRuntime {
                 instance.num_gpus.unwrap_or(1)
             ),
             cost_per_hr: instance.dph_total,
+            note: None,
         })
     }
 

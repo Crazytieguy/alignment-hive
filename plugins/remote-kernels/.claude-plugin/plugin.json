@@ -1,5 +1,5 @@
 {
   "name": "remote-kernels",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads"
 }

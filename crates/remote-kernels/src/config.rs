@@ -241,6 +241,13 @@ pub struct RunpodConfig {
     #[serde(default = "default_cloud_type")]
     pub cloud_type: String,
 
+    /// The image's own start command (its Dockerfile CMD). When known, pod
+    /// creation wraps it with the pre-SSH orphan guard (dockerStartCmd runs
+    /// the guard in the background, then `exec`s this). Unset: the built-in
+    /// default image is known (`/start.sh`); other images get no guard.
+    /// Empty string: explicitly disable the guard.
+    pub image_start_cmd: Option<String>,
+
     /// Extra fields passed through to the `RunPod` API.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
@@ -280,9 +287,14 @@ fn default_gpu_count() -> u32 {
     1
 }
 
-fn default_image_name() -> String {
+pub(crate) fn default_image_name() -> String {
     "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04".to_string()
 }
+
+/// Start command (Dockerfile CMD; the image sets no ENTRYPOINT) of the
+/// default `RunPod` image, per runpod/containers: the base image ends with
+/// `CMD ["/start.sh"]`. Lets the pre-SSH orphan guard apply out of the box.
+pub(crate) const DEFAULT_RUNPOD_IMAGE_START_CMD: &str = "/start.sh";
 
 fn default_container_disk_gb() -> u32 {
     50
@@ -412,6 +424,18 @@ impl Config {
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 
+# The image's own start command (its Dockerfile CMD). When known, pod creation
+# wraps it with a pre-SSH orphan guard: a pod the provisioning server never
+# reaches (crash in the first minutes) cleans itself up after 45 minutes
+# instead of billing until noticed. Applies automatically to the default
+# image; set this when using a custom image (must be its Dockerfile CMD — a
+# wrong value keeps SSH/Jupyter from starting). Set to "" to disable. The
+# guard is also skipped with disabled cleanup, on community cloud without
+# support-public-ip enabled (no SSH heartbeat to disarm it), and when
+# start(image=...) overrides the configured image.
+# Default: "{default_image_start_cmd}" for the default image, unset otherwise (no guard).
+# image-start-cmd = "{default_image_start_cmd}"
+
 # vast.ai runtime configuration (only needed when using
 # start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY
 # (create at https://cloud.vast.ai/manage-keys/ — on 2FA accounts the key
@@ -476,6 +500,7 @@ impl Config {
             default_volume_gb = default_volume_gb(),
             default_volume_mount_path = default_volume_mount_path(),
             default_cloud_type = default_cloud_type(),
+            default_image_start_cmd = DEFAULT_RUNPOD_IMAGE_START_CMD,
             default_vast_gpu = default_vast_gpu_names()[0],
             default_vast_image = default_vast_image(),
             default_vast_disk_gb = default_vast_disk_gb(),
@@ -583,6 +608,26 @@ mod tests {
         // double-send them in the pod-create API payload.
         assert_eq!(config.runpod.gpu_count, 1);
         assert!(!config.runpod.extra.contains_key("gpu-count"));
+    }
+
+    #[test]
+    fn image_start_cmd_parses_and_defaults_to_unset() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.runpod.image_start_cmd.is_none());
+        let config: Config = toml::from_str(
+            r#"
+            [runpod]
+            image-start-cmd = "/custom-entry.sh serve"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.runpod.image_start_cmd.as_deref(),
+            Some("/custom-entry.sh serve")
+        );
+        // Empty string is the documented explicit opt-out; it must survive parsing.
+        let config: Config = toml::from_str("[runpod]\nimage-start-cmd = \"\"").unwrap();
+        assert_eq!(config.runpod.image_start_cmd.as_deref(), Some(""));
     }
 
     #[test]

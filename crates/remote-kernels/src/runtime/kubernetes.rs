@@ -179,6 +179,7 @@ fn handle_for(pod: &Pod) -> InstanceHandle {
         external_id: pod.metadata.name.clone().unwrap_or_default(),
         gpu_name,
         cost_per_hr: None,
+        note: None,
     }
 }
 
@@ -769,6 +770,7 @@ spec:
             env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
             ssh_public_key: String::new(),
             jupyter_token: "tok123".to_string(),
+            cleanup: crate::config::Cleanup::Terminate,
         };
 
         let pod = rt.build_pod(&req).unwrap();
@@ -813,6 +815,7 @@ spec:
             env: std::collections::HashMap::new(),
             ssh_public_key: String::new(),
             jupyter_token: "t".to_string(),
+            cleanup: crate::config::Cleanup::Terminate,
         };
         let pod = rt.build_pod(&req).unwrap();
         assert_eq!(pod.spec.unwrap().active_deadline_seconds, Some(100));

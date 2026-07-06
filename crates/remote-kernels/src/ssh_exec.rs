@@ -44,6 +44,30 @@ pub fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Last-resort pre-SSH orphan guard shared by metered runtimes: a detached
+/// process that runs `halt_cmd` if no heartbeat file has EVER appeared 45
+/// minutes after machine start — the server that provisioned this machine
+/// died, lost its key, or never got in. It runs at machine startup (vast
+/// onstart, `RunPod` dockerStartCmd), before SSH works — once the real
+/// watchdog installs, that takes over as the money guard.
+///
+/// `persistent_marker` handles startup mechanisms that re-run on EVERY
+/// container start (`RunPod` dockerStartCmd persists in the pod config, and
+/// a stop clears `/tmp`): a marker on storage that survives stop/resume
+/// keeps "fires only on a machine no session ever reached" true for pods
+/// resumed outside this tool (console, `runpodctl`) where nothing recreates
+/// the heartbeat. Neither argument may contain single quotes (the script is
+/// single-quote wrapped).
+pub fn orphan_guard_line(halt_cmd: &str, persistent_marker: Option<&str>) -> String {
+    let marker_check = persistent_marker
+        .map(|m| format!(r#" || [ -f "{m}" ]"#))
+        .unwrap_or_default();
+    format!(
+        "nohup sh -c 'sleep 2700; [ -f /tmp/heartbeat ]{marker_check} || {{ {halt_cmd}; }}' \
+         </dev/null >/dev/null 2>&1 &"
+    )
+}
+
 /// The on-machine watchdog script shared by SSH runtimes: a detached loop
 /// that runs `cleanup_cmd` when the heartbeat file goes stale (>5 min — the
 /// MCP server died) or when the deadline in `/tmp/budget_deadline` passes

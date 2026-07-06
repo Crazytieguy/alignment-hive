@@ -142,7 +142,11 @@ impl RunPodClient {
         .await?;
 
         let status = resp.status();
-        if !status.is_success() {
+        // 404 = already gone, which is this call's desired end state — a pod
+        // may have been deleted externally or self-cleaned by the on-pod
+        // watchdog/orphan guard, and terminate() must still succeed so the
+        // local record gets cleared (vast and kubernetes do the same).
+        if !status.is_success() && status.as_u16() != 404 {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("RunPod API error ({status}): {body}");
         }

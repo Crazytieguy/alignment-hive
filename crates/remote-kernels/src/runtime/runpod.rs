@@ -2,8 +2,27 @@
 //!
 //! Connectivity: Jupyter rides `RunPod`'s HTTPS/WSS proxy
 //! (`{pod_id}-8888.proxy.runpod.net`); infra commands and file sync go over
-//! SSH to the pod's public IP. The on-pod watchdog self-cleans via `runpodctl`
-//! (bundled in `RunPod` images, authorized via the pod's own scoped credentials).
+//! SSH to the pod's public IP. The on-pod watchdog and the pre-SSH orphan
+//! guard self-clean via `runpodctl` / the REST API, authorized by the
+//! pod-scoped `RUNPOD_API_KEY` that `RunPod` injects into every pod.
+//!
+//! The orphan guard rides `dockerStartCmd`, which replaces the image's CMD
+//! (and only CMD — an image ENTRYPOINT still runs). It arms only when ALL of:
+//! cleanup is not "disabled" (that mode promises no automatic cleanup, ever);
+//! SSH is expected on the pod (only the SSH heartbeat disarms the guard, and
+//! a Jupyter-only community pod must not self-clean under a live session);
+//! and the image's own start command is known — the built-in default image
+//! (CMD `/start.sh`, no ENTRYPOINT, per runpod/containers) or an explicit
+//! `image-start-cmd` in `[runpod]`.
+//!
+//! Because `dockerStartCmd` persists in the pod config, the guard re-runs on
+//! EVERY container start while a stop clears `/tmp` — so each heartbeat also
+//! drops a marker on the volume ([`disarm_marker`]) that permanently disarms
+//! the guard once any session has reached the pod (a console-resumed pod
+//! with no server around must not self-clean).
+//!
+//! Killing PID 1 is NOT a usable halt on `RunPod` — an exited container
+//! keeps the pod renting the GPU — so self-cleanup must go through the API.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -19,6 +38,17 @@ use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
     ProvisionRequest, Runtime, StopSupport, WatchdogPolicy,
 };
+
+/// `(dockerStartCmd wrapper, guard-off note)` — at most one is `Some`.
+type GuardWrapper = (Option<Vec<String>>, Option<String>);
+
+/// Marker on the pod's storage that permanently disarms the orphan guard
+/// once any session has reached the pod. Lives on the volume mount (which
+/// survives stop/resume when a volume exists) because `dockerStartCmd`
+/// re-arms the guard on every container start while a stop clears `/tmp`.
+fn disarm_marker(volume_mount_path: &str) -> String {
+    format!("{volume_mount_path}/.rk_reached")
+}
 
 pub struct RunPodRuntime {
     client: Arc<RunPodClient>,
@@ -45,7 +75,109 @@ impl RunPodRuntime {
             external_id: pod.id.clone(),
             gpu_name: pod.gpu_display_name().to_string(),
             cost_per_hr: pod.cost_per_hr,
+            note: None,
         }
+    }
+
+    /// Docker treats `docker.io/x` and `x` as the same image — normalize
+    /// before comparing so a spelling difference can't silently drop the
+    /// guard (fail-safe direction, but a lost guard on the supported image).
+    fn image_eq(a: &str, b: &str) -> bool {
+        a.strip_prefix("docker.io/").unwrap_or(a) == b.strip_prefix("docker.io/").unwrap_or(b)
+    }
+
+    /// The image's own start command, when known — the precondition for
+    /// wrapping it with the pre-SSH orphan guard. An explicit
+    /// `image-start-cmd` was configured against `image-name`, so it applies
+    /// only when that image is what's actually running; the built-in default
+    /// image is known independently of config (even when an
+    /// `image-start-cmd` exists for a different image). Unknown images run
+    /// unwrapped (the caller surfaces a note). Empty string is the explicit
+    /// opt-out — for every image, including the default.
+    fn guard_start_cmd(&self, effective_image: &str) -> Option<String> {
+        match &self.runpod.image_start_cmd {
+            Some(cmd) if cmd.is_empty() => None,
+            Some(cmd) if Self::image_eq(effective_image, &self.image_name) => Some(cmd.clone()),
+            _ if Self::image_eq(effective_image, &crate::config::default_image_name()) => {
+                Some(crate::config::DEFAULT_RUNPOD_IMAGE_START_CMD.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether SSH — and with it the heartbeat that disarms the orphan guard
+    /// — is expected on this pod: guaranteed on SECURE cloud, and on
+    /// COMMUNITY only when `support-public-ip` is requested. A Jupyter-only
+    /// pod must NOT carry the guard: nothing would ever write the heartbeat,
+    /// and the guard would clean up a live session at 45 minutes.
+    fn ssh_expected(&self) -> bool {
+        !self.runpod.cloud_type.eq_ignore_ascii_case("COMMUNITY")
+            || self
+                .runpod
+                .extra
+                .get("support-public-ip")
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+    }
+
+    /// The `dockerStartCmd` wrapper (guard in the background, then the
+    /// image's own start command), or the note telling the user the guard is
+    /// off and why. `(None, None)` means the guard is off by explicit choice
+    /// (cleanup = "disabled", or image-start-cmd = "") — no nagging.
+    fn guard_wrapper(&self, image_name: &str, cleanup: Cleanup) -> GuardWrapper {
+        // cleanup = "disabled" documents itself as "no automatic cleanup
+        // (user manages pod lifecycle manually)" — the guard keeps that
+        // promise too: nothing this runtime places on the pod may stop it.
+        let Some(halt_cmd) = self_cleanup_command(cleanup) else {
+            return (None, None);
+        };
+        if self.runpod.image_start_cmd.as_deref() == Some("") {
+            return (None, None);
+        }
+        if !self.ssh_expected() {
+            return (
+                None,
+                Some(
+                    "the pre-SSH orphan guard is OFF for this pod: community-cloud pods \
+                     without support-public-ip may lack SSH, and only the SSH heartbeat \
+                     disarms the guard — it would wrongly self-clean a Jupyter-only \
+                     session after 45 minutes. Set [runpod] support-public-ip = true or \
+                     cloud-type = \"SECURE\" to enable it, or image-start-cmd = \"\" to \
+                     silence this note."
+                        .to_string(),
+                ),
+            );
+        }
+        let Some(cmd) = self.guard_start_cmd(image_name) else {
+            return (
+                None,
+                Some(format!(
+                    "the pre-SSH orphan guard is OFF for this pod: the start command of \
+                     image {image_name:?} isn't known, so it can't be wrapped. If this \
+                     process dies during the first minutes of provisioning, the pod keeps \
+                     billing until stopped by hand. To enable the guard, set image-name to \
+                     this image and [runpod] image-start-cmd to its Dockerfile CMD \
+                     (image-start-cmd = \"\" silences this note)."
+                )),
+            );
+        };
+        // A plain command is exec'd so the image's own process replaces the
+        // wrapper shell (signal delivery as if unwrapped); shell-form
+        // compound CMDs (&&, ;, |, redirects, subshells) would break under
+        // exec — run those under the wrapper shell instead.
+        let invoke = if cmd.chars().any(|c| "&|;<>(){}".contains(c)) {
+            cmd
+        } else {
+            format!("exec {cmd}")
+        };
+        let script = format!(
+            "{} {invoke}",
+            crate::ssh_exec::orphan_guard_line(
+                &halt_cmd,
+                Some(&disarm_marker(&self.runpod.volume_mount_path)),
+            )
+        );
+        (Some(vec!["sh".to_string(), "-c".to_string(), script]), None)
     }
 
     /// Poll the GraphQL API until the pod has SSH connection info.
@@ -100,6 +232,30 @@ impl Runtime for RunPodRuntime {
         env.insert("PUBLIC_KEY".to_string(), req.ssh_public_key.clone());
         env.insert("JUPYTER_PASSWORD".to_string(), req.jupyter_token.clone());
 
+        // Pre-SSH orphan guard: wrap the image's start command so a pod this
+        // server never reaches cleans itself up (see module docs). A wrong
+        // image-start-cmd stays money-bounded: the pod never brings up
+        // SSH/Jupyter, so the provision timeout terminates it.
+        // volume-mount-path is embedded in the guard script and the
+        // heartbeat's marker command (single-quote-wrapped contexts).
+        crate::ssh_exec::validate_shell_safe("volume-mount-path", &self.runpod.volume_mount_path)?;
+        let (docker_start_cmd, note) = self.guard_wrapper(&image_name, req.cleanup);
+        if docker_start_cmd.is_some()
+            && self
+                .runpod
+                .extra
+                .keys()
+                .any(|k| to_camel_case(k) == "dockerStartCmd")
+        {
+            anyhow::bail!(
+                "[runpod] docker-start-cmd would collide with the pre-SSH orphan guard's \
+                 dockerStartCmd wrapper (both set the same pod-create field). Put the \
+                 image's start command in [runpod] image-start-cmd instead — the guard \
+                 wraps it — or set image-start-cmd = \"\" to disable the guard and pass \
+                 docker-start-cmd through unchanged."
+            );
+        }
+
         let extra: HashMap<String, serde_json::Value> = self
             .runpod
             .extra
@@ -126,10 +282,11 @@ impl Runtime for RunPodRuntime {
                 network_volume_id: self.runpod.network_volume_id.clone(),
                 ports: Some(vec!["8888/http".to_string(), "22/tcp".to_string()]),
                 env: Some(env.clone()),
-                // NOTE: dockerStartCmd is NOT used — it replaces the container's
-                // CMD which prevents RunPod images from starting services
-                // (Jupyter, SSH). Startup commands run via SSH instead.
-                docker_start_cmd: None,
+                // Replaces the image's CMD (only) with the orphan-guard
+                // wrapper when the original CMD is known; None otherwise —
+                // replacing an unknown CMD would keep the image's services
+                // (Jupyter, SSH) from ever starting.
+                docker_start_cmd: docker_start_cmd.clone(),
                 extra: extra.clone(),
             };
 
@@ -138,8 +295,15 @@ impl Runtime for RunPodRuntime {
             for attempt in 1..=3 {
                 match self.client.create_pod(&input).await {
                     Ok(pod) => {
-                        tracing::info!(pod_id = %pod.id, gpu = %pod.gpu_display_name(), "Pod created");
-                        return Ok(Self::handle_from_pod(&pod));
+                        tracing::info!(
+                            pod_id = %pod.id,
+                            gpu = %pod.gpu_display_name(),
+                            orphan_guard = docker_start_cmd.is_some(),
+                            "Pod created"
+                        );
+                        let mut handle = Self::handle_from_pod(&pod);
+                        handle.note.clone_from(&note);
+                        return Ok(handle);
                     }
                     Err(e) if e.is_availability_error() => {
                         tracing::info!(gpu_type = %gpu_type, error = %e, "No availability, skipping to next GPU type");
@@ -240,11 +404,28 @@ impl Runtime for RunPodRuntime {
         external_id: &str,
         ctx: &ConnectionContext,
     ) -> anyhow::Result<RunPodConnection> {
-        // SSH is best-effort: Jupyter rides RunPod's HTTPS proxy, so a machine
-        // without a public IP (some community-cloud hosts) is still usable for
-        // kernels — only sync/download/watchdog need SSH and error clearly.
+        // SSH is best-effort ONLY where config doesn't promise it (community
+        // cloud without support-public-ip): Jupyter rides RunPod's HTTPS
+        // proxy, so such a machine is still usable for kernels — only
+        // sync/download/watchdog need SSH and error clearly, and the orphan
+        // guard is never armed there.
+        //
+        // Where config DOES promise SSH — the exact predicate that arms the
+        // guard — a pod without it must fail the start instead: the armed
+        // guard is disarmed only by the SSH heartbeat, and a degraded
+        // Jupyter-only session would be self-cleaned under the user at 45
+        // minutes. (Sync and the watchdog would be silently broken too.)
         let ssh = match self.wait_for_ssh_info(external_id).await {
             Ok(info) => Some(info),
+            Err(e) if self.ssh_expected() => {
+                anyhow::bail!(
+                    "the pod never became reachable over SSH although the config \
+                     guarantees it (cloud-type SECURE or support-public-ip): {e} \
+                     Failing the start — the pre-SSH orphan guard armed at creation \
+                     is disarmed only by the SSH heartbeat, so a Jupyter-only \
+                     session on this pod would self-clean after 45 minutes."
+                );
+            }
             Err(e) => {
                 tracing::warn!(external_id, "No SSH connectivity: {e}");
                 None
@@ -266,24 +447,75 @@ impl Runtime for RunPodRuntime {
 pub struct RunPodConnection {
     jupyter: JupyterEndpoint,
     ssh_key_path: PathBuf,
-    /// `(public_ip, ssh_port)`; `None` when the machine has no public IP
-    /// (kernels still work via the proxy; sync/watchdog don't).
+    /// `(public_ip, ssh_port)`; `None` when the machine has no public IP —
+    /// possible only when config doesn't promise SSH (kernels still work via
+    /// the proxy; sync/watchdog don't, and the orphan guard is not armed).
     ssh: Option<(String, u16)>,
     /// Where uploads land (the volume mount path).
     remote_workdir: String,
 }
 
-impl RunPodConnection {
-    /// Self-cleanup command run by the on-pod watchdog. `runpodctl` ships in
-    /// `RunPod` images with `$RUNPOD_POD_ID` and pod-scoped credentials preset.
-    fn cleanup_command(cleanup: Cleanup) -> Option<&'static str> {
-        match cleanup {
-            Cleanup::Stop => Some("runpodctl stop pod $RUNPOD_POD_ID"),
-            Cleanup::Terminate => Some("runpodctl remove pod $RUNPOD_POD_ID"),
-            Cleanup::Disabled => None,
-        }
-    }
+/// Self-stop chain run on the pod itself: `runpodctl` first (legacy and v2
+/// syntax — which one the preinstalled binary speaks varies by image age),
+/// then the documented REST call as a fallback for images without
+/// `runpodctl`. `RunPod` injects `RUNPOD_POD_ID` and the pod-scoped
+/// `RUNPOD_API_KEY` into every pod. Stopping releases the GPU (billing for
+/// it ends); volume storage keeps billing until termination.
+///
+/// No single quotes anywhere in these commands — they get embedded in
+/// single-quote-wrapped scripts ([`crate::ssh_exec::watchdog_script`],
+/// [`crate::ssh_exec::orphan_guard_line`]).
+const STOP_SELF: &str = concat!(
+    "runpodctl stop pod \"$RUNPOD_POD_ID\"",
+    " || runpodctl pod stop \"$RUNPOD_POD_ID\"",
+    " || curl -sfm 20 -X POST -H \"Authorization: Bearer $RUNPOD_API_KEY\"",
+    " \"https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID/stop\""
+);
 
+/// Env prelude for the self-cleanup chains. They run in two different
+/// environments — the watchdog inherits an SSH-session env (which may lack
+/// the `RunPod`-injected vars on images that don't export them to
+/// non-interactive shells), while the orphan guard is a child of PID 1 — so
+/// fall back to PID 1's environ for the vars, and only (re)prime `runpodctl`
+/// when a key is actually present: an empty `--apiKey` would clobber a
+/// pre-wired config.
+const ENV_PRELUDE: &str = concat!(
+    "[ -n \"$RUNPOD_POD_ID\" ] || export RUNPOD_POD_ID=\"$(tr \"\\0\" \"\\n\" ",
+    "</proc/1/environ | sed -n \"s/^RUNPOD_POD_ID=//p\")\"; ",
+    "[ -n \"$RUNPOD_API_KEY\" ] || export RUNPOD_API_KEY=\"$(tr \"\\0\" \"\\n\" ",
+    "</proc/1/environ | sed -n \"s/^RUNPOD_API_KEY=//p\")\"; ",
+    "[ -n \"$RUNPOD_API_KEY\" ] && runpodctl config --apiKey \"$RUNPOD_API_KEY\" ",
+    ">/dev/null 2>&1; "
+);
+
+/// Self-cleanup command for the on-pod watchdog and orphan guard; `None`
+/// when cleanup is disabled (neither the watchdog nor the guard is placed on
+/// the pod — "disabled" means nothing automatic, ever). Terminate falls back
+/// to stop: a permission gap on self-delete (reported in the wild for
+/// pod-scoped keys) must still end GPU billing — the pod is then left
+/// EXITED for the next session to resume or replace rather than deleted.
+///
+/// Public so the live e2e can run the exact deployed chain from inside a pod
+/// instead of maintaining a copy.
+pub fn self_cleanup_command(cleanup: Cleanup) -> Option<String> {
+    match cleanup {
+        Cleanup::Stop => Some(format!("{ENV_PRELUDE}{STOP_SELF}")),
+        Cleanup::Terminate => Some(format!(
+            concat!(
+                "{p}runpodctl remove pod \"$RUNPOD_POD_ID\"",
+                " || runpodctl pod delete \"$RUNPOD_POD_ID\"",
+                " || curl -sfm 20 -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\"",
+                " \"https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID\"",
+                " || {s}"
+            ),
+            p = ENV_PRELUDE,
+            s = STOP_SELF
+        )),
+        Cleanup::Disabled => None,
+    }
+}
+
+impl RunPodConnection {
     fn ssh_info(&self) -> anyhow::Result<(&str, u16)> {
         self.ssh
             .as_ref()
@@ -374,7 +606,7 @@ impl Connection for RunPodConnection {
     /// tracks the aggregate multi-machine burn rate rather than being a
     /// one-shot timer computed at start.
     async fn install_watchdog(&self, policy: WatchdogPolicy) -> anyhow::Result<()> {
-        let Some(cmd) = Self::cleanup_command(policy.cleanup) else {
+        let Some(cmd) = self_cleanup_command(policy.cleanup) else {
             tracing::info!("Cleanup disabled, skipping watchdog installation");
             return Ok(());
         };
@@ -383,16 +615,29 @@ impl Connection for RunPodConnection {
             self.set_budget_deadline(secs).await?;
         }
 
-        let watchdog = crate::ssh_exec::watchdog_script(cmd);
+        let watchdog = crate::ssh_exec::watchdog_script(&cmd);
         self.exec(&watchdog, Duration::from_secs(10)).await?;
         tracing::info!("Watchdog installed on pod");
         Ok(())
     }
 
     async fn heartbeat(&self) -> anyhow::Result<()> {
-        self.exec("touch /tmp/heartbeat", Duration::from_secs(10))
-            .await
-            .map(|_| ())
+        // Also refresh the persistent disarm marker (see [`disarm_marker`]):
+        // once any session has reached the pod, the orphan guard must never
+        // fire again — not even after a console resume with no server around.
+        // remote_workdir (= volume-mount-path) is validated single-quote-safe
+        // at provision time.
+        // Marker failure must not flap the heartbeat itself (an exotic
+        // read-only volume would otherwise look like a dead machine).
+        self.exec(
+            &format!(
+                "touch /tmp/heartbeat && {{ touch '{}' 2>/dev/null || true; }}",
+                disarm_marker(&self.remote_workdir)
+            ),
+            Duration::from_secs(10),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
@@ -453,16 +698,138 @@ mod tests {
 
     #[test]
     fn cleanup_commands_match_modes() {
-        assert!(
-            RunPodConnection::cleanup_command(Cleanup::Stop)
-                .unwrap()
-                .contains("stop")
+        let stop = self_cleanup_command(Cleanup::Stop).unwrap();
+        assert!(stop.contains("runpodctl stop pod"));
+        assert!(stop.contains("/stop\""), "REST fallback missing: {stop}");
+        let terminate = self_cleanup_command(Cleanup::Terminate).unwrap();
+        assert!(terminate.contains("runpodctl remove pod"));
+        assert!(terminate.contains("-X DELETE"));
+        // A self-delete permission gap must still end GPU billing.
+        assert!(terminate.contains("runpodctl stop pod"));
+        assert!(self_cleanup_command(Cleanup::Disabled).is_none());
+        // Both chains must survive embedding in the single-quote-wrapped
+        // watchdog/guard scripts — same invariant the production validator
+        // enforces for config values.
+        crate::ssh_exec::validate_shell_safe("stop chain", &stop).unwrap();
+        crate::ssh_exec::validate_shell_safe("terminate chain", &terminate).unwrap();
+        // Env-poor shells (watchdog runs in an SSH session env): the prelude
+        // must backfill from PID 1 and never prime runpodctl with an empty key.
+        assert!(stop.contains("/proc/1/environ"));
+        assert!(stop.contains("[ -n \"$RUNPOD_API_KEY\" ] && runpodctl config"));
+    }
+
+    fn runtime_with(config_toml: &str) -> RunPodRuntime {
+        let config: Config = toml::from_str(config_toml).unwrap();
+        RunPodRuntime::new("test-key".to_string(), &config)
+    }
+
+    fn default_image() -> String {
+        crate::config::default_image_name()
+    }
+
+    /// The wrapper's applicability rules, asserted through the function
+    /// provision actually calls.
+    #[test]
+    fn guard_wrapper_applies_exactly_when_safe() {
+        // Default image + default config (SECURE, terminate): guard on,
+        // shaped ["sh", "-c", guard-then-exec], no note.
+        let rt = runtime_with("");
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let cmd = cmd.expect("guard must arm for the default image");
+        assert_eq!(note, None);
+        assert_eq!(&cmd[..2], ["sh", "-c"]);
+        let script = &cmd[2];
+        assert!(script.contains("sleep 2700"));
+        assert!(script.contains("/tmp/heartbeat"));
+        // Persistent disarm marker on the volume (survives stop/resume).
+        assert!(script.contains("/workspace/.rk_reached"), "{script}");
+        assert!(script.ends_with("& exec /start.sh"), "{script}");
+        // The halt chain must survive the guard's single-quote wrapping.
+        assert_eq!(script.matches('\'').count(), 2, "{script}");
+
+        // cleanup = "disabled" promises no automatic cleanup: no guard, and
+        // no note either (explicit choice).
+        assert_eq!(
+            rt.guard_wrapper(&default_image(), Cleanup::Disabled),
+            (None, None)
         );
-        assert!(
-            RunPodConnection::cleanup_command(Cleanup::Terminate)
-                .unwrap()
-                .contains("remove")
+
+        // Community cloud without support-public-ip: SSH (and so the
+        // heartbeat that disarms the guard) isn't guaranteed — the guard
+        // must NOT arm, or it would clean up a live Jupyter-only session.
+        let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"");
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        assert_eq!(cmd, None);
+        assert!(note.unwrap().contains("support-public-ip"));
+        // ...and with support-public-ip requested, the guard arms again.
+        let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        assert!(cmd.is_some());
+        assert_eq!(note, None);
+
+        // Custom image without image-start-cmd: unknown, no guard, note tells
+        // the user how to enable it.
+        let rt = runtime_with(r#"image-name = "my/image:latest""#);
+        let (cmd, note) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate);
+        assert_eq!(cmd, None);
+        assert!(note.unwrap().contains("image-start-cmd"));
+
+        // Explicit image-start-cmd applies to the configured image...
+        let rt = runtime_with(
+            r#"
+            image-name = "my/image:latest"
+            [runpod]
+            image-start-cmd = "/entry.sh serve"
+            "#,
         );
-        assert!(RunPodConnection::cleanup_command(Cleanup::Disabled).is_none());
+        let (cmd, _) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate);
+        assert!(cmd.unwrap()[2].ends_with("& exec /entry.sh serve"));
+        // ...not to unrelated overrides...
+        let (cmd, note) = rt.guard_wrapper("other/image:v2", Cleanup::Terminate);
+        assert_eq!(cmd, None);
+        assert!(note.is_some());
+        // ...but the default image stays known even with a configured
+        // image-start-cmd for a different image (regression: this used to
+        // fall through to no-guard).
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        assert!(cmd.unwrap()[2].ends_with("& exec /start.sh"));
+        assert_eq!(note, None);
+
+        // Empty string is the explicit opt-out — every image, no note.
+        let rt = runtime_with("[runpod]\nimage-start-cmd = \"\"");
+        assert_eq!(
+            rt.guard_wrapper(&default_image(), Cleanup::Terminate),
+            (None, None)
+        );
+        assert_eq!(
+            rt.guard_wrapper("other/image:v2", Cleanup::Terminate),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn image_equality_ignores_docker_io_prefix() {
+        let rt = runtime_with("");
+        let qualified = format!("docker.io/{}", default_image());
+        let (cmd, _) = rt.guard_wrapper(&qualified, Cleanup::Terminate);
+        assert!(cmd.is_some(), "docker.io/ spelling must not drop the guard");
+    }
+
+    #[test]
+    fn compound_start_cmds_run_without_exec() {
+        // exec would replace the shell at the first command and drop the
+        // rest of a shell-form CMD; compound commands run under the wrapper
+        // shell instead.
+        let rt = runtime_with(
+            r#"
+            image-name = "my/image:latest"
+            [runpod]
+            image-start-cmd = "/prep.sh && /start.sh"
+            "#,
+        );
+        let (cmd, _) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate);
+        let script = &cmd.unwrap()[2];
+        assert!(script.ends_with("& /prep.sh && /start.sh"), "{script}");
+        assert!(!script.contains("exec /prep.sh"), "{script}");
     }
 }
