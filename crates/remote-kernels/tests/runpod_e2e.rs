@@ -360,7 +360,7 @@ support-public-ip = true
         "{PY_PID1_ENV}{}",
         r#"
 import subprocess
-pids = subprocess.run(['pgrep','-f','sleep 2700'], capture_output=True, text=True).stdout.split()
+pids = subprocess.run(['pgrep','-f','sleep [0-9]+; \\[ -f /tmp/heartbeat'], capture_output=True, text=True).stdout.split()
 lines = []
 for p in pids:
     try:

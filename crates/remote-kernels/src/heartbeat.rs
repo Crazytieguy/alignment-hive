@@ -5,8 +5,8 @@
 //! through the instance's [`Connection`]:
 //! 1. Wait for the command transport (SSH / exec) to become reachable
 //! 2. Run startup commands (user commands from config)
-//! 3. Install the watchdog: self-cleanup on stale heartbeat (>5 min) or on a
-//!    passed budget deadline
+//! 3. Install the watchdog: self-cleanup on stale heartbeat
+//!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline
 //! 4. Every 60s: signal liveness, refresh the budget deadline from the shared
 //!    spend model (aggregate burn rate across ALL running metered instances,
 //!    so concurrent machines can't collectively exceed the session budget)
@@ -48,12 +48,23 @@ pub fn start(
     conn: Arc<AnyConnection>,
     instance: String,
     cleanup: Cleanup,
+    watchdog_stale_secs: u64,
     startup_commands: Vec<String>,
     state: Arc<Mutex<AppState>>,
     budget: Option<f64>,
 ) -> HeartbeatState {
     let handle = tokio::spawn(async move {
-        if let Err(e) = run(&conn, &instance, cleanup, &startup_commands, &state, budget).await {
+        if let Err(e) = run(
+            &conn,
+            &instance,
+            cleanup,
+            watchdog_stale_secs,
+            &startup_commands,
+            &state,
+            budget,
+        )
+        .await
+        {
             tracing::warn!(instance, "Heartbeat task failed: {e}");
         }
     });
@@ -63,10 +74,12 @@ pub fn start(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     conn: &AnyConnection,
     instance: &str,
     cleanup: Cleanup,
+    watchdog_stale_secs: u64,
     startup_commands: &[String],
     state: &Arc<Mutex<AppState>>,
     budget: Option<f64>,
@@ -92,6 +105,7 @@ async fn run(
         .install_watchdog(WatchdogPolicy {
             cleanup,
             initial_budget_secs,
+            stale_secs: watchdog_stale_secs,
         })
         .await
     {

@@ -45,37 +45,44 @@ pub fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
 }
 
 /// Last-resort pre-SSH orphan guard shared by metered runtimes: a detached
-/// process that runs `halt_cmd` if no heartbeat file has EVER appeared 45
-/// minutes after machine start — the server that provisioned this machine
-/// died, lost its key, or never got in. It runs at machine startup (vast
-/// onstart, `RunPod` dockerStartCmd), before SSH works — once the real
-/// watchdog installs, that takes over as the money guard.
+/// process that runs `halt_cmd` if no heartbeat file has EVER appeared
+/// `halt_after_mins` (config `orphan-halt-mins`) after machine start — the
+/// server that provisioned this machine died, lost its key, or never got
+/// in. It runs at machine startup (vast onstart, `RunPod` dockerStartCmd),
+/// before SSH works — once the real watchdog installs, that takes over as
+/// the money guard.
 ///
 /// `persistent_marker` handles startup mechanisms that re-run on EVERY
 /// container start (`RunPod` dockerStartCmd persists in the pod config, and
 /// a stop clears `/tmp`): a marker on storage that survives stop/resume
 /// keeps "fires only on a machine no session ever reached" true for pods
 /// resumed outside this tool (console, `runpodctl`) where nothing recreates
-/// the heartbeat. Neither argument may contain single quotes (the script is
-/// single-quote wrapped).
-pub fn orphan_guard_line(halt_cmd: &str, persistent_marker: Option<&str>) -> String {
+/// the heartbeat. Neither string argument may contain single quotes (the
+/// script is single-quote wrapped).
+pub fn orphan_guard_line(
+    halt_cmd: &str,
+    persistent_marker: Option<&str>,
+    halt_after_mins: u64,
+) -> String {
     let marker_check = persistent_marker
         .map(|m| format!(r#" || [ -f "{m}" ]"#))
         .unwrap_or_default();
+    let sleep_secs = halt_after_mins.saturating_mul(60);
     format!(
-        "nohup sh -c 'sleep 2700; [ -f /tmp/heartbeat ]{marker_check} || {{ {halt_cmd}; }}' \
+        "nohup sh -c 'sleep {sleep_secs}; [ -f /tmp/heartbeat ]{marker_check} || {{ {halt_cmd}; }}' \
          </dev/null >/dev/null 2>&1 &"
     )
 }
 
 /// The on-machine watchdog script shared by SSH runtimes: a detached loop
-/// that runs `cleanup_cmd` when the heartbeat file goes stale (>5 min — the
-/// MCP server died) or when the deadline in `/tmp/budget_deadline` passes
-/// (refreshed every heartbeat tick at the aggregate multi-machine burn rate).
+/// that runs `cleanup_cmd` when the heartbeat file goes stale for
+/// `stale_secs` (config `watchdog-stale-secs` — the MCP server died) or when
+/// the deadline in `/tmp/budget_deadline` passes (refreshed every heartbeat
+/// tick at the aggregate multi-machine burn rate).
 ///
 /// Wrapped in single quotes for `bash -c`: `$` expansions happen on the
 /// machine. `{{...}}` is Rust format escaping.
-pub fn watchdog_script(cleanup_cmd: &str) -> String {
+pub fn watchdog_script(cleanup_cmd: &str, stale_secs: u64) -> String {
     format!(
         concat!(
             "nohup bash -c '",
@@ -84,7 +91,7 @@ pub fn watchdog_script(cleanup_cmd: &str) -> String {
             "sleep 30; ",
             "now=$(date +%s); ",
             "age=$((now - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))); ",
-            r#"if [ "$age" -gt 300 ]; then "#,
+            r#"if [ "$age" -gt {stale} ]; then "#,
             r#"echo "Heartbeat stale (${{age}}s), cleaning up machine..." >> /tmp/watchdog.log; "#,
             "{cmd}; exit 0; fi; ",
             "if [ -f /tmp/budget_deadline ]; then ",
@@ -94,7 +101,8 @@ pub fn watchdog_script(cleanup_cmd: &str) -> String {
             "{cmd}; exit 0; fi; fi; ",
             "done' </dev/null >/dev/null 2>&1 &",
         ),
-        cmd = cleanup_cmd
+        cmd = cleanup_cmd,
+        stale = stale_secs
     )
 }
 
@@ -167,4 +175,20 @@ pub async fn ssh_cmd(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Config money-windows must reach the generated scripts verbatim.
+    #[test]
+    fn orphan_guard_line_uses_configured_window() {
+        assert!(super::orphan_guard_line("halt", None, 45).contains("sleep 2700"));
+        assert!(super::orphan_guard_line("halt", None, 10).contains("sleep 600"));
+    }
+
+    #[test]
+    fn watchdog_script_uses_configured_staleness() {
+        assert!(super::watchdog_script("halt", 300).contains(r#"if [ "$age" -gt 300 ]"#));
+        assert!(super::watchdog_script("halt", 120).contains(r#"if [ "$age" -gt 120 ]"#));
+    }
 }

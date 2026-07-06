@@ -57,6 +57,8 @@ pub struct RunPodRuntime {
     gpu_type_ids: Vec<String>,
     image_name: String,
     runpod: crate::config::RunpodConfig,
+    /// Pre-SSH orphan guard window (config `orphan-halt-mins`).
+    orphan_halt_mins: u64,
 }
 
 impl RunPodRuntime {
@@ -67,6 +69,7 @@ impl RunPodRuntime {
             gpu_type_ids: config.gpu_type_ids.clone(),
             image_name: config.image_name.clone(),
             runpod: config.runpod.clone(),
+            orphan_halt_mins: config.orphan_halt_mins,
         }
     }
 
@@ -109,7 +112,7 @@ impl RunPodRuntime {
     /// — is expected on this pod: guaranteed on SECURE cloud, and on
     /// COMMUNITY only when `support-public-ip` is requested. A Jupyter-only
     /// pod must NOT carry the guard: nothing would ever write the heartbeat,
-    /// and the guard would clean up a live session at 45 minutes.
+    /// and the guard would clean up a live session at `orphan-halt-mins`.
     fn ssh_expected(&self) -> bool {
         !self.runpod.cloud_type.eq_ignore_ascii_case("COMMUNITY")
             || self
@@ -137,15 +140,15 @@ impl RunPodRuntime {
         if !self.ssh_expected() {
             return (
                 None,
-                Some(
+                Some(format!(
                     "the pre-SSH orphan guard is OFF for this pod: community-cloud pods \
                      without support-public-ip may lack SSH, and only the SSH heartbeat \
                      disarms the guard — it would wrongly self-clean a Jupyter-only \
-                     session after 45 minutes. Set [runpod] support-public-ip = true or \
+                     session after {} minutes. Set [runpod] support-public-ip = true or \
                      cloud-type = \"SECURE\" to enable it, or image-start-cmd = \"\" to \
-                     silence this note."
-                        .to_string(),
-                ),
+                     silence this note.",
+                    self.orphan_halt_mins
+                )),
             );
         }
         let Some(cmd) = self.guard_start_cmd(image_name) else {
@@ -175,6 +178,7 @@ impl RunPodRuntime {
             crate::ssh_exec::orphan_guard_line(
                 &halt_cmd,
                 Some(&disarm_marker(&self.runpod.volume_mount_path)),
+                self.orphan_halt_mins,
             )
         );
         (Some(vec!["sh".to_string(), "-c".to_string(), script]), None)
@@ -204,11 +208,13 @@ impl RunPodRuntime {
 
 /// Runtime capabilities, exposed credential-free so config validation can
 /// consult them at load time (see [`super::validate_config`]).
-pub(crate) fn capabilities() -> Capabilities {
+pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities {
     Capabilities {
         stop_resume: StopSupport::Full,
         metered: true,
-        provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
+        provision_timeout: Some(std::time::Duration::from_secs(
+            runpod.provision_timeout_mins.saturating_mul(60),
+        )),
         // Keys are per-pod env (`PUBLIC_KEY`), not account-registered.
         account_ssh_keys: false,
     }
@@ -222,7 +228,7 @@ impl Runtime for RunPodRuntime {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        capabilities(&self.runpod)
     }
 
     /// Try each configured GPU type in order:
@@ -421,8 +427,9 @@ impl Runtime for RunPodRuntime {
         // Where config DOES promise SSH — the exact predicate that arms the
         // guard — a pod without it must fail the start instead: the armed
         // guard is disarmed only by the SSH heartbeat, and a degraded
-        // Jupyter-only session would be self-cleaned under the user at 45
-        // minutes. (Sync and the watchdog would be silently broken too.)
+        // Jupyter-only session would be self-cleaned under the user after
+        // orphan-halt-mins. (Sync and the watchdog would be silently broken
+        // too.)
         let ssh = match self.wait_for_ssh_info(external_id).await {
             Ok(info) => Some(info),
             Err(e) if self.ssh_expected() => {
@@ -431,7 +438,8 @@ impl Runtime for RunPodRuntime {
                      guarantees it (cloud-type SECURE or support-public-ip): {e} \
                      Failing the start — the pre-SSH orphan guard armed at creation \
                      is disarmed only by the SSH heartbeat, so a Jupyter-only \
-                     session on this pod would self-clean after 45 minutes."
+                     session on this pod would self-clean after {} minutes.",
+                    self.orphan_halt_mins
                 );
             }
             Err(e) => {
@@ -608,7 +616,7 @@ impl Connection for RunPodConnection {
     }
 
     /// Install the on-pod watchdog: a detached loop that self-cleans when the
-    /// heartbeat file goes stale (>5 min — the MCP server died) or when the
+    /// heartbeat file goes stale (`watchdog-stale-secs` — the MCP server died) or when the
     /// budget deadline in `/tmp/budget_deadline` passes. The deadline is
     /// refreshed every heartbeat tick via [`Self::set_budget_deadline`], so it
     /// tracks the aggregate multi-machine burn rate rather than being a
@@ -623,7 +631,7 @@ impl Connection for RunPodConnection {
             self.set_budget_deadline(secs).await?;
         }
 
-        let watchdog = crate::ssh_exec::watchdog_script(&cmd);
+        let watchdog = crate::ssh_exec::watchdog_script(&cmd, policy.stale_secs);
         self.exec(&watchdog, Duration::from_secs(10)).await?;
         tracing::info!("Watchdog installed on pod");
         Ok(())
@@ -812,6 +820,21 @@ mod tests {
         assert_eq!(
             rt.guard_wrapper("other/image:v2", Cleanup::Terminate),
             (None, None)
+        );
+    }
+
+    /// The config money-windows must reach the guard script and the
+    /// provisioning deadline (silent-defaults surfacing).
+    #[test]
+    fn money_windows_flow_from_config() {
+        let rt = runtime_with("orphan-halt-mins = 10");
+        let (cmd, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        assert!(cmd.unwrap()[2].contains("sleep 600"));
+
+        let rt = runtime_with("[runpod]\nprovision-timeout-mins = 5");
+        assert_eq!(
+            rt.capabilities().provision_timeout,
+            Some(std::time::Duration::from_secs(5 * 60))
         );
     }
 

@@ -81,6 +81,58 @@ impl Capabilities {
 /// only validated per-runtime lazily at `start()` — a global value may be a
 /// leftover that never applies to the runtime it would conflict with.
 pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
+    // Money-window sanity: zero windows would self-clean or terminate healthy
+    // machines instantly, and a staleness threshold under ~1.5 heartbeat
+    // ticks (60s each) kills machines on a single delayed beat.
+    if config.orphan_halt_mins == 0 {
+        return Err(
+            "orphan-halt-mins must be at least 1 (0 would halt every machine \
+                    at boot, before the first heartbeat can exist)"
+                .to_string(),
+        );
+    }
+    if config.watchdog_stale_secs < 150 {
+        return Err(format!(
+            "watchdog-stale-secs must be at least 150 (got {}): the server heartbeats \
+             every 60s and a single transient miss is non-fatal by design, so one \
+             missed beat means a 120s gap — plus the watchdog's 30s check \
+             granularity. Lower values self-clean healthy machines on one blip",
+            config.watchdog_stale_secs
+        ));
+    }
+    if let Some(vast) = &config.vast {
+        if vast.onstart_timeout_mins == 0 {
+            return Err(
+                "[vast] onstart-timeout-mins must be at least 1 (0 would launch \
+                        jupyter before onstart installs the tooling it may need)"
+                    .to_string(),
+            );
+        }
+        // The orphan guard's heartbeat can only appear after open() finishes
+        // waiting for onstart, so the halt window must outlast the onstart
+        // ceiling or a slow onstart gets the machine halted mid-provision.
+        if config.orphan_halt_mins < vast.onstart_timeout_mins.saturating_add(5) {
+            return Err(format!(
+                "orphan-halt-mins ({}) must exceed [vast] onstart-timeout-mins ({}) by \
+                 at least 5 minutes: the orphan guard arms when onstart starts, and its \
+                 disarming heartbeat only begins after onstart finishes — a longer \
+                 onstart would get every healthy machine halted mid-provision",
+                config.orphan_halt_mins, vast.onstart_timeout_mins
+            ));
+        }
+    }
+    if config.runpod.provision_timeout_mins == 0
+        || config
+            .vast
+            .as_ref()
+            .is_some_and(|v| v.provision_timeout_mins == Some(0))
+    {
+        return Err(
+            "provision-timeout-mins must be at least 1 (0 would terminate every \
+                    machine the moment provisioning starts)"
+                .to_string(),
+        );
+    }
     for &name in AnyRuntime::known_names() {
         let Some(caps) = AnyRuntime::static_capabilities(name, config) else {
             continue;
@@ -191,6 +243,9 @@ pub struct WatchdogPolicy {
     /// Initial budget deadline in seconds from now (refreshed via
     /// [`Connection::set_budget_deadline`]). `None` = no budget.
     pub initial_budget_secs: Option<u64>,
+    /// Heartbeat staleness that triggers self-cleanup (config
+    /// `watchdog-stale-secs`).
+    pub stale_secs: u64,
 }
 
 /// Live transport to one machine.
@@ -331,10 +386,16 @@ impl AnyRuntime {
     /// (those fail later in [`AnyRuntime::build`] with the full name list).
     pub fn static_capabilities(name: &str, config: &Config) -> Option<Capabilities> {
         match name {
-            "runpod" => Some(runpod::capabilities()),
-            "vast" => Some(vast::capabilities(
-                config.vast.as_ref().is_some_and(|v| v.vm),
-            )),
+            "runpod" => Some(runpod::capabilities(&config.runpod)),
+            "vast" => {
+                // Shared default instead of cloning: this runs per live
+                // target in the budget-exhaustion path, not just at load.
+                static DEFAULT_VAST: std::sync::LazyLock<crate::config::VastConfig> =
+                    std::sync::LazyLock::new(crate::config::VastConfig::default);
+                Some(vast::capabilities(
+                    config.vast.as_ref().unwrap_or(&DEFAULT_VAST),
+                ))
+            }
             "kubernetes" => Some(kubernetes::capabilities()),
             // Meteredness is per-instance for the fake runtime (e2e tests
             // simulate billing), but no fake machine ever costs real money —
@@ -535,6 +596,56 @@ mod tests {
     fn explicit_vast_stop_is_allowed() {
         let cfg = config("[vast]\ncleanup = \"stop\"");
         assert!(validate_config(&cfg, false).is_ok());
+    }
+
+    /// Zero/too-low money windows would self-clean healthy machines — the
+    /// footgun values are rejected at load, everything else is the user's
+    /// tuning to make.
+    #[test]
+    fn nonsense_money_windows_are_rejected_at_load() {
+        let err = validate_config(&config("orphan-halt-mins = 0"), false).unwrap_err();
+        assert!(err.contains("orphan-halt-mins"), "{err}");
+
+        // One non-fatal missed beat = 120s gap + 30s check granularity: the
+        // floor must tolerate the single-miss case the heartbeat loop is
+        // designed to survive.
+        let err = validate_config(&config("watchdog-stale-secs = 120"), false).unwrap_err();
+        assert!(err.contains("watchdog-stale-secs"), "{err}");
+        assert!(validate_config(&config("watchdog-stale-secs = 150"), false).is_ok());
+
+        let err =
+            validate_config(&config("[runpod]\nprovision-timeout-mins = 0"), false).unwrap_err();
+        assert!(err.contains("provision-timeout-mins"), "{err}");
+        let err =
+            validate_config(&config("[vast]\nprovision-timeout-mins = 0"), false).unwrap_err();
+        assert!(err.contains("provision-timeout-mins"), "{err}");
+
+        // Aggressive-but-sane custom values pass.
+        assert!(
+            validate_config(
+                &config("orphan-halt-mins = 5\n[runpod]\nprovision-timeout-mins = 5"),
+                false
+            )
+            .is_ok()
+        );
+
+        // The vast orphan guard arms before onstart and is disarmed only
+        // after it — the halt window must outlast the onstart ceiling.
+        let err = validate_config(
+            &config("orphan-halt-mins = 15\n[vast]\nonstart-timeout-mins = 15"),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("onstart-timeout-mins"), "{err}");
+        assert!(
+            validate_config(
+                &config("orphan-halt-mins = 65\n[vast]\nonstart-timeout-mins = 60"),
+                false
+            )
+            .is_ok()
+        );
+        let err = validate_config(&config("[vast]\nonstart-timeout-mins = 0"), false).unwrap_err();
+        assert!(err.contains("onstart-timeout-mins"), "{err}");
     }
 
     #[test]

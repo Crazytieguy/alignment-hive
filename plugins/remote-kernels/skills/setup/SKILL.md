@@ -80,8 +80,8 @@ area below** and edit the file based on their answers.
   with `jupyter-server` + `ipykernel`)
 - **RunPod custom image → `image-start-cmd`** — pods carry a pre-SSH orphan
   guard: if the server that created a pod dies before ever reaching it (crash
-  in the first minutes of provisioning), the pod cleans itself up after 45
-  minutes instead of billing until someone notices. The guard wraps the
+  in the first minutes of provisioning), the pod cleans itself up after
+  `orphan-halt-mins` (default 45) instead of billing until someone notices. The guard wraps the
   image's own start command via dockerStartCmd, so it needs to know that
   command. The default image is handled automatically; for a custom RunPod
   image, find its Dockerfile `CMD` (check the image's Dockerfile or docs, run
@@ -138,7 +138,10 @@ area below** and edit the file based on their answers.
   `REMOTE_KERNELS_BUDGET` (not in remote-kernels.toml, so Claude can't modify
   it). Enforced across ALL concurrent machines. Requires cleanup !=
   "disabled" on every metered runtime (runpod, vast); Kubernetes is unmetered
-  and exempt — `max-lifetime-secs` bounds pods instead
+  and exempt — `max-lifetime-secs` bounds pods instead. The money-safety
+  windows are also config (see the template): `orphan-halt-mins`,
+  `watchdog-stale-secs`, and per-runtime `provision-timeout-mins` — defaults
+  are sane, mention they exist rather than walking through each
 - **Environment variables** — what needs to be available on the machine?
   `inherit-env` forwards vars from the local environment (including
   `.env`/`.env.local` files). Explicit vars go in the `[env]` section

@@ -85,6 +85,8 @@ pub struct VastRuntime {
     vast: VastConfig,
     /// Instance label prefix (from the top-level `name` config).
     name_prefix: String,
+    /// Pre-SSH orphan guard window (config `orphan-halt-mins`).
+    orphan_halt_mins: u64,
 }
 
 impl VastRuntime {
@@ -93,6 +95,7 @@ impl VastRuntime {
             client: VastClient::new(api_key),
             vast: config.vast.clone().unwrap_or_default(),
             name_prefix: config.name.clone(),
+            orphan_halt_mins: config.orphan_halt_mins,
         }
     }
 
@@ -103,6 +106,7 @@ impl VastRuntime {
             client,
             vast: config.vast.clone().unwrap_or_default(),
             name_prefix: config.name.clone(),
+            orphan_halt_mins: config.orphan_halt_mins,
         }
     }
 
@@ -375,7 +379,11 @@ impl VastRuntime {
             "#!/bin/bash".to_string(), // VMs require an explicit shebang
             "mkdir -p ~/.ssh".to_string(),
             assert_key.clone(),
-            crate::ssh_exec::orphan_guard_line("shutdown -h now || kill -9 1", None),
+            crate::ssh_exec::orphan_guard_line(
+                "shutdown -h now || kill -9 1",
+                None,
+                self.orphan_halt_mins,
+            ),
             format!(
                 "(for _ in $(seq 120); do {assert_key}; sleep 5; done) </dev/null >/dev/null 2>&1 &"
             ),
@@ -435,21 +443,35 @@ fn image_registry_qualified(image: &str) -> bool {
 
 /// Runtime capabilities, exposed credential-free so config validation can
 /// consult them at load time (see [`super::validate_config`]).
-pub(crate) fn capabilities(vm: bool) -> Capabilities {
+pub(crate) fn capabilities(vast: &VastConfig) -> Capabilities {
     Capabilities {
         stop_resume: StopSupport::Unreliable,
         metered: true,
-        // VMs pull a full disk image and boot a kernel — legitimately
-        // slower than containers.
-        provision_timeout: Some(std::time::Duration::from_secs(if vm {
-            35 * 60
-        } else {
-            20 * 60
-        })),
+        provision_timeout: Some(vast.provision_timeout()),
         // vast registers authorized keys account-wide and bakes every
         // account key into new instances — use the stable plugin key.
         account_ssh_keys: true,
     }
+}
+
+/// Shell loop that waits for the onstart completion marker in 5s steps,
+/// bounded by `onstart-timeout-mins`. The skip decision is made ONCE, from
+/// the uptime at wait start: a machine already old when the wait begins has
+/// its onstart long settled and the marker may structurally never appear
+/// (reconnects to long-running machines, pre-marker instances) — but a
+/// fresh machine must get the full configured wait, never a silent mid-wait
+/// skip that would mask a genuine onstart timeout. The threshold tracks the
+/// configured window so a raised `onstart-timeout-mins` isn't capped at the
+/// old 30-minute default.
+fn wait_onstart_script(onstart_mins: u64) -> String {
+    let skip_uptime_secs = 1800.max(onstart_mins.saturating_mul(60));
+    format!(
+        "if [ \"$(cut -d. -f1 /proc/uptime)\" -ge {skip_uptime_secs} ]; then echo rk-skip; else \
+         i=0; s=rk-timeout; while [ \"$i\" -lt {} ]; do \
+         if [ -f /var/tmp/rk_onstart_done ]; then s=rk-done; break; fi; \
+         sleep 5; i=$((i+1)); done; echo \"$s\"; fi",
+        onstart_mins.saturating_mul(12) // 5s steps
+    )
 }
 
 impl Runtime for VastRuntime {
@@ -460,7 +482,7 @@ impl Runtime for VastRuntime {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities(self.vast.vm)
+        capabilities(&self.vast)
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
@@ -761,23 +783,22 @@ impl Runtime for VastRuntime {
         // heartbeat restart. On timeout, warn and proceed — the jupyter
         // launch's liveness check surfaces the real error if tooling is
         // genuinely missing.
-        let wait_onstart = "i=0; s=rk-timeout; while [ \"$i\" -lt 180 ]; do \
-             if [ -f /var/tmp/rk_onstart_done ]; then s=rk-done; break; fi; \
-             if [ \"$(cut -d. -f1 /proc/uptime)\" -ge 1800 ]; then s=rk-skip; break; fi; \
-             sleep 5; i=$((i+1)); done; echo \"$s\"";
+        let onstart_mins = self.vast.onstart_timeout_mins;
+        let wait_onstart = wait_onstart_script(onstart_mins);
         match crate::ssh_exec::ssh_cmd(
             &ctx.ssh_key_path,
             &user,
             &ssh_host,
             ssh_port,
-            wait_onstart,
-            Duration::from_secs(1000),
+            &wait_onstart,
+            Duration::from_secs(onstart_mins.saturating_mul(60).saturating_add(100)),
         )
         .await
         {
             Ok(out) if out.contains("rk-timeout") => {
                 tracing::warn!(
-                    "onstart has not finished after 15 minutes; launching jupyter anyway"
+                    "onstart has not finished after {onstart_mins} minutes \
+                     (config onstart-timeout-mins); launching jupyter anyway"
                 );
             }
             Ok(_) => {}
@@ -1032,7 +1053,10 @@ impl Connection for VastConnection {
         if let Some(secs) = policy.initial_budget_secs {
             self.set_budget_deadline(secs).await?;
         }
-        let script = crate::ssh_exec::watchdog_script("(shutdown -h now || kill -9 1) 2>/dev/null");
+        let script = crate::ssh_exec::watchdog_script(
+            "(shutdown -h now || kill -9 1) 2>/dev/null",
+            policy.stale_secs,
+        );
         self.exec_inner(&script, Duration::from_secs(10)).await?;
         tracing::info!("Watchdog installed on vast instance (halt-only — see docs)");
         Ok(())
@@ -1065,6 +1089,36 @@ mod tests {
     use super::{OfferQueryOverrides, Runtime, VastRuntime, image_registry_qualified};
     use crate::config::Config;
     use crate::vast::client::VastClient;
+
+    /// Config money-windows resolve correctly and reach the onstart guard.
+    #[test]
+    fn provision_timeout_and_orphan_window_from_config() {
+        use std::time::Duration;
+        let caps = |toml: &str| {
+            let config: Config = toml::from_str(toml).unwrap();
+            super::capabilities(&config.vast.clone().unwrap_or_default())
+        };
+        // Defaults: 20 min containers, 35 min VMs (disk image pull + kernel boot).
+        assert_eq!(
+            caps("").provision_timeout,
+            Some(Duration::from_secs(20 * 60))
+        );
+        assert_eq!(
+            caps("[vast]\nvm = true").provision_timeout,
+            Some(Duration::from_secs(35 * 60))
+        );
+        // An explicit provision-timeout-mins wins over the vm auto-bump.
+        assert_eq!(
+            caps("[vast]\nvm = true\nprovision-timeout-mins = 50").provision_timeout,
+            Some(Duration::from_secs(50 * 60))
+        );
+
+        // orphan-halt-mins reaches the onstart guard script.
+        let config: Config = toml::from_str("orphan-halt-mins = 10").unwrap();
+        let rt = VastRuntime::new("test-key".to_string(), &config);
+        let script = rt.onstart_script("ssh-ed25519 AAAATEST test");
+        assert!(script.contains("sleep 600"), "{script}");
+    }
 
     #[test]
     fn image_qualification() {

@@ -31,6 +31,20 @@ pub struct Config {
     /// Per-session budget cap in dollars.
     pub budget_cap: Option<f64>,
 
+    /// Pre-SSH orphan guard window in minutes (shared by runpod and vast): a
+    /// machine that no session ever reaches self-cleans this long after
+    /// machine start. Too low and slow image pulls get killed mid-provision;
+    /// too high and a machine orphaned by a crashed server bills longer.
+    #[serde(default = "default_orphan_halt_mins")]
+    pub orphan_halt_mins: u64,
+
+    /// On-machine watchdog staleness threshold in seconds: how long after
+    /// the supervising server stops heartbeating does the machine clean
+    /// itself up. Lower saves money when a session dies; higher survives
+    /// longer network blips without killing a healthy machine.
+    #[serde(default = "default_watchdog_stale_secs")]
+    pub watchdog_stale_secs: u64,
+
     /// Environment variable names to forward from the local environment to the pod.
     #[serde(default)]
     pub inherit_env: Vec<String>,
@@ -124,6 +138,17 @@ pub struct VastConfig {
     #[serde(default = "default_jupyter_command")]
     pub jupyter_command: String,
 
+    /// Give up on an instance still provisioning after this many minutes and
+    /// terminate it (it bills the whole time). Unset: 20, or 35 with
+    /// vm = true (VM images pull a full disk image and boot a kernel).
+    pub provision_timeout_mins: Option<u64>,
+
+    /// How long `open()` waits for the onstart script to finish before
+    /// launching Jupyter anyway (minutes). Raise it when onstart lines
+    /// install heavy tooling (conda envs, docker images).
+    #[serde(default = "default_vast_onstart_timeout_mins")]
+    pub onstart_timeout_mins: u64,
+
     /// Offers fetched per search (cheapest first).
     #[serde(default = "default_vast_search_limit")]
     pub search_limit: u32,
@@ -153,6 +178,19 @@ pub struct VastConfig {
 impl Default for VastConfig {
     fn default() -> Self {
         toml::from_str("").expect("every VastConfig field must have a serde default")
+    }
+}
+
+impl VastConfig {
+    /// Effective provisioning give-up window: explicit
+    /// `provision-timeout-mins`, else 20 minutes (35 for VMs).
+    pub fn provision_timeout(&self) -> std::time::Duration {
+        let mins = self.provision_timeout_mins.unwrap_or(if self.vm {
+            VAST_VM_PROVISION_TIMEOUT_MINS
+        } else {
+            default_provision_timeout_mins()
+        });
+        std::time::Duration::from_secs(mins.saturating_mul(60))
     }
 }
 
@@ -298,6 +336,11 @@ pub struct RunpodConfig {
     /// Empty string: explicitly disable the guard.
     pub image_start_cmd: Option<String>,
 
+    /// Give up on a pod still provisioning after this many minutes and
+    /// terminate it (it bills the whole time).
+    #[serde(default = "default_provision_timeout_mins")]
+    pub provision_timeout_mins: u64,
+
     /// Extra fields passed through to the `RunPod` API.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
@@ -365,6 +408,26 @@ fn default_cloud_type() -> String {
 fn default_name() -> String {
     "remote-kernels".to_string()
 }
+
+fn default_orphan_halt_mins() -> u64 {
+    45
+}
+
+fn default_watchdog_stale_secs() -> u64 {
+    300
+}
+
+pub(crate) fn default_provision_timeout_mins() -> u64 {
+    20
+}
+
+fn default_vast_onstart_timeout_mins() -> u64 {
+    15
+}
+
+/// VM images pull a full disk image and boot a kernel — legitimately slower
+/// than containers, so unset `[vast] provision-timeout-mins` auto-bumps.
+pub(crate) const VAST_VM_PROVISION_TIMEOUT_MINS: u64 = 35;
 
 fn default_notebook_dir() -> PathBuf {
     PathBuf::from("remote-kernels")
@@ -442,6 +505,21 @@ impl Config {
 # unmetered and exempt.
 # budget-cap = 5.0
 
+# Money-safety windows (runpod and vast; kubernetes is unmetered):
+# A machine no session ever reaches (the provisioning server crashed in the
+# first minutes) self-cleans this long after machine start. Too low kills
+# slow image pulls mid-provision; too high bills longer when orphaned. Must
+# exceed [vast] onstart-timeout-mins by 5+ minutes (the guard arms before
+# onstart and is disarmed only after it finishes).
+# Default: {default_orphan_halt_mins}
+# orphan-halt-mins = {default_orphan_halt_mins}
+# Once a session IS supervising a machine, the on-machine watchdog cleans
+# the machine up when the server's heartbeat goes stale for this many
+# seconds (i.e. how long after your session dies does the machine clean
+# itself up). Lower saves money; higher survives longer network blips.
+# Default: {default_watchdog_stale_secs}
+# watchdog-stale-secs = {default_watchdog_stale_secs}
+
 # Environment variable names to forward from the local environment to the pod.
 # Variables from .env and .env.local files are included automatically.
 # inherit-env = ["HF_TOKEN", "WANDB_API_KEY"]
@@ -501,7 +579,7 @@ impl Config {
 
 # The image's own start command (its Dockerfile CMD). When known, pod creation
 # wraps it with a pre-SSH orphan guard: a pod the provisioning server never
-# reaches (crash in the first minutes) cleans itself up after 45 minutes
+# reaches (crash in the first minutes) cleans itself up after orphan-halt-mins
 # instead of billing until noticed. Applies automatically to the default
 # image; set this when using a custom image (must be its Dockerfile CMD — a
 # wrong value keeps SSH/Jupyter from starting). Set to "" to disable. The
@@ -510,6 +588,11 @@ impl Config {
 # start(image=...) overrides the configured image.
 # Default: "{default_image_start_cmd}" for the default image, unset otherwise (no guard).
 # image-start-cmd = "{default_image_start_cmd}"
+
+# Give up on a pod still provisioning after this many minutes and terminate
+# it — a pod stuck "loading" bills the whole time.
+# Default: {default_provision_timeout_mins}
+# provision-timeout-mins = {default_provision_timeout_mins}
 
 # vast.ai runtime configuration (only needed when using
 # start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY —
@@ -538,8 +621,33 @@ impl Config {
 # vm = false
 # Price ceiling in $/hr for offer search.
 # max-dph = 0.5
-# Startup script lines (run as root at first boot).
+# Startup script lines (run as root at first boot). The pre-SSH orphan guard
+# (see orphan-halt-mins above) is prepended automatically: a machine no
+# session ever reaches halts itself. Jupyter launches only after these lines
+# finish (bounded by onstart-timeout-mins).
 # onstart = ["curl -LsSf https://astral.sh/uv/install.sh | sh"]
+# Give up on an instance still provisioning after this many minutes and
+# terminate it — it bills the whole time. Unset: {default_provision_timeout_mins}, or
+# {vast_vm_provision_timeout_mins} with vm = true (VM images pull a full disk image and boot a
+# kernel). Setting a value overrides BOTH cases, so the example shows the
+# VM-safe number — a lower one would cut short legitimately slow VM pulls.
+# provision-timeout-mins = {vast_vm_provision_timeout_mins}
+# How long to wait for onstart to finish before launching Jupyter anyway
+# (minutes). Raise for heavy onstart lines (conda envs, docker pulls).
+# Default: {default_vast_onstart_timeout_mins}
+# onstart-timeout-mins = {default_vast_onstart_timeout_mins}
+# Directory on the machine that files sync to and kernels run in.
+# Default: "{default_vast_workdir}"
+# workdir = "{default_vast_workdir}"
+# SSH login user. Containers use root; some VM images use a different user.
+# Default: "{default_vast_ssh_user}"
+# ssh-user = "{default_vast_ssh_user}"
+# Command that launches Jupyter on the machine.
+# Default: "{default_jupyter_command}"
+# jupyter-command = "{default_jupyter_command}"
+# vast template hash to base instances on (optional; overrides image/env
+# defaults with the template's).
+# template-hash = "abc123def456"
 # Offers fetched per search, cheapest first.
 # Default: {default_vast_search_limit}
 # search-limit = {default_vast_search_limit}
@@ -612,6 +720,13 @@ impl Config {
             default_volume_mount_path = default_volume_mount_path(),
             default_cloud_type = default_cloud_type(),
             default_image_start_cmd = DEFAULT_RUNPOD_IMAGE_START_CMD,
+            default_orphan_halt_mins = default_orphan_halt_mins(),
+            default_watchdog_stale_secs = default_watchdog_stale_secs(),
+            default_provision_timeout_mins = default_provision_timeout_mins(),
+            vast_vm_provision_timeout_mins = VAST_VM_PROVISION_TIMEOUT_MINS,
+            default_vast_onstart_timeout_mins = default_vast_onstart_timeout_mins(),
+            default_vast_workdir = default_vast_workdir(),
+            default_vast_ssh_user = default_vast_ssh_user(),
             default_vast_gpu = default_vast_gpu_names()[0],
             default_vast_image = default_vast_image(),
             default_vast_disk_gb = default_vast_disk_gb(),
@@ -662,6 +777,16 @@ mod tests {
         assert_eq!(vast.search_limit, 10);
         assert_eq!(vast.attempt_limit, 3);
         assert!(vast.selection_guidance.is_none());
+        // Money windows: documented defaults.
+        assert_eq!(config.orphan_halt_mins, 45);
+        assert_eq!(config.watchdog_stale_secs, 300);
+        assert_eq!(config.runpod.provision_timeout_mins, 20);
+        assert!(vast.provision_timeout_mins.is_none());
+        assert_eq!(
+            vast.provision_timeout(),
+            std::time::Duration::from_secs(20 * 60)
+        );
+        assert_eq!(vast.onstart_timeout_mins, 15);
     }
 
     #[test]
@@ -846,5 +971,24 @@ mod tests {
         assert_eq!(config.gpu_type_ids, default_gpu_type_ids());
         assert_eq!(config.image_name, default_image_name());
         assert_eq!(config.runpod.gpu_count, default_gpu_count());
+        // Uncommented money-window lines must reproduce the defaults.
+        assert_eq!(config.orphan_halt_mins, default_orphan_halt_mins());
+        assert_eq!(config.watchdog_stale_secs, default_watchdog_stale_secs());
+        assert_eq!(
+            config.runpod.provision_timeout_mins,
+            default_provision_timeout_mins()
+        );
+        let vast = config.vast.clone().expect("[vast] section uncommented");
+        assert_eq!(
+            vast.provision_timeout_mins,
+            Some(VAST_VM_PROVISION_TIMEOUT_MINS)
+        );
+        assert_eq!(
+            vast.onstart_timeout_mins,
+            default_vast_onstart_timeout_mins()
+        );
+        assert_eq!(vast.workdir, default_vast_workdir());
+        assert_eq!(vast.ssh_user, default_vast_ssh_user());
+        assert_eq!(vast.jupyter_command, default_jupyter_command());
     }
 }

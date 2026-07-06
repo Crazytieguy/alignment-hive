@@ -1542,6 +1542,7 @@ impl RemoteKernelsServer {
             Arc::clone(&conn),
             name.to_string(),
             cleanup,
+            self.config.watchdog_stale_secs,
             self.config.startup_commands.clone(),
             Arc::clone(&self.state),
             self.budget,
