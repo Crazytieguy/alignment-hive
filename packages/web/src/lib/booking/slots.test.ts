@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DateTime } from "luxon";
-import { OFFICES } from "./offices";
+import { OFFICES, type OfficeConfig, isOfficeOpenOn } from "./offices";
 import {
   type Slot,
   clipBusyToWindows,
@@ -10,8 +10,16 @@ import {
 } from "./slots";
 
 const ZONE = "America/Los_Angeles";
-const mats = OFFICES.mats;
-const farLabs = OFFICES["far-labs"];
+// Fixture configs: the mechanics tests below must not churn whenever the real office
+// schedules in OFFICES change; only the "real office schedule" test reads the live config.
+const office: OfficeConfig = {
+  label: "Test office",
+  timezone: ZONE,
+  weekdays: [2, 4], // Tue, Thu
+  start: "10:30",
+  end: "18:00",
+};
+const singleDay: OfficeConfig = { ...office, weekdays: [3] }; // Wed
 
 function ms(iso: string): number {
   return DateTime.fromISO(iso, { zone: ZONE }).toMillis();
@@ -35,21 +43,21 @@ describe("generateSlots — basic shape", () => {
   const now = ms("2026-06-15T00:00"); // Monday, well clear of any DST transition
 
   test("only emits slots on the office's configured weekdays", () => {
-    const slots = generateSlots(mats, 90, [], now);
+    const slots = generateSlots(office, 90, [], now);
     expect(slots.length).toBeGreaterThan(0);
     for (const s of slots) {
-      expect(mats.weekdays).toContain(local(s).weekday); // Tue(2) / Thu(4)
+      expect(office.weekdays).toContain(local(s).weekday); // Tue(2) / Thu(4)
     }
   });
 
-  test("far-labs only opens on Wednesday", () => {
-    const slots = generateSlots(farLabs, 90, [], now);
+  test("a single-weekday office only opens on that day", () => {
+    const slots = generateSlots(singleDay, 90, [], now);
     expect(slots.length).toBeGreaterThan(0);
     for (const s of slots) expect(local(s).weekday).toBe(3);
   });
 
   test("every slot is within office hours and ends by closing time", () => {
-    const slots = generateSlots(mats, 90, [], now);
+    const slots = generateSlots(office, 90, [], now);
     for (const s of slots) {
       const start = local(s);
       const end = DateTime.fromMillis(s.endUtc, { zone: ZONE });
@@ -63,13 +71,13 @@ describe("generateSlots — basic shape", () => {
   test("offers 30-min-increment starts that fit before closing", () => {
     const date = "2026-06-16"; // a Tuesday fully inside the window
     // 10:30–18:00 on 30-min steps: 60m ends by 17:00 (14 starts), 90m by 16:30 (13), 120m by 16:00 (12)
-    expect(onLocalDate(generateSlots(mats, 60, [], now), date)).toHaveLength(14);
-    expect(onLocalDate(generateSlots(mats, 90, [], now), date)).toHaveLength(13);
-    expect(onLocalDate(generateSlots(mats, 120, [], now), date)).toHaveLength(12);
+    expect(onLocalDate(generateSlots(office, 60, [], now), date)).toHaveLength(14);
+    expect(onLocalDate(generateSlots(office, 90, [], now), date)).toHaveLength(13);
+    expect(onLocalDate(generateSlots(office, 120, [], now), date)).toHaveLength(12);
   });
 
   test("consecutive starts are 30 minutes apart", () => {
-    const day = onLocalDate(generateSlots(mats, 90, [], now), "2026-06-16");
+    const day = onLocalDate(generateSlots(office, 90, [], now), "2026-06-16");
     expect(day[1].startUtc - day[0].startUtc).toBe(30 * 60_000);
   });
 });
@@ -79,7 +87,7 @@ describe("generateSlots — busy intervals (lunch / days off)", () => {
 
   test("a busy lunch block removes the overlapping starts, not the adjacent ones", () => {
     const busy = [{ start: "2026-06-16T12:00:00-07:00", end: "2026-06-16T13:00:00-07:00" }];
-    const day = onLocalDate(generateSlots(mats, 90, busy, now), "2026-06-16");
+    const day = onLocalDate(generateSlots(office, 90, busy, now), "2026-06-16");
     // 13 starts minus the four 90-min starts overlapping 12:00–13:00 (11:00, 11:30, 12:00, 12:30)
     expect(day).toHaveLength(9);
     for (const s of day) {
@@ -92,14 +100,14 @@ describe("generateSlots — busy intervals (lunch / days off)", () => {
 
   test("an all-day busy event hides the whole day", () => {
     const busy = [{ start: "2026-06-16T00:00:00-07:00", end: "2026-06-17T00:00:00-07:00" }];
-    expect(onLocalDate(generateSlots(mats, 90, busy, now), "2026-06-16")).toHaveLength(0);
+    expect(onLocalDate(generateSlots(office, 90, busy, now), "2026-06-16")).toHaveLength(0);
   });
 });
 
 describe("generateSlots — min-notice and horizon", () => {
   test("excludes slots inside the min-notice window", () => {
     const now = ms("2026-06-16T09:00"); // Tuesday 9am; same-day slots are <12h away
-    const slots = generateSlots(mats, 90, [], now);
+    const slots = generateSlots(office, 90, [], now);
     expect(onLocalDate(slots, "2026-06-16")).toHaveLength(0);
     const from = now + 12 * 3_600_000;
     for (const s of slots) expect(s.startUtc).toBeGreaterThanOrEqual(from);
@@ -108,7 +116,7 @@ describe("generateSlots — min-notice and horizon", () => {
   test("excludes slots beyond the booking horizon", () => {
     const now = ms("2026-06-15T00:00");
     const to = now + 21 * 24 * 3_600_000;
-    for (const s of generateSlots(mats, 90, [], now)) {
+    for (const s of generateSlots(office, 90, [], now)) {
       expect(s.endUtc).toBeLessThanOrEqual(to);
     }
   });
@@ -116,7 +124,7 @@ describe("generateSlots — min-notice and horizon", () => {
   test("horizon containment: a slot whose tail crosses the horizon is dropped", () => {
     // now chosen so the horizon (now + 21 days) lands at 13:30 PT on an open Tuesday.
     const now = ms("2026-05-26T13:30");
-    const day = onLocalDate(generateSlots(mats, 90, [], now), "2026-06-16");
+    const day = onLocalDate(generateSlots(office, 90, [], now), "2026-06-16");
     // 90-min starts ending by 13:30: 10:30, 11:00, 11:30, 12:00 (12:30 would end 14:00, past the horizon)
     expect(day).toHaveLength(4);
     const lastEnd = DateTime.fromMillis(day[day.length - 1].endUtc, { zone: ZONE });
@@ -126,7 +134,7 @@ describe("generateSlots — min-notice and horizon", () => {
 
 describe("clipBusyToWindows — keeps the public endpoint from leaking the host calendar", () => {
   const now = ms("2026-06-15T00:00");
-  const windows = officeOpenWindows(mats, now);
+  const windows = officeOpenWindows(office, now);
 
   test("drops busy outside office hours/days", () => {
     const busy = [
@@ -147,8 +155,8 @@ describe("clipBusyToWindows — keeps the public endpoint from leaking the host 
   test("clipping doesn't change the generated slots", () => {
     const busy = [{ start: "2026-06-16T12:00:00-07:00", end: "2026-06-16T13:00:00-07:00" }];
     const clipped = clipBusyToWindows(busy, windows);
-    const fromRaw = generateSlots(mats, 90, busy, now).map((s) => s.startUtc);
-    const fromClipped = generateSlots(mats, 90, clipped, now).map((s) => s.startUtc);
+    const fromRaw = generateSlots(office, 90, busy, now).map((s) => s.startUtc);
+    const fromClipped = generateSlots(office, 90, clipped, now).map((s) => s.startUtc);
     expect(fromClipped).toEqual(fromRaw);
   });
 });
@@ -166,16 +174,66 @@ describe("quantizeBusyToGrid — hides exact event times without changing slots"
 
   test("doesn't change the generated slots", () => {
     const busy = [{ start: "2026-06-16T11:15:00-07:00", end: "2026-06-16T11:35:00-07:00" }];
-    const raw = generateSlots(mats, 90, busy, now).map((s) => s.startUtc);
-    const quantized = generateSlots(mats, 90, quantizeBusyToGrid(busy), now).map((s) => s.startUtc);
+    const raw = generateSlots(office, 90, busy, now).map((s) => s.startUtc);
+    const quantized = generateSlots(office, 90, quantizeBusyToGrid(busy), now).map((s) => s.startUtc);
     expect(quantized).toEqual(raw);
+  });
+});
+
+describe("schedule override", () => {
+  const now = ms("2026-06-15T00:00"); // Monday
+  const overridden: OfficeConfig = {
+    ...office,
+    weekdays: [4], // Thu once the override lapses
+    override: { until: "2026-06-18", weekdays: [2] }, // through Thu: Tue only
+  };
+
+  test("isOfficeOpenOn applies the override through its until date (inclusive), the base after", () => {
+    const day = (iso: string) => DateTime.fromISO(iso, { zone: ZONE });
+    expect(isOfficeOpenOn(overridden, day("2026-06-16"))).toBe(true); // Tue inside override
+    expect(isOfficeOpenOn(overridden, day("2026-06-18"))).toBe(false); // Thu on `until` itself: still overridden
+    expect(isOfficeOpenOn(overridden, day("2026-06-23"))).toBe(false); // Tue after: base weekdays
+    expect(isOfficeOpenOn(overridden, day("2026-06-25"))).toBe(true); // Thu after: base weekdays
+  });
+
+  test("generateSlots applies the override week and the base weekdays after it", () => {
+    const slots = generateSlots(overridden, 90, [], now);
+    expect(onLocalDate(slots, "2026-06-16").length).toBeGreaterThan(0); // Tue, override week
+    expect(onLocalDate(slots, "2026-06-18")).toHaveLength(0); // Thu, override week: closed
+    expect(onLocalDate(slots, "2026-06-23")).toHaveLength(0); // Tue after override: closed
+    expect(onLocalDate(slots, "2026-06-25").length).toBeGreaterThan(0); // Thu after override
+  });
+
+  test("officeOpenWindows applies the override the same way", () => {
+    const days = officeOpenWindows(overridden, now).map((w) =>
+      DateTime.fromMillis(w.startUtc, { zone: ZONE }).toISODate(),
+    );
+    expect(days).toContain("2026-06-16");
+    expect(days).not.toContain("2026-06-18");
+    expect(days).not.toContain("2026-06-23");
+    expect(days).toContain("2026-06-25");
+  });
+
+  // Pins the 2026-07 transition; delete together with the mats `override` once it has passed.
+  test("real mats schedule: Tue-only the week of 2026-07-06, Thu-only from the next", () => {
+    const slots = generateSlots(OFFICES.mats, 90, [], ms("2026-07-06T00:00"));
+    expect(onLocalDate(slots, "2026-07-07").length).toBeGreaterThan(0); // Tue this week
+    expect(onLocalDate(slots, "2026-07-09")).toHaveLength(0); // Thu this week: closed
+    expect(onLocalDate(slots, "2026-07-14")).toHaveLength(0); // Tue next week: closed
+    expect(onLocalDate(slots, "2026-07-16").length).toBeGreaterThan(0); // Thu next week
+  });
+
+  test("real far-labs schedule: Wednesdays", () => {
+    const slots = generateSlots(OFFICES["far-labs"], 90, [], ms("2026-07-06T00:00"));
+    expect(slots.length).toBeGreaterThan(0);
+    for (const s of slots) expect(local(s).weekday).toBe(3);
   });
 });
 
 describe("generateSlots — DST correctness", () => {
   test("spring-forward: wall-clock stays 10:30 while the UTC offset shifts", () => {
     const now = ms("2026-03-01T00:00"); // DST begins Sun 2026-03-08
-    const slots = generateSlots(mats, 90, [], now);
+    const slots = generateSlots(office, 90, [], now);
 
     const beforeDst = onLocalDate(slots, "2026-03-03")[0]; // Tue, still PST
     const afterDst = onLocalDate(slots, "2026-03-10")[0]; // Tue, now PDT
@@ -191,7 +249,7 @@ describe("generateSlots — DST correctness", () => {
 
   test("fall-back: wall-clock stays 10:30 while the UTC offset shifts", () => {
     const now = ms("2026-10-22T00:00"); // DST ends Sun 2026-11-01
-    const slots = generateSlots(mats, 90, [], now);
+    const slots = generateSlots(office, 90, [], now);
 
     const beforeStd = onLocalDate(slots, "2026-10-27")[0]; // Tue, still PDT
     const afterStd = onLocalDate(slots, "2026-11-03")[0]; // Tue, now PST

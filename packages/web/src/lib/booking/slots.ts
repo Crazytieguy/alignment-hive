@@ -1,5 +1,5 @@
 import { DateTime, Interval } from "luxon";
-import { HORIZON_DAYS, MIN_NOTICE_HOURS, type OfficeConfig } from "./offices";
+import { HORIZON_DAYS, MIN_NOTICE_HOURS, type OfficeConfig, isOfficeOpenOn } from "./offices";
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -72,7 +72,7 @@ export function generateSlots(
   const lastDay = DateTime.fromMillis(toUtc, { zone }).startOf("day");
 
   while (day <= lastDay) {
-    if (office.weekdays.includes(day.weekday)) {
+    if (isOfficeOpenOn(office, day)) {
       const dayEnd = day.set({ hour: endH, minute: endM, second: 0, millisecond: 0 });
       let slotStart = day.set({ hour: startH, minute: startM, second: 0, millisecond: 0 });
 
@@ -114,7 +114,7 @@ export function officeOpenWindows(
   let day = DateTime.fromMillis(fromUtc, { zone }).startOf("day");
   const lastDay = DateTime.fromMillis(toUtc, { zone }).startOf("day");
   while (day <= lastDay) {
-    if (office.weekdays.includes(day.weekday)) {
+    if (isOfficeOpenOn(office, day)) {
       const open = day.set({ hour: startH, minute: startM }).toUTC().toMillis();
       const close = day.set({ hour: endH, minute: endM }).toUTC().toMillis();
       const startUtc = Math.max(open, fromUtc);
