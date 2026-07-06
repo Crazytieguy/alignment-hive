@@ -204,10 +204,17 @@ pub struct KubernetesConfig {
     pub namespace: Option<String>,
 
     /// Path to the pod template YAML, relative to the project root. Required.
-    /// Template contract: first container is the workload; its image provides
-    /// `sh`, `tar`, and Python with `jupyter-server` + `ipykernel`; the pod
-    /// stays alive on its own (e.g. `command: ["sleep", "infinity"]`).
+    /// Template contract: the workload container (see `container-name`) has an
+    /// image providing `sh`, `tar`, and Python with `jupyter-server` +
+    /// `ipykernel`; the pod stays alive on its own (e.g. `command: ["sleep",
+    /// "infinity"]`).
     pub pod_template: PathBuf,
+
+    /// Name of the workload container in the template — the one that receives
+    /// env vars and the Jupyter token and runs the kernels. Default: the
+    /// template's FIRST container. Set this when the template lists sidecars
+    /// (logging, vault-agent, ...) before the workload.
+    pub container_name: Option<String>,
 
     /// Label that `start(priority=...)` sets on the pod. Default is Kueue's
     /// workload priority label; plain clusters can set this to any label their
@@ -216,8 +223,12 @@ pub struct KubernetesConfig {
     pub priority_label: String,
 
     /// Safety net applied as the pod's `activeDeadlineSeconds` when the
-    /// template doesn't set one (seconds). Kubernetes has no budget/billing —
-    /// this bounds forgotten pods instead. Set to 0 to disable.
+    /// template doesn't set one (seconds). Kubernetes is unmetered — no budget
+    /// applies — so this is the ONLY lifetime bound the plugin provides.
+    /// When it fires the pod is KILLED mid-run; anything not synced back is
+    /// lost. Set to 0 to disable (the template owns lifecycle). Pick a value
+    /// deliberately for your lab's usage patterns; the default (43200 = 12h)
+    /// is a fallback, not a recommendation.
     #[serde(default = "default_max_lifetime_secs")]
     pub max_lifetime_secs: u64,
 
@@ -555,8 +566,8 @@ impl Config {
 # Kubernetes runtime configuration (only needed when using
 # start(runtime="kubernetes") or default-runtime = "kubernetes").
 # Cluster specifics (GPU resources, tolerations, queue labels, volumes) live
-# in a pod template YAML that you own. Template contract: the first container
-# is the workload; its image provides sh, tar, and Python with jupyter-server
+# in a pod template YAML that you own. Template contract: the workload
+# container's image provides sh, tar, and Python with jupyter-server
 # + ipykernel; the pod keeps itself alive (e.g. command: ["sleep", "infinity"]).
 # [kubernetes]
 # Cleanup mode when the session ends: "terminate" or "disabled" only (pods
@@ -569,10 +580,18 @@ impl Config {
 # context = "my-cluster"
 # Namespace for pods (default: the context's default namespace).
 # namespace = "research"
+# Workload container in the template — receives env vars + the Jupyter token
+# and runs the kernels. Default: the template's FIRST container. Set when the
+# template lists sidecars before the workload.
+# container-name = "workload"
 # Label set by start(priority=...). Default: Kueue's workload priority label.
 # priority-label = "{default_priority_label}"
-# activeDeadlineSeconds applied when the template doesn't set one (0 disables).
-# Default: {default_max_lifetime_secs} (12h)
+# activeDeadlineSeconds applied when the template doesn't set one. Kubernetes
+# is unmetered (no budget applies), so this is the ONLY lifetime bound the
+# plugin provides: when it fires the pod is KILLED mid-run and anything not
+# synced back is lost. 0 disables it (the template owns lifecycle). Pick a
+# value for your lab's usage patterns — the default is a fallback, not a
+# recommendation. Default: {default_max_lifetime_secs} (12h)
 # max-lifetime-secs = {default_max_lifetime_secs}
 # Directory in the pod that files sync to and kernels run in.
 # Default: "{default_k8s_workdir}"

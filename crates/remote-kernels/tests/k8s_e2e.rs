@@ -291,3 +291,162 @@ pod-template = "pod-template.yaml"
     assert!(is_error(&result), "{text}");
     assert!(text.contains("not supported"), "{text}");
 }
+
+/// Sidecar-first template + `container-name`: injection, GPU display, the
+/// Jupyter launch, and tar-over-exec must all target the NAMED container, not
+/// the first one. Exec on a multi-container pod is rejected by the API server
+/// unless the container is explicit, so a working kernel is itself proof.
+#[tokio::test]
+#[ignore = "needs the kind cluster from tests/k8s/setup-kind.sh"]
+async fn k8s_container_name_targets_workload_not_sidecar() {
+    let dir = k8s_project("rk-multi");
+    // Sidecar deliberately FIRST: a naive "first container" pick would hit a
+    // busybox with no python/jupyter and no injected token.
+    std::fs::write(
+        dir.path().join("pod-template.yaml"),
+        r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: main
+spec:
+  restartPolicy: Never
+  containers:
+    - name: sidecar
+      image: busybox:1.36
+      command: ["sh", "-c", "while true; do sleep 3600; done"]
+      resources:
+        requests: { cpu: "50m", memory: 32Mi }
+        limits: { cpu: "100m", memory: 64Mi }
+    - name: workload
+      image: quay.io/jupyter/base-notebook:latest
+      command: ["sleep", "infinity"]
+      workingDir: /home/jovyan/work
+      resources:
+        requests: { cpu: "500m", memory: 512Mi, nvidia.com/gpu: "1" }
+        limits: { cpu: "2", memory: 2Gi, nvidia.com/gpu: "1" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("remote-kernels.toml"),
+        format!(
+            r#"
+default-runtime = "kubernetes"
+name = "rk-multi"
+
+[kubernetes]
+context = "{CONTEXT}"
+pod-template = "pod-template.yaml"
+container-name = "workload"
+workdir = "/home/jovyan/work"
+"#
+        ),
+    )
+    .unwrap();
+    let server = server_in(dir.path());
+
+    let result = server
+        .start(Parameters(remote_kernels::server::StartParams {
+            name: None,
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(true),
+        }))
+        .await
+        .expect("start protocol error");
+    let text = text_of(&result);
+    assert!(!is_error(&result), "start failed: {text}");
+    // GPU display reads the NAMED container (the sidecar has no GPU — a
+    // first-container read would say "no GPU requested").
+    assert!(text.contains("nvidia.com/gpu"), "{text}");
+
+    // The token env landed in the workload container only.
+    let workload_env = kubectl(&[
+        "get",
+        "pod",
+        "rk-multi-main",
+        "-n",
+        "default",
+        "-o",
+        r"jsonpath={.spec.containers[?(@.name=='workload')].env[*].name}",
+    ]);
+    assert!(
+        workload_env.contains("REMOTE_KERNELS_JUPYTER_TOKEN"),
+        "{workload_env}"
+    );
+    let sidecar_env = kubectl(&[
+        "get",
+        "pod",
+        "rk-multi-main",
+        "-n",
+        "default",
+        "-o",
+        r"jsonpath={.spec.containers[?(@.name=='sidecar')].env[*].name}",
+    ]);
+    assert!(
+        !sidecar_env.contains("REMOTE_KERNELS_JUPYTER_TOKEN"),
+        "{sidecar_env}"
+    );
+
+    // A working kernel proves the exec-launched Jupyter ran in the workload
+    // container with the injected token (the sidecar has neither).
+    let result = server
+        .create_kernel(Parameters(remote_kernels::server::CreateKernelParams {
+            name: Some("multi".to_string()),
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    let ktext = text_of(&result);
+    assert!(!is_error(&result), "create_kernel failed: {ktext}");
+    let kernel_id = ktext.split_whitespace().nth(2).unwrap().to_string();
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id,
+            code: "import os; print(6 * 7, len(os.environ['REMOTE_KERNELS_JUPYTER_TOKEN']))"
+                .to_string(),
+            timeout: Some(60),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let out = text_of(&result);
+    assert!(!is_error(&result), "{out}");
+    assert!(out.contains("42 64"), "{out}");
+
+    // tar-over-exec sync targets the workload container's filesystem.
+    std::fs::write(dir.path().join("multi.txt"), "named container").unwrap();
+    let result = server
+        .sync(Parameters(remote_kernels::server::SyncParams {
+            include: None,
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "sync failed: {}", text_of(&result));
+    let synced = kubectl(&[
+        "exec",
+        "rk-multi-main",
+        "-n",
+        "default",
+        "-c",
+        "workload",
+        "--",
+        "cat",
+        "/home/jovyan/work/multi.txt",
+    ]);
+    assert_eq!(synced, "named container");
+
+    let result = server
+        .terminate(Parameters(remote_kernels::server::InstanceParams {
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+}

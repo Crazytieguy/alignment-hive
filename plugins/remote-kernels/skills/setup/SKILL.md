@@ -103,8 +103,22 @@ area below** and edit the file based on their answers.
 - **Kubernetes pod template** — if using k8s, the lab owns a pod YAML
   (resources, tolerations, volumes, Kueue `queue-name` label). Point
   `[kubernetes] pod-template` at it. `start(priority="high")` sets the Kueue
-  workload-priority label. Docs: https://kueue.sigs.k8s.io/docs/tasks/run/plain_pods/
+  workload-priority label. If the template has multiple containers, set
+  `container-name` to the workload container (the one that gets env vars +
+  the Jupyter token and runs kernels) — otherwise the FIRST container is
+  assumed. Docs: https://kueue.sigs.k8s.io/docs/tasks/run/plain_pods/
   and https://kubernetes.io/docs/concepts/workloads/pods/
+- **Kubernetes pod lifetime** — ALWAYS ask explicitly; do not assume. The
+  user knows their lab's usage patterns (interactive sessions vs. overnight
+  runs); we don't. Kubernetes is unmetered — no budget applies — so
+  `max-lifetime-secs` is the only lifetime bound the plugin provides: it
+  becomes the pod's `activeDeadlineSeconds` (when the template doesn't set
+  one), and when it fires the pod is KILLED mid-run — anything not synced
+  back is lost (tie this to the data-persistence discussion). `0` disables
+  it, leaving lifecycle to the template — a legitimate choice when the lab's
+  template owns policy, but then nothing bounds forgotten pods. Write the
+  chosen value into the config even if it matches the fallback (43200 = 12h)
+  so the choice is explicit.
 - **Data persistence** — IMPORTANT: discuss where remotely-generated data
   should live, and make sure that reliably happens; vast and Kubernetes have
   weak-or-no stop/resume, so anything not brought back is lost at terminate.

@@ -1,8 +1,9 @@
 //! Kubernetes backend: pods created from a lab-owned template.
 //!
 //! Cluster specifics (GPU resources, tolerations, queue labels, volumes) live
-//! in the template — the plugin only injects identity labels, the Jupyter
-//! token, an `activeDeadlineSeconds` safety net, and an optional priority
+//! in the template — the plugin only injects identity labels, env + the
+//! Jupyter token (into the `container-name` workload container, default the
+//! first), an `activeDeadlineSeconds` safety net, and an optional priority
 //! label (Kueue's workload priority by default, so `start(priority="high")`
 //! maps to the lab's queue without any Job wrapper).
 //!
@@ -39,7 +40,10 @@ pub struct KubernetesRuntime {
     project_dir: PathBuf,
     /// Pod name prefix (from the top-level `name` config).
     name_prefix: String,
-    client: OnceCell<kube::Client>,
+    /// Client plus the resolved namespace (explicit config key, else the
+    /// kubeconfig context's namespace, else "default" — resolved once because
+    /// the context default comes from the loaded kubeconfig).
+    client: OnceCell<(kube::Client, String)>,
 }
 
 impl KubernetesRuntime {
@@ -52,9 +56,8 @@ impl KubernetesRuntime {
         }
     }
 
-    async fn client(&self) -> anyhow::Result<kube::Client> {
-        let client = self
-            .client
+    async fn client_ns(&self) -> anyhow::Result<&(kube::Client, String)> {
+        self.client
             .get_or_try_init(|| async {
                 let options = kube::config::KubeConfigOptions {
                     context: self.config.context.clone(),
@@ -66,22 +69,20 @@ impl KubernetesRuntime {
                         self.config.context
                     )
                 })?;
-                kube::Client::try_from(kube_config)
-                    .map_err(|e| anyhow::anyhow!("Failed to build Kubernetes client: {e}"))
+                let namespace = resolve_namespace(
+                    self.config.namespace.as_deref(),
+                    &kube_config.default_namespace,
+                );
+                let client = kube::Client::try_from(kube_config)
+                    .map_err(|e| anyhow::anyhow!("Failed to build Kubernetes client: {e}"))?;
+                Ok((client, namespace))
             })
-            .await?;
-        Ok(client.clone())
-    }
-
-    fn namespace(&self) -> String {
-        self.config
-            .namespace
-            .clone()
-            .unwrap_or_else(|| "default".to_string())
+            .await
     }
 
     async fn pods(&self) -> anyhow::Result<Api<Pod>> {
-        Ok(Api::namespaced(self.client().await?, &self.namespace()))
+        let (client, namespace) = self.client_ns().await?;
+        Ok(Api::namespaced(client.clone(), namespace))
     }
 
     /// Load the lab template and specialize it for one instance.
@@ -124,11 +125,26 @@ impl KubernetesRuntime {
             }
         }
 
-        // Inject env (user env + the Jupyter token) into the first container —
-        // the template contract designates it as the workload container.
+        // Inject env (user env + the Jupyter token) into the workload
+        // container: `container-name` from the config when set, else the
+        // template's first container.
+        let container_name = self.config.container_name.as_deref();
+        let idx = workload_container_idx(&spec.containers, container_name).ok_or_else(|| {
+            match container_name {
+                Some(name) => anyhow::anyhow!(
+                    "Pod template has no container named {name:?} (available: {})",
+                    spec.containers
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => anyhow::anyhow!("Pod template has no containers"),
+            }
+        })?;
         let container = spec
             .containers
-            .first_mut()
+            .get_mut(idx)
             .ok_or_else(|| anyhow::anyhow!("Pod template has no containers"))?;
         let env = container.env.get_or_insert_with(Vec::new);
         for (key, value) in &req.env {
@@ -148,6 +164,54 @@ impl KubernetesRuntime {
     }
 }
 
+/// Namespace precedence: explicit `[kubernetes] namespace` key, else the
+/// kubeconfig context's namespace (kube-rs resolves that to "default" when the
+/// context doesn't set one).
+fn resolve_namespace(explicit: Option<&str>, context_default: &str) -> String {
+    explicit.unwrap_or(context_default).to_string()
+}
+
+/// The single definition of "the workload container": `container-name` from
+/// the config when set, else the template's first container. Used for
+/// env/token injection, GPU display, and every exec so they can't drift.
+fn workload_container_idx(
+    containers: &[k8s_openapi::api::core::v1::Container],
+    name: Option<&str>,
+) -> Option<usize> {
+    match name {
+        Some(n) => containers.iter().position(|c| c.name == n),
+        None => (!containers.is_empty()).then_some(0),
+    }
+}
+
+/// Resolve the workload container's NAME from a live pod. Exec on a
+/// multi-container pod requires an explicit container (the API server rejects
+/// ambiguous exec), so connections always name their target.
+fn workload_container_name(pod: &Pod, configured: Option<&str>) -> anyhow::Result<String> {
+    let containers = pod
+        .spec
+        .as_ref()
+        .map(|s| s.containers.as_slice())
+        .unwrap_or_default();
+    let idx = workload_container_idx(containers, configured).ok_or_else(|| match configured {
+        Some(name) => anyhow::anyhow!(
+            "Pod {:?} has no container named {name:?} (available: {}) — \
+             update container-name in the [kubernetes] config section.",
+            pod.metadata.name.as_deref().unwrap_or("?"),
+            containers
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => anyhow::anyhow!(
+            "Pod {:?} has no containers",
+            pod.metadata.name.as_deref().unwrap_or("?")
+        ),
+    })?;
+    Ok(containers[idx].name.clone())
+}
+
 /// DNS-1123-safe pod name for an instance.
 fn pod_name(prefix: &str, instance: &str) -> String {
     let sanitized: String = format!("{prefix}-{instance}")
@@ -163,11 +227,14 @@ fn pod_name(prefix: &str, instance: &str) -> String {
     sanitized.trim_matches('-').chars().take(63).collect()
 }
 
-fn handle_for(pod: &Pod) -> InstanceHandle {
+fn handle_for(pod: &Pod, container_name: Option<&str>) -> InstanceHandle {
     let gpu_name = pod
         .spec
         .as_ref()
-        .and_then(|s| s.containers.first())
+        .and_then(|s| {
+            let idx = workload_container_idx(&s.containers, container_name)?;
+            s.containers.get(idx)
+        })
         .and_then(|c| c.resources.as_ref())
         .and_then(|r| r.limits.as_ref())
         .and_then(|l| l.get("nvidia.com/gpu"))
@@ -220,24 +287,28 @@ impl Runtime for KubernetesRuntime {
             );
         }
         let pod = self.build_pod(req)?;
-        let pods = self.pods().await?;
+        let (client, namespace) = self.client_ns().await?;
+        let namespace = namespace.clone();
+        let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
         let created = pods
             .create(&PostParams::default(), &pod)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to create pod {:?} in namespace {:?}: {e}",
+                    "Failed to create pod {:?} in namespace {namespace:?}: {e}",
                     pod.metadata.name.as_deref().unwrap_or("?"),
-                    self.namespace()
                 )
             })?;
-        tracing::info!(pod = %created.metadata.name.as_deref().unwrap_or("?"), "Pod created");
-        Ok(handle_for(&created))
+        tracing::info!(pod = %created.metadata.name.as_deref().unwrap_or("?"), namespace = %namespace, "Pod created");
+        Ok(handle_for(&created, self.config.container_name.as_deref()))
     }
 
     async fn get_handle(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
         let pods = self.pods().await?;
-        Ok(handle_for(&pods.get(external_id).await?))
+        Ok(handle_for(
+            &pods.get(external_id).await?,
+            self.config.container_name.as_deref(),
+        ))
     }
 
     async fn describe(&self, external_id: &str) -> anyhow::Result<InstanceStatus> {
@@ -317,9 +388,16 @@ impl Runtime for KubernetesRuntime {
     ) -> anyhow::Result<K8sConnection> {
         let pods = self.pods().await?;
 
+        // Exec on a multi-container pod must name its target, so resolve the
+        // workload container from the live pod (also catches a stale
+        // container-name early, with the available names in the error).
+        let pod = pods.get(external_id).await?;
+        let container = workload_container_name(&pod, self.config.container_name.as_deref())?;
+
         let conn = K8sConnection::new(
             pods,
             external_id.to_string(),
+            container,
             self.config.workdir.clone(),
             self.config.jupyter_command.clone(),
             ctx.jupyter_token.clone(),
@@ -332,6 +410,8 @@ impl Runtime for KubernetesRuntime {
 pub struct K8sConnection {
     pods: Api<Pod>,
     pod_name: String,
+    /// Workload container name — every exec targets it explicitly.
+    container: String,
     workdir: String,
     jupyter: JupyterEndpoint,
     /// Local listener task forwarding to the pod's Jupyter port. Aborted on
@@ -353,6 +433,7 @@ impl K8sConnection {
     async fn new(
         pods: Api<Pod>,
         pod_name: String,
+        container: String,
         workdir: String,
         jupyter_command: String,
         token: String,
@@ -366,7 +447,14 @@ impl K8sConnection {
         // the pod env (injected at provision).
         let launch =
             crate::ssh_exec::jupyter_launch_script(&workdir, &jupyter_command, JUPYTER_PORT);
-        exec_capture(&pods, &pod_name, &launch, Duration::from_secs(60)).await?;
+        exec_capture(
+            &pods,
+            &pod_name,
+            &container,
+            &launch,
+            Duration::from_secs(60),
+        )
+        .await?;
 
         // Local listener: each accepted TCP connection gets its own fresh
         // API-server port-forward. Long-lived shared forwards drop under load
@@ -408,6 +496,7 @@ impl K8sConnection {
         Ok(Self {
             pods,
             pod_name,
+            container,
             workdir,
             jupyter: JupyterEndpoint {
                 http_base: format!("http://127.0.0.1:{local_port}"),
@@ -434,6 +523,7 @@ async fn drain(stream: &mut Option<impl tokio::io::AsyncRead + Unpin>) -> String
 async fn exec_argv_capture<I, S>(
     pods: &Api<Pod>,
     pod_name: &str,
+    container: &str,
     argv: I,
     timeout: Duration,
 ) -> anyhow::Result<String>
@@ -442,7 +532,10 @@ where
     S: Into<String>,
 {
     let label = format!("{argv:?}");
-    let ap = kube::api::AttachParams::default().stdout(true).stderr(true);
+    let ap = kube::api::AttachParams::default()
+        .container(container)
+        .stdout(true)
+        .stderr(true);
     let run = async {
         let mut process = pods
             .exec(pod_name, argv, &ap)
@@ -494,10 +587,11 @@ where
 async fn exec_capture(
     pods: &Api<Pod>,
     pod_name: &str,
+    container: &str,
     command: &str,
     timeout: Duration,
 ) -> anyhow::Result<String> {
-    exec_argv_capture(pods, pod_name, ["sh", "-c", command], timeout).await
+    exec_argv_capture(pods, pod_name, container, ["sh", "-c", command], timeout).await
 }
 
 impl Connection for K8sConnection {
@@ -506,7 +600,14 @@ impl Connection for K8sConnection {
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
-        exec_capture(&self.pods, &self.pod_name, command, timeout).await
+        exec_capture(
+            &self.pods,
+            &self.pod_name,
+            &self.container,
+            command,
+            timeout,
+        )
+        .await
     }
 
     async fn wait_reachable(&self) -> anyhow::Result<()> {
@@ -543,6 +644,7 @@ impl Connection for K8sConnection {
         exec_argv_capture(
             &self.pods,
             &self.pod_name,
+            &self.container,
             ["mkdir", "-p", &self.workdir],
             Duration::from_secs(30),
         )
@@ -558,6 +660,7 @@ impl Connection for K8sConnection {
         let mut tar_out = local_tar.stdout.take().expect("piped stdout");
 
         let ap = kube::api::AttachParams::default()
+            .container(&self.container)
             .stdin(true)
             .stdout(true)
             .stderr(true);
@@ -633,7 +736,10 @@ impl Connection for K8sConnection {
         };
 
         // argv form: paths are never shell-interpreted.
-        let ap = kube::api::AttachParams::default().stdout(true).stderr(true);
+        let ap = kube::api::AttachParams::default()
+            .container(&self.container)
+            .stdout(true)
+            .stderr(true);
         let staging = tempfile::tempdir()?;
         let mut local_tar = tokio::process::Command::new("tar")
             .args(["xmf", "-", "-C"])
@@ -795,6 +901,144 @@ spec:
             env.iter().any(|e| e.name == "REMOTE_KERNELS_JUPYTER_TOKEN"
                 && e.value.as_deref() == Some("tok123"))
         );
+    }
+
+    #[test]
+    fn resolve_namespace_precedence() {
+        // Explicit config key wins over the context's namespace.
+        assert_eq!(resolve_namespace(Some("research"), "team-ns"), "research");
+        // No explicit key: the context's namespace (kube-rs already folds a
+        // namespace-less context to "default").
+        assert_eq!(resolve_namespace(None, "team-ns"), "team-ns");
+        assert_eq!(resolve_namespace(None, "default"), "default");
+    }
+
+    /// The mechanism behind the context default: kube-rs resolves the selected
+    /// context's `namespace` into `Config::default_namespace` ("default" when
+    /// the context doesn't set one). Validated here against an in-memory
+    /// kubeconfig so the assumption can't rot silently.
+    #[tokio::test]
+    async fn kube_config_carries_context_namespace() {
+        let kubeconfig: kube::config::Kubeconfig = serde_yaml::from_str(
+            r"
+apiVersion: v1
+kind: Config
+clusters:
+  - name: c
+    cluster: { server: 'https://127.0.0.1:6443' }
+users:
+  - name: u
+    user: {}
+contexts:
+  - name: with-ns
+    context: { cluster: c, user: u, namespace: team-ns }
+  - name: without-ns
+    context: { cluster: c, user: u }
+current-context: with-ns
+",
+        )
+        .unwrap();
+
+        let opts = |ctx: &str| kube::config::KubeConfigOptions {
+            context: Some(ctx.to_string()),
+            ..Default::default()
+        };
+        let with_ns =
+            kube::Config::from_custom_kubeconfig(kubeconfig.clone(), &opts("with-ns")).await;
+        assert_eq!(with_ns.unwrap().default_namespace, "team-ns");
+        let without_ns =
+            kube::Config::from_custom_kubeconfig(kubeconfig, &opts("without-ns")).await;
+        assert_eq!(without_ns.unwrap().default_namespace, "default");
+    }
+
+    const MULTI_CONTAINER_TEMPLATE: &str = r"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: sidecar
+      image: fluentd:latest
+    - name: workload
+      image: python:3.12-slim
+      command: ['sleep', 'infinity']
+";
+
+    fn build_with(config_toml: &str, template: &str) -> anyhow::Result<Pod> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pod.yaml"), template).unwrap();
+        let config: KubernetesConfig = toml::from_str(config_toml).unwrap();
+        let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
+        rt.build_pod(&ProvisionRequest {
+            name: "main".to_string(),
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            cleanup: crate::config::Cleanup::Terminate,
+            env: std::collections::HashMap::new(),
+            ssh_public_key: String::new(),
+            jupyter_token: "tok".to_string(),
+        })
+    }
+
+    #[test]
+    fn container_name_selects_injection_target() {
+        let pod = build_with(
+            r#"pod-template = "pod.yaml"
+container-name = "workload""#,
+            MULTI_CONTAINER_TEMPLATE,
+        )
+        .unwrap();
+        let containers = pod.spec.unwrap().containers;
+        // Only the named container receives env; the sidecar is untouched.
+        assert!(containers[0].env.is_none());
+        let env = containers[1].env.as_ref().unwrap();
+        assert!(env.iter().any(|e| e.name == "REMOTE_KERNELS_JUPYTER_TOKEN"));
+    }
+
+    #[test]
+    fn container_name_defaults_to_first() {
+        let pod = build_with(r#"pod-template = "pod.yaml""#, MULTI_CONTAINER_TEMPLATE).unwrap();
+        let containers = pod.spec.unwrap().containers;
+        assert!(containers[0].env.is_some()); // sidecar-first template: this is
+        assert!(containers[1].env.is_none()); // exactly why container-name exists
+    }
+
+    #[test]
+    fn workload_container_name_matches_injection_target() {
+        // The exec target must resolve exactly like the injection target —
+        // same helper, asserted here against a built pod.
+        let pod = build_with(
+            r#"pod-template = "pod.yaml"
+container-name = "workload""#,
+            MULTI_CONTAINER_TEMPLATE,
+        )
+        .unwrap();
+        assert_eq!(
+            workload_container_name(&pod, Some("workload")).unwrap(),
+            "workload"
+        );
+        // Unset config: first container, by name.
+        assert_eq!(workload_container_name(&pod, None).unwrap(), "sidecar");
+        // Stale/wrong name: actionable error listing what exists.
+        let err = workload_container_name(&pod, Some("gone"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sidecar, workload"), "{err}");
+        assert!(err.contains("container-name"), "{err}");
+    }
+
+    #[test]
+    fn container_name_not_found_lists_available() {
+        let err = build_with(
+            r#"pod-template = "pod.yaml"
+container-name = "gpu-box""#,
+            MULTI_CONTAINER_TEMPLATE,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("gpu-box"), "{err}");
+        assert!(err.contains("sidecar, workload"), "{err}");
     }
 
     #[test]
