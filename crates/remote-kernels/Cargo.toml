@@ -40,6 +40,7 @@ kube = { version = "4.0.0", features = ["client", "runtime", "ws"] }
 k8s-openapi = { version = "0.28.0", features = ["v1_32"] }
 serde_yaml = "0.9.34"
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+serde-inline-default = "1.0.1"
 
 [dev-dependencies]
 dotenvy = "0.15.7"

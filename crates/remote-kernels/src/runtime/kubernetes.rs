@@ -301,7 +301,24 @@ impl Runtime for KubernetesRuntime {
                 )
             })?;
         tracing::info!(pod = %created.metadata.name.as_deref().unwrap_or("?"), namespace = %namespace, "Pod created");
-        Ok(handle_for(&created, self.config.container_name.as_deref()))
+        let mut handle = handle_for(&created, self.config.container_name.as_deref());
+        // Kubernetes has no meter, no watchdog, and (here) no deadline — say
+        // so at start() rather than letting the pod outlive a crashed session
+        // silently. max-lifetime-secs = 0 is a legitimate template-owns-
+        // lifecycle choice; the note is for when the template doesn't either.
+        if created
+            .spec
+            .as_ref()
+            .is_none_or(|s| s.active_deadline_seconds.is_none())
+        {
+            handle.note = Some(
+                "This pod has no lifetime bound: max-lifetime-secs is 0 (disabled) and the \
+                 pod template sets no activeDeadlineSeconds. If this session dies without \
+                 cleaning up, the pod runs until deleted by hand."
+                    .to_string(),
+            );
+        }
+        Ok(handle)
     }
 
     async fn get_handle(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
@@ -719,13 +736,7 @@ impl Connection for K8sConnection {
 
     /// tar-over-exec download of one file or directory.
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        // Resolve relative paths against the workdir, like the SSH runtimes'
-        // rsync against the remote home/workdir.
-        let full = if remote_path.starts_with('/') {
-            remote_path.trim_end_matches('/').to_string()
-        } else {
-            format!("{}/{}", self.workdir, remote_path.trim_end_matches('/'))
-        };
+        let full = crate::sync::resolve_remote_path(&self.workdir, remote_path);
         let (parent, base) = match full.rsplit_once('/') {
             Some((p, b)) if !p.is_empty() && !b.is_empty() => (p.to_string(), b.to_string()),
             Some(("", b)) if !b.is_empty() => ("/".to_string(), b.to_string()),
@@ -870,7 +881,10 @@ spec:
         )
         .unwrap();
 
-        let config: KubernetesConfig = toml::from_str(r#"pod-template = "pod.yaml""#).unwrap();
+        // max-lifetime-secs ships disabled (0); set it explicitly to test
+        // the injection path.
+        let config: KubernetesConfig =
+            toml::from_str("pod-template = \"pod.yaml\"\nmax-lifetime-secs = 43200").unwrap();
         let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
         let req = ProvisionRequest {
             name: "main".to_string(),
@@ -883,6 +897,16 @@ spec:
             jupyter_token: "tok123".to_string(),
             cleanup: crate::config::Cleanup::Terminate,
         };
+
+        // The default config (max-lifetime-secs = 0) must NOT inject a
+        // deadline — the lifetime bound is opt-in.
+        let default_rt = KubernetesRuntime::new(
+            toml::from_str(r#"pod-template = "pod.yaml""#).unwrap(),
+            dir.path().to_path_buf(),
+            "rk".to_string(),
+        );
+        let default_pod = default_rt.build_pod(&req).unwrap();
+        assert_eq!(default_pod.spec.unwrap().active_deadline_seconds, None);
 
         let pod = rt.build_pod(&req).unwrap();
         assert_eq!(pod.metadata.name.as_deref(), Some("rk-main"));

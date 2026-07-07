@@ -2,21 +2,23 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde_inline_default::serde_inline_default;
 
+#[serde_inline_default]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     /// Which runtime `start()` uses when none is specified.
-    #[serde(default = "default_runtime")]
+    #[serde_inline_default("runpod".to_string())]
     pub default_runtime: String,
 
-    /// GPU types to try, in order of preference (runpod runtime).
-    #[serde(default = "default_gpu_type_ids")]
-    pub gpu_type_ids: Vec<String>,
+    /// DEPRECATED: use `[runpod] gpu-type-ids`. Kept as a fallback for
+    /// existing configs.
+    pub gpu_type_ids: Option<Vec<String>>,
 
-    /// Container image to run on the pod.
-    #[serde(default = "default_image_name")]
-    pub image_name: String,
+    /// DEPRECATED: use `[runpod] image-name`. Kept as a fallback for
+    /// existing configs.
+    pub image_name: Option<String>,
 
     /// DEPRECATED: global cleanup mode, kept as a fallback for existing
     /// configs. Use the per-runtime `cleanup` keys instead ("stop" preserves
@@ -24,8 +26,8 @@ pub struct Config {
     /// cleanup). Resolution: `[<runtime>] cleanup` > this key > "terminate".
     pub cleanup: Option<Cleanup>,
 
-    /// Custom name prefix for pods.
-    #[serde(default = "default_name")]
+    /// Custom name prefix for machines.
+    #[serde_inline_default("remote-kernels".to_string())]
     pub name: String,
 
     /// Per-session budget cap in dollars.
@@ -35,36 +37,36 @@ pub struct Config {
     /// machine that no session ever reaches self-cleans this long after
     /// machine start. Too low and slow image pulls get killed mid-provision;
     /// too high and a machine orphaned by a crashed server bills longer.
-    #[serde(default = "default_orphan_halt_mins")]
+    #[serde_inline_default(45)]
     pub orphan_halt_mins: u64,
 
     /// On-machine watchdog staleness threshold in seconds: how long after
     /// the supervising server stops heartbeating does the machine clean
     /// itself up. Lower saves money when a session dies; higher survives
     /// longer network blips without killing a healthy machine.
-    #[serde(default = "default_watchdog_stale_secs")]
+    #[serde_inline_default(300)]
     pub watchdog_stale_secs: u64,
 
-    /// Environment variable names to forward from the local environment to the pod.
+    /// Environment variable names to forward from the local environment to the machine.
     #[serde(default)]
     pub inherit_env: Vec<String>,
 
-    /// Path to a dotenv file whose variables should be loaded onto the pod.
+    /// Path to a dotenv file whose variables should be loaded onto the machine.
     pub env_file: Option<PathBuf>,
 
-    /// Extra environment variables to set on the pod.
+    /// Extra environment variables to set on the machine.
     #[serde(default)]
     pub env: HashMap<String, String>,
 
     /// Directory for notebook files. Defaults to `remote-kernels/` at project root.
-    #[serde(default = "default_notebook_dir")]
+    #[serde_inline_default(PathBuf::from("remote-kernels"))]
     pub notebook_dir: PathBuf,
 
     /// Extra paths to include when syncing, even if gitignored.
     #[serde(default)]
     pub sync_include: Vec<String>,
 
-    /// Commands to run in the pod startup script (after services start).
+    /// Commands to run on the machine after startup (any runtime).
     #[serde(default)]
     pub startup_commands: Vec<String>,
 
@@ -84,6 +86,7 @@ pub struct Config {
 /// vast.ai-specific configuration. Known fields are typed; `[vast.query]`
 /// passes through to the offer search, and unknown `[vast]` keys pass through
 /// to the instance-creation API body.
+#[serde_inline_default]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct VastConfig {
@@ -94,18 +97,20 @@ pub struct VastConfig {
     pub cleanup: Option<Cleanup>,
 
     /// GPU names to search for (vast naming, e.g. "RTX 3090").
-    #[serde(default = "default_vast_gpu_names")]
+    #[serde_inline_default(vec!["RTX 3090".to_string()])]
     pub gpu_name: Vec<String>,
 
     /// Docker image (containers) or VM image (vm = true; must be a
     /// `vastai/kvm:*` image, e.g. "`vastai/kvm:ubuntu_terminal`" — the
     /// runtime registry-qualifies it to `docker.io/...`, without which vast
     /// silently creates a container instead of a VM).
-    #[serde(default = "default_vast_image")]
+    /// The default is vast's official base image (SSH + Jupyter tooling);
+    /// its tag macro resolves server-side to the recommended CUDA build.
+    #[serde_inline_default(DEFAULT_VAST_IMAGE.to_string())]
     pub image: String,
 
     /// Disk size in GB.
-    #[serde(default = "default_vast_disk_gb")]
+    #[serde_inline_default(40.0)]
     pub disk_gb: f64,
 
     /// Create a KVM virtual machine instead of a container. Required for
@@ -126,16 +131,16 @@ pub struct VastConfig {
     pub onstart: Vec<String>,
 
     /// Directory on the machine that files sync to and kernels run in.
-    #[serde(default = "default_vast_workdir")]
+    #[serde_inline_default("/workspace".to_string())]
     pub workdir: String,
 
     /// SSH login user. Containers use root; some VM images use a different
     /// default user.
-    #[serde(default = "default_vast_ssh_user")]
+    #[serde_inline_default("root".to_string())]
     pub ssh_user: String,
 
     /// Command that launches Jupyter on the machine.
-    #[serde(default = "default_jupyter_command")]
+    #[serde_inline_default(DEFAULT_JUPYTER_COMMAND.to_string())]
     pub jupyter_command: String,
 
     /// Give up on an instance still provisioning after this many minutes and
@@ -146,16 +151,16 @@ pub struct VastConfig {
     /// How long `open()` waits for the onstart script to finish before
     /// launching Jupyter anyway (minutes). Raise it when onstart lines
     /// install heavy tooling (conda envs, docker images).
-    #[serde(default = "default_vast_onstart_timeout_mins")]
+    #[serde_inline_default(15)]
     pub onstart_timeout_mins: u64,
 
     /// Offers fetched per search (cheapest first).
-    #[serde(default = "default_vast_search_limit")]
+    #[serde_inline_default(10)]
     pub search_limit: u32,
 
     /// Offers attempted per auto-selected `start()` before giving up (an
     /// offer can be rented out between search and accept).
-    #[serde(default = "default_vast_attempt_limit")]
+    #[serde_inline_default(3)]
     pub attempt_limit: u32,
 
     /// Extra host-picking criteria surfaced to Claude by
@@ -188,45 +193,20 @@ impl VastConfig {
         let mins = self.provision_timeout_mins.unwrap_or(if self.vm {
             VAST_VM_PROVISION_TIMEOUT_MINS
         } else {
-            default_provision_timeout_mins()
+            DEFAULT_PROVISION_TIMEOUT_MINS
         });
         std::time::Duration::from_secs(mins.saturating_mul(60))
     }
 }
 
-fn default_vast_gpu_names() -> Vec<String> {
-    vec!["RTX 3090".to_string()]
-}
-
-fn default_vast_image() -> String {
-    // vast's official base image; the tag macro resolves server-side to the
-    // recommended CUDA build. Includes SSH + Jupyter tooling.
-    "vastai/base-image:@vastai-automatic-tag".to_string()
-}
-
-fn default_vast_disk_gb() -> f64 {
-    40.0
-}
-
-fn default_vast_workdir() -> String {
-    "/workspace".to_string()
-}
-
-fn default_vast_search_limit() -> u32 {
-    10
-}
-
-fn default_vast_attempt_limit() -> u32 {
-    3
-}
-
-fn default_vast_ssh_user() -> String {
-    "root".to_string()
-}
+/// vast's official base image (SSH + Jupyter tooling); the tag macro
+/// resolves server-side to the recommended CUDA build.
+pub(crate) const DEFAULT_VAST_IMAGE: &str = "vastai/base-image:@vastai-automatic-tag";
 
 /// Kubernetes-specific configuration. Cluster-specific details (GPU resources,
 /// tolerations, queue labels, volumes) live in the lab-owned pod template —
 /// this section only points at it and sets the plugin-level knobs.
+#[serde_inline_default]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct KubernetesConfig {
@@ -257,47 +237,34 @@ pub struct KubernetesConfig {
     /// Label that `start(priority=...)` sets on the pod. Default is Kueue's
     /// workload priority label; plain clusters can set this to any label their
     /// tooling reads, or use a `priorityClassName` in the template instead.
-    #[serde(default = "default_priority_label")]
+    #[serde_inline_default("kueue.x-k8s.io/priority-class".to_string())]
     pub priority_label: String,
 
-    /// Safety net applied as the pod's `activeDeadlineSeconds` when the
-    /// template doesn't set one (seconds). Kubernetes is unmetered — no budget
-    /// applies — so this is the ONLY lifetime bound the plugin provides.
-    /// When it fires the pod is KILLED mid-run; anything not synced back is
-    /// lost. Set to 0 to disable (the template owns lifecycle). Pick a value
-    /// deliberately for your lab's usage patterns; the default (43200 = 12h)
-    /// is a fallback, not a recommendation.
-    #[serde(default = "default_max_lifetime_secs")]
+    /// Maximum pod lifetime in seconds, applied as the pod's
+    /// `activeDeadlineSeconds` when the template doesn't set one. Kubernetes
+    /// is unmetered — no budget applies — so this is the ONLY lifetime bound
+    /// the plugin provides. When it fires the pod is KILLED mid-run; anything
+    /// not synced back is lost. Disabled (0) by default: the template owns
+    /// lifecycle. Set a value to bound forgotten pods, sized to the lab's
+    /// longest legitimate runs.
+    #[serde_inline_default(0)]
     pub max_lifetime_secs: u64,
 
     /// Directory in the pod that files sync to and kernels run in.
-    #[serde(default = "default_k8s_workdir")]
+    #[serde_inline_default("/workspace".to_string())]
     pub workdir: String,
 
     /// Command that launches Jupyter inside the pod (standard server flags are
     /// appended). Override e.g. to a venv path.
-    #[serde(default = "default_jupyter_command")]
+    #[serde_inline_default(DEFAULT_JUPYTER_COMMAND.to_string())]
     pub jupyter_command: String,
 }
 
-fn default_priority_label() -> String {
-    "kueue.x-k8s.io/priority-class".to_string()
-}
-
-fn default_max_lifetime_secs() -> u64 {
-    43200 // 12h
-}
-
-fn default_k8s_workdir() -> String {
-    "/workspace".to_string()
-}
-
-fn default_jupyter_command() -> String {
-    "jupyter server".to_string()
-}
+pub(crate) const DEFAULT_JUPYTER_COMMAND: &str = "jupyter server";
 
 /// RunPod-specific configuration. Known fields are typed; unknown fields are passed
 /// through transparently to the `RunPod` pod creation API (camelCase conversion applied).
+#[serde_inline_default]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RunpodConfig {
@@ -306,27 +273,37 @@ pub struct RunpodConfig {
     /// Default: the deprecated global `cleanup` key, else "terminate".
     pub cleanup: Option<Cleanup>,
 
+    /// GPU types to try, in order of preference.
+    /// Default: the deprecated top-level `gpu-type-ids` key, else
+    /// [`DEFAULT_RUNPOD_GPU`].
+    pub gpu_type_ids: Option<Vec<String>>,
+
+    /// Container image to run on the pod.
+    /// Default: the deprecated top-level `image-name` key, else the built-in
+    /// `runpod/pytorch` image.
+    pub image_name: Option<String>,
+
     /// Number of GPUs to attach.
-    #[serde(default = "default_gpu_count")]
+    #[serde_inline_default(1)]
     pub gpu_count: u32,
 
     /// Container disk size in GB.
-    #[serde(default = "default_container_disk_gb")]
+    #[serde_inline_default(50)]
     pub container_disk_gb: u32,
 
     /// Persistent volume size in GB. Set to 0 to disable.
-    #[serde(default = "default_volume_gb")]
+    #[serde_inline_default(20)]
     pub volume_gb: u32,
 
     /// Mount path for volumes.
-    #[serde(default = "default_volume_mount_path")]
+    #[serde_inline_default("/workspace".to_string())]
     pub volume_mount_path: String,
 
     /// Network volume ID to attach (optional).
     pub network_volume_id: Option<String>,
 
     /// Cloud type: "SECURE" or "COMMUNITY".
-    #[serde(default = "default_cloud_type")]
+    #[serde_inline_default("SECURE".to_string())]
     pub cloud_type: String,
 
     /// The image's own start command (its Dockerfile CMD). When known, pod
@@ -338,7 +315,7 @@ pub struct RunpodConfig {
 
     /// Give up on a pod still provisioning after this many minutes and
     /// terminate it (it bills the whole time).
-    #[serde(default = "default_provision_timeout_mins")]
+    #[serde_inline_default(DEFAULT_PROVISION_TIMEOUT_MINS)]
     pub provision_timeout_mins: u64,
 
     /// How this machine's Jupyter is reached: "auto" (SSH tunnel when the
@@ -393,70 +370,28 @@ pub enum Cleanup {
     Disabled,
 }
 
-fn default_runtime() -> String {
-    "runpod".to_string()
-}
+/// The runtimes the config template can generate sections for — the real
+/// (non-fake) subset of [`crate::runtime::AnyRuntime::known_names`].
+pub const TEMPLATABLE_RUNTIMES: &[&str] = &["runpod", "vast", "kubernetes"];
 
-fn default_gpu_type_ids() -> Vec<String> {
-    vec!["NVIDIA GeForce RTX 4090".to_string()]
-}
+/// Default GPU shortlist for the runpod runtime.
+pub(crate) const DEFAULT_RUNPOD_GPU: &str = "NVIDIA GeForce RTX 4090";
 
-fn default_gpu_count() -> u32 {
-    1
-}
-
-pub(crate) fn default_image_name() -> String {
-    "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04".to_string()
-}
+/// Default runpod container image.
+pub(crate) const DEFAULT_RUNPOD_IMAGE: &str =
+    "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04";
 
 /// Start command (Dockerfile CMD; the image sets no ENTRYPOINT) of the
 /// default `RunPod` image, per runpod/containers: the base image ends with
 /// `CMD ["/start.sh"]`. Lets the pre-SSH orphan guard apply out of the box.
 pub(crate) const DEFAULT_RUNPOD_IMAGE_START_CMD: &str = "/start.sh";
 
-fn default_container_disk_gb() -> u32 {
-    50
-}
-
-fn default_volume_gb() -> u32 {
-    20
-}
-
-fn default_volume_mount_path() -> String {
-    "/workspace".to_string()
-}
-
-fn default_cloud_type() -> String {
-    "SECURE".to_string()
-}
-
-fn default_name() -> String {
-    "remote-kernels".to_string()
-}
-
-fn default_orphan_halt_mins() -> u64 {
-    45
-}
-
-fn default_watchdog_stale_secs() -> u64 {
-    300
-}
-
-pub(crate) fn default_provision_timeout_mins() -> u64 {
-    20
-}
-
-fn default_vast_onstart_timeout_mins() -> u64 {
-    15
-}
+/// Provisioning give-up window shared by runpod and (container) vast.
+pub(crate) const DEFAULT_PROVISION_TIMEOUT_MINS: u64 = 20;
 
 /// VM images pull a full disk image and boot a kernel — legitimately slower
 /// than containers, so unset `[vast] provision-timeout-mins` auto-bumps.
 pub(crate) const VAST_VM_PROVISION_TIMEOUT_MINS: u64 = 35;
-
-fn default_notebook_dir() -> PathBuf {
-    PathBuf::from("remote-kernels")
-}
 
 impl Config {
     pub fn load(project_dir: &Path) -> anyhow::Result<Self> {
@@ -474,8 +409,34 @@ impl Config {
                  has different stop/resume semantics)."
             );
         }
+        if config.gpu_type_ids.is_some() || config.image_name.is_some() {
+            tracing::warn!(
+                "Top-level `gpu-type-ids` / `image-name` are deprecated and act only as \
+                 fallbacks — these are runpod-specific, set them under [runpod] instead."
+            );
+        }
         tracing::info!(?config_path, "Loaded config");
         Ok(config)
+    }
+
+    /// Effective runpod GPU shortlist:
+    /// `[runpod] gpu-type-ids` > deprecated top-level key > built-in default.
+    pub fn runpod_gpu_type_ids(&self) -> Vec<String> {
+        self.runpod
+            .gpu_type_ids
+            .clone()
+            .or_else(|| self.gpu_type_ids.clone())
+            .unwrap_or_else(|| vec![DEFAULT_RUNPOD_GPU.to_string()])
+    }
+
+    /// Effective runpod image:
+    /// `[runpod] image-name` > deprecated top-level key > built-in default.
+    pub fn runpod_image_name(&self) -> String {
+        self.runpod
+            .image_name
+            .clone()
+            .or_else(|| self.image_name.clone())
+            .unwrap_or_else(|| DEFAULT_RUNPOD_IMAGE.to_string())
     }
 
     /// The `cleanup` key explicitly set for a runtime's config section, if
@@ -498,33 +459,74 @@ impl Config {
             .unwrap_or_default()
     }
 
-    /// Generate a commented TOML config template with all fields and their defaults.
-    /// This is the single source of truth — the setup skill reads this output
-    /// instead of duplicating field knowledge.
-    #[allow(clippy::too_many_lines)]
+    /// Generate a commented TOML config template with all fields and their
+    /// defaults. This is the single source of truth — the setup skill reads
+    /// this output instead of duplicating field knowledge.
+    ///
+    /// # Panics
+    /// Never: the built-in runtime names are valid by construction.
     pub fn template() -> String {
+        Self::template_for(TEMPLATABLE_RUNTIMES).expect("built-in runtime names are valid")
+    }
+
+    /// Like [`Self::template`], but only includes the sections for the given
+    /// runtimes (shared fields always included). With exactly one runtime,
+    /// `default-runtime` is emitted uncommented and set to it.
+    pub fn template_for(runtimes: &[&str]) -> Result<String, String> {
+        for r in runtimes {
+            if !TEMPLATABLE_RUNTIMES.contains(r) {
+                return Err(format!(
+                    "unknown runtime {r:?} (expected runpod, vast, or kubernetes)"
+                ));
+            }
+        }
+        if runtimes.is_empty() {
+            return Err("at least one runtime is required".to_string());
+        }
+        let mut out = Self::template_shared(runtimes);
+        if runtimes.contains(&"runpod") {
+            out.push_str(&Self::template_runpod());
+        }
+        if runtimes.contains(&"vast") {
+            out.push_str(&Self::template_vast());
+        }
+        if runtimes.contains(&"kubernetes") {
+            out.push_str(&Self::template_kubernetes());
+        }
+        Ok(out)
+    }
+
+    /// The parsed-empty-document defaults instance backing template values,
+    /// so the template can't drift from the serde defaults.
+    fn defaults() -> Self {
+        toml::from_str("").expect("empty config must deserialize to defaults")
+    }
+
+    fn template_shared(runtimes: &[&str]) -> String {
+        let d = Self::defaults();
+        let default_runtime_lines = if let [only] = runtimes {
+            format!("default-runtime = \"{only}\"")
+        } else {
+            format!(
+                "# Default: \"{r}\"\n# default-runtime = \"{r}\"",
+                r = d.default_runtime
+            )
+        };
         format!(
             r#"# remote-kernels configuration
 # https://github.com/Crazytieguy/alignment-hive
 
 # Runtime used by start() when none is specified.
-# Default: "{default_runtime}"
-# default-runtime = "{default_runtime}"
+{default_runtime_lines}
 
-# GPU types to try, in order of preference (runpod runtime).
-# Default: ["{default_gpu}"]
-# gpu-type-ids = ["{default_gpu}"]
-
-# Container image to run on the pod.
-# Default: "{default_image}"
-# image-name = "{default_image}"
-
-# Custom name prefix for pods.
+# Custom name prefix for machines.
 # Default: "{default_name}"
 # name = "{default_name}"
 
 # Per-session budget cap in dollars. Prefer setting REMOTE_KERNELS_BUDGET
 # in .claude/settings.json (Claude can't edit that) over this field.
+# A generous upper limit, not a spending target — machines should still be
+# stopped or terminated as soon as they're no longer in use.
 # Requires cleanup != "disabled" on every metered runtime (runpod, vast) —
 # budget enforcement must be able to stop/terminate machines. Kubernetes is
 # unmetered and exempt.
@@ -545,29 +547,41 @@ impl Config {
 # Default: {default_watchdog_stale_secs}
 # watchdog-stale-secs = {default_watchdog_stale_secs}
 
-# Environment variable names to forward from the local environment to the pod.
-# Variables from .env and .env.local files are included automatically.
+# Environment variable names to forward from the local environment to the
+# machine. Variables from .env and .env.local files are included automatically.
 # inherit-env = ["HF_TOKEN", "WANDB_API_KEY"]
 
-# Path to a dotenv file whose variables should be loaded onto the pod.
+# Path to a dotenv file whose variables should be loaded onto the machine.
 # Resolved relative to the project root.
-# env-file = ".env.pod"
+# env-file = ".env.machine"
 
-# Directory for notebook files (relative to project root).
+# Directory where kernel activity is saved as .ipynb notebooks (relative to
+# the project root; one notebook per kernel).
 # Default: "{default_notebook_dir}"
 # notebook-dir = "{default_notebook_dir}"
 
 # Extra paths to include when syncing, even if gitignored.
 # sync-include = ["data/small-dataset/"]
 
-# Commands to run on the pod after startup (e.g., install packages).
+# Commands to run on the machine after startup (e.g., install packages).
 # startup-commands = ["pip install my-package"]
 
-# Explicit environment variables to set on the pod.
+# Explicit environment variables to set on the machine.
 # [env]
 # MY_VAR = "value"
 
-# RunPod API configuration. Known fields are typed; any extra fields
+"#,
+            default_name = d.name,
+            default_orphan_halt_mins = d.orphan_halt_mins,
+            default_watchdog_stale_secs = d.watchdog_stale_secs,
+            default_notebook_dir = d.notebook_dir.display(),
+        )
+    }
+
+    fn template_runpod() -> String {
+        let d = Self::defaults();
+        format!(
+            r#"# RunPod runtime configuration. Known fields are typed; any extra fields
 # are passed through to the RunPod pod creation API (camelCase conversion applied).
 [runpod]
 # Cleanup mode for RunPod machines when the session ends:
@@ -576,6 +590,14 @@ impl Config {
 #   "disabled"  — no automatic cleanup (manual lifecycle)
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
+
+# GPU types to try, in order of preference.
+# Default: ["{default_gpu}"]
+# gpu-type-ids = ["{default_gpu}"]
+
+# Container image to run on the machine.
+# Default: "{default_image}"
+# image-name = "{default_image}"
 
 # Number of GPUs.
 # Default: {default_gpu_count}
@@ -637,7 +659,24 @@ impl Config {
 # Default: "auto"
 # jupyter-access = "auto"
 
-# vast.ai runtime configuration (only needed when using
+"#,
+            default_cleanup = "terminate",
+            default_gpu = DEFAULT_RUNPOD_GPU,
+            default_image = DEFAULT_RUNPOD_IMAGE,
+            default_gpu_count = d.runpod.gpu_count,
+            default_container_disk_gb = d.runpod.container_disk_gb,
+            default_volume_gb = d.runpod.volume_gb,
+            default_volume_mount_path = d.runpod.volume_mount_path,
+            default_cloud_type = d.runpod.cloud_type,
+            default_image_start_cmd = DEFAULT_RUNPOD_IMAGE_START_CMD,
+            default_provision_timeout_mins = d.runpod.provision_timeout_mins,
+        )
+    }
+
+    fn template_vast() -> String {
+        let vast = VastConfig::default();
+        format!(
+            r#"# vast.ai runtime configuration (only needed when using
 # start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY —
 # a plain console key from https://cloud.vast.ai/manage-keys/. Accounts with
 # 2FA enabled reject API writes: disable 2FA on the account (recommended;
@@ -714,7 +753,29 @@ impl Config {
 # geolocation = {{ in = ["US", "CA"] }}
 # static_ip = {{ eq = true }}
 
-# Kubernetes runtime configuration (only needed when using
+"#,
+            default_cleanup = "terminate",
+            default_provision_timeout_mins = DEFAULT_PROVISION_TIMEOUT_MINS,
+            vast_vm_provision_timeout_mins = VAST_VM_PROVISION_TIMEOUT_MINS,
+            default_vast_onstart_timeout_mins = vast.onstart_timeout_mins,
+            default_vast_workdir = vast.workdir,
+            default_vast_ssh_user = vast.ssh_user,
+            default_jupyter_command = vast.jupyter_command,
+            default_vast_gpu = vast.gpu_name[0],
+            default_vast_image = vast.image,
+            default_vast_disk_gb = vast.disk_gb,
+            default_vast_search_limit = vast.search_limit,
+            default_vast_attempt_limit = vast.attempt_limit,
+        )
+    }
+
+    fn template_kubernetes() -> String {
+        // KubernetesConfig has a required field, so a defaults instance needs
+        // a placeholder pod-template (not referenced by the template text).
+        let k8s: KubernetesConfig = toml::from_str("pod-template = \"placeholder\"")
+            .expect("defaults instance must deserialize");
+        format!(
+            r#"# Kubernetes runtime configuration (only needed when using
 # start(runtime="kubernetes") or default-runtime = "kubernetes").
 # Cluster specifics (GPU resources, tolerations, queue labels, volumes) live
 # in a pod template YAML that you own. Template contract: the workload
@@ -737,12 +798,13 @@ impl Config {
 # container-name = "workload"
 # Label set by start(priority=...). Default: Kueue's workload priority label.
 # priority-label = "{default_priority_label}"
-# activeDeadlineSeconds applied when the template doesn't set one. Kubernetes
-# is unmetered (no budget applies), so this is the ONLY lifetime bound the
-# plugin provides: when it fires the pod is KILLED mid-run and anything not
-# synced back is lost. 0 disables it (the template owns lifecycle). Pick a
-# value for your lab's usage patterns — the default is a fallback, not a
-# recommendation. Default: {default_max_lifetime_secs} (12h)
+# Maximum pod lifetime in seconds, applied as activeDeadlineSeconds when the
+# template doesn't set one. Kubernetes is unmetered (no budget applies), so
+# this is the ONLY lifetime bound the plugin provides: when it fires the pod
+# is KILLED mid-run and anything not synced back is lost. Disabled (0) by
+# default — the pod template owns lifecycle. Set a value to bound forgotten
+# pods, sized to your lab's longest legitimate runs.
+# Default: {default_max_lifetime_secs} (disabled)
 # max-lifetime-secs = {default_max_lifetime_secs}
 # Directory in the pod that files sync to and kernels run in.
 # Default: "{default_k8s_workdir}"
@@ -751,34 +813,11 @@ impl Config {
 # Default: "{default_jupyter_command}"
 # jupyter-command = "{default_jupyter_command}"
 "#,
-            default_runtime = default_runtime(),
-            default_gpu = default_gpu_type_ids()[0],
-            default_image = default_image_name(),
             default_cleanup = "terminate",
-            default_name = default_name(),
-            default_notebook_dir = default_notebook_dir().display(),
-            default_gpu_count = default_gpu_count(),
-            default_container_disk_gb = default_container_disk_gb(),
-            default_volume_gb = default_volume_gb(),
-            default_volume_mount_path = default_volume_mount_path(),
-            default_cloud_type = default_cloud_type(),
-            default_image_start_cmd = DEFAULT_RUNPOD_IMAGE_START_CMD,
-            default_orphan_halt_mins = default_orphan_halt_mins(),
-            default_watchdog_stale_secs = default_watchdog_stale_secs(),
-            default_provision_timeout_mins = default_provision_timeout_mins(),
-            vast_vm_provision_timeout_mins = VAST_VM_PROVISION_TIMEOUT_MINS,
-            default_vast_onstart_timeout_mins = default_vast_onstart_timeout_mins(),
-            default_vast_workdir = default_vast_workdir(),
-            default_vast_ssh_user = default_vast_ssh_user(),
-            default_vast_gpu = default_vast_gpu_names()[0],
-            default_vast_image = default_vast_image(),
-            default_vast_disk_gb = default_vast_disk_gb(),
-            default_vast_search_limit = default_vast_search_limit(),
-            default_vast_attempt_limit = default_vast_attempt_limit(),
-            default_priority_label = default_priority_label(),
-            default_max_lifetime_secs = default_max_lifetime_secs(),
-            default_k8s_workdir = default_k8s_workdir(),
-            default_jupyter_command = default_jupyter_command(),
+            default_priority_label = k8s.priority_label,
+            default_max_lifetime_secs = k8s.max_lifetime_secs,
+            default_k8s_workdir = k8s.workdir,
+            default_jupyter_command = k8s.jupyter_command,
         )
     }
 }
@@ -791,9 +830,16 @@ mod tests {
     fn empty_toml_yields_documented_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.default_runtime, "runpod");
-        assert_eq!(config.gpu_type_ids, vec!["NVIDIA GeForce RTX 4090"]);
+        assert_eq!(config.gpu_type_ids, None);
+        assert_eq!(config.image_name, None);
+        assert_eq!(config.runpod.gpu_type_ids, None);
+        assert_eq!(config.runpod.image_name, None);
         assert_eq!(
-            config.image_name,
+            config.runpod_gpu_type_ids(),
+            vec!["NVIDIA GeForce RTX 4090"]
+        );
+        assert_eq!(
+            config.runpod_image_name(),
             "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
         );
         assert_eq!(config.cleanup, None);
@@ -860,7 +906,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config.gpu_type_ids.len(), 2);
+        // Deprecated top-level keys still parse and act as fallbacks.
+        assert_eq!(config.gpu_type_ids.as_ref().unwrap().len(), 2);
+        assert_eq!(config.runpod_gpu_type_ids().len(), 2);
+        assert_eq!(config.runpod_image_name(), "my/image:latest");
         // Deprecated global key still parses and acts as the fallback.
         assert_eq!(config.cleanup, Some(Cleanup::Stop));
         assert_eq!(config.cleanup_for("runpod"), Cleanup::Stop);
@@ -1011,27 +1060,94 @@ mod tests {
         assert_eq!(config.cleanup_for("runpod"), Cleanup::Terminate);
         assert_eq!(config.cleanup_for("vast"), Cleanup::Terminate);
         assert_eq!(config.cleanup_for("kubernetes"), Cleanup::Terminate);
-        assert_eq!(config.gpu_type_ids, default_gpu_type_ids());
-        assert_eq!(config.image_name, default_image_name());
-        assert_eq!(config.runpod.gpu_count, default_gpu_count());
+        let defaults = Config::defaults();
+        // gpu-type-ids/image-name live in the [runpod] section now; the
+        // deprecated top-level keys are gone from the template.
+        assert_eq!(config.gpu_type_ids, None);
+        assert_eq!(config.image_name, None);
+        assert_eq!(config.runpod_gpu_type_ids(), vec![DEFAULT_RUNPOD_GPU]);
+        assert_eq!(config.runpod_image_name(), DEFAULT_RUNPOD_IMAGE);
+        assert_eq!(config.runpod.gpu_count, defaults.runpod.gpu_count);
         // Uncommented money-window lines must reproduce the defaults.
-        assert_eq!(config.orphan_halt_mins, default_orphan_halt_mins());
-        assert_eq!(config.watchdog_stale_secs, default_watchdog_stale_secs());
+        assert_eq!(config.orphan_halt_mins, defaults.orphan_halt_mins);
+        assert_eq!(config.watchdog_stale_secs, defaults.watchdog_stale_secs);
         assert_eq!(
             config.runpod.provision_timeout_mins,
-            default_provision_timeout_mins()
+            defaults.runpod.provision_timeout_mins
         );
         let vast = config.vast.clone().expect("[vast] section uncommented");
+        let vast_defaults = VastConfig::default();
         assert_eq!(
             vast.provision_timeout_mins,
             Some(VAST_VM_PROVISION_TIMEOUT_MINS)
         );
         assert_eq!(
             vast.onstart_timeout_mins,
-            default_vast_onstart_timeout_mins()
+            vast_defaults.onstart_timeout_mins
         );
-        assert_eq!(vast.workdir, default_vast_workdir());
-        assert_eq!(vast.ssh_user, default_vast_ssh_user());
-        assert_eq!(vast.jupyter_command, default_jupyter_command());
+        assert_eq!(vast.workdir, vast_defaults.workdir);
+        assert_eq!(vast.ssh_user, vast_defaults.ssh_user);
+        assert_eq!(vast.jupyter_command, vast_defaults.jupyter_command);
+        // The kubernetes lifetime bound ships disabled; uncommenting the
+        // template line must keep it disabled.
+        let k8s = config.kubernetes.clone().expect("[kubernetes] section");
+        assert_eq!(k8s.max_lifetime_secs, 0);
+    }
+
+    /// `[runpod]` keys beat the deprecated top-level fallbacks.
+    #[test]
+    fn runpod_field_resolution_precedence() {
+        let config: Config = toml::from_str(
+            r#"
+            gpu-type-ids = ["OLD GPU"]
+            image-name = "old/image"
+
+            [runpod]
+            gpu-type-ids = ["NEW GPU"]
+            image-name = "new/image"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.runpod_gpu_type_ids(), vec!["NEW GPU"]);
+        assert_eq!(config.runpod_image_name(), "new/image");
+
+        // Top-level only: the deprecated keys still take effect.
+        let config: Config = toml::from_str(r#"gpu-type-ids = ["OLD GPU"]"#).unwrap();
+        assert_eq!(config.runpod_gpu_type_ids(), vec!["OLD GPU"]);
+    }
+
+    /// Per-runtime templates: only the requested sections, valid runtime
+    /// names enforced, and a single runtime sets `default-runtime`.
+    #[test]
+    fn template_for_selects_sections() {
+        // Section presence is checked via each section's header comment —
+        // "[vast]" alone also appears in the shared money-window text.
+        let vast_only = Config::template_for(&["vast"]).unwrap();
+        assert!(vast_only.contains("\ndefault-runtime = \"vast\"\n"));
+        assert!(vast_only.contains("vast.ai runtime configuration"));
+        assert!(!vast_only.contains("RunPod runtime configuration"));
+        assert!(!vast_only.contains("Kubernetes runtime configuration"));
+
+        let both = Config::template_for(&["runpod", "kubernetes"]).unwrap();
+        assert!(both.contains("RunPod runtime configuration"));
+        assert!(both.contains("Kubernetes runtime configuration"));
+        assert!(!both.contains("vast.ai runtime configuration"));
+        // Multiple runtimes: default-runtime stays commented.
+        assert!(!both.contains("\ndefault-runtime ="));
+
+        assert!(Config::template_for(&["aws"]).is_err());
+        assert!(Config::template_for(&[]).is_err());
+    }
+
+    /// A single-runtime template must parse as-is (its `default-runtime`
+    /// line is emitted uncommented).
+    #[test]
+    fn single_runtime_template_parses_as_is() {
+        for runtime in ["runpod", "vast", "kubernetes"] {
+            let template = Config::template_for(&[runtime]).unwrap();
+            let config: Config = toml::from_str(&template)
+                .unwrap_or_else(|e| panic!("{runtime} template failed to parse: {e}"));
+            assert_eq!(config.default_runtime, runtime);
+        }
     }
 }

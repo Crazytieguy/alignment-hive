@@ -21,7 +21,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print a commented TOML config template to stdout.
-    ConfigTemplate,
+    ConfigTemplate {
+        /// Only include this runtime's section (repeatable: runpod, vast,
+        /// kubernetes). Shared fields are always included; with exactly one
+        /// runtime, `default-runtime` is set to it. Default: all runtimes.
+        #[arg(long = "runtime")]
+        runtimes: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -29,8 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::ConfigTemplate) => {
-            print!("{}", config::Config::template());
+        Some(Command::ConfigTemplate { runtimes }) => {
+            let template = if runtimes.is_empty() {
+                config::Config::template()
+            } else {
+                let names: Vec<&str> = runtimes.iter().map(String::as_str).collect();
+                config::Config::template_for(&names)?
+            };
+            print!("{template}");
             return Ok(());
         }
         None => serve(cli.project_dir).await,

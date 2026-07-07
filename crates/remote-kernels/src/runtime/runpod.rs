@@ -84,8 +84,8 @@ impl RunPodRuntime {
         Self {
             client: Arc::new(RunPodClient::new(api_key)),
             name: config.name.clone(),
-            gpu_type_ids: config.gpu_type_ids.clone(),
-            image_name: config.image_name.clone(),
+            gpu_type_ids: config.runpod_gpu_type_ids(),
+            image_name: config.runpod_image_name(),
             runpod: config.runpod.clone(),
             orphan_halt_mins: config.orphan_halt_mins,
         }
@@ -126,7 +126,7 @@ impl RunPodRuntime {
         match &self.runpod.image_start_cmd {
             Some(cmd) if cmd.is_empty() => None,
             Some(cmd) if Self::image_eq(effective_image, &self.image_name) => Some(cmd.clone()),
-            _ if Self::image_eq(effective_image, &crate::config::default_image_name()) => {
+            _ if Self::image_eq(effective_image, crate::config::DEFAULT_RUNPOD_IMAGE) => {
                 Some(crate::config::DEFAULT_RUNPOD_IMAGE_START_CMD.to_string())
             }
             _ => None,
@@ -803,7 +803,13 @@ impl Connection for RunPodConnection {
     }
 
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        crate::sync::download_from_pod(self.ssh_endpoint()?, remote_path, local_path).await
+        crate::sync::download_from_pod(
+            self.ssh_endpoint()?,
+            remote_path,
+            local_path,
+            &self.remote_workdir,
+        )
+        .await
     }
 
     /// Install the on-pod watchdog: a detached loop that self-cleans when the
@@ -932,7 +938,7 @@ mod tests {
     }
 
     fn default_image() -> String {
-        crate::config::default_image_name()
+        crate::config::DEFAULT_RUNPOD_IMAGE.to_string()
     }
 
     /// The wrapper's applicability rules, asserted through the function
