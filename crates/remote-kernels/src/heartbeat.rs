@@ -88,7 +88,43 @@ async fn run(
         state: Arc::clone(state),
         budget,
     });
-    conn.wait_reachable().await?;
+    // Persistent bootstrap: a session that came up on a degraded path (e.g.
+    // RunPod's proxy fallback while sshd lags a resume) must keep pursuing
+    // SSH so the watchdog/budget supervision eventually installs — giving up
+    // after one attempt would leave an armed orphan guard facing a live
+    // session with nothing to disarm it. A host-key pin mismatch is the one
+    // unrecoverable case: retrying re-verifies against the same pin.
+    loop {
+        match conn.wait_reachable().await {
+            Ok(()) => break,
+            Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => {
+                tracing::error!(
+                    instance,
+                    "on-machine supervision cannot be established — the machine's host \
+                     key does not match the pinned one, and this cannot heal on its own. \
+                     Watchdog and budget deadline are NOT installed. {e:#}"
+                );
+                return Err(e);
+            }
+            // A pod with no SSH transport at all (proxy-only community
+            // pod) can never be supervised — by design the orphan guard is
+            // not armed there. Give up quietly instead of retrying forever.
+            Err(e) if e.to_string().contains("no public IP") => {
+                tracing::info!(
+                    instance,
+                    "machine has no SSH transport; on-machine supervision unavailable: {e}"
+                );
+                return Err(e);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    instance,
+                    "machine not reachable for supervision yet — retrying in 60s: {e}"
+                );
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
 
     // Startup commands run after the machine is fully up with services started.
     // rsync (needed by sync()) is ensured lazily by the sync path itself; user
@@ -115,10 +151,31 @@ async fn run(
     tracing::info!(instance, "Starting heartbeat loop");
 
     let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut host_key_alarm_raised = false;
     loop {
         interval.tick().await;
         match conn.heartbeat().await {
             Ok(()) => tracing::debug!(instance, "Heartbeat sent"),
+            // Mid-session host-key rotation (host recreated the container at
+            // the same address) is an ACCEPTED failure mode of the TOFU pin:
+            // auto-rehealing would gut the MITM protection. It must be loud
+            // and diagnosed, not warn-level noise — the on-machine watchdog
+            // will self-clean the machine once the heartbeat stays stale.
+            Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => {
+                if host_key_alarm_raised {
+                    tracing::warn!(instance, "Heartbeat still blocked by host-key mismatch");
+                } else {
+                    host_key_alarm_raised = true;
+                    tracing::error!(
+                        instance,
+                        "heartbeat blocked by a host-key mismatch. If nothing is done, \
+                         the on-machine watchdog will self-clean this machine once the \
+                         heartbeat is stale (watchdog-stale-secs). To keep it: delete \
+                         the known-hosts file named below, then stop() and start() to \
+                         reconnect. {e:#}"
+                    );
+                }
+            }
             Err(e) => tracing::warn!(instance, "Heartbeat failed: {e}"),
         }
         // Persist spend every tick — a crash must not lose hours of accrual

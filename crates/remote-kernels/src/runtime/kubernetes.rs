@@ -247,6 +247,7 @@ fn handle_for(pod: &Pod, container_name: Option<&str>) -> InstanceHandle {
         gpu_name,
         cost_per_hr: None,
         note: None,
+        proxy_port_mapped: false,
     }
 }
 
@@ -498,11 +499,7 @@ impl K8sConnection {
             pod_name,
             container,
             workdir,
-            jupyter: JupyterEndpoint {
-                http_base: format!("http://127.0.0.1:{local_port}"),
-                ws_base: format!("ws://127.0.0.1:{local_port}"),
-                token,
-            },
+            jupyter: JupyterEndpoint::loopback(local_port, token),
             forwarder,
         })
     }

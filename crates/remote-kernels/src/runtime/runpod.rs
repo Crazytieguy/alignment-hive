@@ -1,10 +1,16 @@
 //! `RunPod` backend: REST/GraphQL client behind the [`Runtime`] trait.
 //!
-//! Connectivity: Jupyter rides `RunPod`'s HTTPS/WSS proxy
-//! (`{pod_id}-8888.proxy.runpod.net`); infra commands and file sync go over
-//! SSH to the pod's public IP. The on-pod watchdog and the pre-SSH orphan
-//! guard self-clean via `runpodctl` / the REST API, authorized by the
-//! pod-scoped `RUNPOD_API_KEY` that `RunPod` injects into every pod.
+//! Connectivity: Jupyter is reached through a local SSH tunnel to the pod's
+//! loopback whenever the config guarantees SSH (`jupyter-access = "auto"`,
+//! the default), and rides `RunPod`'s public HTTPS/WSS proxy
+//! (`{pod_id}-8888.proxy.runpod.net`, token-protected) otherwise — or as the
+//! fallback when a resumed pod's sshd is slow to return. Only strict
+//! `jupyter-access = "tunnel"` pods are created without the public 8888
+//! mapping (never internet-reachable, no fallback). Infra
+//! commands and file sync go over SSH to the pod's public IP. The on-pod
+//! watchdog and the pre-SSH orphan guard self-clean via `runpodctl` / the
+//! REST API, authorized by the pod-scoped `RUNPOD_API_KEY` that `RunPod`
+//! injects into every pod.
 //!
 //! The orphan guard rides `dockerStartCmd`, which replaces the image's CMD
 //! (and only CMD — an image ENTRYPOINT still runs). It arms only when ALL of:
@@ -26,7 +32,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +44,18 @@ use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
     ProvisionRequest, Runtime, StopSupport, WatchdogPolicy,
 };
+
+/// The Jupyter access path chosen for one `open()` — see
+/// [`RunPodRuntime::access_path`].
+#[derive(Debug)]
+enum AccessDecision {
+    Tunnel {
+        ssh: crate::ssh_exec::SshEndpoint,
+        /// Whether a reachability failure may degrade to the public proxy.
+        proxy_fallback: bool,
+    },
+    Proxy,
+}
 
 /// `(dockerStartCmd wrapper, guard-off note)` — at most one is `Some`.
 type GuardWrapper = (Option<Vec<String>>, Option<String>);
@@ -79,6 +97,13 @@ impl RunPodRuntime {
             gpu_name: pod.gpu_display_name().to_string(),
             cost_per_hr: pod.cost_per_hr,
             note: None,
+            // Missing data conservatively reads as "mapping exists" — every
+            // pre-tunnel pod had it, and the record written at provision is
+            // what open() actually consults.
+            proxy_port_mapped: pod
+                .ports
+                .as_deref()
+                .is_none_or(|p| p.iter().any(|m| m.starts_with("8888/"))),
         }
     }
 
@@ -121,6 +146,106 @@ impl RunPodRuntime {
                 .get("support-public-ip")
                 .and_then(toml::Value::as_bool)
                 == Some(true)
+    }
+
+    /// The pod's port mappings, derived from the Jupyter access mode. Only
+    /// strict "tunnel" mode omits the public 8888 mapping (Jupyter becomes
+    /// physically unreachable from the internet); "auto" keeps it so the
+    /// token-protected proxy remains a fallback when SSH is slow to come
+    /// back — resumed community pods routinely take minutes to restore sshd
+    /// (observed live 2026-07: two resume legs died tunnel-only where the
+    /// proxy would have worked). The mapping is fixed at creation; `open()`
+    /// must not pick proxy for a pod created without it.
+    fn pod_ports(&self) -> anyhow::Result<Vec<String>> {
+        if self.runpod.jupyter_access == crate::config::JupyterAccess::Tunnel
+            && !self.ssh_expected()
+        {
+            anyhow::bail!(
+                "[runpod] jupyter-access = \"tunnel\" requires a config that guarantees \
+                 SSH (cloud-type = \"SECURE\", or support-public-ip = true on community \
+                 cloud) — without SSH the tunnel can never come up, and tunneled pods \
+                 have no public Jupyter fallback."
+            );
+        }
+        Ok(
+            if self.runpod.jupyter_access == crate::config::JupyterAccess::Tunnel {
+                vec!["22/tcp".to_string()]
+            } else {
+                vec!["8888/http".to_string(), "22/tcp".to_string()]
+            },
+        )
+    }
+
+    /// Whether Jupyter should be reached through an SSH tunnel instead of
+    /// `RunPod`'s public proxy. "auto" tunnels exactly when the config
+    /// guarantees SSH ([`Self::ssh_expected`]) but keeps the proxy mapping
+    /// as a break-glass fallback; strict "tunnel" pods are created WITHOUT
+    /// the public 8888 mapping, so their Jupyter is never
+    /// internet-reachable.
+    fn tunnel_preferred(&self) -> bool {
+        match self.runpod.jupyter_access {
+            crate::config::JupyterAccess::Tunnel => true,
+            crate::config::JupyterAccess::Proxy => false,
+            crate::config::JupyterAccess::Auto => self.ssh_expected(),
+        }
+    }
+
+    /// Decide the access path at `open()` time. All access policy lives in
+    /// this one function; `open()` only executes the decision.
+    ///
+    /// The decision uses the POD's creation-time port mapping (persisted in
+    /// the instance record), not just current config: config can drift
+    /// between provision and a later reconnect (jupyter-access flipped,
+    /// cloud-type edited), and a pod created without the public 8888 mapping
+    /// can never be served by a proxy URL. Drift conflicts return
+    /// `USER_ACTION_REQUIRED`-marked errors: the machine is healthy — the
+    /// server's failure path must keep it and let the user decide.
+    fn access_path(
+        &self,
+        proxy_port_mapped: bool,
+        ssh: Option<crate::ssh_exec::SshEndpoint>,
+    ) -> anyhow::Result<AccessDecision> {
+        if !proxy_port_mapped {
+            let Some(ssh) = ssh else {
+                anyhow::bail!(
+                    "{} this pod was created tunnel-only (no public 8888 mapping) but \
+                     currently has no SSH endpoint, so its Jupyter is unreachable. The \
+                     machine was left untouched: start() again once it has an SSH \
+                     endpoint, or terminate() it and start fresh (set [runpod] \
+                     jupyter-access = \"proxy\" first if you want the public proxy).",
+                    super::USER_ACTION_REQUIRED
+                );
+            };
+            return Ok(AccessDecision::Tunnel {
+                ssh,
+                proxy_fallback: false,
+            });
+        }
+        if self.tunnel_preferred() {
+            match ssh {
+                Some(ssh) => {
+                    return Ok(AccessDecision::Tunnel {
+                        ssh,
+                        // Strict tunnel must never silently go public; auto
+                        // may degrade to the token-protected proxy.
+                        proxy_fallback: self.runpod.jupyter_access
+                            != crate::config::JupyterAccess::Tunnel,
+                    });
+                }
+                None if self.runpod.jupyter_access == crate::config::JupyterAccess::Tunnel => {
+                    anyhow::bail!(
+                        "{} jupyter-access = \"tunnel\" but the pod has no SSH endpoint — \
+                         cannot tunnel to its Jupyter, and strict tunnel mode forbids the \
+                         public proxy. The machine was left untouched: start() again once \
+                         it has an SSH endpoint, terminate() it, or set [runpod] \
+                         jupyter-access = \"proxy\".",
+                        super::USER_ACTION_REQUIRED
+                    );
+                }
+                None => {}
+            }
+        }
+        Ok(AccessDecision::Proxy)
     }
 
     /// The `dockerStartCmd` wrapper (guard in the background, then the
@@ -246,6 +371,8 @@ impl Runtime for RunPodRuntime {
         env.insert("PUBLIC_KEY".to_string(), req.ssh_public_key.clone());
         env.insert("JUPYTER_PASSWORD".to_string(), req.jupyter_token.clone());
 
+        let ports = self.pod_ports()?;
+
         // Pre-SSH orphan guard: wrap the image's start command so a pod this
         // server never reaches cleans itself up (see module docs). A wrong
         // image-start-cmd stays money-bounded: the pod never brings up
@@ -294,7 +421,7 @@ impl Runtime for RunPodRuntime {
                 },
                 volume_mount_path: Some(self.runpod.volume_mount_path.clone()),
                 network_volume_id: self.runpod.network_volume_id.clone(),
-                ports: Some(vec!["8888/http".to_string(), "22/tcp".to_string()]),
+                ports: Some(ports.clone()),
                 env: Some(env.clone()),
                 // Replaces the image's CMD (only) with the orphan-guard
                 // wrapper when the original CMD is known; None otherwise —
@@ -431,7 +558,13 @@ impl Runtime for RunPodRuntime {
         // orphan-halt-mins. (Sync and the watchdog would be silently broken
         // too.)
         let ssh = match self.wait_for_ssh_info(external_id).await {
-            Ok(info) => Some(info),
+            Ok((host, port)) => Some(crate::ssh_exec::SshEndpoint {
+                key_path: ctx.ssh_key_path.clone(),
+                known_hosts_path: ctx.known_hosts_path.clone(),
+                user: "root".to_string(),
+                host,
+                port,
+            }),
             Err(e) if self.ssh_expected() => {
                 anyhow::bail!(
                     "the pod never became reachable over SSH although the config \
@@ -447,26 +580,101 @@ impl Runtime for RunPodRuntime {
                 None
             }
         };
+
+        // The pod's creation-time port set is the durable fact that decides
+        // the access path; it is persisted in the instance record at
+        // provision (ctx.proxy_port_mapped), so no provider round-trip and
+        // no guessing. All policy lives in access_path(); this function only
+        // executes the decision.
+        let mut degraded = false;
+        let decision = self.access_path(ctx.proxy_port_mapped, ssh.clone())?;
+        if let AccessDecision::Tunnel {
+            ssh: tunnel_ssh,
+            proxy_fallback,
+        } = decision
+        {
+            // The API reporting an ip/port does not mean sshd is up (a
+            // resumed pod's mapping reappears before its sshd) — a tunnel
+            // spawned too early dies instantly and Jupyter polling times the
+            // start out. With a proxy fallback available, give sshd only a
+            // short window (~90s) before degrading; without one, wait the
+            // full window (24 attempts ≈ up to 6 minutes).
+            let attempts = if proxy_fallback { 6 } else { 24 };
+            match tunnel_ssh.wait_reachable(attempts).await {
+                Ok(()) => {
+                    let tunnel =
+                        crate::ssh_exec::SshTunnel::open(&tunnel_ssh, RUNPOD_JUPYTER_PORT).await?;
+                    let mut jupyter =
+                        JupyterEndpoint::loopback(tunnel.local_port(), ctx.jupyter_token.clone());
+                    if proxy_fallback {
+                        // The proxy mapping still exists on the pod, so
+                        // "not internet-exposed" would be a false claim.
+                        jupyter.exposure = super::JupyterExposure::LocalWithPublicFallback;
+                    }
+                    return Ok(RunPodConnection {
+                        jupyter,
+                        ssh: Some(tunnel_ssh),
+                        tunnel: Some(tunnel),
+                        degraded: false,
+                        remote_workdir: self.runpod.volume_mount_path.clone(),
+                    });
+                }
+                // A pin mismatch is a trust failure: never mask it with a
+                // public fallback path — surface it (the machine is kept;
+                // see USER_ACTION_REQUIRED).
+                Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => return Err(e),
+                // sshd can lag the port mapping by minutes on a resumed pod
+                // (observed live 2026-07). Degrading to the token-protected
+                // proxy beats failing the start — the failed-start path
+                // would TERMINATE the machine.
+                Err(e) if proxy_fallback => {
+                    tracing::warn!(
+                        "tunnel unavailable ({e}); falling back to RunPod's public proxy \
+                         (token-protected) for this session"
+                    );
+                    degraded = true;
+                }
+                // Strict-tunnel pods have no fallback and must not be
+                // destroyed over a slow sshd (resume case): report still
+                // provisioning so the background finalizer keeps waiting,
+                // exactly like vast does.
+                Err(e) => {
+                    tracing::warn!("tunnel-only pod not SSH-reachable yet: {e}");
+                    return Err(super::StillProvisioning.into());
+                }
+            }
+        }
+
         Ok(RunPodConnection {
             jupyter: JupyterEndpoint {
                 http_base: format!("https://{external_id}-8888.proxy.runpod.net"),
                 ws_base: format!("wss://{external_id}-8888.proxy.runpod.net"),
                 token: ctx.jupyter_token.clone(),
+                exposure: super::JupyterExposure::Public,
             },
-            ssh_key_path: ctx.ssh_key_path.clone(),
             ssh,
+            tunnel: None,
+            degraded,
             remote_workdir: self.runpod.volume_mount_path.clone(),
         })
     }
 }
 
+/// The port the `RunPod` image's own Jupyter listens on inside the pod.
+const RUNPOD_JUPYTER_PORT: u16 = 8888;
+
 pub struct RunPodConnection {
     jupyter: JupyterEndpoint,
-    ssh_key_path: PathBuf,
-    /// `(public_ip, ssh_port)`; `None` when the machine has no public IP —
-    /// possible only when config doesn't promise SSH (kernels still work via
-    /// the proxy; sync/watchdog don't, and the orphan guard is not armed).
-    ssh: Option<(String, u16)>,
+    /// `None` when the machine has no public IP — possible only when config
+    /// doesn't promise SSH (kernels still work via the proxy; sync/watchdog
+    /// don't, and the orphan guard is not armed).
+    ssh: Option<crate::ssh_exec::SshEndpoint>,
+    /// Present in tunnel mode ([`RunPodRuntime::tunnel_preferred`]);
+    /// health-checked and respawned on every heartbeat tick.
+    tunnel: Option<crate::ssh_exec::SshTunnel>,
+    /// True when this session wanted the tunnel but degraded to the public
+    /// proxy because SSH was unreachable (see [`Connection::startup_note`]).
+    degraded: bool,
     /// Where uploads land (the volume mount path).
     remote_workdir: String,
 }
@@ -532,17 +740,22 @@ pub fn self_cleanup_command(cleanup: Cleanup) -> Option<String> {
 }
 
 impl RunPodConnection {
-    fn ssh_info(&self) -> anyhow::Result<(&str, u16)> {
-        self.ssh
-            .as_ref()
-            .map(|(ip, port)| (ip.as_str(), *port))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "This machine has no public IP/SSH port (common on community cloud). \
-                     Kernels still work, but sync/download and the on-machine watchdog do not. \
-                     Terminate and start again for a machine with a public IP."
-                )
-            })
+    fn ssh_endpoint(&self) -> anyhow::Result<&crate::ssh_exec::SshEndpoint> {
+        self.ssh.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "This machine has no public IP/SSH port (common on community cloud). \
+                 Kernels still work, but sync/download and the on-machine watchdog do not. \
+                 Terminate and start again for a machine with a public IP."
+            )
+        })
+    }
+
+    /// Keep the Jupyter tunnel alive (shared implementation — see
+    /// [`crate::ssh_exec::SshTunnel::ensure_alive`]).
+    async fn ensure_tunnel_alive(&self) {
+        if let Some(tunnel) = &self.tunnel {
+            tunnel.ensure_alive().await;
+        }
     }
 }
 
@@ -551,37 +764,28 @@ impl Connection for RunPodConnection {
         &self.jupyter
     }
 
+    fn startup_note(&self) -> Option<String> {
+        self.degraded.then(|| {
+            "SSH was unreachable when this session connected, so Jupyter is served \
+             over RunPod's public proxy (token-protected) instead of the SSH tunnel. \
+             The endpoint is sticky for this session — live kernels cannot migrate — \
+             so stop() and start() again to get the tunnel back. On-machine \
+             supervision (watchdog, budget deadline) installs automatically once SSH \
+             recovers (the heartbeat keeps retrying); until then, if SSH never \
+             recovers, an armed orphan guard may still stop this machine."
+                .to_string()
+        })
+    }
+
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
-        let (public_ip, ssh_port) = self.ssh_info()?;
-        crate::ssh_exec::ssh_cmd(
-            &self.ssh_key_path,
-            "root",
-            public_ip,
-            ssh_port,
-            command,
-            timeout,
-        )
-        .await
+        self.ssh_endpoint()?.cmd(command, timeout).await
     }
 
     /// Wait for SSH to become reachable, retrying up to ~2 minutes.
     async fn wait_reachable(&self) -> anyhow::Result<()> {
         // Fail fast when the machine has no SSH at all — the heartbeat
         // pipeline logs this and exits (kernels still work via the proxy).
-        self.ssh_info()?;
-        for attempt in 1..=24 {
-            match self.exec("echo ok", Duration::from_secs(10)).await {
-                Ok(_) => {
-                    tracing::info!(attempt, "SSH is reachable");
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::debug!(attempt, error = %e, "SSH not ready yet");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-        anyhow::bail!("SSH did not become reachable after 2 minutes")
+        self.ssh_endpoint()?.wait_reachable(24).await
     }
 
     async fn upload(
@@ -589,13 +793,9 @@ impl Connection for RunPodConnection {
         project_dir: &Path,
         extra_includes: &[String],
     ) -> anyhow::Result<String> {
-        let (public_ip, ssh_port) = self.ssh_info()?;
         crate::sync::sync_to_pod(
             project_dir,
-            &self.ssh_key_path,
-            "root",
-            public_ip,
-            ssh_port,
+            self.ssh_endpoint()?,
             &self.remote_workdir,
             extra_includes,
         )
@@ -603,16 +803,7 @@ impl Connection for RunPodConnection {
     }
 
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        let (public_ip, ssh_port) = self.ssh_info()?;
-        crate::sync::download_from_pod(
-            &self.ssh_key_path,
-            "root",
-            public_ip,
-            ssh_port,
-            remote_path,
-            local_path,
-        )
-        .await
+        crate::sync::download_from_pod(self.ssh_endpoint()?, remote_path, local_path).await
     }
 
     /// Install the on-pod watchdog: a detached loop that self-cleans when the
@@ -638,6 +829,7 @@ impl Connection for RunPodConnection {
     }
 
     async fn heartbeat(&self) -> anyhow::Result<()> {
+        self.ensure_tunnel_alive().await;
         // Also refresh the persistent disarm marker (see [`disarm_marker`]):
         // once any session has reached the pod, the orphan guard must never
         // fire again — not even after a console resume with no server around.
@@ -844,6 +1036,112 @@ mod tests {
         let qualified = format!("docker.io/{}", default_image());
         let (cmd, _) = rt.guard_wrapper(&qualified, Cleanup::Terminate);
         assert!(cmd.is_some(), "docker.io/ spelling must not drop the guard");
+    }
+
+    #[test]
+    fn tunnel_mode_drives_ports_and_requires_ssh() {
+        // Default (auto + SECURE): tunnel-preferred, but the proxy mapping
+        // is KEPT as the fallback for SSH-slow resumes — only strict
+        // "tunnel" omits it.
+        let rt = runtime_with("");
+        assert!(rt.tunnel_preferred());
+        assert_eq!(
+            rt.pod_ports().unwrap(),
+            vec!["8888/http".to_string(), "22/tcp".to_string()]
+        );
+
+        // auto + community without support-public-ip: proxy, both mappings.
+        let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"");
+        assert!(!rt.tunnel_preferred());
+        assert_eq!(
+            rt.pod_ports().unwrap(),
+            vec!["8888/http".to_string(), "22/tcp".to_string()]
+        );
+
+        // Explicit proxy keeps the public mapping even on SECURE.
+        let rt = runtime_with("[runpod]\njupyter-access = \"proxy\"");
+        assert!(!rt.tunnel_preferred());
+        assert!(rt.pod_ports().unwrap().contains(&"8888/http".to_string()));
+
+        // Explicit tunnel on a config that can't guarantee SSH is rejected
+        // at provision time — such a pod would be unreachable forever.
+        let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\njupyter-access = \"tunnel\"");
+        let err = rt.pod_ports().unwrap_err().to_string();
+        assert!(err.contains("guarantees"), "{err}");
+
+        // tunnel + support-public-ip on community is legal.
+        let rt = runtime_with(
+            "[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true\njupyter-access = \"tunnel\"",
+        );
+        assert_eq!(rt.pod_ports().unwrap(), vec!["22/tcp".to_string()]);
+    }
+
+    fn fake_ssh() -> crate::ssh_exec::SshEndpoint {
+        crate::ssh_exec::SshEndpoint {
+            key_path: std::path::PathBuf::from("/k"),
+            known_hosts_path: std::path::PathBuf::from("/kh"),
+            user: "root".into(),
+            host: "1.2.3.4".into(),
+            port: 22,
+        }
+    }
+
+    #[test]
+    fn access_path_follows_the_pod_not_the_config() {
+        // Tunnel-created pod (no 8888 mapping): tunnel regardless of config
+        // drift, and NEVER a proxy fallback (the mapping doesn't exist).
+        // Without SSH it's a keep-the-machine error, never a dead proxy URL.
+        for config in ["", "[runpod]\njupyter-access = \"proxy\""] {
+            let rt = runtime_with(config);
+            match rt.access_path(false, Some(fake_ssh())).unwrap() {
+                AccessDecision::Tunnel { proxy_fallback, .. } => assert!(!proxy_fallback),
+                AccessDecision::Proxy => panic!("tunnel-only pod must tunnel"),
+            }
+            let err = rt.access_path(false, None).unwrap_err().to_string();
+            assert!(err.contains("tunnel-only"), "{err}");
+            assert!(
+                err.starts_with(crate::runtime::USER_ACTION_REQUIRED),
+                "{err}"
+            );
+        }
+
+        // Proxy-mapped pod: config preference applies; tunnel needs SSH.
+        // auto gets the proxy fallback, strict tunnel does not.
+        let rt = runtime_with("");
+        match rt.access_path(true, Some(fake_ssh())).unwrap() {
+            AccessDecision::Tunnel { proxy_fallback, .. } => {
+                assert!(proxy_fallback, "auto+SECURE tunnels with proxy fallback");
+            }
+            AccessDecision::Proxy => panic!("auto+SECURE must tunnel"),
+        }
+        let rt = runtime_with("[runpod]\njupyter-access = \"tunnel\"");
+        match rt.access_path(true, Some(fake_ssh())).unwrap() {
+            AccessDecision::Tunnel { proxy_fallback, .. } => {
+                assert!(!proxy_fallback, "strict tunnel must never go public");
+            }
+            AccessDecision::Proxy => panic!("strict tunnel must tunnel"),
+        }
+        let rt = runtime_with("[runpod]\njupyter-access = \"proxy\"");
+        assert!(matches!(
+            rt.access_path(true, Some(fake_ssh())).unwrap(),
+            AccessDecision::Proxy
+        ));
+        // Strict tunnel without SSH on a proxy-mapped pod: keep-the-machine
+        // error (a config edit must not destroy a data-bearing pod).
+        let rt = runtime_with("[runpod]\njupyter-access = \"tunnel\"");
+        let err = rt.access_path(true, None).unwrap_err().to_string();
+        assert!(err.contains("no SSH endpoint"), "{err}");
+        assert!(
+            err.starts_with(crate::runtime::USER_ACTION_REQUIRED),
+            "{err}"
+        );
+        // auto without SSH degrades to proxy (open() hard-fails earlier when
+        // SSH is config-promised; this covers the community/no-ip case).
+        let rt = runtime_with("");
+        assert!(matches!(
+            rt.access_path(true, None).unwrap(),
+            AccessDecision::Proxy
+        ));
     }
 
     #[test]

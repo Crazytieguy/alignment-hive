@@ -54,6 +54,17 @@ pub struct InstanceRecord {
     pub gpu_name: Option<String>,
     #[serde(default)]
     pub cost_per_hr: f64,
+    /// Whether the machine was created with `RunPod`'s public 8888 proxy
+    /// mapping (see `InstanceHandle::proxy_port_mapped`). Defaults to TRUE
+    /// for records written before this field existed: every pre-tunnel
+    /// `RunPod` pod had the mapping, and only the `RunPod` `open()` path
+    /// consults it.
+    #[serde(default = "default_true")]
+    pub proxy_port_mapped: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -78,6 +89,8 @@ pub struct InstanceState {
     pub kernel_connections: HashMap<String, KernelConnection>,
     pub notebooks: HashMap<String, Notebook>,
     pub ssh_key_path: PathBuf,
+    /// See `InstanceHandle::proxy_port_mapped`.
+    pub proxy_port_mapped: bool,
     pub connection: Option<Arc<AnyConnection>>,
     pub heartbeat: Option<HeartbeatState>,
     /// Pending executions that timed out. Keyed by (`kernel_id`, `cell_number`).
@@ -97,6 +110,7 @@ impl InstanceState {
         cleanup: Cleanup,
         jupyter_token: String,
         ssh_key_path: PathBuf,
+        proxy_port_mapped: bool,
     ) -> Self {
         Self {
             name,
@@ -116,6 +130,7 @@ impl InstanceState {
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
             ssh_key_path,
+            proxy_port_mapped,
             connection: None,
             heartbeat: None,
             pending_executions: HashMap::new(),
@@ -143,6 +158,7 @@ impl InstanceState {
             ssh_key_path: Some(self.ssh_key_path.display().to_string()),
             gpu_name: Some(self.gpu_name.clone()),
             cost_per_hr: self.cost_per_hr,
+            proxy_port_mapped: self.proxy_port_mapped,
         }
     }
 
@@ -314,6 +330,28 @@ impl AppState {
         state_dir(&self.project_dir).join("id_ed25519")
     }
 
+    /// The per-instance SSH known-hosts file (TOFU pin — see
+    /// [`crate::ssh_exec::SshEndpoint`]). Lives in the instance dir so
+    /// terminate ([`Self::clear_record`]) removes it with the record.
+    pub fn known_hosts_path(&self, name: &str) -> PathBuf {
+        instance_dir(&self.project_dir, name).join("known_hosts")
+    }
+
+    /// Drop the pinned host key. Called whenever the provider may
+    /// legitimately hand the instance a new host identity — a fresh
+    /// provision under a reused name, or a stop/resume cycle (vast can move
+    /// the workload; `RunPod` pods can change public IP). Reconnecting to a
+    /// machine that kept running does NOT reset: the surviving pin is
+    /// exactly what protects that reconnect.
+    pub fn reset_known_hosts(&self, name: &str) {
+        let path = self.known_hosts_path(name);
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), "could not reset known-hosts pin: {e}");
+        }
+    }
+
     /// Resolve which instance a tool call targets: an explicit name must
     /// exist; otherwise the sole live instance is used.
     pub fn resolve_instance(&self, requested: Option<&str>) -> Result<String, String> {
@@ -455,6 +493,8 @@ fn migrate_legacy_state(project_dir: &Path) {
         ssh_key_path,
         gpu_name: legacy.gpu_name,
         cost_per_hr: 0.0,
+        // Every pre-tunnel RunPod pod was created with the public mapping.
+        proxy_port_mapped: true,
     };
 
     if let Ok(json) = serde_json::to_string_pretty(&record)
@@ -491,6 +531,7 @@ mod tests {
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
             ssh_key_path: PathBuf::from("/tmp/test-key"),
+            proxy_port_mapped: false,
             connection: None,
             heartbeat: None,
             pending_executions: HashMap::new(),
@@ -528,6 +569,25 @@ mod tests {
 
         let gitignore = dir.path().join(".claude/remote-kernels/.gitignore");
         assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "*\n");
+    }
+
+    #[test]
+    fn known_hosts_lives_in_instance_dir_and_resets_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let path = state.known_hosts_path("main");
+        assert_eq!(
+            path.parent(),
+            Some(instance_dir(dir.path(), "main")).as_deref()
+        );
+
+        // Reset with no file is a no-op (fresh provision under a new name).
+        state.reset_known_hosts("main");
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "1.2.3.4 ssh-ed25519 AAAA...").unwrap();
+        state.reset_known_hosts("main");
+        assert!(!path.exists(), "reset must drop the pinned host key");
     }
 
     #[test]

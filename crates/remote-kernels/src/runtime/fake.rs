@@ -76,7 +76,10 @@ impl FakeRuntime {
             .arg(format!("--port={port}"))
             .arg("--port-retries=0")
             .arg(format!("--ServerApp.token={token}"))
-            .arg("--ServerApp.disable_check_xsrf=True")
+            // XSRF checking stays ON, mirroring the real launch script: our
+            // client authenticates with the token header, which Jupyter
+            // exempts from the XSRF check — the fake e2e suite is the free
+            // regression proof of that.
             .arg(format!("--ServerApp.root_dir={}", workdir.display()))
             // Kernels inherit the server's cwd; it must be the machine's
             // "workdir" so executed code sees synced files (like /workspace
@@ -148,6 +151,7 @@ impl Runtime for FakeRuntime {
             gpu_name: "Fake GPU".to_string(),
             cost_per_hr: Some(self.cost_per_hr),
             note: None,
+            proxy_port_mapped: false,
         })
     }
 
@@ -159,6 +163,7 @@ impl Runtime for FakeRuntime {
             gpu_name: "Fake GPU".to_string(),
             cost_per_hr: Some(self.cost_per_hr),
             note: None,
+            proxy_port_mapped: false,
         })
     }
 
@@ -228,11 +233,7 @@ impl Runtime for FakeRuntime {
             .get(external_id)
             .ok_or_else(|| anyhow::anyhow!("unknown fake instance"))?;
         Ok(FakeConnection {
-            jupyter: JupyterEndpoint {
-                http_base: format!("http://127.0.0.1:{}", inst.port),
-                ws_base: format!("ws://127.0.0.1:{}", inst.port),
-                token: ctx.jupyter_token.clone(),
-            },
+            jupyter: JupyterEndpoint::loopback(inst.port, ctx.jupyter_token.clone()),
             workdir: inst.workdir.path().to_path_buf(),
             last_budget_deadline: Arc::clone(&inst.last_budget_deadline),
         })

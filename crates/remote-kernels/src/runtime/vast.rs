@@ -24,8 +24,7 @@
 //! budget/heartbeat supervision is the primary enforcement.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
@@ -343,6 +342,45 @@ impl VastRuntime {
         Ok(offers)
     }
 
+    /// The user lands unquoted in `chown -R user:user` and in the
+    /// `authorized_keys` path of the onstart script — hold it to POSIX
+    /// username characters, not just quote-safety.
+    fn validate_ssh_user(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.vast
+                .ssh_user
+                .chars()
+                .next()
+                // POSIX: must start with a letter or underscore — also rules
+                // out "-foo" (parsed as options by chown/ssh) and "."/"..".
+                .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                && self
+                    .vast
+                    .ssh_user
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
+            "[vast] ssh-user must be a plain POSIX username (got {:?})",
+            self.vast.ssh_user
+        );
+        Ok(())
+    }
+
+    /// The single builder of the on-machine self-halt command (C3: one
+    /// implementation for the onstart guard and the watchdog). Halting needs
+    /// root; when the session user is not root, try passwordless sudo first
+    /// and fall back to the bare command (which then only works if the image
+    /// runs sshd as root anyway). No single quotes — both consumers wrap the
+    /// command in a single-quoted script.
+    fn halt_command(ssh_user: &str) -> String {
+        if ssh_user == "root" {
+            "(shutdown -h now || kill -9 1) 2>/dev/null".to_string()
+        } else {
+            "(sudo -n shutdown -h now || shutdown -h now || sudo -n kill -9 1 || kill -9 1) \
+             2>/dev/null"
+                .to_string()
+        }
+    }
+
     /// The onstart script authorizes our per-instance SSH key (as root,
     /// before any SSH attempt succeeds) and then runs the user's startup
     /// lines. Key injection via onstart needs no account-key API permission —
@@ -370,17 +408,30 @@ impl VastRuntime {
     /// all it can do.
     fn onstart_script(&self, ssh_public_key: &str) -> String {
         let key = ssh_public_key.trim();
+        // onstart runs as root; sshd checks authorized_keys in the home of
+        // the user we later SSH in as. With the default root the paths are
+        // identical to `~`; a non-root `ssh-user` gets the key in ITS home
+        // and ownership — injecting into root's home (the old behavior)
+        // would silently lock a non-root config out of the machine.
+        let user = self.vast.ssh_user.as_str();
+        let (home, owner) = if user == "root" {
+            ("/root".to_string(), "root:root".to_string())
+        } else {
+            (format!("/home/{user}"), format!("{user}:{user}"))
+        };
         let assert_key = format!(
-            "grep -qF '{key}' ~/.ssh/authorized_keys 2>/dev/null \
-             || echo '{key}' >> ~/.ssh/authorized_keys; \
-             chown -R root:root ~/.ssh; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys"
+            "grep -qF '{key}' '{home}/.ssh/authorized_keys' 2>/dev/null \
+             || echo '{key}' >> '{home}/.ssh/authorized_keys'; \
+             chown -R {owner} '{home}/.ssh'; chmod 700 '{home}/.ssh'; \
+             chmod 600 '{home}/.ssh/authorized_keys'"
         );
         let mut lines = vec![
             "#!/bin/bash".to_string(), // VMs require an explicit shebang
-            "mkdir -p ~/.ssh".to_string(),
+            format!("mkdir -p '{home}/.ssh'"),
             assert_key.clone(),
             crate::ssh_exec::orphan_guard_line(
-                "shutdown -h now || kill -9 1",
+                // onstart runs as root on vast regardless of ssh-user.
+                &Self::halt_command("root"),
                 None,
                 self.orphan_halt_mins,
             ),
@@ -409,6 +460,7 @@ fn handle_for_offer(contract: i64, offer: &crate::vast::types::Offer) -> Instanc
             offer.num_gpus.unwrap_or(1)
         ),
         cost_per_hr: offer.dph_total,
+        proxy_port_mapped: false,
         note: None,
     }
 }
@@ -486,6 +538,12 @@ impl Runtime for VastRuntime {
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
+        // Both get embedded single-quoted in the onstart script. The key is
+        // plugin-generated (can't contain quotes today), but validate anyway —
+        // the onstart script is the one place a quote would become code.
+        crate::ssh_exec::validate_shell_safe("ssh_public_key", &req.ssh_public_key)?;
+        self.validate_ssh_user()?;
+
         // Account-level key registration BEFORE creation is load-bearing:
         // vast auto-attaches account keys to the instance at create time, and
         // the SSH proxy (sshN.vast.ai) only honors create-time attached keys
@@ -625,6 +683,8 @@ impl Runtime for VastRuntime {
             ),
             cost_per_hr: instance.dph_total,
             note: None,
+            // RunPod-only concept; vast Jupyter is tunnel-only by design.
+            proxy_port_mapped: false,
         })
     }
 
@@ -726,6 +786,9 @@ impl Runtime for VastRuntime {
     ) -> anyhow::Result<VastConnection> {
         let id: i64 = external_id.parse()?;
         crate::ssh_exec::validate_shell_safe("workdir", &self.vast.workdir)?;
+        // Config can drift between provision and reconnect — a post-provision
+        // edit must not be able to inject ssh options via the user string.
+        self.validate_ssh_user()?;
         crate::ssh_exec::validate_shell_safe("jupyter-command", &self.vast.jupyter_command)?;
 
         let user = self.vast.ssh_user.clone();
@@ -766,14 +829,21 @@ impl Runtime for VastRuntime {
         };
         tracing::info!(%ssh_host, ssh_port, "vast SSH endpoint resolved");
 
-        self.wait_ssh_reachable(id, ctx, &user, &ssh_host, ssh_port)
-            .await?;
+        let ssh = crate::ssh_exec::SshEndpoint {
+            key_path: ctx.ssh_key_path.clone(),
+            known_hosts_path: ctx.known_hosts_path.clone(),
+            user,
+            host: ssh_host,
+            port: ssh_port,
+        };
+
+        self.wait_ssh_reachable(id, ctx, &ssh).await?;
 
         // SSH readiness no longer implies onstart completion (the key
         // re-assert makes SSH usable within seconds of boot), and user
         // onstart lines often install what the jupyter command runs (uv,
         // docker, envs). Block on the marker our generated onstart touches
-        // last — one remote wait, not a local poll (each ssh_cmd is a full
+        // last — one remote wait, not a local poll (each SSH exec is a full
         // handshake, and per-attempt timeouts would stretch the bound).
         // Machines up over 30 minutes skip the wait: their onstart is long
         // settled, and the marker may structurally never appear (instances
@@ -785,15 +855,12 @@ impl Runtime for VastRuntime {
         // genuinely missing.
         let onstart_mins = self.vast.onstart_timeout_mins;
         let wait_onstart = wait_onstart_script(onstart_mins);
-        match crate::ssh_exec::ssh_cmd(
-            &ctx.ssh_key_path,
-            &user,
-            &ssh_host,
-            ssh_port,
-            &wait_onstart,
-            Duration::from_secs(onstart_mins.saturating_mul(60).saturating_add(100)),
-        )
-        .await
+        match ssh
+            .cmd(
+                &wait_onstart,
+                Duration::from_secs(onstart_mins.saturating_mul(60).saturating_add(100)),
+            )
+            .await
         {
             Ok(out) if out.contains("rk-timeout") => {
                 tracing::warn!(
@@ -817,36 +884,17 @@ impl Runtime for VastRuntime {
                 JUPYTER_PORT
             )
         );
-        crate::ssh_exec::ssh_cmd(
-            &ctx.ssh_key_path,
-            &user,
-            &ssh_host,
-            ssh_port,
-            &launch,
-            Duration::from_secs(60),
-        )
-        .await?;
+        ssh.cmd(&launch, Duration::from_secs(60)).await?;
 
-        // Local tunnel to the machine's Jupyter port.
-        let local_port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-            listener.local_addr()?.port()
-        };
-        let tunnel = spawn_tunnel(&ctx.ssh_key_path, &user, &ssh_host, ssh_port, local_port)?;
+        // Local tunnel to the machine's Jupyter port (shared SshTunnel — the
+        // one tunnel implementation for every SSH runtime).
+        let tunnel = crate::ssh_exec::SshTunnel::open(&ssh, JUPYTER_PORT).await?;
 
         Ok(VastConnection {
-            jupyter: JupyterEndpoint {
-                http_base: format!("http://127.0.0.1:{local_port}"),
-                ws_base: format!("ws://127.0.0.1:{local_port}"),
-                token: ctx.jupyter_token.clone(),
-            },
-            ssh_key_path: ctx.ssh_key_path.clone(),
-            ssh_user: user,
-            ssh_host,
-            ssh_port,
+            jupyter: JupyterEndpoint::loopback(tunnel.local_port(), ctx.jupyter_token.clone()),
+            ssh,
             workdir: self.vast.workdir.clone(),
-            local_port,
-            tunnel: tokio::sync::Mutex::new(tunnel),
+            tunnel,
         })
     }
 }
@@ -871,26 +919,18 @@ impl VastRuntime {
         &self,
         id: i64,
         ctx: &ConnectionContext,
-        user: &str,
-        ssh_host: &str,
-        ssh_port: u16,
+        ssh: &crate::ssh_exec::SshEndpoint,
     ) -> anyhow::Result<()> {
         let mut denials = 0;
         for attempt in 1..=36 {
-            match crate::ssh_exec::ssh_cmd(
-                &ctx.ssh_key_path,
-                user,
-                ssh_host,
-                ssh_port,
-                "echo ok",
-                Duration::from_secs(10),
-            )
-            .await
-            {
+            match ssh.cmd("echo ok", Duration::from_secs(10)).await {
                 Ok(_) => {
                     tracing::info!(attempt, "vast SSH is reachable");
                     return Ok(());
                 }
+                // A host-key pin mismatch cannot heal by retrying — don't
+                // burn the 36-attempt window against it (nor re-attach keys).
+                Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => return Err(e),
                 Err(e) => {
                     denials += i32::from(e.to_string().contains("Permission denied"));
                     if denials == 12 {
@@ -916,90 +956,36 @@ impl VastRuntime {
     }
 }
 
-/// Spawn the local `ssh -N -L` tunnel to the machine's Jupyter port.
-fn spawn_tunnel(
-    ssh_key_path: &Path,
-    user: &str,
-    ssh_host: &str,
-    ssh_port: u16,
-    local_port: u16,
-) -> anyhow::Result<tokio::process::Child> {
-    Ok(tokio::process::Command::new("ssh")
-        .args([
-            "-i",
-            &ssh_key_path.display().to_string(),
-            "-p",
-            &ssh_port.to_string(),
-        ])
-        .args(crate::ssh_exec::SSH_OPTS)
-        .args([
-            "-N",
-            "-L",
-            &format!("127.0.0.1:{local_port}:127.0.0.1:{JUPYTER_PORT}"),
-            &format!("{user}@{ssh_host}"),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?)
-}
-
 pub struct VastConnection {
     jupyter: JupyterEndpoint,
-    ssh_key_path: PathBuf,
-    ssh_user: String,
-    ssh_host: String,
-    ssh_port: u16,
+    ssh: crate::ssh_exec::SshEndpoint,
     workdir: String,
-    local_port: u16,
-    /// Local `ssh -N -L` tunnel process (killed on drop via `kill_on_drop`).
-    /// Health-checked and respawned on every heartbeat tick — a dead tunnel
-    /// would otherwise silently strand all kernel traffic.
-    tunnel: tokio::sync::Mutex<tokio::process::Child>,
+    /// Local Jupyter tunnel (shared implementation; health-checked and
+    /// respawned on every heartbeat tick — a dead tunnel would otherwise
+    /// silently strand all kernel traffic).
+    tunnel: crate::ssh_exec::SshTunnel,
 }
 
 impl VastConnection {
     async fn exec_inner(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
-        crate::ssh_exec::ssh_cmd(
-            &self.ssh_key_path,
-            &self.ssh_user,
-            &self.ssh_host,
-            self.ssh_port,
-            command,
-            timeout,
-        )
-        .await
-    }
-
-    /// Respawn the tunnel if its process died (network blip, host hiccup) —
-    /// otherwise all kernel traffic to the local port silently fails while
-    /// heartbeats (separate SSH connections) keep succeeding.
-    async fn ensure_tunnel_alive(&self) {
-        let mut tunnel = self.tunnel.lock().await;
-        match tunnel.try_wait() {
-            Ok(None) => {} // still running
-            Ok(Some(status)) => {
-                tracing::warn!(%status, "vast Jupyter tunnel died; respawning");
-                match spawn_tunnel(
-                    &self.ssh_key_path,
-                    &self.ssh_user,
-                    &self.ssh_host,
-                    self.ssh_port,
-                    self.local_port,
-                ) {
-                    Ok(child) => *tunnel = child,
-                    Err(e) => tracing::warn!("failed to respawn tunnel: {e}"),
-                }
-            }
-            Err(e) => tracing::warn!("tunnel status check failed: {e}"),
-        }
+        self.ssh.cmd(command, timeout).await
     }
 }
 
 impl Connection for VastConnection {
     fn jupyter(&self) -> &JupyterEndpoint {
         &self.jupyter
+    }
+
+    fn startup_note(&self) -> Option<String> {
+        (self.ssh.user != "root").then(|| {
+            format!(
+                "Non-root ssh-user ({:?}): the on-machine self-halt (watchdog / budget \
+                 deadline) needs passwordless sudo on this image; without it, only the \
+                 server-side supervision can stop this machine.",
+                self.ssh.user
+            )
+        })
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
@@ -1016,28 +1002,11 @@ impl Connection for VastConnection {
         project_dir: &Path,
         extra_includes: &[String],
     ) -> anyhow::Result<String> {
-        crate::sync::sync_to_pod(
-            project_dir,
-            &self.ssh_key_path,
-            &self.ssh_user,
-            &self.ssh_host,
-            self.ssh_port,
-            &self.workdir,
-            extra_includes,
-        )
-        .await
+        crate::sync::sync_to_pod(project_dir, &self.ssh, &self.workdir, extra_includes).await
     }
 
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        crate::sync::download_from_pod(
-            &self.ssh_key_path,
-            &self.ssh_user,
-            &self.ssh_host,
-            self.ssh_port,
-            remote_path,
-            local_path,
-        )
-        .await
+        crate::sync::download_from_pod(&self.ssh, remote_path, local_path).await
     }
 
     /// Best-effort self-cleanup: there is no credential-free way to destroy a
@@ -1054,7 +1023,7 @@ impl Connection for VastConnection {
             self.set_budget_deadline(secs).await?;
         }
         let script = crate::ssh_exec::watchdog_script(
-            "(shutdown -h now || kill -9 1) 2>/dev/null",
+            &VastRuntime::halt_command(&self.ssh.user),
             policy.stale_secs,
         );
         self.exec_inner(&script, Duration::from_secs(10)).await?;
@@ -1063,7 +1032,7 @@ impl Connection for VastConnection {
     }
 
     async fn heartbeat(&self) -> anyhow::Result<()> {
-        self.ensure_tunnel_alive().await;
+        self.tunnel.ensure_alive().await;
         self.exec_inner("touch /tmp/heartbeat", Duration::from_secs(10))
             .await
             .map(|_| ())
@@ -1137,6 +1106,28 @@ mod tests {
     fn runtime_from(config_toml: &str) -> VastRuntime {
         let config: Config = toml::from_str(config_toml).unwrap();
         VastRuntime::new("test-key".to_string(), &config)
+    }
+
+    #[test]
+    fn onstart_injects_key_into_ssh_users_home() {
+        let key = "ssh-ed25519 AAAATEST test";
+
+        // Default root: root's home, root ownership (previous behavior).
+        let script = runtime_from("").onstart_script(key);
+        assert!(script.contains("'/root/.ssh/authorized_keys'"), "{script}");
+        assert!(script.contains("chown -R root:root '/root/.ssh'"));
+        assert!(!script.contains("/home/"));
+
+        // Non-root ssh-user: ITS home and ownership — injecting into root's
+        // home would silently lock the configured user out.
+        let script = runtime_from("[vast]\nssh-user = \"ubuntu\"").onstart_script(key);
+        assert!(
+            script.contains("'/home/ubuntu/.ssh/authorized_keys'"),
+            "{script}"
+        );
+        assert!(script.contains("chown -R ubuntu:ubuntu '/home/ubuntu/.ssh'"));
+        assert!(script.contains("mkdir -p '/home/ubuntu/.ssh'"));
+        assert!(!script.contains("/root/.ssh"));
     }
 
     #[test]

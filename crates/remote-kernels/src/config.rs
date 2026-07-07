@@ -341,6 +341,17 @@ pub struct RunpodConfig {
     #[serde(default = "default_provision_timeout_mins")]
     pub provision_timeout_mins: u64,
 
+    /// How this machine's Jupyter is reached: "auto" (SSH tunnel when the
+    /// config guarantees SSH — cloud-type SECURE or support-public-ip —
+    /// with `RunPod`'s token-protected public proxy kept as a fallback for
+    /// when SSH is slow to come back, e.g. on resume), "tunnel" (strict:
+    /// always tunnel, pods are created WITHOUT the public 8888 mapping so
+    /// Jupyter is never internet-reachable, and configs that don't
+    /// guarantee SSH are rejected), or "proxy" (always the public proxy —
+    /// the pre-multi-runtime behavior).
+    #[serde(default)]
+    pub jupyter_access: JupyterAccess,
+
     /// Extra fields passed through to the `RunPod` API.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
@@ -354,6 +365,20 @@ impl Default for RunpodConfig {
     fn default() -> Self {
         toml::from_str("").expect("every RunpodConfig field must have a serde default")
     }
+}
+
+/// How a `RunPod` machine's Jupyter endpoint is reached. See the field docs
+/// on [`RunpodConfig::jupyter_access`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JupyterAccess {
+    /// Tunnel when the config guarantees SSH, public proxy otherwise.
+    #[default]
+    Auto,
+    /// Always SSH-tunnel; never expose Jupyter on the public proxy.
+    Tunnel,
+    /// Always the public proxy (token-protected).
+    Proxy,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
@@ -593,6 +618,24 @@ impl Config {
 # it — a pod stuck "loading" bills the whole time.
 # Default: {default_provision_timeout_mins}
 # provision-timeout-mins = {default_provision_timeout_mins}
+
+# How Jupyter on the machine is reached:
+#   "auto"   — SSH tunnel (localhost) when the config guarantees SSH
+#              (cloud-type SECURE, or COMMUNITY with support-public-ip =
+#              true); the token-protected public proxy otherwise, and as a
+#              fallback when SSH is slow to come back (e.g. on resume).
+#   "tunnel" — strict: always tunnel; the pod is created WITHOUT the public
+#              8888 mapping, so Jupyter is never internet-reachable — but a
+#              resume whose SSH never returns keeps retrying until the
+#              provision timeout terminates it, instead of falling back.
+#              Requires an SSH-guaranteeing config.
+#   "proxy"  — always {{pod}}-8888.proxy.runpod.net (token-protected, public).
+# The port mapping is fixed at pod creation and reconnects follow the POD,
+# not the current config: a pod created tunnel-only always tunnels (it has no
+# proxy port), so flipping this takes effect for machines created after the
+# change.
+# Default: "auto"
+# jupyter-access = "auto"
 
 # vast.ai runtime configuration (only needed when using
 # start(runtime="vast") or default-runtime = "vast"). Requires VAST_API_KEY —

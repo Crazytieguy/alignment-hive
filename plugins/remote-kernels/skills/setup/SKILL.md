@@ -100,6 +100,15 @@ area below** and edit the file based on their answers.
   disarm it), and silently when `cleanup = "disabled"` (that mode promises no
   automatic cleanup). A raw `docker-start-cmd` passthrough conflicts with the
   guard; migrate it to `image-start-cmd`
+- **RunPod Jupyter exposure** — by default (`jupyter-access = "auto"`) pods
+  whose config guarantees SSH reach Jupyter through a local SSH tunnel, but
+  the pod KEEPS its token-protected public proxy mapping as a fallback for
+  when SSH is slow to come back (e.g. after a resume) — so the endpoint is
+  still internet-reachable with the token. Users who need Jupyter physically
+  unreachable from the internet must set `jupyter-access = "tunnel"`: no
+  public mapping is created at all, at the cost that a resume whose SSH
+  never returns cannot fall back. Community-cloud pods without
+  `support-public-ip` always use the public proxy (token-protected)
 - **Kubernetes pod template** — if using k8s, the lab owns a pod YAML
   (resources, tolerations, volumes, Kueue `queue-name` label). Point
   `[kubernetes] pod-template` at it. `start(priority="high")` sets the Kueue

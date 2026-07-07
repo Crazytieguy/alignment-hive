@@ -395,6 +395,9 @@ impl RemoteKernelsServer {
         };
 
         tracing::info!(instance = %name, runtime = %runtime_name, "Provisioning machine...");
+        // A fresh machine under a reused name must not inherit the previous
+        // machine's TOFU host-key pin (see SshEndpoint) — it WILL differ.
+        self.state.lock().await.reset_known_hosts(&name);
         let handle = runtime
             .provision(&req)
             .await
@@ -413,6 +416,7 @@ impl RemoteKernelsServer {
                 cleanup,
                 jupyter_token.clone(),
                 ssh_keypair.private_key_path,
+                handle.proxy_port_mapped,
             );
             let record = inst.record();
             state.instances.insert(name.clone(), inst);
@@ -446,6 +450,11 @@ impl RemoteKernelsServer {
                         handle.external_id
                     ))]))
                 }
+                // "user action required" errors mean the MACHINE is fine
+                // (host-key trust, config drift) — keep it and its record.
+                Err(e) if crate::runtime::error_requires_user_action(&e) => Err(
+                    McpError::internal_error(format!("Machine start needs attention: {e:#}"), None),
+                ),
                 Err(e) => {
                     let outcome = self
                         .cleanup_failed_start(&name, &handle.external_id, &runtime_name, false)
@@ -1403,10 +1412,20 @@ impl RemoteKernelsServer {
 
         match status {
             // Running now, or still coming up (e.g. crash mid-provision) —
-            // finalize_start's wait_running handles both.
+            // finalize_start's wait_running handles both. The TOFU pin is
+            // deliberately KEPT: a machine that never stopped must present
+            // the pinned host key, and this reconnect is exactly where the
+            // pin protects against a redirect. If the machine was resumed
+            // OUTSIDE this server (console), its new host key surfaces as an
+            // actionable "host key mismatch" error that keeps the machine —
+            // never as a silent re-pin, and never as a terminate.
             InstanceStatus::Running | InstanceStatus::Provisioning => {}
             InstanceStatus::Stopped => {
                 tracing::info!(external_id = %record.external_id, "Resuming stopped machine...");
+                // A stop/resume cycle may legitimately move the machine (new
+                // public IP, new host key) — drop the TOFU pin for the new
+                // trust session.
+                self.state.lock().await.reset_known_hosts(name);
                 if let Err(e) = runtime.resume(&record.external_id).await {
                     return Some(Err(McpError::internal_error(
                         format!("Failed to resume machine {}: {e}", record.external_id),
@@ -1448,6 +1467,7 @@ impl RemoteKernelsServer {
                 record.cleanup,
                 jupyter_token.clone(),
                 ssh_key_path,
+                record.proxy_port_mapped,
             );
             state.instances.insert(name.to_string(), inst);
         }
@@ -1463,6 +1483,13 @@ impl RemoteKernelsServer {
                      waiting for capacity. Setup continues in the background — poll status().",
                     record.external_id
                 ))])))
+            }
+            Err(e) if crate::runtime::error_requires_user_action(&e) => {
+                // The machine is fine — a trust/config question. Keep it.
+                Some(Err(McpError::internal_error(
+                    format!("Reconnect needs attention: {e:#}"),
+                    None,
+                )))
             }
             Err(e) => {
                 let outcome = self
@@ -1497,14 +1524,24 @@ impl RemoteKernelsServer {
                 .ok_or_else(|| anyhow::anyhow!("instance was removed or replaced during start"))
         }
 
-        let (runtime_name, jupyter_token, ssh_key_path, cleanup) = {
+        let (
+            runtime_name,
+            jupyter_token,
+            ssh_key_path,
+            known_hosts_path,
+            cleanup,
+            proxy_port_mapped,
+        ) = {
             let mut state = self.state.lock().await;
+            let known_hosts_path = state.known_hosts_path(name);
             let inst = same_generation(&mut state, name, external_id)?;
             (
                 inst.runtime.clone(),
                 inst.jupyter_token.clone(),
                 inst.ssh_key_path.clone(),
+                known_hosts_path,
                 inst.cleanup,
+                inst.proxy_port_mapped,
             )
         };
         let runtime = self
@@ -1519,7 +1556,9 @@ impl RemoteKernelsServer {
                 external_id,
                 &ConnectionContext {
                     ssh_key_path,
+                    known_hosts_path,
                     jupyter_token: jupyter_token.clone(),
+                    proxy_port_mapped,
                 },
             )
             .await?;
@@ -1572,8 +1611,19 @@ impl RemoteKernelsServer {
             let inst = same_generation(&mut state, name, external_id)?;
             inst.phase = Phase::Running;
             let record = inst.record();
+            // Declared by the runtime that built the endpoint — never
+            // inferred from the URL (this is a user-facing security claim).
+            let access = match endpoint.exposure {
+                crate::runtime::JupyterExposure::Local => "local tunnel (not internet-exposed)",
+                crate::runtime::JupyterExposure::LocalWithPublicFallback => {
+                    "local tunnel (a token-protected public proxy mapping also exists)"
+                }
+                crate::runtime::JupyterExposure::Public => {
+                    "provider endpoint (public, token-protected)"
+                }
+            };
             let mut summary = format!(
-                "- Name: {name}\n- ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Status: RUNNING",
+                "- Name: {name}\n- ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Jupyter: {access}\n- Status: RUNNING",
                 inst.external_id, inst.runtime, inst.gpu_name, inst.cost_per_hr
             );
             if let Some(budget) = self.budget {
@@ -1591,6 +1641,11 @@ impl RemoteKernelsServer {
             if let Err(e) = state.save_record(name, &record) {
                 tracing::warn!("Failed to persist instance record: {e}");
             }
+        }
+
+        let mut summary = summary;
+        if let Some(note) = conn.startup_note() {
+            let _ = write!(summary, "\n- Note: {note}");
         }
 
         Ok(summary)
@@ -1653,6 +1708,15 @@ impl RemoteKernelsServer {
                     }
                 };
                 tracing::warn!(instance = %name, "Background start failed: {error}");
+                // "user action required" errors mean the machine is fine
+                // (host-key trust, config drift): keep it and its record,
+                // surface via status(), and let the user decide.
+                if crate::runtime::error_requires_user_action(&error) {
+                    server.start_failures.lock().await.push(format!(
+                        "Machine {name:?} needs attention (machine kept): {error:#}"
+                    ));
+                    return;
+                }
                 // Overshooting the provisioning timeout forces termination
                 // regardless of cleanup policy — the timeout is the money
                 // backstop for hosts that bill without becoming usable.
@@ -2095,6 +2159,7 @@ mod failed_start_tests {
                 cleanup,
                 "token".to_string(),
                 dir.path().join("id_ed25519"),
+                false,
             );
             let record = inst.record();
             state.instances.insert("main".to_string(), inst);

@@ -195,6 +195,24 @@ pub struct InstanceHandle {
     /// money-safety guard that could not be applied). Only set by
     /// [`Runtime::provision`]; `None` on handles from status queries.
     pub note: Option<String>,
+    /// Whether the machine was created with `RunPod`'s public 8888 proxy
+    /// mapping — the creation-time fact `open()` needs to decide the Jupyter
+    /// access path (a tunnel-only pod must never be handed a proxy URL).
+    /// Meaningful for `RunPod` only; other runtimes set `false`.
+    pub proxy_port_mapped: bool,
+}
+
+/// Marker prefix for failures where the MACHINE is fine but the user must
+/// decide something (a host-key trust question, a config edit that
+/// contradicts how the pod was created). The server's failed-start path
+/// checks this to KEEP the machine and its record instead of routing to
+/// provider cleanup — terminating a healthy, possibly data-bearing machine
+/// over a trust/config question would destroy user data.
+pub const USER_ACTION_REQUIRED: &str = "user action required:";
+
+/// Whether an error (anywhere in its chain) is marked [`USER_ACTION_REQUIRED`].
+pub fn error_requires_user_action(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(USER_ACTION_REQUIRED)
 }
 
 /// Marker error: the machine is still legitimately coming up (e.g. a
@@ -219,6 +237,21 @@ pub enum InstanceStatus {
     Unknown(String),
 }
 
+/// Who can reach a machine's Jupyter endpoint. Declared by the runtime that
+/// built the endpoint (it knows the access path it chose) — never inferred
+/// from the URL: this classification is shown to the user as a security
+/// property, and a string sniff can silently drift from the truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JupyterExposure {
+    /// Loopback only (SSH tunnel / port-forward) — not internet-reachable.
+    Local,
+    /// Served over loopback, but the pod also keeps a token-protected public
+    /// mapping as a fallback path (`RunPod` `jupyter-access = "auto"`).
+    LocalWithPublicFallback,
+    /// A provider-hosted public endpoint, token-protected.
+    Public,
+}
+
 /// How to reach a machine's Jupyter server.
 #[derive(Debug, Clone)]
 pub struct JupyterEndpoint {
@@ -227,13 +260,33 @@ pub struct JupyterEndpoint {
     /// e.g. `wss://{pod}-8888.proxy.runpod.net` or `ws://127.0.0.1:{port}`
     pub ws_base: String,
     pub token: String,
+    pub exposure: JupyterExposure,
+}
+
+impl JupyterEndpoint {
+    /// The single constructor for loopback endpoints (SSH tunnels,
+    /// port-forwards) — keeps the URL format and the `Local` exposure claim
+    /// paired in one place.
+    pub fn loopback(local_port: u16, token: String) -> Self {
+        Self {
+            http_base: format!("http://127.0.0.1:{local_port}"),
+            ws_base: format!("ws://127.0.0.1:{local_port}"),
+            token,
+            exposure: JupyterExposure::Local,
+        }
+    }
 }
 
 /// Everything a runtime needs (beyond the external id) to open a connection.
 #[derive(Debug, Clone)]
 pub struct ConnectionContext {
     pub ssh_key_path: PathBuf,
+    /// Per-instance TOFU known-hosts file (see [`crate::ssh_exec::SshEndpoint`]).
+    /// SSH-less runtimes (kubernetes, fake) ignore it.
+    pub known_hosts_path: PathBuf,
     pub jupyter_token: String,
+    /// From the instance record: see [`InstanceHandle::proxy_port_mapped`].
+    pub proxy_port_mapped: bool,
 }
 
 /// On-machine self-cleanup policy, installed via [`Connection::install_watchdog`].
@@ -254,6 +307,12 @@ pub struct WatchdogPolicy {
 pub trait Connection: Send + Sync {
     /// How the shared Jupyter layer reaches this machine's Jupyter server.
     fn jupyter(&self) -> &JupyterEndpoint;
+
+    /// A caveat about this connection worth surfacing in the `start()`
+    /// result (e.g. a degraded access path). `None` when all is normal.
+    fn startup_note(&self) -> Option<String> {
+        None
+    }
 
     /// Run an infrastructure command on the machine (never user/Claude code —
     /// that goes through Jupyter kernels).
@@ -523,6 +582,10 @@ pub enum AnyConnection {
 impl Connection for AnyConnection {
     fn jupyter(&self) -> &JupyterEndpoint {
         dispatch!(self, c => c.jupyter())
+    }
+
+    fn startup_note(&self) -> Option<String> {
+        dispatch!(self, c => c.startup_note())
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {

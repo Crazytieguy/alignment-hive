@@ -52,19 +52,16 @@ pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
 /// here — it is not part of the base `runpod/pytorch` image).
 pub async fn sync_to_pod(
     project_dir: &Path,
-    ssh_key_path: &Path,
-    user: &str,
-    public_ip: &str,
-    ssh_port: u16,
+    ssh: &crate::ssh_exec::SshEndpoint,
     remote_path: &str,
     extra_includes: &[String],
 ) -> anyhow::Result<String> {
-    ensure_rsync_on_pod(ssh_key_path, user, public_ip, ssh_port).await?;
+    ensure_rsync_on_pod(ssh).await?;
 
-    let ssh_cmd = crate::ssh_exec::rsync_transport(ssh_key_path, ssh_port);
+    let ssh_cmd = ssh.rsync_transport();
 
     let source = format!("{}/", project_dir.display());
-    let destination = format!("{user}@{public_ip}:{remote_path}/");
+    let destination = format!("{}@{}:{remote_path}/", ssh.user, ssh.host);
 
     tracing::info!(%destination, "Syncing files to pod");
 
@@ -93,17 +90,8 @@ pub async fn sync_to_pod(
 }
 
 /// Ensure rsync is installed on the pod. No-op if already present.
-async fn ensure_rsync_on_pod(
-    ssh_key_path: &Path,
-    user: &str,
-    public_ip: &str,
-    ssh_port: u16,
-) -> anyhow::Result<()> {
-    crate::ssh_exec::ssh_cmd(
-        ssh_key_path,
-        user,
-        public_ip,
-        ssh_port,
+async fn ensure_rsync_on_pod(ssh: &crate::ssh_exec::SshEndpoint) -> anyhow::Result<()> {
+    ssh.cmd(
         "which rsync || (apt-get update -qq && apt-get install -y -qq rsync)",
         std::time::Duration::from_secs(120),
     )
@@ -114,18 +102,15 @@ async fn ensure_rsync_on_pod(
 
 /// Download a file or directory from the pod to a local path.
 pub async fn download_from_pod(
-    ssh_key_path: &Path,
-    user: &str,
-    public_ip: &str,
-    ssh_port: u16,
+    ssh: &crate::ssh_exec::SshEndpoint,
     remote_path: &str,
     local_path: &Path,
 ) -> anyhow::Result<String> {
-    ensure_rsync_on_pod(ssh_key_path, user, public_ip, ssh_port).await?;
+    ensure_rsync_on_pod(ssh).await?;
 
-    let ssh_cmd = crate::ssh_exec::rsync_transport(ssh_key_path, ssh_port);
+    let ssh_cmd = ssh.rsync_transport();
 
-    let source = format!("{user}@{public_ip}:{remote_path}");
+    let source = format!("{}@{}:{remote_path}", ssh.user, ssh.host);
     let destination = local_path.display().to_string();
 
     // Ensure parent directory exists.

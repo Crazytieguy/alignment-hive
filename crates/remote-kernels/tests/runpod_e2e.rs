@@ -185,6 +185,10 @@ gpu-type-ids = ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090", "NVIDIA RT
 
 [runpod]
 cloud-type = "COMMUNITY"
+# Guarantees a public IP → jupyter-access "auto" resolves to the SSH tunnel
+# (the pod keeps its token-protected proxy mapping as the resume fallback):
+# this run is the live proof of the tunnel-first Jupyter path.
+support-public-ip = true
 container-disk-gb = 20
 volume-gb = 0
 "#,
@@ -202,6 +206,16 @@ volume-gb = 0
     let text = text_of(&result);
     assert!(!is_error(&result), "start failed: {text}");
     assert!(text.contains("RUNNING"), "{text}");
+    // The tunneled path must be chosen (config guarantees SSH) — Jupyter is
+    // reached via loopback; the proxy mapping exists only as the resume-time
+    // fallback and must not be the fresh-start choice.
+    assert!(text.contains("local tunnel"), "{text}");
+    // TOFU: the first connection pinned the pod's host key.
+    let known_hosts = dir
+        .path()
+        .join(".claude/remote-kernels/instances/main/known_hosts");
+    let pinned = std::fs::read_to_string(&known_hosts).expect("known_hosts must exist after start");
+    assert!(!pinned.trim().is_empty(), "host key must be pinned");
     eprintln!("started: {text}");
     guard.pod_id =
         remote_kernels::state::load_instance_record(dir.path(), "main").map(|r| r.external_id);
@@ -310,6 +324,12 @@ cloud-type = "COMMUNITY"
 container-disk-gb = 20
 volume-gb = 0
 support-public-ip = true
+# Deliberate cross-coverage: the lifecycle test drives the tunnel path, so
+# this test pins the PROXY path (public URL, WSS via proxy.runpod.net, token
+# auth) to keep it live-covered — it remains the default for community pods
+# without support-public-ip and the auto-mode fallback. Orthogonal to the
+# guard behavior under test (the guard arms on ssh_expected, not on access).
+jupyter-access = "proxy"
 "#,
     )
     .unwrap();
