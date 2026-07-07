@@ -15,10 +15,12 @@ Common alternatives are running Claude Code inside a cloud container, or having 
 ## What This Plugin Does
 
 **Three runtimes, one interface** — RunPod (managed pods, reliable
-stop/resume), vast.ai (cheapest marketplace GPUs; VM mode runs Docker inside,
-e.g. for UK AISI Inspect's sandboxed evals), and Kubernetes (lab clusters:
-pods from a lab-owned template, Kueue queue/priority aware). Configure via
-`remote-kernels.toml`; switch per machine with `start(runtime=...)`.
+stop/resume), vast.ai (cheapest marketplace GPUs — Claude can search offers
+and pick hosts, or take the cheapest qualifying automatically; VM mode runs
+Docker inside, e.g. for UK AISI Inspect's sandboxed evals), and Kubernetes
+(lab clusters: pods from a lab-owned template, Kueue queue/priority aware).
+Configure via `remote-kernels.toml`; switch per machine with
+`start(runtime=...)`.
 
 **Multiple concurrent machines** — Named instances (`start(name="gpu-2")`),
 started in parallel (`wait=false` + `status()` polling), each with its own
@@ -44,7 +46,7 @@ outlive a crashed session are reconnected or reaped on the next start.
 ## Requirements
 
 - An API key for the runtime(s) you use: `RUNPOD_API_KEY` and/or
-  `VAST_API_KEY` (on 2FA-enabled vast accounts, instance creation needs the
-  key elevated once with a 2FA code — the setup skill walks through it), or
-  a kubeconfig for Kubernetes.
+  `VAST_API_KEY` (a plain console key; vast accounts with 2FA enabled reject
+  API writes — the setup skill explains the options, disabling 2FA being the
+  supported one), or a kubeconfig for Kubernetes.
 - Run the `setup` skill to configure interactively.
