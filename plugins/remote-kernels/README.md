@@ -9,8 +9,10 @@ This plugin decouples the agent from the execution environment, in the same
 spirit as Anthropic's [managed agents](https://www.anthropic.com/engineering/managed-agents)
 architecture: Claude and your session stay on your machine (the "brain"),
 while cloud GPUs are interchangeable "hands" it attaches, uses, and discards.
-The common alternatives couple the two — running Claude Code inside a cloud
-container, or piping SSH commands at a long-lived dev box. Decoupling buys:
+The common alternatives fall short of this: running Claude Code inside a
+cloud container couples the two outright, and piping SSH commands at a
+long-lived dev box decouples them only awkwardly — manual provisioning,
+error-prone command plumbing, weaker security. Doing it properly buys:
 
 - **Less manual work** — Claude starts, stops, and terminates machines on
   demand. No pre-provisioning, no manual SSH setup, and your local Claude

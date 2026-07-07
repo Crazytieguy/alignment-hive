@@ -36,16 +36,12 @@ repeatable — and save it as `remote-kernels.toml` at the project root:
 ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh config-template --runtime <runtime>
 ```
 
-(If `--runtime` is rejected, the cached binary predates it: run plain
-`config-template` and delete the sections for runtimes that weren't chosen.)
-
 ## 3. Configure it
 
 The generated file's comments document every field, its default, and the
-tradeoffs — they are the single source of truth; don't re-derive field
-meanings from elsewhere. Walk through the file with the user and edit it,
-preferring values inferred from the project (existing images, GPU needs
-implied by the workload, install steps from the README).
+tradeoffs. Walk through the file with the user and edit it, preferring
+values inferred from the project (existing images, GPU needs implied by the
+workload, install steps from the README).
 
 Then read the reference file for each chosen runtime — it covers setup steps
 and pitfalls that are NOT config fields:
@@ -75,13 +71,14 @@ Cover these with the user regardless of runtime:
   deletes the machine and its data at session end, which is only safe once
   the data-persistence plan below is in place.
 - **Data persistence** — IMPORTANT: agree where remotely-generated data
-  should live, and make sure that reliably happens. vast and Kubernetes have
-  weak-or-no stop/resume, so anything not brought back is lost at terminate.
-  Options: `download` results after runs; RunPod network volumes; Kubernetes
-  PVCs in the pod template; a bucket the user manages (sync via
-  `startup-commands`/onstart, e.g. rclone/s5cmd). RunPod volumes have no
-  snapshots — recommend external backup (HF Hub, W&B, S3) for anything
-  precious.
+  (checkpoints, results, logs) should live, and make sure it reliably gets
+  there. vast and Kubernetes machines are effectively ephemeral, and
+  terminate deletes data on every runtime — anything still on the machine is
+  lost with it. The simple default is to `download` results back to the
+  project after every run. Data too large to shuttle needs storage that
+  outlives the machine: a RunPod network volume, a PVC in the Kubernetes pod
+  template, or an external store the user already trusts (S3, HF Hub, W&B)
+  that jobs push to. The plugin itself backs up nothing.
 - **Budget** — set `REMOTE_KERNELS_BUDGET` in `.claude/settings.json`'s
   `env` section (not in remote-kernels.toml, so Claude can't modify it).
   Enforced across ALL concurrent machines; requires cleanup != "disabled" on
