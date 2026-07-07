@@ -34,6 +34,39 @@ struct FakeInstance {
     last_budget_deadline: Arc<AtomicU64>,
 }
 
+/// Kill the Jupyter server's whole process group. `child.kill()` (and
+/// `kill_on_drop`) only signal the direct child — the launcher wrapper or
+/// the Jupyter server itself — orphaning ipykernel grandchildren, which is
+/// exactly what leaves stray jupyter/python processes after test runs.
+/// [`FakeRuntime::spawn_jupyter`] puts the server in its own process group
+/// (pgid == pid), so signaling the group reaps everything.
+fn kill_group(child: &tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", "--", &format!("-{pid}")])
+            .status();
+    }
+}
+
+/// Group-kill, then reap the direct child. The group signal must land
+/// BEFORE the child is reaped — reaping first frees the pid, and the pgid
+/// could be reused by an unrelated process.
+async fn kill_and_reap(mut child: tokio::process::Child) {
+    kill_group(&child);
+    let _ = child.kill().await;
+}
+
+/// Panic/drop safety net: a test that aborts mid-lifecycle still tears the
+/// group down (`kill_on_drop` alone would orphan the kernels).
+impl Drop for FakeInstance {
+    fn drop(&mut self) {
+        if let Some(child) = &self.child {
+            kill_group(child);
+        }
+    }
+}
+
 pub struct FakeRuntime {
     instances: Arc<Mutex<HashMap<String, FakeInstance>>>,
     cost_per_hr: f64,
@@ -69,7 +102,12 @@ impl FakeRuntime {
             .split_first()
             .ok_or_else(|| anyhow::anyhow!("REMOTE_KERNELS_FAKE_JUPYTER is empty"))?;
 
-        let child = tokio::process::Command::new(program)
+        let mut command = tokio::process::Command::new(program);
+        // Own process group so cleanup can signal the group: SIGKILL to the
+        // server alone can't reach the ipykernel children it spawned.
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .args(args)
             .arg("--no-browser")
             .arg("--ip=127.0.0.1")
@@ -193,8 +231,8 @@ impl Runtime for FakeRuntime {
         let inst = instances
             .get_mut(external_id)
             .ok_or_else(|| anyhow::anyhow!("unknown fake instance"))?;
-        if let Some(mut child) = inst.child.take() {
-            let _ = child.kill().await;
+        if let Some(child) = inst.child.take() {
+            kill_and_reap(child).await;
         }
         Ok(())
     }
@@ -216,9 +254,9 @@ impl Runtime for FakeRuntime {
 
     async fn terminate(&self, external_id: &str) -> anyhow::Result<()> {
         if let Some(mut inst) = self.instances.lock().await.remove(external_id)
-            && let Some(mut child) = inst.child.take()
+            && let Some(child) = inst.child.take()
         {
-            let _ = child.kill().await;
+            kill_and_reap(child).await;
         }
         Ok(())
     }
@@ -311,13 +349,11 @@ impl Connection for FakeConnection {
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let source = self.workdir.join(remote_path.trim_start_matches('/'));
+        // Same path semantics as production backends (workdir-relative,
+        // absolute honored) so the e2e suite tests the real contract.
+        let source = crate::sync::resolve_remote_path(&self.workdir.to_string_lossy(), remote_path);
         let output = tokio::process::Command::new("rsync")
-            .args([
-                "-az".to_string(),
-                source.display().to_string(),
-                local_path.display().to_string(),
-            ])
+            .args(["-az".to_string(), source, local_path.display().to_string()])
             .output()
             .await?;
         if !output.status.success() {

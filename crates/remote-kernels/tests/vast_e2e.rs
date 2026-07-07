@@ -363,17 +363,20 @@ dph_total = { gte = 0.268, lte = 0.45 }
     // Produce + download.
     let (err, out) = exec("open('/workspace/result.txt', 'w').write('gpu output')").await;
     assert!(!err, "{out}");
-    let download_to = dir.path().join("fetched/result.txt");
+    // local_path is project-relative (resolved against the server's project dir).
     let result = server
         .download(Parameters(remote_kernels::server::DownloadParams {
             remote_path: "/workspace/result.txt".to_string(),
-            local_path: download_to.display().to_string(),
+            local_path: "fetched/result.txt".to_string(),
             instance: None,
         }))
         .await
         .unwrap();
     assert!(!is_error(&result), "download failed: {}", text_of(&result));
-    assert_eq!(std::fs::read_to_string(&download_to).unwrap(), "gpu output");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("fetched/result.txt")).unwrap(),
+        "gpu output"
+    );
 
     guard.disarm(&server, None).await;
 }
@@ -531,7 +534,7 @@ def hello():
     let result = server
         .download(Parameters(remote_kernels::server::DownloadParams {
             remote_path: "/root/workspace/logs".to_string(),
-            local_path: logs_dir.display().to_string(),
+            local_path: "fetched-logs".to_string(),
             instance: None,
         }))
         .await

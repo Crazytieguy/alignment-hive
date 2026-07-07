@@ -1006,7 +1006,7 @@ impl Connection for VastConnection {
     }
 
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        crate::sync::download_from_pod(&self.ssh, remote_path, local_path).await
+        crate::sync::download_from_pod(&self.ssh, remote_path, local_path, &self.workdir).await
     }
 
     /// Best-effort self-cleanup: there is no credential-free way to destroy a

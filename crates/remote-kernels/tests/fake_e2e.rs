@@ -154,18 +154,27 @@ async fn full_lifecycle_on_fake_runtime() {
     )
     .await;
     assert!(!err, "{out}");
-    let download_to = dir.path().join("downloads/result.txt");
+    // local_path is project-relative; absolute paths are rejected.
     let result = server
         .download(Parameters(remote_kernels::server::DownloadParams {
             remote_path: "result.txt".to_string(),
-            local_path: download_to.display().to_string(),
+            local_path: "/tmp/escape.txt".to_string(),
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&result), "absolute local_path must be rejected");
+    let result = server
+        .download(Parameters(remote_kernels::server::DownloadParams {
+            remote_path: "result.txt".to_string(),
+            local_path: "downloads/result.txt".to_string(),
             instance: None,
         }))
         .await
         .unwrap();
     assert!(!is_error(&result), "download failed: {}", text_of(&result));
     assert_eq!(
-        std::fs::read_to_string(&download_to).unwrap(),
+        std::fs::read_to_string(dir.path().join("downloads/result.txt")).unwrap(),
         "gpu results"
     );
 

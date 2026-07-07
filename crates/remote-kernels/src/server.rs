@@ -11,7 +11,6 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::config::{Cleanup, Config};
-use crate::descriptions;
 use crate::jupyter::rest::JupyterClient;
 use crate::runtime::{
     AnyRuntime, Connection, ConnectionContext, InstanceStatus, ProvisionRequest, Runtime,
@@ -34,6 +33,9 @@ pub struct RemoteKernelsServer {
     /// `start()` calls could otherwise both provision (and one machine would
     /// leak untracked). Sync mutex: never held across an await.
     starting: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Server instructions, rendered once at construction (they embed the
+    /// project directory, which is fixed for the server's lifetime).
+    instructions: String,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -168,7 +170,8 @@ pub struct ExecuteParams {
     pub kernel_id: String,
     /// Python code to execute.
     pub code: String,
-    /// Timeout in seconds (default: 30). Set to 0 to start execution without waiting (fire-and-forget).
+    /// Timeout in seconds (default: 30). Set to 0 to start the execution and return
+    /// immediately (collect it later with `get_output()`).
     pub timeout: Option<u64>,
     /// If true, queue behind the current execution instead of returning an error when busy.
     pub queue: Option<bool>,
@@ -188,8 +191,9 @@ pub struct GetOutputParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SyncParams {
-    /// Extra paths to include in the sync, even if they would be excluded by .gitignore.
-    /// Paths must be relative to the project root. Absolute paths and ".." are not allowed.
+    /// Extra paths to include in the sync, even if .gitignore excludes them.
+    /// Paths must be relative to the project root. Absolute paths and ".."
+    /// are not allowed.
     pub include: Option<Vec<String>>,
     /// Which machine to sync to. Optional when exactly one is active.
     pub instance: Option<String>,
@@ -197,9 +201,11 @@ pub struct SyncParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DownloadParams {
-    /// Remote path on the machine to download.
+    /// Path on the machine to download. Relative paths resolve against the
+    /// machine's workdir (where kernels run and `sync()` lands files).
     pub remote_path: String,
-    /// Local path to save to.
+    /// Local path to save to, relative to the project root. Absolute paths
+    /// and ".." are not allowed (same rules as sync includes).
     pub local_path: String,
     /// Which machine to download from. Optional when exactly one is active.
     pub instance: Option<String>,
@@ -262,6 +268,7 @@ fn validate_vast_offers(
 #[tool_router]
 impl RemoteKernelsServer {
     pub fn new(config: Config, state: AppState, budget: Option<f64>) -> Self {
+        let instructions = crate::descriptions::server_instructions(&state.project_dir);
         Self {
             config: Arc::new(config),
             state: Arc::new(Mutex::new(state)),
@@ -269,6 +276,7 @@ impl RemoteKernelsServer {
             budget,
             start_failures: Arc::new(Mutex::new(Vec::new())),
             starting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            instructions,
             tool_router: Self::tool_router(),
         }
     }
@@ -724,7 +732,10 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(info)]))
     }
 
-    /// Spin up a kernel on a running machine. Returns the new kernel ID.
+    /// Create a Jupyter kernel on a running machine. Returns the kernel ID and the
+    /// local notebook file where every execution on this kernel is saved. Kernel state
+    /// (variables, imports) persists across `execute()` calls until shutdown or restart;
+    /// code runs in the machine's workdir, where `sync()` lands files.
     #[tool(name = "create_kernel")]
     pub async fn create_kernel(
         &self,
@@ -804,8 +815,9 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    /// Execute Python code in a Jupyter kernel. Returns the output (stdout, stderr, result, errors).
-    /// For long-running code, consider using a reasonable timeout.
+    /// Execute Python code in a kernel. Returns the output (stdout, stderr, result,
+    /// errors). If the timeout elapses, the execution keeps running and the response
+    /// includes a cell number — pass it to `get_output()` to collect the result.
     #[tool(name = "execute")]
     pub async fn execute(
         &self,
@@ -1060,7 +1072,9 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// Sync local project files to a machine. Respects .gitignore.
+    /// Sync the project directory to a machine's workdir (where kernels run).
+    /// Respects .gitignore and mirrors deletions: remote files with no local
+    /// counterpart are removed.
     #[tool(name = "sync")]
     pub async fn sync(&self, params: Parameters<SyncParams>) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
@@ -1098,7 +1112,7 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    /// Download a file or directory from a machine to a local path.
+    /// Download a file or directory from a machine into the project directory.
     #[tool(name = "download")]
     pub async fn download(
         &self,
@@ -1107,7 +1121,13 @@ impl RemoteKernelsServer {
         self.check_budget().await?;
         let params = params.0;
 
-        let conn = {
+        // Same constraint as sync includes: the destination must stay inside
+        // the project.
+        if let Err(msg) = crate::sync::validate_project_relative(&params.local_path) {
+            return err_text(msg);
+        }
+
+        let (project_dir, conn) = {
             let state = self.state.lock().await;
             let name = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
@@ -1119,14 +1139,11 @@ impl RemoteKernelsServer {
                     "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
                 ));
             };
-            conn
+            (state.project_dir.clone(), conn)
         };
 
         let result = conn
-            .download(
-                &params.remote_path,
-                std::path::Path::new(&params.local_path),
-            )
+            .download(&params.remote_path, &project_dir.join(&params.local_path))
             .await
             .map_err(|e| McpError::internal_error(format!("Download failed: {e}"), None))?;
 
@@ -2106,7 +2123,7 @@ impl ServerHandler for RemoteKernelsServer {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some(descriptions::SERVER_INSTRUCTIONS.to_string()),
+            instructions: Some(self.instructions.clone()),
             ..Default::default()
         }
     }

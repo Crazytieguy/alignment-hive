@@ -177,18 +177,18 @@ async fn k8s_full_lifecycle_via_kueue() {
     // Download: kernel writes a result, tar-over-exec brings it back.
     let (err, out) = exec("open('out/result.txt', 'w') if False else None; import os; os.makedirs('out', exist_ok=True); open('out/result.txt', 'w').write('pod results')").await;
     assert!(!err, "{out}");
-    let download_to = dir.path().join("fetched/result.txt");
+    // local_path is project-relative (resolved against the server's project dir).
     let result = server
         .download(Parameters(remote_kernels::server::DownloadParams {
             remote_path: "out/result.txt".to_string(),
-            local_path: download_to.display().to_string(),
+            local_path: "fetched/result.txt".to_string(),
             instance: None,
         }))
         .await
         .unwrap();
     assert!(!is_error(&result), "download failed: {}", text_of(&result));
     assert_eq!(
-        std::fs::read_to_string(&download_to).unwrap(),
+        std::fs::read_to_string(dir.path().join("fetched/result.txt")).unwrap(),
         "pod results"
     );
 

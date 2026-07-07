@@ -28,18 +28,31 @@ pub fn rsync_upload_args(extra_includes: &[String]) -> Vec<String> {
     args
 }
 
-/// Validate sync include paths: must be relative to the project root, with no `..`
-/// components. Rejecting absolute paths and `..` is a security requirement — includes
-/// take priority over `.gitignore` filtering and must not reach outside the project.
-pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
-    for path in includes {
-        if path.starts_with('/') || path.contains("..") {
-            return Err(format!(
-                "Invalid include path: {path:?}. Paths must be relative to the project root. Absolute paths and '..' are not allowed.",
-            ));
-        }
+/// Validate one project-relative path: no absolute paths, no `..` path
+/// components. This is a security requirement — the canonical check for
+/// every tool parameter that names a local path (sync includes, download
+/// destinations): none of them may reach outside the project. Checked
+/// component-wise so filenames merely containing ".." (e.g. "ckpt..best.pt")
+/// stay legal.
+pub fn validate_project_relative(path: &str) -> Result<(), String> {
+    let has_parent_component = Path::new(path)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if path.starts_with('/') || has_parent_component {
+        return Err(format!(
+            "Invalid path: {path:?}. Paths must be relative to the project root. Absolute paths and '..' are not allowed.",
+        ));
     }
     Ok(())
+}
+
+/// Validate sync include paths ([`validate_project_relative`] on each) —
+/// includes take priority over `.gitignore` filtering, so a path outside the
+/// project would exfiltrate files sync should never touch.
+pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
+    includes
+        .iter()
+        .try_for_each(|path| validate_project_relative(path))
 }
 
 /// rsync local project files to the pod.
@@ -100,16 +113,35 @@ async fn ensure_rsync_on_pod(ssh: &crate::ssh_exec::SshEndpoint) -> anyhow::Resu
     Ok(())
 }
 
-/// Download a file or directory from the pod to a local path.
+/// The single implementation of remote download-path semantics, shared by
+/// every runtime: relative paths resolve against the machine's workdir
+/// (where kernels run and sync lands files), absolute paths are honored,
+/// and trailing slashes are trimmed so a directory is always downloaded as
+/// the directory itself (rsync would otherwise copy its *contents*,
+/// diverging from the tar-based kubernetes path).
+pub fn resolve_remote_path(remote_workdir: &str, remote_path: &str) -> String {
+    let trimmed = remote_path.trim_end_matches('/');
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{}/{trimmed}", remote_workdir.trim_end_matches('/'))
+    }
+}
+
+/// Download a file or directory from the pod to a local path. Path
+/// semantics come from [`resolve_remote_path`] so all backends behave
+/// identically.
 pub async fn download_from_pod(
     ssh: &crate::ssh_exec::SshEndpoint,
     remote_path: &str,
     local_path: &Path,
+    remote_workdir: &str,
 ) -> anyhow::Result<String> {
     ensure_rsync_on_pod(ssh).await?;
 
     let ssh_cmd = ssh.rsync_transport();
 
+    let remote_path = resolve_remote_path(remote_workdir, remote_path);
     let source = format!("{}@{}:{remote_path}", ssh.user, ssh.host);
     let destination = local_path.display().to_string();
 
@@ -156,6 +188,23 @@ mod tests {
     fn relative_paths_are_accepted() {
         assert!(validate_include_paths(&paths(&["data/", "models/small.pt", ".env.pod"])).is_ok());
         assert!(validate_include_paths(&[]).is_ok());
+        // ".." as a substring of a filename is not a parent-dir component.
+        assert!(validate_include_paths(&paths(&["ckpt..best.pt", "runs/loss..v2.csv"])).is_ok());
+    }
+
+    #[test]
+    fn remote_paths_resolve_against_workdir() {
+        use super::resolve_remote_path;
+        assert_eq!(
+            resolve_remote_path("/workspace", "out.txt"),
+            "/workspace/out.txt"
+        );
+        assert_eq!(resolve_remote_path("/workspace/", "out/"), "/workspace/out");
+        assert_eq!(resolve_remote_path("/workspace", "/etc/motd"), "/etc/motd");
+        assert_eq!(
+            resolve_remote_path("/workspace", "/data/logs/"),
+            "/data/logs"
+        );
     }
 
     #[test]
