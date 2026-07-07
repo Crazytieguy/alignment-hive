@@ -181,23 +181,27 @@ describe("quantizeBusyToGrid — hides exact event times without changing slots"
 });
 
 describe("schedule override", () => {
-  const now = ms("2026-06-15T00:00"); // Monday
+  const now = ms("2026-06-08T00:00"); // Monday, one week before the override window
   const overridden: OfficeConfig = {
     ...office,
-    weekdays: [4], // Thu once the override lapses
-    override: { until: "2026-06-18", weekdays: [2] }, // through Thu: Tue only
+    weekdays: [4], // Thu outside the override window
+    override: { from: "2026-06-15", until: "2026-06-18", weekdays: [2] }, // Mon–Thu: Tue only
   };
 
-  test("isOfficeOpenOn applies the override through its until date (inclusive), the base after", () => {
+  test("isOfficeOpenOn applies the override between from and until (both inclusive), the base outside", () => {
     const day = (iso: string) => DateTime.fromISO(iso, { zone: ZONE });
+    expect(isOfficeOpenOn(overridden, day("2026-06-09"))).toBe(false); // Tue before `from`: base weekdays
+    expect(isOfficeOpenOn(overridden, day("2026-06-11"))).toBe(true); // Thu before `from`: base weekdays
     expect(isOfficeOpenOn(overridden, day("2026-06-16"))).toBe(true); // Tue inside override
     expect(isOfficeOpenOn(overridden, day("2026-06-18"))).toBe(false); // Thu on `until` itself: still overridden
     expect(isOfficeOpenOn(overridden, day("2026-06-23"))).toBe(false); // Tue after: base weekdays
     expect(isOfficeOpenOn(overridden, day("2026-06-25"))).toBe(true); // Thu after: base weekdays
   });
 
-  test("generateSlots applies the override week and the base weekdays after it", () => {
+  test("generateSlots applies the override window and the base weekdays around it", () => {
     const slots = generateSlots(overridden, 90, [], now);
+    expect(onLocalDate(slots, "2026-06-09")).toHaveLength(0); // Tue before override: closed
+    expect(onLocalDate(slots, "2026-06-11").length).toBeGreaterThan(0); // Thu before override
     expect(onLocalDate(slots, "2026-06-16").length).toBeGreaterThan(0); // Tue, override week
     expect(onLocalDate(slots, "2026-06-18")).toHaveLength(0); // Thu, override week: closed
     expect(onLocalDate(slots, "2026-06-23")).toHaveLength(0); // Tue after override: closed
@@ -208,19 +212,26 @@ describe("schedule override", () => {
     const days = officeOpenWindows(overridden, now).map((w) =>
       DateTime.fromMillis(w.startUtc, { zone: ZONE }).toISODate(),
     );
+    expect(days).not.toContain("2026-06-09");
+    expect(days).toContain("2026-06-11");
     expect(days).toContain("2026-06-16");
     expect(days).not.toContain("2026-06-18");
     expect(days).not.toContain("2026-06-23");
     expect(days).toContain("2026-06-25");
   });
 
-  // Pins the 2026-07 transition; delete together with the mats `override` once it has passed.
-  test("real mats schedule: Tue-only the week of 2026-07-06, Thu-only from the next", () => {
+  // Pins the 2026-07 schedule; delete together with the mats `override` once it has passed.
+  test("real mats schedule: Tue+Thu, plus Fri the week of 2026-07-13", () => {
     const slots = generateSlots(OFFICES.mats, 90, [], ms("2026-07-06T00:00"));
     expect(onLocalDate(slots, "2026-07-07").length).toBeGreaterThan(0); // Tue this week
-    expect(onLocalDate(slots, "2026-07-09")).toHaveLength(0); // Thu this week: closed
-    expect(onLocalDate(slots, "2026-07-14")).toHaveLength(0); // Tue next week: closed
+    expect(onLocalDate(slots, "2026-07-09").length).toBeGreaterThan(0); // Thu this week
+    expect(onLocalDate(slots, "2026-07-10")).toHaveLength(0); // Fri this week: closed
+    // Tue 2026-07-14 stays open in config; Yoav closes it with a calendar block.
+    expect(onLocalDate(slots, "2026-07-14").length).toBeGreaterThan(0);
     expect(onLocalDate(slots, "2026-07-16").length).toBeGreaterThan(0); // Thu next week
+    expect(onLocalDate(slots, "2026-07-17").length).toBeGreaterThan(0); // Fri next week: open
+    expect(onLocalDate(slots, "2026-07-21").length).toBeGreaterThan(0); // Tue the week after
+    expect(onLocalDate(slots, "2026-07-24")).toHaveLength(0); // Fri the week after: closed
   });
 
   test("real far-labs schedule: Wednesdays", () => {
