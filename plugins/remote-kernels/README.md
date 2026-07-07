@@ -5,12 +5,26 @@ vast.ai, or Kubernetes.
 
 ## Motivation
 
-Common alternatives are running Claude Code inside a cloud container, or having Claude run SSH commands against a remote machine. This plugin avoids both:
+This plugin decouples the agent from the execution environment, in the same
+spirit as Anthropic's [managed agents](https://www.anthropic.com/engineering/managed-agents)
+architecture: Claude and your session stay on your machine (the "brain"),
+while cloud GPUs are interchangeable "hands" it attaches, uses, and discards.
+The common alternatives couple the two — running Claude Code inside a cloud
+container, or piping SSH commands at a long-lived dev box. Decoupling buys:
 
-- **Dynamic machine management** — Claude can start, stop, and terminate GPU machines on demand rather than relying on a pre-provisioned machine.
-- **Multi-session isolation** — Multiple Claude sessions can each have their own GPU machines without interference.
-- **No reconfiguration** — Your local Claude Code setup (permissions, plugins, settings) stays the same regardless of which GPU you're using.
-- **No manual SSH** — Code runs through Jupyter kernels rather than piping commands over SSH, which is error-prone and tedious to set up.
+- **Less manual work** — Claude starts, stops, and terminates machines on
+  demand. No pre-provisioning, no manual SSH setup, and your local Claude
+  Code configuration (permissions, plugins, settings) applies unchanged
+  whichever GPU is in use.
+- **Cross-session persistence** — everything durable lives with the agent,
+  not on a disposable GPU box: transcripts, memories, downloaded results,
+  and an `.ipynb` notebook per kernel. A later session reconnects to running
+  machines and reads the notebooks to recover context; the machine itself is
+  safe to lose.
+- **More autonomy** — machines are cattle, not pets. Claude can pick
+  marketplace hosts, run several machines concurrently, and clean up after
+  itself — inside budget and cleanup policies you set once and it can't
+  modify.
 
 ## What This Plugin Does
 
@@ -31,7 +45,7 @@ Jupyter kernels. Claude can execute cells, inspect outputs, and iterate — all
 within the conversation. Kernel activity is saved as `.ipynb` files.
 
 **File sync** — Sync local project files to a machine (`.gitignore`-aware)
-and download results back.
+and download results back, both rooted at the project directory.
 
 **Budget controls** — Set a spending limit via environment variable. Costs
 are tracked across all machines (from allocation, not first use) and the
