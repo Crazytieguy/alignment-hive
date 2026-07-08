@@ -69,8 +69,8 @@ export type OfficeSlug = keyof typeof OFFICES;
 export const DURATIONS = [60, 90, 120] as const;
 export type Duration = (typeof DURATIONS)[number];
 
-/** Earliest a slot may be booked: at least this many hours from now. */
-export const MIN_NOTICE_HOURS = 12;
+/** Earliest a slot may be booked: at least this many hours from now (0 = last-minute allowed). */
+export const MIN_NOTICE_HOURS = 0;
 /** Latest a slot may be booked: at most this many days from now. */
 export const HORIZON_DAYS = 21;
 

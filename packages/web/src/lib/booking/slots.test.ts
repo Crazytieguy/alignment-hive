@@ -105,12 +105,14 @@ describe("generateSlots — busy intervals (lunch / days off)", () => {
 });
 
 describe("generateSlots — min-notice and horizon", () => {
-  test("excludes slots inside the min-notice window", () => {
-    const now = ms("2026-06-16T09:00"); // Tuesday 9am; same-day slots are <12h away
+  test("no min-notice buffer: same-day slots stay available, already-started slots don't", () => {
+    const now = ms("2026-06-16T12:15"); // Tuesday mid-day
     const slots = generateSlots(office, 90, [], now);
-    expect(onLocalDate(slots, "2026-06-16")).toHaveLength(0);
-    const from = now + 12 * 3_600_000;
-    for (const s of slots) expect(s.startUtc).toBeGreaterThanOrEqual(from);
+    const sameDay = onLocalDate(slots, "2026-06-16");
+    // 12:30–16:30 starts remain (10:30–12:00 have already begun)
+    expect(sameDay.length).toBeGreaterThan(0);
+    expect(local(sameDay[0]).hour * 60 + local(sameDay[0]).minute).toBe(12 * 60 + 30);
+    for (const s of slots) expect(s.startUtc).toBeGreaterThanOrEqual(now);
   });
 
   test("excludes slots beyond the booking horizon", () => {
