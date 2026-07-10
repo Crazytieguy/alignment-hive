@@ -53,6 +53,38 @@ fn kill_group(child: &tokio::process::Child) {
     }
 }
 
+fn kill_recorders(workdir: &Path) {
+    kill_recorders_with(workdir, |pid| {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    });
+}
+
+fn kill_recorders_with(workdir: &Path, command_line: impl Fn(u32) -> Option<String>) {
+    let output_dir = workdir.join(".remote-kernels/kernel-output");
+    let Ok(entries) = std::fs::read_dir(output_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "pid")
+            && let Ok(pid) = std::fs::read_to_string(entry.path())
+            && let Ok(pid) = pid.trim().parse::<u32>()
+            && command_line(pid).is_some_and(|command| command.contains("rk-output-recorder"))
+        {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+    }
+}
+
 /// Group-kill, then reap the direct child. The group signal must land
 /// BEFORE the child is reaped — reaping first frees the pid, and the pgid
 /// could be reused by an unrelated process.
@@ -65,6 +97,7 @@ async fn kill_and_reap(mut child: tokio::process::Child) {
 /// group down (`kill_on_drop` alone would orphan the kernels).
 impl Drop for FakeInstance {
     fn drop(&mut self) {
+        kill_recorders(self.workdir.path());
         if let Some(child) = &self.child {
             kill_group(child);
         }
@@ -277,10 +310,11 @@ impl Runtime for FakeRuntime {
     }
 
     async fn terminate(&self, external_id: &str) -> anyhow::Result<()> {
-        if let Some(mut inst) = self.instances.lock().await.remove(external_id)
-            && let Some(child) = inst.child.take()
-        {
-            kill_and_reap(child).await;
+        if let Some(mut inst) = self.instances.lock().await.remove(external_id) {
+            kill_recorders(inst.workdir.path());
+            if let Some(child) = inst.child.take() {
+                kill_and_reap(child).await;
+            }
         }
         Ok(())
     }
@@ -350,6 +384,10 @@ impl Connection for FakeConnection {
 
     fn workdir(&self) -> &str {
         &self.workdir_string
+    }
+
+    fn recorder_ws_url(&self) -> String {
+        self.jupyter.ws_base.clone()
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
@@ -437,5 +475,55 @@ impl Connection for FakeConnection {
         self.last_budget_deadline
             .store(secs_from_now, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kill_recorders_with;
+
+    fn write_pid(workdir: &std::path::Path, pid: u32) {
+        let output_dir = workdir.join(".remote-kernels/kernel-output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("kernel.pid"), pid.to_string()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_recorders_ignores_reused_non_recorder_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        write_pid(dir.path(), child.id());
+        kill_recorders_with(dir.path(), |_| Some("sleep 30".to_string()));
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_recorders_kills_matching_dead_recorder_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("rk-output-recorder-sleeper.py");
+        std::fs::write(&script, "import time; time.sleep(30)\n").unwrap();
+        let mut child = std::process::Command::new("python3")
+            .arg(&script)
+            .spawn()
+            .unwrap();
+        write_pid(dir.path(), child.id());
+        kill_recorders_with(dir.path(), |_| {
+            Some("python3 rk-output-recorder-sleeper.py".to_string())
+        });
+        for _ in 0..50 {
+            if child.try_wait().unwrap().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        panic!("matching recorder process was not killed");
     }
 }

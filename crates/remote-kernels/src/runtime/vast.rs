@@ -40,6 +40,10 @@ use super::{
 
 const JUPYTER_PORT: u16 = 18888;
 
+fn recorder_ws_url() -> String {
+    format!("ws://127.0.0.1:{JUPYTER_PORT}")
+}
+
 /// Baseline host-picking advice shown by `search_vast_offers()`, ahead of the
 /// user's `[vast] selection-guidance`.
 const SELECTION_ADVICE: &str = "\
@@ -981,6 +985,10 @@ impl Connection for VastConnection {
         &self.workdir
     }
 
+    fn recorder_ws_url(&self) -> String {
+        recorder_ws_url()
+    }
+
     fn startup_note(&self) -> Option<String> {
         (self.ssh.user != "root").then(|| {
             format!(
@@ -1062,6 +1070,11 @@ mod tests {
     use super::{OfferQueryOverrides, Runtime, VastRuntime, image_registry_qualified};
     use crate::config::Config;
     use crate::vast::client::VastClient;
+
+    #[test]
+    fn recorder_endpoint_tracks_moved_vast_jupyter_port() {
+        assert_eq!(super::recorder_ws_url(), "ws://127.0.0.1:18888");
+    }
 
     /// Config money-windows resolve correctly and reach the onstart guard.
     #[test]

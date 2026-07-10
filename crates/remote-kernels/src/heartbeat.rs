@@ -386,8 +386,7 @@ async fn mark_fenced(
         .get_mut(instance)
         .filter(|candidate| candidate.external_id == external_id)
     {
-        instance.fenced = Some(reason);
-        instance.lease_generation = None;
+        instance.fence(reason);
     }
 }
 

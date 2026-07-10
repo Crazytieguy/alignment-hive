@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -13,12 +13,30 @@ use tokio::sync::Mutex;
 use crate::config::{Cleanup, Config};
 use crate::jupyter::rest::JupyterClient;
 use crate::runtime::{
-    AnyRuntime, Connection, ConnectionContext, InstanceStatus, ProvisionRequest, Runtime,
+    AnyConnection, AnyRuntime, Connection, ConnectionContext, InstanceStatus, ProvisionRequest,
+    Runtime,
 };
-use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, Phase};
+use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
 
 const RESTART_GUIDANCE: &str =
     "The server restarted (the session may have been backgrounded or resumed).";
+
+const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct RecordedOutputMessage {
+    parent_msg_id: String,
+    msg_type: String,
+    content: serde_json::Value,
+    #[allow(dead_code)]
+    ts: String,
+}
+
+struct RecorderTail {
+    messages: Vec<RecordedOutputMessage>,
+    skipped_lines: usize,
+    window_truncated: bool,
+}
 
 #[derive(Clone)]
 pub struct RemoteKernelsServer {
@@ -580,11 +598,14 @@ impl RemoteKernelsServer {
                 ssh_key_path,
                 record.proxy_port_mapped,
             );
+            instance.kernels.clone_from(&record.kernels);
             // A fenced husk may be replaced so attach can try to reacquire,
             // but it stays fenced until acquire proves ownership of the new
             // generation. A failed attach therefore cannot reopen a
             // destructive record-only path in the superseded process.
-            instance.fenced = prior_fence;
+            if let Some(reason) = prior_fence {
+                instance.fence(reason);
+            }
             if let Some(mut previous) = state.instances.insert(machine_id.clone(), instance) {
                 previous.stop_heartbeat();
             }
@@ -603,25 +624,9 @@ impl RemoteKernelsServer {
             .await
         {
             Ok(summary) => {
-                let jupyter = self.state.lock().await.instances[&machine_id]
-                    .jupyter
-                    .clone();
-                let existing = jupyter.list_kernels().await.map_err(|error| {
-                    McpError::internal_error(
-                        format!("Attached, but kernel listing failed: {error}"),
-                        None,
-                    )
-                })?;
-                let recovery_note = if existing.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\n\n{} existing kernel(s) are running; existing kernels on this machine are not yet rebound.",
-                        existing.len()
-                    )
-                };
+                let recovery = self.recover_attached_kernels(&machine_id, &record).await;
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Attached to machine.\n{summary}{recovery_note}"
+                    "Attached to machine.\n{summary}\n\n{recovery}"
                 ))]))
             }
             Err(error) if error.is::<crate::runtime::StillProvisioning>() => {
@@ -910,7 +915,7 @@ impl RemoteKernelsServer {
         self.check_budget().await?;
         let params = params.0;
 
-        let (instance_name, external_id, jupyter, ws_base, token) = {
+        let (instance_name, external_id, jupyter, ws_base, token, machine_connection) = {
             let state = self.state.lock().await;
             let name = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
@@ -935,6 +940,7 @@ impl RemoteKernelsServer {
                 inst.jupyter.clone(),
                 conn.jupyter().ws_base.clone(),
                 inst.jupyter_token.clone(),
+                Arc::clone(conn),
             )
         };
         let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
@@ -949,6 +955,12 @@ impl RemoteKernelsServer {
             .map_err(|e| McpError::internal_error(format!("Failed to create kernel: {e}"), None))?;
         let kernel_id = kernel.id;
 
+        if let Err(error) =
+            Self::install_output_recorder(&machine_connection, &kernel_id, &token).await
+        {
+            tracing::warn!(%kernel_id, "Output recorder install failed: {error}");
+        }
+
         let conn = crate::jupyter::ws::KernelConnection::connect(&ws_base, &kernel_id, &token)
             .await
             .map_err(|e| {
@@ -958,10 +970,11 @@ impl RemoteKernelsServer {
                 )
             })?;
 
-        let notebook_path = {
+        let (notebook_path, record_save_error) = {
             let mut state = self.state.lock().await;
             let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
             let mut nb_path = None;
+            let mut record = None;
             if let Some(inst) = state.instances.get_mut(&instance_name) {
                 inst.kernel_ids.push(kernel_id.clone());
                 inst.kernel_connections.insert(kernel_id.clone(), conn);
@@ -972,10 +985,19 @@ impl RemoteKernelsServer {
                     params.name.as_deref(),
                 ) {
                     nb_path = Some(nb.path().to_path_buf());
+                    inst.kernels.push(KernelRecord {
+                        kernel_id: kernel_id.clone(),
+                        notebook_path: nb.path().display().to_string(),
+                        name: params.name.clone(),
+                    });
                     inst.notebooks.insert(kernel_id.clone(), nb);
                 }
+                record = Some(inst.record());
             }
-            nb_path
+            let save_error = record
+                .as_ref()
+                .and_then(|record| state.save_record(&instance_name, record).err());
+            (nb_path, save_error)
         };
 
         let label = match &params.name {
@@ -985,6 +1007,9 @@ impl RemoteKernelsServer {
         let mut msg = format!("Kernel created: {label} (machine: {instance_name})");
         if let Some(path) = notebook_path {
             let _ = write!(msg, "\nNotebook: {}", path.display());
+        }
+        if let Some(error) = record_save_error {
+            let _ = write!(msg, "\nRecovery record save failed: {error}");
         }
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -1053,9 +1078,18 @@ impl RemoteKernelsServer {
                 );
             }
 
-            // Create notebook cell placeholder.
+            let session_id = inst.session_id.clone();
+            let kernel_id = params.kernel_id.clone();
+            let conn = inst.kernel_connections.get(&kernel_id).expect("checked");
+
+            let started = conn
+                .start_execution(&session_id, &params.code)
+                .await
+                .map_err(|e| McpError::internal_error(format!("Execution failed: {e}"), None))?;
+            // Persist the execute-request id before returning so recorder
+            // catch-up can target exactly this placeholder after a restart.
             let cell_number = if let Some(nb) = inst.notebooks.get_mut(&params.kernel_id) {
-                match nb.append_cell_placeholder(&params.code) {
+                match nb.append_cell_placeholder(&params.code, &started.parent_msg_id) {
                     Ok(n) => Some(n),
                     Err(e) => {
                         tracing::warn!("Failed to create notebook cell: {e}");
@@ -1065,15 +1099,7 @@ impl RemoteKernelsServer {
             } else {
                 None
             };
-
-            let session_id = inst.session_id.clone();
-            let kernel_id = params.kernel_id.clone();
-            let conn = inst.kernel_connections.get(&kernel_id).expect("checked");
-
-            let rx = conn
-                .start_execution(&session_id, &params.code)
-                .await
-                .map_err(|e| McpError::internal_error(format!("Execution failed: {e}"), None))?;
+            let rx = started.result_rx;
 
             // Fire-and-forget: store receiver and return immediately.
             if timeout_secs == 0 {
@@ -1192,6 +1218,14 @@ impl RemoteKernelsServer {
             }
 
             let key = (params.kernel_id.clone(), params.cell_number);
+            if let Some(output) = inst.recovered_executions.remove(&key) {
+                let formatted = output.format();
+                return if output.error.is_some() {
+                    Ok(CallToolResult::error(vec![Content::text(formatted)]))
+                } else {
+                    Ok(CallToolResult::success(vec![Content::text(formatted)]))
+                };
+            }
             let Some(rx) = inst.pending_executions.remove(&key) else {
                 return err_text(format!(
                     "No pending execution found for kernel {} cell {}. It may have already completed.",
@@ -1398,17 +1432,31 @@ impl RemoteKernelsServer {
             McpError::internal_error(format!("Failed to shut down kernel: {e}"), None)
         })?;
 
-        {
+        let record_save_error = {
             let mut state = self.state.lock().await;
+            let mut record = None;
             if let Some(inst) = state.instances.get_mut(&instance_name) {
                 inst.kernel_ids.retain(|id| *id != kernel_id);
+                inst.kernels
+                    .retain(|binding| binding.kernel_id != kernel_id);
                 inst.kernel_connections.remove(&kernel_id);
+                inst.notebooks.remove(&kernel_id);
+                inst.pending_executions
+                    .retain(|(pending_kernel, _), _| pending_kernel != &kernel_id);
+                inst.recovered_executions
+                    .retain(|(recovered_kernel, _), _| recovered_kernel != &kernel_id);
+                record = Some(inst.record());
             }
-        }
+            record
+                .as_ref()
+                .and_then(|record| state.save_record(&instance_name, record).err())
+        };
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Kernel {kernel_id} shut down."
-        ))]))
+        let mut message = format!("Kernel {kernel_id} shut down.");
+        if let Some(error) = record_save_error {
+            let _ = write!(message, "\nRecovery record save failed: {error}");
+        }
+        Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
     /// Interrupt the currently running execution in a kernel.
@@ -1456,7 +1504,7 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let (instance_name, external_id, jupyter, ws_base, token) = {
+        let (instance_name, external_id, jupyter, ws_base, token, machine_connection, kernel_name) = {
             let state = self.state.lock().await;
             let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
@@ -1474,6 +1522,11 @@ impl RemoteKernelsServer {
                 inst.jupyter.clone(),
                 conn.jupyter().ws_base.clone(),
                 inst.jupyter_token.clone(),
+                Arc::clone(conn),
+                inst.kernels
+                    .iter()
+                    .find(|binding| binding.kernel_id == kernel_id)
+                    .and_then(|binding| binding.name.clone()),
             )
         };
         let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
@@ -1485,6 +1538,11 @@ impl RemoteKernelsServer {
         jupyter.restart_kernel(&kernel_id).await.map_err(|e| {
             McpError::internal_error(format!("Failed to restart kernel: {e}"), None)
         })?;
+        if let Err(error) =
+            Self::install_output_recorder(&machine_connection, &kernel_id, &token).await
+        {
+            tracing::warn!(%kernel_id, "Output recorder reinstall failed: {error}");
+        }
 
         // Reconnect WebSocket — restarting a kernel invalidates the old connection.
         // Retry a few times since the kernel needs time to restart.
@@ -1511,20 +1569,46 @@ impl RemoteKernelsServer {
         let conn = conn.expect("connected after retries");
 
         // Create a new notebook file for the restarted kernel (old one is preserved as history).
-        let mut state = self.state.lock().await;
-        let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
-        let mut notebook_path = None;
-        if let Some(inst) = state.instances.get_mut(&instance_name) {
-            inst.kernel_connections.insert(kernel_id.clone(), conn);
-            if let Ok(nb) = crate::notebook::Notebook::new(&notebook_dir, &kernel_id, None) {
-                notebook_path = Some(nb.path().to_path_buf());
-                inst.notebooks.insert(kernel_id.clone(), nb);
+        let (notebook_path, record_save_error) = {
+            let mut state = self.state.lock().await;
+            let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
+            let mut notebook_path = None;
+            let mut record = None;
+            if let Some(inst) = state.instances.get_mut(&instance_name) {
+                inst.kernel_connections.insert(kernel_id.clone(), conn);
+                inst.pending_executions
+                    .retain(|(pending_kernel, _), _| pending_kernel != &kernel_id);
+                inst.recovered_executions
+                    .retain(|(recovered_kernel, _), _| recovered_kernel != &kernel_id);
+                if let Ok(nb) = crate::notebook::Notebook::new(
+                    &notebook_dir,
+                    &kernel_id,
+                    kernel_name.as_deref(),
+                ) {
+                    notebook_path = Some(nb.path().to_path_buf());
+                    inst.kernels
+                        .retain(|binding| binding.kernel_id != kernel_id);
+                    inst.kernels.push(KernelRecord {
+                        kernel_id: kernel_id.clone(),
+                        notebook_path: nb.path().display().to_string(),
+                        name: kernel_name,
+                    });
+                    inst.notebooks.insert(kernel_id.clone(), nb);
+                }
+                record = Some(inst.record());
             }
-        }
+            let save_error = record
+                .as_ref()
+                .and_then(|record| state.save_record(&instance_name, record).err());
+            (notebook_path, save_error)
+        };
 
         let mut msg = format!("Kernel {kernel_id} restarted.");
         if let Some(path) = notebook_path {
             let _ = write!(msg, "\nNew notebook: {}", path.display());
+        }
+        if let Some(error) = record_save_error {
+            let _ = write!(msg, "\nRecovery record save failed: {error}");
         }
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -1534,6 +1618,401 @@ impl RemoteKernelsServer {
     /// Get a clone of the shared state for use outside the MCP server.
     pub fn shared_state(&self) -> Arc<Mutex<AppState>> {
         Arc::clone(&self.state)
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    async fn install_output_recorder(
+        connection: &AnyConnection,
+        kernel_id: &str,
+        token: &str,
+    ) -> anyhow::Result<()> {
+        let command = Self::output_recorder_command(connection, kernel_id, token)?;
+        connection
+            .exec(&command, std::time::Duration::from_secs(10))
+            .await
+            .map(|_| ())
+    }
+
+    fn output_recorder_command(
+        connection: &AnyConnection,
+        kernel_id: &str,
+        token: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            !kernel_id.is_empty()
+                && kernel_id
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character)),
+            "unsafe kernel id"
+        );
+        let state_dir = crate::machine_scripts::state_dir(connection.workdir());
+        let bin_dir = format!("{state_dir}/bin");
+        let output_dir = format!("{state_dir}/kernel-output");
+        let script_path = format!("{bin_dir}/rk-output-recorder.py");
+        let recorder_log = format!("{output_dir}/{kernel_id}.recorder.log");
+        let mut source_hex =
+            String::with_capacity(crate::machine_scripts::OUTPUT_RECORDER.len() * 2);
+        for byte in crate::machine_scripts::OUTPUT_RECORDER.as_bytes() {
+            let _ = write!(source_hex, "{byte:02x}");
+        }
+        Ok(format!(
+            "mkdir -p {bin_dir} {output_dir} && python3 -c 'import sys; open(sys.argv[1], \"wb\").write(bytes.fromhex(sys.argv[2]))' {script_path} {source_hex} && chmod 700 {script_path} && (export REMOTE_KERNELS_JUPYTER_TOKEN={token}; nohup python3 {script_path} --kernel-id {kernel_id} --state-dir {state_dir} --ws-url {ws_url} --diagnostic-log {recorder_log} </dev/null >/dev/null 2>&1 &)",
+            bin_dir = Self::shell_quote(&bin_dir),
+            output_dir = Self::shell_quote(&output_dir),
+            script_path = Self::shell_quote(&script_path),
+            source_hex = Self::shell_quote(&source_hex),
+            kernel_id = Self::shell_quote(kernel_id),
+            token = Self::shell_quote(token),
+            state_dir = Self::shell_quote(&state_dir),
+            ws_url = Self::shell_quote(&connection.recorder_ws_url()),
+            recorder_log = Self::shell_quote(&recorder_log),
+        ))
+    }
+
+    async fn read_recorder_tail(
+        connection: &AnyConnection,
+        kernel_id: &str,
+    ) -> anyhow::Result<RecorderTail> {
+        let path = format!(
+            "{}/kernel-output/{kernel_id}.jsonl",
+            crate::machine_scripts::state_dir(connection.workdir())
+        );
+        let predecessor = format!("{path}.1");
+        let command = format!(
+            "if [ ! -f {path} ] && [ ! -f {predecessor} ]; then exit 1; fi; {{ [ ! -f {predecessor} ] || cat -- {predecessor}; [ ! -f {path} ] || cat -- {path}; }} | tail -c {RECORDER_TAIL_BYTES}",
+            path = Self::shell_quote(&path),
+            predecessor = Self::shell_quote(&predecessor),
+        );
+        let raw = connection
+            .exec(&command, std::time::Duration::from_secs(10))
+            .await?;
+        Ok(Self::parse_recorder_tail(&raw))
+    }
+
+    fn parse_recorder_tail(raw: &str) -> RecorderTail {
+        let lines: Vec<&str> = raw.lines().collect();
+        let mut messages = Vec::new();
+        let mut skipped_lines = 0;
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(message) => messages.push(message),
+                Err(_) => skipped_lines += 1,
+            }
+        }
+        RecorderTail {
+            messages,
+            skipped_lines,
+            window_truncated: raw.len() == RECORDER_TAIL_BYTES,
+        }
+    }
+
+    fn fold_recorded_outputs(
+        messages: Vec<RecordedOutputMessage>,
+    ) -> BTreeMap<String, (crate::jupyter::messages::ExecutionOutput, bool)> {
+        use crate::jupyter::messages::{ExecutionStatus, Header, JupyterMessage};
+
+        let mut outputs = BTreeMap::new();
+        let mut saw_busy = BTreeMap::<String, bool>::new();
+        for message in messages {
+            let entry = outputs
+                .entry(message.parent_msg_id.clone())
+                .or_insert_with(|| (crate::jupyter::messages::ExecutionOutput::default(), false));
+            let jupyter_message = JupyterMessage {
+                channel: "iopub".to_string(),
+                header: Header {
+                    msg_id: String::new(),
+                    msg_type: message.msg_type.clone(),
+                    username: String::new(),
+                    session: String::new(),
+                    date: String::new(),
+                    version: String::new(),
+                },
+                parent_header: serde_json::json!({"msg_id": message.parent_msg_id}),
+                metadata: serde_json::json!({}),
+                content: message.content,
+                buffers: Vec::new(),
+            };
+            entry.0.process_iopub(&jupyter_message);
+            if message.msg_type == "status" {
+                if jupyter_message.content["execution_state"] == "busy" {
+                    saw_busy.insert(message.parent_msg_id.clone(), true);
+                }
+                if jupyter_message.content["execution_state"] == "idle"
+                    && saw_busy.get(&message.parent_msg_id) == Some(&true)
+                {
+                    entry.1 = true;
+                    if entry.0.status == ExecutionStatus::Running {
+                        entry.0.status = ExecutionStatus::Complete;
+                    }
+                }
+            }
+        }
+        outputs
+    }
+
+    async fn recover_dead_binding(
+        connection: &AnyConnection,
+        binding: &KernelRecord,
+        notebook_dir: &std::path::Path,
+    ) -> (usize, Vec<String>) {
+        let mut notes = Vec::new();
+        let path = std::path::PathBuf::from(&binding.notebook_path);
+        if !path.is_absolute() || !path.starts_with(notebook_dir) {
+            return (0, vec!["notebook mapping rejected".to_string()]);
+        }
+        let mut notebook = match crate::notebook::Notebook::load(&path) {
+            Ok(mut notebook) => match notebook.bind_for_recovery(&binding.kernel_id) {
+                Ok(()) => notebook,
+                Err(error) => return (0, vec![format!("notebook unbindable ({error})")]),
+            },
+            Err(error) => return (0, vec![format!("notebook unreadable ({error})")]),
+        };
+        let tail = match Self::read_recorder_tail(connection, &binding.kernel_id).await {
+            Ok(tail) => tail,
+            Err(error) => return (0, vec![format!("recorder log skipped ({error})")]),
+        };
+        if tail.skipped_lines > 0 {
+            notes.push(format!("recorder lines skipped={}", tail.skipped_lines));
+        }
+        if tail.window_truncated {
+            notes.push("recorder window truncated".to_string());
+        }
+        let mut recovered = 0;
+        for (parent_msg_id, (output, complete)) in Self::fold_recorded_outputs(tail.messages) {
+            if !complete {
+                continue;
+            }
+            match notebook.backfill_output(&parent_msg_id, &output, true) {
+                Ok(Some(_)) => recovered += 1,
+                Ok(None) => {}
+                Err(error) => notes.push(format!("catch-up write failed ({error})")),
+            }
+        }
+        (recovered, notes)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn recover_attached_kernels(
+        &self,
+        machine_id: &str,
+        durable_record: &InstanceRecord,
+    ) -> String {
+        let (jupyter, connection, ws_base, token, notebook_dir, fenced, external_id) = {
+            let state = self.state.lock().await;
+            let Some(instance) = state.instances.get(machine_id) else {
+                return "Recovery skipped: attached instance missing.".to_string();
+            };
+            (
+                instance.jupyter.clone(),
+                instance.connection.clone(),
+                instance
+                    .connection
+                    .as_ref()
+                    .map(|connection| connection.jupyter().ws_base.clone()),
+                instance.jupyter_token.clone(),
+                state.project_dir.join(&self.config.notebook_dir),
+                instance.fenced,
+                instance.external_id.clone(),
+            )
+        };
+        if fenced.is_some() {
+            return "Recovery skipped: machine is fenced.".to_string();
+        }
+        let _recovery_guard = match self.recovery_guard(machine_id, &external_id).await {
+            Ok(guard) => guard,
+            Err(error) => return format!("Recovery skipped: authority unverified ({error})."),
+        };
+        let Some(connection) = connection else {
+            return "Recovery skipped: machine connection missing.".to_string();
+        };
+        let Some(ws_base) = ws_base else {
+            return "Recovery skipped: Jupyter websocket endpoint missing.".to_string();
+        };
+        let live_kernels = match jupyter.list_kernels().await {
+            Ok(kernels) => kernels,
+            Err(error) => return format!("Recovery degraded: kernel list unreadable ({error})."),
+        };
+        let mut report = Vec::new();
+        let mut recovered_records = Vec::new();
+        let stale_bindings = durable_record
+            .kernels
+            .iter()
+            .filter(|binding| {
+                !live_kernels
+                    .iter()
+                    .any(|kernel| kernel.id == binding.kernel_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for binding in &stale_bindings {
+            let (recovered, notes) =
+                Self::recover_dead_binding(&connection, binding, &notebook_dir).await;
+            let mut line = format!(
+                "Kernel {}: gone; catch-up={recovered}; binding removed",
+                binding.kernel_id
+            );
+            if !notes.is_empty() {
+                let _ = write!(line, "; {}", notes.join("; "));
+            }
+            report.push(line);
+        }
+        for kernel in live_kernels {
+            let binding = durable_record
+                .kernels
+                .iter()
+                .find(|binding| binding.kernel_id == kernel.id)
+                .cloned();
+            let mut notes = Vec::new();
+            let mut notebook = binding.as_ref().and_then(|binding| {
+                let path = std::path::PathBuf::from(&binding.notebook_path);
+                if !path.is_absolute() || !path.starts_with(&notebook_dir) {
+                    notes.push("notebook mapping rejected".to_string());
+                    return None;
+                }
+                match crate::notebook::Notebook::load(&path) {
+                    Ok(mut notebook) => match notebook.bind_for_recovery(&kernel.id) {
+                        Ok(()) => Some(notebook),
+                        Err(error) => {
+                            notes.push(format!("notebook unbindable ({error})"));
+                            None
+                        }
+                    },
+                    Err(error) => {
+                        notes.push(format!("notebook unreadable ({error})"));
+                        None
+                    }
+                }
+            });
+            if notebook.is_none() {
+                let reason = if binding.is_some() {
+                    "recovery: prior notebook unbindable"
+                } else {
+                    "recovery: no durable notebook mapping"
+                };
+                match crate::notebook::Notebook::new_continuation(
+                    &notebook_dir,
+                    &kernel.id,
+                    binding.as_ref().and_then(|binding| binding.name.as_deref()),
+                    reason,
+                ) {
+                    Ok(continuation) => {
+                        notes.push("continuation notebook created".to_string());
+                        notebook = Some(continuation);
+                    }
+                    Err(error) => notes.push(format!("continuation notebook failed ({error})")),
+                }
+            }
+
+            let websocket =
+                match crate::jupyter::ws::KernelConnection::connect(&ws_base, &kernel.id, &token)
+                    .await
+                {
+                    Ok(connection) => Some(connection),
+                    Err(error) => {
+                        notes.push(format!("websocket failed ({error})"));
+                        None
+                    }
+                };
+
+            let mut recovered = Vec::new();
+            if let Some(notebook) = notebook.as_mut() {
+                match Self::read_recorder_tail(&connection, &kernel.id).await {
+                    Ok(tail) => {
+                        if tail.skipped_lines > 0 {
+                            notes.push(format!("recorder lines skipped={}", tail.skipped_lines));
+                        }
+                        if tail.window_truncated {
+                            notes.push("recorder window truncated".to_string());
+                        }
+                        for (parent_msg_id, (output, complete)) in
+                            Self::fold_recorded_outputs(tail.messages)
+                        {
+                            // A partial tail stays a placeholder. Writing it
+                            // would make a later attach unable to apply the
+                            // complete ordered message group without either
+                            // duplicating or replacing live-path output.
+                            if !complete {
+                                continue;
+                            }
+                            match notebook.backfill_output(&parent_msg_id, &output, true) {
+                                Ok(Some(cell_number)) => {
+                                    recovered.push((cell_number, output));
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    notes.push(format!("catch-up write failed ({error})"));
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => notes.push(format!("recorder log skipped ({error})")),
+                }
+            }
+            let recovered_count = recovered.len();
+
+            let notebook_path = notebook
+                .as_ref()
+                .map(|notebook| notebook.path().to_path_buf());
+            {
+                let mut state = self.state.lock().await;
+                if let Some(instance) = state.instances.get_mut(machine_id) {
+                    instance.kernel_ids.push(kernel.id.clone());
+                    if let Some(websocket) = websocket {
+                        instance
+                            .kernel_connections
+                            .insert(kernel.id.clone(), websocket);
+                    }
+                    if let Some(notebook) = notebook {
+                        instance.notebooks.insert(kernel.id.clone(), notebook);
+                    }
+                    for (cell_number, output) in recovered {
+                        instance
+                            .recovered_executions
+                            .insert((kernel.id.clone(), cell_number), output);
+                    }
+                }
+            }
+            if let Some(path) = notebook_path {
+                recovered_records.push(KernelRecord {
+                    kernel_id: kernel.id.clone(),
+                    notebook_path: path.display().to_string(),
+                    name: binding.and_then(|binding| binding.name),
+                });
+            }
+            let execution_state = kernel.execution_state.as_deref().unwrap_or("unknown");
+            let mut line = format!(
+                "Kernel {}: {}; catch-up={recovered_count}",
+                kernel.id, execution_state
+            );
+            if !notes.is_empty() {
+                let _ = write!(line, "; {}", notes.join("; "));
+            }
+            report.push(line);
+        }
+
+        let save_error = {
+            let mut state = self.state.lock().await;
+            if let Some(instance) = state.instances.get_mut(machine_id) {
+                instance.kernels = recovered_records;
+                let record = instance.record();
+                state.save_record(machine_id, &record).err()
+            } else {
+                None
+            }
+        };
+        if let Some(error) = save_error {
+            report.push(format!("Recovery record save failed: {error}."));
+        }
+        if report.is_empty() {
+            report.push("No live kernels or durable bindings.".to_string());
+        }
+        format!("Recovery:\n{}", report.join("\n"))
     }
 
     /// Called only while the machine operation lock is held. A fenced entry
@@ -1726,22 +2205,19 @@ impl RemoteKernelsServer {
             Ok(()) => Ok(()),
             Err(crate::machine_scripts::LeaseError::Fenced) => {
                 if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.fenced = Some(FenceReason::TakenOver);
-                    instance.lease_generation = None;
+                    instance.fence(FenceReason::TakenOver);
                 }
                 anyhow::bail!("another session took over machine {machine_id}")
             }
             Err(crate::machine_scripts::LeaseError::Finalizing) => {
                 if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.fenced = Some(FenceReason::Finalizing);
-                    instance.lease_generation = None;
+                    instance.fence(FenceReason::Finalizing);
                 }
                 anyhow::bail!("machine {machine_id} is finalizing")
             }
             Err(error) => {
                 if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.fenced = Some(FenceReason::AuthorityUnknown);
-                    instance.lease_generation = None;
+                    instance.fence(FenceReason::AuthorityUnknown);
                 }
                 anyhow::bail!(
                     "could not verify lease authority for machine {machine_id}; no mutation issued: {error}"
@@ -1763,6 +2239,66 @@ impl RemoteKernelsServer {
             .await
             .map_err(|error| error.to_string())?;
         Ok(guard)
+    }
+
+    /// Recovery is read-mostly and degradable. Only authoritative lease
+    /// responses fence it; a transport/parse failure skips this pass without
+    /// disabling the still-live predecessor state.
+    async fn recovery_guard(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+    ) -> Result<std::fs::File, String> {
+        let (project_dir, lease) = {
+            let state = self.state.lock().await;
+            let Some(instance) = state.instances.get(machine_id) else {
+                return Err("attached instance missing".to_string());
+            };
+            if instance.external_id != external_id {
+                return Err("machine generation changed".to_string());
+            }
+            if let Some(message) = Self::fenced_message(instance) {
+                return Err(message);
+            }
+            (
+                state.project_dir.clone(),
+                instance.lease_generation.zip(instance.connection.clone()),
+            )
+        };
+        let guard = crate::state::acquire_operation_lock(&project_dir, machine_id)
+            .await
+            .map_err(|error| format!("could not lock machine operation: {error}"))?;
+        let Some((generation, connection)) = lease else {
+            return Ok(guard);
+        };
+        match crate::machine_scripts::refresh(&connection, generation, &self.owner_uuid).await {
+            Ok(()) => Ok(guard),
+            Err(error) => Err(self.recovery_refresh_error(machine_id, error).await),
+        }
+    }
+
+    async fn recovery_refresh_error(
+        &self,
+        machine_id: &str,
+        error: crate::machine_scripts::LeaseError,
+    ) -> String {
+        let reason = match &error {
+            crate::machine_scripts::LeaseError::Fenced => Some(FenceReason::TakenOver),
+            crate::machine_scripts::LeaseError::Finalizing => Some(FenceReason::Finalizing),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
+                instance.fence(reason);
+            }
+            match reason {
+                FenceReason::TakenOver => format!("another session took over machine {machine_id}"),
+                FenceReason::Finalizing => format!("machine {machine_id} is finalizing"),
+                FenceReason::AuthorityUnknown => unreachable!(),
+            }
+        } else {
+            format!("lease refresh transient: {error}")
+        }
     }
 
     /// Shared post-allocation path for new machines and attachments: wait for
@@ -2460,7 +2996,10 @@ impl RemoteKernelsServer {
         let Some(name) = state.instance_for_kernel(kernel_id).map(String::from) else {
             return;
         };
-        if let Some(inst) = state.instances.get_mut(&name)
+        if let Some(inst) = state
+            .instances
+            .get_mut(&name)
+            .filter(|instance| instance.fenced.is_none())
             && let Some(nb) = inst.notebooks.get_mut(kernel_id)
             && let Err(e) = nb.update_cell_output(cell_number, output)
         {
@@ -2497,7 +3036,8 @@ mod tests {
 
     use super::{RemoteKernelsServer, validate_vast_offers};
     use crate::config::{Cleanup, Config};
-    use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, Phase};
+    use crate::jupyter::messages::ExecutionOutput;
+    use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
 
     fn test_instance(machine_id: &str) -> InstanceState {
         InstanceState::provisioning(
@@ -2541,6 +3081,228 @@ mod tests {
         assert!(super::validate_label(Some(&"x".repeat(65))).is_err());
     }
 
+    fn recorder_line(parent_msg_id: &str, msg_type: &str, content: &serde_json::Value) -> String {
+        serde_json::json!({
+            "parent_msg_id": parent_msg_id,
+            "msg_type": msg_type,
+            "content": content,
+            "ts": "2026-01-01T00:00:00Z"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn recorder_tail_skips_torn_and_interior_corrupt_lines() {
+        let raw = format!(
+            "torn-head\n{}\nnot-json\n{}\npartial-tail",
+            recorder_line(
+                "msg-1",
+                "status",
+                &serde_json::json!({"execution_state": "busy"})
+            ),
+            recorder_line(
+                "msg-1",
+                "status",
+                &serde_json::json!({"execution_state": "idle"})
+            ),
+        );
+        let tail = RemoteKernelsServer::parse_recorder_tail(&raw);
+        assert_eq!(tail.messages.len(), 2);
+        assert_eq!(tail.skipped_lines, 3);
+        assert!(!tail.window_truncated);
+    }
+
+    #[test]
+    fn fold_truncated_group_without_busy_stays_partial() {
+        let suffix = format!(
+            "\n{}\n{}\n",
+            recorder_line(
+                "msg-1",
+                "stream",
+                &serde_json::json!({"name": "stdout", "text": "missing head"})
+            ),
+            recorder_line(
+                "msg-1",
+                "status",
+                &serde_json::json!({"execution_state": "idle"})
+            ),
+        );
+        let padding = "x".repeat(super::RECORDER_TAIL_BYTES - suffix.len());
+        let tail = RemoteKernelsServer::parse_recorder_tail(&(padding + &suffix));
+        assert!(tail.window_truncated);
+        let folded = RemoteKernelsServer::fold_recorded_outputs(tail.messages);
+        assert!(!folded["msg-1"].1);
+    }
+
+    #[tokio::test]
+    async fn fenced_completion_cannot_write_rebound_notebook() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
+        let server =
+            RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
+        let machine_id = crate::ulid::new();
+        let mut instance = test_instance(&machine_id);
+        instance.kernel_ids.push("kernel-1".to_string());
+        let notebook_dir = dir.path().join("notebooks");
+        let mut notebook =
+            crate::notebook::Notebook::new(&notebook_dir, "kernel-1", Some("predecessor")).unwrap();
+        notebook.append_cell_placeholder("slow()", "msg-1").unwrap();
+        let path = notebook.path().to_path_buf();
+        instance.notebooks.insert("kernel-1".to_string(), notebook);
+        instance.fence(FenceReason::TakenOver);
+        server
+            .state
+            .lock()
+            .await
+            .instances
+            .insert(machine_id, instance);
+        let before = std::fs::read(&path).unwrap();
+        server
+            .update_notebook_cell(
+                "kernel-1",
+                1,
+                &ExecutionOutput {
+                    stdout: "late predecessor output".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn transient_recovery_refresh_does_not_fence_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
+        let server =
+            RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
+        let machine_id = crate::ulid::new();
+        server
+            .state
+            .lock()
+            .await
+            .instances
+            .insert(machine_id.clone(), test_instance(&machine_id));
+        let note = server
+            .recovery_refresh_error(
+                &machine_id,
+                crate::machine_scripts::LeaseError::Transport(anyhow::anyhow!("moved tunnel")),
+            )
+            .await;
+        assert!(note.contains("transient"), "{note}");
+        assert!(
+            server.state.lock().await.instances[&machine_id]
+                .fenced
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn dead_kernel_binding_catches_up_before_removal() {
+        use crate::runtime::AnyConnection;
+
+        let remote = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let connection = AnyConnection::Fake(
+            crate::runtime::fake::FakeConnection::for_test(remote.path(), false).unwrap(),
+        );
+        let mut notebook =
+            crate::notebook::Notebook::new(local.path(), "dead-kernel", Some("dead")).unwrap();
+        notebook
+            .append_cell_placeholder("print('saved')", "msg-dead")
+            .unwrap();
+        let path = notebook.path().to_path_buf();
+        let binding = KernelRecord {
+            kernel_id: "dead-kernel".to_string(),
+            notebook_path: path.display().to_string(),
+            name: Some("dead".to_string()),
+        };
+        let output_dir = remote.path().join(".remote-kernels/kernel-output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let log = [
+            recorder_line(
+                "msg-dead",
+                "status",
+                &serde_json::json!({"execution_state": "busy"}),
+            ),
+            recorder_line(
+                "msg-dead",
+                "stream",
+                &serde_json::json!({"name": "stdout", "text": "saved\n"}),
+            ),
+            recorder_line(
+                "msg-dead",
+                "status",
+                &serde_json::json!({"execution_state": "idle"}),
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(output_dir.join("dead-kernel.jsonl"), log).unwrap();
+
+        let (recovered, notes) =
+            RemoteKernelsServer::recover_dead_binding(&connection, &binding, local.path()).await;
+        assert_eq!(recovered, 1, "{notes:?}");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(value["cells"][0]["outputs"][0]["text"][0], "saved\n");
+        let mut bindings = vec![binding];
+        bindings.clear();
+        assert!(bindings.is_empty());
+    }
+
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn rotated_predecessor_is_included_in_recorder_tail() {
+        use crate::runtime::AnyConnection;
+
+        let remote = tempfile::tempdir().unwrap();
+        let connection = AnyConnection::Fake(
+            crate::runtime::fake::FakeConnection::for_test(remote.path(), false).unwrap(),
+        );
+        let output_dir = remote.path().join(".remote-kernels/kernel-output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(
+            output_dir.join("kernel-1.jsonl.1"),
+            recorder_line(
+                "msg-1",
+                "status",
+                &serde_json::json!({"execution_state": "busy"}),
+            ) + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            output_dir.join("kernel-1.jsonl"),
+            recorder_line(
+                "msg-1",
+                "status",
+                &serde_json::json!({"execution_state": "idle"}),
+            ) + "\n",
+        )
+        .unwrap();
+        let tail = RemoteKernelsServer::read_recorder_tail(&connection, "kernel-1")
+            .await
+            .unwrap();
+        assert!(RemoteKernelsServer::fold_recorded_outputs(tail.messages)["msg-1"].1);
+    }
+
+    #[cfg(feature = "fake-runtime")]
+    #[test]
+    fn recorder_token_is_environment_only() {
+        use crate::runtime::AnyConnection;
+
+        let remote = tempfile::tempdir().unwrap();
+        let connection = AnyConnection::Fake(
+            crate::runtime::fake::FakeConnection::for_test(remote.path(), false).unwrap(),
+        );
+        let command =
+            RemoteKernelsServer::output_recorder_command(&connection, "kernel-1", "secret-token")
+                .unwrap();
+        assert!(!command.contains("--token"), "{command}");
+        assert!(command.contains("REMOTE_KERNELS_JUPYTER_TOKEN='secret-token'"));
+    }
+
     #[test]
     fn resumed_attach_refusal_warns_that_machine_is_billing() {
         let message = super::attach_refusal_message(
@@ -2562,7 +3324,7 @@ mod tests {
             RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
         let machine_id = crate::ulid::new();
         let mut husk = test_instance(&machine_id);
-        husk.fenced = Some(FenceReason::TakenOver);
+        husk.fence(FenceReason::TakenOver);
         server
             .state
             .lock()
@@ -2634,6 +3396,7 @@ mod tests {
             gpu_name: Some("Test GPU".to_string()),
             cost_per_hr: 1.25,
             proxy_port_mapped: false,
+            kernels: Vec::new(),
         };
         state
             .save_record(&ulid, &record(Some(ulid.clone()), "new", Phase::Running))
@@ -2654,7 +3417,7 @@ mod tests {
             false,
         );
         live.phase = Phase::Running;
-        live.fenced = Some(FenceReason::TakenOver);
+        live.fence(FenceReason::TakenOver);
         state.instances.insert(ulid.clone(), live);
 
         let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
@@ -2695,7 +3458,7 @@ mod tests {
         );
         instance.phase = Phase::Running;
         instance.kernel_ids.push("kernel-1".to_string());
-        instance.fenced = Some(FenceReason::TakenOver);
+        instance.fence(FenceReason::TakenOver);
         let record = instance.record();
         state.save_record(&machine_id, &record).unwrap();
         state.instances.insert(machine_id.clone(), instance);

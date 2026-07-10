@@ -12,6 +12,9 @@ pub const LEASE: &str = include_str!("../scripts/machine/rk-lease.sh");
 /// Detached Jupyter drain and finalize supervisor script.
 pub const WATCHDOG: &str = include_str!("../scripts/machine/rk-watchdog.sh");
 
+/// Per-kernel machine-side `IOPub` recorder.
+pub const OUTPUT_RECORDER: &str = include_str!("../scripts/machine/rk-output-recorder.py");
+
 /// The caller no longer owns the lease generation or operation.
 pub const EXIT_FENCED: i32 = 9;
 /// The terminal `finalizing` state refuses the requested operation.

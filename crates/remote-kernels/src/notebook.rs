@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use anyhow::Context as _;
+use serde_json::{Value, json};
 
 use crate::jupyter::messages::ExecutionOutput;
 
 /// Manages a notebook file (.ipynb) for a single kernel.
 pub struct Notebook {
     path: PathBuf,
-    cells: Vec<serde_json::Value>,
+    metadata: Value,
+    cells: Vec<Value>,
     execution_count: u32,
 }
 
@@ -24,10 +26,15 @@ impl Notebook {
             Some(n) => sanitize_filename(n),
             None => kernel_id[..8.min(kernel_id.len())].to_string(),
         };
-        let path = dir.join(format!("{timestamp}_{label}.ipynb"));
+        let kernel_fragment = sanitize_filename(&kernel_id[..8.min(kernel_id.len())]);
+        let unique = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let path = dir.join(format!(
+            "{timestamp}_{label}_{kernel_fragment}_{unique}.ipynb"
+        ));
 
         let notebook = Self {
             path,
+            metadata: notebook_metadata(kernel_id, None),
             cells: Vec::new(),
             execution_count: 0,
         };
@@ -37,9 +44,94 @@ impl Notebook {
         Ok(notebook)
     }
 
+    /// Create an empty transcript for a live kernel whose prior notebook
+    /// binding could not be verified. The marker is intentionally visible in
+    /// ordinary notebook metadata.
+    pub fn new_continuation(
+        notebook_dir: &Path,
+        kernel_id: &str,
+        name: Option<&str>,
+        reason: &str,
+    ) -> anyhow::Result<Self> {
+        let mut notebook = Self::new(notebook_dir, kernel_id, name)?;
+        notebook.metadata["remote_kernels"]["continuation"] = json!(reason);
+        notebook.save()?;
+        Ok(notebook)
+    }
+
+    /// Load and validate an existing notebook while preserving its metadata.
+    /// Incomplete streaming placeholders are valid and get an explicit marker.
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("read notebook {}", path.display()))?;
+        let value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("parse notebook {}", path.display()))?;
+        anyhow::ensure!(
+            value["nbformat"].as_u64() == Some(4),
+            "notebook nbformat must be 4"
+        );
+        let metadata = value
+            .get("metadata")
+            .filter(|value| value.is_object())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("notebook metadata must be an object"))?;
+        let raw_cells = value
+            .get("cells")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("notebook cells must be an array"))?;
+        let mut cells = Vec::with_capacity(raw_cells.len());
+        let mut execution_count = 0_u32;
+        for (index, raw_cell) in raw_cells.iter().enumerate() {
+            validate_cell(raw_cell).with_context(|| format!("invalid cell {}", index + 1))?;
+            let cell = raw_cell.clone();
+            if cell["cell_type"] == "code"
+                && let Some(count) = cell["execution_count"].as_u64()
+            {
+                let count = u32::try_from(count)
+                    .map_err(|_| anyhow::anyhow!("execution_count exceeds u32"))?;
+                execution_count = execution_count.max(count);
+            }
+            cells.push(cell);
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            metadata,
+            cells,
+            execution_count,
+        })
+    }
+
     /// Get the path to the notebook file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Kernel id embedded when this notebook was created.
+    pub fn kernel_id(&self) -> Option<&str> {
+        self.metadata["remote_kernels"]["kernel_id"].as_str()
+    }
+
+    /// Accept this notebook as the transcript for `expected_kernel_id`, then
+    /// mark incomplete placeholders. Loading alone is deliberately read-only.
+    pub fn bind_for_recovery(&mut self, expected_kernel_id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.kernel_id() == Some(expected_kernel_id),
+            "notebook kernel id mismatch"
+        );
+        let mut changed = false;
+        for cell in &mut self.cells {
+            if cell["cell_type"] == "code"
+                && cell["metadata"]["remote_kernels"]["placeholder"] == true
+                && cell["metadata"]["remote_kernels"]["recovery_status"] != "output incomplete"
+            {
+                cell["metadata"]["remote_kernels"]["recovery_status"] = json!("output incomplete");
+                changed = true;
+            }
+        }
+        if changed {
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Append a code cell with its output (used when execution completes synchronously).
@@ -62,13 +154,22 @@ impl Notebook {
 
     /// Create a cell placeholder with empty output. Returns the cell number (1-indexed).
     /// Used for streaming: the cell is created up front, then updated as output arrives.
-    pub fn append_cell_placeholder(&mut self, code: &str) -> anyhow::Result<u32> {
+    pub fn append_cell_placeholder(
+        &mut self,
+        code: &str,
+        parent_msg_id: &str,
+    ) -> anyhow::Result<u32> {
         self.execution_count += 1;
 
         let cell = json!({
             "cell_type": "code",
             "execution_count": self.execution_count,
-            "metadata": {},
+            "metadata": {
+                "remote_kernels": {
+                    "parent_msg_id": parent_msg_id,
+                    "placeholder": true
+                }
+            },
             "source": split_source(code),
             "outputs": []
         });
@@ -89,6 +190,10 @@ impl Notebook {
         if let Some(cell) = self.cells.get_mut(index) {
             let outputs = build_outputs(output, cell_number);
             cell["outputs"] = json!(outputs);
+            cell["metadata"]["remote_kernels"]["placeholder"] = json!(false);
+            if let Some(metadata) = cell["metadata"]["remote_kernels"].as_object_mut() {
+                metadata.remove("recovery_status");
+            }
             self.save()?;
         } else {
             // Can happen when a stale pending execution completes after the
@@ -103,28 +208,109 @@ impl Notebook {
         Ok(())
     }
 
+    /// Back-fill one still-empty placeholder by its execute-request message id.
+    /// A finalized/live-written cell is never changed, which is the catch-up
+    /// dedupe boundary.
+    pub fn backfill_output(
+        &mut self,
+        parent_msg_id: &str,
+        output: &ExecutionOutput,
+        complete: bool,
+    ) -> anyhow::Result<Option<u32>> {
+        let Some((index, cell)) = self.cells.iter_mut().enumerate().find(|(_, cell)| {
+            cell["metadata"]["remote_kernels"]["parent_msg_id"].as_str() == Some(parent_msg_id)
+        }) else {
+            return Ok(None);
+        };
+        let is_placeholder = cell["metadata"]["remote_kernels"]["placeholder"] == true;
+        let has_outputs = cell["outputs"]
+            .as_array()
+            .is_some_and(|outputs| !outputs.is_empty());
+        if !is_placeholder || has_outputs {
+            return Ok(None);
+        }
+        let cell_number = u32::try_from(index + 1).context("notebook has too many cells")?;
+        cell["outputs"] = json!(build_outputs(output, cell_number));
+        cell["metadata"]["remote_kernels"]["recovery_status"] = if complete {
+            json!("recovered")
+        } else {
+            json!("output incomplete")
+        };
+        if complete {
+            cell["metadata"]["remote_kernels"]["placeholder"] = json!(false);
+        }
+        self.save()?;
+        Ok(Some(cell_number))
+    }
+
     fn save(&self) -> anyhow::Result<()> {
         let notebook = json!({
             "nbformat": 4,
             "nbformat_minor": 5,
-            "metadata": {
-                "kernelspec": {
-                    "display_name": "Python 3",
-                    "language": "python",
-                    "name": "python3"
-                },
-                "language_info": {
-                    "name": "python",
-                    "version": "3.10"
-                }
-            },
+            "metadata": self.metadata,
             "cells": self.cells
         });
 
         let json = serde_json::to_string_pretty(&notebook)?;
-        std::fs::write(&self.path, json)?;
+        let tmp = self
+            .path
+            .with_extension(format!("ipynb.{}.tmp", uuid::Uuid::new_v4().simple()));
+        if let Err(error) =
+            std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &self.path))
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(())
     }
+}
+
+fn notebook_metadata(kernel_id: &str, continuation: Option<&str>) -> Value {
+    let mut metadata = json!({
+        "kernelspec": {
+            "display_name": "Python 3",
+            "language": "python",
+            "name": "python3"
+        },
+        "language_info": {
+            "name": "python",
+            "version": "3.10"
+        },
+        "remote_kernels": {
+            "kernel_id": kernel_id
+        }
+    });
+    if let Some(reason) = continuation {
+        metadata["remote_kernels"]["continuation"] = json!(reason);
+    }
+    metadata
+}
+
+fn validate_cell(cell: &Value) -> anyhow::Result<()> {
+    anyhow::ensure!(cell.is_object(), "cell must be an object");
+    let cell_type = cell["cell_type"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("cell_type must be a string"))?;
+    anyhow::ensure!(
+        cell["metadata"].is_object(),
+        "cell metadata must be an object"
+    );
+    let source_valid = cell["source"].is_string()
+        || cell["source"]
+            .as_array()
+            .is_some_and(|lines| lines.iter().all(Value::is_string));
+    anyhow::ensure!(source_valid, "cell source must be a string or string array");
+    if cell_type == "code" {
+        anyhow::ensure!(
+            cell["outputs"].is_array(),
+            "code cell outputs must be an array"
+        );
+        anyhow::ensure!(
+            cell["execution_count"].is_null() || cell["execution_count"].is_u64(),
+            "code cell execution_count must be null or unsigned"
+        );
+    }
+    Ok(())
 }
 
 /// Split source code into lines for nbformat (each line ends with \n except the last).
@@ -194,6 +380,16 @@ fn build_outputs(output: &ExecutionOutput, execution_count: u32) -> Vec<serde_js
         }));
     }
 
+    for data in &output.display_data {
+        outputs.push(json!({
+            "output_type": "display_data",
+            "data": {
+                "text/plain": split_source(data)
+            },
+            "metadata": {}
+        }));
+    }
+
     if let Some(ref err) = output.error {
         outputs.push(json!({
             "output_type": "error",
@@ -230,9 +426,14 @@ mod tests {
         let json = read_notebook(&nb);
         assert_eq!(json["nbformat"], 4);
         assert_eq!(json["cells"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            json["metadata"]["remote_kernels"]["kernel_id"],
+            "abcdef1234567890"
+        );
         // Unnamed kernels get an 8-char kernel-id prefix in the filename.
         let filename = nb.path().file_name().unwrap().to_string_lossy();
-        assert!(filename.ends_with("_abcdef12.ipynb"), "was {filename}");
+        assert!(filename.contains("_abcdef12_"), "was {filename}");
+        assert!(filename.ends_with(".ipynb"), "was {filename}");
     }
 
     #[test]
@@ -258,7 +459,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut nb = Notebook::new(dir.path(), "kernel-1", Some("stream")).unwrap();
 
-        let cell_number = nb.append_cell_placeholder("1 + 1").unwrap();
+        let cell_number = nb.append_cell_placeholder("1 + 1", "msg-1").unwrap();
         assert_eq!(cell_number, 1);
         let json = read_notebook(&nb);
         assert_eq!(json["cells"][0]["outputs"].as_array().unwrap().len(), 0);
@@ -285,8 +486,102 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut nb = Notebook::new(dir.path(), "kernel-1", Some("counts")).unwrap();
         nb.append_cell("a = 1", &output_with("", None)).unwrap();
-        let second = nb.append_cell_placeholder("a + 1").unwrap();
+        let second = nb.append_cell_placeholder("a + 1", "msg-2").unwrap();
         assert_eq!(second, 2);
+    }
+
+    #[test]
+    fn load_valid_notebook_permits_appending() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = Notebook::new(dir.path(), "kernel-1", Some("load")).unwrap();
+        original
+            .append_cell("a = 1", &output_with("", None))
+            .unwrap();
+
+        let mut loaded = Notebook::load(original.path()).unwrap();
+        assert_eq!(loaded.kernel_id(), Some("kernel-1"));
+        assert_eq!(loaded.append_cell_placeholder("a + 1", "msg-2").unwrap(), 2);
+    }
+
+    #[test]
+    fn load_is_read_only_until_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = Notebook::new(dir.path(), "kernel-1", Some("placeholder")).unwrap();
+        original
+            .append_cell_placeholder("slow()", "msg-slow")
+            .unwrap();
+        let before = std::fs::read(original.path()).unwrap();
+
+        let mut loaded = Notebook::load(original.path()).unwrap();
+        assert_eq!(std::fs::read(original.path()).unwrap(), before);
+        loaded.bind_for_recovery("kernel-1").unwrap();
+        let json = read_notebook(&loaded);
+        assert_eq!(
+            json["cells"][0]["metadata"]["remote_kernels"]["recovery_status"],
+            "output incomplete"
+        );
+    }
+
+    #[test]
+    fn load_rejects_corrupt_notebook() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.ipynb");
+        std::fs::write(
+            &path,
+            r#"{"nbformat":4,"metadata":{},"cells":[{"cell_type":"code","metadata":{},"source":[],"outputs":"bad","execution_count":1}]}"#,
+        )
+        .unwrap();
+        assert!(Notebook::load(&path).is_err());
+    }
+
+    #[test]
+    fn catch_up_only_fills_empty_placeholder_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut notebook = Notebook::new(dir.path(), "kernel-1", Some("dedupe")).unwrap();
+        notebook
+            .append_cell_placeholder("print('first')", "msg-1")
+            .unwrap();
+        let first = output_with("first\n", None);
+        assert_eq!(
+            notebook.backfill_output("msg-1", &first, true).unwrap(),
+            Some(1)
+        );
+        let duplicate = output_with("duplicate\n", None);
+        assert_eq!(
+            notebook.backfill_output("msg-1", &duplicate, true).unwrap(),
+            None
+        );
+        let json = read_notebook(&notebook);
+        assert_eq!(json["cells"][0]["outputs"][0]["text"][0], "first\n");
+    }
+
+    #[test]
+    fn continuation_notebooks_created_same_second_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let first =
+            Notebook::new_continuation(dir.path(), "kernel-1", Some("recovery"), "missing binding")
+                .unwrap();
+        let second =
+            Notebook::new_continuation(dir.path(), "kernel-1", Some("recovery"), "missing binding")
+                .unwrap();
+        assert_ne!(first.path(), second.path());
+        assert!(first.path().exists() && second.path().exists());
+    }
+
+    #[test]
+    fn atomic_save_replaces_without_temp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut notebook = Notebook::new(dir.path(), "kernel-1", Some("atomic")).unwrap();
+        notebook.append_cell_placeholder("1 + 1", "msg-1").unwrap();
+        notebook
+            .update_cell_output(1, &output_with("", Some("2")))
+            .unwrap();
+        assert!(Notebook::load(notebook.path()).is_ok());
+        let files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![notebook.path().to_path_buf()]);
     }
 
     #[test]

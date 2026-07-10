@@ -311,6 +311,13 @@ pub trait Connection: Send + Sync {
     /// Persistent machine workdir. Lifecycle state lives below this path.
     fn workdir(&self) -> &str;
 
+    /// Loopback WebSocket endpoint as seen from the machine itself. Production
+    /// Jupyter servers use port 8888; the fake runtime overrides its random
+    /// local test port.
+    fn recorder_ws_url(&self) -> String {
+        "ws://127.0.0.1:8888".to_string()
+    }
+
     /// A caveat about this connection worth surfacing in the `start()`
     /// result (e.g. a degraded access path). `None` when all is normal.
     fn startup_note(&self) -> Option<String> {
@@ -589,6 +596,10 @@ impl Connection for AnyConnection {
 
     fn workdir(&self) -> &str {
         dispatch!(self, c => c.workdir())
+    }
+
+    fn recorder_ws_url(&self) -> String {
+        dispatch!(self, c => c.recorder_ws_url())
     }
 
     fn startup_note(&self) -> Option<String> {

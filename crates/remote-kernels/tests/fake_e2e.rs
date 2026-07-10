@@ -287,16 +287,37 @@ async fn multiple_concurrent_machines() {
     terminate(&server, Some(&beta)).await;
 }
 
-/// A fresh server explicitly attaches by durable id. Phase 2 reports remote
-/// kernels but does not rebind them, and unknown-kernel errors point back to
-/// the durable machine.
+/// A fresh server attaches by durable id, rebinds the live kernel/notebook,
+/// and catches up an execution that completed after the first server vanished.
 #[tokio::test]
 #[ignore = "needs uv + network for jupyter-server; run with --ignored"]
-async fn fresh_server_force_attach_and_restart_guidance() {
+async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
     let dir = tempfile::tempdir().unwrap();
     let first = server_in(dir.path(), None);
     let (machine_id, _) = start_machine(&first, Some("attachable")).await;
     let old_kernel = create_kernel(&first, Some(&machine_id)).await;
+
+    // The real stdlib recorder is used against the fake Jupyter websocket.
+    // Give its nohup process time to subscribe before starting the execution.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let result = first
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: old_kernel.clone(),
+            code: "import time; time.sleep(0.5); print('recovered-output')".to_string(),
+            timeout: Some(0),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let execution_text = text_of(&result);
+    let cell_number: u32 = execution_text
+        .lines()
+        .find_map(|line| line.strip_prefix("Cell number: "))
+        .expect("cell number")
+        .parse()
+        .unwrap();
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let second = server_in(dir.path(), None);
     let result = second
@@ -308,16 +329,39 @@ async fn fresh_server_force_attach_and_restart_guidance() {
         .unwrap();
     let text = text_of(&result);
     assert!(!is_error(&result), "{text}");
-    assert!(text.contains("not yet rebound"), "{text}");
+    assert!(text.contains(&format!("Kernel {old_kernel}:")), "{text}");
+    assert!(text.contains("catch-up=1"), "{text}");
 
-    let (is_error, guidance) = execute(&second, &old_kernel, "1 + 1").await;
-    assert!(is_error, "{guidance}");
-    // The machine is attached (instances non-empty), so the "server
-    // restarted" line is correctly suppressed; durable-machine guidance
-    // remains.
-    assert!(!guidance.contains("server restarted"), "{guidance}");
-    assert!(guidance.contains(&machine_id), "{guidance}");
-    assert!(guidance.contains("Use attach"), "{guidance}");
+    let recovered = second
+        .get_output(Parameters(remote_kernels::server::GetOutputParams {
+            kernel_id: old_kernel.clone(),
+            cell_number,
+            wait: Some(false),
+            timeout: None,
+        }))
+        .await
+        .unwrap();
+    let recovered_text = text_of(&recovered);
+    assert!(
+        recovered_text.contains("recovered-output"),
+        "{recovered_text}"
+    );
+
+    let (is_error, output) = execute(&second, &old_kernel, "20 + 22").await;
+    assert!(!is_error, "{output}");
+    assert!(output.contains("42"), "{output}");
+
+    let notebook = std::fs::read_dir(dir.path().join("remote-kernels"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let notebook_text = std::fs::read_to_string(notebook).unwrap();
+    assert!(
+        notebook_text.contains("recovered-output"),
+        "{notebook_text}"
+    );
 
     terminate(&second, Some(&machine_id)).await;
 }
@@ -484,7 +528,7 @@ async fn attach_evicts_fenced_husk_and_succeeds() {
         .instances
         .get_mut(&machine_id)
         .unwrap()
-        .fenced = Some(remote_kernels::state::FenceReason::TakenOver);
+        .fence(remote_kernels::state::FenceReason::TakenOver);
 
     let result = server
         .attach(Parameters(remote_kernels::server::AttachParams {

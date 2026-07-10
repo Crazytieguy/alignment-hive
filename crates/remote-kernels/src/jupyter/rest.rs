@@ -75,8 +75,7 @@ impl JupyterClient {
         }
     }
 
-    /// List kernels currently known to Jupyter. Attach uses this only to
-    /// report that phase-3 notebook/kernel recovery has not rebound them yet.
+    /// List kernels currently known to Jupyter, including execution state.
     pub async fn list_kernels(&self) -> anyhow::Result<Vec<KernelInfo>> {
         let url = format!("{}/api/kernels", self.base_url);
         let response = self

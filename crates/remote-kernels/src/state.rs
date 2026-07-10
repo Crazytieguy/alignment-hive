@@ -34,6 +34,15 @@ pub enum Phase {
     Stopped,
 }
 
+/// Durable binding between a Jupyter kernel and its local notebook transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelRecord {
+    pub kernel_id: String,
+    pub notebook_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// The durable per-instance record (`instances/<name>/state.json`).
 ///
 /// Contains everything needed to reconnect to — or terminate — the machine
@@ -68,6 +77,9 @@ pub struct InstanceRecord {
     /// consults it.
     #[serde(default = "default_true")]
     pub proxy_port_mapped: bool,
+    /// Kernel/notebook bindings survive MCP server restarts.
+    #[serde(default)]
+    pub kernels: Vec<KernelRecord>,
 }
 
 fn default_true() -> bool {
@@ -95,6 +107,7 @@ pub struct InstanceState {
     pub jupyter_token: String,
     pub session_id: String,
     pub kernel_ids: Vec<String>,
+    pub kernels: Vec<KernelRecord>,
     pub kernel_connections: HashMap<String, KernelConnection>,
     pub notebooks: HashMap<String, Notebook>,
     pub ssh_key_path: PathBuf,
@@ -111,6 +124,8 @@ pub struct InstanceState {
     pub supervision_note: Option<String>,
     /// Pending executions that timed out. Keyed by (`kernel_id`, `cell_number`).
     pub pending_executions: HashMap<(String, u32), oneshot::Receiver<ExecutionOutput>>,
+    /// Completed outputs reconstructed from the machine recorder at attach.
+    pub recovered_executions: HashMap<(String, u32), ExecutionOutput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +167,7 @@ impl InstanceState {
             jupyter_token,
             session_id: uuid::Uuid::new_v4().to_string(),
             kernel_ids: Vec::new(),
+            kernels: Vec::new(),
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
             ssh_key_path,
@@ -162,6 +178,7 @@ impl InstanceState {
             lease_generation: None,
             supervision_note: Some("supervision setup is pending".to_string()),
             pending_executions: HashMap::new(),
+            recovered_executions: HashMap::new(),
         }
     }
 
@@ -189,6 +206,7 @@ impl InstanceState {
             gpu_name: Some(self.gpu_name.clone()),
             cost_per_hr: self.cost_per_hr,
             proxy_port_mapped: self.proxy_port_mapped,
+            kernels: self.kernels.clone(),
         }
     }
 
@@ -196,6 +214,16 @@ impl InstanceState {
         if let Some(hb) = self.heartbeat.take() {
             hb.stop();
         }
+    }
+
+    /// Fence this server's generation and release every notebook/websocket
+    /// writer that could otherwise complete after a successor has rebound.
+    pub fn fence(&mut self, reason: FenceReason) {
+        self.fenced = Some(reason);
+        self.lease_generation = None;
+        self.kernel_connections.clear();
+        self.notebooks.clear();
+        self.pending_executions.clear();
     }
 }
 
@@ -564,6 +592,7 @@ fn migrate_legacy_state(project_dir: &Path) {
         cost_per_hr: 0.0,
         // Every pre-tunnel RunPod pod was created with the public mapping.
         proxy_port_mapped: true,
+        kernels: Vec::new(),
     };
 
     if let Ok(json) = serde_json::to_string_pretty(&record)
@@ -598,6 +627,7 @@ mod tests {
             jupyter_token: "test-token".to_string(),
             session_id: "test-session".to_string(),
             kernel_ids: Vec::new(),
+            kernels: Vec::new(),
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
             ssh_key_path: PathBuf::from("/tmp/test-key"),
@@ -608,6 +638,7 @@ mod tests {
             lease_generation: None,
             supervision_note: None,
             pending_executions: HashMap::new(),
+            recovered_executions: HashMap::new(),
         }
     }
 
@@ -618,6 +649,11 @@ mod tests {
         let machine_id = crate::ulid::new();
         let mut inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
         inst.label = Some("training".to_string());
+        inst.kernels.push(KernelRecord {
+            kernel_id: "kernel-1".to_string(),
+            notebook_path: "/tmp/kernel-1.ipynb".to_string(),
+            name: Some("analysis".to_string()),
+        });
         let record = inst.record();
         state.instances.insert(machine_id.clone(), inst);
 
@@ -631,6 +667,7 @@ mod tests {
         assert_eq!(loaded.phase, Phase::Running);
         assert_eq!(loaded.cleanup, Cleanup::Terminate);
         assert_eq!(loaded.jupyter_token.as_deref(), Some("test-token"));
+        assert_eq!(loaded.kernels, record.kernels);
 
         let all = list_instance_records(dir.path());
         assert_eq!(all.len(), 1);

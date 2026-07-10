@@ -14,12 +14,17 @@ pub struct KernelConnection {
     /// Whether the kernel is currently executing code.
     is_busy: Arc<AtomicBool>,
     /// Background reader task handle.
-    _reader_handle: tokio::task::JoinHandle<()>,
+    reader_handle: tokio::task::JoinHandle<()>,
 }
 
 struct ExecuteCommand {
     msg: JupyterMessage,
     result_tx: oneshot::Sender<ExecutionOutput>,
+}
+
+pub struct StartedExecution {
+    pub parent_msg_id: String,
+    pub result_rx: oneshot::Receiver<ExecutionOutput>,
 }
 
 impl KernelConnection {
@@ -52,7 +57,7 @@ impl KernelConnection {
         Ok(Self {
             request_tx,
             is_busy,
-            _reader_handle: reader_handle,
+            reader_handle,
         })
     }
 
@@ -67,8 +72,9 @@ impl KernelConnection {
         &self,
         session_id: &str,
         code: &str,
-    ) -> anyhow::Result<oneshot::Receiver<ExecutionOutput>> {
+    ) -> anyhow::Result<StartedExecution> {
         let msg = JupyterMessage::execute_request(session_id, code);
+        let parent_msg_id = msg.header.msg_id.clone();
         let (result_tx, result_rx) = oneshot::channel();
 
         self.request_tx
@@ -76,7 +82,10 @@ impl KernelConnection {
             .await
             .map_err(|_| anyhow::anyhow!("Kernel connection closed"))?;
 
-        Ok(result_rx)
+        Ok(StartedExecution {
+            parent_msg_id,
+            result_rx,
+        })
     }
 
     /// Execute code and wait for the result with a timeout.
@@ -86,7 +95,7 @@ impl KernelConnection {
         code: &str,
         timeout: std::time::Duration,
     ) -> anyhow::Result<ExecutionOutput> {
-        let result_rx = self.start_execution(session_id, code).await?;
+        let result_rx = self.start_execution(session_id, code).await?.result_rx;
 
         match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(output)) => Ok(output),
@@ -213,5 +222,34 @@ impl KernelConnection {
             }
             let _ = tx.send(output);
         }
+    }
+}
+
+impl Drop for KernelConnection {
+    fn drop(&mut self) {
+        self.reader_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{ExecuteCommand, KernelConnection};
+
+    #[tokio::test]
+    async fn dropping_fenced_connection_aborts_reader_task() {
+        let (request_tx, _request_rx) = tokio::sync::mpsc::channel::<ExecuteCommand>(1);
+        let reader_handle = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = reader_handle.abort_handle();
+        let connection = KernelConnection {
+            request_tx,
+            is_busy: Arc::new(AtomicBool::new(false)),
+            reader_handle,
+        };
+        drop(connection);
+        tokio::task::yield_now().await;
+        assert!(abort_handle.is_finished());
     }
 }
