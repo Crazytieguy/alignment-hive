@@ -127,7 +127,13 @@ impl KernelConnection {
         mut request_rx: mpsc::Receiver<ExecuteCommand>,
         is_busy: Arc<AtomicBool>,
     ) {
-        let mut pending: Option<(String, ExecutionOutput, oneshot::Sender<ExecutionOutput>)> = None;
+        let mut pending: Option<(
+            String,
+            ExecutionOutput,
+            oneshot::Sender<ExecutionOutput>,
+            bool,
+            bool,
+        )> = None;
 
         loop {
             tokio::select! {
@@ -151,7 +157,13 @@ impl KernelConnection {
                     }
 
                     is_busy.store(true, Ordering::Relaxed);
-                    pending = Some((msg_id, ExecutionOutput::default(), cmd.result_tx));
+                    pending = Some((
+                        msg_id,
+                        ExecutionOutput::default(),
+                        cmd.result_tx,
+                        false,
+                        false,
+                    ));
                 }
 
                 Some(msg_result) = ws_stream_rx.next() => {
@@ -181,13 +193,19 @@ impl KernelConnection {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    if let Some((ref expected_id, ref mut output, _)) = pending {
+                    let mut complete = false;
+                    if let Some((ref expected_id, ref mut output, _, ref mut shell_replied, ref mut idle)) = pending {
                         if parent_msg_id != expected_id {
                             continue;
                         }
                         match msg.channel.as_str() {
                             "iopub" => {
                                 output.process_iopub(&msg);
+                                if msg.header.msg_type == "status"
+                                    && msg.content["execution_state"].as_str() == Some("idle")
+                                {
+                                    *idle = true;
+                                }
                             }
                             "shell" if msg.header.msg_type == "execute_reply" => {
                                 let status = msg.content["status"].as_str().unwrap_or("ok");
@@ -197,12 +215,16 @@ impl KernelConnection {
                                     output.status = ExecutionStatus::Complete;
                                 }
 
-                                is_busy.store(false, Ordering::Relaxed);
-                                if let Some((_, output, tx)) = pending.take() {
-                                    let _ = tx.send(output);
-                                }
+                                *shell_replied = true;
                             }
                             _ => {}
+                        }
+                        complete = *shell_replied && *idle;
+                    }
+                    if complete {
+                        is_busy.store(false, Ordering::Relaxed);
+                        if let Some((_, output, tx, _, _)) = pending.take() {
+                            let _ = tx.send(output);
                         }
                     }
                 }
@@ -213,7 +235,7 @@ impl KernelConnection {
 
         // If we exit with a pending execution, complete it with what we have.
         is_busy.store(false, Ordering::Relaxed);
-        if let Some((_, mut output, tx)) = pending.take() {
+        if let Some((_, mut output, tx, _, _)) = pending.take() {
             if output.status == ExecutionStatus::Running {
                 output.status = ExecutionStatus::Errored;
                 output

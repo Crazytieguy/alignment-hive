@@ -234,6 +234,7 @@ volume-gb = 0
             kernel_id: kernel_id.clone(),
             code: "21 * 2".to_string(),
             timeout: Some(90),
+            wait: None,
             queue: None,
         }))
         .await
@@ -256,6 +257,7 @@ volume-gb = 0
             kernel_id: kernel_id.clone(),
             code: "print(open('/workspace/data.txt').read())".to_string(),
             timeout: Some(60),
+            wait: None,
             queue: None,
         }))
         .await
@@ -363,6 +365,7 @@ jupyter-access = "proxy"
                 kernel_id,
                 code,
                 timeout: Some(120),
+                wait: None,
                 queue: None,
             }))
             .await

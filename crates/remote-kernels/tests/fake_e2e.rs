@@ -102,6 +102,7 @@ async fn execute(server: &RemoteKernelsServer, kernel_id: &str, code: &str) -> (
             kernel_id: kernel_id.to_string(),
             code: code.to_string(),
             timeout: Some(60),
+            wait: None,
             queue: None,
         }))
         .await
@@ -201,6 +202,7 @@ async fn full_lifecycle_on_fake_runtime() {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(1); 'slow done'".to_string(),
             timeout: Some(0),
+            wait: None,
             queue: None,
         }))
         .await
@@ -245,6 +247,212 @@ async fn full_lifecycle_on_fake_runtime() {
         "{}",
         text_of(&result)
     );
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn wait_returns_multi_second_execution_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("blocking-wait")).await;
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+
+    let started = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "import time; time.sleep(2); 'wait complete'".to_string(),
+            timeout: Some(0),
+            wait: None,
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&started), "{}", text_of(&started));
+
+    let result = server
+        .wait(Parameters(remote_kernels::server::WaitParams {
+            kernel_id: kernel_id.clone(),
+            timeout: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("wait complete"), "{text}");
+
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "import time; time.sleep(2); 'execute wait complete'".to_string(),
+            timeout: Some(1),
+            wait: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("execute wait complete"), "{text}");
+
+    let older = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "import time; time.sleep(1); 'older pending result'".to_string(),
+            timeout: Some(0),
+            wait: None,
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let older_cell = text_of(&older)
+        .lines()
+        .find_map(|line| line.strip_prefix("Cell number: "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "'new directly-held result'".to_string(),
+            timeout: Some(1),
+            wait: Some(true),
+            queue: Some(true),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("new directly-held result"), "{text}");
+    assert!(!text.contains("older pending result"), "{text}");
+    let older = server
+        .get_output(Parameters(remote_kernels::server::GetOutputParams {
+            kernel_id,
+            cell_number: older_cell,
+            wait: Some(true),
+            timeout: Some(30),
+        }))
+        .await
+        .unwrap();
+    assert!(text_of(&older).contains("older pending result"));
+    terminate(&server, Some(&machine_id)).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn wait_timeout_preserves_result_for_get_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("wait-timeout")).await;
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+
+    let started = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "import time; time.sleep(2); 'collected later'".to_string(),
+            timeout: Some(0),
+            wait: None,
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let started_text = text_of(&started);
+    let cell_number = started_text
+        .lines()
+        .find_map(|line| line.strip_prefix("Cell number: "))
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let timed_out = server
+        .wait(Parameters(remote_kernels::server::WaitParams {
+            kernel_id: kernel_id.clone(),
+            timeout: Some(1),
+        }))
+        .await
+        .unwrap();
+    assert!(text_of(&timed_out).contains("still running after 1s"));
+
+    let result = server
+        .get_output(Parameters(remote_kernels::server::GetOutputParams {
+            kernel_id,
+            cell_number,
+            wait: Some(true),
+            timeout: Some(30),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("collected later"), "{text}");
+    terminate(&server, Some(&machine_id)).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn fence_during_wait_returns_promptly_and_execution_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("wait-fence")).await;
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+    let started = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "import time; time.sleep(10); 'survived takeover'".to_string(),
+            timeout: Some(0),
+            wait: None,
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&started), "{}", text_of(&started));
+
+    let waiting = {
+        let server = server.clone();
+        let kernel_id = kernel_id.clone();
+        tokio::spawn(async move {
+            server
+                .wait(Parameters(remote_kernels::server::WaitParams {
+                    kernel_id,
+                    timeout: None,
+                }))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // A successor acquires the lease generation, then the predecessor observes
+    // the takeover exactly as its heartbeat would.
+    let successor = server_in(dir.path(), None);
+    let attached = successor
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: Some(true),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&attached), "{}", text_of(&attached));
+    server
+        .shared_state()
+        .lock()
+        .await
+        .instances
+        .get_mut(&machine_id)
+        .unwrap()
+        .fence(remote_kernels::state::FenceReason::TakenOver);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("wait should return promptly after fencing")
+        .unwrap()
+        .unwrap();
+    let text = text_of(&result);
+    assert!(is_error(&result), "{text}");
+    assert!(text.contains("another session took over"), "{text}");
+    assert!(
+        text.contains("execution continues on the machine"),
+        "{text}"
+    );
+    terminate(&successor, Some(&machine_id)).await;
 }
 
 /// Two concurrent machines: kernels route by kernel id without an instance
@@ -317,6 +525,7 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
             kernel_id: old_kernel.clone(),
             code: "import time; time.sleep(0.5); print('recovered-output')".to_string(),
             timeout: Some(0),
+            wait: None,
             queue: None,
         }))
         .await
@@ -568,6 +777,7 @@ async fn disconnect_with_busy_kernel_leaves_machine_and_record() {
             kernel_id,
             code: "import time; time.sleep(30)".to_string(),
             timeout: Some(0),
+            wait: None,
             queue: None,
         }))
         .await

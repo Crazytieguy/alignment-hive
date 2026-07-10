@@ -148,6 +148,7 @@ async fn k8s_full_lifecycle_via_kueue() {
                     kernel_id,
                     code,
                     timeout: Some(60),
+                    wait: None,
                     queue: None,
                 }))
                 .await
@@ -429,6 +430,7 @@ workdir = "/home/jovyan/work"
             code: "import os; print(6 * 7, len(os.environ['REMOTE_KERNELS_JUPYTER_TOKEN']))"
                 .to_string(),
             timeout: Some(60),
+            wait: None,
             queue: None,
         }))
         .await

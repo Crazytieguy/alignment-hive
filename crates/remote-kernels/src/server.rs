@@ -4,13 +4,19 @@ use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolResult, Content, Implementation, Meta, ProgressNotificationParam, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::{
+    ErrorData as McpError, Peer, RoleServer, ServerHandler, tool, tool_handler, tool_router,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::config::{Cleanup, Config};
+use crate::jupyter::messages::ExecutionOutput;
 use crate::jupyter::rest::JupyterClient;
 use crate::runtime::{
     AnyConnection, AnyRuntime, Connection, ConnectionContext, InstanceStatus, ProvisionRequest,
@@ -23,7 +29,6 @@ const RESTART_GUIDANCE: &str =
 
 const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
 const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
-const SUPERVISION_DISCOVERY_TIMEOUT_SECS: u64 = 5 * 60;
 
 #[derive(Debug, thiserror::Error)]
 #[error("configured budget cannot be enforced: {0}")]
@@ -42,6 +47,14 @@ struct RecorderTail {
     messages: Vec<RecordedOutputMessage>,
     skipped_lines: usize,
     window_truncated: bool,
+}
+
+struct HeldExecution {
+    result_rx: tokio::sync::oneshot::Receiver<ExecutionOutput>,
+    instance_name: String,
+    kernel_id: String,
+    cell_number: Option<u32>,
+    cleanup: Cleanup,
 }
 
 #[derive(Clone)]
@@ -206,8 +219,18 @@ pub struct ExecuteParams {
     /// Timeout in seconds (default: 30). Set to 0 to start the execution and return
     /// immediately (collect it later with `get_output()`).
     pub timeout: Option<u64>,
+    /// If true, hold the call open until execution completes, ignoring `timeout`.
+    pub wait: Option<bool>,
     /// If true, queue behind the current execution instead of returning an error when busy.
     pub queue: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WaitParams {
+    /// The kernel whose oldest pending execution should be awaited.
+    pub kernel_id: String,
+    /// Optional timeout in seconds. Omit it to wait without an internal cap.
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1196,16 +1219,36 @@ impl RemoteKernelsServer {
 
     /// Execute Python code in a kernel. Returns the output (stdout, stderr, result,
     /// errors). If the timeout elapses, the execution keeps running and the response
-    /// includes a cell number — pass it to `get_output()` to collect the result.
+    /// includes a cell number — pass it to `get_output()` to collect the result. Holding
+    /// the call open keeps a background session alive; prefer wait() over polling for long cells.
     #[tool(name = "execute")]
+    #[allow(clippy::doc_markdown, clippy::collapsible_if)]
+    pub async fn execute_tool(
+        &self,
+        params: Parameters<ExecuteParams>,
+        meta: Meta,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.execute_inner(params.0, Some((meta, peer))).await
+    }
+
     pub async fn execute(
         &self,
         params: Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.execute_inner(params.0, None).await
+    }
+
+    #[allow(clippy::collapsible_if, clippy::too_many_lines)]
+    async fn execute_inner(
+        &self,
+        params: ExecuteParams,
+        progress: Option<(Meta, Peer<RoleServer>)>,
+    ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
 
-        let params = params.0;
         let timeout_secs = params.timeout.unwrap_or(30);
+        let wait_uncapped = params.wait.unwrap_or(false);
         let queue = params.queue.unwrap_or(false);
 
         let (guard_instance, guard_external_id) = {
@@ -1282,7 +1325,7 @@ impl RemoteKernelsServer {
             let rx = started.result_rx;
 
             // Fire-and-forget: store receiver and return immediately.
-            if timeout_secs == 0 {
+            if timeout_secs == 0 && !wait_uncapped {
                 if let Some(cell_num) = cell_number {
                     inst.pending_executions
                         .insert((kernel_id.clone(), cell_num), rx);
@@ -1303,11 +1346,27 @@ impl RemoteKernelsServer {
         drop(mutation_guard);
         // State lock dropped here — we can await freely.
 
+        if wait_uncapped {
+            return self
+                .wait_held(
+                    HeldExecution {
+                        result_rx,
+                        instance_name,
+                        kernel_id,
+                        cell_number,
+                        cleanup,
+                    },
+                    None,
+                    progress,
+                )
+                .await;
+        }
+
         // Wait for result with timeout. Using select! so we can store the receiver on timeout.
-        let timeout = std::time::Duration::from_secs(timeout_secs);
         let timed_out;
         let mut completed_output = None;
 
+        let timeout = std::time::Duration::from_secs(timeout_secs);
         tokio::select! {
             result = &mut result_rx => {
                 timed_out = false;
@@ -1373,6 +1432,188 @@ impl RemoteKernelsServer {
         }
     }
 
+    /// Wait for the kernel's oldest pending execution. Holding the call open keeps a
+    /// background session alive; prefer wait() over polling for long cells.
+    #[tool(name = "wait")]
+    #[allow(clippy::doc_markdown)]
+    pub async fn wait_tool(
+        &self,
+        params: Parameters<WaitParams>,
+        meta: Meta,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.wait_inner(params.0, Some((meta, peer))).await
+    }
+
+    /// Direct entry point used by integration tests; MCP callers use `wait_tool`.
+    pub async fn wait(&self, params: Parameters<WaitParams>) -> Result<CallToolResult, McpError> {
+        self.wait_inner(params.0, None).await
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::collapsible_if,
+        clippy::too_many_lines
+    )]
+    async fn wait_inner(
+        &self,
+        params: WaitParams,
+        progress: Option<(Meta, Peer<RoleServer>)>,
+    ) -> Result<CallToolResult, McpError> {
+        let held = {
+            let mut state = self.state.lock().await;
+            let Some(instance_name) = state
+                .instance_for_kernel(&params.kernel_id)
+                .map(String::from)
+            else {
+                return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
+            };
+            let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(format!("{message}; the execution continues on the machine"));
+            }
+            let Some(cell_number) = inst
+                .pending_executions
+                .keys()
+                .filter(|(kernel_id, _)| kernel_id == &params.kernel_id)
+                .map(|(_, cell_number)| *cell_number)
+                .min()
+            else {
+                return err_text(format!(
+                    "No available pending execution found for kernel {}. Start one with execute(timeout=0), use execute(wait=true), or wait for another active wait/get_output call to finish.",
+                    params.kernel_id
+                ));
+            };
+            let result_rx = inst
+                .pending_executions
+                .remove(&(params.kernel_id.clone(), cell_number))
+                .expect("selected pending execution");
+            HeldExecution {
+                result_rx,
+                instance_name,
+                kernel_id: params.kernel_id,
+                cell_number: Some(cell_number),
+                cleanup: inst.cleanup,
+            }
+        };
+        self.wait_held(held, params.timeout, progress).await
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::collapsible_if,
+        clippy::too_many_lines
+    )]
+    async fn wait_held(
+        &self,
+        mut held: HeldExecution,
+        timeout_secs: Option<u64>,
+        progress: Option<(Meta, Peer<RoleServer>)>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let mut fence_check = tokio::time::interval(std::time::Duration::from_millis(200));
+        fence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut progress_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        progress_tick.tick().await;
+        let mut timeout = timeout_secs
+            .map(|seconds| Box::pin(tokio::time::sleep(std::time::Duration::from_secs(seconds))));
+
+        let output = loop {
+            tokio::select! {
+                result = &mut held.result_rx => break result.ok(),
+                _ = fence_check.tick() => {
+                    let state = self.state.lock().await;
+                    if let Some(inst) = state.instances.get(&held.instance_name) {
+                        if let Some(message) = Self::fenced_message(inst) {
+                            return err_text(format!(
+                                "{message}; the execution continues on the machine"
+                            ));
+                        }
+                    }
+                }
+                _ = progress_tick.tick(), if progress.is_some() => {
+                    let Some((meta, peer)) = &progress else { unreachable!() };
+                    if let Some(progress_token) = meta.get_progress_token() {
+                        let state = self.state.lock().await;
+                        let execution_state = state.instances.get(&held.instance_name)
+                            .and_then(|inst| inst.kernel_connections.get(&held.kernel_id))
+                            .map_or("connection unavailable", |conn| if conn.is_busy() { "running" } else { "queued" });
+                        let elapsed = started.elapsed().as_secs();
+                        let _ = peer.notify_progress(ProgressNotificationParam {
+                            progress_token,
+                            progress: elapsed as f64,
+                            total: None,
+                            message: Some(format!("wait: elapsed={elapsed}s state={execution_state}")),
+                        }).await;
+                    }
+                }
+                () = async { timeout.as_mut().expect("guarded timeout").as_mut().await }, if timeout.is_some() => {
+                    let mut state = self.state.lock().await;
+                    if let Some(inst) = state.instances.get_mut(&held.instance_name) {
+                        if let Some(message) = Self::fenced_message(inst) {
+                            return err_text(format!("{message}; the execution continues on the machine"));
+                        }
+                        if let Some(cell_number) = held.cell_number {
+                            inst.pending_executions.insert(
+                                (held.kernel_id.clone(), cell_number),
+                                held.result_rx,
+                            );
+                        }
+                    }
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Execution still running after {}s. Use wait() again or get_output() to collect it.",
+                        timeout_secs.expect("timeout branch")
+                    ))]));
+                }
+            }
+        };
+
+        let Some(output) = output else {
+            let state = self.state.lock().await;
+            if let Some(inst) = state.instances.get(&held.instance_name) {
+                if let Some(message) = Self::fenced_message(inst) {
+                    return err_text(format!("{message}; the execution continues on the machine"));
+                }
+            }
+            return err_text("Kernel connection was lost.");
+        };
+
+        {
+            let mut state = self.state.lock().await;
+            if let Some(inst) = state.instances.get_mut(&held.instance_name) {
+                if let Some(message) = Self::fenced_message(inst) {
+                    if let Some(cell_number) = held.cell_number {
+                        inst.recovered_executions
+                            .insert((held.kernel_id.clone(), cell_number), output);
+                    }
+                    return err_text(format!("{message}; the execution continues on the machine"));
+                }
+            }
+        }
+
+        if let Some(cell_number) = held.cell_number {
+            self.update_notebook_cell(&held.kernel_id, cell_number, &output)
+                .await;
+        }
+        let mut formatted = output.format();
+        let is_error = output.error.is_some();
+        let total_spend = self.state.lock().await.total_spend();
+        if let Some(spend_line) = self.format_spend_line(total_spend) {
+            formatted.push_str(&spend_line);
+        }
+        if held.cleanup == Cleanup::Disabled {
+            formatted.push_str(
+                "\nNote: automatic cleanup is disabled. Remember to stop/terminate the machine when done.",
+            );
+        }
+        if is_error {
+            Ok(CallToolResult::error(vec![Content::text(formatted)]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(formatted)]))
+        }
+    }
+
     /// Check on or wait for a previously started execution that timed out.
     /// The `cell_number` is returned by `execute()` when it times out or when timeout=0 is used.
     #[tool(name = "get_output")]
@@ -1408,7 +1649,7 @@ impl RemoteKernelsServer {
             }
             let Some(rx) = inst.pending_executions.remove(&key) else {
                 return err_text(format!(
-                    "No pending execution found for kernel {} cell {}. It may have already completed.",
+                    "No available pending execution found for kernel {} cell {}. It may have completed, or another wait/get_output call may currently hold it.",
                     params.kernel_id, params.cell_number
                 ));
             };
@@ -2663,26 +2904,24 @@ impl RemoteKernelsServer {
         }
 
         if *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
-            if self.budget.is_some() {
-                // A budgeted start cannot return success while enforceability
-                // is still unknown. The heartbeat owns provider-specific SSH /
-                // flock discovery and reports a definitive state here.
-                if tokio::time::timeout(
-                    std::time::Duration::from_secs(SUPERVISION_DISCOVERY_TIMEOUT_SECS),
-                    supervision.changed(),
-                )
-                .await
-                .is_err()
-                {
-                    return Err(BudgetUnenforceable(format!(
-                        "supervision remained unavailable for {SUPERVISION_DISCOVERY_TIMEOUT_SECS} seconds"
-                    ))
-                    .into());
+            // Both the user-visible caveat and the budget enforceability gate
+            // consume the same definitive heartbeat event. The timeout is only
+            // a backstop for genuinely slow or unreachable transports.
+            let resolved = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
+                    if supervision.changed().await.is_err() {
+                        break;
+                    }
                 }
-            } else {
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(1), supervision.changed())
-                        .await;
+            })
+            .await
+            .is_ok()
+                && *supervision.borrow() != crate::heartbeat::SupervisionStatus::Pending;
+            if !resolved && self.budget.is_some() {
+                return Err(BudgetUnenforceable(
+                    "supervision remained pending after 15 seconds".to_string(),
+                )
+                .into());
             }
         }
         let supervision_status = supervision.borrow().clone();
@@ -4277,6 +4516,7 @@ mod tests {
                 kernel_id: "kernel-1".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
+                wait: None,
                 queue: None,
             }))
             .await
@@ -4293,6 +4533,7 @@ mod tests {
                 kernel_id: "missing-while-live".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
+                wait: None,
                 queue: None,
             }))
             .await
@@ -4307,6 +4548,7 @@ mod tests {
                 kernel_id: "missing-kernel".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
+                wait: None,
                 queue: None,
             }))
             .await

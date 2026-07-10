@@ -1,6 +1,7 @@
 {
   "remote-kernels": {
     "command": "bash",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh", "--project-dir", "."]
+    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh", "--project-dir", "."],
+    "timeout": 28800000
   }
 }
