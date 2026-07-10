@@ -94,6 +94,9 @@ pub struct Offer {
     /// On-demand price, $/hr (GPU + base machine).
     #[serde(default)]
     pub dph_total: Option<f64>,
+    /// Total disk charge for this configured instance, in $/hr.
+    #[serde(default)]
+    pub storage_total_cost: Option<f64>,
     #[serde(default)]
     pub reliability2: Option<f64>,
     /// Deep-learning performance score (vast's synthetic benchmark).
@@ -162,6 +165,9 @@ pub struct Instance {
     pub num_gpus: Option<u32>,
     #[serde(default)]
     pub dph_total: Option<f64>,
+    /// Total disk charge for this instance, in $/hr.
+    #[serde(default)]
+    pub storage_total_cost: Option<f64>,
     #[serde(default)]
     pub status_msg: Option<String>,
 }

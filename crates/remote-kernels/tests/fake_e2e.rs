@@ -14,6 +14,7 @@
 #![cfg(feature = "fake-runtime")]
 
 use remote_kernels::config::Config;
+use remote_kernels::runtime::{Connection, Runtime};
 use remote_kernels::server::RemoteKernelsServer;
 use remote_kernels::state::AppState;
 use rmcp::handler::server::wrapper::Parameters;
@@ -42,6 +43,16 @@ fn server_in(dir: &std::path::Path, budget: Option<f64>) -> RemoteKernelsServer 
     // SAFETY: tests run single-threaded (--test-threads=1 documented above).
     unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_JUPYTER", JUPYTER_CMD) };
     RemoteKernelsServer::new(fake_config(), AppState::new(dir.to_path_buf()), budget)
+}
+
+fn server_with(
+    dir: &std::path::Path,
+    config: Config,
+    budget: Option<remote_kernels::config::EffectiveBudget>,
+) -> RemoteKernelsServer {
+    // SAFETY: tests run single-threaded (--test-threads=1 documented above).
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_JUPYTER", JUPYTER_CMD) };
+    RemoteKernelsServer::new_with_budget(config, AppState::new(dir.to_path_buf()), budget)
 }
 
 async fn start_machine(server: &RemoteKernelsServer, label: Option<&str>) -> (String, String) {
@@ -102,6 +113,7 @@ async fn terminate(server: &RemoteKernelsServer, instance: Option<&str>) -> Stri
     let result = server
         .terminate(Parameters(remote_kernels::server::InstanceParams {
             instance: instance.map(String::from),
+            skip_finalize: None,
         }))
         .await
         .expect("terminate protocol error");
@@ -223,7 +235,7 @@ async fn full_lifecycle_on_fake_runtime() {
     let text = terminate(&server, None).await;
     assert!(text.contains("terminated"), "{text}");
     let result = server
-        .status(Parameters(remote_kernels::server::InstanceParams {
+        .status(Parameters(remote_kernels::server::StatusParams {
             instance: None,
         }))
         .await
@@ -270,7 +282,7 @@ async fn multiple_concurrent_machines() {
 
     // Status shows both.
     let result = server
-        .status(Parameters(remote_kernels::server::InstanceParams {
+        .status(Parameters(remote_kernels::server::StatusParams {
             instance: None,
         }))
         .await
@@ -423,7 +435,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
 
     // Both machines are gone.
     let result = server
-        .status(Parameters(remote_kernels::server::InstanceParams {
+        .status(Parameters(remote_kernels::server::StatusParams {
             instance: None,
         }))
         .await
@@ -463,6 +475,7 @@ async fn stop_and_resume_roundtrip() {
     let result = server
         .stop(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
+            skip_finalize: None,
         }))
         .await
         .unwrap();
@@ -472,7 +485,7 @@ async fn stop_and_resume_roundtrip() {
 
     // Record survives; status reports it as from a previous session.
     let result = server
-        .status(Parameters(remote_kernels::server::InstanceParams {
+        .status(Parameters(remote_kernels::server::StatusParams {
             instance: None,
         }))
         .await
@@ -541,6 +554,354 @@ async fn attach_evicts_fenced_husk_and_succeeds() {
     assert!(!is_error(&result), "{text}");
     assert!(text.contains("Attached"), "{text}");
     terminate(&server, Some(&machine_id)).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn disconnect_with_busy_kernel_leaves_machine_and_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("busy-disconnect")).await;
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id,
+            code: "import time; time.sleep(30)".to_string(),
+            timeout: Some(0),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+
+    server.shutdown_cleanup().await;
+
+    let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
+    assert_eq!(
+        runtime.describe(&record.external_id).await.unwrap(),
+        remote_kernels::runtime::InstanceStatus::Running
+    );
+    assert_eq!(
+        remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+            .unwrap()
+            .phase,
+        remote_kernels::state::Phase::Running
+    );
+    let fresh = server_in(dir.path(), None);
+    let attached = fresh
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: Some(true),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&attached), "{}", text_of(&attached));
+    let lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    assert!(lifecycle.finalize_phase.is_none());
+    terminate(&fresh, Some(&machine_id)).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn explicit_stop_runs_preop_then_enters_finalizing_before_provider_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let config: Config = toml::from_str(
+        "default-runtime = \"fake\"\n[runpod]\npre-stop-command = \"printf pre-op > .remote-kernels/pre-op; sleep 2\"",
+    )
+    .unwrap();
+    let server = server_with(dir.path(), config, None);
+    let (machine_id, _) = start_machine(&server, Some("ordered-stop")).await;
+    let connection = server.shared_state().lock().await.instances[&machine_id]
+        .connection
+        .clone()
+        .unwrap();
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_STOP_PAUSE_MS", "2000") };
+    let stopping = {
+        let server = server.clone();
+        let machine_id = machine_id.clone();
+        tokio::spawn(async move {
+            server
+                .stop(Parameters(remote_kernels::server::InstanceParams {
+                    instance: Some(machine_id),
+                    skip_finalize: None,
+                }))
+                .await
+        })
+    };
+    for _ in 0..40 {
+        if connection
+            .exec(
+                "test -f .remote-kernels/pre-op",
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // The old heartbeat/oplock writer must be able to move while the pre-op
+    // is running; otherwise a long pre-op makes the watchdog declare it stale.
+    let heartbeat_lock = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        remote_kernels::state::acquire_operation_lock(dir.path(), &machine_id),
+    )
+    .await
+    .expect("pre-op must not hold the operation lock")
+    .unwrap();
+    drop(heartbeat_lock);
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    let lease_while_provider_call_is_paused = remote_kernels::machine_scripts::read(&connection)
+        .await
+        .unwrap();
+    assert_eq!(lease_while_provider_call_is_paused.state, "finalizing");
+    assert_eq!(
+        remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+            .describe(&record.external_id)
+            .await
+            .unwrap(),
+        remote_kernels::runtime::InstanceStatus::Running,
+        "provider must still be running after enter-finalizing and before stop returns"
+    );
+    let result = stopping.await.unwrap().unwrap();
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_STOP_PAUSE_MS") };
+    assert!(!is_error(&result), "{}", text_of(&result));
+    assert_eq!(
+        connection
+            .exec(
+                "cat .remote-kernels/pre-op",
+                std::time::Duration::from_secs(2)
+            )
+            .await
+            .unwrap(),
+        "pre-op"
+    );
+    let lease = remote_kernels::machine_scripts::read(&connection)
+        .await
+        .unwrap();
+    assert_eq!(lease.state, "finalizing");
+    assert_eq!(lease.action, "stop");
+    assert_eq!(
+        remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+            .describe(&record.external_id)
+            .await
+            .unwrap(),
+        remote_kernels::runtime::InstanceStatus::Stopped
+    );
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .terminate(&record.external_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn failing_terminate_preop_downgrades_to_confirmed_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let config: Config =
+        toml::from_str("default-runtime = \"fake\"\n[runpod]\npre-terminate-command = \"false\"")
+            .unwrap();
+    let server = server_with(dir.path(), config, None);
+    let (machine_id, _) = start_machine(&server, Some("downgrade")).await;
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    let result = server
+        .terminate(Parameters(remote_kernels::server::InstanceParams {
+            instance: Some(machine_id.clone()),
+            skip_finalize: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(
+        text.contains("stopped for preservation, not terminated"),
+        "{text}"
+    );
+    let lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    assert_eq!(
+        lifecycle.finalize_phase,
+        Some(remote_kernels::state::FinalizePhase::CompletedStop)
+    );
+    assert!(!lifecycle.outcome_unknown);
+    assert_eq!(lifecycle.storage_rate_per_hr, Some(0.0));
+    let status = server
+        .status(Parameters(remote_kernels::server::StatusParams {
+            instance: Some(machine_id.clone()),
+        }))
+        .await
+        .unwrap();
+    assert!(
+        text_of(&status).contains("storage billing may continue until terminated"),
+        "{}",
+        text_of(&status)
+    );
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .terminate(&record.external_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn ambiguous_stop_refuses_attach_until_provider_state_converges() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("ambiguous")).await;
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_STOP_ERROR_BEFORE_ACTION", "1") };
+    let error = server
+        .stop(Parameters(remote_kernels::server::InstanceParams {
+            instance: Some(machine_id.clone()),
+            skip_finalize: None,
+        }))
+        .await
+        .unwrap_err();
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_STOP_ERROR_BEFORE_ACTION") };
+    assert!(format!("{error}").contains("outcome unknown"), "{error}");
+    let lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    assert_eq!(
+        lifecycle.finalize_phase,
+        Some(remote_kernels::state::FinalizePhase::Finalizing)
+    );
+    assert!(lifecycle.outcome_unknown);
+
+    let refused = server
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&refused), "{}", text_of(&refused));
+    assert!(text_of(&refused).contains("attach refused"));
+
+    let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
+    runtime.stop(&record.external_id).await.unwrap();
+    let status = server
+        .status(Parameters(remote_kernels::server::StatusParams {
+            instance: Some(machine_id.clone()),
+        }))
+        .await
+        .unwrap();
+    assert!(
+        text_of(&status).contains("provider confirmed stop"),
+        "{}",
+        text_of(&status)
+    );
+    let lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    assert_eq!(
+        lifecycle.finalize_phase,
+        Some(remote_kernels::state::FinalizePhase::CompletedStop)
+    );
+    runtime.terminate(&record.external_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn reconciliation_completes_server_death_terminate_marker_under_oplock() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("server-death")).await;
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    let (connection, generation) = {
+        let state = server.shared_state();
+        let state = state.lock().await;
+        let instance = &state.instances[&machine_id];
+        (
+            instance.connection.clone().unwrap(),
+            instance.lease_generation.unwrap(),
+        )
+    };
+    let op_id = uuid::Uuid::new_v4().to_string();
+    remote_kernels::machine_scripts::enter_finalizing(
+        &connection,
+        generation,
+        &op_id,
+        remote_kernels::config::Cleanup::Terminate,
+    )
+    .await
+    .unwrap();
+    let marker = serde_json::json!({
+        "uuid": op_id,
+        "action": "terminate",
+        "finalize_exit": 0,
+        "ts": 1,
+        "generation": generation,
+        "post_action_rate": 0.0
+    });
+    connection
+        .exec(
+            &format!(
+                "printf %s '{}' > .remote-kernels/outcome.json",
+                marker.to_string().replace('\'', "")
+            ),
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    remote_kernels::state::clear_lifecycle_record(dir.path(), &machine_id).unwrap();
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .stop(&record.external_id)
+        .await
+        .unwrap();
+
+    let fresh = server_in(dir.path(), None);
+    let messages = fresh.reconcile().await.join("\n");
+    assert!(
+        messages.contains("authorized terminate; terminated"),
+        "{messages}"
+    );
+    assert!(remote_kernels::state::load_instance_record(dir.path(), &machine_id).is_none());
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn unsupervisable_budget_fails_start_and_waiver_is_toml_only() {
+    let run = |source, allow| {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str(&format!(
+            "default-runtime = \"fake\"\n[runpod]\nallow-unenforced-budget = {allow}"
+        ))
+        .unwrap();
+        let server = server_with(
+            dir.path(),
+            config,
+            Some(remote_kernels::config::EffectiveBudget { cap: 5.0, source }),
+        );
+        (dir, server)
+    };
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_NO_FLOCK", "1") };
+    let (env_dir, env_server) = run(remote_kernels::config::BudgetSource::Environment, true);
+    let env_result = env_server
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: Some("env-budget".to_string()),
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(true),
+        }))
+        .await;
+    assert!(env_result.is_err());
+    assert!(remote_kernels::state::list_instance_records(env_dir.path()).is_empty());
+
+    let (toml_dir, toml_server) = run(remote_kernels::config::BudgetSource::Toml, true);
+    let (machine_id, text) = start_machine(&toml_server, Some("toml-waiver")).await;
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_NO_FLOCK") };
+    assert!(text.contains("budget not enforceable"), "{text}");
+    let record = remote_kernels::state::load_instance_record(toml_dir.path(), &machine_id).unwrap();
+    remote_kernels::runtime::fake::FakeRuntime::new(toml_dir.path())
+        .terminate(&record.external_id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

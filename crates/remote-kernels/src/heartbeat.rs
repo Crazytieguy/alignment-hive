@@ -27,6 +27,7 @@ pub const NO_SSH_CAVEAT: &str =
 pub const NO_FLOCK_CAVEAT: &str =
     "flock unavailable: supervision and lease fencing unavailable; manual cleanup";
 pub const BAD_STATE_DIR_CAVEAT: &str = "persistent state directory unavailable: supervision and lease fencing unavailable; manual cleanup";
+pub const UNSUPPORTED_CAVEAT: &str = "runtime has no machine-side watchdog: supervision and lease fencing unavailable; manual cleanup";
 
 #[derive(Debug, Clone, Copy)]
 pub enum AcquireMode {
@@ -71,8 +72,7 @@ pub fn start(
     conn: Arc<AnyConnection>,
     instance: String,
     external_id: String,
-    cleanup: Cleanup,
-    watchdog_stale_secs: u64,
+    watchdog_policy: WatchdogPolicy,
     acquire_mode: AcquireMode,
     owner_uuid: String,
     state: Arc<Mutex<AppState>>,
@@ -86,8 +86,7 @@ pub fn start(
             &conn,
             &instance,
             &external_id,
-            cleanup,
-            watchdog_stale_secs,
+            watchdog_policy,
             acquire_mode,
             &owner_uuid,
             &state,
@@ -115,8 +114,7 @@ async fn establish_and_run(
     conn: &AnyConnection,
     instance: &str,
     external_id: &str,
-    cleanup: Cleanup,
-    watchdog_stale_secs: u64,
+    mut watchdog_policy: WatchdogPolicy,
     acquire_mode: AcquireMode,
     owner_uuid: &str,
     state: &Arc<Mutex<AppState>>,
@@ -125,6 +123,13 @@ async fn establish_and_run(
     operation_lock: std::fs::File,
     status: &watch::Sender<SupervisionStatus>,
 ) -> anyhow::Result<()> {
+    if !conn.supports_lease() {
+        mark_unsupervisable(state, instance, external_id, UNSUPPORTED_CAVEAT).await;
+        let _ = status.send(SupervisionStatus::Unsupervisable(
+            UNSUPPORTED_CAVEAT.to_string(),
+        ));
+        return Ok(());
+    }
     let lease = loop {
         match conn.wait_reachable().await {
             Ok(()) => {}
@@ -187,16 +192,15 @@ async fn establish_and_run(
         Some(feed) => feed.remaining_secs().await,
         None => None,
     };
-    if cleanup == Cleanup::Disabled {
+    watchdog_policy.initial_budget_secs = initial_budget_secs;
+    if watchdog_policy.cleanup == Cleanup::Disabled {
         tracing::info!(instance, "Cleanup disabled, skipping watchdog");
-    } else if let Err(e) = conn
-        .install_watchdog(WatchdogPolicy {
-            cleanup,
-            initial_budget_secs,
-            stale_secs: watchdog_stale_secs,
-        })
-        .await
-    {
+    } else if !conn.supports_watchdog() {
+        tracing::info!(
+            instance,
+            "Runtime supports lease fencing but not a detached watchdog"
+        );
+    } else if let Err(e) = conn.install_watchdog(watchdog_policy.clone()).await {
         tracing::warn!(instance, "Failed to install watchdog: {e}");
     }
     let _ = status.send(SupervisionStatus::Active);
@@ -242,8 +246,8 @@ async fn establish_and_run(
                 return Ok(());
             }
         }
-        // Transitional compatibility: the old watchdog still consumes this
-        // heartbeat until phase 4 replaces it with rk-watchdog.sh.
+        // Some runtimes retain a transport/tunnel heartbeat in addition to
+        // the fenced lease refresh.
         match conn.heartbeat().await {
             Ok(()) => tracing::debug!(instance, "Legacy heartbeat sent"),
             Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => {
@@ -257,7 +261,7 @@ async fn establish_and_run(
             Err(e) => tracing::warn!(instance, "Legacy heartbeat failed: {e}"),
         }
         state.lock().await.persist_spend();
-        if cleanup != Cleanup::Disabled
+        if watchdog_policy.cleanup != Cleanup::Disabled
             && let Some(feed) = &budget
             && let Some(secs) = feed.remaining_secs().await
             && let Err(e) = conn.set_budget_deadline(secs).await
@@ -290,8 +294,11 @@ async fn acquire_lease(
             ));
         }
         let age = crate::machine_scripts::age_secs(&current);
+        // An empty owner means the lease was cleanly released (complete-stop):
+        // nobody is driving the machine no matter how fresh the timestamp is.
         if current.state == "active"
             && current.generation > 0
+            && !current.owner_uuid.is_empty()
             && current.owner_uuid != owner_uuid
             && age < 180
             && !force
@@ -342,16 +349,29 @@ async fn mark_acquired(
     external_id: &str,
     generation: u64,
 ) {
-    if let Some(instance) = state
-        .lock()
-        .await
+    let mut state = state.lock().await;
+    if let Some(candidate) = state
         .instances
         .get_mut(instance)
         .filter(|candidate| candidate.external_id == external_id)
     {
-        instance.fenced = None;
-        instance.lease_generation = Some(generation);
-        instance.supervision_note = None;
+        candidate.fenced = None;
+        candidate.lease_generation = Some(generation);
+        candidate.supervision_note = None;
+        let prior = crate::state::load_lifecycle_record(&state.project_dir, instance);
+        let acquired = crate::state::LifecycleRecord {
+            storage_rate_per_hr: prior.storage_rate_per_hr,
+            storage_rate_note: prior.storage_rate_note,
+            ..crate::state::LifecycleRecord::default()
+        };
+        if let Err(error) =
+            crate::state::save_lifecycle_record(&state.project_dir, instance, &acquired)
+        {
+            tracing::warn!(
+                instance,
+                "Fresh lease acquired but stale lifecycle state could not be cleared: {error}"
+            );
+        }
     }
 }
 

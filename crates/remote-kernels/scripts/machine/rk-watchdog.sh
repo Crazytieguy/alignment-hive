@@ -149,7 +149,7 @@ run_finalize() {
         return 0
     fi
 
-    "$finalize_cmd" &
+    bash -lc "$finalize_cmd" &
     command_pid=$!
     (
         sleep "$limit"
@@ -322,7 +322,8 @@ finish_armed() {
 
     sync "$outcome_path" 2>/dev/null || sync
     pause_after_enter_for_test
-    exec "$action_cmd" "$decided_action"
+    # bash -lc consumes the next argument as $0; the validated action is $1.
+    exec bash -lc "$action_cmd" rk-action "$decided_action"
 }
 
 supervise() {

@@ -9,6 +9,7 @@
 //! a clean terminate starts from zero (budget is per session, monotonic).
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -80,6 +81,59 @@ pub struct InstanceRecord {
     /// Kernel/notebook bindings survive MCP server restarts.
     #[serde(default)]
     pub kernels: Vec<KernelRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FinalizePhase {
+    Armed,
+    Finalizing,
+    CompletedStop,
+    RetrievingOutcome,
+    RetrievalUnavailable,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LifecycleRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_rate_per_hr: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_rate_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_phase: Option<FinalizePhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Cleanup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_epoch: Option<u64>,
+    #[serde(default)]
+    pub outcome_unknown: bool,
+    /// Set only after an outcome marker authorizes terminate. An armed
+    /// disconnect is intentionally takeoverable and never sets this flag.
+    #[serde(default)]
+    pub wants_terminate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeMarker {
+    #[serde(alias = "op_id")]
+    pub uuid: String,
+    pub action: Cleanup,
+    pub finalize_exit: i32,
+    pub ts: u64,
+    pub generation: u64,
+    pub post_action_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingTransition {
+    pub uuid: String,
+    pub ts: u64,
+    pub action: Cleanup,
+    pub post_action_rate: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -515,6 +569,79 @@ pub fn load_instance_record(project_dir: &Path, name: &str) -> Option<InstanceRe
     let path = instance_dir(project_dir, name).join("state.json");
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+pub fn load_lifecycle_record(project_dir: &Path, name: &str) -> LifecycleRecord {
+    if validate_machine_id(name).is_err() {
+        return LifecycleRecord::default();
+    }
+    let path = instance_dir(project_dir, name).join("lifecycle.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_lifecycle_record(
+    project_dir: &Path,
+    name: &str,
+    lifecycle: &LifecycleRecord,
+) -> anyhow::Result<()> {
+    validate_machine_id(name).map_err(anyhow::Error::msg)?;
+    let dir = instance_dir(project_dir, name);
+    std::fs::create_dir_all(&dir)?;
+    ensure_gitignore(project_dir);
+    let temporary = dir.join(format!(".lifecycle.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(lifecycle)?)?;
+    std::fs::rename(temporary, dir.join("lifecycle.json"))?;
+    Ok(())
+}
+
+pub fn clear_lifecycle_record(project_dir: &Path, name: &str) -> anyhow::Result<()> {
+    validate_machine_id(name).map_err(anyhow::Error::msg)?;
+    let path = instance_dir(project_dir, name).join("lifecycle.json");
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn import_pending_transition(
+    project_dir: &Path,
+    machine_id: &str,
+    marker: &OutcomeMarker,
+) -> anyhow::Result<bool> {
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    let path = state_dir(project_dir)
+        .join("ledger")
+        .join(format!("{machine_id}.pending-transitions.jsonl"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    ensure_gitignore(project_dir);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing
+        .lines()
+        .filter_map(|line| serde_json::from_str::<PendingTransition>(line).ok())
+        .any(|entry| entry.uuid == marker.uuid)
+    {
+        return Ok(false);
+    }
+    let transition = PendingTransition {
+        uuid: marker.uuid.clone(),
+        ts: marker.ts,
+        action: marker.action,
+        post_action_rate: marker.post_action_rate,
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, &transition)?;
+    file.write_all(b"\n")?;
+    file.sync_data()?;
+    Ok(true)
 }
 
 fn load_spend(project_dir: &Path) -> f64 {

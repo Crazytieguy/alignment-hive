@@ -201,6 +201,7 @@ async fn k8s_full_lifecycle_via_kueue() {
     let result = server
         .terminate(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
+            skip_finalize: None,
         }))
         .await
         .unwrap();
@@ -265,6 +266,7 @@ async fn k8s_priority_label_and_capability_validation() {
     let result = server
         .terminate(Parameters(remote_kernels::server::InstanceParams {
             instance: Some("queued".to_string()),
+            skip_finalize: None,
         }))
         .await
         .unwrap();
@@ -461,6 +463,7 @@ workdir = "/home/jovyan/work"
     let result = server
         .terminate(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
+            skip_finalize: None,
         }))
         .await
         .unwrap();

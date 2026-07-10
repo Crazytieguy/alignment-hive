@@ -245,6 +245,8 @@ impl Runtime for FakeRuntime {
             external_id,
             gpu_name: "Fake GPU".to_string(),
             cost_per_hr: Some(self.cost_per_hr),
+            storage_rate_per_hr: 0.0,
+            storage_rate_note: Some("fake runtime exposes no storage price".to_string()),
             note: None,
             proxy_port_mapped: false,
         })
@@ -257,6 +259,8 @@ impl Runtime for FakeRuntime {
             external_id: external_id.to_string(),
             gpu_name: "Fake GPU".to_string(),
             cost_per_hr: Some(self.cost_per_hr),
+            storage_rate_per_hr: 0.0,
+            storage_rate_note: Some("fake runtime exposes no storage price".to_string()),
             note: None,
             proxy_port_mapped: false,
         })
@@ -284,12 +288,24 @@ impl Runtime for FakeRuntime {
     }
 
     async fn stop(&self, external_id: &str) -> anyhow::Result<()> {
+        if std::env::var_os("REMOTE_KERNELS_FAKE_STOP_ERROR_BEFORE_ACTION").is_some() {
+            anyhow::bail!("simulated ambiguous stop failure before provider action");
+        }
+        if let Some(delay_ms) = std::env::var("REMOTE_KERNELS_FAKE_STOP_PAUSE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
         let mut instances = self.instances.lock().await;
         let inst = instances
             .get_mut(external_id)
             .ok_or_else(|| anyhow::anyhow!("unknown fake instance"))?;
         if let Some(child) = inst.child.take() {
             kill_and_reap(child).await;
+        }
+        if std::env::var_os("REMOTE_KERNELS_FAKE_STOP_ERROR_AFTER_ACTION").is_some() {
+            anyhow::bail!("simulated ambiguous stop failure after provider action");
         }
         Ok(())
     }
@@ -388,6 +404,14 @@ impl Connection for FakeConnection {
 
     fn recorder_ws_url(&self) -> String {
         self.jupyter.ws_base.clone()
+    }
+
+    fn watchdog_port(&self) -> u16 {
+        self.jupyter
+            .http_base
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(8888)
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {

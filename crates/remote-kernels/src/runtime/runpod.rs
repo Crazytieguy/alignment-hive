@@ -96,6 +96,10 @@ impl RunPodRuntime {
             external_id: pod.id.clone(),
             gpu_name: pod.gpu_display_name().to_string(),
             cost_per_hr: pod.cost_per_hr,
+            storage_rate_per_hr: 0.0,
+            storage_rate_note: Some(
+                "RunPod pod responses expose no normalized storage-only price".to_string(),
+            ),
             note: None,
             // Missing data conservatively reads as "mapping exists" — every
             // pre-tunnel pod had it, and the record written at provision is
@@ -739,6 +743,15 @@ pub fn self_cleanup_command(cleanup: Cleanup) -> Option<String> {
     }
 }
 
+#[doc(hidden)]
+pub fn watchdog_action_command() -> String {
+    format!(
+        "case \"$1\" in stop) {stop} ;; terminate) {terminate} ;; *) exit 11 ;; esac",
+        stop = self_cleanup_command(Cleanup::Stop).expect("stop command"),
+        terminate = self_cleanup_command(Cleanup::Terminate).expect("terminate command"),
+    )
+}
+
 impl RunPodConnection {
     fn ssh_endpoint(&self) -> anyhow::Result<&crate::ssh_exec::SshEndpoint> {
         self.ssh.as_ref().ok_or_else(|| {
@@ -814,25 +827,19 @@ impl Connection for RunPodConnection {
         .await
     }
 
-    /// Install the on-pod watchdog: a detached loop that self-cleans when the
-    /// heartbeat file goes stale (`watchdog-stale-secs` — the MCP server died) or when the
-    /// budget deadline in `/tmp/budget_deadline` passes. The deadline is
-    /// refreshed every heartbeat tick via [`Self::set_budget_deadline`], so it
-    /// tracks the aggregate multi-machine burn rate rather than being a
-    /// one-shot timer computed at start.
+    /// Install the fenced drain/finalize watchdog in the persistent workdir.
     async fn install_watchdog(&self, policy: WatchdogPolicy) -> anyhow::Result<()> {
-        let Some(cmd) = self_cleanup_command(policy.cleanup) else {
+        if policy.cleanup == Cleanup::Disabled {
             tracing::info!("Cleanup disabled, skipping watchdog installation");
             return Ok(());
-        };
+        }
 
         if let Some(secs) = policy.initial_budget_secs {
             self.set_budget_deadline(secs).await?;
         }
 
-        let watchdog = crate::ssh_exec::watchdog_script(&cmd, policy.stale_secs);
-        self.exec(&watchdog, Duration::from_secs(10)).await?;
-        tracing::info!("Watchdog installed on pod");
+        crate::machine_scripts::install_watchdog(self, &policy, &watchdog_action_command()).await?;
+        tracing::info!("Fenced finalize watchdog installed on pod");
         Ok(())
     }
 
@@ -857,12 +864,7 @@ impl Connection for RunPodConnection {
     }
 
     async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
-        self.exec(
-            &format!("echo $(($(date +%s) + {secs_from_now})) > /tmp/budget_deadline"),
-            Duration::from_secs(10),
-        )
-        .await
-        .map(|_| ())
+        crate::machine_scripts::set_budget_deadline(self, secs_from_now).await
     }
 }
 

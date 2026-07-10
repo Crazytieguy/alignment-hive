@@ -71,21 +71,25 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // Budget: env var overrides config. Env var is typically set via .claude/settings.json
     // so Claude can't modify it.
-    let budget = std::env::var("REMOTE_KERNELS_BUDGET")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .or(config.budget_cap);
+    let budget = config.resolve_budget(std::env::var("REMOTE_KERNELS_BUDGET").ok().as_deref())?;
 
     // Cleanup modes are validated against each runtime's capabilities:
     // explicit per-runtime keys eagerly, plus the budget/"disabled"
     // incompatibility on metered runtimes.
-    if let Err(msg) = remote_kernels::runtime::validate_config(&config, budget.is_some()) {
+    if let Err(msg) = remote_kernels::runtime::validate_config_with_budget_source(
+        &config,
+        budget.map(|value| value.source),
+    ) {
         return Err(format!("Configuration error: {msg}").into());
     }
 
     let app_state = state::AppState::new(project_dir);
-    let server = server::RemoteKernelsServer::new(config, app_state, budget);
+    let server = server::RemoteKernelsServer::new_with_budget(config, app_state, budget);
     let shutdown_server = server.clone();
+
+    for message in server.reconcile().await {
+        tracing::info!("{message}");
+    }
 
     tracing::info!("Starting remote-kernels MCP server");
 
@@ -96,8 +100,8 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     running.waiting().await?;
 
-    // Graceful shutdown: apply each machine's cleanup policy.
-    tracing::info!("MCP server disconnected, cleaning up...");
+    // A transport disconnect only arms remote finalization and preserves records.
+    tracing::info!("MCP server disconnected, arming finalization...");
     shutdown_server.shutdown_cleanup().await;
 
     Ok(())

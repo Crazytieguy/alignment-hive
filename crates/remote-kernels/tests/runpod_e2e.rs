@@ -79,6 +79,7 @@ impl Drop for TerminateGuard {
                 match server
                     .terminate(Parameters(remote_kernels::server::InstanceParams {
                         instance: None,
+                        skip_finalize: None,
                     }))
                     .await
                 {
@@ -267,6 +268,7 @@ volume-gb = 0
     let result = server
         .stop(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
+            skip_finalize: None,
         }))
         .await
         .unwrap();
@@ -290,6 +292,7 @@ volume-gb = 0
     let result = server
         .terminate(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
+            skip_finalize: None,
         }))
         .await
         .unwrap();
@@ -298,7 +301,7 @@ volume-gb = 0
 
     // Nothing left.
     let result = server
-        .status(Parameters(remote_kernels::server::InstanceParams {
+        .status(Parameters(remote_kernels::server::StatusParams {
             instance: None,
         }))
         .await
@@ -504,6 +507,7 @@ print(r.stderr[-1500:])
     let result = server
         .terminate(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
+            skip_finalize: None,
         }))
         .await
         .unwrap();

@@ -36,6 +36,7 @@ fn python_available() -> bool {
 struct Harness {
     temp: TempDir,
     path: OsString,
+    bash_env: PathBuf,
 }
 
 impl Harness {
@@ -53,7 +54,14 @@ impl Harness {
         let mut path = OsString::from(bin.as_os_str());
         path.push(":");
         path.push(std::env::var_os("PATH").unwrap_or_default());
-        Some(Self { temp, path })
+        let bash_env = temp.path().join("bash-env");
+        fs::write(&bash_env, format!("export PATH={}:$PATH\n", bin.display()))
+            .expect("write bash environment");
+        Some(Self {
+            temp,
+            path,
+            bash_env,
+        })
     }
 
     fn state_dir(&self) -> PathBuf {
@@ -64,6 +72,12 @@ impl Harness {
         let mut command = Command::new(program.as_ref());
         command.env("PATH", &self.path);
         command
+    }
+
+    fn install_command(&self, name: &str, body: &str) {
+        let path = self.temp.path().join("bin").join(name);
+        fs::write(&path, body).expect("write command stub");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod command stub");
     }
 
     fn lease(&self, args: &[&str]) -> Output {
@@ -129,7 +143,13 @@ fn wait_for_log_lines(path: &Path, count: usize, timeout: Duration) -> String {
         }
         assert!(
             start.elapsed() < timeout,
-            "timed out waiting for action log"
+            "timed out waiting for action log; watchdog log: {}",
+            fs::read_to_string(
+                path.parent()
+                    .expect("action log parent")
+                    .join("state/watchdog.log")
+            )
+            .unwrap_or_else(|error| format!("<unavailable: {error}>"))
         );
         thread::sleep(Duration::from_millis(50));
     }
@@ -233,6 +253,7 @@ struct WatchdogConfig<'a> {
 struct InstallOptions<'a> {
     storage_rate: Option<&'a str>,
     enter_pause: Option<(u64, &'a Path)>,
+    action_command: Option<&'a str>,
 }
 
 fn install_watchdog(
@@ -272,10 +293,16 @@ fn install_watchdog_with_options(
         .arg("test-token")
         .arg(config.default_action)
         .arg(config.finalize_cmd)
-        .arg(support_script("provider-action.sh"))
+        .arg(options.action_command.map_or_else(
+            || format!("{} \"$1\"", support_script("provider-action.sh").display()),
+            ToString::to_string,
+        ))
         .env("RK_WATCHDOG_POLL_SECS", "1")
         .env("RK_ACTION_LOG", action_log)
         .env("RK_STATE_DIR", &state_dir)
+        .env("BASH_ENV", &harness.bash_env)
+        .env("RUNPOD_POD_ID", "test-pod")
+        .env("RUNPOD_API_KEY", "test-key")
         .env("RK_FAKE_JUPYTER_STATE", &jupyter.state_file);
     if let Some(storage_rate) = options.storage_rate {
         command.arg(storage_rate);
@@ -490,6 +517,72 @@ fn watchdog_waits_for_busy_kernel_to_become_idle() {
     jupyter.set_state("idle");
     let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
     assert!(log.contains("action=terminate"));
+}
+
+#[test]
+fn watchdog_executes_real_runpod_action_command_with_action_in_dollar_one() {
+    let Some(harness) =
+        Harness::new("watchdog_executes_real_runpod_action_command_with_action_in_dollar_one")
+    else {
+        return;
+    };
+    let jupyter = FakeJupyter::start(&harness, "idle", "real_runpod_action_command");
+    let action_log = harness.temp.path().join("runpod-actions.log");
+    harness.install_command(
+        "runpodctl",
+        "#!/bin/sh\n[ \"$1\" = config ] && exit 0\nprintf '%s\\n' \"$*\" >> \"$RK_ACTION_LOG\"\n",
+    );
+    harness.lease_ok(&["acquire", "owner-a"]);
+    stale_heartbeat(&harness, 1);
+    let action_command = remote_kernels::runtime::runpod::watchdog_action_command();
+    let options = InstallOptions {
+        action_command: Some(&action_command),
+        ..InstallOptions::default()
+    };
+    let config = WatchdogConfig {
+        stale_secs: 1,
+        grace_secs: 2,
+        finalize_wait_secs: 0,
+        finalize_timeout_secs: 3,
+        default_action: "terminate",
+        finalize_cmd: Path::new("-"),
+    };
+    let _watchdog =
+        install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
+    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
+    assert!(log.contains("remove pod test-pod"), "{log}");
+}
+
+#[test]
+fn watchdog_executes_real_vast_compound_halt_command() {
+    let Some(harness) = Harness::new("watchdog_executes_real_vast_compound_halt_command") else {
+        return;
+    };
+    let jupyter = FakeJupyter::start(&harness, "idle", "real_vast_halt_command");
+    let action_log = harness.temp.path().join("vast-actions.log");
+    harness.install_command(
+        "shutdown",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RK_ACTION_LOG\"\n",
+    );
+    harness.lease_ok(&["acquire", "owner-a"]);
+    stale_heartbeat(&harness, 1);
+    let action_command = remote_kernels::runtime::vast::VastRuntime::halt_command("root");
+    let options = InstallOptions {
+        action_command: Some(&action_command),
+        ..InstallOptions::default()
+    };
+    let config = WatchdogConfig {
+        stale_secs: 1,
+        grace_secs: 2,
+        finalize_wait_secs: 0,
+        finalize_timeout_secs: 3,
+        default_action: "stop",
+        finalize_cmd: Path::new("-"),
+    };
+    let _watchdog =
+        install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
+    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
+    assert!(log.contains("-h now"), "{log}");
 }
 
 #[test]
@@ -793,6 +886,7 @@ fn budget_keep_intent_floors_to_stop_and_preserves_prior_outcome() {
     let options = InstallOptions {
         storage_rate: Some("0.125"),
         enter_pause: None,
+        action_command: None,
     };
     let _watchdog =
         install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
@@ -956,6 +1050,7 @@ fn acquire_is_refused_between_enter_finalizing_and_provider_exec() {
     let options = InstallOptions {
         storage_rate: None,
         enter_pause: Some((3, &pause_marker)),
+        action_command: None,
     };
     let _watchdog =
         install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);

@@ -83,6 +83,18 @@ pub struct Config {
     pub vast: Option<VastConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetSource {
+    Toml,
+    Environment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveBudget {
+    pub cap: f64,
+    pub source: BudgetSource,
+}
+
 /// vast.ai-specific configuration. Known fields are typed; `[vast.query]`
 /// passes through to the offer search, and unknown `[vast]` keys pass through
 /// to the instance-creation API body.
@@ -95,6 +107,16 @@ pub struct VastConfig {
     /// hang forever) and storage bills until terminated.
     /// Default: the deprecated global `cleanup` key, else "terminate".
     pub cleanup: Option<Cleanup>,
+
+    pub pre_stop_command: Option<String>,
+    pub pre_terminate_command: Option<String>,
+    pub finalize_wait_secs: Option<u64>,
+    #[serde_inline_default(600)]
+    pub finalize_command_timeout_secs: u64,
+    #[serde_inline_default(900)]
+    pub budget_grace_secs: u64,
+    #[serde(default)]
+    pub allow_unenforced_budget: bool,
 
     /// GPU names to search for (vast naming, e.g. "RTX 3090").
     #[serde_inline_default(vec!["RTX 3090".to_string()])]
@@ -215,6 +237,16 @@ pub struct KubernetesConfig {
     /// Default: the deprecated global `cleanup` key, else "terminate".
     pub cleanup: Option<Cleanup>,
 
+    pub pre_stop_command: Option<String>,
+    pub pre_terminate_command: Option<String>,
+    pub finalize_wait_secs: Option<u64>,
+    #[serde_inline_default(600)]
+    pub finalize_command_timeout_secs: u64,
+    #[serde_inline_default(900)]
+    pub budget_grace_secs: u64,
+    #[serde(default)]
+    pub allow_unenforced_budget: bool,
+
     /// kubeconfig context to use (default: the current context).
     pub context: Option<String>,
 
@@ -272,6 +304,16 @@ pub struct RunpodConfig {
     /// (reliable on `RunPod`; storage costs apply), "terminate", or "disabled".
     /// Default: the deprecated global `cleanup` key, else "terminate".
     pub cleanup: Option<Cleanup>,
+
+    pub pre_stop_command: Option<String>,
+    pub pre_terminate_command: Option<String>,
+    pub finalize_wait_secs: Option<u64>,
+    #[serde_inline_default(600)]
+    pub finalize_command_timeout_secs: u64,
+    #[serde_inline_default(900)]
+    pub budget_grace_secs: u64,
+    #[serde(default)]
+    pub allow_unenforced_budget: bool,
 
     /// GPU types to try, in order of preference.
     /// Default: the deprecated top-level `gpu-type-ids` key, else
@@ -459,6 +501,122 @@ impl Config {
             .unwrap_or_default()
     }
 
+    pub fn resolve_budget(
+        &self,
+        environment: Option<&str>,
+    ) -> anyhow::Result<Option<EffectiveBudget>> {
+        if let Some(raw) = environment {
+            let cap = raw.parse::<f64>().map_err(|_| {
+                anyhow::anyhow!("REMOTE_KERNELS_BUDGET must be a number (got {raw:?})")
+            })?;
+            return Ok(Some(EffectiveBudget {
+                cap,
+                source: BudgetSource::Environment,
+            }));
+        }
+        Ok(self.budget_cap.map(|cap| EffectiveBudget {
+            cap,
+            source: BudgetSource::Toml,
+        }))
+    }
+
+    pub fn pre_command_for(&self, runtime: &str, cleanup: Cleanup) -> Option<&str> {
+        let pair = match runtime {
+            "runpod" | "fake" => (
+                self.runpod.pre_stop_command.as_deref(),
+                self.runpod.pre_terminate_command.as_deref(),
+            ),
+            "vast" => self.vast.as_ref().map_or((None, None), |config| {
+                (
+                    config.pre_stop_command.as_deref(),
+                    config.pre_terminate_command.as_deref(),
+                )
+            }),
+            "kubernetes" => self.kubernetes.as_ref().map_or((None, None), |config| {
+                (
+                    config.pre_stop_command.as_deref(),
+                    config.pre_terminate_command.as_deref(),
+                )
+            }),
+            _ => (None, None),
+        };
+        match cleanup {
+            Cleanup::Stop => pair.0,
+            Cleanup::Terminate => pair.1,
+            Cleanup::Disabled => None,
+        }
+    }
+
+    pub fn finalize_wait_secs_for(&self, runtime: &str) -> Option<u64> {
+        match runtime {
+            "runpod" | "fake" => self.runpod.finalize_wait_secs,
+            "vast" => self
+                .vast
+                .as_ref()
+                .and_then(|config| config.finalize_wait_secs),
+            "kubernetes" => self
+                .kubernetes
+                .as_ref()
+                .and_then(|config| config.finalize_wait_secs),
+            _ => None,
+        }
+    }
+
+    pub fn finalize_command_timeout_secs_for(&self, runtime: &str) -> u64 {
+        match runtime {
+            "runpod" | "fake" => self.runpod.finalize_command_timeout_secs,
+            "vast" => self
+                .vast
+                .as_ref()
+                .map_or(600, |config| config.finalize_command_timeout_secs),
+            "kubernetes" => self
+                .kubernetes
+                .as_ref()
+                .map_or(600, |config| config.finalize_command_timeout_secs),
+            _ => 600,
+        }
+    }
+
+    pub fn budget_grace_secs_for(&self, runtime: &str) -> u64 {
+        match runtime {
+            "runpod" | "fake" => self.runpod.budget_grace_secs,
+            "vast" => self
+                .vast
+                .as_ref()
+                .map_or(900, |config| config.budget_grace_secs),
+            "kubernetes" => self
+                .kubernetes
+                .as_ref()
+                .map_or(900, |config| config.budget_grace_secs),
+            _ => 900,
+        }
+    }
+
+    pub fn allow_unenforced_budget_for(&self, runtime: &str) -> bool {
+        match runtime {
+            "runpod" | "fake" => self.runpod.allow_unenforced_budget,
+            "vast" => self
+                .vast
+                .as_ref()
+                .is_some_and(|config| config.allow_unenforced_budget),
+            "kubernetes" => self
+                .kubernetes
+                .as_ref()
+                .is_some_and(|config| config.allow_unenforced_budget),
+            _ => false,
+        }
+    }
+
+    pub fn runpod_ssh_expected(&self) -> bool {
+        self.runpod.cloud_type.eq_ignore_ascii_case("SECURE")
+            || self
+                .runpod
+                .extra
+                .get("support-public-ip")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+    }
+
     /// Generate a commented TOML config template with all fields and their
     /// defaults. This is the single source of truth — the setup skill reads
     /// this output instead of duplicating field knowledge.
@@ -540,10 +698,10 @@ impl Config {
 # onstart and is disarmed only after it finishes).
 # Default: {default_orphan_halt_mins}
 # orphan-halt-mins = {default_orphan_halt_mins}
-# Once a session IS supervising a machine, the on-machine watchdog cleans
-# the machine up when the server's heartbeat goes stale for this many
-# seconds (i.e. how long after your session dies does the machine clean
-# itself up). Lower saves money; higher survives longer network blips.
+# Once a session IS supervising a machine, a stale heartbeat arms drain and
+# finalization; it does not destroy the machine directly. Process replacement
+# after roughly an hour of background inactivity can be a normal event. A new
+# session can attach during the drain and take over safely.
 # Default: {default_watchdog_stale_secs}
 # watchdog-stale-secs = {default_watchdog_stale_secs}
 
@@ -590,6 +748,23 @@ impl Config {
 #   "disabled"  — no automatic cleanup (manual lifecycle)
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
+
+# Finalize lifecycle. On disconnect the machine waits for kernels to go idle,
+# runs the command matching the decided action, writes an outcome marker, then
+# tries its provider action. Self-terminate uses the pod-scoped credential and
+# falls back to self-stop; reconciliation completes a pending terminate.
+# pre-stop-command = "rclone sync results remote:results"
+# pre-terminate-command = "rclone sync results remote:results"
+# Unset waits without a deadline for kernels to become idle.
+# finalize-wait-secs = 3600
+# Default: {default_finalize_timeout}
+# finalize-command-timeout-secs = {default_finalize_timeout}
+# Budget drain plus finalize command share this total grace window.
+# Default: {default_budget_grace}
+# budget-grace-secs = {default_budget_grace}
+# Only a TOML budget-cap may waive enforcement when SSH is unavailable.
+# REMOTE_KERNELS_BUDGET is never waivable from project config.
+# allow-unenforced-budget = false
 
 # GPU types to try, in order of preference.
 # Default: ["{default_gpu}"]
@@ -670,9 +845,12 @@ impl Config {
             default_cloud_type = d.runpod.cloud_type,
             default_image_start_cmd = DEFAULT_RUNPOD_IMAGE_START_CMD,
             default_provision_timeout_mins = d.runpod.provision_timeout_mins,
+            default_finalize_timeout = d.runpod.finalize_command_timeout_secs,
+            default_budget_grace = d.runpod.budget_grace_secs,
         )
     }
 
+    #[allow(clippy::too_many_lines)] // exhaustive commented runtime template
     fn template_vast() -> String {
         let vast = VastConfig::default();
         format!(
@@ -688,6 +866,19 @@ impl Config {
 # and storage bills until terminated — prefer "terminate".
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
+# Finalize lifecycle. A stale heartbeat drains kernels and runs the matching
+# command before guest halt. Halt preserves data but storage keeps billing;
+# reconciliation later terminates when the outcome marker authorizes it.
+# pre-stop-command = "rclone sync results remote:results"
+# pre-terminate-command = "rclone sync results remote:results"
+# Unset waits without a deadline for kernels to become idle.
+# finalize-wait-secs = 3600
+# Default: {default_finalize_timeout}
+# finalize-command-timeout-secs = {default_finalize_timeout}
+# Default: {default_budget_grace}
+# budget-grace-secs = {default_budget_grace}
+# Only a TOML budget-cap may waive enforcement when supervision is unavailable.
+# allow-unenforced-budget = false
 # GPU names to search for (vast naming).
 # Default: ["{default_vast_gpu}"]
 # gpu-name = ["{default_vast_gpu}"]
@@ -766,6 +957,8 @@ impl Config {
             default_vast_disk_gb = vast.disk_gb,
             default_vast_search_limit = vast.search_limit,
             default_vast_attempt_limit = vast.attempt_limit,
+            default_finalize_timeout = vast.finalize_command_timeout_secs,
+            default_budget_grace = vast.budget_grace_secs,
         )
     }
 
@@ -786,6 +979,14 @@ impl Config {
 # have no stop concept; "stop" is rejected).
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
+# Kubernetes has no machine-side watchdog in this release. Disconnect always
+# preserves the pod; max-lifetime-secs remains the only automatic lifetime bound.
+# Finalize commands apply only to explicit server-driven operations.
+# pre-terminate-command = "rclone sync results remote:results"
+# finalize-wait-secs = 3600
+# finalize-command-timeout-secs = 600
+# budget-grace-secs = 900
+# allow-unenforced-budget = false
 # Path to the pod template YAML, relative to the project root. Required.
 # pod-template = "k8s/dev-pod.yaml"
 # kubeconfig context (default: current context).
@@ -876,6 +1077,110 @@ mod tests {
             std::time::Duration::from_secs(20 * 60)
         );
         assert_eq!(vast.onstart_timeout_mins, 15);
+        for runtime in ["runpod", "vast", "kubernetes"] {
+            assert!(config.pre_command_for(runtime, Cleanup::Stop).is_none());
+            assert!(
+                config
+                    .pre_command_for(runtime, Cleanup::Terminate)
+                    .is_none()
+            );
+            assert_eq!(config.finalize_wait_secs_for(runtime), None);
+            assert_eq!(config.finalize_command_timeout_secs_for(runtime), 600);
+            assert_eq!(config.budget_grace_secs_for(runtime), 900);
+            assert!(!config.allow_unenforced_budget_for(runtime));
+        }
+    }
+
+    #[test]
+    fn phase4_lifecycle_keys_parse_for_every_runtime() {
+        let config: Config = toml::from_str(
+            r#"
+            [runpod]
+            pre-stop-command = "rp-stop"
+            pre-terminate-command = "rp-terminate"
+            finalize-wait-secs = 101
+            finalize-command-timeout-secs = 102
+            budget-grace-secs = 103
+            allow-unenforced-budget = true
+
+            [vast]
+            pre-stop-command = "vast-stop"
+            pre-terminate-command = "vast-terminate"
+            finalize-wait-secs = 201
+            finalize-command-timeout-secs = 202
+            budget-grace-secs = 203
+            allow-unenforced-budget = true
+
+            [kubernetes]
+            pod-template = "pod.yaml"
+            pre-stop-command = "k8s-stop"
+            pre-terminate-command = "k8s-terminate"
+            finalize-wait-secs = 301
+            finalize-command-timeout-secs = 302
+            budget-grace-secs = 303
+            allow-unenforced-budget = true
+            "#,
+        )
+        .unwrap();
+        for (runtime, stop, terminate, wait, timeout, grace) in [
+            ("runpod", "rp-stop", "rp-terminate", 101, 102, 103),
+            ("vast", "vast-stop", "vast-terminate", 201, 202, 203),
+            ("kubernetes", "k8s-stop", "k8s-terminate", 301, 302, 303),
+        ] {
+            assert_eq!(config.pre_command_for(runtime, Cleanup::Stop), Some(stop));
+            assert_eq!(
+                config.pre_command_for(runtime, Cleanup::Terminate),
+                Some(terminate)
+            );
+            assert_eq!(config.finalize_wait_secs_for(runtime), Some(wait));
+            assert_eq!(config.finalize_command_timeout_secs_for(runtime), timeout);
+            assert_eq!(config.budget_grace_secs_for(runtime), grace);
+            assert!(config.allow_unenforced_budget_for(runtime));
+        }
+    }
+
+    #[test]
+    fn budget_source_is_fail_closed_and_environment_wins() {
+        let config: Config = toml::from_str("budget-cap = 12.5").unwrap();
+        assert_eq!(
+            config.resolve_budget(None).unwrap(),
+            Some(EffectiveBudget {
+                cap: 12.5,
+                source: BudgetSource::Toml,
+            })
+        );
+        assert_eq!(
+            config.resolve_budget(Some("7.5")).unwrap(),
+            Some(EffectiveBudget {
+                cap: 7.5,
+                source: BudgetSource::Environment,
+            })
+        );
+        let error = config.resolve_budget(Some("not-money")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("REMOTE_KERNELS_BUDGET must be a number"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn template_golden_contains_phase4_lifecycle_contract() {
+        let template = Config::template();
+        for line in [
+            "# pre-stop-command = \"rclone sync results remote:results\"",
+            "# pre-terminate-command = \"rclone sync results remote:results\"",
+            "# finalize-wait-secs = 3600",
+            "# finalize-command-timeout-secs = 600",
+            "# budget-grace-secs = 900",
+            "# allow-unenforced-budget = false",
+        ] {
+            assert!(template.contains(line), "missing template line {line:?}");
+        }
+        assert!(template.contains("Process replacement"));
+        assert!(template.contains("after roughly an hour of background inactivity"));
+        assert!(template.contains("storage keeps billing"));
     }
 
     #[test]

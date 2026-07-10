@@ -334,38 +334,6 @@ pub fn orphan_guard_line(
     )
 }
 
-/// The on-machine watchdog script shared by SSH runtimes: a detached loop
-/// that runs `cleanup_cmd` when the heartbeat file goes stale for
-/// `stale_secs` (config `watchdog-stale-secs` — the MCP server died) or when
-/// the deadline in `/tmp/budget_deadline` passes (refreshed every heartbeat
-/// tick at the aggregate multi-machine burn rate).
-///
-/// Wrapped in single quotes for `bash -c`: `$` expansions happen on the
-/// machine. `{{...}}` is Rust format escaping.
-pub fn watchdog_script(cleanup_cmd: &str, stale_secs: u64) -> String {
-    format!(
-        concat!(
-            "nohup bash -c '",
-            "touch /tmp/heartbeat; ",
-            "while true; do ",
-            "sleep 30; ",
-            "now=$(date +%s); ",
-            "age=$((now - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))); ",
-            r#"if [ "$age" -gt {stale} ]; then "#,
-            r#"echo "Heartbeat stale (${{age}}s), cleaning up machine..." >> /tmp/watchdog.log; "#,
-            "{cmd}; exit 0; fi; ",
-            "if [ -f /tmp/budget_deadline ]; then ",
-            "deadline=$(cat /tmp/budget_deadline 2>/dev/null || echo 0); ",
-            r#"if [ "$now" -gt "$deadline" ]; then "#,
-            r#"echo "Budget deadline passed, cleaning up machine..." >> /tmp/watchdog.log; "#,
-            "{cmd}; exit 0; fi; fi; ",
-            "done' </dev/null >/dev/null 2>&1 &",
-        ),
-        cmd = cleanup_cmd,
-        stale = stale_secs
-    )
-}
-
 /// Idempotent Jupyter launch script for SSH runtimes. Expects
 /// `$REMOTE_KERNELS_JUPYTER_TOKEN` in the environment of the invocation.
 /// `workdir` and `jupyter_command` must be validated shell-safe (no single
@@ -453,11 +421,5 @@ mod tests {
     fn orphan_guard_line_uses_configured_window() {
         assert!(super::orphan_guard_line("halt", None, 45).contains("sleep 2700"));
         assert!(super::orphan_guard_line("halt", None, 10).contains("sleep 600"));
-    }
-
-    #[test]
-    fn watchdog_script_uses_configured_staleness() {
-        assert!(super::watchdog_script("halt", 300).contains(r#"if [ "$age" -gt 300 ]"#));
-        assert!(super::watchdog_script("halt", 120).contains(r#"if [ "$age" -gt 120 ]"#));
     }
 }

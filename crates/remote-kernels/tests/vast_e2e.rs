@@ -75,6 +75,7 @@ impl TerminateGuard {
         let result = server
             .terminate(Parameters(remote_kernels::server::InstanceParams {
                 instance: instance.map(String::from),
+                skip_finalize: None,
             }))
             .await
             .expect("terminate protocol error");
@@ -91,7 +92,7 @@ async fn wait_until_running(server: &RemoteKernelsServer, deadline_secs: u64) ->
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
         let result = server
-            .status(Parameters(remote_kernels::server::InstanceParams {
+            .status(Parameters(remote_kernels::server::StatusParams {
                 instance: None,
             }))
             .await
@@ -128,6 +129,7 @@ impl Drop for TerminateGuard {
                 match server
                     .terminate(Parameters(remote_kernels::server::InstanceParams {
                         instance: None,
+                        skip_finalize: None,
                     }))
                     .await
                 {

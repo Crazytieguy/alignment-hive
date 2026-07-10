@@ -38,6 +38,14 @@ pub struct LeaseState {
     pub ts: u64,
     /// Machine epoch paired with `ts` by the lease script under its lock.
     pub now: u64,
+    #[serde(default)]
+    pub arm_reason: String,
+    #[serde(default)]
+    pub arm_deadline: u64,
+    #[serde(default)]
+    pub op_id: String,
+    #[serde(default)]
+    pub action: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +94,120 @@ pub async fn refresh(
     invoke(conn, &["refresh", &generation.to_string(), owner_uuid])
         .await
         .map(|_| ())
+}
+
+pub async fn arm_disconnect(
+    conn: &AnyConnection,
+    generation: u64,
+    deadline: Option<u64>,
+) -> Result<(), LeaseError> {
+    let generation = generation.to_string();
+    let mut args = vec!["arm", generation.as_str(), "disconnect"];
+    let deadline = deadline.map(|value| value.to_string());
+    if let Some(deadline) = deadline.as_deref() {
+        args.push(deadline);
+    }
+    invoke(conn, &args).await.map(|_| ())
+}
+
+pub async fn enter_finalizing(
+    conn: &AnyConnection,
+    generation: u64,
+    op_id: &str,
+    action: crate::config::Cleanup,
+) -> Result<(), LeaseError> {
+    let generation = generation.to_string();
+    let action = cleanup_name(action);
+    invoke(conn, &["enter-finalizing", &generation, op_id, action])
+        .await
+        .map(|_| ())
+}
+
+pub async fn revert_to_armed(conn: &AnyConnection, op_id: &str) -> Result<(), LeaseError> {
+    invoke(conn, &["revert-to-armed", op_id]).await.map(|_| ())
+}
+
+pub async fn complete_stop(conn: &AnyConnection, op_id: &str) -> Result<(), LeaseError> {
+    invoke(conn, &["complete-stop", op_id]).await.map(|_| ())
+}
+
+pub async fn read_outcome(conn: &AnyConnection) -> Result<crate::state::OutcomeMarker, LeaseError> {
+    let path = format!("{}/outcome.json", state_dir(conn.workdir()));
+    let command = format!("cat {}", shell_quote(&path));
+    let output = conn
+        .exec(&command, Duration::from_secs(10))
+        .await
+        .map_err(LeaseError::Transport)?;
+    serde_json::from_str(output.trim()).map_err(|error| LeaseError::Invalid(error.to_string()))
+}
+
+pub async fn install_watchdog<C: Connection + ?Sized>(
+    conn: &C,
+    policy: &crate::runtime::WatchdogPolicy,
+    action_command: &str,
+) -> anyhow::Result<()> {
+    let dir = state_dir(conn.workdir());
+    let lease_path = format!("{dir}/rk-lease.sh");
+    let watchdog_path = format!("{dir}/rk-watchdog.sh");
+    let finalize_wait = policy.finalize_wait_secs.unwrap_or(0).to_string();
+    let storage_rate = policy
+        .storage_rate_per_hr
+        .map_or_else(|| "null".to_string(), |rate| rate.to_string());
+    let arguments = [
+        shell_quote(&dir),
+        "install".to_string(),
+        shell_quote(&lease_path),
+        policy.stale_secs.to_string(),
+        policy.budget_grace_secs.to_string(),
+        finalize_wait,
+        policy.finalize_timeout_secs.to_string(),
+        conn.watchdog_port().to_string(),
+        shell_quote(&conn.jupyter().token),
+        cleanup_name(policy.cleanup).to_string(),
+        shell_quote(policy.finalize_command.as_deref().unwrap_or("-")),
+        shell_quote(action_command),
+        storage_rate,
+    ]
+    .join(" ");
+    let command = format!(
+        "umask 077; mkdir -p {dir}; printf %s {lease} > {lease_path}; chmod 700 {lease_path}; printf %s {watchdog} > {watchdog_path}; chmod 700 {watchdog_path}; bash {watchdog_path} {arguments}",
+        dir = shell_quote(&dir),
+        lease = shell_quote(LEASE),
+        lease_path = shell_quote(&lease_path),
+        watchdog = shell_quote(WATCHDOG),
+        watchdog_path = shell_quote(&watchdog_path),
+    );
+    conn.exec(&command, Duration::from_secs(30)).await?;
+    Ok(())
+}
+
+pub async fn set_budget_deadline<C: Connection + ?Sized>(
+    conn: &C,
+    secs_from_now: u64,
+) -> anyhow::Result<()> {
+    let dir = state_dir(conn.workdir());
+    let destination = format!("{dir}/budget_deadline");
+    let temporary = format!("{dir}/.budget_deadline.$$.tmp");
+    let command = format!(
+        "mkdir -p {dir}; value=$(($(date +%s) + {secs_from_now})); printf '%s\\n' \"$value\" > {temporary} && mv -f {temporary} {destination}",
+        dir = shell_quote(&dir),
+        temporary = shell_quote(&temporary),
+        destination = shell_quote(&destination),
+    );
+    conn.exec(&command, Duration::from_secs(10)).await?;
+    Ok(())
+}
+
+fn cleanup_name(cleanup: crate::config::Cleanup) -> &'static str {
+    match cleanup {
+        crate::config::Cleanup::Stop => "stop",
+        crate::config::Cleanup::Terminate => "terminate",
+        crate::config::Cleanup::Disabled => "disabled",
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseError> {
@@ -144,6 +266,10 @@ mod tests {
             state: "active".to_string(),
             ts: 10_000_000,
             now: 10_000_075,
+            arm_reason: String::new(),
+            arm_deadline: 0,
+            op_id: String::new(),
+            action: String::new(),
         };
         assert_eq!(age_secs(&lease), 75);
     }
@@ -156,6 +282,10 @@ mod tests {
             state: "active".to_string(),
             ts: 200,
             now: 100,
+            arm_reason: String::new(),
+            arm_deadline: 0,
+            op_id: String::new(),
+            action: String::new(),
         };
         assert_eq!(age_secs(&lease), 0);
     }

@@ -22,6 +22,12 @@ const RESTART_GUIDANCE: &str =
     "The server restarted (the session may have been backgrounded or resumed).";
 
 const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
+const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
+const SUPERVISION_DISCOVERY_TIMEOUT_SECS: u64 = 5 * 60;
+
+#[derive(Debug, thiserror::Error)]
+#[error("configured budget cannot be enforced: {0}")]
+struct BudgetUnenforceable(String);
 
 #[derive(Debug, Deserialize)]
 struct RecordedOutputMessage {
@@ -47,6 +53,7 @@ pub struct RemoteKernelsServer {
     runtimes: Arc<Mutex<HashMap<String, Arc<AnyRuntime>>>>,
     /// Effective budget cap (env var overrides config).
     budget: Option<f64>,
+    budget_source: Option<crate::config::BudgetSource>,
     /// Failure messages from background (wait=false) starts, drained by `status()`.
     start_failures: Arc<Mutex<Vec<String>>>,
     /// One lease owner identity per server process. Attach rotates the remote
@@ -165,6 +172,14 @@ pub struct AttachParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InstanceParams {
     /// Which machine to operate on. Optional when exactly one is active.
+    pub instance: Option<String>,
+    /// Skip the configured pre-stop/pre-terminate command. Lease fencing still applies.
+    pub skip_finalize: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StatusParams {
+    /// Which machine to report. Omit to report every durable record.
     pub instance: Option<String>,
 }
 
@@ -305,17 +320,77 @@ fn attach_refusal_message(mode: ConnectMode, message: &str) -> String {
     }
 }
 
+fn provider_rejection_is_authoritative(error: &anyhow::Error) -> bool {
+    if let Some(error) = error.downcast_ref::<crate::vast::client::ApiStatusError>() {
+        return (400..500).contains(&error.status);
+    }
+    let text = error.to_string();
+    let Some(after) = text.split("API error (").nth(1) else {
+        return false;
+    };
+    after
+        .get(..3)
+        .and_then(|digits| digits.parse::<u16>().ok())
+        .is_some_and(|status| (400..500).contains(&status))
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn connection_context_for_record(
+    project_dir: &std::path::Path,
+    machine_id: &str,
+    record: &InstanceRecord,
+) -> anyhow::Result<ConnectionContext> {
+    let jupyter_token = record
+        .jupyter_token
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing Jupyter token"))?;
+    let ssh_key_path = record
+        .ssh_key_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.exists())
+        .ok_or_else(|| anyhow::anyhow!("missing SSH key"))?;
+    Ok(ConnectionContext {
+        ssh_key_path,
+        known_hosts_path: crate::state::state_dir(project_dir)
+            .join("instances")
+            .join(machine_id)
+            .join("known_hosts"),
+        jupyter_token,
+        proxy_port_mapped: record.proxy_port_mapped,
+    })
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
 impl RemoteKernelsServer {
     pub fn new(config: Config, state: AppState, budget: Option<f64>) -> Self {
+        let budget = budget.map(|cap| crate::config::EffectiveBudget {
+            cap,
+            source: crate::config::BudgetSource::Toml,
+        });
+        Self::new_with_budget(config, state, budget)
+    }
+
+    pub fn new_with_budget(
+        config: Config,
+        state: AppState,
+        budget: Option<crate::config::EffectiveBudget>,
+    ) -> Self {
         let instructions = crate::descriptions::server_instructions(&state.project_dir);
         Self {
             config: Arc::new(config),
             state: Arc::new(Mutex::new(state)),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
-            budget,
+            budget: budget.map(|value| value.cap),
+            budget_source: budget.map(|value| value.source),
             start_failures: Arc::new(Mutex::new(Vec::new())),
             owner_uuid: uuid::Uuid::new_v4().to_string(),
             instructions,
@@ -417,6 +492,14 @@ impl RemoteKernelsServer {
                 tracing::warn!("Failed to persist instance record: {e}");
             }
         }
+        let lifecycle = crate::state::LifecycleRecord {
+            storage_rate_per_hr: Some(handle.storage_rate_per_hr),
+            storage_rate_note: handle.storage_rate_note.clone(),
+            ..crate::state::LifecycleRecord::default()
+        };
+        if let Err(error) = crate::state::save_lifecycle_record(&project_dir, &name, &lifecycle) {
+            tracing::warn!(instance = %name, "Failed to persist storage pricing: {error}");
+        }
 
         // Provisioning caveats (e.g. a money-safety guard that could not be
         // applied) must reach the user on every success path.
@@ -457,8 +540,14 @@ impl RemoteKernelsServer {
                     McpError::internal_error(format!("Machine start needs attention: {e:#}"), None),
                 ),
                 Err(e) => {
+                    let force_terminate = e.is::<BudgetUnenforceable>();
                     let outcome = self
-                        .cleanup_failed_start(&name, &handle.external_id, &runtime_name, false)
+                        .cleanup_failed_start(
+                            &name,
+                            &handle.external_id,
+                            &runtime_name,
+                            force_terminate,
+                        )
                         .await;
                     Err(McpError::internal_error(
                         format!("Machine failed to start: {e} ({})", outcome.describe()),
@@ -490,6 +579,7 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
         let machine_id = params.machine_id;
+        let reconcile_message = self.reconcile_machine(&machine_id).await;
         if let Err(message) = crate::state::validate_machine_id(&machine_id) {
             return err_text(message);
         }
@@ -502,6 +592,20 @@ impl RemoteKernelsServer {
             };
             (state.project_dir.clone(), record)
         };
+        let lifecycle = crate::state::load_lifecycle_record(&project_dir, &machine_id);
+        if (lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
+            && !lifecycle.wants_terminate)
+            || (lifecycle.wants_terminate && !params.force.unwrap_or(false))
+        {
+            let reason = if lifecycle.wants_terminate {
+                "has a marker-confirmed pending terminate; attach refused without force"
+            } else {
+                "has an unresolved finalizing operation; attach refused until provider-state reconciliation completes"
+            };
+            return err_text(format!(
+                "Machine {machine_id} {reason}. Reconcile or verify it at the provider first."
+            ));
+        }
         let operation_lock = Self::acquire_operation_lock(&project_dir, &machine_id).await?;
         let prior_fence = match self.claim_attach_slot(&machine_id).await {
             Ok(prior_fence) => prior_fence,
@@ -625,8 +729,11 @@ impl RemoteKernelsServer {
         {
             Ok(summary) => {
                 let recovery = self.recover_attached_kernels(&machine_id, &record).await;
+                let reconciliation = reconcile_message
+                    .map(|message| format!("\n\n{message}"))
+                    .unwrap_or_default();
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Attached to machine.\n{summary}\n\n{recovery}"
+                    "Attached to machine.\n{summary}\n\n{recovery}{reconciliation}"
                 ))]))
             }
             Err(error) if error.is::<crate::runtime::StillProvisioning>() => {
@@ -696,6 +803,7 @@ impl RemoteKernelsServer {
         &self,
         params: Parameters<InstanceParams>,
     ) -> Result<CallToolResult, McpError> {
+        let skip_finalize = params.0.skip_finalize.unwrap_or(false);
         let requested = params.0.instance;
 
         let resolved = {
@@ -727,14 +835,16 @@ impl RemoteKernelsServer {
         };
 
         tracing::info!(instance = %name, external_id = %target.external_id, "Stopping machine...");
-        self.cleanup_instance(&target, CleanupAction::Stop)
+        let actual = self
+            .explicit_cleanup_instance(&target, CleanupAction::Stop, skip_finalize)
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to stop machine: {e}"), None))?;
 
         let total = self.state.lock().await.total_spend();
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Machine {name} stopped. Session cost: ${total:.2}. \
+            "Machine {name} {}. Session cost: ${total:.2}. \
              Use attach(\"{name}\") to resume it or terminate(instance=\"{name}\") to delete it.",
+            actual.past_tense(),
         ))]))
     }
 
@@ -744,6 +854,7 @@ impl RemoteKernelsServer {
         &self,
         params: Parameters<InstanceParams>,
     ) -> Result<CallToolResult, McpError> {
+        let skip_finalize = params.0.skip_finalize.unwrap_or(false);
         let requested = params.0.instance;
 
         // Live instance, or a record-only (stopped/crashed) machine.
@@ -779,17 +890,26 @@ impl RemoteKernelsServer {
         };
 
         tracing::info!(instance = %target.name, external_id = %target.external_id, "Terminating machine...");
-        self.cleanup_instance(&target, CleanupAction::Terminate)
+        let actual = self
+            .explicit_cleanup_instance(&target, CleanupAction::Terminate, skip_finalize)
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Failed to terminate machine: {e}"), None)
             })?;
 
         let total = self.state.lock().await.total_spend();
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Machine {:?} terminated. Session cost: ${total:.2}. All machine data has been deleted.",
-            target.name
-        ))]))
+        let message = if actual == CleanupAction::Terminate {
+            format!(
+                "Machine {:?} terminated. Session cost: ${total:.2}. All machine data has been deleted.",
+                target.name
+            )
+        } else {
+            format!(
+                "Finalize command failed; machine {:?} stopped for preservation, not terminated. Session cost: ${total:.2}. Storage may still bill until terminate() succeeds.",
+                target.name
+            )
+        };
+        Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
     /// Get the status of all machines (or one, via `instance`): phase, GPU, cost,
@@ -797,10 +917,39 @@ impl RemoteKernelsServer {
     #[tool(name = "status")]
     pub async fn status(
         &self,
-        params: Parameters<InstanceParams>,
+        params: Parameters<StatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let only = params.0.instance;
         let mut sections: Vec<String> = Vec::new();
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let initial_records = crate::state::list_instance_records(&project_dir)
+            .into_iter()
+            .filter(|(id, _)| only.as_deref().is_none_or(|requested| requested == id))
+            .collect::<Vec<_>>();
+        let mut provider_states = HashMap::new();
+        for (id, record) in &initial_records {
+            let state = match self.runtime_for(&record.runtime).await {
+                Ok(runtime) => runtime
+                    .describe(&record.external_id)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(format!("{error}")),
+            };
+            match &state {
+                Ok(provider_state) => {
+                    if let Some(message) = self
+                        .reconcile_machine_with_state(id, provider_state.clone())
+                        .await
+                    {
+                        sections.push(message);
+                    }
+                }
+                Err(error) => sections.push(format!(
+                    "Reconciliation {id}: provider state unknown; preserved ({error})"
+                )),
+            }
+            provider_states.insert(id.clone(), state);
+        }
         {
             let mut failures = self.start_failures.lock().await;
             sections.extend(failures.drain(..));
@@ -833,13 +982,14 @@ impl RemoteKernelsServer {
             .into_iter()
             .filter(|(id, _)| only.as_deref().is_none_or(|requested| requested == id))
         {
-            let provider_status = match self.runtime_for(&record.runtime).await {
-                Ok(runtime) => match runtime.describe(&record.external_id).await {
+            let lifecycle = crate::state::load_lifecycle_record(&project_dir, &id);
+            let provider_status = provider_states.get(&id).map_or_else(
+                || "not queried".to_string(),
+                |state| match state {
                     Ok(status) => format!("{status:?}"),
                     Err(error) => format!("query failed: {error}"),
                 },
-                Err(error) => format!("unknown ({error})"),
-            };
+            );
             let live_info = live.get(&id);
             let phase = live_info.map_or(record.phase, |info| info.0);
             let gpu = live_info
@@ -879,6 +1029,36 @@ impl RemoteKernelsServer {
                 }
             } else {
                 let _ = write!(section, "\nUse attach(\"{id}\") to reconnect.");
+                if let Some(caveat) = &lifecycle.supervision_note {
+                    let _ = write!(section, "\nCaveat: {caveat}");
+                }
+            }
+            if provider_status == "Stopped"
+                && let Some(storage_rate) = lifecycle.storage_rate_per_hr
+            {
+                if storage_rate > 0.0 {
+                    let _ = write!(
+                        section,
+                        "\nstopped, still billing ~${:.2}/day until terminated",
+                        storage_rate * 24.0
+                    );
+                } else {
+                    let note = lifecycle
+                        .storage_rate_note
+                        .as_deref()
+                        .map(|note| format!(": {note}"))
+                        .unwrap_or_default();
+                    let _ = write!(
+                        section,
+                        "\nstopped, storage billing may continue until terminated (rate unavailable{note})"
+                    );
+                }
+            }
+            if let Some(finalize_phase) = lifecycle.finalize_phase {
+                let _ = write!(section, "\nFinalize: {finalize_phase:?}");
+                if lifecycle.outcome_unknown {
+                    let _ = write!(section, " (outcome unknown; verify at provider)");
+                }
             }
             sections.push(section);
         }
@@ -2376,6 +2556,33 @@ impl RemoteKernelsServer {
             )
             .await?;
         let conn = Arc::new(conn);
+        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, name);
+        lifecycle.storage_rate_per_hr = Some(handle.storage_rate_per_hr);
+        lifecycle
+            .storage_rate_note
+            .clone_from(&handle.storage_rate_note);
+        crate::state::save_lifecycle_record(&project_dir, name, &lifecycle)?;
+        if matches!(mode, ConnectMode::Attach { resumed: true, .. })
+            && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::CompletedStop)
+            && let Some(op_id) = lifecycle.op_id.as_deref()
+            && let Err(error) = crate::machine_scripts::complete_stop(&conn, op_id).await
+        {
+            tracing::warn!(
+                instance = name,
+                "Could not clear prior stopped lease before fresh acquire: {error}"
+            );
+        }
+        if matches!(
+            mode,
+            ConnectMode::Attach {
+                force: true,
+                resumed: true
+            }
+        ) && lifecycle.wants_terminate
+            && let Some(op_id) = lifecycle.op_id.as_deref()
+        {
+            crate::machine_scripts::revert_to_armed(&conn, op_id).await?;
+        }
         let endpoint = conn.jupyter().clone();
         let jupyter = JupyterClient::new(&endpoint.http_base, &jupyter_token);
 
@@ -2398,12 +2605,24 @@ impl RemoteKernelsServer {
             ConnectMode::Fresh => crate::heartbeat::AcquireMode::Fresh,
             ConnectMode::Attach { force, .. } => crate::heartbeat::AcquireMode::Attach { force },
         };
+        let watchdog_policy = crate::runtime::WatchdogPolicy {
+            cleanup,
+            initial_budget_secs: None,
+            stale_secs: self.config.watchdog_stale_secs,
+            budget_grace_secs: self.config.budget_grace_secs_for(&runtime_name),
+            finalize_wait_secs: self.config.finalize_wait_secs_for(&runtime_name),
+            finalize_timeout_secs: self.config.finalize_command_timeout_secs_for(&runtime_name),
+            finalize_command: self
+                .config
+                .pre_command_for(&runtime_name, cleanup)
+                .map(ToString::to_string),
+            storage_rate_per_hr: lifecycle.storage_rate_per_hr,
+        };
         let (hb, mut supervision) = crate::heartbeat::start(
             Arc::clone(&conn),
             name.to_string(),
             external_id.to_string(),
-            cleanup,
-            self.config.watchdog_stale_secs,
+            watchdog_policy,
             acquire_mode,
             self.owner_uuid.clone(),
             Arc::clone(&self.state),
@@ -2444,8 +2663,27 @@ impl RemoteKernelsServer {
         }
 
         if *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), supervision.changed())
-                .await;
+            if self.budget.is_some() {
+                // A budgeted start cannot return success while enforceability
+                // is still unknown. The heartbeat owns provider-specific SSH /
+                // flock discovery and reports a definitive state here.
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(SUPERVISION_DISCOVERY_TIMEOUT_SECS),
+                    supervision.changed(),
+                )
+                .await
+                .is_err()
+                {
+                    return Err(BudgetUnenforceable(format!(
+                        "supervision remained unavailable for {SUPERVISION_DISCOVERY_TIMEOUT_SECS} seconds"
+                    ))
+                    .into());
+                }
+            } else {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), supervision.changed())
+                        .await;
+            }
         }
         let supervision_status = supervision.borrow().clone();
         match supervision_status {
@@ -2458,8 +2696,30 @@ impl RemoteKernelsServer {
                         Some("supervision setup is retrying in the background".to_string());
                 }
             }
-            crate::heartbeat::SupervisionStatus::Active
-            | crate::heartbeat::SupervisionStatus::Unsupervisable(_) => {}
+            crate::heartbeat::SupervisionStatus::Active => {}
+            crate::heartbeat::SupervisionStatus::Unsupervisable(caveat) => {
+                let waiver = self.budget_source == Some(crate::config::BudgetSource::Toml)
+                    && self.config.allow_unenforced_budget_for(&runtime_name);
+                if self.budget.is_some() && !waiver {
+                    return Err(BudgetUnenforceable(format!(
+                        "on this machine after disconnect ({caveat})"
+                    ))
+                    .into());
+                }
+                let note = if self.budget.is_some() {
+                    format!(
+                        "{caveat}; budget not enforceable on this machine after disconnect; manual cleanup only"
+                    )
+                } else {
+                    caveat
+                };
+                let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, name);
+                lifecycle.supervision_note = Some(note.clone());
+                crate::state::save_lifecycle_record(&project_dir, name, &lifecycle)?;
+                if let Some(instance) = self.state.lock().await.instances.get_mut(name) {
+                    instance.supervision_note = Some(note);
+                }
+            }
         }
 
         // Mark Running and persist. The billing clock deliberately keeps its
@@ -2829,58 +3089,536 @@ impl RemoteKernelsServer {
         })
     }
 
-    /// The single implementation of "stop or terminate one machine": provider
-    /// call first, then (only on success) spend snapshot, heartbeat stop, and
-    /// record update — all pinned to the target's `external_id` so a machine
-    /// replaced under the same record key concurrently is never touched.
-    ///
-    /// On provider failure nothing is forgotten: memory and records stay, so
-    /// the machine remains visible and cleanup can be retried.
-    async fn cleanup_instance(
+    pub async fn reconcile(&self) -> Vec<String> {
+        self.reconcile_records(None).await
+    }
+
+    async fn reconcile_records(&self, only: Option<&str>) -> Vec<String> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let ids = crate::state::list_instance_records(&project_dir)
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| only.is_none_or(|only| only == id))
+            .collect::<Vec<_>>();
+        let mut messages = Vec::new();
+        for id in ids {
+            if let Some(message) = self.reconcile_machine(&id).await {
+                messages.push(message);
+            }
+        }
+        messages
+    }
+
+    async fn reconcile_machine(&self, machine_id: &str) -> Option<String> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let record = crate::state::load_instance_record(&project_dir, machine_id)?;
+        let runtime = match self.runtime_for(&record.runtime).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider unavailable; preserved ({error})"
+                ));
+            }
+        };
+        let provider_state = match runtime.describe(&record.external_id).await {
+            Ok(state) => state,
+            Err(error) => {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider state unknown; preserved ({error})"
+                ));
+            }
+        };
+        self.reconcile_machine_with_state(machine_id, provider_state)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)] // explicit preservation ladder is kept linear for auditability
+    async fn reconcile_machine_with_state(
+        &self,
+        machine_id: &str,
+        provider_state: InstanceStatus,
+    ) -> Option<String> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let record = crate::state::load_instance_record(&project_dir, machine_id)?;
+        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
+        let runtime = match self.runtime_for(&record.runtime).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider unavailable; preserved ({error})"
+                ));
+            }
+        };
+
+        if provider_state == InstanceStatus::Gone {
+            if let Err(error) = self.state.lock().await.clear_record(machine_id) {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider confirms gone; record cleanup failed ({error})"
+                ));
+            }
+            return Some(format!(
+                "Reconciliation {machine_id}: provider confirms gone; record cleared"
+            ));
+        }
+
+        if provider_state == InstanceStatus::Running
+            && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::RetrievingOutcome)
+        {
+            let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await
+            {
+                Ok(lock) => lock,
+                Err(error) => {
+                    return Some(format!(
+                        "Reconciliation {machine_id}: retrieval recovery lock unavailable; preserved ({error:?})"
+                    ));
+                }
+            };
+            if !matches!(
+                runtime.describe(&record.external_id).await,
+                Ok(InstanceStatus::Running)
+            ) {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider moved during retrieval recovery; preserved"
+                ));
+            }
+            return match runtime.stop(&record.external_id).await {
+                Ok(()) => {
+                    let mut stopped = record.clone();
+                    stopped.phase = Phase::Stopped;
+                    let _ = self.state.lock().await.save_record(machine_id, &stopped);
+                    lifecycle.finalize_phase =
+                        Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                    lifecycle.outcome_unknown = true;
+                    let _ =
+                        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                    Some(format!(
+                        "Reconciliation {machine_id}: re-stopped after interrupted outcome retrieval"
+                    ))
+                }
+                Err(error) => Some(format!(
+                    "Reconciliation {machine_id}: interrupted retrieval may still be running; manual provider stop required ({error})"
+                )),
+            };
+        }
+
+        if provider_state == InstanceStatus::Running
+            && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
+            && lifecycle.started_at_epoch.is_some_and(|started| {
+                now_epoch().saturating_sub(started) > FINALIZE_OP_TIMEOUT_SECS
+            })
+        {
+            return Some(format!(
+                "Reconciliation {machine_id}: stale finalizing outcome unknown; verify at provider"
+            ));
+        }
+
+        if provider_state != InstanceStatus::Stopped {
+            return None;
+        }
+
+        // A provider-confirmed stop resolves an ambiguous explicit stop even
+        // when the marker is unavailable: the requested preservation action
+        // happened, so complete local bookkeeping and leave attach possible.
+        if lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
+            && lifecycle.action == Some(Cleanup::Stop)
+        {
+            let mut stopped = record.clone();
+            stopped.phase = Phase::Stopped;
+            let _ = self.state.lock().await.save_record(machine_id, &stopped);
+            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+            lifecycle.outcome_unknown = false;
+            let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            return Some(format!(
+                "Reconciliation {machine_id}: provider confirmed stop; completed prior ambiguous stop"
+            ));
+        }
+
+        let server_death_candidate =
+            record.phase == Phase::Running && lifecycle.finalize_phase.is_none();
+        if lifecycle.finalize_phase.is_none() && !server_death_candidate {
+            return None;
+        }
+        if server_death_candidate {
+            lifecycle.action = Some(record.cleanup);
+        }
+        if lifecycle.finalize_phase == Some(crate::state::FinalizePhase::RetrievalUnavailable) {
+            return Some(format!(
+                "Reconciliation {machine_id}: stopped; outcome retrieval previously failed; preserved"
+            ));
+        }
+        if lifecycle.wants_terminate {
+            return Some(format!(
+                "Reconciliation {machine_id}: marker-confirmed terminate remains pending; preserved after an ambiguous provider outcome"
+            ));
+        }
+
+        let context = match connection_context_for_record(&project_dir, machine_id, &record) {
+            Ok(context) => context,
+            Err(error) => {
+                return Some(format!(
+                    "Reconciliation {machine_id}: stopped; outcome retrieval unavailable; preserved ({error})"
+                ));
+            }
+        };
+        if let Ok(connection) = runtime.open(&record.external_id, &context).await
+            && let Ok(marker) = crate::machine_scripts::read_outcome(&connection).await
+        {
+            return Some(
+                self.apply_stopped_marker(machine_id, &record, &runtime, marker)
+                    .await,
+            );
+        }
+
+        if record.runtime != "runpod" || lifecycle.action != Some(Cleanup::Terminate) {
+            return Some(format!(
+                "Reconciliation {machine_id}: stopped; outcome retrieval unavailable; preserved"
+            ));
+        }
+
+        let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                return Some(format!(
+                    "Reconciliation {machine_id}: retrieval lock unavailable; preserved ({error:?})"
+                ));
+            }
+        };
+        if !matches!(
+            runtime.describe(&record.external_id).await,
+            Ok(InstanceStatus::Stopped)
+        ) {
+            return Some(format!(
+                "Reconciliation {machine_id}: provider moved before retrieval; preserved"
+            ));
+        }
+        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievingOutcome);
+        if let Err(error) =
+            crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)
+        {
+            return Some(format!(
+                "Reconciliation {machine_id}: could not persist retrieval phase; preserved ({error})"
+            ));
+        }
+        if let Err(error) = runtime.resume(&record.external_id).await {
+            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
+            lifecycle.outcome_unknown = true;
+            let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            return Some(format!(
+                "Reconciliation {machine_id}: resume-to-read failed; preserved stopped ({error})"
+            ));
+        }
+        self.state.lock().await.reset_known_hosts(machine_id);
+        let marker = async {
+            runtime.wait_running(&record.external_id).await?;
+            let connection = runtime.open(&record.external_id, &context).await?;
+            crate::machine_scripts::read_outcome(&connection)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        .await;
+        match marker {
+            Ok(marker) if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 => {
+                lifecycle.wants_terminate = true;
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                if let Err(error) =
+                    crate::state::import_pending_transition(&project_dir, machine_id, &marker)
+                {
+                    let _ = runtime.stop(&record.external_id).await;
+                    lifecycle.finalize_phase =
+                        Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                    lifecycle.wants_terminate = false;
+                    lifecycle.outcome_unknown = true;
+                    let _ =
+                        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                    return Some(format!(
+                        "Reconciliation {machine_id}: marker import failed; re-stopped for preservation ({error})"
+                    ));
+                }
+                if let Err(error) = runtime.terminate(&record.external_id).await {
+                    let restop = runtime.stop(&record.external_id).await;
+                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+                    lifecycle.outcome_unknown = true;
+                    let _ =
+                        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                    return Some(format!(
+                        "Reconciliation {machine_id}: terminate outcome unknown; {} ({error})",
+                        if restop.is_ok() {
+                            "re-stopped for preservation"
+                        } else {
+                            "manual provider verification required"
+                        }
+                    ));
+                }
+                let _ = self.state.lock().await.clear_record(machine_id);
+                Some(format!(
+                    "Reconciliation {machine_id}: finalize marker authorized terminate; terminated"
+                ))
+            }
+            Ok(marker) => {
+                let _ = crate::state::import_pending_transition(&project_dir, machine_id, &marker);
+                let restop = runtime.stop(&record.external_id).await;
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+                lifecycle.action = Some(Cleanup::Stop);
+                lifecycle.wants_terminate = false;
+                lifecycle.outcome_unknown = false;
+                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                Some(format!(
+                    "Reconciliation {machine_id}: finalize did not authorize terminate; {}",
+                    if restop.is_ok() {
+                        "re-stopped for preservation"
+                    } else {
+                        "manual provider stop required"
+                    }
+                ))
+            }
+            Err(error) => {
+                let restop = runtime.stop(&record.external_id).await;
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                lifecycle.outcome_unknown = true;
+                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                Some(format!(
+                    "Reconciliation {machine_id}: outcome unreadable; {} ({error})",
+                    if restop.is_ok() {
+                        "re-stopped for preservation"
+                    } else {
+                        "manual provider stop required"
+                    }
+                ))
+            }
+        }
+    }
+
+    async fn apply_stopped_marker(
+        &self,
+        machine_id: &str,
+        record: &InstanceRecord,
+        runtime: &Arc<AnyRuntime>,
+        marker: crate::state::OutcomeMarker,
+    ) -> String {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                return format!(
+                    "Reconciliation {machine_id}: marker read; operation lock unavailable; preserved ({error:?})"
+                );
+            }
+        };
+        if !matches!(
+            runtime.describe(&record.external_id).await,
+            Ok(InstanceStatus::Stopped)
+        ) {
+            return format!(
+                "Reconciliation {machine_id}: provider moved after marker read; preserved"
+            );
+        }
+        if let Err(error) =
+            crate::state::import_pending_transition(&project_dir, machine_id, &marker)
+        {
+            return format!(
+                "Reconciliation {machine_id}: transition import failed; preserved ({error})"
+            );
+        }
+        if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 {
+            let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
+            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+            lifecycle.action = Some(Cleanup::Terminate);
+            lifecycle.wants_terminate = true;
+            lifecycle.op_id = Some(marker.uuid.clone());
+            let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            return match runtime.terminate(&record.external_id).await {
+                Ok(()) => {
+                    let _ = self.state.lock().await.clear_record(machine_id);
+                    format!(
+                        "Reconciliation {machine_id}: finalize marker authorized terminate; terminated"
+                    )
+                }
+                Err(error) => format!(
+                    "Reconciliation {machine_id}: terminate outcome unknown; verify at provider ({error})"
+                ),
+            };
+        }
+        let mut stopped = record.clone();
+        stopped.phase = Phase::Stopped;
+        let _ = self.state.lock().await.save_record(machine_id, &stopped);
+        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
+        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+        lifecycle.op_id = Some(marker.uuid);
+        lifecycle.action = Some(Cleanup::Stop);
+        lifecycle.wants_terminate = false;
+        lifecycle.outcome_unknown = false;
+        let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+        format!("Reconciliation {machine_id}: stopped outcome imported; data preserved")
+    }
+
+    #[allow(clippy::too_many_lines)] // ordered pre-op, fencing, provider classification, bookkeeping
+    async fn explicit_cleanup_instance(
         &self,
         target: &CleanupTarget,
-        action: CleanupAction,
-    ) -> anyhow::Result<()> {
+        requested: CleanupAction,
+        skip_finalize: bool,
+    ) -> anyhow::Result<CleanupAction> {
         let project_dir = self.state.lock().await.project_dir.clone();
+        let runtime = self
+            .runtime_for(&target.runtime)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+
+        let (connection, generation, supervised) = {
+            let state = self.state.lock().await;
+            state
+                .instances
+                .get(&target.name)
+                .map_or((None, None, false), |instance| {
+                    (
+                        instance.connection.clone(),
+                        instance.lease_generation,
+                        instance.supervision_note.is_none(),
+                    )
+                })
+        };
+        let requested_cleanup = match requested {
+            CleanupAction::Stop => Cleanup::Stop,
+            CleanupAction::Terminate => Cleanup::Terminate,
+        };
+        let mut actual = requested;
+        // Prove authority under the oplock before running user pre-op code,
+        // then release it so the heartbeat can keep the lease fresh during a
+        // long finalize command. Authority is proved again immediately before
+        // enter-finalizing/provider mutation.
+        {
+            let _authority_lock = Self::acquire_operation_lock(&project_dir, &target.name)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+            self.verify_mutation_authority(&target.name, &target.external_id)
+                .await?;
+        }
+        if !skip_finalize
+            && let Some(command) = self
+                .config
+                .pre_command_for(&target.runtime, requested_cleanup)
+            && let Some(connection) = &connection
+            && let Err(error) = connection
+                .exec(
+                    command,
+                    std::time::Duration::from_secs(
+                        self.config
+                            .finalize_command_timeout_secs_for(&target.runtime),
+                    ),
+                )
+                .await
+        {
+            tracing::warn!(instance = %target.name, "Finalize command failed: {error}");
+            if requested == CleanupAction::Terminate {
+                actual = CleanupAction::Stop;
+            }
+        }
+
         let _operation_lock = Self::acquire_operation_lock(&project_dir, &target.name)
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
         self.verify_mutation_authority(&target.name, &target.external_id)
             .await?;
-        let runtime = self
-            .runtime_for(&target.runtime)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-        match action {
-            CleanupAction::Stop => runtime.stop(&target.external_id).await?,
-            CleanupAction::Terminate => runtime.terminate(&target.external_id).await?,
+        let op_id = uuid::Uuid::new_v4().to_string();
+        if supervised {
+            let (Some(connection), Some(generation)) = (&connection, generation) else {
+                anyhow::bail!("supervision state is incomplete; no provider action issued");
+            };
+            crate::machine_scripts::enter_finalizing(
+                connection,
+                generation,
+                &op_id,
+                match actual {
+                    CleanupAction::Stop => Cleanup::Stop,
+                    CleanupAction::Terminate => Cleanup::Terminate,
+                },
+            )
+            .await?;
         }
 
+        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &target.name);
+        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+        lifecycle.op_id = Some(op_id.clone());
+        lifecycle.action = Some(match actual {
+            CleanupAction::Stop => Cleanup::Stop,
+            CleanupAction::Terminate => Cleanup::Terminate,
+        });
+        lifecycle.started_at_epoch = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        lifecycle.outcome_unknown = false;
+        lifecycle.wants_terminate = false;
+        crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+
+        let provider_result = match actual {
+            CleanupAction::Stop => runtime.stop(&target.external_id).await,
+            CleanupAction::Terminate => runtime.terminate(&target.external_id).await,
+        };
+        if let Err(error) = provider_result {
+            let unchanged = matches!(
+                runtime.describe(&target.external_id).await,
+                Ok(crate::runtime::InstanceStatus::Running)
+            );
+            if provider_rejection_is_authoritative(&error) && unchanged {
+                if let Some(connection) = &connection {
+                    crate::machine_scripts::revert_to_armed(connection, &op_id).await?;
+                }
+                lifecycle.finalize_phase = None;
+                lifecycle.op_id = None;
+                lifecycle.action = None;
+                crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+                anyhow::bail!("provider rejected {}: {error}", actual.verb());
+            }
+            lifecycle.outcome_unknown = true;
+            crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+            if let Some(instance) = self.state.lock().await.instances.get_mut(&target.name) {
+                instance.fence(FenceReason::Finalizing);
+            }
+            anyhow::bail!(
+                "{} outcome unknown; verify at provider: {error}",
+                actual.verb()
+            );
+        }
+
+        self.complete_provider_action(target, actual).await?;
+        if actual == CleanupAction::Stop {
+            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+            lifecycle.outcome_unknown = false;
+            crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+        }
+        Ok(actual)
+    }
+
+    async fn complete_provider_action(
+        &self,
+        target: &CleanupTarget,
+        action: CleanupAction,
+    ) -> anyhow::Result<()> {
         let mut state = self.state.lock().await;
         let is_current_generation = state
             .instances
             .get(&target.name)
-            .is_some_and(|i| i.external_id == target.external_id);
+            .is_some_and(|instance| instance.external_id == target.external_id);
         if is_current_generation {
             state.snapshot_spend_for(&target.name);
-            if let Some(mut inst) = state.instances.remove(&target.name) {
-                inst.stop_heartbeat();
+            if let Some(mut instance) = state.instances.remove(&target.name) {
+                instance.stop_heartbeat();
                 if action == CleanupAction::Stop {
-                    inst.phase = Phase::Stopped;
-                    let record = inst.record();
-                    if let Err(e) = state.save_record(&target.name, &record) {
-                        tracing::warn!("Failed to save instance record: {e}");
-                    }
+                    instance.phase = Phase::Stopped;
+                    state.save_record(&target.name, &instance.record())?;
                 }
             }
         }
         if action == CleanupAction::Terminate
             && crate::state::load_instance_record(&state.project_dir, &target.name)
-                .is_some_and(|r| r.external_id == target.external_id)
-            && let Err(e) = state.clear_record(&target.name)
+                .is_some_and(|record| record.external_id == target.external_id)
         {
-            tracing::warn!("Failed to clear instance record: {e}");
+            state.clear_record(&target.name)?;
         }
         Ok(())
     }
@@ -2915,8 +3653,8 @@ impl RemoteKernelsServer {
                 Cleanup::Stop => CleanupAction::Stop,
                 Cleanup::Terminate | Cleanup::Disabled => CleanupAction::Terminate,
             };
-            match self.cleanup_instance(&target, action).await {
-                Ok(()) => actions.push(format!("{}: {}", target.name, action.past_tense())),
+            match self.explicit_cleanup_instance(&target, action, false).await {
+                Ok(actual) => actions.push(format!("{}: {}", target.name, actual.past_tense())),
                 Err(e) => actions.push(format!(
                     "{}: attempted to {} but failed: {e} — it is still tracked; retry or check the provider dashboard",
                     target.name,
@@ -2931,33 +3669,100 @@ impl RemoteKernelsServer {
         format!("Machines cleaned up — {}.", actions.join("; "))
     }
 
-    /// Graceful-shutdown cleanup: apply each live instance's cleanup policy.
-    /// Called by `main()` when the MCP transport disconnects.
+    /// A transport disconnect never calls a provider. It snapshots spend,
+    /// preserves Running records, and best-effort arms the machine-side drain.
     pub async fn shutdown_cleanup(&self) {
-        for (target, cleanup, _cost_per_hr) in self.all_live_targets().await {
-            let action = match cleanup {
-                Cleanup::Disabled => {
-                    tracing::info!(instance = %target.name, external_id = %target.external_id, "Cleanup disabled, leaving machine running");
-                    // Keep the record (phase Running) so the next session reconnects.
-                    let mut state = self.state.lock().await;
-                    state.snapshot_spend_for(&target.name);
-                    if let Some(mut inst) = state.instances.remove(&target.name) {
-                        inst.stop_heartbeat();
-                        inst.phase = Phase::Running;
-                        let record = inst.record();
-                        let _ = state.save_record(&target.name, &record);
+        let names = self
+            .state
+            .lock()
+            .await
+            .instances
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in names {
+            let project_dir = self.state.lock().await.project_dir.clone();
+            let operation_lock = match Self::acquire_operation_lock(&project_dir, &name).await {
+                Ok(lock) => Some(lock),
+                Err(error) => {
+                    tracing::warn!(instance = %name, "Disconnect arm lock unavailable; preserving: {error:?}");
+                    None
+                }
+            };
+            let (connection, generation, cleanup, supervised, record) = {
+                let mut state = self.state.lock().await;
+                if state
+                    .instances
+                    .get(&name)
+                    .is_some_and(|instance| instance.fenced.is_some())
+                {
+                    if let Some(instance) = state.instances.get_mut(&name)
+                        && let Some(heartbeat) = instance.heartbeat.take()
+                    {
+                        heartbeat.stop();
                     }
+                    tracing::info!(instance = %name, "Fenced disconnect discarded local state without touching durable records");
                     continue;
                 }
-                Cleanup::Stop => CleanupAction::Stop,
-                Cleanup::Terminate => CleanupAction::Terminate,
-            };
-            match self.cleanup_instance(&target, action).await {
-                Ok(()) => {
-                    tracing::info!(instance = %target.name, external_id = %target.external_id, ?cleanup, "Machine cleaned up");
+                state.snapshot_spend_for(&name);
+                let Some(mut instance) = state.instances.remove(&name) else {
+                    continue;
+                };
+                instance.stop_heartbeat();
+                instance.phase = Phase::Running;
+                let record = instance.record();
+                let values = (
+                    instance.connection.clone(),
+                    instance.lease_generation,
+                    instance.cleanup,
+                    instance.supervision_note.is_none(),
+                    record.clone(),
+                );
+                if let Err(error) = state.save_record(&name, &record) {
+                    tracing::warn!(instance = %name, "Could not preserve disconnect record: {error}");
                 }
-                Err(e) => {
-                    tracing::warn!(instance = %target.name, external_id = %target.external_id, "Failed to clean up machine: {e}");
+                values
+            };
+            if operation_lock.is_none() || !supervised || cleanup == Cleanup::Disabled {
+                tracing::info!(instance = %name, "Disconnect preserved machine without remote arm");
+                continue;
+            }
+            let (Some(connection), Some(generation)) = (connection, generation) else {
+                tracing::info!(instance = %name, "Disconnect preserved machine; no lease transport");
+                continue;
+            };
+            let deadline = self
+                .config
+                .finalize_wait_secs_for(&record.runtime)
+                .map(|secs| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        .saturating_add(secs)
+                });
+            match crate::machine_scripts::arm_disconnect(&connection, generation, deadline).await {
+                Ok(()) => {
+                    let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &name);
+                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Armed);
+                    lifecycle.action = Some(cleanup);
+                    lifecycle.wants_terminate = false;
+                    lifecycle.outcome_unknown = false;
+                    lifecycle.started_at_epoch = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
+                    if let Err(error) =
+                        crate::state::save_lifecycle_record(&project_dir, &name, &lifecycle)
+                    {
+                        tracing::warn!(instance = %name, "Disconnect arm was remote-only: {error}");
+                    }
+                    tracing::info!(instance = %name, "Disconnect armed machine-side finalization");
+                }
+                Err(error) => {
+                    tracing::warn!(instance = %name, "Disconnect arm failed; machine preserved: {error}");
                 }
             }
         }
@@ -3037,7 +3842,9 @@ mod tests {
     use super::{RemoteKernelsServer, validate_vast_offers};
     use crate::config::{Cleanup, Config};
     use crate::jupyter::messages::ExecutionOutput;
-    use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
+    #[cfg(feature = "fake-runtime")]
+    use crate::state::KernelRecord;
+    use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, Phase};
 
     fn test_instance(machine_id: &str) -> InstanceState {
         InstanceState::provisioning(
@@ -3423,7 +4230,7 @@ mod tests {
         let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
         let server = RemoteKernelsServer::new(config, state, None);
         let result = server
-            .status(Parameters(super::InstanceParams { instance: None }))
+            .status(Parameters(super::StatusParams { instance: None }))
             .await
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
@@ -3619,6 +4426,7 @@ mod fencing_tests {
         let stop = server
             .stop(Parameters(InstanceParams {
                 instance: Some(machine_id.clone()),
+                skip_finalize: None,
             }))
             .await
             .unwrap();
@@ -3627,6 +4435,7 @@ mod fencing_tests {
         let terminate = server
             .terminate(Parameters(InstanceParams {
                 instance: Some(machine_id.clone()),
+                skip_finalize: None,
             }))
             .await
             .unwrap();
@@ -3669,8 +4478,16 @@ mod fencing_tests {
             connection,
             machine_id.clone(),
             external_id.to_string(),
-            Cleanup::Terminate,
-            300,
+            crate::runtime::WatchdogPolicy {
+                cleanup: Cleanup::Terminate,
+                initial_budget_secs: None,
+                stale_secs: 300,
+                budget_grace_secs: 900,
+                finalize_wait_secs: None,
+                finalize_timeout_secs: 600,
+                finalize_command: None,
+                storage_rate_per_hr: None,
+            },
             crate::heartbeat::AcquireMode::Fresh,
             "owner".to_string(),
             Arc::clone(&server.state),

@@ -375,7 +375,8 @@ impl VastRuntime {
     /// and fall back to the bare command (which then only works if the image
     /// runs sshd as root anyway). No single quotes — both consumers wrap the
     /// command in a single-quoted script.
-    fn halt_command(ssh_user: &str) -> String {
+    #[doc(hidden)]
+    pub fn halt_command(ssh_user: &str) -> String {
         if ssh_user == "root" {
             "(shutdown -h now || kill -9 1) 2>/dev/null".to_string()
         } else {
@@ -464,6 +465,11 @@ fn handle_for_offer(contract: i64, offer: &crate::vast::types::Offer) -> Instanc
             offer.num_gpus.unwrap_or(1)
         ),
         cost_per_hr: offer.dph_total,
+        storage_rate_per_hr: offer.storage_total_cost.unwrap_or(0.0),
+        storage_rate_note: offer
+            .storage_total_cost
+            .is_none()
+            .then(|| "vast offer exposed no storage_total_cost".to_string()),
         proxy_port_mapped: false,
         note: None,
     }
@@ -686,6 +692,11 @@ impl Runtime for VastRuntime {
                 instance.num_gpus.unwrap_or(1)
             ),
             cost_per_hr: instance.dph_total,
+            storage_rate_per_hr: instance.storage_total_cost.unwrap_or(0.0),
+            storage_rate_note: instance
+                .storage_total_cost
+                .is_none()
+                .then(|| "vast instance exposed no storage_total_cost".to_string()),
             note: None,
             // RunPod-only concept; vast Jupyter is tunnel-only by design.
             proxy_port_mapped: false,
@@ -989,6 +1000,10 @@ impl Connection for VastConnection {
         recorder_ws_url()
     }
 
+    fn watchdog_port(&self) -> u16 {
+        JUPYTER_PORT
+    }
+
     fn startup_note(&self) -> Option<String> {
         (self.ssh.user != "root").then(|| {
             format!(
@@ -1021,7 +1036,7 @@ impl Connection for VastConnection {
         crate::sync::download_from_pod(&self.ssh, remote_path, local_path, &self.workdir).await
     }
 
-    /// Best-effort self-cleanup: there is no credential-free way to destroy a
+    /// Best-effort finalize: there is no credential-free way to destroy a
     /// vast instance from inside it, so the watchdog halts the machine
     /// (VMs: `shutdown`; containers: kill PID 1 → instance exits). Storage
     /// billing continues until the server or user destroys it — the
@@ -1034,12 +1049,13 @@ impl Connection for VastConnection {
         if let Some(secs) = policy.initial_budget_secs {
             self.set_budget_deadline(secs).await?;
         }
-        let script = crate::ssh_exec::watchdog_script(
+        crate::machine_scripts::install_watchdog(
+            self,
+            &policy,
             &VastRuntime::halt_command(&self.ssh.user),
-            policy.stale_secs,
-        );
-        self.exec_inner(&script, Duration::from_secs(10)).await?;
-        tracing::info!("Watchdog installed on vast instance (halt-only — see docs)");
+        )
+        .await?;
+        tracing::info!("Fenced finalize watchdog installed on vast instance (halt-only)");
         Ok(())
     }
 
@@ -1051,12 +1067,7 @@ impl Connection for VastConnection {
     }
 
     async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
-        self.exec_inner(
-            &format!("echo $(($(date +%s) + {secs_from_now})) > /tmp/budget_deadline"),
-            Duration::from_secs(10),
-        )
-        .await
-        .map(|_| ())
+        crate::machine_scripts::set_budget_deadline(self, secs_from_now).await
     }
 }
 
@@ -1366,8 +1377,8 @@ mod tests {
     /// cheapest-first, i.e. the OPPOSITE of the ranked order the tests pass —
     /// order preservation is what's under test.
     const RESOLVE_BODY: &str = r#"{"offers": [
-        {"id": 111, "gpu_name": "RTX 3090", "num_gpus": 1, "dph_total": 0.30},
-        {"id": 222, "gpu_name": "RTX 4090", "num_gpus": 2, "dph_total": 0.51}
+        {"id": 111, "gpu_name": "RTX 3090", "num_gpus": 1, "dph_total": 0.30, "storage_total_cost": 0.002},
+        {"id": 222, "gpu_name": "RTX 4090", "num_gpus": 2, "dph_total": 0.51, "storage_total_cost": 0.003}
     ]}"#;
 
     #[tokio::test]
@@ -1404,6 +1415,8 @@ mod tests {
         // Metadata comes from the RESOLVED offer, not a post-create query.
         assert_eq!(handle.gpu_name, "RTX 3090 x1");
         assert_eq!(handle.cost_per_hr, Some(0.30));
+        assert!((handle.storage_rate_per_hr - 0.002).abs() < f64::EPSILON);
+        assert!(handle.storage_rate_note.is_none());
         // Claude's ranked order respected (NOT the API's cheapest-first
         // order): 222 attempted before 111.
         let asks = fake.asks_tried();

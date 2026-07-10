@@ -246,6 +246,8 @@ fn handle_for(pod: &Pod, container_name: Option<&str>) -> InstanceHandle {
         external_id: pod.metadata.name.clone().unwrap_or_default(),
         gpu_name,
         cost_per_hr: None,
+        storage_rate_per_hr: 0.0,
+        storage_rate_note: Some("kubernetes exposes no provider storage price".to_string()),
         note: None,
         proxy_port_mapped: false,
     }
@@ -615,6 +617,10 @@ impl Connection for K8sConnection {
 
     fn workdir(&self) -> &str {
         &self.workdir
+    }
+
+    fn supports_watchdog(&self) -> bool {
+        false
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {

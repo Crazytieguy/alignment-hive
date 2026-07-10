@@ -234,6 +234,19 @@ case "$op" in
         action=""
         write_lease
         ;;
+    complete-stop)
+        [ "$#" -eq 1 ] && is_atom "$1" || fail_invalid "usage: complete-stop <op_id>"
+        [ "$state" = "finalizing" ] && [ "$op_id" = "$1" ] && [ "$action" = "stop" ] \
+            || exit "$EXIT_FENCED"
+        pause_after_read_for_test
+        state="active"
+        owner_uuid=""
+        arm_reason=""
+        arm_deadline=0
+        op_id=""
+        action=""
+        write_lease
+        ;;
     read)
         [ "$#" -eq 0 ] || fail_invalid "usage: read"
         print_lease

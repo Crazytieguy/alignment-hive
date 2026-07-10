@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::{Cleanup, Config};
+use crate::config::{BudgetSource, Cleanup, Config};
 
 /// How reliably a runtime supports stop/resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,13 @@ impl Capabilities {
 /// only validated per-runtime lazily at `start()` — a global value may be a
 /// leftover that never applies to the runtime it would conflict with.
 pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
+    validate_config_with_budget_source(config, has_budget.then_some(BudgetSource::Environment))
+}
+
+pub fn validate_config_with_budget_source(
+    config: &Config,
+    budget_source: Option<BudgetSource>,
+) -> Result<(), String> {
     // Money-window sanity: zero windows would self-clean or terminate healthy
     // machines instantly, and a staleness threshold under ~1.5 heartbeat
     // ticks (60s each) kills machines on a single delayed beat.
@@ -134,6 +141,16 @@ pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> 
         );
     }
     for &name in AnyRuntime::known_names() {
+        if config.finalize_command_timeout_secs_for(name) == 0 {
+            return Err(format!(
+                "[{name}] finalize-command-timeout-secs must be at least 1"
+            ));
+        }
+        if config.budget_grace_secs_for(name) == 0 {
+            return Err(format!("[{name}] budget-grace-secs must be at least 1"));
+        }
+    }
+    for &name in AnyRuntime::known_names() {
         let Some(caps) = AnyRuntime::static_capabilities(name, config) else {
             continue;
         };
@@ -141,7 +158,8 @@ pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> 
             caps.validate_cleanup(explicit)
                 .map_err(|msg| format!("[{name}] cleanup: {msg}"))?;
         }
-        if has_budget && caps.metered && config.cleanup_for(name) == Cleanup::Disabled {
+        if budget_source.is_some() && caps.metered && config.cleanup_for(name) == Cleanup::Disabled
+        {
             return Err(format!(
                 "budget-cap (or REMOTE_KERNELS_BUDGET) cannot be used while cleanup resolves \
                  to \"disabled\" for the metered runtime {name:?} — budget enforcement \
@@ -150,6 +168,16 @@ pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> 
                  \"disabled\".)"
             ));
         }
+    }
+    if let Some(source) = budget_source
+        && config.runpod.jupyter_access == crate::config::JupyterAccess::Proxy
+        && !config.runpod_ssh_expected()
+        && !(source == BudgetSource::Toml && config.runpod.allow_unenforced_budget)
+    {
+        return Err(
+            "budget cannot be enforced for [runpod] jupyter-access = \"proxy\" when the config does not expect SSH; set cloud-type = \"SECURE\" or support-public-ip = true. allow-unenforced-budget is accepted only for a TOML budget-cap, never REMOTE_KERNELS_BUDGET"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -191,6 +219,10 @@ pub struct InstanceHandle {
     pub gpu_name: String,
     /// Hourly cost in dollars. `None` for unmetered runtimes.
     pub cost_per_hr: Option<f64>,
+    /// Provider-reported storage-only rate after stop, normalized to $/hr.
+    /// Providers that expose no usable price record zero with an explanation.
+    pub storage_rate_per_hr: f64,
+    pub storage_rate_note: Option<String>,
     /// Provisioning caveat to surface in the `start()` result (e.g. a
     /// money-safety guard that could not be applied). Only set by
     /// [`Runtime::provision`]; `None` on handles from status queries.
@@ -290,7 +322,7 @@ pub struct ConnectionContext {
 }
 
 /// On-machine self-cleanup policy, installed via [`Connection::install_watchdog`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WatchdogPolicy {
     pub cleanup: Cleanup,
     /// Initial budget deadline in seconds from now (refreshed via
@@ -299,6 +331,12 @@ pub struct WatchdogPolicy {
     /// Heartbeat staleness that triggers self-cleanup (config
     /// `watchdog-stale-secs`).
     pub stale_secs: u64,
+    pub budget_grace_secs: u64,
+    /// `None` means unbounded drain; the script CLI represents that as zero.
+    pub finalize_wait_secs: Option<u64>,
+    pub finalize_timeout_secs: u64,
+    pub finalize_command: Option<String>,
+    pub storage_rate_per_hr: Option<f64>,
 }
 
 /// Live transport to one machine.
@@ -318,10 +356,26 @@ pub trait Connection: Send + Sync {
         "ws://127.0.0.1:8888".to_string()
     }
 
+    /// Jupyter port as seen from the machine-side watchdog.
+    fn watchdog_port(&self) -> u16 {
+        8888
+    }
+
     /// A caveat about this connection worth surfacing in the `start()`
     /// result (e.g. a degraded access path). `None` when all is normal.
     fn startup_note(&self) -> Option<String> {
         None
+    }
+
+    /// Whether this connection can host the fenced lease/watchdog machinery.
+    fn supports_watchdog(&self) -> bool {
+        true
+    }
+
+    /// Whether this transport can host the fenced lease. Kubernetes supports
+    /// leases through exec even though it cannot run a detached watchdog.
+    fn supports_lease(&self) -> bool {
+        true
     }
 
     /// Run an infrastructure command on the machine (never user/Claude code —
@@ -727,6 +781,19 @@ mod tests {
         );
         let err = validate_config(&config("[vast]\nonstart-timeout-mins = 0"), false).unwrap_err();
         assert!(err.contains("onstart-timeout-mins"), "{err}");
+
+        for key in ["finalize-command-timeout-secs", "budget-grace-secs"] {
+            for runtime in ["runpod", "vast", "kubernetes"] {
+                let required = if runtime == "kubernetes" {
+                    "pod-template = \"pod.yaml\"\n"
+                } else {
+                    ""
+                };
+                let input = format!("[{runtime}]\n{required}{key} = 0");
+                let err = validate_config(&config(&input), false).unwrap_err();
+                assert!(err.contains(key), "{err}");
+            }
+        }
     }
 
     #[test]
@@ -752,5 +819,16 @@ mod tests {
             "cleanup = \"disabled\"\n\n[runpod]\ncleanup = \"stop\"\n\n[vast]\ncleanup = \"terminate\"",
         );
         assert!(validate_config(&cfg, true).is_ok());
+    }
+
+    #[test]
+    fn unenforced_budget_waiver_is_toml_only() {
+        let cfg = config(
+            "budget-cap = 5\n[runpod]\njupyter-access = \"proxy\"\ncloud-type = \"COMMUNITY\"\nallow-unenforced-budget = true",
+        );
+        assert!(validate_config_with_budget_source(&cfg, Some(BudgetSource::Toml)).is_ok());
+        let error =
+            validate_config_with_budget_source(&cfg, Some(BudgetSource::Environment)).unwrap_err();
+        assert!(error.contains("never REMOTE_KERNELS_BUDGET"), "{error}");
     }
 }
