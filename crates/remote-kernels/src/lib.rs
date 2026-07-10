@@ -59,4 +59,5 @@ pub mod ssh;
 pub mod ssh_exec;
 pub mod state;
 pub mod sync;
+pub mod ulid;
 pub mod vast;

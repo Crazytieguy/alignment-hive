@@ -210,7 +210,7 @@ impl RunPodRuntime {
                 anyhow::bail!(
                     "{} this pod was created tunnel-only (no public 8888 mapping) but \
                      currently has no SSH endpoint, so its Jupyter is unreachable. The \
-                     machine was left untouched: start() again once it has an SSH \
+                     machine was left untouched: retry attach() once it has an SSH \
                      endpoint, or terminate() it and start fresh (set [runpod] \
                      jupyter-access = \"proxy\" first if you want the public proxy).",
                     super::USER_ACTION_REQUIRED
@@ -236,7 +236,7 @@ impl RunPodRuntime {
                     anyhow::bail!(
                         "{} jupyter-access = \"tunnel\" but the pod has no SSH endpoint — \
                          cannot tunnel to its Jupyter, and strict tunnel mode forbids the \
-                         public proxy. The machine was left untouched: start() again once \
+                         public proxy. The machine was left untouched: retry attach() once \
                          it has an SSH endpoint, terminate() it, or set [runpod] \
                          jupyter-access = \"proxy\".",
                         super::USER_ACTION_REQUIRED
@@ -764,15 +764,17 @@ impl Connection for RunPodConnection {
         &self.jupyter
     }
 
+    fn workdir(&self) -> &str {
+        &self.remote_workdir
+    }
+
     fn startup_note(&self) -> Option<String> {
         self.degraded.then(|| {
             "SSH was unreachable when this session connected, so Jupyter is served \
              over RunPod's public proxy (token-protected) instead of the SSH tunnel. \
              The endpoint is sticky for this session — live kernels cannot migrate — \
-             so stop() and start() again to get the tunnel back. On-machine \
-             supervision (watchdog, budget deadline) installs automatically once SSH \
-             recovers (the heartbeat keeps retrying); until then, if SSH never \
-             recovers, an armed orphan guard may still stop this machine."
+             so stop() and attach() again to get the tunnel back. If no SSH transport \
+             exists, supervision and lease fencing are unavailable and cleanup is manual."
                 .to_string()
         })
     }

@@ -15,7 +15,10 @@ use crate::jupyter::rest::JupyterClient;
 use crate::runtime::{
     AnyRuntime, Connection, ConnectionContext, InstanceStatus, ProvisionRequest, Runtime,
 };
-use crate::state::{AppState, InstanceRecord, InstanceState, Phase, validate_instance_name};
+use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, Phase};
+
+const RESTART_GUIDANCE: &str =
+    "The server restarted (the session may have been backgrounded or resumed).";
 
 #[derive(Clone)]
 pub struct RemoteKernelsServer {
@@ -28,11 +31,9 @@ pub struct RemoteKernelsServer {
     budget: Option<f64>,
     /// Failure messages from background (wait=false) starts, drained by `status()`.
     start_failures: Arc<Mutex<Vec<String>>>,
-    /// Names currently being provisioned — closes the window between `start()`'s
-    /// "already active" check and the instance insert, where two concurrent
-    /// `start()` calls could otherwise both provision (and one machine would
-    /// leak untracked). Sync mutex: never held across an await.
-    starting: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// One lease owner identity per server process. Attach rotates the remote
+    /// generation to this owner; heartbeat refresh proves it remains current.
+    owner_uuid: String,
     /// Server instructions, rendered once at construction (they embed the
     /// project directory, which is fixed for the server's lifetime).
     instructions: String,
@@ -53,7 +54,13 @@ enum CleanupAction {
     Terminate,
 }
 
-/// How a failed start/reconnect was resolved, per the machine's cleanup
+#[derive(Clone, Copy)]
+enum ConnectMode {
+    Fresh,
+    Attach { force: bool, resumed: bool },
+}
+
+/// How a failed start/attach was resolved, per the machine's cleanup
 /// policy — used to tell the user what happened to the machine.
 #[derive(Clone, Copy)]
 enum FailedStartCleanup {
@@ -71,11 +78,11 @@ impl FailedStartCleanup {
             }
             Self::Stopped => {
                 "per its cleanup policy the machine was stopped, not terminated — storage \
-                 keeps billing; start() resumes it, terminate() deletes it"
+                 keeps billing; attach() resumes it, terminate() deletes it"
             }
             Self::LeftRunning => {
                 "cleanup is disabled for this machine, so it was left as-is and may still \
-                 bill — start() retries it, stop()/terminate() ends it"
+                 bill — attach() retries it, stop()/terminate() ends it"
             }
             Self::Unconfirmed => {
                 "cleanup could NOT be confirmed — the machine may still exist and bill; \
@@ -101,27 +108,12 @@ impl CleanupAction {
     }
 }
 
-/// RAII reservation of an instance name during `start()`.
-struct StartReservation {
-    names: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    name: String,
-}
-
-impl Drop for StartReservation {
-    fn drop(&mut self) {
-        if let Ok(mut names) = self.names.lock() {
-            names.remove(&self.name);
-        }
-    }
-}
-
 // --- Tool parameter types ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StartParams {
-    /// Name for this machine (default: "main"). Use distinct names to run
-    /// multiple machines concurrently.
-    pub name: Option<String>,
+    /// Optional display-only label. Machine identity is a generated ULID.
+    pub label: Option<String>,
     /// Runtime to start the machine on (default: the configured default-runtime).
     pub runtime: Option<String>,
     /// Override GPU type for this machine.
@@ -142,6 +134,14 @@ pub struct StartParams {
     /// the background — poll `status()` for readiness. Useful when starting
     /// several machines at once. Default: true (wait until ready).
     pub wait: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AttachParams {
+    /// Machine id from `start()` or `status()`. Legacy name ids are also accepted.
+    pub machine_id: String,
+    /// Take over a fresh active lease owned by another server.
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -263,6 +263,30 @@ fn validate_vast_offers(
     Ok(())
 }
 
+fn validate_label(label: Option<&str>) -> Result<(), String> {
+    let Some(label) = label else { return Ok(()) };
+    if label.is_empty() || label.len() > 64 {
+        return Err("Label must be 1-64 characters".to_string());
+    }
+    if !label
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err(format!(
+            "Invalid label {label:?}: only alphanumerics, '-' and '_' are allowed"
+        ));
+    }
+    Ok(())
+}
+
+fn attach_refusal_message(mode: ConnectMode, message: &str) -> String {
+    if matches!(mode, ConnectMode::Attach { resumed: true, .. }) {
+        format!("machine was resumed and is billing; attach refused: {message}")
+    } else {
+        message.to_string()
+    }
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -275,26 +299,22 @@ impl RemoteKernelsServer {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             budget,
             start_failures: Arc::new(Mutex::new(Vec::new())),
-            starting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            owner_uuid: uuid::Uuid::new_v4().to_string(),
             instructions,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Spin up a GPU machine. Uses settings from remote-kernels.toml, with optional overrides.
-    ///
-    /// If a machine with this name exists from a previous session (stopped or running),
-    /// reconnects to it instead of creating a new one. Use `terminate()` first for a fresh
-    /// machine. To run several machines concurrently, call `start()` with distinct names
-    /// (consider wait=false to start them in parallel, then poll `status()`).
+    /// Create a fresh GPU machine with a generated id. Use `attach()` to reconnect.
     #[tool(name = "start")]
     pub async fn start(&self, params: Parameters<StartParams>) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
         let params = params.0;
 
-        let name = params.name.unwrap_or_else(|| "main".to_string());
-        if let Err(msg) = validate_instance_name(&name) {
-            return err_text(msg);
+        let name = crate::ulid::new();
+        let label = params.label;
+        if let Err(message) = validate_label(label.as_deref()) {
+            return err_text(message);
         }
         let wait = params.wait.unwrap_or(true);
         let runtime_name = params
@@ -307,60 +327,6 @@ impl RemoteKernelsServer {
             &runtime_name,
         ) {
             return err_text(msg);
-        }
-
-        // Reserve the name for the duration of this call (released on return).
-        let _reservation = {
-            let mut starting = self
-                .starting
-                .lock()
-                .map_err(|_| McpError::internal_error("start reservation poisoned", None))?;
-            if !starting.insert(name.clone()) {
-                return err_text(format!(
-                    "Machine {name:?} is already being started by a concurrent call."
-                ));
-            }
-            StartReservation {
-                names: Arc::clone(&self.starting),
-                name: name.clone(),
-            }
-        };
-
-        // Already active in memory?
-        {
-            let state = self.state.lock().await;
-            if let Some(inst) = state.instances.get(&name) {
-                let phase = match inst.phase {
-                    Phase::Provisioning => "still provisioning — poll status()",
-                    Phase::Running => "running",
-                    Phase::Stopped => "stopped",
-                };
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Machine {name:?} is already {phase} (id: {}). Use status() to check it, \
-                     or stop()/terminate() first. To run an additional machine, pass a \
-                     different name to start().",
-                    inst.external_id
-                ))]));
-            }
-        }
-
-        // A record from a previous session?
-        let record = {
-            let state = self.state.lock().await;
-            crate::state::load_instance_record(&state.project_dir, &name)
-        };
-        if let Some(record) = record {
-            if params.gpu_type.is_some() || params.image.is_some() || params.vast_offers.is_some() {
-                // Don't silently reconnect to a machine with different settings.
-                return err_text(format!(
-                    "An existing machine ({}) named {name:?} was found from a previous session. \
-                     Use terminate() to delete it before starting one with different settings.",
-                    record.external_id
-                ));
-            }
-            if let Some(result) = self.try_reconnect(&name, record).await {
-                return result;
-            }
         }
 
         // New machine.
@@ -417,6 +383,7 @@ impl RemoteKernelsServer {
             let mut state = self.state.lock().await;
             let inst = InstanceState::provisioning(
                 name.clone(),
+                label.clone(),
                 runtime_name.clone(),
                 handle.external_id.clone(),
                 handle.gpu_name.clone(),
@@ -442,16 +409,24 @@ impl RemoteKernelsServer {
             .unwrap_or_default();
 
         if wait {
-            match self.finalize_start(&name, &handle.external_id).await {
+            match self
+                .finalize_start(&name, &handle.external_id, ConnectMode::Fresh, None)
+                .await
+            {
                 Ok(summary) => Ok(CallToolResult::success(vec![Content::text(format!(
                     "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel.{note}"
                 ))])),
                 Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
                     // Not a failure — the machine is queued/waiting for
                     // capacity. Keep it and keep finalizing in the background.
-                    self.spawn_background_finalize(&name, &handle.external_id, &runtime_name);
+                    self.spawn_background_finalize(
+                        &name,
+                        &handle.external_id,
+                        &runtime_name,
+                        ConnectMode::Fresh,
+                    );
                     Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Machine {name:?} (id: {}) is still queued or waiting for capacity. \
+                        "Machine {name} (provider id: {}) is still queued or waiting for capacity. \
                          It was NOT cleaned up — setup continues in the background. Poll \
                          status() until it shows running, or terminate(instance=\"{name}\") \
                          to give up.{note}",
@@ -475,12 +450,212 @@ impl RemoteKernelsServer {
             }
         } else {
             // Finish setup in the background; failures are reported via status().
-            self.spawn_background_finalize(&name, &handle.external_id, &runtime_name);
+            self.spawn_background_finalize(
+                &name,
+                &handle.external_id,
+                &runtime_name,
+                ConnectMode::Fresh,
+            );
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Machine {name:?} is provisioning (id: {}, GPU: {}). Setup continues in the \
+                "Machine {name} is provisioning (provider id: {}, GPU: {}). Setup continues in the \
                  background — poll status() until it shows running before creating kernels.{note}",
                 handle.external_id, handle.gpu_name
             ))]))
+        }
+    }
+
+    /// Reconnect to a durable machine by id. Use force only for an intentional takeover.
+    #[tool(name = "attach")]
+    pub async fn attach(
+        &self,
+        params: Parameters<AttachParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let machine_id = params.machine_id;
+        if let Err(message) = crate::state::validate_machine_id(&machine_id) {
+            return err_text(message);
+        }
+
+        let (project_dir, record) = {
+            let state = self.state.lock().await;
+            let Some(record) = crate::state::load_instance_record(&state.project_dir, &machine_id)
+            else {
+                return err_text(Self::unknown_machine_message(&state, &machine_id));
+            };
+            (state.project_dir.clone(), record)
+        };
+        let operation_lock = Self::acquire_operation_lock(&project_dir, &machine_id).await?;
+        let prior_fence = match self.claim_attach_slot(&machine_id).await {
+            Ok(prior_fence) => prior_fence,
+            Err(message) => return err_text(message),
+        };
+        let runtime = self.runtime_for(&record.runtime).await?;
+
+        let provider_status = runtime
+            .describe(&record.external_id)
+            .await
+            .map_err(|error| {
+                McpError::internal_error(
+                    format!(
+                        "Could not verify machine {machine_id} ({}): {error}. Its record was kept.",
+                        record.external_id
+                    ),
+                    None,
+                )
+            })?;
+        match &provider_status {
+            InstanceStatus::Gone => {
+                self.state
+                    .lock()
+                    .await
+                    .clear_record(&machine_id)
+                    .map_err(|error| {
+                        McpError::internal_error(
+                            format!("Failed to clear gone machine record: {error}"),
+                            None,
+                        )
+                    })?;
+                return err_text(format!(
+                    "Machine {machine_id} is gone at the provider; its durable record was cleared."
+                ));
+            }
+            InstanceStatus::Unknown(status) => {
+                return err_text(format!(
+                    "Machine {machine_id} has unexpected provider status {status:?}; record kept."
+                ));
+            }
+            InstanceStatus::Stopped | InstanceStatus::Running | InstanceStatus::Provisioning => {}
+        }
+
+        let Some((jupyter_token, ssh_key_path)) = record.jupyter_token.clone().zip(
+            record
+                .ssh_key_path
+                .clone()
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.exists()),
+        ) else {
+            return err_text(format!(
+                "Machine {machine_id} is missing its SSH key or Jupyter token; record kept."
+            ));
+        };
+        let resumed = provider_status == InstanceStatus::Stopped;
+        if resumed {
+            self.state.lock().await.reset_known_hosts(&machine_id);
+            runtime.resume(&record.external_id).await.map_err(|error| {
+                McpError::internal_error(
+                    format!("Failed to resume machine {machine_id}: {error}"),
+                    None,
+                )
+            })?;
+            let mut resumed_record = record.clone();
+            resumed_record.phase = Phase::Running;
+            self.state
+                .lock()
+                .await
+                .save_record(&machine_id, &resumed_record)
+                .map_err(|error| {
+                    McpError::internal_error(
+                        format!(
+                            "Machine {machine_id} was resumed and is billing, but its running state could not be persisted: {error}"
+                        ),
+                        None,
+                    )
+                })?;
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            let mut instance = InstanceState::provisioning(
+                machine_id.clone(),
+                record.label.clone(),
+                record.runtime.clone(),
+                record.external_id.clone(),
+                record
+                    .gpu_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                record.cost_per_hr,
+                record.cleanup,
+                jupyter_token,
+                ssh_key_path,
+                record.proxy_port_mapped,
+            );
+            // A fenced husk may be replaced so attach can try to reacquire,
+            // but it stays fenced until acquire proves ownership of the new
+            // generation. A failed attach therefore cannot reopen a
+            // destructive record-only path in the superseded process.
+            instance.fenced = prior_fence;
+            if let Some(mut previous) = state.instances.insert(machine_id.clone(), instance) {
+                previous.stop_heartbeat();
+            }
+        }
+
+        match self
+            .finalize_start(
+                &machine_id,
+                &record.external_id,
+                ConnectMode::Attach {
+                    force: params.force.unwrap_or(false),
+                    resumed,
+                },
+                Some(operation_lock),
+            )
+            .await
+        {
+            Ok(summary) => {
+                let jupyter = self.state.lock().await.instances[&machine_id]
+                    .jupyter
+                    .clone();
+                let existing = jupyter.list_kernels().await.map_err(|error| {
+                    McpError::internal_error(
+                        format!("Attached, but kernel listing failed: {error}"),
+                        None,
+                    )
+                })?;
+                let recovery_note = if existing.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\n{} existing kernel(s) are running; existing kernels on this machine are not yet rebound.",
+                        existing.len()
+                    )
+                };
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Attached to machine.\n{summary}{recovery_note}"
+                ))]))
+            }
+            Err(error) if error.is::<crate::runtime::StillProvisioning>() => {
+                self.spawn_background_finalize(
+                    &machine_id,
+                    &record.external_id,
+                    &record.runtime,
+                    ConnectMode::Attach {
+                        force: params.force.unwrap_or(false),
+                        resumed,
+                    },
+                );
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Machine {machine_id} is still provisioning; attachment continues in the background. Poll status()."
+                ))]))
+            }
+            Err(error) => {
+                let mut state = self.state.lock().await;
+                let keep_fenced_husk = state
+                    .instances
+                    .get(&machine_id)
+                    .is_some_and(|instance| instance.fenced.is_some());
+                if !keep_fenced_husk && let Some(mut instance) = state.instances.remove(&machine_id)
+                {
+                    instance.stop_heartbeat();
+                }
+                let detail = format!("{error:#}");
+                let prefix = if resumed && !detail.contains("resumed and is billing") {
+                    format!("Machine {machine_id} was resumed and is billing; attach failed")
+                } else {
+                    format!("Attach refused for machine {machine_id}")
+                };
+                err_text(format!("{prefix}: {detail}"))
+            }
         }
     }
 
@@ -509,7 +684,7 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(report)]))
     }
 
-    /// Stop a machine. It is preserved and can be resumed with `start()`, but storage
+    /// Stop a machine. It is preserved and can be resumed with `attach()`, but storage
     /// costs may still apply. Use `terminate()` to delete it entirely.
     #[tool(name = "stop")]
     pub async fn stop(
@@ -518,22 +693,29 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let requested = params.0.instance;
 
-        let name = {
+        let resolved = {
             let state = self.state.lock().await;
-            match state.resolve_instance(requested.as_deref()) {
-                Ok(name) => name,
-                Err(msg) => {
-                    // Maybe it's a stopped machine known only on disk.
-                    if let Some(name) = self.resolve_record_only(requested.as_deref()).await {
-                        return err_text(format!(
-                            "Machine {name:?} is already stopped. Use start(name=\"{name}\") to \
-                             resume it or terminate(instance=\"{name}\") to delete it."
-                        ));
-                    }
-                    return err_text(msg);
+            state.resolve_instance(requested.as_deref())
+        };
+        let name = match resolved {
+            Ok(name) => name,
+            Err(message) => {
+                if let Some(name) = self.resolve_record_only(requested.as_deref()).await {
+                    return err_text(format!(
+                        "Machine {name} is already stopped. Use attach(\"{name}\") to \
+                         resume it or terminate(instance=\"{name}\") to delete it."
+                    ));
                 }
+                return err_text(message);
             }
         };
+
+        {
+            let state = self.state.lock().await;
+            if let Some(message) = state.instances.get(&name).and_then(Self::fenced_message) {
+                return err_text(message);
+            }
+        }
 
         let Some(target) = self.live_target(&name).await else {
             return err_text(format!("Machine {name:?} is no longer active."));
@@ -546,8 +728,8 @@ impl RemoteKernelsServer {
 
         let total = self.state.lock().await.total_spend();
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Machine {name:?} stopped. Session cost: ${total:.2}. \
-             Use start(name=\"{name}\") to resume it or terminate(instance=\"{name}\") to delete it.",
+            "Machine {name} stopped. Session cost: ${total:.2}. \
+             Use attach(\"{name}\") to resume it or terminate(instance=\"{name}\") to delete it.",
         ))]))
     }
 
@@ -562,7 +744,16 @@ impl RemoteKernelsServer {
         // Live instance, or a record-only (stopped/crashed) machine.
         let live_name = {
             let state = self.state.lock().await;
-            state.resolve_instance(requested.as_deref()).ok()
+            match state.resolve_instance(requested.as_deref()) {
+                Ok(name) => {
+                    if let Some(message) = state.instances.get(&name).and_then(Self::fenced_message)
+                    {
+                        return err_text(message);
+                    }
+                    Some(name)
+                }
+                Err(_) => None,
+            }
         };
         let target = if let Some(name) = live_name {
             self.live_target(&name).await
@@ -576,10 +767,10 @@ impl RemoteKernelsServer {
                 }
             })
         } else {
-            return err_text("No machine is running. Call start() first.");
+            return err_text("No machine is attached in this server.");
         };
         let Some(target) = target else {
-            return err_text("No machine is running. Call start() first.");
+            return err_text("No machine is attached in this server.");
         };
 
         tracing::info!(instance = %target.name, external_id = %target.external_id, "Terminating machine...");
@@ -603,118 +794,93 @@ impl RemoteKernelsServer {
         &self,
         params: Parameters<InstanceParams>,
     ) -> Result<CallToolResult, McpError> {
-        struct LiveSnapshot {
-            name: String,
-            runtime: String,
-            external_id: String,
-            gpu: String,
-            cost_per_hr: f64,
-            uptime_mins: u64,
-            kernels: Vec<String>,
-            phase: Phase,
-            cleanup: Cleanup,
-        }
-
         let only = params.0.instance;
         let mut sections: Vec<String> = Vec::new();
-
-        // Background start failures are one-shot notifications.
         {
             let mut failures = self.start_failures.lock().await;
             sections.extend(failures.drain(..));
         }
 
-        // Live instances.
-        let live: Vec<LiveSnapshot> = {
+        let (records, live) = {
             let state = self.state.lock().await;
-            state
+            let records = crate::state::list_instance_records(&state.project_dir);
+            let live = state
                 .instances
-                .values()
-                .filter(|inst| only.as_deref().is_none_or(|o| o == inst.name))
-                .map(|inst| LiveSnapshot {
-                    name: inst.name.clone(),
-                    runtime: inst.runtime.clone(),
-                    external_id: inst.external_id.clone(),
-                    gpu: inst.gpu_name.clone(),
-                    cost_per_hr: inst.cost_per_hr,
-                    uptime_mins: inst.started_at.elapsed().as_secs() / 60,
-                    kernels: inst.kernel_ids.clone(),
-                    phase: inst.phase,
-                    cleanup: inst.cleanup,
+                .iter()
+                .map(|(id, instance)| {
+                    (
+                        id.clone(),
+                        (
+                            instance.phase,
+                            instance.gpu_name.clone(),
+                            instance.kernel_ids.clone(),
+                            instance.fenced,
+                            instance.started_at.elapsed().as_secs() / 60,
+                            instance.supervision_note.clone(),
+                        ),
+                    )
                 })
-                .collect()
+                .collect::<HashMap<_, _>>();
+            (records, live)
         };
-        let live_names: Vec<String> = live.iter().map(|i| i.name.clone()).collect();
 
-        for inst in live {
-            let provider_status = match self.runtime_for(&inst.runtime).await {
-                Ok(rt) => match rt.describe(&inst.external_id).await {
-                    Ok(status) => format!("{status:?}"),
-                    Err(e) => format!("query failed: {e}"),
-                },
-                Err(_) => "unknown (runtime unavailable)".to_string(),
-            };
-            let phase_note = match inst.phase {
-                Phase::Provisioning => " (provisioning — not ready yet)",
-                _ => "",
-            };
-            sections.push(format!(
-                "Machine: {} ({}, id {}){phase_note}\n\
-                 Status: {provider_status}\n\
-                 GPU: {}\n\
-                 Cost: ${:.2}/hr\n\
-                 Uptime: {} minutes\n\
-                 Cleanup: {}\n\
-                 Kernels: {}",
-                inst.name,
-                inst.runtime,
-                inst.external_id,
-                inst.gpu,
-                inst.cost_per_hr,
-                inst.uptime_mins,
-                match inst.cleanup {
-                    Cleanup::Stop => "stop",
-                    Cleanup::Terminate => "terminate",
-                    Cleanup::Disabled => "disabled",
-                },
-                if inst.kernels.is_empty() {
-                    "none".to_string()
-                } else {
-                    inst.kernels.join(", ")
-                },
-            ));
-        }
-
-        // Record-only machines (stopped, or from a previous session).
-        let records = {
-            let state = self.state.lock().await;
-            crate::state::list_instance_records(&state.project_dir)
-        };
-        for (name, record) in records {
-            if live_names.contains(&name) || only.as_deref().is_some_and(|o| o != name) {
-                continue;
-            }
+        for (id, record) in records
+            .into_iter()
+            .filter(|(id, _)| only.as_deref().is_none_or(|requested| requested == id))
+        {
             let provider_status = match self.runtime_for(&record.runtime).await {
-                Ok(rt) => match rt.describe(&record.external_id).await {
+                Ok(runtime) => match runtime.describe(&record.external_id).await {
                     Ok(status) => format!("{status:?}"),
-                    Err(e) => format!("query failed: {e}"),
+                    Err(error) => format!("query failed: {error}"),
                 },
-                Err(e) => format!("unknown ({e})"),
+                Err(error) => format!("unknown ({error})"),
             };
-            sections.push(format!(
-                "Machine: {name} ({}, id {}) — from a previous session\n\
-                 Status: {provider_status}\n\
-                 GPU: {}\n\
-                 Note: use start(name=\"{name}\") to reconnect or terminate(instance=\"{name}\") to delete.",
+            let live_info = live.get(&id);
+            let phase = live_info.map_or(record.phase, |info| info.0);
+            let gpu = live_info
+                .map(|info| info.1.as_str())
+                .or(record.gpu_name.as_deref())
+                .unwrap_or("unknown");
+            let mut annotations = Vec::new();
+            if crate::state::is_legacy_machine_id(&id) {
+                annotations.push("legacy");
+            }
+            if live_info.is_some_and(|info| info.3.is_some()) {
+                annotations.push("fenced");
+            }
+            let annotation = if annotations.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", annotations.join(", "))
+            };
+            let mut section = format!(
+                "Machine: {id}{annotation}\nLabel: {}\nPhase: {phase:?}\nProvider: {} ({provider_status})\nGPU: {gpu}\nCost: ${:.2}/hr",
+                record.label.as_deref().unwrap_or("none"),
                 record.runtime,
-                record.external_id,
-                record.gpu_name.as_deref().unwrap_or("unknown"),
-            ));
+                record.cost_per_hr,
+            );
+            if let Some((_, _, kernels, _, uptime_mins, supervision_note)) = live_info {
+                let _ = write!(
+                    section,
+                    "\nUptime: {uptime_mins} minutes\nKernels: {}",
+                    if kernels.is_empty() {
+                        "none".to_string()
+                    } else {
+                        kernels.join(", ")
+                    }
+                );
+                if let Some(caveat) = supervision_note {
+                    let _ = write!(section, "\nCaveat: {caveat}");
+                }
+            } else {
+                let _ = write!(section, "\nUse attach(\"{id}\") to reconnect.");
+            }
+            sections.push(section);
         }
 
         if sections.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No machine is currently running.",
+                "No durable machine records found.",
             )]));
         }
 
@@ -744,13 +910,16 @@ impl RemoteKernelsServer {
         self.check_budget().await?;
         let params = params.0;
 
-        let (instance_name, jupyter, ws_base, token) = {
+        let (instance_name, external_id, jupyter, ws_base, token) = {
             let state = self.state.lock().await;
             let name = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
-                Err(msg) => return err_text(msg),
+                Err(msg) => return err_text(Self::unknown_instance_message(&state, &msg)),
             };
             let inst = &state.instances[&name];
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
             if inst.phase != Phase::Running {
                 return err_text(format!(
                     "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
@@ -762,10 +931,15 @@ impl RemoteKernelsServer {
                 .ok_or_else(|| McpError::internal_error("Machine has no connection", None))?;
             (
                 name,
+                inst.external_id.clone(),
                 inst.jupyter.clone(),
                 conn.jupyter().ws_base.clone(),
                 inst.jupyter_token.clone(),
             )
+        };
+        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
         };
 
         // HTTP call happens outside the state lock.
@@ -829,6 +1003,28 @@ impl RemoteKernelsServer {
         let timeout_secs = params.timeout.unwrap_or(30);
         let queue = params.queue.unwrap_or(false);
 
+        let (guard_instance, guard_external_id) = {
+            let state = self.state.lock().await;
+            let Some(instance_name) = state
+                .instance_for_kernel(&params.kernel_id)
+                .map(String::from)
+            else {
+                return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
+            };
+            let instance = &state.instances[&instance_name];
+            if let Some(message) = Self::fenced_message(instance) {
+                return err_text(message);
+            }
+            (instance_name, instance.external_id.clone())
+        };
+        let mutation_guard = match self
+            .mutation_guard(&guard_instance, &guard_external_id)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
+        };
+
         let (mut result_rx, cell_number, kernel_id, instance_name, cleanup) = {
             let mut state = self.state.lock().await;
             let Some(instance_name) = state
@@ -838,6 +1034,9 @@ impl RemoteKernelsServer {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
             let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
             let cleanup = inst.cleanup;
 
             let Some(conn) = inst.kernel_connections.get(&params.kernel_id) else {
@@ -895,6 +1094,7 @@ impl RemoteKernelsServer {
 
             (rx, cell_number, kernel_id, instance_name, cleanup)
         };
+        drop(mutation_guard);
         // State lock dropped here — we can await freely.
 
         // Wait for result with timeout. Using select! so we can store the receiver on timeout.
@@ -987,6 +1187,9 @@ impl RemoteKernelsServer {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
             let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
 
             let key = (params.kernel_id.clone(), params.cell_number);
             let Some(rx) = inst.pending_executions.remove(&key) else {
@@ -1089,19 +1292,31 @@ impl RemoteKernelsServer {
             return err_text(msg);
         }
 
-        let (project_dir, conn) = {
+        let (name, external_id, project_dir, conn) = {
             let state = self.state.lock().await;
             let name = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
-                Err(msg) => return err_text(msg),
+                Err(msg) => return err_text(Self::unknown_instance_message(&state, &msg)),
             };
             let inst = &state.instances[&name];
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
             let Some(conn) = inst.connection.clone() else {
                 return err_text(format!(
                     "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
                 ));
             };
-            (state.project_dir.clone(), conn)
+            (
+                name,
+                inst.external_id.clone(),
+                state.project_dir.clone(),
+                conn,
+            )
+        };
+        let _mutation_guard = match self.mutation_guard(&name, &external_id).await {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
         };
 
         let result = conn
@@ -1131,9 +1346,12 @@ impl RemoteKernelsServer {
             let state = self.state.lock().await;
             let name = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
-                Err(msg) => return err_text(msg),
+                Err(msg) => return err_text(Self::unknown_instance_message(&state, &msg)),
             };
             let inst = &state.instances[&name];
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
             let Some(conn) = inst.connection.clone() else {
                 return err_text(format!(
                     "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
@@ -1158,13 +1376,21 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let (instance_name, jupyter) = {
+        let (instance_name, external_id, jupyter) = {
             let state = self.state.lock().await;
             let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
+            if let Some(message) = Self::fenced_message(&state.instances[&name]) {
+                return err_text(message);
+            }
             let jupyter = state.instances[&name].jupyter.clone();
-            (name, jupyter)
+            let external_id = state.instances[&name].external_id.clone();
+            (name, external_id, jupyter)
+        };
+        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
         };
 
         // HTTP call happens outside the state lock.
@@ -1193,12 +1419,23 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let jupyter = {
+        let (instance_name, external_id, jupyter) = {
             let state = self.state.lock().await;
-            let Some(name) = state.instance_for_kernel(&kernel_id) else {
+            let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
-            state.instances[name].jupyter.clone()
+            if let Some(message) = Self::fenced_message(&state.instances[&name]) {
+                return err_text(message);
+            }
+            (
+                name.clone(),
+                state.instances[&name].external_id.clone(),
+                state.instances[&name].jupyter.clone(),
+            )
+        };
+        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
         };
 
         // HTTP call happens outside the state lock.
@@ -1219,21 +1456,29 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let (instance_name, jupyter, ws_base, token) = {
+        let (instance_name, external_id, jupyter, ws_base, token) = {
             let state = self.state.lock().await;
             let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
             let inst = &state.instances[&name];
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
             let Some(conn) = inst.connection.as_ref() else {
                 return err_text("Machine connection is not available.");
             };
             (
                 name,
+                inst.external_id.clone(),
                 inst.jupyter.clone(),
                 conn.jupyter().ws_base.clone(),
                 inst.jupyter_token.clone(),
             )
+        };
+        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
         };
 
         // Restart via REST API — outside the state lock.
@@ -1289,6 +1534,35 @@ impl RemoteKernelsServer {
     /// Get a clone of the shared state for use outside the MCP server.
     pub fn shared_state(&self) -> Arc<Mutex<AppState>> {
         Arc::clone(&self.state)
+    }
+
+    /// Called only while the machine operation lock is held. A fenced entry
+    /// may be replaced after provider checks, but its fence is carried into
+    /// the replacement until lease acquire succeeds. A live entry owns the
+    /// slot and refuses a second same-server attach.
+    async fn claim_attach_slot(&self, machine_id: &str) -> Result<Option<FenceReason>, String> {
+        let mut state = self.state.lock().await;
+        let Some(existing) = state.instances.get_mut(machine_id) else {
+            return Ok(None);
+        };
+        if let Some(reason) = existing.fenced {
+            existing.stop_heartbeat();
+            return Ok(Some(reason));
+        }
+        Err(format!(
+            "Machine {machine_id} is already attached in this server."
+        ))
+    }
+
+    async fn acquire_operation_lock(
+        project_dir: &std::path::Path,
+        machine_id: &str,
+    ) -> Result<std::fs::File, McpError> {
+        crate::state::acquire_operation_lock(project_dir, machine_id)
+            .await
+            .map_err(|error| {
+                McpError::internal_error(format!("Could not lock machine operation: {error}"), None)
+            })
     }
 
     /// Get (building lazily) the runtime with the given name. Credentials are
@@ -1360,167 +1634,138 @@ impl RemoteKernelsServer {
             .values()
             .flat_map(|i| i.kernel_ids.iter().cloned())
             .collect();
-        format!(
+        let base = format!(
             "Kernel {kernel_id} not found. Available kernels: {}",
             if all_kernels.is_empty() {
                 "none".to_string()
             } else {
                 all_kernels.join(", ")
             }
-        )
-    }
-
-    /// Try to reconnect to a machine recorded from a previous session/crash.
-    ///
-    /// Returns `Some(Ok(...))` if reconnection succeeded, `Some(Err(...))` if
-    /// it was attempted but failed, or `None` if there's nothing to reconnect
-    /// to (caller should create a new machine).
-    #[allow(clippy::too_many_lines)] // sequential status dispositions; splitting hurts readability
-    async fn try_reconnect(
-        &self,
-        name: &str,
-        record: InstanceRecord,
-    ) -> Option<Result<CallToolResult, McpError>> {
-        let runtime = match self.runtime_for(&record.runtime).await {
-            Ok(rt) => rt,
-            Err(e) => return Some(Err(e)),
-        };
-
-        // A record whose credentials are unusable still points at a possibly
-        // billing machine — never silently replace it (the new machine's
-        // record would overwrite this one and the old machine is forgotten).
-        let credentials = record.jupyter_token.clone().zip(
-            record
-                .ssh_key_path
-                .clone()
-                .map(std::path::PathBuf::from)
-                .filter(|p| p.exists()),
         );
-        let Some((jupyter_token, ssh_key_path)) = credentials else {
-            return Some(err_text(format!(
-                "A machine ({}) named {name:?} exists from a previous session, but its \
-                 credentials (SSH key / Jupyter token) are missing, so it can't be reconnected. \
-                 Use terminate(instance=\"{name}\") to delete it, then start() again.",
-                record.external_id
-            )));
-        };
+        Self::with_attach_guidance(state, &base)
+    }
 
-        let status = match runtime.describe(&record.external_id).await {
-            Ok(status) => status,
-            Err(e) => {
-                // A transient provider error is NOT proof the machine is gone
-                // — clearing the record here would abandon a possibly-billing
-                // machine. Surface the error and keep the record; the user can
-                // retry or terminate() explicitly. (describe() maps a real
-                // 404 to InstanceStatus::Gone, handled below.)
-                return Some(Err(McpError::internal_error(
-                    format!(
-                        "Could not verify the previous machine {} ({}): {e}. \
-                         Its record was kept — retry start(), or terminate(instance=\"{name}\") \
-                         to delete it.",
-                        record.external_id, record.runtime
-                    ),
-                    None,
-                )));
-            }
-        };
+    fn unknown_machine_message(state: &AppState, machine_id: &str) -> String {
+        Self::with_attach_guidance(state, &format!("Machine {machine_id} was not found."))
+    }
 
-        tracing::info!(external_id = %record.external_id, ?status, "Found existing machine from previous session");
+    fn unknown_instance_message(state: &AppState, message: &str) -> String {
+        Self::with_attach_guidance(state, message)
+    }
 
-        match status {
-            // Running now, or still coming up (e.g. crash mid-provision) —
-            // finalize_start's wait_running handles both. The TOFU pin is
-            // deliberately KEPT: a machine that never stopped must present
-            // the pinned host key, and this reconnect is exactly where the
-            // pin protects against a redirect. If the machine was resumed
-            // OUTSIDE this server (console), its new host key surfaces as an
-            // actionable "host key mismatch" error that keeps the machine —
-            // never as a silent re-pin, and never as a terminate.
-            InstanceStatus::Running | InstanceStatus::Provisioning => {}
-            InstanceStatus::Stopped => {
-                tracing::info!(external_id = %record.external_id, "Resuming stopped machine...");
-                // A stop/resume cycle may legitimately move the machine (new
-                // public IP, new host key) — drop the TOFU pin for the new
-                // trust session.
-                self.state.lock().await.reset_known_hosts(name);
-                if let Err(e) = runtime.resume(&record.external_id).await {
-                    return Some(Err(McpError::internal_error(
-                        format!("Failed to resume machine {}: {e}", record.external_id),
-                        None,
-                    )));
-                }
-            }
-            InstanceStatus::Gone => {
-                // Definitive: the provider no longer knows this machine.
-                tracing::info!(external_id = %record.external_id, "Previous machine is gone, creating new machine");
-                let state = self.state.lock().await;
-                let _ = state.clear_record(name);
-                return None;
-            }
-            InstanceStatus::Unknown(s) => {
-                // NOT proof the machine is gone — it may still be billing.
-                // Keep the record; the user decides.
-                return Some(err_text(format!(
-                    "The previous machine {} named {name:?} is in an unexpected state ({s}). \
-                     Its record was kept — retry start(), or terminate(instance=\"{name}\") \
-                     to delete it.",
-                    record.external_id
-                )));
-            }
+    fn with_attach_guidance(state: &AppState, base: &str) -> String {
+        let records = crate::state::list_instance_records(&state.project_dir);
+        if records.is_empty() {
+            return format!("{base}\nCall start() to create a machine.");
         }
+        let machines = records
+            .into_iter()
+            .map(|(id, record)| {
+                format!(
+                    "- {id} | label: {} | phase: {:?}",
+                    record.label.as_deref().unwrap_or("none"),
+                    record.phase
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let restart = if state.instances.is_empty() {
+            format!("\n\n{RESTART_GUIDANCE}")
+        } else {
+            String::new()
+        };
+        format!("{base}{restart}\nDurable machines:\n{machines}\nUse attach(<id>).")
+    }
 
-        // Register the instance and finish setup through the shared path.
-        {
-            let mut state = self.state.lock().await;
-            let inst = InstanceState::provisioning(
-                name.to_string(),
-                record.runtime.clone(),
-                record.external_id.clone(),
-                record
-                    .gpu_name
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                record.cost_per_hr,
-                record.cleanup,
-                jupyter_token.clone(),
-                ssh_key_path,
-                record.proxy_port_mapped,
+    fn fenced_message(instance: &InstanceState) -> Option<String> {
+        instance.fenced.map(|reason| {
+            let label = instance.label.as_deref().unwrap_or("no label");
+            match reason {
+                FenceReason::TakenOver => format!(
+                    "another session took over machine {} ({label})",
+                    instance.name
+                ),
+                FenceReason::Finalizing => format!(
+                    "machine {} ({label}) is finalizing; outcome/status must be resolved",
+                    instance.name
+                ),
+                FenceReason::AuthorityUnknown => format!(
+                    "lease authority is unknown for machine {} ({label}); no machine mutations are allowed",
+                    instance.name
+                ),
+            }
+        })
+    }
+
+    /// Last gate before any provider mutation. When this process has a lease,
+    /// refresh is a generation-checked proof of current ownership; ambiguity
+    /// preserves the machine instead of mutating it.
+    async fn verify_mutation_authority(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+    ) -> anyhow::Result<()> {
+        let lease = {
+            let state = self.state.lock().await;
+            let Some(instance) = state.instances.get(machine_id) else {
+                return Ok(());
+            };
+            anyhow::ensure!(
+                instance.external_id == external_id,
+                "machine generation changed before mutation"
             );
-            state.instances.insert(name.to_string(), inst);
-        }
-
-        match self.finalize_start(name, &record.external_id).await {
-            Ok(summary) => Some(Ok(CallToolResult::success(vec![Content::text(format!(
-                "Reconnected to existing machine!\n{summary}\n\nUse create_kernel() to start a kernel."
-            ))]))),
-            Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
-                self.spawn_background_finalize(name, &record.external_id, &record.runtime);
-                Some(Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Machine {name:?} (id: {}) from the previous session is still queued or \
-                     waiting for capacity. Setup continues in the background — poll status().",
-                    record.external_id
-                ))])))
+            if let Some(message) = Self::fenced_message(instance) {
+                anyhow::bail!(message);
             }
-            Err(e) if crate::runtime::error_requires_user_action(&e) => {
-                // The machine is fine — a trust/config question. Keep it.
-                Some(Err(McpError::internal_error(
-                    format!("Reconnect needs attention: {e:#}"),
-                    None,
-                )))
+            instance.lease_generation.zip(instance.connection.clone())
+        };
+        let Some((generation, connection)) = lease else {
+            return Ok(());
+        };
+        match crate::machine_scripts::refresh(&connection, generation, &self.owner_uuid).await {
+            Ok(()) => Ok(()),
+            Err(crate::machine_scripts::LeaseError::Fenced) => {
+                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
+                    instance.fenced = Some(FenceReason::TakenOver);
+                    instance.lease_generation = None;
+                }
+                anyhow::bail!("another session took over machine {machine_id}")
             }
-            Err(e) => {
-                let outcome = self
-                    .cleanup_failed_start(name, &record.external_id, &record.runtime, false)
-                    .await;
-                Some(Err(McpError::internal_error(
-                    format!("Failed to reconnect: {e} ({})", outcome.describe()),
-                    None,
-                )))
+            Err(crate::machine_scripts::LeaseError::Finalizing) => {
+                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
+                    instance.fenced = Some(FenceReason::Finalizing);
+                    instance.lease_generation = None;
+                }
+                anyhow::bail!("machine {machine_id} is finalizing")
+            }
+            Err(error) => {
+                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
+                    instance.fenced = Some(FenceReason::AuthorityUnknown);
+                    instance.lease_generation = None;
+                }
+                anyhow::bail!(
+                    "could not verify lease authority for machine {machine_id}; no mutation issued: {error}"
+                )
             }
         }
     }
 
-    /// Shared post-allocation path for new machines and reconnects: wait for
+    async fn mutation_guard(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+    ) -> Result<std::fs::File, String> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let guard = crate::state::acquire_operation_lock(&project_dir, machine_id)
+            .await
+            .map_err(|error| format!("could not lock machine operation: {error}"))?;
+        self.verify_mutation_authority(machine_id, external_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(guard)
+    }
+
+    /// Shared post-allocation path for new machines and attachments: wait for
     /// running, open the connection, start the heartbeat, wait for Jupyter,
     /// then mark the instance Running. Returns a human-readable summary.
     ///
@@ -1528,7 +1773,13 @@ impl RemoteKernelsServer {
     /// terminated and recreated while this runs (background start), all
     /// write-backs bail instead of clobbering the new machine's state.
     #[allow(clippy::too_many_lines)]
-    async fn finalize_start(&self, name: &str, external_id: &str) -> anyhow::Result<String> {
+    async fn finalize_start(
+        &self,
+        name: &str,
+        external_id: &str,
+        mode: ConnectMode,
+        operation_lock: Option<std::fs::File>,
+    ) -> anyhow::Result<String> {
         fn same_generation<'a>(
             state: &'a mut AppState,
             name: &str,
@@ -1542,6 +1793,7 @@ impl RemoteKernelsServer {
         }
 
         let (
+            project_dir,
             runtime_name,
             jupyter_token,
             ssh_key_path,
@@ -1550,9 +1802,11 @@ impl RemoteKernelsServer {
             proxy_port_mapped,
         ) = {
             let mut state = self.state.lock().await;
+            let project_dir = state.project_dir.clone();
             let known_hosts_path = state.known_hosts_path(name);
             let inst = same_generation(&mut state, name, external_id)?;
             (
+                project_dir,
                 inst.runtime.clone(),
                 inst.jupyter_token.clone(),
                 inst.ssh_key_path.clone(),
@@ -1560,6 +1814,12 @@ impl RemoteKernelsServer {
                 inst.cleanup,
                 inst.proxy_port_mapped,
             )
+        };
+        let operation_lock = match operation_lock {
+            Some(lock) => lock,
+            None => Self::acquire_operation_lock(&project_dir, name)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?,
         };
         let runtime = self
             .runtime_for(&runtime_name)
@@ -1584,29 +1844,46 @@ impl RemoteKernelsServer {
         let jupyter = JupyterClient::new(&endpoint.http_base, &jupyter_token);
 
         // Update instance details.
-        {
+        let previous_heartbeat = {
             let mut state = self.state.lock().await;
             let inst = same_generation(&mut state, name, external_id)?;
             inst.gpu_name.clone_from(&handle.gpu_name);
             inst.cost_per_hr = handle.cost_per_hr.unwrap_or(inst.cost_per_hr);
             inst.jupyter = jupyter.clone();
             inst.connection = Some(Arc::clone(&conn));
+            inst.heartbeat.take()
+        };
+        if let Some(previous_heartbeat) = previous_heartbeat {
+            previous_heartbeat.stop();
         }
 
         // Heartbeat + on-machine watchdog with the shared budget feed.
-        let hb = crate::heartbeat::start(
+        let acquire_mode = match mode {
+            ConnectMode::Fresh => crate::heartbeat::AcquireMode::Fresh,
+            ConnectMode::Attach { force, .. } => crate::heartbeat::AcquireMode::Attach { force },
+        };
+        let (hb, mut supervision) = crate::heartbeat::start(
             Arc::clone(&conn),
             name.to_string(),
+            external_id.to_string(),
             cleanup,
             self.config.watchdog_stale_secs,
-            self.config.startup_commands.clone(),
+            acquire_mode,
+            self.owner_uuid.clone(),
             Arc::clone(&self.state),
             self.budget,
+            self.config.startup_commands.clone(),
+            operation_lock,
         );
         {
             let mut state = self.state.lock().await;
             match same_generation(&mut state, name, external_id) {
-                Ok(inst) => inst.heartbeat = Some(hb),
+                Ok(inst) => {
+                    if let Some(old) = inst.heartbeat.take() {
+                        old.stop();
+                    }
+                    inst.heartbeat = Some(hb);
+                }
                 Err(e) => {
                     hb.stop();
                     return Err(e);
@@ -1616,10 +1893,38 @@ impl RemoteKernelsServer {
 
         // Wait for Jupyter to be ready — without holding the state lock (this
         // can poll for minutes; other instances must stay operable meanwhile).
-        jupyter
-            .wait_until_ready()
-            .await
-            .map_err(|e| anyhow::anyhow!("Jupyter failed to start: {e}"))?;
+        if let Err(error) = jupyter.wait_until_ready().await {
+            let heartbeat = self
+                .state
+                .lock()
+                .await
+                .instances
+                .get_mut(name)
+                .and_then(|instance| instance.heartbeat.take());
+            if let Some(heartbeat) = heartbeat {
+                heartbeat.stop();
+            }
+            anyhow::bail!("Jupyter failed to start: {error}");
+        }
+
+        if *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), supervision.changed())
+                .await;
+        }
+        let supervision_status = supervision.borrow().clone();
+        match supervision_status {
+            crate::heartbeat::SupervisionStatus::Refused(message) => {
+                anyhow::bail!(attach_refusal_message(mode, &message));
+            }
+            crate::heartbeat::SupervisionStatus::Pending => {
+                if let Some(instance) = self.state.lock().await.instances.get_mut(name) {
+                    instance.supervision_note =
+                        Some("supervision setup is retrying in the background".to_string());
+                }
+            }
+            crate::heartbeat::SupervisionStatus::Active
+            | crate::heartbeat::SupervisionStatus::Unsupervisable(_) => {}
+        }
 
         // Mark Running and persist. The billing clock deliberately keeps its
         // provisioning start time — providers bill from allocation.
@@ -1640,9 +1945,16 @@ impl RemoteKernelsServer {
                 }
             };
             let mut summary = format!(
-                "- Name: {name}\n- ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Jupyter: {access}\n- Status: RUNNING",
-                inst.external_id, inst.runtime, inst.gpu_name, inst.cost_per_hr
+                "- ID: {name}\n- Label: {}\n- Provider ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Jupyter: {access}\n- Status: RUNNING",
+                inst.label.as_deref().unwrap_or("none"),
+                inst.external_id,
+                inst.runtime,
+                inst.gpu_name,
+                inst.cost_per_hr
             );
+            if let Some(caveat) = &inst.supervision_note {
+                let _ = write!(summary, "\n- Caveat: {caveat}");
+            }
             if let Some(budget) = self.budget {
                 let total_spend = state.total_spend();
                 let remaining = budget - total_spend;
@@ -1671,7 +1983,13 @@ impl RemoteKernelsServer {
     /// Finish machine setup in the background, retrying while the machine is
     /// still legitimately provisioning (Kueue queue, capacity wait). Real
     /// failures clean up the machine and surface via `status()`.
-    fn spawn_background_finalize(&self, name: &str, external_id: &str, runtime_name: &str) {
+    fn spawn_background_finalize(
+        &self,
+        name: &str,
+        external_id: &str,
+        runtime_name: &str,
+        mode: ConnectMode,
+    ) {
         let server = self.clone();
         let name = name.to_string();
         let external_id = external_id.to_string();
@@ -1686,7 +2004,7 @@ impl RemoteKernelsServer {
             // provision timeout either, hence the small cap.
             let mut hard_failures = 0;
             loop {
-                let error = match server.finalize_start(&name, &external_id).await {
+                let error = match server.finalize_start(&name, &external_id, mode, None).await {
                     Ok(_) => return,
                     Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
                         // Bounded patience: metered machines bill while
@@ -1731,6 +2049,27 @@ impl RemoteKernelsServer {
                 if crate::runtime::error_requires_user_action(&error) {
                     server.start_failures.lock().await.push(format!(
                         "Machine {name:?} needs attention (machine kept): {error:#}"
+                    ));
+                    return;
+                }
+                if matches!(mode, ConnectMode::Attach { .. }) {
+                    let mut state = server.state.lock().await;
+                    if state
+                        .instances
+                        .get(&name)
+                        .is_some_and(|instance| instance.external_id == external_id)
+                        && let Some(mut instance) = state.instances.remove(&name)
+                    {
+                        instance.stop_heartbeat();
+                    }
+                    drop(state);
+                    let billing = if matches!(mode, ConnectMode::Attach { resumed: true, .. }) {
+                        " The machine was resumed and is billing."
+                    } else {
+                        ""
+                    };
+                    server.start_failures.lock().await.push(format!(
+                        "Attach to machine {name} failed; machine and record kept.{billing} {error:#}"
                     ));
                     return;
                 }
@@ -1791,7 +2130,7 @@ impl RemoteKernelsServer {
         (elapsed > timeout).then_some(elapsed)
     }
 
-    /// Clean up after a failed start/reconnect, honoring the machine's
+    /// Clean up after a failed start, honoring the machine's
     /// cleanup policy: terminate (default), stop (keep the record so the
     /// machine can be resumed — a reconnected machine may hold real data),
     /// or disabled (leave the machine as-is; keep the record). A machine
@@ -1815,6 +2154,22 @@ impl RemoteKernelsServer {
         force_terminate: bool,
     ) -> FailedStartCleanup {
         tracing::warn!(instance = %name, external_id, "Cleaning up after failed start");
+
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let _operation_lock = match Self::acquire_operation_lock(&project_dir, name).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(
+                    instance = name,
+                    "Could not lock failed-start cleanup: {error:?}"
+                );
+                return FailedStartCleanup::Unconfirmed;
+            }
+        };
+        if let Err(error) = self.verify_mutation_authority(name, external_id).await {
+            tracing::warn!(instance = name, "Failed-start cleanup suppressed: {error}");
+            return FailedStartCleanup::Unconfirmed;
+        }
 
         // Drop the in-memory instance (snapshotting the billed provisioning
         // time) and capture its record for the policy decision, falling back
@@ -1941,7 +2296,7 @@ impl RemoteKernelsServer {
     /// The single implementation of "stop or terminate one machine": provider
     /// call first, then (only on success) spend snapshot, heartbeat stop, and
     /// record update — all pinned to the target's `external_id` so a machine
-    /// recreated under the same name concurrently is never touched.
+    /// replaced under the same record key concurrently is never touched.
     ///
     /// On provider failure nothing is forgotten: memory and records stay, so
     /// the machine remains visible and cleanup can be retried.
@@ -1950,6 +2305,12 @@ impl RemoteKernelsServer {
         target: &CleanupTarget,
         action: CleanupAction,
     ) -> anyhow::Result<()> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let _operation_lock = Self::acquire_operation_lock(&project_dir, &target.name)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        self.verify_mutation_authority(&target.name, &target.external_id)
+            .await?;
         let runtime = self
             .runtime_for(&target.runtime)
             .await
@@ -2066,13 +2427,14 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// Snapshot of every live instance: cleanup coordinates, effective
-    /// cleanup mode, and hourly cost (0.0 = unmetered).
+    /// Snapshot of live instances this process may mutate automatically.
+    /// Fenced, supervision-pending, and unsupervisable machines are omitted.
     async fn all_live_targets(&self) -> Vec<(CleanupTarget, Cleanup, f64)> {
         let state = self.state.lock().await;
         state
             .instances
             .values()
+            .filter(|instance| instance.fenced.is_none() && instance.supervision_note.is_none())
             .map(|i| {
                 (
                     CleanupTarget {
@@ -2131,7 +2493,26 @@ impl ServerHandler for RemoteKernelsServer {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_vast_offers;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::{RemoteKernelsServer, validate_vast_offers};
+    use crate::config::{Cleanup, Config};
+    use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, Phase};
+
+    fn test_instance(machine_id: &str) -> InstanceState {
+        InstanceState::provisioning(
+            machine_id.to_string(),
+            Some("worker".to_string()),
+            "missing-runtime".to_string(),
+            "provider-id".to_string(),
+            "Test GPU".to_string(),
+            0.0,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/missing-key".into(),
+            false,
+        )
+    }
 
     #[test]
     fn vast_offers_validation() {
@@ -2148,6 +2529,426 @@ mod tests {
         // Wrong runtime, including the default-runtime resolution case.
         assert!(
             validate_vast_offers(Some(&[1]), false, "runpod").is_err_and(|e| e.contains("runtime"))
+        );
+    }
+
+    #[test]
+    fn label_validation_rejects_bad_input() {
+        assert!(super::validate_label(None).is_ok());
+        assert!(super::validate_label(Some("gpu_2-alpha")).is_ok());
+        assert!(super::validate_label(Some("")).is_err());
+        assert!(super::validate_label(Some("has space")).is_err());
+        assert!(super::validate_label(Some(&"x".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn resumed_attach_refusal_warns_that_machine_is_billing() {
+        let message = super::attach_refusal_message(
+            super::ConnectMode::Attach {
+                force: false,
+                resumed: true,
+            },
+            "another owner has a fresh lease",
+        );
+        assert!(message.contains("resumed and is billing"), "{message}");
+        assert!(message.contains("attach refused"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn attach_slot_preserves_fence_until_replacement_acquires() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
+        let server =
+            RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
+        let machine_id = crate::ulid::new();
+        let mut husk = test_instance(&machine_id);
+        husk.fenced = Some(FenceReason::TakenOver);
+        server
+            .state
+            .lock()
+            .await
+            .instances
+            .insert(machine_id.clone(), husk);
+
+        let prior_fence = server.claim_attach_slot(&machine_id).await.unwrap();
+        assert_eq!(prior_fence, Some(FenceReason::TakenOver));
+        assert!(
+            server
+                .state
+                .lock()
+                .await
+                .instances
+                .get(&machine_id)
+                .is_some_and(|instance| instance.fenced == prior_fence)
+        );
+    }
+
+    #[tokio::test]
+    async fn same_server_attach_oplock_serializes_slot_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().to_path_buf();
+        let machine_id = crate::ulid::new();
+        let first = RemoteKernelsServer::acquire_operation_lock(&project_dir, &machine_id)
+            .await
+            .unwrap();
+        let second_dir = project_dir.clone();
+        let second_id = machine_id.clone();
+        let second = tokio::spawn(async move {
+            RemoteKernelsServer::acquire_operation_lock(&second_dir, &second_id).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !second.is_finished(),
+            "second attach must wait on the oplock"
+        );
+
+        let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
+        let server = RemoteKernelsServer::new(config, AppState::new(project_dir.clone()), None);
+        server
+            .state
+            .lock()
+            .await
+            .instances
+            .insert(machine_id.clone(), test_instance(&machine_id));
+        drop(first);
+        let second_guard = second.await.unwrap().unwrap();
+        assert!(server.claim_attach_slot(&machine_id).await.is_err());
+        drop(second_guard);
+        assert_eq!(server.state.lock().await.instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn status_lists_mixed_durable_records_with_annotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        let ulid = crate::ulid::new();
+        let record = |id: Option<String>, label: &str, phase| InstanceRecord {
+            machine_id: id,
+            label: Some(label.to_string()),
+            runtime: "missing-runtime".to_string(),
+            external_id: format!("provider-{label}"),
+            phase,
+            cleanup: Cleanup::Terminate,
+            jupyter_token: Some("token".to_string()),
+            ssh_key_path: Some("/tmp/missing-key".to_string()),
+            gpu_name: Some("Test GPU".to_string()),
+            cost_per_hr: 1.25,
+            proxy_port_mapped: false,
+        };
+        state
+            .save_record(&ulid, &record(Some(ulid.clone()), "new", Phase::Running))
+            .unwrap();
+        state
+            .save_record("main", &record(None, "old", Phase::Stopped))
+            .unwrap();
+        let mut live = InstanceState::provisioning(
+            ulid.clone(),
+            Some("new".to_string()),
+            "missing-runtime".to_string(),
+            "provider-new".to_string(),
+            "Test GPU".to_string(),
+            1.25,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/missing-key".into(),
+            false,
+        );
+        live.phase = Phase::Running;
+        live.fenced = Some(FenceReason::TakenOver);
+        state.instances.insert(ulid.clone(), live);
+
+        let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
+        let server = RemoteKernelsServer::new(config, state, None);
+        let result = server
+            .status(Parameters(super::InstanceParams { instance: None }))
+            .await
+            .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains(&ulid) && text.contains("[fenced]"), "{text}");
+        assert!(text.contains("main [legacy]"), "{text}");
+        assert!(
+            text.contains("Label: new") && text.contains("Label: old"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Phase: Running") && text.contains("Phase: Stopped"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fenced_and_restarted_kernel_errors_use_shared_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        let machine_id = crate::ulid::new();
+        let mut instance = InstanceState::provisioning(
+            machine_id.clone(),
+            Some("worker".to_string()),
+            "missing-runtime".to_string(),
+            "provider-id".to_string(),
+            "Test GPU".to_string(),
+            0.0,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/missing-key".into(),
+            false,
+        );
+        instance.phase = Phase::Running;
+        instance.kernel_ids.push("kernel-1".to_string());
+        instance.fenced = Some(FenceReason::TakenOver);
+        let record = instance.record();
+        state.save_record(&machine_id, &record).unwrap();
+        state.instances.insert(machine_id.clone(), instance);
+        let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
+        let server = RemoteKernelsServer::new(config, state, None);
+
+        let result = server
+            .execute(Parameters(super::ExecuteParams {
+                kernel_id: "kernel-1".to_string(),
+                code: "1 + 1".to_string(),
+                timeout: None,
+                queue: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("another session took over"), "{text}");
+        assert!(
+            text.contains(&machine_id) && text.contains("worker"),
+            "{text}"
+        );
+
+        let result = server
+            .execute(Parameters(super::ExecuteParams {
+                kernel_id: "missing-while-live".to_string(),
+                code: "1 + 1".to_string(),
+                timeout: None,
+                queue: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(!text.contains("server restarted"), "{text}");
+        assert!(text.contains("Durable machines"), "{text}");
+
+        server.state.lock().await.instances.clear();
+        let result = server
+            .execute(Parameters(super::ExecuteParams {
+                kernel_id: "missing-kernel".to_string(),
+                code: "1 + 1".to_string(),
+                timeout: None,
+                queue: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("server restarted"), "{text}");
+        assert!(
+            text.contains(&machine_id) && text.contains("Use attach"),
+            "{text}"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "fake-runtime"))]
+mod fencing_tests {
+    use std::sync::Arc;
+
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::*;
+    use crate::runtime::AnyConnection;
+    use crate::runtime::fake::FakeConnection;
+
+    fn server_in(dir: &std::path::Path) -> RemoteKernelsServer {
+        let config: Config = toml::from_str("default-runtime = \"fake\"").unwrap();
+        RemoteKernelsServer::new(config, AppState::new(dir.to_path_buf()), None)
+    }
+
+    fn instance(
+        machine_id: &str,
+        external_id: &str,
+        connection: Arc<AnyConnection>,
+    ) -> InstanceState {
+        let mut instance = InstanceState::provisioning(
+            machine_id.to_string(),
+            Some("fence-test".to_string()),
+            "fake".to_string(),
+            external_id.to_string(),
+            "Fake GPU".to_string(),
+            0.0,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/test-key".into(),
+            false,
+        );
+        instance.phase = Phase::Running;
+        instance.connection = Some(connection);
+        instance
+    }
+
+    fn result_text(result: &CallToolResult) -> String {
+        result.content[0].as_text().unwrap().text.clone()
+    }
+
+    #[tokio::test]
+    async fn rotated_generation_fences_every_destructive_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_dir = tempfile::tempdir().unwrap();
+        let connection = Arc::new(AnyConnection::Fake(
+            FakeConnection::for_test(machine_dir.path(), false).unwrap(),
+        ));
+        let owner_a = "owner-a";
+        let first = crate::machine_scripts::acquire(&connection, owner_a)
+            .await
+            .unwrap();
+        crate::machine_scripts::acquire(&connection, "owner-b")
+            .await
+            .unwrap();
+
+        let server = server_in(dir.path());
+        let machine_id = crate::ulid::new();
+        let external_id = "provider-fence-test";
+        {
+            let mut state = server.state.lock().await;
+            let mut instance = instance(&machine_id, external_id, Arc::clone(&connection));
+            instance.lease_generation = Some(first.generation);
+            let record = instance.record();
+            state.save_record(&machine_id, &record).unwrap();
+            state.instances.insert(machine_id.clone(), instance);
+        }
+        let heartbeat = crate::heartbeat::start_owned_for_test(
+            Arc::clone(&connection),
+            machine_id.clone(),
+            external_id.to_string(),
+            first.generation,
+            owner_a.to_string(),
+            Arc::clone(&server.state),
+        );
+        server
+            .state
+            .lock()
+            .await
+            .instances
+            .get_mut(&machine_id)
+            .unwrap()
+            .heartbeat = Some(heartbeat);
+
+        for _ in 0..100 {
+            if server.state.lock().await.instances[&machine_id]
+                .fenced
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            server.state.lock().await.instances[&machine_id].fenced,
+            Some(FenceReason::TakenOver)
+        );
+        assert!(server.all_live_targets().await.is_empty());
+        assert_eq!(
+            server.cleanup_all_for_budget().await,
+            "No machine was running."
+        );
+
+        let stop = server
+            .stop(Parameters(InstanceParams {
+                instance: Some(machine_id.clone()),
+            }))
+            .await
+            .unwrap();
+        assert!(stop.is_error.unwrap_or(false));
+        assert!(result_text(&stop).contains("another session took over"));
+        let terminate = server
+            .terminate(Parameters(InstanceParams {
+                instance: Some(machine_id.clone()),
+            }))
+            .await
+            .unwrap();
+        assert!(terminate.is_error.unwrap_or(false));
+        assert!(result_text(&terminate).contains("another session took over"));
+
+        server.shutdown_cleanup().await;
+        assert!(
+            server
+                .state
+                .lock()
+                .await
+                .instances
+                .contains_key(&machine_id)
+        );
+        assert!(crate::state::load_instance_record(dir.path(), &machine_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn no_flock_supervision_degrades_without_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_dir = tempfile::tempdir().unwrap();
+        let connection = Arc::new(AnyConnection::Fake(
+            FakeConnection::for_test(machine_dir.path(), true).unwrap(),
+        ));
+        let server = server_in(dir.path());
+        let machine_id = crate::ulid::new();
+        let external_id = "provider-no-flock";
+        {
+            let mut state = server.state.lock().await;
+            let instance = instance(&machine_id, external_id, Arc::clone(&connection));
+            let record = instance.record();
+            state.save_record(&machine_id, &record).unwrap();
+            state.instances.insert(machine_id.clone(), instance);
+        }
+        let operation_lock = RemoteKernelsServer::acquire_operation_lock(dir.path(), &machine_id)
+            .await
+            .unwrap();
+        let (heartbeat, mut status) = crate::heartbeat::start(
+            connection,
+            machine_id.clone(),
+            external_id.to_string(),
+            Cleanup::Terminate,
+            300,
+            crate::heartbeat::AcquireMode::Fresh,
+            "owner".to_string(),
+            Arc::clone(&server.state),
+            None,
+            Vec::new(),
+            operation_lock,
+        );
+        server
+            .state
+            .lock()
+            .await
+            .instances
+            .get_mut(&machine_id)
+            .unwrap()
+            .heartbeat = Some(heartbeat);
+        tokio::time::timeout(std::time::Duration::from_secs(2), status.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            status.borrow().clone(),
+            crate::heartbeat::SupervisionStatus::Unsupervisable(_)
+        ));
+        let state = server.state.lock().await;
+        let instance = &state.instances[&machine_id];
+        assert!(instance.fenced.is_none());
+        assert!(
+            instance
+                .supervision_note
+                .as_deref()
+                .is_some_and(|note| note.contains("flock unavailable"))
+        );
+        drop(state);
+        assert!(server.all_live_targets().await.is_empty());
+        assert!(
+            server
+                .state
+                .lock()
+                .await
+                .instances
+                .contains_key(&machine_id)
         );
     }
 }
@@ -2169,6 +2970,7 @@ mod failed_start_tests {
             let mut state = server.state.lock().await;
             let inst = InstanceState::provisioning(
                 "main".to_string(),
+                None,
                 "fake".to_string(),
                 "fake-test-id".to_string(),
                 "GPU".to_string(),

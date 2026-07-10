@@ -84,6 +84,16 @@ impl Harness {
         );
     }
 
+    fn lease_json(&self, args: &[&str]) -> Value {
+        let output = self.lease(args);
+        assert!(
+            output.status.success(),
+            "lease command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("valid lease JSON output")
+    }
+
     fn read_lease(&self) -> Value {
         let output = self.lease(&["read"]);
         assert!(output.status.success());
@@ -314,6 +324,43 @@ fn acquire_refresh_and_stale_writer_is_fenced_without_mutation() {
 }
 
 #[test]
+fn acquire_returns_owned_lease_from_the_same_critical_section() {
+    let Some(harness) = Harness::new("acquire_returns_owned_lease_from_the_same_critical_section")
+    else {
+        return;
+    };
+    let before = now_epoch();
+    let lease = harness.lease_json(&["acquire", "owner-a"]);
+    let after = now_epoch();
+    assert_eq!(lease["generation"], 1);
+    assert_eq!(lease["owner_uuid"], "owner-a");
+    assert!(
+        lease["now"]
+            .as_u64()
+            .is_some_and(|now| now >= before && now <= after)
+    );
+    let ts = lease["ts"].as_u64().unwrap();
+    let now = lease["now"].as_u64().unwrap();
+    assert!(now.saturating_sub(ts) <= 1);
+}
+
+#[test]
+fn read_reports_machine_now_without_changing_stored_shape() {
+    let Some(harness) = Harness::new("read_reports_machine_now_without_changing_stored_shape")
+    else {
+        return;
+    };
+    harness.lease_ok(&["acquire", "owner-a"]);
+    let read = harness.read_lease();
+    assert!(read["now"].as_u64().is_some());
+    let stored: Value = serde_json::from_slice(
+        &fs::read(harness.state_dir().join("lease.json")).expect("stored lease"),
+    )
+    .expect("stored lease JSON");
+    assert!(stored.get("now").is_none(), "machine now is response-only");
+}
+
+#[test]
 fn acquire_during_disconnect_arm_cancels_finalize() {
     let Some(harness) = Harness::new("acquire_during_disconnect_arm_cancels_finalize") else {
         return;
@@ -401,6 +448,7 @@ fn critical_section_pause_blocks_concurrent_acquire() {
         .arg(machine_script("rk-lease.sh"))
         .arg(harness.state_dir())
         .args(["acquire", "owner-b"])
+        .stdout(Stdio::null())
         .spawn()
         .expect("spawn concurrent acquire");
     thread::sleep(Duration::from_millis(250));

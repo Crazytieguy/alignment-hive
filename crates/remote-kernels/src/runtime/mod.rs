@@ -308,6 +308,9 @@ pub trait Connection: Send + Sync {
     /// How the shared Jupyter layer reaches this machine's Jupyter server.
     fn jupyter(&self) -> &JupyterEndpoint;
 
+    /// Persistent machine workdir. Lifecycle state lives below this path.
+    fn workdir(&self) -> &str;
+
     /// A caveat about this connection worth surfacing in the `start()`
     /// result (e.g. a degraded access path). `None` when all is normal.
     fn startup_note(&self) -> Option<String> {
@@ -508,7 +511,7 @@ impl AnyRuntime {
                 )))
             }
             #[cfg(feature = "fake-runtime")]
-            "fake" => Ok(Self::Fake(fake::FakeRuntime::new())),
+            "fake" => Ok(Self::Fake(fake::FakeRuntime::new(project_dir))),
             other => anyhow::bail!(
                 "Unknown runtime {other:?}. Available runtimes: {}",
                 Self::known_names().join(", ")
@@ -582,6 +585,10 @@ pub enum AnyConnection {
 impl Connection for AnyConnection {
     fn jupyter(&self) -> &JupyterEndpoint {
         dispatch!(self, c => c.jupyter())
+    }
+
+    fn workdir(&self) -> &str {
+        dispatch!(self, c => c.workdir())
     }
 
     fn startup_note(&self) -> Option<String> {

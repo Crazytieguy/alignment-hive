@@ -4,10 +4,11 @@
 //! The heartbeat pipeline is runtime-agnostic — all machine specifics go
 //! through the instance's [`Connection`]:
 //! 1. Wait for the command transport (SSH / exec) to become reachable
-//! 2. Run startup commands (user commands from config)
-//! 3. Install the watchdog: self-cleanup on stale heartbeat
+//! 2. Acquire fenced lease authority (or mark supervision unavailable)
+//! 3. Run startup commands (user commands from config)
+//! 4. Install the watchdog: self-cleanup on stale heartbeat
 //!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline
-//! 4. Every 60s: signal liveness, refresh the budget deadline from the shared
+//! 5. Every 60s: signal liveness, refresh the budget deadline from the shared
 //!    spend model (aggregate burn rate across ALL running metered instances,
 //!    so concurrent machines can't collectively exceed the session budget)
 
@@ -15,10 +16,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 
 use crate::config::Cleanup;
 use crate::runtime::{AnyConnection, Connection, WatchdogPolicy};
-use crate::state::AppState;
+use crate::state::{AppState, FenceReason};
+
+pub const NO_SSH_CAVEAT: &str =
+    "no SSH transport: supervision and lease fencing unavailable; manual cleanup";
+pub const NO_FLOCK_CAVEAT: &str =
+    "flock unavailable: supervision and lease fencing unavailable; manual cleanup";
+pub const BAD_STATE_DIR_CAVEAT: &str = "persistent state directory unavailable: supervision and lease fencing unavailable; manual cleanup";
+
+#[derive(Debug, Clone, Copy)]
+pub enum AcquireMode {
+    Fresh,
+    Attach { force: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisionStatus {
+    Pending,
+    Active,
+    Unsupervisable(String),
+    Refused(String),
+}
 
 /// Computes the remaining budget as seconds-until-deadline at the current
 /// aggregate burn rate. Shared across all instance heartbeats.
@@ -44,24 +66,35 @@ impl BudgetFeed {
 }
 
 /// Start the heartbeat pipeline for one instance. Returns immediately.
+#[allow(clippy::too_many_arguments)] // lease, watchdog, connection, and spend contexts are independent
 pub fn start(
     conn: Arc<AnyConnection>,
     instance: String,
+    external_id: String,
     cleanup: Cleanup,
     watchdog_stale_secs: u64,
-    startup_commands: Vec<String>,
+    acquire_mode: AcquireMode,
+    owner_uuid: String,
     state: Arc<Mutex<AppState>>,
     budget: Option<f64>,
-) -> HeartbeatState {
+    startup_commands: Vec<String>,
+    operation_lock: std::fs::File,
+) -> (HeartbeatState, watch::Receiver<SupervisionStatus>) {
+    let (status_tx, status_rx) = watch::channel(SupervisionStatus::Pending);
     let handle = tokio::spawn(async move {
-        if let Err(e) = run(
+        if let Err(e) = establish_and_run(
             &conn,
             &instance,
+            &external_id,
             cleanup,
             watchdog_stale_secs,
-            &startup_commands,
+            acquire_mode,
+            &owner_uuid,
             &state,
             budget,
+            &startup_commands,
+            operation_lock,
+            &status_tx,
         )
         .await
         {
@@ -69,68 +102,87 @@ pub fn start(
         }
     });
 
-    HeartbeatState {
-        task_handle: handle,
-    }
+    (
+        HeartbeatState {
+            task_handle: handle,
+        },
+        status_rx,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run(
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn establish_and_run(
     conn: &AnyConnection,
     instance: &str,
+    external_id: &str,
     cleanup: Cleanup,
     watchdog_stale_secs: u64,
-    startup_commands: &[String],
+    acquire_mode: AcquireMode,
+    owner_uuid: &str,
     state: &Arc<Mutex<AppState>>,
     budget: Option<f64>,
+    startup_commands: &[String],
+    operation_lock: std::fs::File,
+    status: &watch::Sender<SupervisionStatus>,
 ) -> anyhow::Result<()> {
+    let lease = loop {
+        match conn.wait_reachable().await {
+            Ok(()) => {}
+            Err(error) if error.to_string().contains("no public IP") => {
+                mark_unsupervisable(state, instance, external_id, NO_SSH_CAVEAT).await;
+                let _ = status.send(SupervisionStatus::Unsupervisable(NO_SSH_CAVEAT.to_string()));
+                return Ok(());
+            }
+            Err(error) if crate::ssh_exec::is_host_key_mismatch(&error) => {
+                let caveat = format!(
+                    "host key mismatch: supervision and lease fencing unavailable; manual cleanup ({error})"
+                );
+                mark_unsupervisable(state, instance, external_id, &caveat).await;
+                let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    instance,
+                    "machine not reachable for supervision yet — retrying in 60s: {error}"
+                );
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+        }
+
+        match acquire_lease(conn, acquire_mode, owner_uuid).await {
+            Ok(lease) => break lease,
+            Err(EstablishError::Retry(error)) => {
+                tracing::warn!(
+                    instance,
+                    "lease setup failed transiently — retrying in 60s: {error}"
+                );
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            Err(EstablishError::Unsupervisable(caveat)) => {
+                mark_unsupervisable(state, instance, external_id, &caveat).await;
+                let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+                return Ok(());
+            }
+            Err(EstablishError::Refused(reason, message)) => {
+                mark_fenced(state, instance, external_id, reason).await;
+                let _ = status.send(SupervisionStatus::Refused(message));
+                return Ok(());
+            }
+        }
+    };
+
+    let lease_generation = lease.generation;
+    mark_acquired(state, instance, external_id, lease_generation).await;
+    // All setup writes happen only after acquiring authority and while the
+    // local operation lock prevents another project server from rotating it.
+    run_startup_commands(conn, instance, startup_commands).await;
+
     let budget = budget.map(|budget| BudgetFeed {
         state: Arc::clone(state),
         budget,
     });
-    // Persistent bootstrap: a session that came up on a degraded path (e.g.
-    // RunPod's proxy fallback while sshd lags a resume) must keep pursuing
-    // SSH so the watchdog/budget supervision eventually installs — giving up
-    // after one attempt would leave an armed orphan guard facing a live
-    // session with nothing to disarm it. A host-key pin mismatch is the one
-    // unrecoverable case: retrying re-verifies against the same pin.
-    loop {
-        match conn.wait_reachable().await {
-            Ok(()) => break,
-            Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => {
-                tracing::error!(
-                    instance,
-                    "on-machine supervision cannot be established — the machine's host \
-                     key does not match the pinned one, and this cannot heal on its own. \
-                     Watchdog and budget deadline are NOT installed. {e:#}"
-                );
-                return Err(e);
-            }
-            // A pod with no SSH transport at all (proxy-only community
-            // pod) can never be supervised — by design the orphan guard is
-            // not armed there. Give up quietly instead of retrying forever.
-            Err(e) if e.to_string().contains("no public IP") => {
-                tracing::info!(
-                    instance,
-                    "machine has no SSH transport; on-machine supervision unavailable: {e}"
-                );
-                return Err(e);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    instance,
-                    "machine not reachable for supervision yet — retrying in 60s: {e}"
-                );
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
-        }
-    }
-
-    // Startup commands run after the machine is fully up with services started.
-    // rsync (needed by sync()) is ensured lazily by the sync path itself; user
-    // commands run here so they're ready before the first execute().
-    run_startup_commands(conn, instance, startup_commands).await;
-
     let initial_budget_secs = match &budget {
         Some(feed) => feed.remaining_secs().await,
         None => None,
@@ -147,6 +199,8 @@ async fn run(
     {
         tracing::warn!(instance, "Failed to install watchdog: {e}");
     }
+    let _ = status.send(SupervisionStatus::Active);
+    drop(operation_lock);
 
     tracing::info!(instance, "Starting heartbeat loop");
 
@@ -154,36 +208,55 @@ async fn run(
     let mut host_key_alarm_raised = false;
     loop {
         interval.tick().await;
+        let project_dir = state.lock().await.project_dir.clone();
+        let _operation_lock =
+            match crate::state::acquire_operation_lock(&project_dir, instance).await {
+                Ok(lock) => lock,
+                Err(error) => {
+                    mark_fenced(state, instance, external_id, FenceReason::AuthorityUnknown).await;
+                    tracing::warn!(
+                        instance,
+                        "Heartbeat stopped: operation lock unavailable: {error}"
+                    );
+                    return Ok(());
+                }
+            };
+        match crate::machine_scripts::refresh(conn, lease_generation, owner_uuid).await {
+            Ok(()) => tracing::debug!(instance, "Lease refreshed"),
+            Err(crate::machine_scripts::LeaseError::Fenced) => {
+                mark_fenced(state, instance, external_id, FenceReason::TakenOver).await;
+                tracing::warn!(instance, "Heartbeat stopped: another session took over");
+                return Ok(());
+            }
+            Err(crate::machine_scripts::LeaseError::Finalizing) => {
+                mark_fenced(state, instance, external_id, FenceReason::Finalizing).await;
+                tracing::warn!(instance, "Heartbeat stopped: machine is finalizing");
+                return Ok(());
+            }
+            Err(error) => {
+                mark_fenced(state, instance, external_id, FenceReason::AuthorityUnknown).await;
+                tracing::warn!(
+                    instance,
+                    "Heartbeat stopped: lease authority is unknown: {error}"
+                );
+                return Ok(());
+            }
+        }
+        // Transitional compatibility: the old watchdog still consumes this
+        // heartbeat until phase 4 replaces it with rk-watchdog.sh.
         match conn.heartbeat().await {
-            Ok(()) => tracing::debug!(instance, "Heartbeat sent"),
-            // Mid-session host-key rotation (host recreated the container at
-            // the same address) is an ACCEPTED failure mode of the TOFU pin:
-            // auto-rehealing would gut the MITM protection. It must be loud
-            // and diagnosed, not warn-level noise — the on-machine watchdog
-            // will self-clean the machine once the heartbeat stays stale.
+            Ok(()) => tracing::debug!(instance, "Legacy heartbeat sent"),
             Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => {
                 if host_key_alarm_raised {
                     tracing::warn!(instance, "Heartbeat still blocked by host-key mismatch");
                 } else {
                     host_key_alarm_raised = true;
-                    tracing::error!(
-                        instance,
-                        "heartbeat blocked by a host-key mismatch. If nothing is done, \
-                         the on-machine watchdog will self-clean this machine once the \
-                         heartbeat is stale (watchdog-stale-secs). To keep it: delete \
-                         the known-hosts file named below, then stop() and start() to \
-                         reconnect. {e:#}"
-                    );
+                    tracing::error!(instance, "heartbeat blocked by host-key mismatch: {e:#}");
                 }
             }
-            Err(e) => tracing::warn!(instance, "Heartbeat failed: {e}"),
+            Err(e) => tracing::warn!(instance, "Legacy heartbeat failed: {e}"),
         }
-        // Persist spend every tick — a crash must not lose hours of accrual
-        // (hydration on restart reads this file).
         state.lock().await.persist_spend();
-        // Refresh the on-machine budget deadline: rates change as instances
-        // start/stop, so the deadline must track the aggregate, not a one-shot
-        // value computed at instance start.
         if cleanup != Cleanup::Disabled
             && let Some(feed) = &budget
             && let Some(secs) = feed.remaining_secs().await
@@ -191,6 +264,154 @@ async fn run(
         {
             tracing::warn!(instance, "Failed to refresh budget deadline: {e}");
         }
+    }
+}
+
+#[derive(Debug)]
+enum EstablishError {
+    Retry(String),
+    Unsupervisable(String),
+    Refused(FenceReason, String),
+}
+
+async fn acquire_lease(
+    conn: &AnyConnection,
+    mode: AcquireMode,
+    owner_uuid: &str,
+) -> Result<crate::machine_scripts::LeaseState, EstablishError> {
+    if let AcquireMode::Attach { force } = mode {
+        let current = crate::machine_scripts::read(conn)
+            .await
+            .map_err(classify_lease_error)?;
+        if current.state == "finalizing" {
+            return Err(EstablishError::Refused(
+                FenceReason::Finalizing,
+                "machine is finalizing; outcome/status must be resolved before attach".to_string(),
+            ));
+        }
+        let age = crate::machine_scripts::age_secs(&current);
+        if current.state == "active"
+            && current.generation > 0
+            && current.owner_uuid != owner_uuid
+            && age < 180
+            && !force
+        {
+            return Err(EstablishError::Refused(
+                FenceReason::TakenOver,
+                format!(
+                    "machine has an active lease owned by another session ({age}s old); retry attach(force=true) only to take it over"
+                ),
+            ));
+        }
+    }
+    crate::machine_scripts::acquire(conn, owner_uuid)
+        .await
+        .map_err(classify_lease_error)
+}
+
+fn classify_lease_error(error: crate::machine_scripts::LeaseError) -> EstablishError {
+    match error {
+        crate::machine_scripts::LeaseError::NoFlock => {
+            EstablishError::Unsupervisable(NO_FLOCK_CAVEAT.to_string())
+        }
+        crate::machine_scripts::LeaseError::BadStateDir => {
+            EstablishError::Unsupervisable(BAD_STATE_DIR_CAVEAT.to_string())
+        }
+        crate::machine_scripts::LeaseError::Fenced => EstablishError::Refused(
+            FenceReason::TakenOver,
+            "another session took over the machine".to_string(),
+        ),
+        crate::machine_scripts::LeaseError::Finalizing => EstablishError::Refused(
+            FenceReason::Finalizing,
+            "machine is finalizing; outcome/status must be resolved before attach".to_string(),
+        ),
+        crate::machine_scripts::LeaseError::Transport(error) => {
+            EstablishError::Retry(error.to_string())
+        }
+        crate::machine_scripts::LeaseError::Invalid(message) => {
+            EstablishError::Unsupervisable(format!(
+                "lease state unavailable: supervision and lease fencing unavailable; manual cleanup ({message})"
+            ))
+        }
+    }
+}
+
+async fn mark_acquired(
+    state: &Arc<Mutex<AppState>>,
+    instance: &str,
+    external_id: &str,
+    generation: u64,
+) {
+    if let Some(instance) = state
+        .lock()
+        .await
+        .instances
+        .get_mut(instance)
+        .filter(|candidate| candidate.external_id == external_id)
+    {
+        instance.fenced = None;
+        instance.lease_generation = Some(generation);
+        instance.supervision_note = None;
+    }
+}
+
+async fn mark_unsupervisable(
+    state: &Arc<Mutex<AppState>>,
+    instance: &str,
+    external_id: &str,
+    caveat: &str,
+) {
+    if let Some(instance) = state
+        .lock()
+        .await
+        .instances
+        .get_mut(instance)
+        .filter(|candidate| candidate.external_id == external_id)
+    {
+        instance.lease_generation = None;
+        instance.supervision_note = Some(caveat.to_string());
+    }
+}
+
+async fn mark_fenced(
+    state: &Arc<Mutex<AppState>>,
+    instance: &str,
+    external_id: &str,
+    reason: FenceReason,
+) {
+    if let Some(instance) = state
+        .lock()
+        .await
+        .instances
+        .get_mut(instance)
+        .filter(|candidate| candidate.external_id == external_id)
+    {
+        instance.fenced = Some(reason);
+        instance.lease_generation = None;
+    }
+}
+
+#[cfg(all(test, feature = "fake-runtime"))]
+pub fn start_owned_for_test(
+    conn: Arc<AnyConnection>,
+    instance: String,
+    external_id: String,
+    generation: u64,
+    owner_uuid: String,
+    state: Arc<Mutex<AppState>>,
+) -> HeartbeatState {
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        interval.tick().await;
+        if matches!(
+            crate::machine_scripts::refresh(&conn, generation, &owner_uuid).await,
+            Err(crate::machine_scripts::LeaseError::Fenced)
+        ) {
+            mark_fenced(&state, &instance, &external_id, FenceReason::TakenOver).await;
+        }
+    });
+    HeartbeatState {
+        task_handle: handle,
     }
 }
 

@@ -94,7 +94,7 @@ impl Drop for TerminateGuard {
 async fn start_machine(server: &RemoteKernelsServer) -> CallToolResult {
     server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: None,
+            label: None,
             runtime: None,
             gpu_type: None,
             image: None,
@@ -170,7 +170,7 @@ def pid1_env():
     return env
 ";
 
-/// Full RunPod lifecycle incl. the stop → reconnect(resume) → terminate path.
+/// Full RunPod lifecycle incl. the stop → attach(resume) → terminate path.
 #[tokio::test]
 #[ignore = "spends real money on RunPod; requires RUNPOD_API_KEY"]
 async fn runpod_lifecycle_with_stop_resume() {
@@ -210,15 +210,20 @@ volume-gb = 0
     // reached via loopback; the proxy mapping exists only as the resume-time
     // fallback and must not be the fresh-start choice.
     assert!(text.contains("local tunnel"), "{text}");
+    let machine_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- ID: "))
+        .expect("machine id")
+        .to_string();
     // TOFU: the first connection pinned the pod's host key.
-    let known_hosts = dir
-        .path()
-        .join(".claude/remote-kernels/instances/main/known_hosts");
+    let known_hosts = dir.path().join(format!(
+        ".claude/remote-kernels/instances/{machine_id}/known_hosts"
+    ));
     let pinned = std::fs::read_to_string(&known_hosts).expect("known_hosts must exist after start");
     assert!(!pinned.trim().is_empty(), "host key must be pinned");
     eprintln!("started: {text}");
     guard.pod_id =
-        remote_kernels::state::load_instance_record(dir.path(), "main").map(|r| r.external_id);
+        remote_kernels::state::load_instance_record(dir.path(), &machine_id).map(|r| r.external_id);
 
     // Kernel + execution + sync round trip.
     let kernel_id = create_kernel_retry(&server, "regress").await;
@@ -258,7 +263,7 @@ volume-gb = 0
     assert!(!is_error(&result), "{out}");
     assert!(out.contains("hello runpod"), "{out}");
 
-    // Stop, then start() must reconnect by resuming the same pod.
+    // Stop, then attach() must resume the same pod.
     let result = server
         .stop(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
@@ -269,10 +274,16 @@ volume-gb = 0
     assert!(!is_error(&result), "stop failed: {text}");
     eprintln!("stopped: {text}");
 
-    let result = start_machine(&server).await;
+    let result = server
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: None,
+        }))
+        .await
+        .expect("attach protocol error");
     let text = text_of(&result);
     assert!(!is_error(&result), "resume failed: {text}");
-    assert!(text.contains("Reconnected"), "{text}");
+    assert!(text.contains("Attached"), "{text}");
     eprintln!("resumed: {text}");
 
     // Terminate for real.
@@ -366,7 +377,13 @@ jupyter-access = "proxy"
     );
     eprintln!("started: {text}");
 
-    let pod_id = remote_kernels::state::load_instance_record(dir.path(), "main")
+    let machine_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- ID: "))
+        .expect("machine id")
+        .to_string();
+
+    let pod_id = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
         .expect("instance record")
         .external_id;
     guard.pod_id = Some(pod_id.clone());
@@ -441,7 +458,7 @@ print(r.stderr[-1500:])
     eprintln!("self-stop verified: pod EXITED via pod-scoped credentials");
 
     // To the next session the self-stop looks like a dead server: a FRESH
-    // server must reconnect from the on-disk record and resume the pod.
+    // server must attach from the on-disk record and resume the pod.
     // (The first server still believes the pod is running — reusing it would
     // test nothing.)
     let server = RemoteKernelsServer::new(
@@ -450,10 +467,16 @@ print(r.stderr[-1500:])
         None,
     );
     guard.server = server.clone();
-    let result = start_machine(&server).await;
+    let result = server
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: Some(true),
+        }))
+        .await
+        .expect("attach protocol error");
     let text = text_of(&result);
     assert!(!is_error(&result), "resume failed: {text}");
-    assert!(text.contains("Reconnected"), "{text}");
+    assert!(text.contains("Attached"), "{text}");
     eprintln!("resumed: {text}");
 
     let kernel_id = create_kernel_retry(&server, "guard2").await;

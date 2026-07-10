@@ -98,7 +98,7 @@ async fn k8s_full_lifecycle_via_kueue() {
     // Start (blocking): template → pod → Kueue admission → Running → Jupyter.
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: None,
+            label: None,
             runtime: None,
             gpu_type: None,
             image: None,
@@ -112,12 +112,17 @@ async fn k8s_full_lifecycle_via_kueue() {
     assert!(!is_error(&result), "start failed: {text}");
     assert!(text.contains("RUNNING"), "{text}");
     assert!(text.contains("nvidia.com/gpu"), "GPU from template: {text}");
+    let machine_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- ID: "))
+        .expect("machine id");
+    let pod_name = format!("rk-e2e-{}", machine_id.to_ascii_lowercase());
 
     // Kueue actually managed this pod: it has a Workload object and the
     // admission gate was lifted.
     let workloads = kubectl(&["get", "workloads", "-n", "default", "-o", "name"]);
     assert!(
-        workloads.contains("pod-rk-e2e-main"),
+        workloads.contains(&format!("pod-{pod_name}")),
         "kueue workload exists: {workloads}"
     );
 
@@ -203,7 +208,7 @@ async fn k8s_full_lifecycle_via_kueue() {
     // Deletion is async; poll briefly.
     for _ in 0..30 {
         let pods = kubectl(&["get", "pods", "-n", "default", "-o", "name"]);
-        if !pods.contains("rk-e2e-main") {
+        if !pods.contains(&pod_name) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -221,7 +226,7 @@ async fn k8s_priority_label_and_capability_validation() {
 
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: Some("queued".to_string()),
+            label: Some("queued".to_string()),
             runtime: None,
             gpu_type: None,
             image: None,
@@ -232,11 +237,17 @@ async fn k8s_priority_label_and_capability_validation() {
         .await
         .expect("start protocol error");
     assert!(!is_error(&result), "{}", text_of(&result));
+    let start_text = text_of(&result);
+    let machine_id = start_text
+        .split_whitespace()
+        .nth(1)
+        .expect("machine id in async start");
+    let pod_name = format!("rk-prio-{}", machine_id.to_ascii_lowercase());
 
     let labels = kubectl(&[
         "get",
         "pod",
-        "rk-prio-queued",
+        &pod_name,
         "-n",
         "default",
         "-o",
@@ -247,7 +258,7 @@ async fn k8s_priority_label_and_capability_validation() {
         "priority label set: {labels}"
     );
     assert!(
-        labels.contains(r#""remote-kernels/instance":"queued""#),
+        labels.contains(&format!(r#""remote-kernels/instance":"{machine_id}""#)),
         "{labels}"
     );
 
@@ -277,7 +288,7 @@ pod-template = "pod-template.yaml"
     let server = server_in(dir.path());
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: Some("nostop".to_string()),
+            label: Some("nostop".to_string()),
             runtime: None,
             gpu_type: None,
             image: None,
@@ -349,7 +360,7 @@ workdir = "/home/jovyan/work"
 
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: None,
+            label: None,
             runtime: None,
             gpu_type: None,
             image: None,
@@ -364,12 +375,17 @@ workdir = "/home/jovyan/work"
     // GPU display reads the NAMED container (the sidecar has no GPU — a
     // first-container read would say "no GPU requested").
     assert!(text.contains("nvidia.com/gpu"), "{text}");
+    let machine_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- ID: "))
+        .expect("machine id");
+    let pod_name = format!("rk-multi-{}", machine_id.to_ascii_lowercase());
 
     // The token env landed in the workload container only.
     let workload_env = kubectl(&[
         "get",
         "pod",
-        "rk-multi-main",
+        &pod_name,
         "-n",
         "default",
         "-o",
@@ -382,7 +398,7 @@ workdir = "/home/jovyan/work"
     let sidecar_env = kubectl(&[
         "get",
         "pod",
-        "rk-multi-main",
+        &pod_name,
         "-n",
         "default",
         "-o",
@@ -431,7 +447,7 @@ workdir = "/home/jovyan/work"
     assert!(!is_error(&result), "sync failed: {}", text_of(&result));
     let synced = kubectl(&[
         "exec",
-        "rk-multi-main",
+        &pod_name,
         "-n",
         "default",
         "-c",

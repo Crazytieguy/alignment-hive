@@ -11,13 +11,16 @@
 //!   budget enforcement can be tested against wall-clock accrual
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
@@ -32,6 +35,7 @@ struct FakeInstance {
     /// Last budget deadline (secs-from-now) pushed by the heartbeat, for test
     /// observation of the budget supervisor.
     last_budget_deadline: Arc<AtomicU64>,
+    lease_no_flock: bool,
 }
 
 /// Kill the Jupyter server's whole process group. `child.kill()` (and
@@ -72,14 +76,24 @@ pub struct FakeRuntime {
     cost_per_hr: f64,
 }
 
+type FakeInstances = Arc<Mutex<HashMap<String, FakeInstance>>>;
+type FakeProjects = std::sync::Mutex<HashMap<PathBuf, FakeInstances>>;
+
 impl FakeRuntime {
-    pub fn new() -> Self {
+    pub fn new(project_dir: &Path) -> Self {
+        static PROJECTS: std::sync::LazyLock<FakeProjects> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
         let cost_per_hr = std::env::var("REMOTE_KERNELS_FAKE_COST_PER_HR")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0);
         Self {
-            instances: Arc::new(Mutex::new(HashMap::new())),
+            instances: PROJECTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(project_dir.to_path_buf())
+                .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))
+                .clone(),
             cost_per_hr,
         }
     }
@@ -139,7 +153,7 @@ impl FakeRuntime {
 
 impl Default for FakeRuntime {
     fn default() -> Self {
-        Self::new()
+        Self::new(Path::new("."))
     }
 }
 
@@ -171,6 +185,15 @@ impl Runtime for FakeRuntime {
         let external_id = format!("fake-{}", uuid::Uuid::new_v4());
         let port = Self::free_port()?;
         let workdir = tempfile::tempdir()?;
+        let bin_dir = workdir.path().join(".remote-kernels/fake-bin");
+        std::fs::create_dir_all(&bin_dir)?;
+        let flock = bin_dir.join("flock");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/machine/test-support/flock.py"),
+            &flock,
+        )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&flock, std::fs::Permissions::from_mode(0o755))?;
         let child = Self::spawn_jupyter(port, &req.jupyter_token, workdir.path())?;
 
         self.instances.lock().await.insert(
@@ -181,6 +204,7 @@ impl Runtime for FakeRuntime {
                 token: req.jupyter_token.clone(),
                 workdir,
                 last_budget_deadline: Arc::new(AtomicU64::new(u64::MAX)),
+                lease_no_flock: std::env::var_os("REMOTE_KERNELS_FAKE_NO_FLOCK").is_some(),
             },
         );
 
@@ -270,10 +294,14 @@ impl Runtime for FakeRuntime {
         let inst = instances
             .get(external_id)
             .ok_or_else(|| anyhow::anyhow!("unknown fake instance"))?;
+        let workdir = inst.workdir.path().to_path_buf();
         Ok(FakeConnection {
             jupyter: JupyterEndpoint::loopback(inst.port, ctx.jupyter_token.clone()),
-            workdir: inst.workdir.path().to_path_buf(),
+            workdir_string: workdir.display().to_string(),
+            workdir,
+            bin_dir: inst.workdir.path().join(".remote-kernels/fake-bin"),
             last_budget_deadline: Arc::clone(&inst.last_budget_deadline),
+            lease_no_flock: inst.lease_no_flock,
         })
     }
 }
@@ -281,13 +309,37 @@ impl Runtime for FakeRuntime {
 pub struct FakeConnection {
     jupyter: JupyterEndpoint,
     workdir: std::path::PathBuf,
+    workdir_string: String,
+    bin_dir: std::path::PathBuf,
     last_budget_deadline: Arc<AtomicU64>,
+    lease_no_flock: bool,
 }
 
 impl FakeConnection {
     /// For tests: the last deadline (secs-from-now) the heartbeat pushed.
     pub fn last_budget_deadline(&self) -> u64 {
         self.last_budget_deadline.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(workdir: &Path, lease_no_flock: bool) -> anyhow::Result<Self> {
+        let bin_dir = workdir.join(".remote-kernels/fake-bin");
+        std::fs::create_dir_all(&bin_dir)?;
+        let flock = bin_dir.join("flock");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/machine/test-support/flock.py"),
+            &flock,
+        )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&flock, std::fs::Permissions::from_mode(0o755))?;
+        Ok(Self {
+            jupyter: JupyterEndpoint::loopback(1, "test-token".to_string()),
+            workdir: workdir.to_path_buf(),
+            workdir_string: workdir.display().to_string(),
+            bin_dir,
+            last_budget_deadline: Arc::new(AtomicU64::new(u64::MAX)),
+            lease_no_flock,
+        })
     }
 }
 
@@ -296,13 +348,24 @@ impl Connection for FakeConnection {
         &self.jupyter
     }
 
+    fn workdir(&self) -> &str {
+        &self.workdir_string
+    }
+
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
+        if self.lease_no_flock && command.contains("flock is required") {
+            return Ok("flock is required\n__RK_LEASE_EXIT__=11\n".to_string());
+        }
+        let mut path = std::ffi::OsString::from(self.bin_dir.as_os_str());
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
         let output = tokio::time::timeout(
             timeout,
             tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(command)
                 .current_dir(&self.workdir)
+                .env("PATH", path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

@@ -44,10 +44,10 @@ fn server_in(dir: &std::path::Path, budget: Option<f64>) -> RemoteKernelsServer 
     RemoteKernelsServer::new(fake_config(), AppState::new(dir.to_path_buf()), budget)
 }
 
-async fn start_machine(server: &RemoteKernelsServer, name: Option<&str>) -> String {
+async fn start_machine(server: &RemoteKernelsServer, label: Option<&str>) -> (String, String) {
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: name.map(String::from),
+            label: label.map(String::from),
             runtime: None,
             gpu_type: None,
             image: None,
@@ -60,7 +60,12 @@ async fn start_machine(server: &RemoteKernelsServer, name: Option<&str>) -> Stri
     let text = text_of(&result);
     assert!(!is_error(&result), "start failed: {text}");
     assert!(text.contains("RUNNING"), "unexpected start output: {text}");
-    text
+    let machine_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- ID: "))
+        .expect("machine id in start output")
+        .to_string();
+    (machine_id, text)
 }
 
 async fn create_kernel(server: &RemoteKernelsServer, instance: Option<&str>) -> String {
@@ -114,7 +119,7 @@ async fn full_lifecycle_on_fake_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let server = server_in(dir.path(), None);
 
-    let start_text = start_machine(&server, None).await;
+    let (_, start_text) = start_machine(&server, None).await;
     assert!(start_text.contains("Fake GPU"), "{start_text}");
 
     let kernel_id = create_kernel(&server, None).await;
@@ -224,7 +229,7 @@ async fn full_lifecycle_on_fake_runtime() {
         .await
         .unwrap();
     assert!(
-        text_of(&result).contains("No machine"),
+        text_of(&result).contains("No durable machine records"),
         "{}",
         text_of(&result)
     );
@@ -239,8 +244,8 @@ async fn multiple_concurrent_machines() {
     let dir = tempfile::tempdir().unwrap();
     let server = server_in(dir.path(), None);
 
-    start_machine(&server, Some("alpha")).await;
-    start_machine(&server, Some("beta")).await;
+    let (alpha, _) = start_machine(&server, Some("alpha")).await;
+    let (beta, _) = start_machine(&server, Some("beta")).await;
 
     // Instance-scoped tool without a name must ask for disambiguation.
     let result = server
@@ -254,8 +259,8 @@ async fn multiple_concurrent_machines() {
     assert!(text_of(&result).contains("alpha"), "{}", text_of(&result));
 
     // Kernels on both machines; execution routes by kernel id alone.
-    let kernel_a = create_kernel(&server, Some("alpha")).await;
-    let kernel_b = create_kernel(&server, Some("beta")).await;
+    let kernel_a = create_kernel(&server, Some(&alpha)).await;
+    let kernel_b = create_kernel(&server, Some(&beta)).await;
     let (err, out) = execute(&server, &kernel_a, "'machine ' + 'A'").await;
     assert!(!err, "{out}");
     assert!(out.contains("machine A"));
@@ -274,12 +279,47 @@ async fn multiple_concurrent_machines() {
     assert!(text.contains("alpha") && text.contains("beta"), "{text}");
 
     // Terminate one; the other keeps working.
-    terminate(&server, Some("alpha")).await;
+    terminate(&server, Some(&alpha)).await;
     let (err, out) = execute(&server, &kernel_b, "1 + 1").await;
     assert!(!err, "{out}");
     assert!(out.contains("2"));
 
-    terminate(&server, Some("beta")).await;
+    terminate(&server, Some(&beta)).await;
+}
+
+/// A fresh server explicitly attaches by durable id. Phase 2 reports remote
+/// kernels but does not rebind them, and unknown-kernel errors point back to
+/// the durable machine.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn fresh_server_force_attach_and_restart_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&first, Some("attachable")).await;
+    let old_kernel = create_kernel(&first, Some(&machine_id)).await;
+
+    let second = server_in(dir.path(), None);
+    let result = second
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: Some(true),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("not yet rebound"), "{text}");
+
+    let (is_error, guidance) = execute(&second, &old_kernel, "1 + 1").await;
+    assert!(is_error, "{guidance}");
+    // The machine is attached (instances non-empty), so the "server
+    // restarted" line is correctly suppressed; durable-machine guidance
+    // remains.
+    assert!(!guidance.contains("server restarted"), "{guidance}");
+    assert!(guidance.contains(&machine_id), "{guidance}");
+    assert!(guidance.contains("Use attach"), "{guidance}");
+
+    terminate(&second, Some(&machine_id)).await;
 }
 
 /// Budget supervisor: with a tiny budget and a huge fake burn rate, the next
@@ -296,10 +336,11 @@ async fn budget_exhaustion_cleans_up_all_machines() {
     // Billing starts at allocation, so use wait=false: both machines are
     // allocated within milliseconds (before the budget is consumed), then
     // burn concurrently while finalizing in the background.
-    for name in ["burner-1", "burner-2"] {
+    let mut machine_ids = Vec::new();
+    for label in ["burner-1", "burner-2"] {
         let result = server
             .start(Parameters(remote_kernels::server::StartParams {
-                name: Some(name.to_string()),
+                label: Some(label.to_string()),
                 runtime: None,
                 gpu_type: None,
                 image: None,
@@ -311,6 +352,12 @@ async fn budget_exhaustion_cleans_up_all_machines() {
             .expect("async start should be allocated within budget");
         let text = text_of(&result);
         assert!(text.contains("provisioning"), "{text}");
+        machine_ids.push(
+            text.split_whitespace()
+                .nth(1)
+                .expect("machine id in async start output")
+                .to_string(),
+        );
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -319,14 +366,14 @@ async fn budget_exhaustion_cleans_up_all_machines() {
     let err = server
         .create_kernel(Parameters(remote_kernels::server::CreateKernelParams {
             name: None,
-            instance: Some("burner-1".to_string()),
+            instance: Some(machine_ids[0].clone()),
         }))
         .await
         .expect_err("budget exhaustion should surface as an MCP error");
     let msg = format!("{err}");
     assert!(msg.contains("budget"), "{msg}");
     assert!(
-        msg.contains("burner-1") && msg.contains("burner-2"),
+        msg.contains(&machine_ids[0]) && msg.contains(&machine_ids[1]),
         "{msg}"
     );
 
@@ -338,7 +385,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
         .await
         .unwrap();
     assert!(
-        text_of(&result).contains("No machine"),
+        text_of(&result).contains("No durable machine records"),
         "{}",
         text_of(&result)
     );
@@ -346,7 +393,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
     // start() is budget-gated too (the original implementation forgot this).
     let err = server
         .start(Parameters(remote_kernels::server::StartParams {
-            name: Some("burner-3".to_string()),
+            label: Some("burner-3".to_string()),
             runtime: None,
             gpu_type: None,
             image: None,
@@ -361,14 +408,14 @@ async fn budget_exhaustion_cleans_up_all_machines() {
     unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_COST_PER_HR") };
 }
 
-/// Stop preserves the record; start() with the same name resumes it.
+/// Stop preserves the record; attach() by id resumes it.
 #[tokio::test]
 #[ignore = "needs uv + network for jupyter-server; run with --ignored"]
 async fn stop_and_resume_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let server = server_in(dir.path(), None);
 
-    start_machine(&server, None).await;
+    let (machine_id, _) = start_machine(&server, Some("resumable")).await;
     let result = server
         .stop(Parameters(remote_kernels::server::InstanceParams {
             instance: None,
@@ -386,11 +433,94 @@ async fn stop_and_resume_roundtrip() {
         }))
         .await
         .unwrap();
-    assert!(text_of(&result).contains("main"), "{}", text_of(&result));
+    assert!(
+        text_of(&result).contains(&machine_id),
+        "{}",
+        text_of(&result)
+    );
 
-    // start() resumes the same machine (same external id).
-    let text = start_machine(&server, None).await;
-    assert!(text.contains("Reconnected"), "{text}");
+    let result = server
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("Attached"), "{text}");
 
     terminate(&server, None).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn no_flock_start_degrades_but_keeps_machine_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: this suite is documented and run single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_NO_FLOCK", "1") };
+    let server = server_in(dir.path(), None);
+    let (machine_id, text) = start_machine(&server, Some("no-flock")).await;
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_NO_FLOCK") };
+
+    assert!(text.contains("flock unavailable"), "{text}");
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+    let (error, output) = execute(&server, &kernel_id, "6 * 7").await;
+    assert!(!error, "{output}");
+    assert!(output.contains("42"), "{output}");
+    terminate(&server, Some(&machine_id)).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn attach_evicts_fenced_husk_and_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("reattach")).await;
+    server
+        .shared_state()
+        .lock()
+        .await
+        .instances
+        .get_mut(&machine_id)
+        .unwrap()
+        .fenced = Some(remote_kernels::state::FenceReason::TakenOver);
+
+    let result = server
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: Some(true),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("Attached"), "{text}");
+    terminate(&server, Some(&machine_id)).await;
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn same_server_concurrent_attach_has_one_winner() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&first, Some("race")).await;
+    let second = server_in(dir.path(), None);
+    let attach = |server: RemoteKernelsServer| {
+        let machine_id = machine_id.clone();
+        async move {
+            server
+                .attach(Parameters(remote_kernels::server::AttachParams {
+                    machine_id,
+                    force: Some(true),
+                }))
+                .await
+                .unwrap()
+        }
+    };
+    let (left, right) = tokio::join!(attach(second.clone()), attach(second.clone()));
+    assert_ne!(is_error(&left), is_error(&right));
+    let refusal = if is_error(&left) { &left } else { &right };
+    assert!(text_of(refusal).contains("already attached"));
+    terminate(&second, Some(&machine_id)).await;
 }

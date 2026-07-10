@@ -613,6 +613,10 @@ impl Connection for K8sConnection {
         &self.jupyter
     }
 
+    fn workdir(&self) -> &str {
+        &self.workdir
+    }
+
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
         exec_capture(
             &self.pods,

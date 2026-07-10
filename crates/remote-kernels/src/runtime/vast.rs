@@ -977,6 +977,10 @@ impl Connection for VastConnection {
         &self.jupyter
     }
 
+    fn workdir(&self) -> &str {
+        &self.workdir
+    }
+
     fn startup_note(&self) -> Option<String> {
         (self.ssh.user != "root").then(|| {
             format!(

@@ -75,6 +75,24 @@ impl JupyterClient {
         }
     }
 
+    /// List kernels currently known to Jupyter. Attach uses this only to
+    /// report that phase-3 notebook/kernel recovery has not rebound them yet.
+    pub async fn list_kernels(&self) -> anyhow::Result<Vec<KernelInfo>> {
+        let url = format!("{}/api/kernels", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", format!("token {}", self.token))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to list kernels ({status}): {body}");
+        }
+        Ok(response.json().await?)
+    }
+
     /// Create a new Python kernel, returns its ID.
     ///
     /// Retries on 404 errors — the Jupyter kernel manager may not be fully

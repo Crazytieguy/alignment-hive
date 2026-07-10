@@ -24,6 +24,11 @@ pub fn rsync_upload_args(extra_includes: &[String]) -> Vec<String> {
         "--exclude=.claude".to_string(),
         "--exclude=target".to_string(),
         "--exclude=node_modules".to_string(),
+        // The machine-side supervision state (lease, intent/outcome markers,
+        // kernel-output logs) lives in <workdir>/.remote-kernels. `--delete`
+        // MUST NOT touch it: wiping the lease mid-session unfences the
+        // machine and destroys finalize/recovery state.
+        "--exclude=.remote-kernels".to_string(),
     ]);
     args
 }

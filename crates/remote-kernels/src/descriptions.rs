@@ -10,10 +10,11 @@ use std::path::Path;
 pub fn server_instructions(project_dir: &Path) -> String {
     format!(
         "Cloud GPU machines with persistent Jupyter kernels.\n\
-         Machines are named; when several are active, machine-scoped tools take an `instance` \
+         start() always creates a fresh machine id; use its optional label only for display. \
+         Use status() to discover durable machines and attach(machine_id) after a server restart \
+         (including normal background/resume replacement). When several are active, machine-scoped tools take an `instance` \
          argument (kernel-scoped tools never do — each kernel id routes to its machine \
-         automatically). Starting a machine reconnects to the same-named machine from a \
-         previous session if one exists; kernels don't survive that, so create new ones.\n\
+         automatically). A fenced error means another session took over; stop using that machine here.\n\
          Everything executed on a kernel is auto-saved to a local .ipynb notebook (path shown \
          when the kernel is created) — read it to recover context after conversation compaction.\n\
          sync() and download() are rooted at the project directory the server started in: \

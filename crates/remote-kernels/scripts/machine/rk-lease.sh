@@ -98,6 +98,7 @@ pause_after_read_for_test() {
 write_lease() {
     local now tmp
     now=$(date +%s)
+    lease_ts="$now"
     tmp="$state_dir/.lease.json.$$.$RANDOM.tmp"
     printf "{\"generation\":%s,\"owner_uuid\":\"%s\",\"state\":\"%s\",\"arm_reason\":\"%s\",\"arm_deadline\":%s,\"op_id\":\"%s\",\"action\":\"%s\",\"ts\":%s}\n" \
         "$generation" "$owner_uuid" "$state" "$arm_reason" "$arm_deadline" \
@@ -106,6 +107,14 @@ write_lease() {
         rm -f "$tmp"
         fail_invalid "cannot replace lease"
     }
+}
+
+print_lease() {
+    local now
+    now=$(date +%s)
+    printf "{\"generation\":%s,\"owner_uuid\":\"%s\",\"state\":\"%s\",\"arm_reason\":\"%s\",\"arm_deadline\":%s,\"op_id\":\"%s\",\"action\":\"%s\",\"ts\":%s,\"now\":%s}\n" \
+        "$generation" "$owner_uuid" "$state" "$arm_reason" "$arm_deadline" \
+        "$op_id" "$action" "$lease_ts" "$now"
 }
 
 [ "$#" -ge 2 ] || fail_invalid "usage: rk-lease.sh <state_dir> <op> [args]"
@@ -139,6 +148,7 @@ case "$op" in
             action=""
         fi
         write_lease
+        print_lease
         ;;
     refresh)
         [ "$#" -eq 2 ] && is_uint "$1" && is_atom "$2" \
@@ -226,11 +236,7 @@ case "$op" in
         ;;
     read)
         [ "$#" -eq 0 ] || fail_invalid "usage: read"
-        if [ -f "$lease_file" ]; then
-            cat "$lease_file"
-        else
-            printf "{\"generation\":0,\"owner_uuid\":\"\",\"state\":\"active\",\"arm_reason\":\"\",\"arm_deadline\":0,\"op_id\":\"\",\"action\":\"\",\"ts\":0}\n"
-        fi
+        print_lease
         ;;
     *) fail_invalid "unknown lease operation: $op" ;;
 esac

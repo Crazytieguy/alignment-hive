@@ -1,7 +1,7 @@
 //! In-memory and on-disk state for the MCP server.
 //!
-//! Multiple concurrent machines are supported: each named instance has its own
-//! state dir at `.claude/remote-kernels/instances/<name>/` holding its
+//! Multiple concurrent machines are supported: each machine has its own state
+//! dir at `.claude/remote-kernels/instances/<id>/` holding its
 //! `state.json` (the durable record) and SSH key. Session spend is tracked
 //! globally and persisted to `.claude/remote-kernels/spend.json` — it is
 //! rehydrated at startup only while instance records exist, so a mid-session
@@ -41,6 +41,13 @@ pub enum Phase {
 /// connection credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceRecord {
+    /// Server-generated machine identity. Older name-keyed records omit this;
+    /// their directory name remains the legacy id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    /// Optional display-only label. It never participates in identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub runtime: String,
     pub external_id: String,
     pub phase: Phase,
@@ -74,7 +81,9 @@ struct PersistedSpend {
 
 /// Live state for one machine.
 pub struct InstanceState {
+    /// Machine id (a ULID for new records, legacy name for old records).
     pub name: String,
+    pub label: Option<String>,
     pub runtime: String,
     pub external_id: String,
     pub phase: Phase,
@@ -93,8 +102,22 @@ pub struct InstanceState {
     pub proxy_port_mapped: bool,
     pub connection: Option<Arc<AnyConnection>>,
     pub heartbeat: Option<HeartbeatState>,
+    /// Set when a lease refresh proves this process no longer owns the
+    /// machine. Kernel and instance data operations fail closed thereafter.
+    pub fenced: Option<FenceReason>,
+    /// Generation acquired by this server, when lease fencing is available.
+    pub lease_generation: Option<u64>,
+    /// Present when the machine stays usable but cannot be supervised/fenced.
+    pub supervision_note: Option<String>,
     /// Pending executions that timed out. Keyed by (`kernel_id`, `cell_number`).
     pub pending_executions: HashMap<(String, u32), oneshot::Receiver<ExecutionOutput>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceReason {
+    TakenOver,
+    Finalizing,
+    AuthorityUnknown,
 }
 
 impl InstanceState {
@@ -103,6 +126,7 @@ impl InstanceState {
     #[allow(clippy::too_many_arguments)]
     pub fn provisioning(
         name: String,
+        label: Option<String>,
         runtime: String,
         external_id: String,
         gpu_name: String,
@@ -114,6 +138,7 @@ impl InstanceState {
     ) -> Self {
         Self {
             name,
+            label,
             runtime,
             external_id,
             phase: Phase::Provisioning,
@@ -133,6 +158,9 @@ impl InstanceState {
             proxy_port_mapped,
             connection: None,
             heartbeat: None,
+            fenced: None,
+            lease_generation: None,
+            supervision_note: Some("supervision setup is pending".to_string()),
             pending_executions: HashMap::new(),
         }
     }
@@ -150,6 +178,8 @@ impl InstanceState {
 
     pub fn record(&self) -> InstanceRecord {
         InstanceRecord {
+            machine_id: Some(self.name.clone()),
+            label: self.label.clone(),
             runtime: self.runtime.clone(),
             external_id: self.external_id.clone(),
             phase: self.phase,
@@ -179,12 +209,49 @@ pub struct AppState {
     pub accumulated_spend: f64,
 }
 
-fn state_dir(project_dir: &Path) -> PathBuf {
+pub fn state_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude/remote-kernels")
 }
 
 fn instance_dir(project_dir: &Path, name: &str) -> PathBuf {
     state_dir(project_dir).join("instances").join(name)
+}
+
+/// Operation locks live outside instance directories so deleting a record
+/// cannot unlink the lock while another process still holds it.
+pub fn operation_lock_path(project_dir: &Path, machine_id: &str) -> PathBuf {
+    state_dir(project_dir)
+        .join("ledger")
+        .join(format!("{machine_id}.oplock"))
+}
+
+/// Acquire the cross-process machine-operation lock. The open file is the
+/// guard; rustix `flock` auto-releases it on process death.
+pub async fn acquire_operation_lock(
+    project_dir: &Path,
+    machine_id: &str,
+) -> anyhow::Result<std::fs::File> {
+    let path = operation_lock_path(project_dir, machine_id);
+    tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+        Ok(file)
+    })
+    .await?
+}
+
+/// New ids are canonical 26-character Crockford-base32 ULIDs. Every other
+/// safe directory key is a legacy id and remains addressable for migration.
+pub fn is_legacy_machine_id(machine_id: &str) -> bool {
+    !crate::ulid::is_valid(machine_id)
 }
 
 fn ensure_gitignore(project_dir: &Path) {
@@ -194,20 +261,19 @@ fn ensure_gitignore(project_dir: &Path) {
     }
 }
 
-/// Validate an instance name for filesystem safety.
-pub fn validate_instance_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.len() > 64 {
-        return Err("Instance name must be 1-64 characters".to_string());
+/// Validate an id as one filesystem path component. Legacy records predate
+/// ULIDs, so attachment accepts any existing component rather than applying
+/// the old provider-label alphabet.
+pub fn validate_machine_id(machine_id: &str) -> Result<(), String> {
+    let mut components = Path::new(machine_id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(component)), None)
+            if component == std::ffi::OsStr::new(machine_id) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!("Invalid machine id {machine_id:?}")),
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(format!(
-            "Invalid instance name {name:?}: only alphanumerics, '-' and '_' are allowed"
-        ));
-    }
-    Ok(())
 }
 
 impl AppState {
@@ -367,7 +433,7 @@ impl AppState {
         }
         let mut names = self.instances.keys();
         match (names.next(), names.next()) {
-            (None, _) => Err("No machine is running. Call start() first.".to_string()),
+            (None, _) => Err("No machine is attached in this server.".to_string()),
             (Some(sole), None) => Ok(sole.clone()),
             (Some(_), Some(_)) => Err(format!(
                 "Multiple instances are active — specify one with the `instance` parameter. \
@@ -417,6 +483,7 @@ pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)
 }
 
 pub fn load_instance_record(project_dir: &Path, name: &str) -> Option<InstanceRecord> {
+    validate_machine_id(name).ok()?;
     let path = instance_dir(project_dir, name).join("state.json");
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
@@ -485,6 +552,8 @@ fn migrate_legacy_state(project_dir: &Path) {
     });
 
     let record = InstanceRecord {
+        machine_id: None,
+        label: Some("main".to_string()),
         runtime: "runpod".to_string(),
         external_id: pod_id,
         phase: Phase::Stopped, // conservative: reconnect logic re-queries the provider
@@ -517,6 +586,7 @@ mod tests {
     fn instance(name: &str, cost_per_hr: f64, running_for: std::time::Duration) -> InstanceState {
         InstanceState {
             name: name.to_string(),
+            label: None,
             runtime: "runpod".to_string(),
             external_id: format!("pod-{name}"),
             phase: Phase::Running,
@@ -534,22 +604,29 @@ mod tests {
             proxy_port_mapped: false,
             connection: None,
             heartbeat: None,
+            fenced: None,
+            lease_generation: None,
+            supervision_note: None,
             pending_executions: HashMap::new(),
         }
     }
 
     #[test]
-    fn record_roundtrip() {
+    fn ulid_record_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        let inst = instance("main", 0.5, std::time::Duration::ZERO);
+        let machine_id = crate::ulid::new();
+        let mut inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
+        inst.label = Some("training".to_string());
         let record = inst.record();
-        state.instances.insert("main".to_string(), inst);
+        state.instances.insert(machine_id.clone(), inst);
 
-        state.save_record("main", &record).unwrap();
+        state.save_record(&machine_id, &record).unwrap();
 
-        let loaded = load_instance_record(dir.path(), "main").unwrap();
-        assert_eq!(loaded.external_id, "pod-main");
+        let loaded = load_instance_record(dir.path(), &machine_id).unwrap();
+        assert_eq!(loaded.external_id, format!("pod-{machine_id}"));
+        assert_eq!(loaded.machine_id.as_deref(), Some(machine_id.as_str()));
+        assert_eq!(loaded.label.as_deref(), Some("training"));
         assert_eq!(loaded.runtime, "runpod");
         assert_eq!(loaded.phase, Phase::Running);
         assert_eq!(loaded.cleanup, Cleanup::Terminate);
@@ -557,7 +634,21 @@ mod tests {
 
         let all = list_instance_records(dir.path());
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].0, "main");
+        assert_eq!(all[0].0, machine_id);
+        assert!(!is_legacy_machine_id(&all[0].0));
+    }
+
+    #[test]
+    fn legacy_name_keyed_record_remains_resolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let legacy = instance("old_name", 0.0, std::time::Duration::ZERO).record();
+        state.save_record("old_name", &legacy).unwrap();
+
+        let loaded = load_instance_record(dir.path(), "old_name").unwrap();
+        assert_eq!(loaded.external_id, "pod-old_name");
+        assert!(is_legacy_machine_id("old_name"));
+        assert!(load_instance_record(dir.path(), "../escape").is_none());
     }
 
     #[test]
@@ -745,15 +836,5 @@ mod tests {
         );
         let err = state.resolve_instance(None).unwrap_err();
         assert!(err.contains("gpu-2") && err.contains("main"), "{err}");
-    }
-
-    #[test]
-    fn instance_names_validated() {
-        assert!(validate_instance_name("main").is_ok());
-        assert!(validate_instance_name("gpu-2_test").is_ok());
-        assert!(validate_instance_name("").is_err());
-        assert!(validate_instance_name("has space").is_err());
-        assert!(validate_instance_name("../escape").is_err());
-        assert!(validate_instance_name(&"x".repeat(65)).is_err());
     }
 }
