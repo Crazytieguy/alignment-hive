@@ -9,8 +9,12 @@
 //! 4. Install the watchdog: self-cleanup on stale heartbeat
 //!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline
 //! 5. Every 60s: signal liveness, refresh the budget deadline from the shared
-//!    spend model (aggregate burn rate across ALL running metered instances,
-//!    so concurrent machines can't collectively exceed the session budget)
+//!    spend model (aggregate burn rate across all metered instances THIS
+//!    session owns, so its concurrent machines can't collectively exceed its
+//!    per-session budget)
+//!
+//! The lease owner value is the Claude session id, so a respawned server for
+//! the same session re-acquires its machines without force.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,14 +69,16 @@ pub struct BudgetFeed {
 }
 
 impl BudgetFeed {
-    /// Seconds until the session budget is exhausted if every running metered
-    /// instance keeps burning. `None` when nothing is currently metered or
-    /// accounting is unavailable; hard accounting errors must preserve the
-    /// last remote deadline, never synthesize a zero-second destruction arm.
+    /// Seconds until this session's budget is exhausted if every metered
+    /// machine it owns keeps burning (budgets are per Claude session: only
+    /// spend and rates attributed to this session count). `None` when this
+    /// session owns nothing metered or accounting is unavailable; hard
+    /// accounting errors must preserve the last remote deadline, never
+    /// synthesize a zero-second destruction arm.
     pub async fn remaining_secs(&self) -> Option<u64> {
         let state = self.state.lock().await;
-        let summary = match state.spend_summary() {
-            Ok(summary) => summary,
+        let session = match state.session_spend() {
+            Ok(session) => session,
             Err(error) => {
                 tracing::error!(
                     "Budget deadline refresh skipped: accounting failed closed: {error}"
@@ -80,11 +86,11 @@ impl BudgetFeed {
                 return None;
             }
         };
-        let rate = summary.hourly_rate;
+        let rate = session.hourly_rate;
         if rate <= 0.0 {
             return None;
         }
-        let remaining_dollars = self.budget - summary.total;
+        let remaining_dollars = self.budget - session.spent;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Some(((remaining_dollars / rate) * 3600.0).max(0.0) as u64)
     }
@@ -98,7 +104,7 @@ pub fn start(
     external_id: String,
     watchdog_policy: WatchdogPolicy,
     acquire_mode: AcquireMode,
-    owner_uuid: String,
+    lease_owner: String,
     state: Arc<Mutex<AppState>>,
     budget: Option<f64>,
     startup_commands: Vec<String>,
@@ -112,7 +118,7 @@ pub fn start(
             &external_id,
             watchdog_policy,
             acquire_mode,
-            &owner_uuid,
+            &lease_owner,
             &state,
             budget,
             &startup_commands,
@@ -140,7 +146,7 @@ async fn establish_and_run(
     external_id: &str,
     mut watchdog_policy: WatchdogPolicy,
     acquire_mode: AcquireMode,
-    owner_uuid: &str,
+    lease_owner: &str,
     state: &Arc<Mutex<AppState>>,
     budget: Option<f64>,
     startup_commands: &[String],
@@ -180,7 +186,7 @@ async fn establish_and_run(
             }
         }
 
-        match acquire_lease(conn, acquire_mode, owner_uuid).await {
+        match acquire_lease(conn, acquire_mode, lease_owner).await {
             Ok(lease) => break lease,
             Err(EstablishError::Retry(error)) => {
                 tracing::warn!(
@@ -204,6 +210,35 @@ async fn establish_and_run(
 
     let lease_generation = lease.generation;
     mark_acquired(state, machine_id, external_id, lease_generation).await;
+    // Adoption commit: the lease acquire proved authority, so the ledger
+    // owner must match the lease owner (the session id). This runs BEFORE
+    // the budget feed computes the first deadline, so an adopter's deadline
+    // reflects the adopter's remaining budget — and it heals a crash that
+    // landed between a previous acquire and its owner-changed append. An
+    // append failure is conservative: spend stays with the prior owner,
+    // whose machine-side deadline remains armed.
+    {
+        let state_guard = state.lock().await;
+        let ledger_owner = state_guard.machine_ledger_owner(machine_id);
+        match ledger_owner {
+            Ok(Some(owner)) if owner != state_guard.session_owner => {
+                if let Err(error) = state_guard.append_owner_change(machine_id) {
+                    tracing::error!(
+                        instance = machine_id,
+                        "Adoption could not be recorded in the ledger \
+                         (spend stays attributed to {owner}): {error}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(
+                    instance = machine_id,
+                    "Ledger owner unavailable during acquire: {error}"
+                );
+            }
+        }
+    }
     // All setup writes happen only after acquiring authority and while the
     // local operation lock prevents another project server from rotating it.
     run_startup_commands(conn, machine_id, startup_commands).await;
@@ -255,7 +290,7 @@ async fn establish_and_run(
                     return Ok(());
                 }
             };
-        match crate::machine_scripts::refresh(conn, lease_generation, owner_uuid).await {
+        match crate::machine_scripts::refresh(conn, lease_generation, lease_owner).await {
             Ok(()) => tracing::debug!(instance = machine_id, "Lease refreshed"),
             Err(crate::machine_scripts::LeaseError::Fenced) => {
                 mark_fenced(state, machine_id, external_id, FenceReason::TakenOver).await;
@@ -337,7 +372,7 @@ enum EstablishError {
 async fn acquire_lease(
     conn: &AnyConnection,
     mode: AcquireMode,
-    owner_uuid: &str,
+    lease_owner: &str,
 ) -> Result<crate::machine_scripts::LeaseState, EstablishError> {
     if let AcquireMode::Attach { force } = mode {
         let current = crate::machine_scripts::read(conn)
@@ -355,7 +390,7 @@ async fn acquire_lease(
         if current.state == "active"
             && current.generation > 0
             && !current.owner_uuid.is_empty()
-            && current.owner_uuid != owner_uuid
+            && current.owner_uuid != lease_owner
             && age < 180
             && !force
         {
@@ -367,7 +402,7 @@ async fn acquire_lease(
             ));
         }
     }
-    crate::machine_scripts::acquire(conn, owner_uuid)
+    crate::machine_scripts::acquire(conn, lease_owner)
         .await
         .map_err(classify_lease_error)
 }
@@ -418,6 +453,8 @@ async fn mark_acquired(
         let acquired = crate::state::LifecycleRecord {
             storage_rate_per_hr: prior.storage_rate_per_hr,
             storage_rate_note: prior.storage_rate_note,
+            // A queued finish() survives reconnects; attach resumes it.
+            finish_intent: prior.finish_intent,
             ..crate::state::LifecycleRecord::default()
         };
         if let Err(error) =
@@ -472,14 +509,14 @@ pub fn start_owned_for_test(
     machine_id: String,
     external_id: String,
     generation: u64,
-    owner_uuid: String,
+    lease_owner: String,
     state: Arc<Mutex<AppState>>,
 ) -> HeartbeatState {
     let handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(10));
         interval.tick().await;
         if matches!(
-            crate::machine_scripts::refresh(&conn, generation, &owner_uuid).await,
+            crate::machine_scripts::refresh(&conn, generation, &lease_owner).await,
             Err(crate::machine_scripts::LeaseError::Fenced)
         ) {
             mark_fenced(&state, &machine_id, &external_id, FenceReason::TakenOver).await;

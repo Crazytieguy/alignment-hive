@@ -16,7 +16,14 @@ pub enum EventKind {
     Stopped,
     Terminated,
     RateChanged,
+    /// Ownership transition only — never carries or alters billing rates.
+    OwnerChanged,
 }
+
+/// Synthetic owner for spend recorded before ownership existed (pre-upgrade
+/// ledgers). It counts toward no session's budget: that spend predates the
+/// scoping, and its era's machine-side deadline still enforces it.
+pub const LEGACY_OWNER: &str = "legacy";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LedgerEvent {
@@ -29,6 +36,11 @@ pub struct LedgerEvent {
     pub epoch_id: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub accrued_spend: f64,
+    /// Claude session that owns the machine's spend from this event onward.
+    /// Absent on rate-only events (ownership is unchanged) and on all
+    /// pre-upgrade events (folded as [`LEGACY_OWNER`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -71,6 +83,23 @@ pub struct SpendSummary {
     pub total: f64,
     pub hourly_rate: f64,
     pub machine_rates: BTreeMap<String, f64>,
+    /// Live-ledger spend attributed per owner (session id or [`LEGACY_OWNER`]).
+    pub owner_totals: BTreeMap<String, f64>,
+    /// Current owner of each machine's spend interval.
+    pub machine_owners: BTreeMap<String, String>,
+}
+
+/// Durable per-owner spend carried across epoch GC (`ledger/owner-rollups.json`).
+/// Entries are never time-pruned: elapsed wall time must not become a budget
+/// reset — a resumed old conversation keeps its window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OwnerRollups {
+    #[serde(default)]
+    pub owners: BTreeMap<String, f64>,
+    /// Epoch ids already merged, so a crashed-and-retried close cannot
+    /// double-merge. One compact line per epoch that ever closed.
+    #[serde(default)]
+    pub merged_epochs: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +139,10 @@ fn ledger_dir(project_dir: &Path) -> PathBuf {
 
 fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("epoch.json")
+}
+
+fn rollups_path(dir: &Path) -> PathBuf {
+    dir.join("owner-rollups.json")
 }
 
 fn sync_parent(path: &Path) -> Result<(), LedgerError> {
@@ -329,6 +362,11 @@ impl EpochGuard {
 
     fn commit_new_epoch(&self) -> Result<(), LedgerError> {
         let closing_epoch = self.manifest()?.epoch_id;
+        // Per-owner rollups must be durable BEFORE the closing epoch's
+        // ledgers become deletable — a session's budget window survives
+        // restarts and epoch GC. Idempotent: a crashed-and-retried close
+        // finds the epoch already merged.
+        self.merge_owner_rollups(&closing_epoch)?;
         let manifest = EpochManifest {
             epoch_id: uuid::Uuid::new_v4().to_string(),
             phase: EpochPhase::Open,
@@ -515,12 +553,18 @@ impl EpochGuard {
                     ));
                 }
             }
-            let folded = fold_events(events, &epoch, now_ms)?;
+            let (folded, machine_owner) = fold_events(events, &epoch, now_ms)?;
             result.total += folded.total;
             result.hourly_rate += folded.hourly_rate;
             result
                 .machine_rates
                 .insert(machine_id.to_string(), folded.hourly_rate);
+            for (owner, amount) in folded.owner_totals {
+                *result.owner_totals.entry(owner).or_default() += amount;
+            }
+            result
+                .machine_owners
+                .insert(machine_id.to_string(), machine_owner);
         }
         if !corruptions.is_empty() {
             return Err(LedgerError::CorruptFold {
@@ -571,6 +615,74 @@ impl EpochGuard {
         Ok(ids)
     }
 
+    /// Durable per-owner spend from epochs already garbage-collected.
+    /// Missing file = no closed epochs yet. Corruption fails closed.
+    pub fn owner_rollups(&self) -> Result<OwnerRollups, LedgerError> {
+        let path = rollups_path(&self.ledger_dir);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(OwnerRollups::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_slice(&bytes).map_err(|error| {
+            LedgerError::Corrupt(format!("cannot parse {}: {error}", path.display()))
+        })
+    }
+
+    /// Fold the closing epoch's per-owner totals into the durable rollups,
+    /// keyed by epoch id so retries cannot double-merge.
+    fn merge_owner_rollups(&self, closing_epoch: &str) -> Result<(), LedgerError> {
+        let mut rollups = self.owner_rollups()?;
+        if rollups.merged_epochs.iter().any(|id| id == closing_epoch) {
+            return Ok(());
+        }
+        let now_ms = now_ms();
+        let mut owner_totals: BTreeMap<String, f64> = BTreeMap::new();
+        for entry in std::fs::read_dir(&self.ledger_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".pending-transitions.jsonl"))
+            {
+                continue;
+            }
+            // A corrupt ledger blocks the close (fail closed) — its spend
+            // must reach the rollups before its file can ever be deleted.
+            let (folded, _) = fold_events(read_events(&path)?, closing_epoch, now_ms)?;
+            for (owner, amount) in folded.owner_totals {
+                *owner_totals.entry(owner).or_default() += amount;
+            }
+        }
+        for (owner, amount) in owner_totals {
+            *rollups.owners.entry(owner).or_default() += amount;
+        }
+        rollups.merged_epochs.push(closing_epoch.to_string());
+        atomic_json(&rollups_path(&self.ledger_dir), &rollups)
+    }
+
+    /// Current spend owner of one machine's ledger (`None` when the machine
+    /// has no current-epoch events).
+    pub fn machine_owner(&self, machine_id: &str) -> Result<Option<String>, LedgerError> {
+        crate::state::validate_machine_id(machine_id).map_err(LedgerError::Corrupt)?;
+        let path = self.ledger_dir.join(format!("{machine_id}.jsonl"));
+        match std::fs::metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let events = read_events(&path)?;
+        let epoch = self.manifest()?.epoch_id;
+        if !events.iter().any(|event| event.epoch_id == epoch) {
+            return Ok(None);
+        }
+        let (_, owner) = fold_events(events, &epoch, now_ms())?;
+        Ok(Some(owner))
+    }
+
     pub fn has_current_epoch_events(&self, machine_id: &str) -> Result<bool, LedgerError> {
         crate::state::validate_machine_id(machine_id).map_err(LedgerError::Corrupt)?;
         let path = self.ledger_dir.join(format!("{machine_id}.jsonl"));
@@ -607,6 +719,8 @@ fn validate_event(event: &LedgerEvent) -> Result<(), LedgerError> {
         || event.storage_rate_per_hr < 0.0
         || !event.accrued_spend.is_finite()
         || event.accrued_spend < 0.0
+        || (event.event == EventKind::OwnerChanged && event.owner.is_none())
+        || event.owner.as_deref().is_some_and(str::is_empty)
     {
         return Err(LedgerError::Corrupt(format!(
             "invalid event {}",
@@ -651,11 +765,15 @@ fn read_events_partial(path: &Path) -> (Vec<LedgerEvent>, Option<String>) {
     (events, None)
 }
 
+/// Fold one machine's events: `(summary, final_owner)`. `owner_totals`
+/// attributes each interval and accrual to the owner active when it opened;
+/// ownership transitions take effect strictly at their timestamp and never
+/// alter the billing rate.
 pub fn fold_events(
     events: Vec<LedgerEvent>,
     epoch_id: &str,
     now_ms: u64,
-) -> Result<SpendSummary, LedgerError> {
+) -> Result<(SpendSummary, String), LedgerError> {
     let mut unique = BTreeMap::new();
     for event in events
         .into_iter()
@@ -679,6 +797,14 @@ pub fn fold_events(
     let mut total = 0.0;
     let mut rate = 0.0;
     let mut last_ts = None;
+    let mut owner = LEGACY_OWNER.to_string();
+    let mut owner_totals: BTreeMap<String, f64> = BTreeMap::new();
+    let mut attribute = |owner: &str, amount: f64, total: &mut f64| {
+        if amount != 0.0 {
+            *total += amount;
+            *owner_totals.entry(owner.to_string()).or_default() += amount;
+        }
+    };
     for event in events {
         if let Some(previous) = last_ts {
             if event.ts_ms < previous {
@@ -689,30 +815,43 @@ pub fn fold_events(
             #[allow(clippy::cast_precision_loss)]
             // millisecond deltas are far below f64's exact range
             let elapsed_ms = (event.ts_ms - previous) as f64;
-            total += rate * elapsed_ms / 3_600_000.0;
+            attribute(&owner, rate * elapsed_ms / 3_600_000.0, &mut total);
         }
-        total += event.accrued_spend;
-        rate = event.total_rate();
+        // The interval before the event belongs to the prior owner; spend
+        // materializing AT the event belongs to the owner it declares.
+        if let Some(new_owner) = &event.owner {
+            owner.clone_from(new_owner);
+        }
+        attribute(&owner, event.accrued_spend, &mut total);
+        if event.event != EventKind::OwnerChanged {
+            rate = event.total_rate();
+        }
         last_ts = Some(event.ts_ms);
     }
     if let Some(previous) = last_ts {
         #[allow(clippy::cast_precision_loss)] // millisecond deltas are far below f64's exact range
         let elapsed_ms = now_ms.saturating_sub(previous) as f64;
-        total += rate * elapsed_ms / 3_600_000.0;
+        attribute(&owner, rate * elapsed_ms / 3_600_000.0, &mut total);
     }
-    Ok(SpendSummary {
-        total,
-        hourly_rate: rate,
-        machine_rates: BTreeMap::new(),
-    })
+    Ok((
+        SpendSummary {
+            total,
+            hourly_rate: rate,
+            machine_rates: BTreeMap::new(),
+            owner_totals,
+            machine_owners: BTreeMap::new(),
+        },
+        owner,
+    ))
 }
 
 fn kind_order(kind: EventKind) -> u8 {
     match kind {
         EventKind::Provisioned | EventKind::Resumed => 0,
-        EventKind::RateChanged => 1,
-        EventKind::Stopped => 2,
-        EventKind::Terminated => 3,
+        EventKind::OwnerChanged => 1,
+        EventKind::RateChanged => 2,
+        EventKind::Stopped => 3,
+        EventKind::Terminated => 4,
     }
 }
 
@@ -737,6 +876,7 @@ pub fn event(
         generation,
         epoch_id: String::new(),
         accrued_spend: 0.0,
+        owner: None,
         note,
     }
 }
@@ -758,6 +898,7 @@ mod tests {
                 generation: 1,
                 epoch_id: epoch.into(),
                 accrued_spend: 0.0,
+                owner: None,
                 note: None,
             },
             LedgerEvent {
@@ -769,6 +910,7 @@ mod tests {
                 generation: 1,
                 epoch_id: epoch.into(),
                 accrued_spend: 0.0,
+                owner: None,
                 note: None,
             },
             LedgerEvent {
@@ -780,17 +922,18 @@ mod tests {
                 generation: 1,
                 epoch_id: epoch.into(),
                 accrued_spend: 0.0,
+                owner: None,
                 note: None,
             },
         ];
-        let expected = fold_events(base.clone(), epoch, 9_000_000).unwrap();
+        let expected = fold_events(base.clone(), epoch, 9_000_000).unwrap().0;
         for permutation in [vec![2, 1, 0], vec![1, 0, 2], vec![0, 2, 1]] {
             let mut events = permutation
                 .into_iter()
                 .map(|i| base[i].clone())
                 .collect::<Vec<_>>();
             events.push(base[1].clone());
-            assert_eq!(fold_events(events, epoch, 9_000_000).unwrap(), expected);
+            assert_eq!(fold_events(events, epoch, 9_000_000).unwrap().0, expected);
         }
         assert!((expected.total - 1.5).abs() < 1e-9);
     }
@@ -807,6 +950,7 @@ mod tests {
             generation: 2,
             epoch_id: epoch.into(),
             accrued_spend: 0.0,
+            owner: None,
             note: None,
         };
         let stop = LedgerEvent {
@@ -818,16 +962,156 @@ mod tests {
             generation: 1,
             epoch_id: epoch.into(),
             accrued_spend: 0.0,
+            owner: None,
             note: None,
         };
         for events in [
             vec![resume.clone(), stop.clone()],
             vec![stop.clone(), resume.clone()],
         ] {
-            let folded = fold_events(events, epoch, 3_601_000).unwrap();
+            let folded = fold_events(events, epoch, 3_601_000).unwrap().0;
             assert!((folded.hourly_rate - 0.1).abs() < f64::EPSILON);
             assert!((folded.total - 0.1).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn ownership_splits_attribution_without_touching_rates() {
+        let epoch = "epoch";
+        let mut provision = LedgerEvent {
+            uuid: "p".into(),
+            ts_ms: 0,
+            event: EventKind::Provisioned,
+            compute_rate_per_hr: 2.0,
+            storage_rate_per_hr: 0.0,
+            generation: 1,
+            epoch_id: epoch.into(),
+            accrued_spend: 0.0,
+            owner: Some("session-a".into()),
+            note: None,
+        };
+        let adoption = LedgerEvent {
+            uuid: "o".into(),
+            ts_ms: 1_800_000, // 30 min in
+            event: EventKind::OwnerChanged,
+            compute_rate_per_hr: 0.0,
+            storage_rate_per_hr: 0.0,
+            generation: 2,
+            epoch_id: epoch.into(),
+            accrued_spend: 0.0,
+            owner: Some("session-b".into()),
+            note: None,
+        };
+        let (summary, owner) =
+            fold_events(vec![provision.clone(), adoption.clone()], epoch, 3_600_000).unwrap();
+        assert_eq!(owner, "session-b");
+        // OwnerChanged carries zero rates but must NOT stop billing.
+        assert!((summary.hourly_rate - 2.0).abs() < f64::EPSILON);
+        assert!((summary.total - 2.0).abs() < 1e-9);
+        assert!((summary.owner_totals["session-a"] - 1.0).abs() < 1e-9);
+        assert!((summary.owner_totals["session-b"] - 1.0).abs() < 1e-9);
+
+        // Pre-upgrade events with no owner fold as the synthetic legacy owner.
+        provision.owner = None;
+        let (summary, owner) = fold_events(vec![provision], epoch, 1_800_000).unwrap();
+        assert_eq!(owner, LEGACY_OWNER);
+        assert!((summary.owner_totals[LEGACY_OWNER] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn owner_changed_requires_owner_and_empty_owner_is_invalid() {
+        let mut event = event(EventKind::OwnerChanged, 0.0, 0.0, 1, None, None);
+        event.epoch_id = "epoch".into();
+        assert!(validate_event(&event).is_err());
+        event.owner = Some(String::new());
+        assert!(validate_event(&event).is_err());
+        event.owner = Some("session".into());
+        assert!(validate_event(&event).is_ok());
+    }
+
+    #[test]
+    fn epoch_close_merges_per_owner_rollups_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = EpochGuard::acquire(dir.path()).unwrap();
+        let closing_epoch = guard.manifest().unwrap().epoch_id.clone();
+        let mut spend = event(EventKind::Provisioned, 0.0, 0.0, 1, None, None);
+        spend.owner = Some("session-a".into());
+        spend.accrued_spend = 3.0;
+        guard.append("machine", "provision", spend).unwrap();
+        let mut done = event(EventKind::Terminated, 0.0, 0.0, 1, None, None);
+        done.accrued_spend = 0.0;
+        guard.append("machine", "terminate", done).unwrap();
+
+        guard.close_epoch(now_ms()).unwrap();
+        let rollups = guard.owner_rollups().unwrap();
+        assert!((rollups.owners["session-a"] - 3.0).abs() < 1e-9);
+        assert_eq!(rollups.merged_epochs, vec![closing_epoch.clone()]);
+
+        // Crash-and-retry of the same close cannot double-merge.
+        guard.merge_owner_rollups(&closing_epoch).unwrap();
+        let rollups = guard.owner_rollups().unwrap();
+        assert!((rollups.owners["session-a"] - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn crashed_close_merges_rollups_on_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = EpochGuard::acquire(dir.path()).unwrap();
+        let closing_epoch = guard.manifest().unwrap().epoch_id.clone();
+        let mut spend = event(EventKind::Provisioned, 0.0, 0.0, 1, None, None);
+        spend.owner = Some("session-a".into());
+        spend.accrued_spend = 5.0;
+        guard.append("machine", "provision", spend).unwrap();
+        // Simulate a crash right after phase:closing was persisted.
+        atomic_json(
+            &manifest_path(&ledger_dir(dir.path())),
+            &EpochManifest {
+                epoch_id: closing_epoch.clone(),
+                phase: EpochPhase::Closing,
+                folded_total: Some(5.0),
+            },
+        )
+        .unwrap();
+        drop(guard);
+
+        let recovered = EpochGuard::acquire(dir.path()).unwrap();
+        let rollups = recovered.owner_rollups().unwrap();
+        assert!(
+            (rollups.owners["session-a"] - 5.0).abs() < 1e-9,
+            "{rollups:?}"
+        );
+        assert!(!ledger_dir(dir.path()).join("machine.jsonl").exists());
+        // A later close of the new epoch appends, never re-merges the old.
+        assert_eq!(rollups.merged_epochs, vec![closing_epoch]);
+    }
+
+    #[test]
+    fn corrupt_rollups_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = EpochGuard::acquire(dir.path()).unwrap();
+        std::fs::write(ledger_dir(dir.path()).join("owner-rollups.json"), "{broken").unwrap();
+        assert!(guard.owner_rollups().is_err());
+    }
+
+    #[test]
+    fn machine_owner_follows_the_latest_ownership_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = EpochGuard::acquire(dir.path()).unwrap();
+        assert_eq!(guard.machine_owner("machine").unwrap(), None);
+        let mut provision = event(EventKind::Provisioned, 1.0, 0.0, 1, None, None);
+        provision.owner = Some("session-a".into());
+        guard.append("machine", "provision", provision).unwrap();
+        assert_eq!(
+            guard.machine_owner("machine").unwrap().as_deref(),
+            Some("session-a")
+        );
+        let mut adopted = event(EventKind::OwnerChanged, 0.0, 0.0, 2, None, None);
+        adopted.owner = Some("session-b".into());
+        guard.append("machine", "adopt", adopted).unwrap();
+        assert_eq!(
+            guard.machine_owner("machine").unwrap().as_deref(),
+            Some("session-b")
+        );
     }
 
     #[test]

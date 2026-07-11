@@ -72,14 +72,21 @@ Cover these with the user regardless of runtime:
   Claude Code that an ordinary project file doesn't — a strong guardrail,
   though not an absolute guarantee in fully-automatic permission modes.
   Optional: no budget means the user manages spend manually, and that is a
-  supported choice. When set, it covers total provider spend across ALL
-  concurrent machines — including storage that keeps billing on a stopped
-  machine until someone terminates it (status() shows that tail). Frame it
-  as a generous upper limit, not a spending target — Claude should always
-  stop or terminate machines that are no longer in use, and the budget is
-  the backstop for when that fails. The money-safety windows (orphan halt,
-  provision timeouts, budget grace) are also config with sane defaults —
-  mention they exist in the template rather than walking through each.
+  supported choice. When set, the cap is **per Claude session**: it covers
+  total provider spend attributable to that session — machines it started
+  plus, from the moment of attach, machines it adopted — including storage
+  that keeps billing on a stopped machine until someone terminates it
+  (status() shows that tail). The count is cumulative for the life of the
+  session (it survives restarts, backgrounding, and machine termination;
+  it resets only with a genuinely new session), and concurrent sessions
+  have independent caps — total exposure is cap x live sessions. A machine
+  left behind by an ended session keeps self-enforcing that session's
+  remaining budget until adopted. Frame the cap as a generous upper limit,
+  not a spending target — Claude should always stop or terminate machines
+  that are no longer in use, and the budget is the backstop for when that
+  fails. The money-safety windows (orphan halt, provision timeouts, budget
+  grace) are also config with sane defaults — mention they exist in the
+  template rather than walking through each.
 - **Notebooks** — everything executed on a kernel is saved as an `.ipynb`
   file under `remote-kernels/` at the project root (one notebook per kernel;
   configurable via `notebook-dir`). Decide with the user whether to commit

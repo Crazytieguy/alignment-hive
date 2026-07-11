@@ -87,9 +87,14 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let server = server::RemoteKernelsServer::new_with_budget(config, app_state, budget);
     let shutdown_server = server.clone();
 
-    for message in server.reconcile().await {
+    let reconcile_messages = server.reconcile().await;
+    for message in &reconcile_messages {
         tracing::info!("{message}");
     }
+    // Startup reconcile findings surface via status(), and this session's
+    // running machines are picked back up automatically in the background.
+    server.queue_alerts(reconcile_messages).await;
+    server.spawn_auto_reattach();
 
     tracing::info!("Starting remote-kernels MCP server");
 

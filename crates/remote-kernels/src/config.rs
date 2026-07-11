@@ -687,16 +687,21 @@ impl Config {
 # Default: "{default_name}"
 # name = "{default_name}"
 
-# Budget cap in dollars. Prefer setting REMOTE_KERNELS_BUDGET in
-# .claude/settings.json's env section over this field — it overrides this
-# file and cannot be waived by project config. The cap covers one run of
-# spend: from the first machine started until every machine is terminated
-# and settled (it survives server restarts; it is not a monthly cap). Treat
-# it as a generous upper limit, not a spending target — machines should
-# still be stopped or terminated as soon as they're no longer in use.
-# Requires cleanup != "disabled" on every metered runtime (runpod, vast) —
-# startup fails otherwise, since budget enforcement must be able to
-# stop/terminate machines. Kubernetes is unmetered and exempt.
+# Budget cap in dollars, per Claude session. Prefer setting
+# REMOTE_KERNELS_BUDGET in .claude/settings.json's env section over this
+# field — it overrides this file and cannot be waived by project config.
+# Each Claude session gets its own cap covering the spend attributable to
+# it: machines it started plus, from the moment of attach, machines it
+# adopted. The count is cumulative for the life of the session — it
+# survives restarts, backgrounding, and machine termination, and resets
+# only with a genuinely new session. Concurrent sessions have independent
+# caps (total exposure = cap x live sessions). A machine left behind by an
+# ended session keeps self-enforcing that session's remaining budget until
+# adopted. Treat the cap as a generous upper limit, not a spending target —
+# machines should still be stopped or terminated as soon as they're no
+# longer in use. Requires cleanup != "disabled" on every metered runtime
+# (runpod, vast) — startup fails otherwise, since budget enforcement must
+# be able to stop/terminate machines. Kubernetes is unmetered and exempt.
 # budget-cap = 5.0
 
 # Money-safety window (runpod and vast; kubernetes is unmetered):

@@ -48,9 +48,10 @@ within the conversation. Kernel activity is saved as `.ipynb` files.
 **File sync** — Sync local project files to a machine (`.gitignore`-aware)
 and download results back, both rooted at the project directory.
 
-**Budget controls** — Set a spending limit once and it is enforced across
-all machines, including storage that keeps billing on stopped ones. On
-exhaustion, machines get a grace window to save their work before being
+**Budget controls** — Set a spending limit once and each Claude session
+gets its own cap, covering all the machines that session pays for —
+including storage that keeps billing on stopped ones. On exhaustion, that
+session's machines get a grace window to save their work before being
 stopped or terminated — enforced on the machine itself, so it holds even if
 your laptop dies.
 

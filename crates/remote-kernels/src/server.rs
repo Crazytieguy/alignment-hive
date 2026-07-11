@@ -24,10 +24,6 @@ use crate::runtime::{
 };
 use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
 
-const RESTART_GUIDANCE: &str = "This MCP server process restarted since these machines were \
-     created (normal when a session is backgrounded, resumed, or reloaded), so in-memory \
-     connections were dropped. The machines themselves are unaffected.";
-
 const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
 const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
 
@@ -84,9 +80,14 @@ pub struct RemoteKernelsServer {
     budget_exhausted: Arc<std::sync::atomic::AtomicBool>,
     /// Failure messages from background (wait=false) starts, drained by `status()`.
     start_failures: Arc<Mutex<Vec<String>>>,
-    /// One lease owner identity per server process. Attach rotates the remote
-    /// generation to this owner; heartbeat refresh proves it remains current.
-    owner_uuid: String,
+    /// Machines with a `finish()` drain in flight (single-flight per machine;
+    /// the running drain re-reads the intent, so newer plans are picked up).
+    finish_drains: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// The lease owner value written to machines: the Claude session id
+    /// (`AppState::session_owner`). Attach rotates the remote generation to
+    /// this owner; heartbeat refresh proves it remains current; a respawned
+    /// server for the same session re-acquires without force.
+    lease_owner: String,
     /// Server instructions, rendered once at construction (they embed the
     /// project directory, which is fixed for the server's lifetime).
     instructions: String,
@@ -219,6 +220,20 @@ pub struct TerminateParams {
     /// data are deleted). Only safe when its work is already done or the
     /// data is expendable.
     pub skip_pre_terminate_command: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FinishParams {
+    /// Which machine to finish. Optional when exactly one is active.
+    pub instance: Option<String>,
+    /// Files to download into the project before the final action. Paths are
+    /// relative to the machine workdir and land at the same relative path
+    /// under the project root. Absolute paths and ".." are not allowed.
+    pub download: Option<Vec<String>>,
+    /// What to do once pending executions and downloads finish: "stop"
+    /// (preserve the machine; storage may bill), "terminate" (delete it), or
+    /// "keep" (leave it running).
+    pub then: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -438,6 +453,7 @@ impl RemoteKernelsServer {
         budget: Option<crate::config::EffectiveBudget>,
     ) -> Self {
         let instructions = crate::descriptions::server_instructions(&state.project_dir);
+        let lease_owner = state.session_owner.clone();
         Self {
             config: Arc::new(config),
             state: Arc::new(Mutex::new(state)),
@@ -446,7 +462,8 @@ impl RemoteKernelsServer {
             budget_source: budget.map(|value| value.source),
             budget_exhausted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             start_failures: Arc::new(Mutex::new(Vec::new())),
-            owner_uuid: uuid::Uuid::new_v4().to_string(),
+            finish_drains: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            lease_owner,
             instructions,
             tool_router: Self::tool_router(),
         }
@@ -663,16 +680,35 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// Reconnect to a durable machine by id. Use force only for an intentional takeover.
+    /// Connect to a durable machine by id: resume a stopped machine (its billing
+    /// restarts) or adopt a machine from another session (its future spend counts
+    /// against this session's budget). Machines this session already owns are
+    /// reattached automatically when the server starts and rarely need this
+    /// tool. Use force only for an intentional takeover.
     #[tool(name = "attach")]
     pub async fn attach(
         &self,
         params: Parameters<AttachParams>,
     ) -> Result<CallToolResult, McpError> {
         let params = params.0;
-        let machine_id = params.machine_id;
+        self.attach_machine(params.machine_id, params.force.unwrap_or(false), false)
+            .await
+    }
+
+    /// Shared attach path. `auto` is the startup re-attach: no budget gate
+    /// (reattaching spends nothing, and supervision must return even when
+    /// exhausted), and never a resume (resume = money = explicit tool call).
+    #[allow(clippy::too_many_lines)] // the attach ladder is kept linear for auditability
+    async fn attach_machine(
+        &self,
+        machine_id: String,
+        force: bool,
+        auto: bool,
+    ) -> Result<CallToolResult, McpError> {
         let reconcile_message = self.reconcile_machine(&machine_id).await;
-        self.check_budget().await?;
+        if !auto {
+            self.check_budget().await?;
+        }
         if let Err(message) = crate::state::validate_machine_id(&machine_id) {
             return err_text(message);
         }
@@ -688,7 +724,7 @@ impl RemoteKernelsServer {
         let lifecycle = crate::state::load_lifecycle_record(&project_dir, &machine_id);
         if (lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
             && !lifecycle.wants_terminate)
-            || (lifecycle.wants_terminate && !params.force.unwrap_or(false))
+            || (lifecycle.wants_terminate && !force)
         {
             let reason = if lifecycle.wants_terminate {
                 format!(
@@ -754,6 +790,13 @@ impl RemoteKernelsServer {
             ));
         };
         let resumed = provider_status == InstanceStatus::Stopped;
+        if resumed && auto {
+            // Startup re-attach never resumes: resuming restarts billing and
+            // is always an explicit decision.
+            return err_text(format!(
+                "Machine {machine_id} is stopped; automatic reattach skipped it. attach(\"{machine_id}\") resumes it (billing restarts)."
+            ));
+        }
         if resumed {
             self.state.lock().await.reset_known_hosts(&machine_id);
             self.accounted_resume(
@@ -818,10 +861,7 @@ impl RemoteKernelsServer {
             .finalize_start(
                 &machine_id,
                 &record.external_id,
-                ConnectMode::Attach {
-                    force: params.force.unwrap_or(false),
-                    resumed,
-                },
+                ConnectMode::Attach { force, resumed },
                 Some(operation_lock),
             )
             .await
@@ -831,8 +871,17 @@ impl RemoteKernelsServer {
                 let reconciliation = reconcile_message
                     .map(|message| format!("\n\n{message}"))
                     .unwrap_or_default();
+                let finish_note = if crate::state::load_lifecycle_record(&project_dir, &machine_id)
+                    .finish_intent
+                    .is_some()
+                {
+                    self.spawn_finish_drain(&machine_id);
+                    "\n\nA queued finish() plan was found and resumed."
+                } else {
+                    ""
+                };
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Attached to machine.\n{summary}\n\n{recovery}{reconciliation}"
+                    "Attached to machine.\n{summary}\n\n{recovery}{reconciliation}{finish_note}"
                 ))]))
             }
             Err(error) if error.is::<crate::runtime::StillProvisioning>() => {
@@ -840,26 +889,37 @@ impl RemoteKernelsServer {
                     &machine_id,
                     &record.external_id,
                     &record.runtime,
-                    ConnectMode::Attach {
-                        force: params.force.unwrap_or(false),
-                        resumed,
-                    },
+                    ConnectMode::Attach { force, resumed },
                 );
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Machine {machine_id} is still provisioning; attachment continues in the background. Poll status()."
                 ))]))
             }
             Err(error) => {
-                let mut state = self.state.lock().await;
-                let keep_fenced_husk = state
-                    .instances
-                    .get(&machine_id)
-                    .is_some_and(|instance| instance.fenced.is_some());
-                if !keep_fenced_husk && let Some(mut instance) = state.instances.remove(&machine_id)
                 {
-                    instance.stop_heartbeat();
+                    let mut state = self.state.lock().await;
+                    let keep_fenced_husk = state
+                        .instances
+                        .get(&machine_id)
+                        .is_some_and(|instance| instance.fenced.is_some());
+                    if !keep_fenced_husk
+                        && let Some(mut instance) = state.instances.remove(&machine_id)
+                    {
+                        instance.stop_heartbeat();
+                    }
                 }
                 let detail = format!("{error:#}");
+                if resumed && error.is::<BudgetUnenforceable>() {
+                    // A budget is configured but the machine this attach just
+                    // resumed cannot enforce it — never leave it billing with
+                    // no enforceable deadline.
+                    let outcome = self
+                        .restop_after_resume(&machine_id, &record.external_id, &record.runtime)
+                        .await;
+                    return err_text(format!(
+                        "Attach failed for machine {machine_id}: {detail}. {outcome}"
+                    ));
+                }
                 let prefix = if resumed && !detail.contains("resumed and is billing") {
                     format!("Machine {machine_id} was resumed and is billing; attach failed")
                 } else {
@@ -867,6 +927,46 @@ impl RemoteKernelsServer {
                 };
                 err_text(format!("{prefix}: {detail}"))
             }
+        }
+    }
+
+    /// Close the billing interval a failed budgeted attach opened: stop the
+    /// machine again and record it. Returns the user-facing outcome sentence.
+    async fn restop_after_resume(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+        runtime_name: &str,
+    ) -> String {
+        let Ok(runtime) = self.runtime_for(runtime_name).await else {
+            return format!(
+                "The machine could not be stopped again (runtime {runtime_name} unavailable) and is still billing — stop it at the provider dashboard."
+            );
+        };
+        match runtime.stop(external_id).await {
+            Ok(()) => {
+                if let Err(error) = self.record_stopped(machine_id, None).await {
+                    return format!(
+                        "The machine was stopped again (no unenforced billing), but recording the stop failed ({error})."
+                    );
+                }
+                let project_dir = self.state.lock().await.project_dir.clone();
+                if let Some(mut record) =
+                    crate::state::load_instance_record(&project_dir, machine_id)
+                {
+                    record.phase = Phase::Stopped;
+                    let _ = self.state.lock().await.save_record(machine_id, &record);
+                }
+                "Because a budget is set and the machine could not be supervised, it was stopped again — it is not billing unsupervised.".to_string()
+            }
+            Err(error) => Self::action_needed(
+                machine_id,
+                external_id,
+                &format!(
+                    "it was resumed, its budget cannot be enforced, and stopping it again failed ({error})"
+                ),
+                "call stop",
+            ),
         }
     }
 
@@ -1026,6 +1126,351 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
+    /// Queue end-of-run operations for a machine: wait for pending executions to
+    /// finish, download listed files into the project, then stop, terminate, or
+    /// keep it. Returns immediately; progress failures surface in `status()`. The
+    /// plan is also saved on the machine, so on supervised machines it completes
+    /// even if this server disappears (a terminate waits as a stop until the
+    /// downloads are collected).
+    #[tool(name = "finish")]
+    pub async fn finish(
+        &self,
+        params: Parameters<FinishParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let then = match params.then.as_str() {
+            "stop" => crate::state::FinishThen::Stop,
+            "terminate" => crate::state::FinishThen::Terminate,
+            "keep" => crate::state::FinishThen::Keep,
+            other => {
+                return err_text(format!(
+                    "then must be \"stop\", \"terminate\", or \"keep\" (got {other:?})"
+                ));
+            }
+        };
+        let downloads = params.download.unwrap_or_default();
+        for path in &downloads {
+            if let Err(message) = crate::sync::validate_project_relative(path) {
+                return err_text(message);
+            }
+        }
+
+        let (machine_id, project_dir, conn, jupyter, supervised, cleanup) = {
+            let state = self.state.lock().await;
+            let machine_id = match state.resolve_instance(params.instance.as_deref()) {
+                Ok(machine_id) => machine_id,
+                Err(message) => return err_text(Self::unknown_instance_message(&state, &message)),
+            };
+            let inst = &state.instances[&machine_id];
+            if let Some(message) = Self::fenced_message(inst) {
+                return err_text(message);
+            }
+            if inst.phase != Phase::Running {
+                return err_text(format!(
+                    "Machine {machine_id:?} is not ready yet (still provisioning). Poll status() first."
+                ));
+            }
+            let Some(conn) = inst.connection.clone() else {
+                return err_text(format!(
+                    "Machine {machine_id:?} has no connection yet. Poll status() first."
+                ));
+            };
+            (
+                machine_id,
+                state.project_dir.clone(),
+                conn,
+                inst.jupyter.clone(),
+                inst.supervision_note.is_none(),
+                inst.cleanup,
+            )
+        };
+
+        // Local intent first — it is the recovery source a later attach or
+        // this server's own drain task works from. Written under the state
+        // lock: intent read-modify-writes race only against other in-process
+        // writers (the drain), never across processes (fenced lease).
+        let intent = crate::state::FinishIntent {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            downloads: downloads.clone(),
+            then,
+        };
+        {
+            let _state = self.state.lock().await;
+            let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &machine_id);
+            lifecycle.finish_intent = Some(intent);
+            if let Err(error) =
+                crate::state::save_lifecycle_record(&project_dir, &machine_id, &lifecycle)
+            {
+                return err_text(format!(
+                    "Could not save the finish plan locally: {error}. Nothing was queued."
+                ));
+            }
+        }
+
+        // Machine-visible marker, so a machine-side finalize honors the plan
+        // when no server is alive at drain time. Command transport first,
+        // Jupyter Contents API as the fallback (proxy-only machines).
+        let downloads_pending = !downloads.is_empty();
+        let marker =
+            match crate::machine_scripts::write_intent(&*conn, downloads_pending, then).await {
+                Ok(()) => Ok(()),
+                Err(exec_error) => jupyter
+                    .put_text_file(
+                        crate::machine_scripts::INTENT_RELATIVE_PATH,
+                        &crate::machine_scripts::intent_marker_json(downloads_pending, then),
+                    )
+                    .await
+                    .map_err(|api_error| format!("{exec_error:#}; Contents API: {api_error:#}")),
+            };
+
+        self.spawn_finish_drain(&machine_id);
+
+        let downloads_sentence = if downloads.is_empty() {
+            String::new()
+        } else {
+            format!("{} file(s) will be downloaded, then ", downloads.len())
+        };
+        let action_sentence = match then {
+            crate::state::FinishThen::Stop => {
+                "the machine will be stopped (preserved; storage may bill)"
+            }
+            crate::state::FinishThen::Terminate => "the machine will be terminated",
+            crate::state::FinishThen::Keep => "the machine will be kept running",
+        };
+        let guarantee = if supervised && cleanup != Cleanup::Disabled {
+            match &marker {
+                Ok(()) => {
+                    "The plan is saved on the machine too: if this server disappears, the machine's own cleanup applies it."
+                }
+                Err(_) => {
+                    "Saving the plan on the machine failed, so it runs only while a server is connected; a new server's attach() resumes it."
+                }
+            }
+        } else {
+            "This machine cannot act on the plan itself, so it runs only while a server is connected; a new server's attach() resumes it."
+        };
+        let marker_note = marker
+            .err()
+            .map(|error| format!("\nMarker write failed: {error}"))
+            .unwrap_or_default();
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Finish plan queued for machine {machine_id}: after pending executions complete, {downloads_sentence}{action_sentence}. {guarantee}{marker_note}"
+        ))]))
+    }
+
+    /// Run the queued `finish()` plan in the background; failures land in the
+    /// `status()` queue with the intent kept for a later attach to resume.
+    /// Single-flight per machine: the running drain re-reads the durable
+    /// intent between plans, so a superseding `finish()` is picked up while
+    /// stale work aborts on its token check.
+    fn spawn_finish_drain(&self, machine_id: &str) {
+        let server = self.clone();
+        let machine_id = machine_id.to_string();
+        tokio::spawn(async move {
+            if !server.finish_drains.lock().await.insert(machine_id.clone()) {
+                return;
+            }
+            loop {
+                match server.finish_drain(&machine_id).await {
+                    Ok(Some(message)) => {
+                        tracing::info!(instance = %machine_id, "Finish plan: {message}");
+                        // Loop: a newer plan may have replaced this one.
+                    }
+                    Ok(None) => break,
+                    Err(message) => {
+                        server.start_failures.lock().await.push(format!(
+                            "Queued finish() for machine {machine_id} did not complete: {message}"
+                        ));
+                        break;
+                    }
+                }
+            }
+            server.finish_drains.lock().await.remove(&machine_id);
+        });
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn finish_drain(&self, machine_id: &str) -> Result<Option<String>, String> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let Some(intent) =
+            crate::state::load_lifecycle_record(&project_dir, machine_id).finish_intent
+        else {
+            return Ok(None);
+        };
+        // True while `intent.uuid` is still the durable plan — a superseding
+        // finish() minted a new token, and this worker must not act on a
+        // replaced plan (especially not stop/terminate).
+        let still_current = || {
+            crate::state::load_lifecycle_record(&project_dir, machine_id)
+                .finish_intent
+                .is_some_and(|current| current.uuid == intent.uuid)
+        };
+        let started = std::time::Instant::now();
+
+        // Wait for quiet: every Jupyter kernel idle. A configured
+        // finalize-wait cap forces progress.
+        loop {
+            if !still_current() {
+                return Ok(Some("superseded by a newer finish() plan".to_string()));
+            }
+            let (conn, jupyter, fenced, runtime_name) = {
+                let state = self.state.lock().await;
+                let Some(inst) = state.instances.get(machine_id) else {
+                    return Err(
+                        "the machine is no longer attached; the plan resumes on the next attach()"
+                            .to_string(),
+                    );
+                };
+                (
+                    inst.connection.clone(),
+                    inst.jupyter.clone(),
+                    inst.fenced.is_some(),
+                    inst.runtime.clone(),
+                )
+            };
+            if fenced {
+                return Err(
+                    "another session took over the machine; the plan stays queued".to_string(),
+                );
+            }
+            if conn.is_none() {
+                return Err(
+                    "the machine lost its connection; the plan resumes on attach()".to_string(),
+                );
+            }
+            // Jupyter's kernel state is the drain authority (same as the
+            // machine-side watchdog) — a completed execution nobody has
+            // collected yet must not hold the plan open.
+            let busy = match jupyter.list_kernels().await {
+                Ok(kernels) => kernels.iter().any(|kernel| {
+                    kernel
+                        .execution_state
+                        .as_deref()
+                        .is_some_and(|state| state == "busy" || state == "starting")
+                }),
+                Err(error) => {
+                    return Err(format!(
+                        "could not check kernel state ({error}); the plan stays queued"
+                    ));
+                }
+            };
+            if !busy {
+                break;
+            }
+            if let Some(cap) = self.config.finalize_wait_secs_for(&runtime_name)
+                && started.elapsed().as_secs() >= cap
+            {
+                tracing::warn!(
+                    instance = %machine_id,
+                    "finish(): executions still running after finalize-wait-secs — proceeding"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
+        // Downloads, checkpointing progress after each so a crash never
+        // re-risks collected data and a retry skips what's done.
+        let mut remaining = intent.downloads.clone();
+        while let Some(path) = remaining.first().cloned() {
+            if !still_current() {
+                return Ok(Some("superseded by a newer finish() plan".to_string()));
+            }
+            let conn = {
+                let state = self.state.lock().await;
+                state
+                    .instances
+                    .get(machine_id)
+                    .and_then(|inst| inst.connection.clone())
+            };
+            let Some(conn) = conn else {
+                return Err(
+                    "the machine lost its connection mid-download; the plan resumes on attach()"
+                        .to_string(),
+                );
+            };
+            conn.download(&path, &project_dir.join(&path))
+                .await
+                .map_err(|error| {
+                    format!("downloading {path:?} failed ({error:#}); the plan stays queued — retry with attach() or finish()")
+                })?;
+            remaining.remove(0);
+            let state = self.state.lock().await;
+            let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
+            if let Some(current) = &mut lifecycle.finish_intent
+                && current.uuid == intent.uuid
+            {
+                current.downloads.clone_from(&remaining);
+                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            }
+            drop(state);
+        }
+
+        // Final token check before anything irreversible: the marker clear
+        // and the stop/terminate must act only on the still-current plan.
+        if !still_current() {
+            return Ok(Some("superseded by a newer finish() plan".to_string()));
+        }
+        // Downloads are safe; the marker's protective role (downgrading a
+        // terminate while data is uncollected) is over. Clear it before the
+        // action so a stale intent can't confuse a later finalize.
+        if let Some(conn) = {
+            let state = self.state.lock().await;
+            state
+                .instances
+                .get(machine_id)
+                .and_then(|inst| inst.connection.clone())
+        } && let Err(error) = crate::machine_scripts::clear_intent(&*conn).await
+        {
+            tracing::warn!(instance = %machine_id, "Could not clear finish marker: {error:#}");
+        }
+
+        let outcome = match intent.then {
+            crate::state::FinishThen::Keep => {
+                "downloads complete; the machine is kept running".to_string()
+            }
+            crate::state::FinishThen::Stop | crate::state::FinishThen::Terminate => {
+                let Some(target) = self.live_target(machine_id).await else {
+                    return Err(
+                        "the machine is no longer attached; the plan resumes on attach()"
+                            .to_string(),
+                    );
+                };
+                let action = if intent.then == crate::state::FinishThen::Stop {
+                    CleanupAction::Stop
+                } else {
+                    CleanupAction::Terminate
+                };
+                let actual = self
+                    .explicit_cleanup_instance(&target, action, false)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "the final {} failed ({error:#}); the plan stays queued",
+                            action.verb()
+                        )
+                    })?;
+                format!("machine {}", actual.past_tense())
+            }
+        };
+
+        // Compare-and-clear under the state lock: never erase a plan that
+        // replaced this one mid-action.
+        {
+            let _state = self.state.lock().await;
+            let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
+            if lifecycle
+                .finish_intent
+                .as_ref()
+                .is_some_and(|current| current.uuid == intent.uuid)
+            {
+                lifecycle.finish_intent = None;
+                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            }
+        }
+        Ok(Some(outcome))
+    }
+
     /// Get the status of all machines (or one, via `instance`): phase, GPU, cost,
     /// uptime, kernels, and session spend.
     #[tool(name = "status")]
@@ -1109,6 +1554,13 @@ impl RemoteKernelsServer {
         };
 
         let has_records = !records.is_empty();
+        let machine_owners = self
+            .state
+            .lock()
+            .await
+            .spend_summary()
+            .map(|summary| summary.machine_owners)
+            .unwrap_or_default();
         for (id, record) in records
             .into_iter()
             .filter(|(id, _)| only.as_deref().is_none_or(|requested| requested == id))
@@ -1173,6 +1625,21 @@ impl RemoteKernelsServer {
                 if let Some(caveat) = &lifecycle.supervision_note {
                     let _ = write!(section, "\nCaveat: {caveat}");
                 }
+                match machine_owners.get(&id).map(String::as_str) {
+                    Some(crate::ledger::LEGACY_OWNER) => {
+                        let _ = write!(
+                            section,
+                            "\nSpend owner: none (pre-upgrade machine; counts toward no session's budget until adopted)"
+                        );
+                    }
+                    Some(owner) if owner != self.lease_owner => {
+                        let _ = write!(
+                            section,
+                            "\nSpend owner: another Claude session — its budget window still applies; attach(\"{id}\") adopts it into this session's budget"
+                        );
+                    }
+                    _ => {}
+                }
             }
             if let Some(volume_id) = &lifecycle.external_volume_id {
                 let _ = write!(section, "\nexternal volume {volume_id}: not budget-tracked");
@@ -1210,17 +1677,24 @@ impl RemoteKernelsServer {
             sections.push("No durable machine records found.".to_string());
         }
 
-        let spend = self.state.lock().await.spend_summary();
+        let spend = self.state.lock().await.session_spend();
         let mut info = sections.join("\n\n");
         match spend {
-            Ok(summary) => {
-                let _ = write!(info, "\n\nSession cost: ${:.2}", summary.total);
-                if let Some(budget) = self.budget {
-                    let remaining = budget - summary.total;
+            Ok(session) => {
+                let _ = write!(info, "\n\nSession cost: ${:.2}", session.spent);
+                if session.other_spend > 0.005 {
                     let _ = write!(
                         info,
-                        "\nBudget: ${:.2} / ${budget:.2} (${remaining:.2} remaining)",
-                        summary.total
+                        " (plus ${:.2} attributed to other or pre-upgrade sessions)",
+                        session.other_spend
+                    );
+                }
+                if let Some(budget) = self.budget {
+                    let remaining = budget - session.spent;
+                    let _ = write!(
+                        info,
+                        "\nBudget: ${:.2} / ${budget:.2} (${remaining:.2} remaining; each Claude session has its own budget)",
+                        session.spent
                     );
                 }
             }
@@ -1443,12 +1917,12 @@ impl RemoteKernelsServer {
                 );
             }
 
-            let session_id = inst.session_id.clone();
+            let jupyter_session_id = inst.jupyter_session_id.clone();
             let kernel_id = params.kernel_id.clone();
             let conn = inst.kernel_connections.get(&kernel_id).expect("checked");
 
             let started = conn
-                .start_execution(&session_id, &params.code)
+                .start_execution(&jupyter_session_id, &params.code)
                 .await
                 .map_err(|e| McpError::internal_error(format!("Execution failed: {e}"), None))?;
             // Persist the execute-request id before returning so recorder
@@ -1845,7 +2319,7 @@ impl RemoteKernelsServer {
         cleanup_disabled: bool,
         is_error: bool,
     ) -> Result<CallToolResult, McpError> {
-        let spend = self.state.lock().await.spend_summary();
+        let spend = self.state.lock().await.session_spend();
         if let Some(spend_line) = self.format_spend_line(spend) {
             body.push_str(&spend_line);
         }
@@ -2988,6 +3462,17 @@ impl RemoteKernelsServer {
     }
 
     fn with_attach_guidance(state: &AppState, base: &str) -> String {
+        if !state.reattaching.is_empty() {
+            let ids = state
+                .reattaching
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!(
+                "{base}\nThe server is still reconnecting to this session's machines ({ids}) — retry shortly."
+            );
+        }
         let records = crate::state::list_instance_records(&state.project_dir);
         if records.is_empty() {
             return format!("{base}\nCall start() to create a machine.");
@@ -3003,12 +3488,7 @@ impl RemoteKernelsServer {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let restart = if state.instances.is_empty() {
-            format!("\n\n{RESTART_GUIDANCE}")
-        } else {
-            String::new()
-        };
-        format!("{base}{restart}\nDurable machines:\n{machines}\nUse attach(<id>).")
+        format!("{base}\nDurable machines:\n{machines}\nUse attach(<id>).")
     }
 
     /// Reclaim alerts queued for `status()` into a successful `start()`'s
@@ -3116,7 +3596,7 @@ impl RemoteKernelsServer {
         let Some((generation, connection)) = lease else {
             return Ok(());
         };
-        match crate::machine_scripts::refresh(&connection, generation, &self.owner_uuid).await {
+        match crate::machine_scripts::refresh(&connection, generation, &self.lease_owner).await {
             Ok(()) => Ok(()),
             Err(crate::machine_scripts::LeaseError::Fenced) => {
                 anyhow::bail!(
@@ -3185,7 +3665,7 @@ impl RemoteKernelsServer {
         let Some((generation, connection)) = lease else {
             return Ok(guard);
         };
-        match crate::machine_scripts::refresh(&connection, generation, &self.owner_uuid).await {
+        match crate::machine_scripts::refresh(&connection, generation, &self.lease_owner).await {
             Ok(()) => Ok(guard),
             Err(error) => Err(self.recovery_refresh_error(machine_id, error).await),
         }
@@ -3372,7 +3852,7 @@ impl RemoteKernelsServer {
             external_id.to_string(),
             watchdog_policy,
             acquire_mode,
-            self.owner_uuid.clone(),
+            self.lease_owner.clone(),
             Arc::clone(&self.state),
             self.budget,
             self.config.startup_commands.clone(),
@@ -3504,13 +3984,13 @@ impl RemoteKernelsServer {
                 let _ = write!(summary, "\n- Caveat: {caveat}");
             }
             if let Some(budget) = self.budget {
-                match state.spend_summary() {
-                    Ok(spend) => {
-                        let remaining = budget - spend.total;
+                match state.session_spend() {
+                    Ok(session) => {
+                        let remaining = budget - session.spent;
                         let _ = write!(
                             summary,
                             "\n- Budget: ${:.2} / ${budget:.2} (${remaining:.2} remaining)",
-                            spend.total
+                            session.spent
                         );
                     }
                     Err(error) => {
@@ -3623,9 +4103,16 @@ impl RemoteKernelsServer {
                     }
                     drop(state);
                     let billing = if matches!(mode, ConnectMode::Attach { resumed: true, .. }) {
-                        " The machine was resumed and is billing."
+                        if error.is::<BudgetUnenforceable>() {
+                            let outcome = server
+                                .restop_after_resume(&machine_id, &external_id, &runtime_name)
+                                .await;
+                            format!(" {outcome}")
+                        } else {
+                            " The machine was resumed and is billing.".to_string()
+                        }
                     } else {
-                        ""
+                        String::new()
                     };
                     server.start_failures.lock().await.push(format!(
                         "Attach to machine {machine_id} failed; machine and record kept.{billing} {error:#}"
@@ -3875,11 +4362,11 @@ impl RemoteKernelsServer {
                 None,
             ));
         }
-        let total_spend = self
+        let session_spend = self
             .state
             .lock()
             .await
-            .spend_summary()
+            .session_spend()
             .map_err(|error| {
                 McpError::internal_error(
                     format!(
@@ -3888,11 +4375,11 @@ impl RemoteKernelsServer {
                     None,
                 )
             })?
-            .total;
+            .spent;
         let Some(budget) = self.budget else {
             return Ok(());
         };
-        if total_spend < budget {
+        if session_spend < budget {
             return Ok(());
         }
 
@@ -3902,7 +4389,9 @@ impl RemoteKernelsServer {
             .store(true, std::sync::atomic::Ordering::Release);
         let action = self.cleanup_all_for_budget().await;
         Err(McpError::internal_error(
-            format!("Session budget of ${budget:.2} reached (spent ${total_spend:.2}). {action}"),
+            format!(
+                "Session budget of ${budget:.2} reached (this session has spent ${session_spend:.2}). {action}"
+            ),
             None,
         ))
     }
@@ -3917,10 +4406,10 @@ impl RemoteKernelsServer {
                 "Budget: session limit ${budget:.2} is exhausted; new spend remains blocked for this server session"
             ));
         }
-        match self.state.lock().await.spend_summary() {
-            Ok(summary) if summary.total >= budget => Some(format!(
+        match self.state.lock().await.session_spend() {
+            Ok(session) if session.spent >= budget => Some(format!(
                 "Budget: ${:.2} / ${budget:.2} exhausted; status is observational and did not clean up machines",
-                summary.total
+                session.spent
             )),
             Ok(_) => None,
             Err(error) => Some(format!(
@@ -3941,6 +4430,72 @@ impl RemoteKernelsServer {
 
     pub async fn reconcile(&self) -> Vec<String> {
         self.reconcile_records(None).await
+    }
+
+    /// Queue alerts for `status()` to surface (used by startup reconcile so
+    /// its findings aren't lost to the log).
+    pub async fn queue_alerts(&self, messages: Vec<String>) {
+        if !messages.is_empty() {
+            self.start_failures.lock().await.extend(messages);
+        }
+    }
+
+    /// Reattach, in the background, every durable running machine whose
+    /// ledger owner is this session — the respawned server picks its own
+    /// machines back up without ceremony (and before finalize-wait can fire).
+    /// Never resumes stopped machines, never checks the budget (reattaching
+    /// spends nothing, and supervision must return even when exhausted).
+    pub fn spawn_auto_reattach(&self) {
+        let server = self.clone();
+        tokio::spawn(async move { server.auto_reattach().await });
+    }
+
+    async fn auto_reattach(&self) {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let mut mine = Vec::new();
+        {
+            let mut state = self.state.lock().await;
+            for (machine_id, record) in crate::state::list_instance_records(&project_dir) {
+                if record.phase != Phase::Running || state.instances.contains_key(&machine_id) {
+                    continue;
+                }
+                if state
+                    .machine_ledger_owner(&machine_id)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(self.lease_owner.as_str())
+                {
+                    state.reattaching.insert(machine_id.clone());
+                    mine.push(machine_id);
+                }
+            }
+        }
+        for machine_id in mine {
+            let result = self.attach_machine(machine_id.clone(), false, true).await;
+            self.state.lock().await.reattaching.remove(&machine_id);
+            match result {
+                Ok(reply) if !reply.is_error.unwrap_or(false) => {
+                    tracing::info!(instance = %machine_id, "Automatically reattached");
+                }
+                Ok(reply) => {
+                    let text = reply
+                        .content
+                        .iter()
+                        .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    self.start_failures.lock().await.push(format!(
+                        "Automatic reattach of machine {machine_id} did not complete: {text}"
+                    ));
+                }
+                Err(error) => {
+                    self.start_failures.lock().await.push(format!(
+                        "Automatic reattach of machine {machine_id} failed: {error}"
+                    ));
+                }
+            }
+        }
     }
 
     async fn reconcile_records(&self, only: Option<&str>) -> Vec<String> {
@@ -4669,16 +5224,37 @@ impl RemoteKernelsServer {
         Ok(())
     }
 
-    /// Stop or terminate every machine due to budget exhaustion.
+    /// Stop or terminate this session's machines due to budget exhaustion.
     /// Returns a human-readable description of what happened.
     async fn cleanup_all_for_budget(&self) -> String {
         let targets = self.all_live_targets().await;
         if targets.is_empty() {
             return "No machine was running.".to_string();
         }
+        // Budgets are per session: exhausting this session's cap must never
+        // destroy a machine whose spend belongs to another session (or to no
+        // session — pre-upgrade legacy). Live instances are normally owned by
+        // this session (attach adopts), so a mismatch is a rare crash sliver;
+        // if ownership can't be read, err on the side of not destroying.
+        let machine_owners = self
+            .state
+            .lock()
+            .await
+            .spend_summary()
+            .map(|summary| summary.machine_owners)
+            .unwrap_or_default();
 
         let mut actions = Vec::new();
         for (target, cleanup, cost_per_hr) in targets {
+            if machine_owners.get(&target.machine_id).map(String::as_str)
+                != Some(self.lease_owner.as_str())
+            {
+                actions.push(format!(
+                    "{}: left alone (its spend is not attributed to this session)",
+                    target.machine_id
+                ));
+                continue;
+            }
             // Unmetered machines don't consume budget — exhaustion is not a
             // reason to touch them (their own cleanup still applies at
             // session end). A machine counts as metered if it reports an
@@ -4869,28 +5445,28 @@ impl RemoteKernelsServer {
         }
         format!(
             " Session cost: {}.",
-            Self::format_spend_amount(self.state.lock().await.spend_summary())
+            Self::format_spend_amount(self.state.lock().await.session_spend())
         )
     }
 
     /// Format a spend/budget line for tool responses.
-    fn format_spend_amount(spend: Result<crate::ledger::SpendSummary, String>) -> String {
+    fn format_spend_amount(spend: Result<crate::state::SessionSpend, String>) -> String {
         spend.map_or_else(
             |error| format!("accounting unavailable ({error})"),
-            |summary| format!("${:.2}", summary.total),
+            |session| format!("${:.2}", session.spent),
         )
     }
 
     fn format_spend_line(
         &self,
-        spend: Result<crate::ledger::SpendSummary, String>,
+        spend: Result<crate::state::SessionSpend, String>,
     ) -> Option<String> {
         self.budget.map(|budget| match spend {
-            Ok(summary) => {
-                let remaining = budget - summary.total;
+            Ok(session) => {
+                let remaining = budget - session.spent;
                 format!(
                     "\n[Session: ${:.2} / ${budget:.2} budget (${remaining:.2} remaining)]",
-                    summary.total
+                    session.spent
                 )
             }
             Err(error) => format!("\n[Session: accounting unavailable ({error})]"),
@@ -4963,38 +5539,74 @@ mod tests {
         assert!(super::validate_label(Some(&"x".repeat(65))).is_err());
     }
 
-    fn migrated_over_budget_state(dir: &std::path::Path) -> AppState {
-        let initial = AppState::new(dir.to_path_buf());
-        initial
+    /// Spend attributed to `state`'s own session, exceeding a $1 budget.
+    fn session_over_budget_state(dir: &std::path::Path) -> AppState {
+        let state = AppState::new(dir.to_path_buf());
+        state
             .save_record("main", &test_instance("main").record())
             .unwrap();
-        std::fs::write(
-            crate::state::state_dir(dir).join("spend.json"),
-            serde_json::json!({"accumulated_spend": 2.0}).to_string(),
-        )
-        .unwrap();
-        AppState::new(dir.to_path_buf())
+        let guard = crate::ledger::EpochGuard::acquire(dir).unwrap();
+        let mut event = crate::ledger::event(
+            crate::ledger::EventKind::Provisioned,
+            0.0,
+            0.0,
+            0,
+            None,
+            None,
+        );
+        event.owner = Some(state.session_owner.clone());
+        event.accrued_spend = 2.0;
+        guard.append("main", "provisioned", event).unwrap();
+        drop(guard);
+        state
     }
 
     #[tokio::test]
-    async fn session_budget_floor_survives_epoch_reset_until_fresh_server() {
+    async fn session_budget_survives_epoch_reset_for_same_session_only() {
         let dir = tempfile::tempdir().unwrap();
-        let server = RemoteKernelsServer::new(
-            toml::from_str("").unwrap(),
-            migrated_over_budget_state(dir.path()),
-            Some(1.0),
-        );
+        let state = session_over_budget_state(dir.path());
+        let session = state.session_owner.clone();
+        let server = RemoteKernelsServer::new(toml::from_str("").unwrap(), state, Some(1.0));
         assert!(server.check_budget().await.is_err());
         server.state.lock().await.clear_record("main").unwrap();
         let error = server.check_budget().await.unwrap_err().to_string();
         assert!(error.contains("already exhausted"), "{error}");
 
-        let fresh = RemoteKernelsServer::new(
-            toml::from_str("").unwrap(),
-            AppState::new(dir.path().to_path_buf()),
-            Some(1.0),
-        );
-        assert!(fresh.check_budget().await.is_ok());
+        // Same session, fresh server process (restart): the durable rollup
+        // keeps the window — terminating everything is not a budget reset.
+        let mut same_session = AppState::new(dir.path().to_path_buf());
+        same_session.session_owner.clone_from(&session);
+        let fresh_same =
+            RemoteKernelsServer::new(toml::from_str("").unwrap(), same_session, Some(1.0));
+        assert!(fresh_same.check_budget().await.is_err());
+
+        // A genuinely different session gets its own budget. (Explicit owner:
+        // the test environment may export CLAUDE_CODE_SESSION_ID.)
+        let mut other_session = AppState::new(dir.path().to_path_buf());
+        other_session.session_owner = format!("other-{}", uuid::Uuid::new_v4());
+        let fresh_other =
+            RemoteKernelsServer::new(toml::from_str("").unwrap(), other_session, Some(1.0));
+        assert!(fresh_other.check_budget().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn legacy_ownerless_spend_counts_toward_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = AppState::new(dir.path().to_path_buf());
+        initial
+            .save_record("main", &test_instance("main").record())
+            .unwrap();
+        std::fs::write(
+            crate::state::state_dir(dir.path()).join("spend.json"),
+            serde_json::json!({"accumulated_spend": 2.0}).to_string(),
+        )
+        .unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let session = state.session_spend().unwrap();
+        assert!(session.spent.abs() < f64::EPSILON, "{session:?}");
+        assert!(session.other_spend >= 2.0, "{session:?}");
+        let server = RemoteKernelsServer::new(toml::from_str("").unwrap(), state, Some(1.0));
+        assert!(server.check_budget().await.is_ok());
     }
 
     #[tokio::test]
@@ -5002,7 +5614,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = RemoteKernelsServer::new(
             toml::from_str("").unwrap(),
-            migrated_over_budget_state(dir.path()),
+            session_over_budget_state(dir.path()),
             Some(1.0),
         );
         let report = server.non_mutating_budget_report().await.unwrap();
@@ -5522,7 +6134,6 @@ mod tests {
             .await
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
-        assert!(!text.contains("server process restarted"), "{text}");
         assert!(text.contains("Durable machines"), "{text}");
 
         server.state.lock().await.instances.clear();
@@ -5537,11 +6148,31 @@ mod tests {
             .await
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
-        assert!(text.contains("server process restarted"), "{text}");
         assert!(
             text.contains(&machine_id) && text.contains("Use attach"),
             "{text}"
         );
+
+        // While the startup reattach is in flight, the same error softens to
+        // "retry shortly" instead of pointing at attach().
+        server
+            .state
+            .lock()
+            .await
+            .reattaching
+            .insert(machine_id.clone());
+        let result = server
+            .execute(Parameters(super::ExecuteParams {
+                kernel_id: "missing-kernel".to_string(),
+                code: "1 + 1".to_string(),
+                timeout: None,
+                background: None,
+                queue: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("retry shortly"), "{text}");
     }
 }
 
@@ -5614,6 +6245,159 @@ mod fencing_tests {
 
     fn result_text(result: &CallToolResult) -> String {
         result.content[0].as_text().unwrap().text.clone()
+    }
+
+    /// Codex P1 (fresh pass): a deliberate adoption must install the
+    /// ADOPTER's deadline, computed after the owner-changed append — never
+    /// leave the machine running on the previous owner's budget window.
+    #[tokio::test]
+    async fn adoption_appends_owner_and_installs_adopters_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_dir = tempfile::tempdir().unwrap();
+        let connection = Arc::new(AnyConnection::Fake(
+            FakeConnection::for_test(machine_dir.path(), false).unwrap(),
+        ));
+        // Another session drove this machine moments ago.
+        crate::machine_scripts::acquire(&connection, "old-session")
+            .await
+            .unwrap();
+
+        let mut app = AppState::new(dir.path().to_path_buf());
+        app.session_owner = "adopter".to_string();
+        let machine_id = crate::ulid::new();
+        let external_id = "provider-adopt";
+        {
+            let guard = crate::ledger::EpochGuard::acquire(dir.path()).unwrap();
+            // $3600/hr = $1/s, so the deadline math is legible in seconds.
+            let mut provisioned = crate::ledger::event(
+                crate::ledger::EventKind::Provisioned,
+                3600.0,
+                0.0,
+                1,
+                None,
+                None,
+            );
+            provisioned.owner = Some("old-session".into());
+            guard.append(&machine_id, "provision", provisioned).unwrap();
+        }
+        {
+            let mut state = app;
+            let mut inst = instance(&machine_id, external_id, Arc::clone(&connection));
+            inst.cleanup = Cleanup::Terminate;
+            state.save_record(&machine_id, &inst.record()).unwrap();
+            state.instances.insert(machine_id.clone(), inst);
+            let state = Arc::new(tokio::sync::Mutex::new(state));
+            let oplock = crate::state::acquire_operation_lock(dir.path(), &machine_id)
+                .await
+                .unwrap();
+            let policy = crate::runtime::WatchdogPolicy {
+                cleanup: Cleanup::Terminate,
+                initial_budget_secs: None,
+                stale_secs: 300,
+                budget_grace_secs: 900,
+                finalize_wait_secs: None,
+                finalize_timeout_secs: 600,
+                finalize_command: None,
+                storage_rate_per_hr: None,
+            };
+            let (heartbeat, mut supervision) = crate::heartbeat::start(
+                Arc::clone(&connection),
+                machine_id.clone(),
+                external_id.to_string(),
+                policy,
+                crate::heartbeat::AcquireMode::Attach { force: true },
+                "adopter".to_string(),
+                Arc::clone(&state),
+                Some(100.0),
+                Vec::new(),
+                oplock,
+            );
+            let active = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if *supervision.borrow() == crate::heartbeat::SupervisionStatus::Active {
+                        return true;
+                    }
+                    if supervision.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            })
+            .await;
+            assert_eq!(active, Ok(true), "supervision never became active");
+
+            // Ownership committed to the ledger before the deadline math.
+            let owner = state
+                .lock()
+                .await
+                .machine_ledger_owner(&machine_id)
+                .unwrap();
+            assert_eq!(owner.as_deref(), Some("adopter"));
+
+            // The installed deadline reflects the ADOPTER's ~$100 remaining
+            // at $1/s — not the previous owner's window and not "no deadline".
+            let AnyConnection::Fake(fake) = &*connection else {
+                unreachable!()
+            };
+            let mut deadline = u64::MAX;
+            for _ in 0..100 {
+                deadline = fake.last_budget_deadline();
+                if deadline != u64::MAX {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(
+                (50..=100).contains(&deadline),
+                "expected the adopter's ~100s window, got {deadline}"
+            );
+            heartbeat.stop();
+        }
+    }
+
+    /// Codex P1 (fresh pass): exhausting THIS session's budget must never
+    /// stop or terminate a machine whose spend belongs to another session.
+    #[tokio::test]
+    async fn budget_cleanup_skips_machines_owned_by_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_dir = tempfile::tempdir().unwrap();
+        let connection = Arc::new(AnyConnection::Fake(
+            FakeConnection::for_test(machine_dir.path(), false).unwrap(),
+        ));
+        let mut app = AppState::new(dir.path().to_path_buf());
+        app.session_owner = "exhausted-session".to_string();
+        let machine_id = crate::ulid::new();
+        {
+            let guard = crate::ledger::EpochGuard::acquire(dir.path()).unwrap();
+            let mut provisioned = crate::ledger::event(
+                crate::ledger::EventKind::Provisioned,
+                1.0,
+                0.0,
+                1,
+                None,
+                None,
+            );
+            provisioned.owner = Some("other-session".into());
+            guard.append(&machine_id, "provision", provisioned).unwrap();
+        }
+        let mut inst = instance(&machine_id, "provider-other", Arc::clone(&connection));
+        inst.supervision_note = None;
+        app.save_record(&machine_id, &inst.record()).unwrap();
+        app.instances.insert(machine_id.clone(), inst);
+        let config: Config = toml::from_str(r#"default-runtime = "fake""#).unwrap();
+        let server = RemoteKernelsServer::new(config, app, Some(1.0));
+
+        let message = server.cleanup_all_for_budget().await;
+        assert!(message.contains("left alone"), "{message}");
+        assert!(
+            server
+                .state
+                .lock()
+                .await
+                .instances
+                .contains_key(&machine_id),
+            "the other session's machine must remain untouched"
+        );
+        assert!(crate::state::load_instance_record(dir.path(), &machine_id).is_some());
     }
 
     #[tokio::test]

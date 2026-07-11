@@ -14,8 +14,10 @@ pub fn server_instructions(project_dir: &Path) -> String {
          code (kernel state persists across calls) → download() results → stop() or terminate() \
          when done (configured automatic cleanup is the backstop).\n\
          start() always creates a fresh machine; its optional label is display-only. status() \
-         lists durable machines; attach(machine_id) reconnects to one — needed after this server \
-         process restarts. When several machines are active, machine-scoped tools take an \
+         lists durable machines. This session's running machines are reattached automatically \
+         when the server starts; attach(machine_id) is for resuming a stopped machine (billing \
+         restarts) or adopting a machine from another session. When several machines are \
+         active, machine-scoped tools take an \
          `instance` argument; kernel-scoped tools never do (each kernel id routes to its machine \
          automatically). Machines are single-controller: one session drives a machine at a \
          time, and sharing one across sessions is unsupported — a fenced error means \

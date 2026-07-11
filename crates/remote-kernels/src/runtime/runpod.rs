@@ -22,10 +22,12 @@
 //! `image-start-cmd` in `[runpod]`.
 //!
 //! Because `dockerStartCmd` persists in the pod config, the guard re-runs on
-//! EVERY container start while a stop clears `/tmp` — so each heartbeat also
-//! drops a marker on the volume ([`disarm_marker`]) that permanently disarms
-//! the guard once any session has reached the pod (a console-resumed pod
-//! with no server around must not self-clean).
+//! EVERY container start while a stop clears `/tmp` — deliberately: the
+//! guard is boot-scoped, so any resume (this tool's, including a crash
+//! mid-resume, or a console resume with no server around) re-arms it, and a
+//! resumed pod no session reaches self-halts within the configured window
+//! instead of billing unsupervised. The halt is preservation-aware: a pod
+//! that ever held session state is stopped, never terminated, by the guard.
 //!
 //! Killing PID 1 is NOT a usable halt on `RunPod` — an exited container
 //! keeps the pod renting the GPU — so self-cleanup must go through the API.
@@ -59,14 +61,6 @@ enum AccessDecision {
 
 /// `(dockerStartCmd wrapper, guard-off note)` — at most one is `Some`.
 type GuardWrapper = (Option<Vec<String>>, Option<String>);
-
-/// Marker on the pod's storage that permanently disarms the orphan guard
-/// once any session has reached the pod. Lives on the volume mount (which
-/// survives stop/resume when a volume exists) because `dockerStartCmd`
-/// re-arms the guard on every container start while a stop clears `/tmp`.
-fn disarm_marker(volume_mount_path: &str) -> String {
-    format!("{volume_mount_path}/.rk_reached")
-}
 
 pub struct RunPodRuntime {
     client: Arc<RunPodClient>,
@@ -306,13 +300,20 @@ impl RunPodRuntime {
         } else {
             format!("exec {cmd}")
         };
+        // Preservation-aware halt: once the pod has ever held session state
+        // (its persistent state dir exists on the volume), the guard stops
+        // rather than applying a terminate policy — a resume the guard ends
+        // must not destroy data (invariant: failure degrades toward
+        // preservation). A never-reached fresh pod has no data to lose, so
+        // the configured action applies.
+        let stop_cmd = self_cleanup_command(Cleanup::Stop).expect("stop is always available");
+        let halt = format!(
+            "if [ -e \"{state_dir}\" ]; then {stop_cmd}; else {halt_cmd}; fi",
+            state_dir = crate::machine_scripts::state_dir(&self.runpod.volume_mount_path),
+        );
         let script = format!(
             "{} {invoke}",
-            crate::ssh_exec::orphan_guard_line(
-                &halt_cmd,
-                Some(&disarm_marker(&self.runpod.volume_mount_path)),
-                self.orphan_halt_mins,
-            )
+            crate::ssh_exec::orphan_guard_line(&halt, self.orphan_halt_mins)
         );
         (Some(vec!["sh".to_string(), "-c".to_string(), script]), None)
     }
@@ -850,22 +851,12 @@ impl Connection for RunPodConnection {
 
     async fn heartbeat(&self) -> anyhow::Result<()> {
         self.ensure_tunnel_alive().await;
-        // Also refresh the persistent disarm marker (see [`disarm_marker`]):
-        // once any session has reached the pod, the orphan guard must never
-        // fire again — not even after a console resume with no server around.
-        // remote_workdir (= volume-mount-path) is validated single-quote-safe
-        // at provision time.
-        // Marker failure must not flap the heartbeat itself (an exotic
-        // read-only volume would otherwise look like a dead machine).
-        self.exec(
-            &format!(
-                "touch /tmp/heartbeat && {{ touch '{}' 2>/dev/null || true; }}",
-                disarm_marker(&self.remote_workdir)
-            ),
-            Duration::from_secs(10),
-        )
-        .await
-        .map(|_| ())
+        // `/tmp/heartbeat` disarms the boot-scoped orphan guard for the
+        // current container life; /tmp is cleared by a stop, so a fresh boot
+        // always starts armed until a session actually reaches the pod.
+        self.exec("touch /tmp/heartbeat", Duration::from_secs(10))
+            .await
+            .map(|_| ())
     }
 
     async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
@@ -963,9 +954,18 @@ mod tests {
         assert_eq!(&cmd[..2], ["sh", "-c"]);
         let script = &cmd[2];
         assert!(script.contains("sleep 2700"));
+        // Boot-scoped: /tmp/heartbeat (cleared by stop) is the only disarm
+        // signal — no persistent marker may survive a resume and disarm the
+        // fresh boot's guard.
         assert!(script.contains("/tmp/heartbeat"));
-        // Persistent disarm marker on the volume (survives stop/resume).
-        assert!(script.contains("/workspace/.rk_reached"), "{script}");
+        assert!(!script.contains(".rk_reached"), "{script}");
+        // Preservation-aware halt: an ever-reached pod (state dir on the
+        // volume) is stopped; only a never-reached one gets the configured
+        // terminate.
+        assert!(
+            script.contains("if [ -e \"/workspace/.remote-kernels\" ]; then"),
+            "{script}"
+        );
         assert!(script.ends_with("& exec /start.sh"), "{script}");
         // The halt chain must survive the guard's single-quote wrapping.
         assert_eq!(script.matches('\'').count(), 2, "{script}");

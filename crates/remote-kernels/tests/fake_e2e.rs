@@ -45,6 +45,21 @@ fn server_in(dir: &std::path::Path, budget: Option<f64>) -> RemoteKernelsServer 
     RemoteKernelsServer::new(fake_config(), AppState::new(dir.to_path_buf()), budget)
 }
 
+/// A server pinned to an explicit Claude session id — budget scope and lease
+/// owner. Tests must pin owners: the surrounding environment may or may not
+/// export CLAUDE_CODE_SESSION_ID.
+fn server_in_session(
+    dir: &std::path::Path,
+    budget: Option<f64>,
+    session: &str,
+) -> RemoteKernelsServer {
+    // SAFETY: tests run single-threaded (--test-threads=1 documented above).
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_JUPYTER", JUPYTER_CMD) };
+    let mut state = AppState::new(dir.to_path_buf());
+    state.session_owner = session.to_string();
+    RemoteKernelsServer::new(fake_config(), state, budget)
+}
+
 fn server_with(
     dir: &std::path::Path,
     config: Config,
@@ -724,9 +739,29 @@ async fn budget_exhaustion_cleans_up_all_machines() {
         .expect_err("start() must be budget-gated");
     assert!(format!("{err}").contains("already exhausted"), "{err}");
 
-    // The floor is process-local: a fresh server after full cleanup starts a
-    // clean epoch and may admit a new machine under the same configured cap.
-    let fresh = server_in(dir.path(), Some(0.30));
+    // The budget window is per session and durable: a restarted server for
+    // the SAME session stays blocked even though full cleanup closed the
+    // on-disk epoch (the per-owner rollup carries the spend forward).
+    let same_session = {
+        let session = server.shared_state().lock().await.session_owner.clone();
+        server_in_session(dir.path(), Some(0.30), &session)
+    };
+    let err = same_session
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: Some("burner-3".to_string()),
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(true),
+        }))
+        .await
+        .expect_err("the same session's budget window survives restart and epoch close");
+    assert!(format!("{err}").contains("budget"), "{err}");
+
+    // A genuinely new session gets its own cap.
+    let fresh = server_in_session(dir.path(), Some(0.30), "budget-e2e-fresh-session");
     let result = fresh
         .start(Parameters(remote_kernels::server::StartParams {
             label: Some("fresh-session".to_string()),
@@ -738,7 +773,7 @@ async fn budget_exhaustion_cleans_up_all_machines() {
             wait: Some(false),
         }))
         .await
-        .expect("fresh server session should admit against the new epoch");
+        .expect("a new session should admit against its own budget");
     assert!(
         text_of(&result).contains("provisioning"),
         "{}",
@@ -752,6 +787,279 @@ async fn budget_exhaustion_cleans_up_all_machines() {
     let _ = terminate(&fresh, Some(&fresh_machine)).await;
 
     unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_COST_PER_HR") };
+}
+
+/// Two live sessions in one project: independent caps, and one session
+/// exhausting its budget must not touch — or even mention destroying — the
+/// other session's machine (codex P1, fresh pass).
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn concurrent_sessions_have_disjoint_budgets_and_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    // $360/hr = $0.10/second.
+    // SAFETY: single-threaded test run.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_COST_PER_HR", "360") };
+    let poor = server_in_session(dir.path(), Some(0.30), "session-poor");
+    let rich = server_in_session(dir.path(), Some(100.0), "session-rich");
+
+    let (rich_machine, _) = start_machine(&rich, Some("rich-machine")).await;
+    let result = poor
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: Some("poor-machine".to_string()),
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(false),
+        }))
+        .await
+        .expect("poor session's start should be admitted within its budget");
+    let poor_machine = text_of(&result)
+        .split_whitespace()
+        .nth(1)
+        .expect("machine id in async start output")
+        .to_string();
+
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // The poor session trips its cap...
+    let err = poor
+        .create_kernel(Parameters(remote_kernels::server::CreateKernelParams {
+            name: None,
+            instance: Some(poor_machine.clone()),
+        }))
+        .await
+        .expect_err("poor session should be exhausted");
+    let message = format!("{err}");
+    assert!(message.contains("budget"), "{message}");
+    assert!(message.contains(&poor_machine), "{message}");
+    assert!(
+        !message.contains(&rich_machine),
+        "the rich session's machine must not appear in the poor session's cleanup: {message}"
+    );
+
+    // ...while the rich session is untouched and fully operational.
+    let record = remote_kernels::state::load_instance_record(dir.path(), &rich_machine)
+        .expect("rich machine record must survive the poor session's exhaustion");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Running);
+    let kernel = create_kernel(&rich, Some(&rich_machine)).await;
+    let (is_err, output) = execute(&rich, &kernel, "6 * 7").await;
+    assert!(!is_err, "{output}");
+    assert!(output.contains("42"), "{output}");
+
+    terminate(&rich, Some(&rich_machine)).await;
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_COST_PER_HR") };
+}
+
+/// A respawned server for the same session picks its running machines back
+/// up automatically — no attach() ceremony — while stopped machines and
+/// other sessions' machines are left alone.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn auto_reattach_restores_same_sessions_running_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "auto-session");
+    let (machine_id, _) = start_machine(&first, Some("auto")).await;
+    let kernel = create_kernel(&first, Some(&machine_id)).await;
+    let (is_err, output) = execute(&first, &kernel, "value = 20").await;
+    assert!(!is_err, "{output}");
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Another session's server must NOT pick the machine up.
+    let other = server_in_session(dir.path(), None, "other-session");
+    other.spawn_auto_reattach();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        other.shared_state().lock().await.instances.is_empty(),
+        "another session must not auto-adopt this machine"
+    );
+
+    // The same session's server picks it up in the background.
+    let second = server_in_session(dir.path(), None, "auto-session");
+    second.spawn_auto_reattach();
+    let mut reattached = false;
+    for _ in 0..60 {
+        if second
+            .shared_state()
+            .lock()
+            .await
+            .instances
+            .get(&machine_id)
+            .is_some_and(|inst| inst.phase == remote_kernels::state::Phase::Running)
+        {
+            reattached = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(reattached, "machine was not auto-reattached within 30s");
+
+    // The recovered binding is usable: the kernel (which survived on the
+    // machine) answers through the new server without any attach() call.
+    let mut answered = false;
+    let mut last = String::new();
+    for _ in 0..20 {
+        let (is_err, output) = execute(&second, &kernel, "value + 22").await;
+        last = output;
+        if !is_err && last.contains("42") {
+            answered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(answered, "recovered kernel did not answer: {last}");
+
+    terminate(&second, Some(&machine_id)).await;
+}
+
+/// finish(): queue downloads + stop while a cell is still running; the drain
+/// waits for idle, collects the file into the project, stops the machine,
+/// and clears the queued intent.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn finish_waits_downloads_then_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in_session(dir.path(), None, "finish-session");
+    let (machine_id, _) = start_machine(&server, Some("finisher")).await;
+    let kernel = create_kernel(&server, Some(&machine_id)).await;
+
+    // A slow cell that produces the artifact only at the end — finish() must
+    // wait for it rather than downloading a missing file.
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel.clone(),
+            code: "import os, time
+time.sleep(3)
+os.makedirs('results', exist_ok=True)
+with open('results/out.txt', 'w') as f:
+    f.write('finish-payload')"
+                .to_string(),
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    let result = server
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: Some(vec!["results/out.txt".to_string()]),
+            then: "stop".to_string(),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("queued"), "{text}");
+
+    let mut stopped = false;
+    for _ in 0..60 {
+        if remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+            .is_some_and(|record| record.phase == remote_kernels::state::Phase::Stopped)
+        {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(stopped, "finish() did not stop the machine within 30s");
+
+    let downloaded = dir.path().join("results/out.txt");
+    assert_eq!(
+        std::fs::read_to_string(&downloaded).expect("downloaded artifact"),
+        "finish-payload"
+    );
+    let lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    assert!(
+        lifecycle.finish_intent.is_none(),
+        "completed finish() must clear its queued intent"
+    );
+
+    // No failure alert may be lurking for status().
+    let status = server
+        .status(Parameters(remote_kernels::server::StatusParams {
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    let status_text = text_of(&status);
+    assert!(!status_text.contains("did not complete"), "{status_text}");
+
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// A finish() plan replaced while its drain is still waiting must never act:
+/// the stale terminate aborts on its token check and the machine follows the
+/// replacement plan (codex adversarial finding: supersession race).
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn superseding_finish_cancels_queued_terminate() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in_session(dir.path(), None, "supersede-session");
+    let (machine_id, _) = start_machine(&server, Some("keeper")).await;
+    let kernel = create_kernel(&server, Some(&machine_id)).await;
+
+    // Keep the kernel busy so the terminate plan is stuck draining.
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel.clone(),
+            code: "import time; time.sleep(8)".to_string(),
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    let result = server
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: None,
+            then: "terminate".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    // Replace the plan before the drain can act.
+    let result = server
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: None,
+            then: "keep".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    // Give the busy cell time to end and both plans time to settle.
+    let mut settled = false;
+    for _ in 0..60 {
+        if remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_none()
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(settled, "the replacement plan never completed");
+
+    // The stale terminate must NOT have fired: record intact, machine live.
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("machine record must survive — the replaced terminate must not run");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Running);
+    let (is_err, output) = execute(&server, &kernel, "'still-' + 'alive'").await;
+    assert!(!is_err, "{output}");
+    assert!(output.contains("still-alive"), "{output}");
+
+    terminate(&server, Some(&machine_id)).await;
 }
 
 /// Stop preserves the record; attach() by id resumes it.

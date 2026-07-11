@@ -304,32 +304,28 @@ pub fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Last-resort pre-SSH orphan guard shared by metered runtimes: a detached
-/// process that runs `halt_cmd` if no heartbeat file has EVER appeared
-/// `halt_after_mins` (config `orphan-halt-mins`) after machine start — the
-/// server that provisioned this machine died, lost its key, or never got
-/// in. It runs at machine startup (vast onstart, `RunPod` dockerStartCmd),
-/// before SSH works — once the real watchdog installs, that takes over as
-/// the money guard.
+/// Last-resort orphan guard shared by metered runtimes: a detached process
+/// that runs `halt_cmd` if no heartbeat has appeared within
+/// `halt_after_mins` (config `orphan-halt-mins`) of THIS boot. It runs at
+/// machine startup (vast onstart, `RunPod` dockerStartCmd), before SSH
+/// works — once a session's first heartbeat lands, the real watchdog takes
+/// over as the money guard.
 ///
-/// `persistent_marker` handles startup mechanisms that re-run on EVERY
-/// container start (`RunPod` dockerStartCmd persists in the pod config, and
-/// a stop clears `/tmp`): a marker on storage that survives stop/resume
-/// keeps "fires only on a machine no session ever reached" true for pods
-/// resumed outside this tool (console, `runpodctl`) where nothing recreates
-/// the heartbeat. Neither string argument may contain single quotes (the
-/// script is single-quote wrapped).
-pub fn orphan_guard_line(
-    halt_cmd: &str,
-    persistent_marker: Option<&str>,
-    halt_after_mins: u64,
-) -> String {
-    let marker_check = persistent_marker
-        .map(|m| format!(r#" || [ -f "{m}" ]"#))
-        .unwrap_or_default();
+/// The guard is deliberately boot-scoped: startup mechanisms re-run it on
+/// every container start while a stop clears `/tmp`, so each boot gets a
+/// fresh armed window. A machine resumed by anything — this tool
+/// (crash-mid-resume included), the provider console — self-halts after the
+/// window unless a session's heartbeat reaches it, bounding unsupervised
+/// billing after every resume. `/tmp/heartbeat` is the only disarm signal:
+/// it cannot survive a stop, so evidence from a previous life can never
+/// disarm the current boot. `halt_cmd` may not contain single quotes (the
+/// script is single-quote wrapped); callers on stop-capable runtimes should
+/// make it preservation-aware (stop rather than destroy once the machine
+/// has ever held data).
+pub fn orphan_guard_line(halt_cmd: &str, halt_after_mins: u64) -> String {
     let sleep_secs = halt_after_mins.saturating_mul(60);
     format!(
-        "nohup sh -c 'sleep {sleep_secs}; [ -f /tmp/heartbeat ]{marker_check} || {{ {halt_cmd}; }}' \
+        "nohup sh -c 'sleep {sleep_secs}; [ -f /tmp/heartbeat ] || {{ {halt_cmd}; }}' \
          </dev/null >/dev/null 2>&1 &"
     )
 }
@@ -419,7 +415,7 @@ mod tests {
     /// Config money-windows must reach the generated scripts verbatim.
     #[test]
     fn orphan_guard_line_uses_configured_window() {
-        assert!(super::orphan_guard_line("halt", None, 45).contains("sleep 2700"));
-        assert!(super::orphan_guard_line("halt", None, 10).contains("sleep 600"));
+        assert!(super::orphan_guard_line("halt", 45).contains("sleep 2700"));
+        assert!(super::orphan_guard_line("halt", 10).contains("sleep 600"));
     }
 }

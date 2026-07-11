@@ -437,7 +437,6 @@ impl VastRuntime {
             crate::ssh_exec::orphan_guard_line(
                 // onstart runs as root on vast regardless of ssh-user.
                 &Self::halt_command("root"),
-                None,
                 self.orphan_halt_mins,
             ),
             format!(

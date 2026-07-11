@@ -181,6 +181,54 @@ pub async fn install_watchdog<C: Connection + ?Sized>(
     Ok(())
 }
 
+/// Relative path (from the machine workdir) of the `finish()` intent marker
+/// the watchdog's finalizer consults. Kept relative so the Jupyter Contents
+/// API fallback (rooted at the workdir) can address the same file.
+pub const INTENT_RELATIVE_PATH: &str = ".remote-kernels/intent.json";
+
+/// Serialize a `finish()` intent for the machine-visible marker. The
+/// watchdog's finalizer downgrades `terminate` to `stop` while
+/// `downloads_pending` is true, so queued data is preserved until a server
+/// collects it.
+pub fn intent_marker_json(downloads_pending: bool, then: crate::state::FinishThen) -> String {
+    format!(
+        "{{\"downloads_pending\":{downloads_pending},\"then\":\"{}\"}}",
+        then.as_str()
+    )
+}
+
+/// Write the intent marker atomically on the machine (command transport).
+pub async fn write_intent<C: Connection + ?Sized>(
+    conn: &C,
+    downloads_pending: bool,
+    then: crate::state::FinishThen,
+) -> anyhow::Result<()> {
+    let dir = state_dir(conn.workdir());
+    let destination = format!("{dir}/intent.json");
+    let temporary = format!("{dir}/.intent.$$.tmp");
+    let payload = intent_marker_json(downloads_pending, then);
+    let command = format!(
+        "mkdir -p {dir}; printf '%s\\n' {payload} > {temporary} && mv -f {temporary} {destination}",
+        dir = shell_quote(&dir),
+        payload = shell_quote(&payload),
+        temporary = shell_quote(&temporary),
+        destination = shell_quote(&destination),
+    );
+    conn.exec(&command, Duration::from_secs(10)).await?;
+    Ok(())
+}
+
+/// Remove the intent marker (queued finish completed or cancelled).
+pub async fn clear_intent<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
+    let path = format!("{}/intent.json", state_dir(conn.workdir()));
+    conn.exec(
+        &format!("rm -f {}", shell_quote(&path)),
+        Duration::from_secs(10),
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn set_budget_deadline<C: Connection + ?Sized>(
     conn: &C,
     secs_from_now: u64,

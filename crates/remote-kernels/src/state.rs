@@ -89,10 +89,47 @@ pub enum FinalizePhase {
     RetrievalUnavailable,
 }
 
+/// A queued `finish()` request: what to download and what to do afterwards.
+/// Persisted locally (this record) and as a machine-visible marker so the
+/// machine-side finalizer can honor it if no server is alive at drain time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishIntent {
+    /// Token minted per `finish()` call. A drain re-checks it before every
+    /// irreversible step, so a superseding `finish()` (new token) makes stale
+    /// workers abort instead of acting on a replaced plan.
+    #[serde(default)]
+    pub uuid: String,
+    /// Remote paths (relative to the machine workdir) still to download.
+    #[serde(default)]
+    pub downloads: Vec<String>,
+    pub then: FinishThen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FinishThen {
+    Stop,
+    Terminate,
+    Keep,
+}
+
+impl FinishThen {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Terminate => "terminate",
+            Self::Keep => "keep",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecycleRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervision_note: Option<String>,
+    /// A queued `finish()` not yet completed; a later attach resumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_intent: Option<FinishIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_rate_per_hr: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,7 +194,7 @@ pub struct InstanceState {
     pub cleanup: Cleanup,
     pub jupyter: JupyterClient,
     pub jupyter_token: String,
-    pub session_id: String,
+    pub jupyter_session_id: String,
     pub kernel_ids: Vec<String>,
     pub kernels: Vec<KernelRecord>,
     pub kernel_connections: HashMap<String, KernelConnection>,
@@ -217,7 +254,7 @@ impl InstanceState {
             // endpoint; all tool paths gate on phase == Running first.
             jupyter: JupyterClient::new("http://pending.invalid", &jupyter_token),
             jupyter_token,
-            session_id: uuid::Uuid::new_v4().to_string(),
+            jupyter_session_id: uuid::Uuid::new_v4().to_string(),
             kernel_ids: Vec::new(),
             kernels: Vec::new(),
             kernel_connections: HashMap::new(),
@@ -272,7 +309,37 @@ impl InstanceState {
 pub struct AppState {
     pub project_dir: PathBuf,
     pub instances: BTreeMap<String, InstanceState>,
+    /// Budget/ownership scope: the Claude session driving this server
+    /// (`CLAUDE_CODE_SESSION_ID`, stable across resume and relaunch), or a
+    /// process-unique fallback that degrades scoping to per-process.
+    pub session_owner: String,
+    /// Machine ids currently being reattached automatically at startup —
+    /// unknown-kernel/instance errors soften to "reconnecting, retry shortly"
+    /// while an id is in flight.
+    pub reattaching: std::collections::HashSet<String>,
     accounting_init_error: Option<String>,
+}
+
+/// The Claude session id this process serves, resolved once per call:
+/// `CLAUDE_CODE_SESSION_ID` when the client provides it, else a fresh uuid.
+pub fn resolve_session_owner() -> String {
+    std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+/// This session's spend picture: the durable rollups plus live-ledger
+/// attribution, with the unattributed remainder kept visible.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionSpend {
+    /// Cumulative spend attributed to this session (rollups + live ledgers).
+    pub spent: f64,
+    /// Aggregate hourly burn of the machines this session currently owns.
+    pub hourly_rate: f64,
+    /// Spend owned by other sessions or by no session ([`crate::ledger::LEGACY_OWNER`]).
+    pub other_spend: f64,
 }
 
 pub fn state_dir(project_dir: &Path) -> PathBuf {
@@ -357,6 +424,8 @@ impl AppState {
         Self {
             project_dir,
             instances: BTreeMap::new(),
+            session_owner: resolve_session_owner(),
+            reattaching: std::collections::HashSet::new(),
             accounting_init_error,
         }
     }
@@ -367,6 +436,68 @@ impl AppState {
         }
         crate::ledger::fold(&self.project_dir, crate::ledger::now_ms())
             .map_err(|error| error.to_string())
+    }
+
+    /// Spend and burn rate attributed to THIS session: durable per-owner
+    /// rollups (epochs already garbage-collected) plus live-ledger
+    /// attribution. Fails closed on any accounting corruption.
+    pub fn session_spend(&self) -> Result<SessionSpend, String> {
+        if let Some(error) = &self.accounting_init_error {
+            return Err(error.clone());
+        }
+        let guard = crate::ledger::EpochGuard::acquire(&self.project_dir)
+            .map_err(|error| error.to_string())?;
+        let summary = guard
+            .fold(crate::ledger::now_ms())
+            .map_err(|error| error.to_string())?;
+        let rollups = guard.owner_rollups().map_err(|error| error.to_string())?;
+        let mine = rollups
+            .owners
+            .get(&self.session_owner)
+            .copied()
+            .unwrap_or(0.0)
+            + summary
+                .owner_totals
+                .get(&self.session_owner)
+                .copied()
+                .unwrap_or(0.0);
+        let all_time: f64 = rollups.owners.values().sum::<f64>() + summary.total;
+        let hourly_rate = summary
+            .machine_rates
+            .iter()
+            .filter(|(machine_id, _)| {
+                summary.machine_owners.get(*machine_id) == Some(&self.session_owner)
+            })
+            .map(|(_, rate)| rate)
+            .sum();
+        Ok(SessionSpend {
+            spent: mine,
+            hourly_rate,
+            other_spend: (all_time - mine).max(0.0),
+        })
+    }
+
+    /// Current ledger owner of one machine (`None`: no current-epoch events).
+    pub fn machine_ledger_owner(&self, machine_id: &str) -> Result<Option<String>, String> {
+        if let Some(error) = &self.accounting_init_error {
+            return Err(error.clone());
+        }
+        crate::ledger::EpochGuard::acquire(&self.project_dir)
+            .and_then(|guard| guard.machine_owner(machine_id))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Append an `owner-changed` event moving the machine's spend to this
+    /// session — the adoption commit after a lease acquire proves authority.
+    pub fn append_owner_change(&self, machine_id: &str) -> anyhow::Result<bool> {
+        self.append_ledger_event(
+            machine_id,
+            crate::ledger::EventKind::OwnerChanged,
+            None,
+            None,
+            None,
+            Some("adopted by lease acquire".to_string()),
+        )
     }
 
     /// Total epoch spend. A corrupt ledger returns the conservative valid
@@ -434,7 +565,10 @@ impl AppState {
             crate::ledger::EventKind::Stopped => (0.0, post_action_rate.unwrap_or(storage)),
             crate::ledger::EventKind::RateChanged => post_action_rate
                 .map_or((total, storage), |post_action_rate| (0.0, post_action_rate)),
-            crate::ledger::EventKind::Terminated => (0.0, 0.0),
+            // Ownership never alters rates; the fold ignores these fields.
+            crate::ledger::EventKind::Terminated | crate::ledger::EventKind::OwnerChanged => {
+                (0.0, 0.0)
+            }
         };
         let generation = self
             .instances
@@ -443,6 +577,14 @@ impl AppState {
             .unwrap_or(0);
         let stable_remote_uuid = uuid.clone();
         let mut event = crate::ledger::event(kind, compute, storage, generation, uuid, note);
+        if matches!(
+            kind,
+            crate::ledger::EventKind::Provisioned
+                | crate::ledger::EventKind::Resumed
+                | crate::ledger::EventKind::OwnerChanged
+        ) {
+            event.owner = Some(self.session_owner.clone());
+        }
         if let Some(ts_ms) = ts_ms {
             event.ts_ms = ts_ms;
         }
@@ -474,7 +616,7 @@ impl AppState {
         } else {
             lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
         };
-        let event = crate::ledger::event(
+        let mut event = crate::ledger::event(
             crate::ledger::EventKind::Provisioned,
             record.cost_per_hr.max(0.0),
             storage,
@@ -489,6 +631,9 @@ impl AppState {
                     .unwrap_or("storage pricing recorded")
             )),
         );
+        // The initial owner rides ON the provision event, keeping admission
+        // one crash-atomic WAL'd write — never a second recoverable entry.
+        event.owner = Some(self.session_owner.clone());
         guard.prepare(machine_id, "provisioned", event)?;
         // The WAL is durable before either half of admission can be lost.
         // Startup recovers it when the record exists, or fails closed on an
@@ -961,7 +1106,7 @@ mod tests {
             cleanup: Cleanup::Terminate,
             jupyter: JupyterClient::new("http://127.0.0.1:1", "test-token"),
             jupyter_token: "test-token".to_string(),
-            session_id: "test-session".to_string(),
+            jupyter_session_id: "test-session".to_string(),
             kernel_ids: Vec::new(),
             kernels: Vec::new(),
             kernel_connections: HashMap::new(),

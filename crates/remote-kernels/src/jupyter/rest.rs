@@ -169,6 +169,61 @@ impl JupyterClient {
         Ok(())
     }
 
+    /// Write a small text file via the Contents API (path relative to the
+    /// Jupyter root, i.e. the machine workdir). The fallback marker channel
+    /// for machines without a command transport; parent directories are
+    /// created as needed.
+    pub async fn put_text_file(&self, path: &str, content: &str) -> anyhow::Result<()> {
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            let url = format!("{}/api/contents/{parent}", self.base_url);
+            let resp = self
+                .client
+                .put(&url)
+                .header("Authorization", format!("token {}", self.token))
+                .json(&serde_json::json!({"type": "directory"}))
+                .send()
+                .await?;
+            // 409/400 = already exists on some Jupyter versions — the file
+            // PUT below is the authoritative failure signal.
+            tracing::debug!(parent, status = %resp.status(), "Contents API mkdir");
+        }
+        let url = format!("{}/api/contents/{path}", self.base_url);
+        let resp = self
+            .client
+            .put(&url)
+            .header("Authorization", format!("token {}", self.token))
+            .json(&serde_json::json!({
+                "type": "file",
+                "format": "text",
+                "content": content,
+            }))
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to write {path} via Contents API ({status}): {body}");
+        }
+        Ok(())
+    }
+
+    /// Delete a file via the Contents API. Missing files are fine.
+    pub async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+        let url = format!("{}/api/contents/{path}", self.base_url);
+        let resp = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("token {}", self.token))
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to delete {path} via Contents API ({status}): {body}");
+        }
+        Ok(())
+    }
+
     /// Interrupt a running execution in a kernel.
     pub async fn interrupt_kernel(&self, kernel_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/api/kernels/{kernel_id}/interrupt", self.base_url);
