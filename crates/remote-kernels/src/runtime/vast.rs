@@ -746,7 +746,7 @@ impl Runtime for VastRuntime {
     /// definitive `Gone` fails early. At the deadline, [`StillProvisioning`]
     /// keeps the machine and continues finalization in the background.
     async fn wait_running(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let deadline = std::time::Instant::now() + Duration::from_mins(5);
         loop {
             match self.describe(external_id).await? {
                 InstanceStatus::Running => match self.get_handle(external_id).await {
@@ -902,7 +902,7 @@ impl Runtime for VastRuntime {
                 JUPYTER_PORT
             )
         );
-        ssh.cmd(&launch, Duration::from_secs(60)).await?;
+        ssh.cmd(&launch, Duration::from_mins(1)).await?;
 
         // Local tunnel to the machine's Jupyter port (shared SshTunnel — the
         // one tunnel implementation for every SSH runtime).
@@ -1099,18 +1099,15 @@ mod tests {
             super::capabilities(&config.vast.clone().unwrap_or_default())
         };
         // Defaults: 20 min containers, 35 min VMs (disk image pull + kernel boot).
-        assert_eq!(
-            caps("").provision_timeout,
-            Some(Duration::from_secs(20 * 60))
-        );
+        assert_eq!(caps("").provision_timeout, Some(Duration::from_mins(20)));
         assert_eq!(
             caps("[vast]\nvm = true").provision_timeout,
-            Some(Duration::from_secs(35 * 60))
+            Some(Duration::from_mins(35))
         );
         // An explicit provision-timeout-mins wins over the vm auto-bump.
         assert_eq!(
             caps("[vast]\nvm = true\nprovision-timeout-mins = 50").provision_timeout,
-            Some(Duration::from_secs(50 * 60))
+            Some(Duration::from_mins(50))
         );
 
         // orphan-halt-mins reaches the onstart guard script.

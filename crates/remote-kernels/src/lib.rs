@@ -16,7 +16,7 @@ pub fn init_tls() {
 pub(crate) fn api_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_mins(1))
         .build()
         .expect("reqwest client")
 }

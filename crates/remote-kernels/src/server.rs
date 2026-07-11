@@ -2228,7 +2228,7 @@ impl RemoteKernelsServer {
         let started = std::time::Instant::now();
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut next_progress = std::time::Duration::from_secs(60);
+        let mut next_progress = std::time::Duration::from_mins(1);
 
         let batch_label = |entry: &HeldExecution| {
             format!(
@@ -2353,7 +2353,7 @@ impl RemoteKernelsServer {
             if let Some((meta, peer)) = &progress
                 && started.elapsed() >= next_progress
             {
-                next_progress += std::time::Duration::from_secs(60);
+                next_progress += std::time::Duration::from_mins(1);
                 if let Some(progress_token) = meta.get_progress_token() {
                     let elapsed = started.elapsed().as_secs();
                     let _ = peer
@@ -2463,7 +2463,7 @@ impl RemoteKernelsServer {
         let started = std::time::Instant::now();
         let mut fence_check = tokio::time::interval(std::time::Duration::from_millis(200));
         fence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut progress_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut progress_tick = tokio::time::interval(std::time::Duration::from_mins(1));
         progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         progress_tick.tick().await;
         let mut timeout = deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
@@ -4162,7 +4162,7 @@ impl RemoteKernelsServer {
             let fallback_cap =
                 crate::runtime::AnyRuntime::static_capabilities(&runtime_name, &server.config)
                     .and_then(|caps| caps.provision_timeout)
-                    .unwrap_or(std::time::Duration::from_secs(3600));
+                    .unwrap_or(std::time::Duration::from_hours(1));
             loop {
                 let error = match server
                     .finalize_start(&machine_id, &external_id, mode, None)

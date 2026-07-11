@@ -1234,7 +1234,7 @@ mod tests {
     fn clear_record_closes_epoch_but_never_deletes_instance_state_early() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        let inst = instance("main", 1.0, std::time::Duration::from_secs(3600));
+        let inst = instance("main", 1.0, std::time::Duration::from_hours(1));
         let record = inst.record();
         state.instances.insert("main".to_string(), inst);
         state
@@ -1340,7 +1340,7 @@ mod tests {
     fn ledger_is_authoritative_across_restart() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        let inst = instance("main", 2.0, std::time::Duration::from_secs(3600));
+        let inst = instance("main", 2.0, std::time::Duration::from_hours(1));
         let record = inst.record();
         state.instances.insert("main".to_string(), inst);
         state

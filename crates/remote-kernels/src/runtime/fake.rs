@@ -198,7 +198,7 @@ pub(crate) fn capabilities(metered: bool) -> Capabilities {
     Capabilities {
         stop_resume: StopSupport::Full,
         metered,
-        provision_timeout: Some(std::time::Duration::from_secs(20 * 60)),
+        provision_timeout: Some(std::time::Duration::from_mins(20)),
         account_ssh_keys: false,
     }
 }

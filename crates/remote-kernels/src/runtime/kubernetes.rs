@@ -366,7 +366,7 @@ impl Runtime for KubernetesRuntime {
     async fn wait_running(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
         let pods = self.pods().await?;
         let wait = await_condition(pods.clone(), external_id, conditions::is_pod_running());
-        match tokio::time::timeout(Duration::from_secs(300), wait).await {
+        match tokio::time::timeout(Duration::from_mins(5), wait).await {
             Ok(result) => {
                 result.map_err(|e| anyhow::anyhow!("Error while waiting for pod: {e}"))?;
             }
@@ -475,7 +475,7 @@ impl K8sConnection {
             &pod_name,
             &container,
             &launch,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await?;
 
@@ -735,7 +735,7 @@ impl Connection for K8sConnection {
             }
             Ok::<(), anyhow::Error>(())
         };
-        tokio::time::timeout(Duration::from_secs(600), transfer)
+        tokio::time::timeout(Duration::from_mins(10), transfer)
             .await
             .map_err(|_| anyhow::anyhow!("upload timed out (600s)"))??;
 
@@ -812,7 +812,7 @@ impl Connection for K8sConnection {
             }
             Ok::<(), anyhow::Error>(())
         };
-        tokio::time::timeout(Duration::from_secs(600), transfer)
+        tokio::time::timeout(Duration::from_mins(10), transfer)
             .await
             .map_err(|_| anyhow::anyhow!("download timed out (600s)"))??;
 

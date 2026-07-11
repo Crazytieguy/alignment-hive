@@ -189,7 +189,7 @@ async fn establish_and_run(
                     instance = machine_id,
                     "machine not reachable for supervision yet — retrying in 60s: {error}"
                 );
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_mins(1)).await;
                 continue;
             }
         }
@@ -219,7 +219,7 @@ async fn establish_and_run(
                     instance = machine_id,
                     "lease setup failed transiently — retrying in 60s: {error}"
                 );
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_mins(1)).await;
             }
             Err(EstablishError::Unsupervisable(caveat)) => {
                 mark_unsupervisable(state, machine_id, external_id, &caveat).await;
@@ -316,7 +316,7 @@ async fn establish_and_run(
 
     tracing::info!(instance = machine_id, "Starting heartbeat loop");
 
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut interval = tokio::time::interval(Duration::from_mins(1));
     let mut host_key_alarm_raised = false;
     loop {
         interval.tick().await;
@@ -584,7 +584,7 @@ async fn run_startup_commands(conn: &AnyConnection, machine_id: &str, commands: 
     }
     let combined = commands.join(" && ");
     tracing::info!(instance = machine_id, "Running startup commands");
-    match conn.exec(&combined, Duration::from_secs(300)).await {
+    match conn.exec(&combined, Duration::from_mins(5)).await {
         Ok(_) => tracing::info!(instance = machine_id, "Startup commands completed"),
         Err(e) => tracing::warn!(instance = machine_id, "Startup commands failed: {e}"),
     }

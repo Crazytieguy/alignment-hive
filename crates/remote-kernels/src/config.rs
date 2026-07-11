@@ -1137,10 +1137,7 @@ mod tests {
         assert_eq!(config.watchdog_stale_secs, 300);
         assert_eq!(config.runpod.provision_timeout_mins, 20);
         assert!(vast.provision_timeout_mins.is_none());
-        assert_eq!(
-            vast.provision_timeout(),
-            std::time::Duration::from_secs(20 * 60)
-        );
+        assert_eq!(vast.provision_timeout(), std::time::Duration::from_mins(20));
         assert_eq!(vast.onstart_timeout_mins, 15);
         for runtime in ["runpod", "vast", "kubernetes"] {
             assert!(config.pre_command_for(runtime, Cleanup::Stop).is_none());

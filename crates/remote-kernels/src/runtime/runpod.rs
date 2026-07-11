@@ -1041,7 +1041,7 @@ mod tests {
         let rt = runtime_with("[runpod]\nprovision-timeout-mins = 5");
         assert_eq!(
             rt.capabilities().provision_timeout,
-            Some(std::time::Duration::from_secs(5 * 60))
+            Some(std::time::Duration::from_mins(5))
         );
     }
 

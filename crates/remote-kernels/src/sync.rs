@@ -111,7 +111,7 @@ pub async fn sync_to_pod(
 async fn ensure_rsync_on_pod(ssh: &crate::ssh_exec::SshEndpoint) -> anyhow::Result<()> {
     ssh.cmd(
         "which rsync || (apt-get update -qq && apt-get install -y -qq rsync)",
-        std::time::Duration::from_secs(120),
+        std::time::Duration::from_mins(2),
     )
     .await
     .map_err(|e| anyhow::anyhow!("Failed to ensure rsync is installed on pod: {e}"))?;
