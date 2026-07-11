@@ -733,7 +733,14 @@ impl RemoteKernelsServer {
             };
             (state.project_dir.clone(), record)
         };
-        let lifecycle = crate::state::load_lifecycle_record(&project_dir, &machine_id);
+        let lifecycle = match crate::state::load_lifecycle_record_checked(&project_dir, &machine_id)
+        {
+            Ok(lifecycle) => lifecycle,
+            // Fail closed: the unreadable fields are the ones that hold
+            // destructive/racy actions back (wants_terminate, finalize
+            // state) — attaching blind could revive a machine mid-cleanup.
+            Err(error) => return err_text(format!("Machine {machine_id}: {error}")),
+        };
         if (lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
             && !lifecycle.wants_terminate)
             || (lifecycle.wants_terminate && !force)
@@ -1176,7 +1183,7 @@ impl RemoteKernelsServer {
             }
         }
 
-        let (machine_id, project_dir, conn, jupyter, supervised, cleanup) = {
+        let (machine_id, project_dir, conn, supervised, cleanup) = {
             let state = self.state.lock().await;
             let machine_id = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(machine_id) => machine_id,
@@ -1211,7 +1218,6 @@ impl RemoteKernelsServer {
                 machine_id,
                 state.project_dir.clone(),
                 conn,
-                inst.jupyter.clone(),
                 inst.supervision_note.is_none(),
                 inst.cleanup,
             )
@@ -1240,20 +1246,14 @@ impl RemoteKernelsServer {
         }
 
         // Machine-visible marker, so a machine-side finalize honors the plan
-        // when no server is alive at drain time. Command transport first,
-        // Jupyter Contents API as the fallback (proxy-only machines).
+        // when no server is alive at drain time. Machines without a command
+        // transport also have no finalizer that could consume a marker, so
+        // there is deliberately no fallback channel — the reply just says
+        // the plan runs only while a server is connected.
         let downloads_pending = !downloads.is_empty();
-        let marker =
-            match crate::machine_scripts::write_intent(&*conn, downloads_pending, then).await {
-                Ok(()) => Ok(()),
-                Err(exec_error) => jupyter
-                    .put_text_file(
-                        crate::machine_scripts::INTENT_RELATIVE_PATH,
-                        &crate::machine_scripts::intent_marker_json(downloads_pending, then),
-                    )
-                    .await
-                    .map_err(|api_error| format!("{exec_error:#}; Contents API: {api_error:#}")),
-            };
+        let marker = crate::machine_scripts::write_intent(&*conn, downloads_pending, then)
+            .await
+            .map_err(|error| format!("{error:#}"));
 
         self.spawn_finish_drain(&machine_id);
 
@@ -1654,7 +1654,7 @@ impl RemoteKernelsServer {
             if let Some((_, _, kernels, _, uptime_mins, supervision_note)) = live_info {
                 let _ = write!(
                     section,
-                    "\nUptime: {uptime_mins} minutes\nKernels: {}",
+                    "\nAttached for: {uptime_mins} minutes\nKernels: {}",
                     if kernels.is_empty() {
                         "none".to_string()
                     } else {
@@ -2009,6 +2009,13 @@ impl RemoteKernelsServer {
                     let _ = write!(
                         msg,
                         "\nCell number: {cell_num}\nUse get_output(kernel_id=\"{kernel_id}\", cell_number={cell_num}) to check on it."
+                    );
+                } else {
+                    // Without a cell number there is no key to park the
+                    // receiver under — say so instead of silently dropping
+                    // the only handle to the result.
+                    msg.push_str(
+                        "\nWARNING: its notebook cell could not be created, so the result cannot be collected with get_output(); the kernel still runs it, and the machine-side recorder (if active) captures the output.",
                     );
                 }
                 return Ok(CallToolResult::success(vec![Content::text(msg)]));
@@ -2605,12 +2612,16 @@ impl RemoteKernelsServer {
             });
             match self.wait_execution(held, deadline, progress.as_ref()).await {
                 WaitOutcome::Completed(output) => {
-                    let formatted = output.format();
-                    if output.error.is_some() {
-                        Ok(CallToolResult::error(vec![Content::text(formatted)]))
-                    } else {
-                        Ok(CallToolResult::success(vec![Content::text(formatted)]))
-                    }
+                    let is_error = output.error.is_some();
+                    // Same footer as execute()/wait(): spend line and
+                    // cleanup-disabled reminder apply to results however
+                    // they are collected.
+                    self.finish_execution_reply(
+                        output.format(),
+                        cleanup == Cleanup::Disabled,
+                        is_error,
+                    )
+                    .await
                 }
                 WaitOutcome::StillRunning => {
                     Ok(CallToolResult::success(vec![Content::text(format!(
@@ -2628,13 +2639,13 @@ impl RemoteKernelsServer {
                 Ok(output) => {
                     self.update_notebook_cell(&params.kernel_id, params.cell_number, &output)
                         .await;
-                    let formatted = output.format();
                     let is_error = output.error.is_some();
-                    if is_error {
-                        Ok(CallToolResult::error(vec![Content::text(formatted)]))
-                    } else {
-                        Ok(CallToolResult::success(vec![Content::text(formatted)]))
-                    }
+                    self.finish_execution_reply(
+                        output.format(),
+                        cleanup == Cleanup::Disabled,
+                        is_error,
+                    )
+                    .await
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     // Put it back.
@@ -2693,15 +2704,31 @@ impl RemoteKernelsServer {
                 conn,
             )
         };
-        let _mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
-            Ok(guard) => guard,
+        // Verify lease authority, then RELEASE the machine oplock before the
+        // upload: rsync can run for minutes, and the lock is for provider
+        // transitions — holding it here starves the 60s heartbeat tick (the
+        // machine-side lease would go stale and self-arm mid-sync) and any
+        // explicit stop()/terminate(). Fencing covers a mid-upload takeover.
+        match self.mutation_guard(&machine_id, &external_id).await {
+            Ok(guard) => drop(guard),
             Err(message) => return err_text(message),
-        };
+        }
 
         let result = conn
             .upload(&project_dir, &includes)
             .await
             .map_err(|e| McpError::internal_error(format!("Sync failed: {e}"), None))?;
+        if let Some(message) = {
+            let state = self.state.lock().await;
+            state
+                .instances
+                .get(&machine_id)
+                .and_then(Self::fenced_message)
+        } {
+            return err_text(format!(
+                "Files were uploading while another session took over the machine; the upload may be incomplete or overwritten. {message}"
+            ));
+        }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -3823,15 +3850,18 @@ impl RemoteKernelsServer {
             )
             .await?;
         let conn = Arc::new(conn);
-        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
-        let previous_storage_rate = lifecycle.storage_rate_per_hr.unwrap_or(0.0);
-        if lifecycle.external_volume_id.is_none() {
-            lifecycle.storage_rate_per_hr = Some(handle.storage_rate_per_hr);
-            lifecycle
-                .storage_rate_note
-                .clone_from(&handle.storage_rate_note);
-        }
-        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)?;
+        let mut previous_storage_rate = 0.0;
+        let lifecycle = self
+            .update_lifecycle(machine_id, |lifecycle| {
+                previous_storage_rate = lifecycle.storage_rate_per_hr.unwrap_or(0.0);
+                if lifecycle.external_volume_id.is_none() {
+                    lifecycle.storage_rate_per_hr = Some(handle.storage_rate_per_hr);
+                    lifecycle
+                        .storage_rate_note
+                        .clone_from(&handle.storage_rate_note);
+                }
+            })
+            .await?;
         if matches!(mode, ConnectMode::Attach { resumed: true, .. })
             && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::CompletedStop)
             && let Some(op_id) = lifecycle.op_id.as_deref()
@@ -4025,9 +4055,10 @@ impl RemoteKernelsServer {
                 } else {
                     caveat
                 };
-                let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
-                lifecycle.supervision_note = Some(note.clone());
-                crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)?;
+                self.update_lifecycle(machine_id, |lifecycle| {
+                    lifecycle.supervision_note = Some(note.clone());
+                })
+                .await?;
                 if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
                     instance.supervision_note = Some(note);
                 }
@@ -4521,6 +4552,23 @@ impl RemoteKernelsServer {
         }
     }
 
+    /// Single-writer discipline for lifecycle.json: every read-modify-write
+    /// runs under the state mutex (in-process serialization; cross-process
+    /// writers are already constrained by the machine oplock and lease
+    /// fencing) and mutates the FRESH on-disk record — never a copy captured
+    /// before an await.
+    async fn update_lifecycle(
+        &self,
+        machine_id: &str,
+        mutate: impl FnOnce(&mut crate::state::LifecycleRecord),
+    ) -> anyhow::Result<crate::state::LifecycleRecord> {
+        let state = self.state.lock().await;
+        let mut lifecycle = crate::state::load_lifecycle_record(&state.project_dir, machine_id);
+        mutate(&mut lifecycle);
+        crate::state::save_lifecycle_record(&state.project_dir, machine_id, &lifecycle)?;
+        Ok(lifecycle)
+    }
+
     /// An explicit `stop()`/`terminate()` supersedes any queued `finish()` plan —
     /// without this, the stale plan would resume on the next attach and
     /// could stop or terminate the machine again unexpectedly.
@@ -4677,7 +4725,19 @@ impl RemoteKernelsServer {
     ) -> Option<String> {
         let project_dir = self.state.lock().await.project_dir.clone();
         let record = crate::state::load_instance_record(&project_dir, machine_id)?;
-        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
+        // Read-only decision snapshot: never saved back (saves go through
+        // `update_lifecycle` so they can't clobber concurrent writers).
+        let mut lifecycle_snapshot = match crate::state::load_lifecycle_record_checked(
+            &project_dir,
+            machine_id,
+        ) {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => {
+                return Some(format!(
+                    "Machine {machine_id}: {error}. Reconciliation left it untouched — it may still be billing."
+                ));
+            }
+        };
         let runtime = match self.runtime_for(&record.runtime).await {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -4703,7 +4763,8 @@ impl RemoteKernelsServer {
 
         if provider_state == InstanceStatus::Running
             && record.phase == Phase::Stopped
-            && lifecycle.finalize_phase != Some(crate::state::FinalizePhase::RetrievingOutcome)
+            && lifecycle_snapshot.finalize_phase
+                != Some(crate::state::FinalizePhase::RetrievingOutcome)
         {
             // Resumed outside this tool (console, CLI): GPU billing restarted
             // while the ledger still shows the stopped storage tail. Reopen
@@ -4731,10 +4792,10 @@ impl RemoteKernelsServer {
         }
 
         if provider_state == InstanceStatus::Stopped && record.phase == Phase::Stopped {
-            let expected_storage = if lifecycle.external_volume_id.is_some() {
+            let expected_storage = if lifecycle_snapshot.external_volume_id.is_some() {
                 0.0
             } else {
-                lifecycle.storage_rate_per_hr.unwrap_or(0.0)
+                lifecycle_snapshot.storage_rate_per_hr.unwrap_or(0.0)
             };
             let open_rate = self
                 .state
@@ -4753,7 +4814,8 @@ impl RemoteKernelsServer {
         }
 
         if provider_state == InstanceStatus::Running
-            && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::RetrievingOutcome)
+            && lifecycle_snapshot.finalize_phase
+                == Some(crate::state::FinalizePhase::RetrievingOutcome)
         {
             let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await
             {
@@ -4788,11 +4850,13 @@ impl RemoteKernelsServer {
                     let mut stopped = record.clone();
                     stopped.phase = Phase::Stopped;
                     let _ = self.state.lock().await.save_record(machine_id, &stopped);
-                    lifecycle.finalize_phase =
-                        Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                    lifecycle.outcome_unknown = true;
-                    let _ =
-                        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                    let _ = self
+                        .update_lifecycle(machine_id, |lifecycle| {
+                            lifecycle.finalize_phase =
+                                Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                            lifecycle.outcome_unknown = true;
+                        })
+                        .await;
                     Some(format!(
                         "Machine {machine_id}: it was stopped again after an interrupted attempt to read its self-cleanup result; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
                     ))
@@ -4809,8 +4873,45 @@ impl RemoteKernelsServer {
         }
 
         if provider_state == InstanceStatus::Running
-            && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
-            && lifecycle.started_at_epoch.is_some_and(|started| {
+            && lifecycle_snapshot.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
+            && lifecycle_snapshot.finalize_unsupervised
+            && lifecycle_snapshot.started_at_epoch.is_some_and(|started| {
+                now_epoch().saturating_sub(started) > FINALIZE_OP_TIMEOUT_SECS
+            })
+        {
+            // No machine-side finalizer exists (the machine was
+            // unsupervisable when the cleanup was issued), so nothing can
+            // act on this op — waiting for an outcome dead-ends while the
+            // machine bills. Race-free: enter-finalizing was never issued.
+            let cleared = self
+                .update_lifecycle(machine_id, |lifecycle| {
+                    lifecycle.finalize_phase = None;
+                    lifecycle.op_id = None;
+                    lifecycle.action = None;
+                    lifecycle.outcome_unknown = false;
+                    lifecycle.finalize_unsupervised = false;
+                })
+                .await;
+            if let Err(error) = cleared {
+                return Some(format!(
+                    "Machine {machine_id}: an earlier {} never took effect and the machine cannot clean itself up, but clearing the stale state failed ({error}); it is still running and billing",
+                    lifecycle_snapshot
+                        .action
+                        .map_or("cleanup", |action| match action {
+                            Cleanup::Stop => "stop",
+                            Cleanup::Terminate => "terminate",
+                            Cleanup::Disabled => "cleanup",
+                        })
+                ));
+            }
+            return Some(format!(
+                "Machine {machine_id}: an earlier stop/terminate never took effect, and this machine has no on-machine cleanup to finish it — it is still running and billing. attach(\"{machine_id}\") to use it, or retry stop()/terminate() to end the billing."
+            ));
+        }
+
+        if provider_state == InstanceStatus::Running
+            && lifecycle_snapshot.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
+            && lifecycle_snapshot.started_at_epoch.is_some_and(|started| {
                 now_epoch().saturating_sub(started) > FINALIZE_OP_TIMEOUT_SECS
             })
         {
@@ -4829,8 +4930,8 @@ impl RemoteKernelsServer {
         // A provider-confirmed stop resolves an ambiguous explicit stop even
         // when the marker is unavailable: the requested preservation action
         // happened, so complete local bookkeeping and leave attach possible.
-        if lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
-            && lifecycle.action == Some(Cleanup::Stop)
+        if lifecycle_snapshot.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
+            && lifecycle_snapshot.action == Some(Cleanup::Stop)
         {
             if let Err(error) = self.record_stopped(machine_id, None).await {
                 return Some(format!(
@@ -4840,23 +4941,30 @@ impl RemoteKernelsServer {
             let mut stopped = record.clone();
             stopped.phase = Phase::Stopped;
             let _ = self.state.lock().await.save_record(machine_id, &stopped);
-            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
-            lifecycle.outcome_unknown = false;
-            let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            let _ = self
+                .update_lifecycle(machine_id, |lifecycle| {
+                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+                    lifecycle.outcome_unknown = false;
+                })
+                .await;
             return Some(format!(
                 "Machine {machine_id}: the provider confirms it stopped, completing an earlier stop whose result was unclear; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
             ));
         }
 
         let server_death_candidate =
-            record.phase == Phase::Running && lifecycle.finalize_phase.is_none();
-        if lifecycle.finalize_phase.is_none() && !server_death_candidate {
+            record.phase == Phase::Running && lifecycle_snapshot.finalize_phase.is_none();
+        if lifecycle_snapshot.finalize_phase.is_none() && !server_death_candidate {
             return None;
         }
         if server_death_candidate {
-            lifecycle.action = Some(record.cleanup);
+            // Snapshot-only: persisted by the first `update_lifecycle` below
+            // (the RetrievingOutcome write), which every later save follows.
+            lifecycle_snapshot.action = Some(record.cleanup);
         }
-        if lifecycle.finalize_phase == Some(crate::state::FinalizePhase::RetrievalUnavailable) {
+        if lifecycle_snapshot.finalize_phase
+            == Some(crate::state::FinalizePhase::RetrievalUnavailable)
+        {
             return Some(Self::lifecycle_check_incomplete(
                 machine_id,
                 "an earlier attempt to read its self-cleanup result failed",
@@ -4864,7 +4972,7 @@ impl RemoteKernelsServer {
                 "bill for storage",
             ));
         }
-        if lifecycle.wants_terminate {
+        if lifecycle_snapshot.wants_terminate {
             return Some(Self::lifecycle_check_incomplete(
                 machine_id,
                 "it committed to terminating itself, but the provider outcome was ambiguous, so the terminate is still pending",
@@ -4893,7 +5001,7 @@ impl RemoteKernelsServer {
             );
         }
 
-        if record.runtime != "runpod" || lifecycle.action != Some(Cleanup::Terminate) {
+        if record.runtime != "runpod" || lifecycle_snapshot.action != Some(Cleanup::Terminate) {
             return Some(Self::lifecycle_check_incomplete(
                 machine_id,
                 "could not connect to read its self-cleanup result",
@@ -4924,9 +5032,14 @@ impl RemoteKernelsServer {
                 "be billing",
             ));
         }
-        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievingOutcome);
-        if let Err(error) =
-            crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)
+        if let Err(error) = self
+            .update_lifecycle(machine_id, |lifecycle| {
+                if server_death_candidate {
+                    lifecycle.action = Some(record.cleanup);
+                }
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievingOutcome);
+            })
+            .await
         {
             return Some(Self::lifecycle_check_incomplete(
                 machine_id,
@@ -4943,9 +5056,13 @@ impl RemoteKernelsServer {
             )
             .await
         {
-            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
-            lifecycle.outcome_unknown = true;
-            let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            let _ = self
+                .update_lifecycle(machine_id, |lifecycle| {
+                    lifecycle.finalize_phase =
+                        Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                    lifecycle.outcome_unknown = true;
+                })
+                .await;
             return Some(Self::lifecycle_check_incomplete(
                 machine_id,
                 &format!("briefly resuming it to read its self-cleanup result failed: {error}"),
@@ -4964,21 +5081,26 @@ impl RemoteKernelsServer {
         .await;
         match marker {
             Ok(marker) if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 => {
-                lifecycle.wants_terminate = true;
-                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
-                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                let _ = self
+                    .update_lifecycle(machine_id, |lifecycle| {
+                        lifecycle.wants_terminate = true;
+                        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+                    })
+                    .await;
                 if let Err(error) =
                     crate::state::import_pending_transition(&project_dir, machine_id, &marker)
                 {
                     if runtime.stop(&record.external_id).await.is_ok() {
                         let _ = self.record_stopped(machine_id, None).await;
                     }
-                    lifecycle.finalize_phase =
-                        Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                    lifecycle.wants_terminate = false;
-                    lifecycle.outcome_unknown = true;
-                    let _ =
-                        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                    let _ = self
+                        .update_lifecycle(machine_id, |lifecycle| {
+                            lifecycle.finalize_phase =
+                                Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                            lifecycle.wants_terminate = false;
+                            lifecycle.outcome_unknown = true;
+                        })
+                        .await;
                     return Some(format!(
                         "Machine {machine_id}: its self-cleanup result could not be recorded locally ({error}); it was stopped again to preserve its data and may still bill for storage; this retries automatically on the next status() or attach()"
                     ));
@@ -4988,10 +5110,14 @@ impl RemoteKernelsServer {
                     if restop.is_ok() {
                         let _ = self.record_stopped(machine_id, None).await;
                     }
-                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
-                    lifecycle.outcome_unknown = true;
-                    let _ =
-                        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                    let _ = self
+                        .update_lifecycle(machine_id, |lifecycle| {
+                            lifecycle.finalize_phase =
+                                Some(crate::state::FinalizePhase::Finalizing);
+                            lifecycle.wants_terminate = true;
+                            lifecycle.outcome_unknown = true;
+                        })
+                        .await;
                     return Some(Self::action_needed(
                         machine_id,
                         &record.external_id,
@@ -5017,11 +5143,14 @@ impl RemoteKernelsServer {
                 if restop.is_ok() {
                     let _ = self.record_stopped(machine_id, None).await;
                 }
-                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
-                lifecycle.action = Some(Cleanup::Stop);
-                lifecycle.wants_terminate = false;
-                lifecycle.outcome_unknown = false;
-                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                let _ = self
+                    .update_lifecycle(machine_id, |lifecycle| {
+                        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+                        lifecycle.action = Some(Cleanup::Stop);
+                        lifecycle.wants_terminate = false;
+                        lifecycle.outcome_unknown = false;
+                    })
+                    .await;
                 Some(if restop.is_ok() {
                     format!(
                         "Machine {machine_id}: its self-cleanup chose to stop (preserve data) rather than terminate; it is stopped — its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
@@ -5040,9 +5169,13 @@ impl RemoteKernelsServer {
                 if restop.is_ok() {
                     let _ = self.record_stopped(machine_id, None).await;
                 }
-                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                lifecycle.outcome_unknown = true;
-                let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+                let _ = self
+                    .update_lifecycle(machine_id, |lifecycle| {
+                        lifecycle.finalize_phase =
+                            Some(crate::state::FinalizePhase::RetrievalUnavailable);
+                        lifecycle.outcome_unknown = true;
+                    })
+                    .await;
                 Some(Self::action_needed(
                     machine_id,
                     &record.external_id,
@@ -5101,12 +5234,14 @@ impl RemoteKernelsServer {
             );
         }
         if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 {
-            let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
-            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
-            lifecycle.action = Some(Cleanup::Terminate);
-            lifecycle.wants_terminate = true;
-            lifecycle.op_id = Some(marker.uuid.clone());
-            let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+            let _ = self
+                .update_lifecycle(machine_id, |lifecycle| {
+                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+                    lifecycle.action = Some(Cleanup::Terminate);
+                    lifecycle.wants_terminate = true;
+                    lifecycle.op_id = Some(marker.uuid.clone());
+                })
+                .await;
             return match runtime.terminate(&record.external_id).await {
                 Ok(()) => {
                     let _ = self.record_terminated_and_clear(machine_id).await;
@@ -5125,13 +5260,15 @@ impl RemoteKernelsServer {
         let mut stopped = record.clone();
         stopped.phase = Phase::Stopped;
         let _ = self.state.lock().await.save_record(machine_id, &stopped);
-        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
-        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
-        lifecycle.op_id = Some(marker.uuid);
-        lifecycle.action = Some(Cleanup::Stop);
-        lifecycle.wants_terminate = false;
-        lifecycle.outcome_unknown = false;
-        let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
+        let _ = self
+            .update_lifecycle(machine_id, |lifecycle| {
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+                lifecycle.op_id = Some(marker.uuid);
+                lifecycle.action = Some(Cleanup::Stop);
+                lifecycle.wants_terminate = false;
+                lifecycle.outcome_unknown = false;
+            })
+            .await;
         format!(
             "Machine {machine_id}: it was stopped while disconnected; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
         )
@@ -5145,6 +5282,10 @@ impl RemoteKernelsServer {
         skip_finalize: bool,
     ) -> anyhow::Result<CleanupAction> {
         let project_dir = self.state.lock().await.project_dir.clone();
+        // Fail closed on an unreadable lifecycle record before acting: its
+        // fields decide finalize behavior and ambiguity handling.
+        crate::state::load_lifecycle_record_checked(&project_dir, &target.machine_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         let runtime = self
             .runtime_for(&target.runtime)
             .await
@@ -5223,22 +5364,27 @@ impl RemoteKernelsServer {
             .await?;
         }
 
-        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &target.machine_id);
-        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
-        lifecycle.op_id = Some(op_id.clone());
-        lifecycle.action = Some(match actual {
-            CleanupAction::Stop => Cleanup::Stop,
-            CleanupAction::Terminate => Cleanup::Terminate,
-        });
-        lifecycle.started_at_epoch = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
-        lifecycle.outcome_unknown = false;
-        lifecycle.wants_terminate = false;
-        crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
+        let lifecycle = self
+            .update_lifecycle(&target.machine_id, |lifecycle| {
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
+                lifecycle.op_id = Some(op_id.clone());
+                lifecycle.action = Some(match actual {
+                    CleanupAction::Stop => Cleanup::Stop,
+                    CleanupAction::Terminate => Cleanup::Terminate,
+                });
+                lifecycle.started_at_epoch = Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+                lifecycle.outcome_unknown = false;
+                lifecycle.wants_terminate = false;
+                // An unsupervised machine has no finalizer, so no outcome
+                // marker can ever appear — recovery must not wait for one.
+                lifecycle.finalize_unsupervised = !supervised;
+            })
+            .await?;
 
         let provider_result = match actual {
             CleanupAction::Stop => runtime.stop(&target.external_id).await,
@@ -5252,15 +5398,47 @@ impl RemoteKernelsServer {
             if provider_rejection_is_authoritative(&error) && unchanged {
                 if let Some(connection) = &connection {
                     crate::machine_scripts::revert_to_armed(connection, &op_id).await?;
+                    // The on-machine watchdog exits when it observes
+                    // `finalizing`, so the reverted (armed) lease has no
+                    // supervisor left — reinstall one or the machine never
+                    // acts on the arm and bills unsupervised.
+                    let cleanup =
+                        crate::state::load_instance_record(&project_dir, &target.machine_id)
+                            .map_or(Cleanup::Terminate, |record| record.cleanup);
+                    let policy = crate::runtime::WatchdogPolicy {
+                        cleanup,
+                        initial_budget_secs: None,
+                        stale_secs: self.config.watchdog_stale_secs,
+                        budget_grace_secs: self.config.budget_grace_secs_for(&target.runtime),
+                        finalize_wait_secs: self.config.finalize_wait_secs_for(&target.runtime),
+                        finalize_timeout_secs: self
+                            .config
+                            .finalize_command_timeout_secs_for(&target.runtime),
+                        finalize_command: self
+                            .config
+                            .pre_command_for(&target.runtime, cleanup)
+                            .map(ToString::to_string),
+                        storage_rate_per_hr: lifecycle.storage_rate_per_hr,
+                    };
+                    if let Err(install_error) = connection.install_watchdog(policy).await {
+                        tracing::warn!(
+                            instance = %target.machine_id,
+                            "Could not reinstall the watchdog after revert: {install_error:#}"
+                        );
+                    }
                 }
-                lifecycle.finalize_phase = None;
-                lifecycle.op_id = None;
-                lifecycle.action = None;
-                crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
+                self.update_lifecycle(&target.machine_id, |lifecycle| {
+                    lifecycle.finalize_phase = None;
+                    lifecycle.op_id = None;
+                    lifecycle.action = None;
+                })
+                .await?;
                 anyhow::bail!("provider rejected {}: {error}", actual.verb());
             }
-            lifecycle.outcome_unknown = true;
-            crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
+            self.update_lifecycle(&target.machine_id, |lifecycle| {
+                lifecycle.outcome_unknown = true;
+            })
+            .await?;
             if let Some(instance) = self
                 .state
                 .lock()
@@ -5279,9 +5457,11 @@ impl RemoteKernelsServer {
         self.complete_provider_action(target, actual, Some(op_id.clone()))
             .await?;
         if actual == CleanupAction::Stop {
-            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
-            lifecycle.outcome_unknown = false;
-            crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
+            self.update_lifecycle(&target.machine_id, |lifecycle| {
+                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
+                lifecycle.outcome_unknown = false;
+            })
+            .await?;
         }
         Ok(actual)
     }
@@ -5520,20 +5700,20 @@ impl RemoteKernelsServer {
                 });
             match crate::machine_scripts::arm_disconnect(&connection, generation, deadline).await {
                 Ok(()) => {
-                    let mut lifecycle =
-                        crate::state::load_lifecycle_record(&project_dir, &machine_id);
-                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Armed);
-                    lifecycle.action = Some(cleanup);
-                    lifecycle.wants_terminate = false;
-                    lifecycle.outcome_unknown = false;
-                    lifecycle.started_at_epoch = Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    );
-                    if let Err(error) =
-                        crate::state::save_lifecycle_record(&project_dir, &machine_id, &lifecycle)
+                    if let Err(error) = self
+                        .update_lifecycle(&machine_id, |lifecycle| {
+                            lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Armed);
+                            lifecycle.action = Some(cleanup);
+                            lifecycle.wants_terminate = false;
+                            lifecycle.outcome_unknown = false;
+                            lifecycle.started_at_epoch = Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            );
+                        })
+                        .await
                     {
                         tracing::warn!(instance = %machine_id, "Disconnect arm was remote-only: {error}");
                     }
@@ -5750,6 +5930,20 @@ mod tests {
         let fresh_other =
             RemoteKernelsServer::new(toml::from_str("").unwrap(), other_session, Some(1.0));
         assert!(fresh_other.check_budget().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn corrupt_owner_rollups_block_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = session_over_budget_state(dir.path());
+        std::fs::write(
+            crate::state::state_dir(dir.path()).join("ledger/owner-rollups.json"),
+            "{broken",
+        )
+        .unwrap();
+        let server = RemoteKernelsServer::new(toml::from_str("").unwrap(), state, Some(100.0));
+        let error = server.check_budget().await.unwrap_err().to_string();
+        assert!(error.contains("Spend tracking is broken"), "{error}");
     }
 
     #[tokio::test]

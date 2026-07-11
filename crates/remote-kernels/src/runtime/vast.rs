@@ -889,6 +889,10 @@ impl Runtime for VastRuntime {
         }
 
         // Launch Jupyter (idempotent) with the token passed via environment.
+        // The token can come from a hand-edited record on attach — it is
+        // embedded in single quotes, so enforce the same shell-safety rule
+        // as config strings.
+        crate::ssh_exec::validate_shell_safe("jupyter token", &ctx.jupyter_token)?;
         let launch = format!(
             "export REMOTE_KERNELS_JUPYTER_TOKEN='{}'; {}",
             ctx.jupyter_token,

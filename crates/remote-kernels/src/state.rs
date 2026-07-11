@@ -150,6 +150,11 @@ pub struct LifecycleRecord {
     /// disconnect is intentionally takeoverable and never sets this flag.
     #[serde(default)]
     pub wants_terminate: bool,
+    /// The finalize was issued for a machine with NO machine-side finalizer
+    /// (unsupervisable) — no outcome marker can ever appear, so ambiguity
+    /// handling may not wait for one.
+    #[serde(default)]
+    pub finalize_unsupervised: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -780,6 +785,32 @@ pub fn load_instance_record(project_dir: &Path, machine_id: &str) -> Option<Inst
     let path = instance_dir(project_dir, machine_id).join("state.json");
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+/// Strict variant for decision gates that guard destructive actions: a
+/// MISSING file is a normal default, but a file that exists and cannot be
+/// parsed fails closed — its lost fields (`wants_terminate`,
+/// `finalize_phase`) are exactly the ones that hold destructive actions
+/// back.
+pub fn load_lifecycle_record_checked(
+    project_dir: &Path,
+    machine_id: &str,
+) -> Result<LifecycleRecord, String> {
+    validate_machine_id(machine_id)?;
+    let path = instance_dir(project_dir, machine_id).join("lifecycle.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LifecycleRecord::default());
+        }
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "{} exists but cannot be parsed ({error}); inspect or restore it — its fields gate destructive actions",
+            path.display()
+        )
+    })
 }
 
 pub fn load_lifecycle_record(project_dir: &Path, machine_id: &str) -> LifecycleRecord {

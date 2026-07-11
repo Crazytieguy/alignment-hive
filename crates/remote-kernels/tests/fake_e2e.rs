@@ -992,6 +992,104 @@ with open('results/out.txt', 'w') as f:
     terminate(&server, Some(&machine_id)).await;
 }
 
+/// The core finish() promise: a queued plan survives server death and a
+/// fresh server's attach() resumes it to completion (downloads collected,
+/// action applied, intent cleared).
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn finish_plan_resumes_after_server_death() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "finish-death-session");
+    let (machine_id, _) = start_machine(&first, Some("survivor")).await;
+    let kernel = create_kernel(&first, Some(&machine_id)).await;
+
+    // Produce the artifact, then queue downloads + stop while a long cell
+    // blocks the drain — and kill the server before it can act.
+    let (is_err, output) = execute(
+        &first,
+        &kernel,
+        "import os
+os.makedirs('results', exist_ok=True)
+with open('results/late.txt','w') as f:
+    f.write('collected-after-death')",
+    )
+    .await;
+    assert!(!is_err, "{output}");
+    let result = first
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel.clone(),
+            code: "import time; time.sleep(60)".to_string(),
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    let result = first
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: Some(vec!["results/late.txt".to_string()]),
+            then: "stop".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    drop(first); // server dies with the plan queued and the kernel busy
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_some(),
+        "plan must survive the server"
+    );
+
+    // A fresh same-session server picks the plan up on attach. Interrupt the
+    // long cell so the drain can proceed promptly.
+    let second = server_in_session(dir.path(), None, "finish-death-session");
+    let result = second
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: Some(true),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(
+        text.contains("finish() plan was found and resumed"),
+        "{text}"
+    );
+    let _ = second
+        .interrupt(Parameters(remote_kernels::server::KernelIdParams {
+            kernel_id: kernel.clone(),
+        }))
+        .await;
+
+    let mut stopped = false;
+    for _ in 0..120 {
+        if remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+            .is_some_and(|record| record.phase == remote_kernels::state::Phase::Stopped)
+        {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(stopped, "resumed plan never stopped the machine");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("results/late.txt")).unwrap(),
+        "collected-after-death"
+    );
+    assert!(
+        remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_none()
+    );
+
+    terminate(&second, Some(&machine_id)).await;
+}
+
 /// A failed download must block the queued terminate entirely: the plan
 /// stays queued, the failure surfaces in status(), and the machine survives.
 #[tokio::test]
@@ -1039,6 +1137,68 @@ async fn finish_download_failure_blocks_the_action() {
             .finish_intent
             .is_some(),
         "the plan must stay queued for a retry"
+    );
+
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// An explicit stop() supersedes a queued finish() plan entirely: the plan
+/// is cancelled, not left to fire on the next attach.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn explicit_stop_cancels_queued_finish_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in_session(dir.path(), None, "cancel-session");
+    let (machine_id, _) = start_machine(&server, Some("cancel")).await;
+    let kernel = create_kernel(&server, Some(&machine_id)).await;
+
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel.clone(),
+            code: "import time; time.sleep(6)".to_string(),
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    let result = server
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: None,
+            then: "terminate".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    // The user changes their mind: explicit stop supersedes the plan.
+    let result = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    assert!(
+        remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_none(),
+        "explicit stop must cancel the queued plan"
+    );
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("stopped machine keeps its record");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Stopped);
+
+    // Give any stale drain a moment, then confirm nothing resurrected it.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_none()
     );
 
     terminate(&server, Some(&machine_id)).await;

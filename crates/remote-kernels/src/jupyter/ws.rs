@@ -146,6 +146,12 @@ impl KernelConnection {
             bool,
             bool,
         )> = None;
+        // Grace deadline armed when execute_reply has arrived but the iopub
+        // idle has not: idle normally lands milliseconds later, but it can be
+        // lost server-side (iopub HWM overflow under output floods, or a
+        // kernel crash in the reply→idle gap) — without a bound the kernel
+        // wedges busy forever and the queue jams.
+        let mut idle_grace: Option<tokio::time::Instant> = None;
 
         loop {
             tokio::select! {
@@ -176,6 +182,23 @@ impl KernelConnection {
                         false,
                         false,
                     ));
+                    idle_grace = None;
+                }
+
+                () = async {
+                    match idle_grace {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                }, if idle_grace.is_some() => {
+                    tracing::warn!(
+                        "iopub idle never arrived after execute_reply; completing with the output received so far"
+                    );
+                    idle_grace = None;
+                    is_busy.store(false, Ordering::Relaxed);
+                    if let Some((_, output, tx, _, _)) = pending.take() {
+                        let _ = tx.send(output);
+                    }
                 }
 
                 Some(msg_result) = ws_stream_rx.next() => {
@@ -232,6 +255,13 @@ impl KernelConnection {
                             _ => {}
                         }
                         complete = *shell_replied && *idle;
+                        idle_grace = if *shell_replied && !*idle {
+                            // Trailing iopub output is still expected — give
+                            // it a bounded window rather than forever.
+                            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10))
+                        } else {
+                            None
+                        };
                     }
                     if complete {
                         is_busy.store(false, Ordering::Relaxed);

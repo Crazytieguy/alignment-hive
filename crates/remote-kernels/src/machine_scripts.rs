@@ -195,11 +195,6 @@ pub async fn install_watchdog<C: Connection + ?Sized>(
     Ok(())
 }
 
-/// Relative path (from the machine workdir) of the `finish()` intent marker
-/// the watchdog's finalizer consults. Kept relative so the Jupyter Contents
-/// API fallback (rooted at the workdir) can address the same file.
-pub const INTENT_RELATIVE_PATH: &str = ".remote-kernels/intent.json";
-
 /// Serialize a `finish()` intent for the machine-visible marker. The
 /// watchdog's finalizer downgrades `terminate` to `stop` while
 /// `downloads_pending` is true, so queued data is preserved until a server
@@ -340,6 +335,15 @@ async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseErro
 #[cfg(test)]
 mod tests {
     use super::{LeaseState, age_secs};
+
+    /// The lease/watchdog scripts travel inside single-quote-wrapped SSH
+    /// commands — a single quote anywhere in them breaks the transport.
+    /// The invariant is load-bearing; enforce it, don't just comment it.
+    #[test]
+    fn machine_scripts_contain_no_single_quotes() {
+        assert!(!super::LEASE.contains('\''), "rk-lease.sh");
+        assert!(!super::WATCHDOG.contains('\''), "rk-watchdog.sh");
+    }
 
     #[test]
     fn machine_clock_skew_freshness_uses_paired_remote_now() {
