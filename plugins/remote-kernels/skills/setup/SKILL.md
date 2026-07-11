@@ -67,27 +67,40 @@ Cover these with the user regardless of runtime:
   WANDB_API_KEY, ...)? `inherit-env` forwards local variables (including
   from `.env`/`.env.local`); explicit values go in `[env]`.
 - **Cleanup mode** — the per-runtime `cleanup` key (semantics in the template
-  comments). Make sure the user actively chooses: the default, terminate,
-  deletes the machine and its data at session end, which is only safe once
-  the data-persistence plan below is in place.
+  comments). Cleanup no longer fires just because a session disconnects or a
+  laptop closes: the machine finishes running work, runs the finalize command
+  (below), and only then stops or terminates itself. Make sure the user
+  actively chooses: the default, terminate, deletes the machine and its data
+  once that sequence completes, which is only safe once the data-persistence
+  plan below is in place.
 - **Data persistence** — IMPORTANT: agree where remotely-generated data
   (checkpoints, results, logs) should live, and make sure it reliably gets
-  there. vast and Kubernetes machines are effectively ephemeral, and
-  terminate deletes data on every runtime — anything still on the machine is
-  lost with it. The simple default is to `download` results back to the
-  project after every run. Data too large to shuttle needs storage that
-  outlives the machine: a RunPod network volume, a PVC in the Kubernetes pod
-  template, or an external store the user already trusts (S3, HF Hub, W&B)
-  that jobs push to. The plugin itself backs up nothing.
+  there. The strongest pattern is continuous: have long-running jobs push
+  results to storage that outlives the machine *as they run*, so there is
+  never much unsynced work to lose — use whatever store the user's stack
+  already trusts. For shorter runs, `download` results back to the project
+  after each one. Terminate deletes anything still on the machine, on every
+  runtime; the plugin itself backs up nothing.
+- **Finalize commands** — the per-runtime `pre-terminate-command` /
+  `pre-stop-command` keys run on the machine after work drains and before
+  cleanup acts, as the safety net for whatever the continuous pattern above
+  didn't cover. Ask directly: "if a machine has to clean itself up while
+  you're away, where should results go?" — and set the command that puts
+  them there. Leaving it unset is a valid answer, spelled out plainly:
+  terminate may then lose unsynced work. If the command fails, terminate
+  degrades to stop so the data stays collectable.
 - **Budget** — set `REMOTE_KERNELS_BUDGET` in `.claude/settings.json`'s
   `env` section (not in remote-kernels.toml, so Claude can't modify it).
-  Enforced across ALL concurrent machines; requires cleanup != "disabled" on
-  every metered runtime. Frame it as a generous upper limit, not a spending
-  target — Claude should always stop or terminate machines that are no
-  longer in use, and the budget is the backstop for when that fails. The
-  money-safety windows (orphan halt, watchdog staleness, provision timeouts)
-  are also config with sane defaults — mention they exist in the template
-  rather than walking through each.
+  Optional: no budget means the user manages spend manually, and that is a
+  supported choice. When set, it covers total provider spend across ALL
+  concurrent machines — including storage that keeps billing on a stopped
+  machine until someone terminates it (status() shows that tail). Frame it
+  as a generous upper limit, not a spending target — Claude should always
+  stop or terminate machines that are no longer in use, and the budget is
+  the backstop for when that fails. The money-safety windows (orphan halt,
+  watchdog staleness, provision timeouts, budget grace) are also config with
+  sane defaults — mention they exist in the template rather than walking
+  through each.
 - **Notebooks** — everything executed on a kernel is saved as an `.ipynb`
   file under `remote-kernels/` at the project root (one notebook per kernel;
   configurable via `notebook-dir`). Decide with the user whether to commit

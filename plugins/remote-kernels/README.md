@@ -38,9 +38,12 @@ Docker inside, e.g. for UK AISI Inspect's sandboxed evals), and Kubernetes
 Configure via `remote-kernels.toml`; switch per machine with
 `start(runtime=...)`.
 
-**Multiple concurrent machines** — Named instances (`start(name="gpu-2")`),
-started in parallel (`wait=false` + `status()` polling), each with its own
-kernels. Kernel calls route automatically — no instance bookkeeping.
+**Multiple concurrent machines** — Every `start()` provisions a fresh
+machine with a unique id (plus an optional display label); reconnecting to
+an existing machine is always an explicit `attach(machine_id)`, with kernel
+state and output recovered across sessions. Machines start in parallel
+(`wait=false` + `status()` polling), each with its own kernels; kernel calls
+route automatically — no instance bookkeeping.
 
 **Jupyter kernel execution** — Run code on remote GPUs through persistent
 Jupyter kernels. Claude can execute cells, inspect outputs, and iterate — all
@@ -49,15 +52,21 @@ within the conversation. Kernel activity is saved as `.ipynb` files.
 **File sync** — Sync local project files to a machine (`.gitignore`-aware)
 and download results back, both rooted at the project directory.
 
-**Budget controls** — Set a spending limit via environment variable. Costs
-are tracked across all machines (from allocation, not first use) and the
-limit is enforced: on exhaustion every machine is stopped or terminated and
-further operations are blocked. Each machine also carries an on-machine
-watchdog as a crash-independent backstop.
+**Budget controls** — Set a spending limit via environment variable. Total
+provider spend is tracked across all machines (from allocation, not first
+use, including storage on stopped machines) and the limit is enforced: on
+exhaustion machines get a bounded grace window to save their work, then are
+stopped or terminated, and further operations are blocked. Each machine also
+carries an on-machine watchdog as a crash-independent backstop.
 
-**Automatic cleanup** — Configurable cleanup modes: stop (preserve state),
-terminate (delete everything), or disabled (manual management). Machines that
-outlive a crashed session are reconnected or reaped on the next start.
+**Automatic cleanup that never races your work** — Disconnects (background
+sessions, closed laptops, crashes) never destroy a machine: it finishes
+running work, runs your configured finalize command to push results out,
+and only then applies the cleanup mode — stop (preserve state), terminate
+(delete everything), or disabled (manual management). If saving fails,
+terminate degrades to stop so data stays collectable. A later session
+attaches, recovers kernels and any output produced while disconnected, and
+completes whatever cleanup is still pending.
 
 ## Requirements
 
