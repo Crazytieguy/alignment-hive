@@ -272,15 +272,10 @@ pub struct DownloadParams {
 }
 
 fn generate_token() -> String {
-    use std::fmt::Write as _;
-
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
-        let _ = write!(acc, "{b:02x}");
-        acc
-    })
+    hex::encode(bytes)
 }
 
 /// Expected/recoverable conditions reach Claude as a `CallToolResult` error
@@ -2099,10 +2094,6 @@ impl RemoteKernelsServer {
         Arc::clone(&self.state)
     }
 
-    fn shell_quote(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
-    }
-
     async fn install_output_recorder(
         connection: &AnyConnection,
         kernel_id: &str,
@@ -2132,22 +2123,18 @@ impl RemoteKernelsServer {
         let output_dir = format!("{state_dir}/kernel-output");
         let script_path = format!("{bin_dir}/rk-output-recorder.py");
         let recorder_log = format!("{output_dir}/{kernel_id}.recorder.log");
-        let mut source_hex =
-            String::with_capacity(crate::machine_scripts::OUTPUT_RECORDER.len() * 2);
-        for byte in crate::machine_scripts::OUTPUT_RECORDER.as_bytes() {
-            let _ = write!(source_hex, "{byte:02x}");
-        }
+        let source_hex = hex::encode(crate::machine_scripts::OUTPUT_RECORDER.as_bytes());
         Ok(format!(
             "mkdir -p {bin_dir} {output_dir} && python3 -c 'import sys; open(sys.argv[1], \"wb\").write(bytes.fromhex(sys.argv[2]))' {script_path} {source_hex} && chmod 700 {script_path} && (export REMOTE_KERNELS_JUPYTER_TOKEN={token}; nohup python3 {script_path} --kernel-id {kernel_id} --state-dir {state_dir} --ws-url {ws_url} --diagnostic-log {recorder_log} </dev/null >/dev/null 2>&1 &)",
-            bin_dir = Self::shell_quote(&bin_dir),
-            output_dir = Self::shell_quote(&output_dir),
-            script_path = Self::shell_quote(&script_path),
-            source_hex = Self::shell_quote(&source_hex),
-            kernel_id = Self::shell_quote(kernel_id),
-            token = Self::shell_quote(token),
-            state_dir = Self::shell_quote(&state_dir),
-            ws_url = Self::shell_quote(&connection.recorder_ws_url()),
-            recorder_log = Self::shell_quote(&recorder_log),
+            bin_dir = crate::machine_scripts::shell_quote(&bin_dir),
+            output_dir = crate::machine_scripts::shell_quote(&output_dir),
+            script_path = crate::machine_scripts::shell_quote(&script_path),
+            source_hex = crate::machine_scripts::shell_quote(&source_hex),
+            kernel_id = crate::machine_scripts::shell_quote(kernel_id),
+            token = crate::machine_scripts::shell_quote(token),
+            state_dir = crate::machine_scripts::shell_quote(&state_dir),
+            ws_url = crate::machine_scripts::shell_quote(&connection.recorder_ws_url()),
+            recorder_log = crate::machine_scripts::shell_quote(&recorder_log),
         ))
     }
 
@@ -2162,8 +2149,8 @@ impl RemoteKernelsServer {
         let predecessor = format!("{path}.1");
         let command = format!(
             "if [ ! -f {path} ] && [ ! -f {predecessor} ]; then exit 1; fi; {{ [ ! -f {predecessor} ] || cat -- {predecessor}; [ ! -f {path} ] || cat -- {path}; }} | tail -c {RECORDER_TAIL_BYTES}",
-            path = Self::shell_quote(&path),
-            predecessor = Self::shell_quote(&predecessor),
+            path = crate::machine_scripts::shell_quote(&path),
+            predecessor = crate::machine_scripts::shell_quote(&predecessor),
         );
         let raw = connection
             .exec(&command, std::time::Duration::from_secs(10))

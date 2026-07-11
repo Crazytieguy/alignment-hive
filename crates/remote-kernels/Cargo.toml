@@ -42,6 +42,9 @@ serde_yaml = "0.9.34"
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustix = { version = "1.1.4", features = ["fs"] }
 serde-inline-default = "1.0.1"
+ulid = "1.2.1"
+hex = "0.4.3"
+shlex = "2.0.1"
 
 [dev-dependencies]
 dotenvy = "0.15.7"

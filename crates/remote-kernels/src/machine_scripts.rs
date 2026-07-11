@@ -206,15 +206,21 @@ fn cleanup_name(cleanup: crate::config::Cleanup) -> &'static str {
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+/// The one shell-quoting implementation for commands sent to machines.
+/// Inputs are our own controlled values (paths, ids, tokens — never NUL), so
+/// the NUL-byte failure `shlex` guards against cannot occur; fall back to the
+/// input's POSIX single-quote wrap in that impossible case rather than panic.
+pub fn shell_quote(value: &str) -> String {
+    shlex::try_quote(value)
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "'\"'\"'")))
 }
 
 async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseError> {
     let state_dir = state_dir(conn.workdir());
     let arguments = args
         .iter()
-        .map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'")))
+        .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
     // rk-lease.sh deliberately contains no single quotes, so it can be sent
@@ -222,8 +228,8 @@ async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseErro
     // child exit is captured in-band so Connection::exec can retain its
     // simple stdout-or-error contract while lease exit 9/10 stay observable.
     let command = format!(
-        "bash -c '{LEASE}' -- '{}' {arguments} 2>&1; code=$?; printf '\n{EXIT_SENTINEL}%s\n' \"$code\"; exit 0",
-        state_dir.replace('\'', "'\"'\"'")
+        "bash -c '{LEASE}' -- {} {arguments} 2>&1; code=$?; printf '\n{EXIT_SENTINEL}%s\n' \"$code\"; exit 0",
+        shell_quote(&state_dir)
     );
     let raw = conn
         .exec(&command, Duration::from_secs(10))

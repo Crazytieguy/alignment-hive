@@ -1,40 +1,15 @@
-//! Minimal ULID generation/validation used for machine identities.
+//! Machine-identity ULIDs, backed by the `ulid` crate.
 //!
-//! This module is intentionally tiny while the build environment cannot fetch
-//! the upstream `ulid` crate. It emits the standard 48-bit millisecond time +
-//! 80-bit randomness representation in canonical Crockford base32.
-
-use rand::RngCore;
-
-const ENCODING: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+//! `is_valid` is stricter than the crate's parser: record directory names
+//! must round-trip byte-identically (canonical uppercase Crockford), so a
+//! parseable-but-non-canonical form (e.g. lowercase) is rejected.
 
 pub fn new() -> String {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let timestamp = millis.min(u128::from((1_u64 << 48) - 1));
-    let mut random = [0_u8; 10];
-    rand::thread_rng().fill_bytes(&mut random);
-
-    let mut random_value = 0_u128;
-    for byte in random {
-        random_value = (random_value << 8) | u128::from(byte);
-    }
-    let mut value = (timestamp << 80) | random_value;
-
-    let mut encoded = [b'0'; 26];
-    for slot in encoded.iter_mut().rev() {
-        *slot = ENCODING[(value & 31) as usize];
-        value >>= 5;
-    }
-    encoded.into_iter().map(char::from).collect()
+    ulid::Ulid::new().to_string()
 }
 
 pub fn is_valid(value: &str) -> bool {
-    value.len() == 26
-        && value.as_bytes()[0] <= b'7'
-        && value.bytes().all(|byte| ENCODING.contains(&byte))
+    ulid::Ulid::from_string(value).is_ok_and(|parsed| parsed.to_string() == value)
 }
 
 #[cfg(test)]
@@ -48,12 +23,16 @@ mod tests {
         assert!(is_valid(&first), "{first}");
         assert!(is_valid(&second), "{second}");
         assert_ne!(first, second);
+        assert_eq!(first.len(), 26);
     }
 
     #[test]
     fn validation_rejects_legacy_and_ambiguous_forms() {
         assert!(!is_valid("main"));
+        // 'I' is outside Crockford base32.
         assert!(!is_valid("01ARZ3NDEKTSV4RRFFQ69G5FAI"));
+        // Parseable but non-canonical (lowercase) must not validate.
+        assert!(!is_valid("01arz3ndektsv4rrffq69g5fav"));
         assert!(is_valid("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
     }
 }
