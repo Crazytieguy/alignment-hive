@@ -1058,6 +1058,7 @@ impl RemoteKernelsServer {
         };
 
         tracing::info!(instance = %machine_id, external_id = %target.external_id, "Stopping machine...");
+        self.cancel_finish_intent(&machine_id).await;
         let actual = self
             .explicit_cleanup_instance(&target, CleanupAction::Stop, skip_finalize)
             .await
@@ -1123,6 +1124,7 @@ impl RemoteKernelsServer {
         };
 
         tracing::info!(instance = %target.machine_id, external_id = %target.external_id, "Terminating machine...");
+        self.cancel_finish_intent(&target.machine_id).await;
         let actual = self
             .explicit_cleanup_instance(&target, CleanupAction::Terminate, skip_finalize)
             .await
@@ -4516,6 +4518,25 @@ impl RemoteKernelsServer {
             Err(error) => Some(format!(
                 "Accounting unavailable ({error}); new spend is blocked"
             )),
+        }
+    }
+
+    /// An explicit `stop()`/`terminate()` supersedes any queued `finish()` plan —
+    /// without this, the stale plan would resume on the next attach and
+    /// could stop or terminate the machine again unexpectedly.
+    async fn cancel_finish_intent(&self, machine_id: &str) {
+        let state = self.state.lock().await;
+        let mut lifecycle = crate::state::load_lifecycle_record(&state.project_dir, machine_id);
+        if lifecycle.finish_intent.is_some() {
+            lifecycle.finish_intent = None;
+            if let Err(error) =
+                crate::state::save_lifecycle_record(&state.project_dir, machine_id, &lifecycle)
+            {
+                tracing::warn!(
+                    instance = machine_id,
+                    "Could not cancel the queued finish() plan: {error}"
+                );
+            }
         }
     }
 

@@ -68,6 +68,7 @@ impl KernelConnection {
 
     /// Start an execution without waiting for the result.
     /// Returns a receiver that will yield the final `ExecutionOutput` when complete.
+    #[allow(clippy::unused_async)] // callers treat submission as async; keep the signature stable
     pub async fn start_execution(
         &self,
         session_id: &str,
@@ -77,10 +78,21 @@ impl KernelConnection {
         let parent_msg_id = msg.header.msg_id.clone();
         let (result_tx, result_rx) = oneshot::channel();
 
+        // try_send, not send: callers hold the server state lock, and the ws
+        // loop only drains this queue between executions — a blocking send
+        // on a full queue would freeze every other tool call (including
+        // interrupt/stop) until the running cell finishes.
         self.request_tx
-            .send(ExecuteCommand { msg, result_tx })
-            .await
-            .map_err(|_| anyhow::anyhow!("Kernel connection closed"))?;
+            .try_send(ExecuteCommand { msg, result_tx })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => anyhow::anyhow!(
+                    "Kernel execution queue is full (16 pending executions) — wait() for \
+                     results or interrupt() before queueing more"
+                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    anyhow::anyhow!("Kernel connection closed")
+                }
+            })?;
 
         Ok(StartedExecution {
             parent_msg_id,
