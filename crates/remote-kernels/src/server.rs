@@ -242,7 +242,6 @@ pub struct KernelIdParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)] // a stale caller sending a removed field must error, not silently degrade
 pub struct ExecuteParams {
     /// The kernel ID to execute in.
     pub kernel_id: String,
@@ -1998,18 +1997,35 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// Check on or wait for a previously started execution that timed out.
-    /// The `cell_number` is returned by `execute()` when it times out or when timeout=0 is used.
+    /// Check on or wait for a previously started execution. The `cell_number` is
+    /// returned by `execute()` when it times out or when background=true is used.
     #[tool(name = "get_output")]
+    pub async fn get_output_tool(
+        &self,
+        params: Parameters<GetOutputParams>,
+        meta: Meta,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.get_output_inner(params.0, Some((meta, peer))).await
+    }
+
+    /// Direct entry point used by integration tests; MCP callers use `get_output_tool`.
     pub async fn get_output(
         &self,
         params: Parameters<GetOutputParams>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.0;
+        self.get_output_inner(params.0, None).await
+    }
+
+    async fn get_output_inner(
+        &self,
+        params: GetOutputParams,
+        progress: Option<(Meta, Peer<RoleServer>)>,
+    ) -> Result<CallToolResult, McpError> {
         let wait = params.wait.unwrap_or(true);
         let timeout_secs = params.timeout.unwrap_or(30);
 
-        let (mut result_rx, machine_id) = {
+        let (mut result_rx, machine_id, cleanup) = {
             let mut state = self.state.lock().await;
             let Some(machine_id) = state
                 .instance_for_kernel(&params.kernel_id)
@@ -2037,55 +2053,40 @@ impl RemoteKernelsServer {
                     params.kernel_id, params.cell_number
                 ));
             };
-            (rx, machine_id)
+            (rx, machine_id, inst.cleanup)
         };
 
         if wait {
-            // Wait with timeout, using select! to preserve the receiver.
-            // timeout 0 = no cap.
-            let timed_out;
-            let mut completed_output = None;
-
-            if timeout_secs == 0 {
-                timed_out = false;
-                completed_output = (&mut result_rx).await.ok();
-            } else {
-                tokio::select! {
-                    result = &mut result_rx => {
-                        timed_out = false;
-                        completed_output = result.ok();
-                    }
-                    () = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
-                        timed_out = true;
-                    }
-                }
-            }
-
-            if timed_out {
-                // Put it back.
-                let mut state = self.state.lock().await;
-                if let Some(inst) = state.instances.get_mut(&machine_id) {
-                    inst.pending_executions
-                        .insert((params.kernel_id, params.cell_number), result_rx);
-                }
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Execution still running after {timeout_secs}s. Use get_output() again to check.",
-                ))]));
-            }
-
-            match completed_output {
-                Some(output) => {
-                    self.update_notebook_cell(&params.kernel_id, params.cell_number, &output)
-                        .await;
+            // Same engine as wait(): fence ticks, progress keep-alive, and
+            // receiver preservation on timeout. timeout 0 = no cap.
+            let held = HeldExecution {
+                result_rx,
+                machine_id,
+                kernel_id: params.kernel_id,
+                cell_number: Some(params.cell_number),
+                cleanup,
+            };
+            let deadline = (timeout_secs != 0).then(|| {
+                tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs)
+            });
+            match self.wait_execution(held, deadline, progress.as_ref()).await {
+                WaitOutcome::Completed(output) => {
                     let formatted = output.format();
-                    let is_error = output.error.is_some();
-                    if is_error {
+                    if output.error.is_some() {
                         Ok(CallToolResult::error(vec![Content::text(formatted)]))
                     } else {
                         Ok(CallToolResult::success(vec![Content::text(formatted)]))
                     }
                 }
-                None => err_text("Kernel connection was lost."),
+                WaitOutcome::StillRunning => {
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Execution still running after {timeout_secs}s. Use get_output() again to check."
+                    ))]))
+                }
+                WaitOutcome::Fenced(message) => {
+                    err_text(format!("{message}; the execution continues on the machine"))
+                }
+                WaitOutcome::ConnectionLost => err_text("Kernel connection was lost."),
             }
         } else {
             // Non-blocking check.
