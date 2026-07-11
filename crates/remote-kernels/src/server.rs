@@ -402,6 +402,13 @@ fn provider_rejection_is_authoritative(error: &anyhow::Error) -> bool {
         .is_some_and(|status| (400..500).contains(&status))
 }
 
+/// Clamp a tool-supplied timeout to one year: `Instant + huge Duration`
+/// (and oversized tokio sleeps) panic, and anything past this is
+/// indistinguishable from "no cap" anyway.
+fn clamp_timeout_secs(secs: u64) -> u64 {
+    secs.min(31_536_000)
+}
+
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -706,6 +713,11 @@ impl RemoteKernelsServer {
         auto: bool,
     ) -> Result<CallToolResult, McpError> {
         let reconcile_message = self.reconcile_machine(&machine_id).await;
+        // Queue-then-reclaim (like start()): reconcile outcomes are one-shot,
+        // and every attach refusal path below must not swallow them.
+        if let Some(message) = &reconcile_message {
+            self.start_failures.lock().await.push(message.clone());
+        }
         if !auto {
             self.check_budget().await?;
         }
@@ -868,9 +880,9 @@ impl RemoteKernelsServer {
         {
             Ok(summary) => {
                 let recovery = self.recover_attached_kernels(&machine_id, &record).await;
-                let reconciliation = reconcile_message
-                    .map(|message| format!("\n\n{message}"))
-                    .unwrap_or_default();
+                let reconciliation = self
+                    .reclaim_start_alerts(reconcile_message.as_slice())
+                    .await;
                 let finish_note = if crate::state::load_lifecycle_record(&project_dir, &machine_id)
                     .finish_intent
                     .is_some()
@@ -1082,6 +1094,13 @@ impl RemoteKernelsServer {
                     }
                     Some(machine_id)
                 }
+                // With no explicit instance and several live machines, the
+                // ambiguity error must propagate — falling through to a
+                // record-only lookup could silently pick (and DELETE) an
+                // unrelated detached machine.
+                Err(message) if requested.is_none() && !state.instances.is_empty() => {
+                    return err_text(message);
+                }
                 Err(_) => None,
             }
         };
@@ -1164,6 +1183,17 @@ impl RemoteKernelsServer {
             let inst = &state.instances[&machine_id];
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
+            }
+            if then == crate::state::FinishThen::Stop
+                && crate::runtime::AnyRuntime::static_capabilities(&inst.runtime, &self.config)
+                    .is_some_and(|caps| {
+                        caps.stop_resume == crate::runtime::StopSupport::Unsupported
+                    })
+            {
+                return err_text(format!(
+                    "Runtime {:?} cannot stop machines (stop/resume unsupported) — a queued stop would never complete. Use then=\"terminate\" or then=\"keep\".",
+                    inst.runtime
+                ));
             }
             if inst.phase != Phase::Running {
                 return err_text(format!(
@@ -1286,6 +1316,15 @@ impl RemoteKernelsServer {
                 }
             }
             server.finish_drains.lock().await.remove(&machine_id);
+            // A plan queued between our last look and the set removal would
+            // otherwise strand until the next attach — respawn for it.
+            let project_dir = server.state.lock().await.project_dir.clone();
+            if crate::state::load_lifecycle_record(&project_dir, &machine_id)
+                .finish_intent
+                .is_some()
+            {
+                server.spawn_finish_drain(&machine_id);
+            }
         });
     }
 
@@ -1441,6 +1480,9 @@ impl RemoteKernelsServer {
                 } else {
                     CleanupAction::Terminate
                 };
+                if !still_current() {
+                    return Ok(Some("superseded by a newer finish() plan".to_string()));
+                }
                 let actual = self
                     .explicit_cleanup_instance(&target, action, false)
                     .await
@@ -1669,6 +1711,19 @@ impl RemoteKernelsServer {
                 if lifecycle.outcome_unknown {
                     let _ = write!(section, " (outcome unknown; verify at provider)");
                 }
+            }
+            if let Some(intent) = &lifecycle.finish_intent {
+                let _ = write!(
+                    section,
+                    "\nQueued finish(): {} download(s) pending, then {}{}",
+                    intent.downloads.len(),
+                    intent.then.as_str(),
+                    if live_info.is_some() {
+                        ""
+                    } else {
+                        " — attach() resumes the plan"
+                    }
+                );
             }
             sections.push(section);
         }
@@ -1982,7 +2037,7 @@ impl RemoteKernelsServer {
         let timed_out;
         let mut completed_output = None;
 
-        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let timeout = std::time::Duration::from_secs(clamp_timeout_secs(timeout_secs));
         tokio::select! {
             result = &mut result_rx => {
                 timed_out = false;
@@ -2108,8 +2163,9 @@ impl RemoteKernelsServer {
         timeout_secs: Option<u64>,
         progress: Option<(Meta, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
-        let deadline = timeout_secs
-            .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+        let deadline = timeout_secs.map(|secs| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
+        });
         let mut sections: Vec<String> = Vec::new();
         let mut any_error = false;
         // Executions on already-fenced machines stay in place, exactly like
@@ -2363,8 +2419,9 @@ impl RemoteKernelsServer {
         progress: Option<(Meta, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
         let cleanup = held.cleanup;
-        let deadline = timeout_secs
-            .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+        let deadline = timeout_secs.map(|secs| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
+        });
         match self.wait_execution(held, deadline, progress.as_ref()).await {
             WaitOutcome::Completed(output) => {
                 let is_error = output.error.is_some();
@@ -2541,7 +2598,8 @@ impl RemoteKernelsServer {
                 cleanup,
             };
             let deadline = (timeout_secs != 0).then(|| {
-                tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs)
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(clamp_timeout_secs(timeout_secs))
             });
             match self.wait_execution(held, deadline, progress.as_ref()).await {
                 WaitOutcome::Completed(output) => {
@@ -3775,12 +3833,27 @@ impl RemoteKernelsServer {
         if matches!(mode, ConnectMode::Attach { resumed: true, .. })
             && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::CompletedStop)
             && let Some(op_id) = lifecycle.op_id.as_deref()
-            && let Err(error) = crate::machine_scripts::complete_stop(&conn, op_id).await
         {
-            tracing::warn!(
-                instance = machine_id,
-                "Could not clear prior stopped lease before fresh acquire: {error}"
-            );
+            match crate::machine_scripts::complete_stop(&conn, op_id).await {
+                // The consumed outcome marker must not survive the resume:
+                // it would block this machine's NEXT disconnect self-cleanup
+                // forever (the watchdog refuses new provider actions while
+                // an unresolved outcome exists).
+                Ok(()) => {
+                    if let Err(error) = crate::machine_scripts::clear_outcome(&*conn).await {
+                        tracing::warn!(
+                            instance = machine_id,
+                            "Could not remove the consumed outcome marker: {error:#}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        instance = machine_id,
+                        "Could not clear prior stopped lease before fresh acquire: {error}"
+                    );
+                }
+            }
         }
         if matches!(
             mode,
@@ -3792,6 +3865,14 @@ impl RemoteKernelsServer {
             && let Some(op_id) = lifecycle.op_id.as_deref()
         {
             crate::machine_scripts::revert_to_armed(&conn, op_id).await?;
+            // Same reasoning: the imported outcome must not block the
+            // revived machine's future finalize.
+            if let Err(error) = crate::machine_scripts::clear_outcome(&*conn).await {
+                tracing::warn!(
+                    instance = machine_id,
+                    "Could not remove the consumed outcome marker: {error:#}"
+                );
+            }
         }
         let endpoint = conn.jupyter().clone();
         let jupyter = JupyterClient::new(&endpoint.http_base, &jupyter_token);
@@ -4018,6 +4099,7 @@ impl RemoteKernelsServer {
     /// Finish machine setup in the background, retrying while the machine is
     /// still legitimately provisioning (Kueue queue, capacity wait). Real
     /// failures clean up the machine and surface via `status()`.
+    #[allow(clippy::too_many_lines)] // one linear retry ladder, kept auditable
     fn spawn_background_finalize(
         &self,
         machine_id: &str,
@@ -4038,6 +4120,16 @@ impl RemoteKernelsServer {
             // crashing on startup every time) shouldn't burn the full
             // provision timeout either, hence the small cap.
             let mut hard_failures = 0;
+            // Local fallback bound: provisioning_overdue reads the live
+            // instance map, so it can't fire if the entry was removed —
+            // this loop must terminate regardless (it re-acquires the
+            // machine oplock every iteration and would otherwise starve
+            // stop()/terminate() forever; observed live on RunPod).
+            let loop_started = std::time::Instant::now();
+            let fallback_cap =
+                crate::runtime::AnyRuntime::static_capabilities(&runtime_name, &server.config)
+                    .and_then(|caps| caps.provision_timeout)
+                    .unwrap_or(std::time::Duration::from_secs(3600));
             loop {
                 let error = match server
                     .finalize_start(&machine_id, &external_id, mode, None)
@@ -4049,11 +4141,20 @@ impl RemoteKernelsServer {
                         // provisioning and have no on-machine watchdog yet
                         // (it installs after SSH), so a host stuck "loading"
                         // must eventually be cut loose, not waited on forever.
-                        let Some(elapsed) =
-                            server.provisioning_overdue(&machine_id, &external_id).await
-                        else {
-                            tracing::info!(instance = %machine_id, "Still provisioning, continuing to wait...");
-                            continue;
+                        let elapsed = match server
+                            .provisioning_overdue(&machine_id, &external_id)
+                            .await
+                        {
+                            Some(elapsed) => elapsed,
+                            None if loop_started.elapsed() > fallback_cap => loop_started.elapsed(),
+                            None => {
+                                tracing::info!(instance = %machine_id, "Still provisioning, continuing to wait...");
+                                // Yield the machine oplock window: an explicit
+                                // stop()/terminate() waiting on it must be able
+                                // to win between our attempts.
+                                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                                continue;
+                            }
                         };
                         anyhow::anyhow!(
                             "machine still not ready (running + reachable) after {} \
@@ -4459,15 +4560,19 @@ impl RemoteKernelsServer {
                 if record.phase != Phase::Running || state.instances.contains_key(&machine_id) {
                     continue;
                 }
-                if state
-                    .machine_ledger_owner(&machine_id)
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    == Some(self.lease_owner.as_str())
-                {
-                    state.reattaching.insert(machine_id.clone());
-                    mine.push(machine_id);
+                match state.machine_ledger_owner(&machine_id) {
+                    Ok(owner) if owner.as_deref() == Some(self.lease_owner.as_str()) => {
+                        state.reattaching.insert(machine_id.clone());
+                        mine.push(machine_id);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        // Skipping silently would leave a possibly-ours
+                        // running machine unsupervised with no signal.
+                        self.start_failures.lock().await.push(format!(
+                            "Automatic reattach skipped machine {machine_id}: its spend owner could not be read ({error}); attach(\"{machine_id}\") manually if it is yours"
+                        ));
+                    }
                 }
             }
         }
@@ -4572,6 +4677,35 @@ impl RemoteKernelsServer {
             }
             return Some(format!(
                 "Machine {machine_id}: confirmed deleted at the provider; local record cleared"
+            ));
+        }
+
+        if provider_state == InstanceStatus::Running
+            && record.phase == Phase::Stopped
+            && lifecycle.finalize_phase != Some(crate::state::FinalizePhase::RetrievingOutcome)
+        {
+            // Resumed outside this tool (console, CLI): GPU billing restarted
+            // while the ledger still shows the stopped storage tail. Reopen
+            // the interval at the full rate (attributed to the machine's
+            // existing owner) so spend is never silently untracked.
+            let reopened = self.state.lock().await.append_ledger_event(
+                machine_id,
+                crate::ledger::EventKind::RateChanged,
+                None,
+                None,
+                None,
+                Some("resumed outside this tool; interval reopened".to_string()),
+            );
+            if let Err(error) = reopened {
+                return Some(format!(
+                    "Machine {machine_id}: the provider shows it running again, but recording that in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
+                ));
+            }
+            let mut running = record.clone();
+            running.phase = Phase::Running;
+            let _ = self.state.lock().await.save_record(machine_id, &running);
+            return Some(format!(
+                "Machine {machine_id}: it was resumed outside this tool and is billing at its full rate again. attach(\"{machine_id}\") to use it, or stop()/terminate() to end the billing."
             ));
         }
 
@@ -5227,7 +5361,7 @@ impl RemoteKernelsServer {
     /// Stop or terminate this session's machines due to budget exhaustion.
     /// Returns a human-readable description of what happened.
     async fn cleanup_all_for_budget(&self) -> String {
-        let targets = self.all_live_targets().await;
+        let targets = self.all_live_targets(true).await;
         if targets.is_empty() {
             return "No machine was running.".to_string();
         }
@@ -5392,13 +5526,21 @@ impl RemoteKernelsServer {
     }
 
     /// Snapshot of live instances this process may mutate automatically.
-    /// Fenced, supervision-pending, and unsupervisable machines are omitted.
-    async fn all_live_targets(&self) -> Vec<(CleanupTarget, Cleanup, f64)> {
+    /// Fenced machines are always omitted; `include_unsupervisable` is for
+    /// budget exhaustion, where a machine with no machine-side enforcement
+    /// is precisely the one whose billing must be ended server-side.
+    async fn all_live_targets(
+        &self,
+        include_unsupervisable: bool,
+    ) -> Vec<(CleanupTarget, Cleanup, f64)> {
         let state = self.state.lock().await;
         state
             .instances
             .values()
-            .filter(|instance| instance.fenced.is_none() && instance.supervision_note.is_none())
+            .filter(|instance| {
+                instance.fenced.is_none()
+                    && (include_unsupervisable || instance.supervision_note.is_none())
+            })
             .map(|i| {
                 (
                     CleanupTarget {
@@ -6456,7 +6598,7 @@ mod fencing_tests {
             server.state.lock().await.instances[&machine_id].fenced,
             Some(FenceReason::TakenOver)
         );
-        assert!(server.all_live_targets().await.is_empty());
+        assert!(server.all_live_targets(true).await.is_empty());
         assert_eq!(
             server.cleanup_all_for_budget().await,
             "No machine was running."
@@ -6560,7 +6702,10 @@ mod fencing_tests {
                 .is_some_and(|note| note.contains("lacks the flock utility"))
         );
         drop(state);
-        assert!(server.all_live_targets().await.is_empty());
+        assert!(server.all_live_targets(false).await.is_empty());
+        // Budget exhaustion, by contrast, must still be able to end the
+        // billing of an unsupervisable metered machine.
+        assert_eq!(server.all_live_targets(true).await.len(), 1);
         assert!(
             server
                 .state

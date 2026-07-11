@@ -506,19 +506,33 @@ impl Config {
         &self,
         environment: Option<&str>,
     ) -> anyhow::Result<Option<EffectiveBudget>> {
+        fn validate(cap: f64, source: &str) -> anyhow::Result<f64> {
+            // NaN compares false everywhere, which would make the very first
+            // budget check read as exhausted and clean up the session's
+            // machines; negatives and infinities are equally meaningless.
+            anyhow::ensure!(
+                cap.is_finite() && cap >= 0.0,
+                "{source} must be a finite, non-negative dollar amount (got {cap})"
+            );
+            Ok(cap)
+        }
         if let Some(raw) = environment {
             let cap = raw.parse::<f64>().map_err(|_| {
                 anyhow::anyhow!("REMOTE_KERNELS_BUDGET must be a number (got {raw:?})")
             })?;
             return Ok(Some(EffectiveBudget {
-                cap,
+                cap: validate(cap, "REMOTE_KERNELS_BUDGET")?,
                 source: BudgetSource::Environment,
             }));
         }
-        Ok(self.budget_cap.map(|cap| EffectiveBudget {
-            cap,
-            source: BudgetSource::Toml,
-        }))
+        self.budget_cap
+            .map(|cap| {
+                Ok(EffectiveBudget {
+                    cap: validate(cap, "budget-cap")?,
+                    source: BudgetSource::Toml,
+                })
+            })
+            .transpose()
     }
 
     pub fn pre_command_for(&self, runtime: &str, cleanup: Cleanup) -> Option<&str> {

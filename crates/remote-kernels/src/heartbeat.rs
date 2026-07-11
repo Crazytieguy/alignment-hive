@@ -260,7 +260,30 @@ async fn establish_and_run(
             "Runtime supports lease fencing but not a detached watchdog"
         );
     } else if let Err(e) = conn.install_watchdog(watchdog_policy.clone()).await {
+        // A failed install means NO machine-side cleanup or budget
+        // enforcement exists — reporting Active here would bypass the
+        // BudgetUnenforceable gate and silently leave a budgeted machine
+        // able to bill unbounded after a disconnect.
         tracing::warn!(instance = machine_id, "Failed to install watchdog: {e}");
+        let caveat = format!(
+            "installing the machine-side auto-cleanup failed ({e:#}){NO_AUTO_SHUTDOWN_TAIL}"
+        );
+        mark_unsupervisable(state, machine_id, external_id, &caveat).await;
+        let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+        return Ok(());
+    }
+    // A session with no budget must not inherit a previous owner's budget
+    // deadline: a stale deadline would stop the machine mid-work. Only an
+    // ACTIVE lease is cleared — a budget-armed lease keeps its inherited
+    // absolute deadline (takeover must not extend spend).
+    if budget.is_none()
+        && lease.state == "active"
+        && let Err(e) = crate::machine_scripts::clear_budget_deadline(conn).await
+    {
+        tracing::warn!(
+            instance = machine_id,
+            "Could not clear inherited budget deadline: {e:#}"
+        );
     }
     let _ = status.send(SupervisionStatus::Active);
     drop(operation_lock);

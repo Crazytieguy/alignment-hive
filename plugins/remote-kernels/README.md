@@ -36,10 +36,12 @@ Configure via `remote-kernels.toml`; switch per machine with
 `start(runtime=...)`.
 
 **Multiple concurrent machines** — Every `start()` provisions a fresh
-machine with a unique id; reconnecting to an existing machine is always an
-explicit `attach(machine_id)`, with kernel state and output recovered
-across sessions. Machines start in parallel, each with its own kernels, and
-kernel calls route automatically — no instance bookkeeping.
+machine with a unique id. A restarted server picks its own session's
+running machines back up automatically; resuming a stopped machine or
+adopting another session's is an explicit `attach(machine_id)`, with
+kernel state and output recovered across sessions. Machines start in
+parallel, each with its own kernels, and kernel calls route automatically —
+no instance bookkeeping.
 
 **Jupyter kernel execution** — Run code on remote GPUs through persistent
 Jupyter kernels. Claude can execute cells, inspect outputs, and iterate — all

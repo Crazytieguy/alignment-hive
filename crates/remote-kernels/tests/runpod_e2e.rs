@@ -309,7 +309,7 @@ volume-gb = 0
         .await
         .unwrap();
     assert!(
-        text_of(&result).contains("No machine"),
+        text_of(&result).contains("No durable machine records"),
         "{}",
         text_of(&result)
     );

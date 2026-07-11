@@ -992,6 +992,58 @@ with open('results/out.txt', 'w') as f:
     terminate(&server, Some(&machine_id)).await;
 }
 
+/// A failed download must block the queued terminate entirely: the plan
+/// stays queued, the failure surfaces in status(), and the machine survives.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn finish_download_failure_blocks_the_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in_session(dir.path(), None, "dl-fail-session");
+    let (machine_id, _) = start_machine(&server, Some("dl-fail")).await;
+    let _kernel = create_kernel(&server, Some(&machine_id)).await;
+
+    let result = server
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: Some(vec!["does-not-exist/missing.txt".to_string()]),
+            then: "terminate".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    // The drain must fail on the download and give up WITHOUT terminating.
+    let mut alerted = false;
+    for _ in 0..60 {
+        let status = server
+            .status(Parameters(remote_kernels::server::StatusParams {
+                instance: None,
+            }))
+            .await
+            .unwrap();
+        let text = text_of(&status);
+        if text.contains("did not complete") {
+            alerted = true;
+            assert!(text.contains("stays queued"), "{text}");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(alerted, "download failure never surfaced in status()");
+
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("machine must survive a failed download");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Running);
+    assert!(
+        remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_some(),
+        "the plan must stay queued for a retry"
+    );
+
+    terminate(&server, Some(&machine_id)).await;
+}
+
 /// A finish() plan replaced while its drain is still waiting must never act:
 /// the stale terminate aborts on its token check and the machine follows the
 /// replacement plan (codex adversarial finding: supersession race).

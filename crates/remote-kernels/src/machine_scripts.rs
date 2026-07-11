@@ -131,6 +131,20 @@ pub async fn complete_stop(conn: &AnyConnection, op_id: &str) -> Result<(), Leas
     invoke(conn, &["complete-stop", op_id]).await.map(|_| ())
 }
 
+/// Remove a consumed outcome marker. Once its transition is durably imported
+/// into the local ledger, the marker's only remaining effect is to block the
+/// machine's NEXT finalize (the watchdog refuses a new provider action while
+/// an unresolved outcome exists) — so a resumed machine must shed it.
+pub async fn clear_outcome<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
+    let path = format!("{}/outcome.json", state_dir(conn.workdir()));
+    conn.exec(
+        &format!("rm -f {}", shell_quote(&path)),
+        Duration::from_secs(10),
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn read_outcome(conn: &AnyConnection) -> Result<crate::state::OutcomeMarker, LeaseError> {
     let path = format!("{}/outcome.json", state_dir(conn.workdir()));
     let command = format!("cat {}", shell_quote(&path));
@@ -205,7 +219,7 @@ pub async fn write_intent<C: Connection + ?Sized>(
 ) -> anyhow::Result<()> {
     let dir = state_dir(conn.workdir());
     let destination = format!("{dir}/intent.json");
-    let temporary = format!("{dir}/.intent.$$.tmp");
+    let temporary = format!("{dir}/.intent.{}.tmp", uuid::Uuid::new_v4());
     let payload = intent_marker_json(downloads_pending, then);
     let command = format!(
         "mkdir -p {dir}; printf '%s\\n' {payload} > {temporary} && mv -f {temporary} {destination}",
@@ -229,13 +243,27 @@ pub async fn clear_intent<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()
     Ok(())
 }
 
+/// Remove the persisted budget deadline (a session with no budget must not
+/// run under a previous owner's window).
+pub async fn clear_budget_deadline<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
+    let path = format!("{}/budget_deadline", state_dir(conn.workdir()));
+    conn.exec(
+        &format!("rm -f {}", shell_quote(&path)),
+        Duration::from_secs(10),
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn set_budget_deadline<C: Connection + ?Sized>(
     conn: &C,
     secs_from_now: u64,
 ) -> anyhow::Result<()> {
     let dir = state_dir(conn.workdir());
     let destination = format!("{dir}/budget_deadline");
-    let temporary = format!("{dir}/.budget_deadline.$$.tmp");
+    // The temp name is quoted on the machine, so "$$" would be literal —
+    // use a locally unique suffix instead.
+    let temporary = format!("{dir}/.budget_deadline.{}.tmp", uuid::Uuid::new_v4());
     let command = format!(
         "mkdir -p {dir}; value=$(($(date +%s) + {secs_from_now})); printf '%s\\n' \"$value\" > {temporary} && mv -f {temporary} {destination}",
         dir = shell_quote(&dir),

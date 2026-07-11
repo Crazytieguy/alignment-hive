@@ -40,8 +40,8 @@ Edge cases:
 - **CMD can't be determined confidently**: set `image-start-cmd = ""` and
   warn the user explicitly what that costs: a crash during the first
   minutes of provisioning leaves the pod billing until stopped by hand
-  (RunPod console, or `start()` from a later session, which reconnects and
-  resumes supervision).
+  (RunPod console, or `attach()`/`status()` from a later session, which
+  can supervise or end it — `start()` always creates a fresh machine).
 - A raw `docker-start-cmd` passthrough conflicts with the guard; migrate it
   to `image-start-cmd`.
 
