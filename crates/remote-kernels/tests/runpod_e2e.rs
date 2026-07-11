@@ -333,9 +333,25 @@ async fn runpod_orphan_guard_self_cleanup() {
         r#"
 name = "rk-guard"
 cleanup = "stop"
-gpu-type-ids = ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000"]
+# Cheap consumer types first, then a spread of datacenter/workstation types
+# that rarely drought at the same time — a Friday-evening run found all of
+# the first three at Low stock simultaneously and couldn't provision at all.
+gpu-type-ids = [
+    "NVIDIA GeForce RTX 4090",
+    "NVIDIA GeForce RTX 3090",
+    "NVIDIA RTX A5000",
+    "NVIDIA RTX PRO 4500 Blackwell",
+    "NVIDIA A40",
+    "NVIDIA L4",
+    "NVIDIA GeForce RTX 5090",
+]
 
 [runpod]
+# COMMUNITY deliberately: it's the cheap path, and losing the GPU across the
+# stop is handled in the test itself. Verified live that RunPod re-rents the
+# GPU while a pod is stopped on BOTH clouds — the same "not enough free GPUs"
+# 500 on resume hit COMMUNITY twice and SECURE once — so paying secure rates
+# buys no reservation here.
 cloud-type = "COMMUNITY"
 container-disk-gb = 20
 volume-gb = 0
@@ -473,13 +489,49 @@ print(r.stderr[-1500:])
         None,
     );
     guard.server = server.clone();
-    let result = server
-        .attach(Parameters(remote_kernels::server::AttachParams {
-            machine_id: machine_id.clone(),
-            force: Some(true),
-        }))
-        .await
-        .expect("attach protocol error");
+    // Resume can fail on host capacity: RunPod releases the GPU while a pod
+    // is stopped and may re-rent it (on secure cloud too, verified live), so
+    // that error is environmental, not a defect. Retry briefly; if capacity
+    // never frees, the terminate-chain leg below can't run, and a green
+    // result would overstate coverage — clean up provider-side and fail as
+    // inconclusive instead.
+    let mut attached = None;
+    for attempt in 1..=4 {
+        match server
+            .attach(Parameters(remote_kernels::server::AttachParams {
+                machine_id: machine_id.clone(),
+                force: Some(true),
+            }))
+            .await
+        {
+            Ok(result) => {
+                attached = Some(result);
+                break;
+            }
+            Err(e) if e.message.contains("not enough free GPUs") => {
+                eprintln!("resume attempt {attempt}: host capacity exhausted ({e})");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+            Err(e) => panic!("attach protocol error: {e:?}"),
+        }
+    }
+    let Some(result) = attached else {
+        client
+            .terminate_pod(&pod_id)
+            .await
+            .expect("provider delete of stopped pod");
+        match client.get_pod(&pod_id).await {
+            Err(e) if e.to_string().contains("404") => eprintln!("pod gone at provider"),
+            Ok(pod) => panic!("pod still exists at provider: {:?}", pod.desired_status),
+            Err(e) => panic!("could not confirm pod deletion: {e}"),
+        }
+        guard.done = true;
+        panic!(
+            "INCONCLUSIVE: resume blocked by RunPod host capacity after 4 attempts — \
+             the terminate-chain leg did not run (the stopped pod was deleted \
+             provider-side; nothing leaks). Rerun at a quieter hour."
+        );
+    };
     let text = text_of(&result);
     assert!(!is_error(&result), "resume failed: {text}");
     assert!(text.contains("Attached"), "{text}");
