@@ -102,7 +102,7 @@ async fn execute(server: &RemoteKernelsServer, kernel_id: &str, code: &str) -> (
             kernel_id: kernel_id.to_string(),
             code: code.to_string(),
             timeout: Some(60),
-            wait_forever: None,
+            background: None,
             queue: None,
         }))
         .await
@@ -112,9 +112,9 @@ async fn execute(server: &RemoteKernelsServer, kernel_id: &str, code: &str) -> (
 
 async fn terminate(server: &RemoteKernelsServer, instance: Option<&str>) -> String {
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: instance.map(String::from),
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .expect("terminate protocol error");
@@ -201,14 +201,14 @@ async fn full_lifecycle_on_fake_runtime() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(1); 'slow done'".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
         .unwrap();
     let text = text_of(&result);
-    assert!(text.contains("fire-and-forget"), "{text}");
+    assert!(text.contains("started in the background"), "{text}");
     let cell_number: u32 = text
         .lines()
         .find_map(|l| l.strip_prefix("Cell number: "))
@@ -261,8 +261,8 @@ async fn wait_returns_multi_second_execution_result() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(2); 'wait complete'".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
@@ -284,8 +284,8 @@ async fn wait_returns_multi_second_execution_result() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(2); 'execute wait complete'".to_string(),
-            timeout: None,
-            wait_forever: Some(true),
+            timeout: Some(0),
+            background: None,
             queue: None,
         }))
         .await
@@ -298,8 +298,8 @@ async fn wait_returns_multi_second_execution_result() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(1); 'older pending result'".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
@@ -314,8 +314,8 @@ async fn wait_returns_multi_second_execution_result() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "'new directly-held result'".to_string(),
-            timeout: None,
-            wait_forever: Some(true),
+            timeout: Some(0),
+            background: None,
             queue: Some(true),
         }))
         .await
@@ -349,8 +349,8 @@ async fn wait_returns_multi_second_execution_result() {
             .execute(Parameters(remote_kernels::server::ExecuteParams {
                 kernel_id: kernel.clone(),
                 code: code.to_string(),
-                timeout: Some(0),
-                wait_forever: None,
+                timeout: None,
+                background: Some(true),
                 queue: None,
             }))
             .await
@@ -400,8 +400,8 @@ async fn wait_timeout_preserves_result_for_get_output() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(2); 'collected later'".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
@@ -449,8 +449,8 @@ async fn fence_during_wait_returns_promptly_and_execution_continues() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(10); 'survived takeover'".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
@@ -575,8 +575,8 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: old_kernel.clone(),
             code: "import time; time.sleep(0.5); print('recovered-output')".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
@@ -763,9 +763,9 @@ async fn stop_and_resume_roundtrip() {
 
     let (machine_id, _) = start_machine(&server, Some("resumable")).await;
     let result = server
-        .stop(Parameters(remote_kernels::server::InstanceParams {
+        .stop(Parameters(remote_kernels::server::StopParams {
             instance: None,
-            skip_finalize: None,
+            skip_pre_stop_command: None,
         }))
         .await
         .unwrap();
@@ -857,8 +857,8 @@ async fn disconnect_with_busy_kernel_leaves_machine_and_record() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id,
             code: "import time; time.sleep(30)".to_string(),
-            timeout: Some(0),
-            wait_forever: None,
+            timeout: None,
+            background: Some(true),
             queue: None,
         }))
         .await
@@ -916,9 +916,9 @@ async fn explicit_stop_runs_preop_then_enters_finalizing_before_provider_stop() 
         let machine_id = machine_id.clone();
         tokio::spawn(async move {
             server
-                .stop(Parameters(remote_kernels::server::InstanceParams {
+                .stop(Parameters(remote_kernels::server::StopParams {
                     instance: Some(machine_id),
-                    skip_finalize: None,
+                    skip_pre_stop_command: None,
                 }))
                 .await
         })
@@ -1001,9 +1001,9 @@ async fn failing_terminate_preop_downgrades_to_confirmed_stop() {
     let (machine_id, _) = start_machine(&server, Some("downgrade")).await;
     let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: Some(machine_id.clone()),
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .unwrap();
@@ -1047,9 +1047,9 @@ async fn ambiguous_stop_refuses_attach_until_provider_state_converges() {
     // SAFETY: suite is single-threaded.
     unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_STOP_ERROR_BEFORE_ACTION", "1") };
     let error = server
-        .stop(Parameters(remote_kernels::server::InstanceParams {
+        .stop(Parameters(remote_kernels::server::StopParams {
             instance: Some(machine_id.clone()),
-            skip_finalize: None,
+            skip_pre_stop_command: None,
         }))
         .await
         .unwrap_err();

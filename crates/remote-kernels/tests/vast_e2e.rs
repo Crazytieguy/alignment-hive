@@ -73,9 +73,9 @@ struct TerminateGuard {
 impl TerminateGuard {
     async fn disarm(&mut self, server: &RemoteKernelsServer, instance: Option<&str>) {
         let result = server
-            .terminate(Parameters(remote_kernels::server::InstanceParams {
+            .terminate(Parameters(remote_kernels::server::TerminateParams {
                 instance: instance.map(String::from),
-                skip_finalize: None,
+                skip_pre_terminate_command: None,
             }))
             .await
             .expect("terminate protocol error");
@@ -127,9 +127,9 @@ impl Drop for TerminateGuard {
             rt.block_on(async move {
                 let server = server_in(&dir);
                 match server
-                    .terminate(Parameters(remote_kernels::server::InstanceParams {
+                    .terminate(Parameters(remote_kernels::server::TerminateParams {
                         instance: None,
-                        skip_finalize: None,
+                        skip_pre_terminate_command: None,
                     }))
                     .await
                 {
@@ -331,7 +331,7 @@ dph_total = { gte = 0.268, lte = 0.45 }
                     kernel_id,
                     code,
                     timeout: Some(90),
-                    wait_forever: None,
+                    background: None,
                     queue: None,
                 }))
                 .await
@@ -478,7 +478,7 @@ geolocation = { notin = ["CN"] }
                     kernel_id,
                     code,
                     timeout: Some(timeout),
-                    wait_forever: None,
+                    background: None,
                     queue: None,
                 }))
                 .await

@@ -77,9 +77,9 @@ impl Drop for TerminateGuard {
                     }
                 }
                 match server
-                    .terminate(Parameters(remote_kernels::server::InstanceParams {
+                    .terminate(Parameters(remote_kernels::server::TerminateParams {
                         instance: None,
-                        skip_finalize: None,
+                        skip_pre_terminate_command: None,
                     }))
                     .await
                 {
@@ -234,7 +234,7 @@ volume-gb = 0
             kernel_id: kernel_id.clone(),
             code: "21 * 2".to_string(),
             timeout: Some(90),
-            wait_forever: None,
+            background: None,
             queue: None,
         }))
         .await
@@ -257,7 +257,7 @@ volume-gb = 0
             kernel_id: kernel_id.clone(),
             code: "print(open('/workspace/data.txt').read())".to_string(),
             timeout: Some(60),
-            wait_forever: None,
+            background: None,
             queue: None,
         }))
         .await
@@ -268,9 +268,9 @@ volume-gb = 0
 
     // Stop, then attach() must resume the same pod.
     let result = server
-        .stop(Parameters(remote_kernels::server::InstanceParams {
+        .stop(Parameters(remote_kernels::server::StopParams {
             instance: None,
-            skip_finalize: None,
+            skip_pre_stop_command: None,
         }))
         .await
         .unwrap();
@@ -292,9 +292,9 @@ volume-gb = 0
 
     // Terminate for real.
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: None,
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .unwrap();
@@ -365,7 +365,7 @@ jupyter-access = "proxy"
                 kernel_id,
                 code,
                 timeout: Some(120),
-                wait_forever: None,
+                background: None,
                 queue: None,
             }))
             .await
@@ -508,9 +508,9 @@ print(r.stderr[-1500:])
     // Local cleanup: terminate clears the record (a provider 404 counts as
     // success), and for the stopped-fallback case it deletes the pod.
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: None,
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .unwrap();

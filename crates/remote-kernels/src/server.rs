@@ -201,13 +201,24 @@ pub struct AttachParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct InstanceParams {
+pub struct StopParams {
     /// Which machine to operate on. Optional when exactly one is active.
     pub instance: Option<String>,
-    /// Skip the configured pre-stop/pre-terminate command (the step that
-    /// saves results off the machine before cleanup). Only safe when that
-    /// work is already done or the data is expendable.
-    pub skip_finalize: Option<bool>,
+    /// Skip the configured pre-stop-command (the step that saves results or
+    /// cleans up external resources before the machine stops). Only safe
+    /// when its work is already done or known unnecessary.
+    pub skip_pre_stop_command: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TerminateParams {
+    /// Which machine to operate on. Optional when exactly one is active.
+    pub instance: Option<String>,
+    /// Skip the configured pre-terminate-command (the step that saves
+    /// results or cleans up external resources before the machine and its
+    /// data are deleted). Only safe when its work is already done or the
+    /// data is expendable.
+    pub skip_pre_terminate_command: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -231,7 +242,7 @@ pub struct KernelIdParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)] // a stale caller sending the removed `wait` field must error, not silently degrade
+#[serde(deny_unknown_fields)] // a stale caller sending a removed field must error, not silently degrade
 pub struct ExecuteParams {
     /// The kernel ID to execute in.
     pub kernel_id: String,
@@ -239,12 +250,11 @@ pub struct ExecuteParams {
     pub code: String,
     /// Timeout in seconds (default: 30). If it elapses, the code keeps running in the
     /// background and the response includes a cell number for `get_output()`. Set to 0
-    /// to start the execution and return immediately (fire-and-forget). Note: 0 does
-    /// NOT mean "no timeout" — to block until completion, use `wait_forever`.
+    /// for NO timeout: hold the call open until the execution completes.
     pub timeout: Option<u64>,
-    /// Block until the execution completes, however long it takes. Mutually exclusive
-    /// with `timeout` — setting both is an error (pick a cap or no cap, not both).
-    pub wait_forever: Option<bool>,
+    /// Start the execution and return immediately (fire-and-forget); collect the
+    /// result later with `get_output()`. Mutually exclusive with `timeout`.
+    pub background: Option<bool>,
     /// If true, queue behind the current execution instead of returning an error when busy.
     pub queue: Option<bool>,
 }
@@ -254,7 +264,8 @@ pub struct WaitParams {
     /// The kernel whose oldest pending execution should be awaited. Omit to
     /// wait for every pending execution on every kernel.
     pub kernel_id: Option<String>,
-    /// Optional timeout in seconds. Omit it to wait without an internal cap.
+    /// Optional timeout in seconds. Omit it (or pass 0) to wait without an
+    /// internal cap.
     pub timeout: Option<u64>,
 }
 
@@ -266,7 +277,7 @@ pub struct GetOutputParams {
     pub cell_number: u32,
     /// If true (default), wait for the execution to complete. If false, check without blocking.
     pub wait: Option<bool>,
-    /// Timeout in seconds when waiting (default: 30).
+    /// Timeout in seconds when waiting (default: 30; 0 = no cap).
     pub timeout: Option<u64>,
 }
 
@@ -888,11 +899,8 @@ impl RemoteKernelsServer {
     /// Stop a machine. It is preserved and can be resumed with `attach()`, but storage
     /// costs may still apply. Use `terminate()` to delete it entirely.
     #[tool(name = "stop")]
-    pub async fn stop(
-        &self,
-        params: Parameters<InstanceParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let skip_finalize = params.0.skip_finalize.unwrap_or(false);
+    pub async fn stop(&self, params: Parameters<StopParams>) -> Result<CallToolResult, McpError> {
+        let skip_finalize = params.0.skip_pre_stop_command.unwrap_or(false);
         let requested = params.0.instance;
 
         let resolved = {
@@ -944,9 +952,9 @@ impl RemoteKernelsServer {
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to stop machine: {e}"), None))?;
 
-        let spend = Self::format_spend_amount(self.state.lock().await.spend_summary());
+        let cost_note = self.session_cost_note(&target.runtime).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Machine {machine_id} {}. Session cost: {spend}. \
+            "Machine {machine_id} {}.{cost_note} \
              Use attach(\"{machine_id}\") to resume it or terminate(instance=\"{machine_id}\") to delete it.",
             actual.past_tense(),
         ))]))
@@ -956,9 +964,9 @@ impl RemoteKernelsServer {
     #[tool(name = "terminate")]
     pub async fn terminate(
         &self,
-        params: Parameters<InstanceParams>,
+        params: Parameters<TerminateParams>,
     ) -> Result<CallToolResult, McpError> {
-        let skip_finalize = params.0.skip_finalize.unwrap_or(false);
+        let skip_finalize = params.0.skip_pre_terminate_command.unwrap_or(false);
         let requested = params.0.instance;
 
         // Live instance, or a record-only (stopped/crashed) machine.
@@ -1004,15 +1012,15 @@ impl RemoteKernelsServer {
                 McpError::internal_error(format!("Failed to terminate machine: {e}"), None)
             })?;
 
-        let spend = Self::format_spend_amount(self.state.lock().await.spend_summary());
+        let cost_note = self.session_cost_note(&target.runtime).await;
         let message = if actual == CleanupAction::Terminate {
             format!(
-                "Machine {:?} terminated. Session cost: {spend}. All machine data has been deleted.",
+                "Machine {:?} terminated.{cost_note} All machine data has been deleted.",
                 target.machine_id
             )
         } else {
             format!(
-                "Finalize command failed; machine {:?} stopped for preservation, not terminated. Session cost: {spend}. Storage may still bill until terminate() succeeds.",
+                "The pre-terminate command failed; machine {:?} was stopped for preservation, not terminated.{cost_note} Storage may still bill until terminate() succeeds.",
                 target.machine_id
             )
         };
@@ -1035,7 +1043,11 @@ impl RemoteKernelsServer {
             .collect::<Vec<_>>();
         let mut provider_states = HashMap::new();
         for (id, record) in &initial_records {
-            let state = match self.runtime_for(&record.runtime).await {
+            // A runtime that can't even be built (missing API key, bad
+            // kubeconfig) is a local config problem, not a provider outage —
+            // retrying won't help, so say so.
+            let runtime = self.runtime_for(&record.runtime).await;
+            let state = match &runtime {
                 Ok(runtime) => runtime
                     .describe(&record.external_id)
                     .await
@@ -1051,6 +1063,12 @@ impl RemoteKernelsServer {
                         sections.push(message);
                     }
                 }
+                Err(error) if runtime.is_err() => sections.push(format!(
+                    "Machine {id}: its runtime {:?} is not usable from this session ({error}). \
+                     Fix the credentials or config (this won't heal on its own); the machine was \
+                     left untouched and may still be billing.",
+                    record.runtime
+                )),
                 Err(error) => sections.push(Self::lifecycle_check_incomplete(
                     id,
                     &format!("the provider could not report its state: {error}"),
@@ -1335,8 +1353,9 @@ impl RemoteKernelsServer {
     /// Execute Python code in a kernel. Returns the output (stdout, stderr, result,
     /// errors). If the timeout elapses, the execution keeps running and the response
     /// includes a cell number — pass it to `get_output()` to collect the result. Holding
-    /// the call open keeps a background session alive; prefer wait_forever or a follow-up
-    /// wait() over polling for long cells, unless there is other work to do meanwhile.
+    /// the call open keeps a background session alive; prefer timeout=0 (no cap) or a
+    /// follow-up wait() over polling for long cells, unless there is other work to do
+    /// meanwhile.
     #[tool(name = "execute")]
     #[allow(clippy::doc_markdown, clippy::collapsible_if)]
     pub async fn execute_tool(
@@ -1363,14 +1382,15 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
 
-        let wait_uncapped = params.wait_forever.unwrap_or(false);
-        if wait_uncapped && params.timeout.is_some() {
+        let background = params.background.unwrap_or(false);
+        if background && params.timeout.is_some() {
             return err_text(
-                "`wait_forever` and `timeout` are mutually exclusive. Use `timeout` for a capped \
-                 wait (the code keeps running past it), or `wait_forever: true` to block until \
-                 completion.",
+                "`background` and `timeout` are mutually exclusive. background=true returns \
+                 immediately (collect the result with get_output()); use `timeout` to wait — \
+                 0 waits without a cap.",
             );
         }
+        let wait_uncapped = params.timeout == Some(0);
         let timeout_secs = params.timeout.unwrap_or(30);
         let queue = params.queue.unwrap_or(false);
 
@@ -1448,13 +1468,13 @@ impl RemoteKernelsServer {
             let rx = started.result_rx;
 
             // Fire-and-forget: store receiver and return immediately.
-            if timeout_secs == 0 && !wait_uncapped {
+            if background {
                 if let Some(cell_num) = cell_number {
                     inst.pending_executions
                         .insert((kernel_id.clone(), cell_num), rx);
                 }
 
-                let mut msg = String::from("Execution started (fire-and-forget).");
+                let mut msg = String::from("Execution started in the background.");
                 if let Some(cell_num) = cell_number {
                     let _ = write!(
                         msg,
@@ -1564,8 +1584,10 @@ impl RemoteKernelsServer {
         params: WaitParams,
         progress: Option<(Meta, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
+        // 0 means "no cap", same as omitting the timeout (and as execute()).
+        let timeout = params.timeout.filter(|&secs| secs != 0);
         let Some(kernel_id) = params.kernel_id else {
-            return self.wait_all(params.timeout, progress).await;
+            return self.wait_all(timeout, progress).await;
         };
         let held = {
             let mut state = self.state.lock().await;
@@ -1599,7 +1621,7 @@ impl RemoteKernelsServer {
                 cleanup: inst.cleanup,
             }
         };
-        self.wait_held(held, params.timeout, progress).await
+        self.wait_held(held, timeout, progress).await
     }
 
     /// Wait for every execution that was pending when the call was made,
@@ -2020,17 +2042,22 @@ impl RemoteKernelsServer {
 
         if wait {
             // Wait with timeout, using select! to preserve the receiver.
-            let timeout = std::time::Duration::from_secs(timeout_secs);
+            // timeout 0 = no cap.
             let timed_out;
             let mut completed_output = None;
 
-            tokio::select! {
-                result = &mut result_rx => {
-                    timed_out = false;
-                    completed_output = result.ok();
-                }
-                () = tokio::time::sleep(timeout) => {
-                    timed_out = true;
+            if timeout_secs == 0 {
+                timed_out = false;
+                completed_output = (&mut result_rx).await.ok();
+            } else {
+                tokio::select! {
+                    result = &mut result_rx => {
+                        timed_out = false;
+                        completed_output = result.ok();
+                    }
+                    () = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                        timed_out = true;
+                    }
                 }
             }
 
@@ -4831,6 +4858,20 @@ impl RemoteKernelsServer {
         }
     }
 
+    /// The " Session cost: …." sentence for stop/terminate replies — omitted
+    /// for unmetered runtimes when no budget is set (nothing to account).
+    async fn session_cost_note(&self, runtime: &str) -> String {
+        let metered = crate::runtime::AnyRuntime::static_capabilities(runtime, &self.config)
+            .is_none_or(|caps| caps.metered);
+        if self.budget.is_none() && !metered {
+            return String::new();
+        }
+        format!(
+            " Session cost: {}.",
+            Self::format_spend_amount(self.state.lock().await.spend_summary())
+        )
+    }
+
     /// Format a spend/budget line for tool responses.
     fn format_spend_amount(spend: Result<crate::ledger::SpendSummary, String>) -> String {
         spend.map_or_else(
@@ -5400,7 +5441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_rejects_wait_forever_with_timeout() {
+    async fn execute_rejects_background_with_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(dir.path().to_path_buf());
         let config: Config = toml::from_str("").unwrap();
@@ -5410,7 +5451,7 @@ mod tests {
                 kernel_id: "any-kernel".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: Some(60),
-                wait_forever: Some(true),
+                background: Some(true),
                 queue: None,
             }))
             .await
@@ -5457,7 +5498,7 @@ mod tests {
                 kernel_id: "kernel-1".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
-                wait_forever: None,
+                background: None,
                 queue: None,
             }))
             .await
@@ -5474,7 +5515,7 @@ mod tests {
                 kernel_id: "missing-while-live".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
-                wait_forever: None,
+                background: None,
                 queue: None,
             }))
             .await
@@ -5489,7 +5530,7 @@ mod tests {
                 kernel_id: "missing-kernel".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
-                wait_forever: None,
+                background: None,
                 queue: None,
             }))
             .await
@@ -5637,18 +5678,18 @@ mod fencing_tests {
         );
 
         let stop = server
-            .stop(Parameters(InstanceParams {
+            .stop(Parameters(StopParams {
                 instance: Some(machine_id.clone()),
-                skip_finalize: None,
+                skip_pre_stop_command: None,
             }))
             .await
             .unwrap();
         assert!(stop.is_error.unwrap_or(false));
         assert!(result_text(&stop).contains("another session took control"));
         let terminate = server
-            .terminate(Parameters(InstanceParams {
+            .terminate(Parameters(TerminateParams {
                 instance: Some(machine_id.clone()),
-                skip_finalize: None,
+                skip_pre_terminate_command: None,
             }))
             .await
             .unwrap();

@@ -148,7 +148,7 @@ async fn k8s_full_lifecycle_via_kueue() {
                     kernel_id,
                     code,
                     timeout: Some(60),
-                    wait_forever: None,
+                    background: None,
                     queue: None,
                 }))
                 .await
@@ -200,9 +200,9 @@ async fn k8s_full_lifecycle_via_kueue() {
 
     // Terminate deletes the pod at the cluster.
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: None,
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .unwrap();
@@ -265,9 +265,9 @@ async fn k8s_priority_label_and_capability_validation() {
     );
 
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: Some("queued".to_string()),
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .unwrap();
@@ -430,7 +430,7 @@ workdir = "/home/jovyan/work"
             code: "import os; print(6 * 7, len(os.environ['REMOTE_KERNELS_JUPYTER_TOKEN']))"
                 .to_string(),
             timeout: Some(60),
-            wait_forever: None,
+            background: None,
             queue: None,
         }))
         .await
@@ -463,9 +463,9 @@ workdir = "/home/jovyan/work"
     assert_eq!(synced, "named container");
 
     let result = server
-        .terminate(Parameters(remote_kernels::server::InstanceParams {
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
             instance: None,
-            skip_finalize: None,
+            skip_pre_terminate_command: None,
         }))
         .await
         .unwrap();

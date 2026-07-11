@@ -17,8 +17,10 @@ pub fn server_instructions(project_dir: &Path) -> String {
          lists durable machines; attach(machine_id) reconnects to one — needed after this server \
          process restarts. When several machines are active, machine-scoped tools take an \
          `instance` argument; kernel-scoped tools never do (each kernel id routes to its machine \
-         automatically). A fenced error means another session took over that machine — stop \
-         using it here.\n\
+         automatically). Machines are single-controller: one session drives a machine at a \
+         time, and sharing one across sessions is unsupported — a fenced error means \
+         another session took over; stop using that machine here (attach(force=true) is \
+         the deliberate way to move control).\n\
          Everything executed is auto-saved to a local .ipynb notebook (path shown at kernel \
          creation) — read it to recover context after conversation compaction.\n\
          For long cells, prefer wait() over polling — holding the call open keeps a background \

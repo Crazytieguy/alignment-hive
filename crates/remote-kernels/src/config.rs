@@ -674,6 +674,10 @@ impl Config {
         format!(
             r#"# remote-kernels configuration
 # https://github.com/Crazytieguy/alignment-hive
+#
+# Every option is commented out. Where a "Default:" line is present, the
+# commented value IS that default (generated from the code); values without
+# one are illustrative examples, not defaults.
 
 # Runtime used by start() when none is specified.
 {default_runtime_lines}
@@ -762,8 +766,8 @@ impl Config {
 # pre-stop-command = "rclone sync results remote:results"
 # pre-terminate-command = "rclone sync results remote:results"
 # How long to wait for running work to go idle before cleanup proceeds anyway.
-# Default: unlimited — budget exhaustion is the only thing that overrides
-# the wait. Set a value only to put a hard bound on it.
+# Unset: unlimited — budget exhaustion is the only thing that overrides the
+# wait. Set a value only to put a hard bound on it.
 # finalize-wait-secs = 3600
 # Time limit for the pre-stop/pre-terminate command itself.
 # Default: {default_finalize_timeout}
@@ -892,8 +896,8 @@ impl Config {
 # pre-stop-command = "rclone sync results remote:results"
 # pre-terminate-command = "rclone sync results remote:results"
 # How long to wait for running work to go idle before cleanup proceeds anyway.
-# Default: unlimited — budget exhaustion is the only thing that overrides
-# the wait. Set a value only to put a hard bound on it.
+# Unset: unlimited — budget exhaustion is the only thing that overrides the
+# wait. Set a value only to put a hard bound on it.
 # finalize-wait-secs = 3600
 # Time limit for the pre-stop/pre-terminate command itself.
 # Default: {default_finalize_timeout}
@@ -1220,7 +1224,7 @@ mod tests {
         ] {
             assert!(template.contains(line), "missing template line {line:?}");
         }
-        assert!(template.contains("Default: unlimited"));
+        assert!(template.contains("Unset: unlimited"));
         assert!(template.contains("grace window"));
         assert!(template.contains("never waivable"));
         // Deliberately absent: the watchdog staleness knob is not user-facing.

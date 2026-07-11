@@ -68,9 +68,9 @@ Cover these with the user regardless of runtime:
   from `.env`/`.env.local`); explicit values go in `[env]`.
 - **Budget** — set `REMOTE_KERNELS_BUDGET` in `.claude/settings.json`'s
   `env` section rather than `budget-cap` in remote-kernels.toml: the env var
-  overrides the TOML and is harder for Claude to change (with auto-approved
-  edits Claude could technically edit either file, so it is a strong
-  guardrail, not an absolute one — be honest about that if asked).
+  overrides the TOML, and settings.json edits get extra protection from
+  Claude Code that an ordinary project file doesn't — a strong guardrail,
+  though not an absolute guarantee in fully-automatic permission modes.
   Optional: no budget means the user manages spend manually, and that is a
   supported choice. When set, it covers total provider spend across ALL
   concurrent machines — including storage that keeps billing on a stopped
