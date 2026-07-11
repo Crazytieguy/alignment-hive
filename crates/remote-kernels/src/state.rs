@@ -40,7 +40,7 @@ pub struct KernelRecord {
     pub name: Option<String>,
 }
 
-/// The durable per-instance record (`instances/<name>/state.json`).
+/// The durable per-instance record (`instances/<machine_id>/state.json`).
 ///
 /// Contains everything needed to reconnect to — or terminate — the machine
 /// from a fresh process: provider identity, resolved cleanup policy, and
@@ -146,7 +146,7 @@ struct PersistedSpend {
 /// Live state for one machine.
 pub struct InstanceState {
     /// Machine id (a ULID for new records, legacy name for old records).
-    pub name: String,
+    pub machine_id: String,
     pub label: Option<String>,
     pub runtime: String,
     pub external_id: String,
@@ -192,7 +192,7 @@ impl InstanceState {
     /// The single construction point for both new machines and reconnects.
     #[allow(clippy::too_many_arguments)]
     pub fn provisioning(
-        name: String,
+        machine_id: String,
         label: Option<String>,
         runtime: String,
         external_id: String,
@@ -204,7 +204,7 @@ impl InstanceState {
         proxy_port_mapped: bool,
     ) -> Self {
         Self {
-            name,
+            machine_id,
             label,
             runtime,
             external_id,
@@ -236,7 +236,7 @@ impl InstanceState {
 
     pub fn record(&self) -> InstanceRecord {
         InstanceRecord {
-            machine_id: Some(self.name.clone()),
+            machine_id: Some(self.machine_id.clone()),
             label: self.label.clone(),
             runtime: self.runtime.clone(),
             external_id: self.external_id.clone(),
@@ -279,8 +279,8 @@ pub fn state_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude/remote-kernels")
 }
 
-fn instance_dir(project_dir: &Path, name: &str) -> PathBuf {
-    state_dir(project_dir).join("instances").join(name)
+fn instance_dir(project_dir: &Path, machine_id: &str) -> PathBuf {
+    state_dir(project_dir).join("instances").join(machine_id)
 }
 
 /// Operation locks live outside instance directories so deleting a record
@@ -402,7 +402,7 @@ impl AppState {
 
     pub fn append_ledger_event(
         &self,
-        name: &str,
+        machine_id: &str,
         kind: crate::ledger::EventKind,
         uuid: Option<String>,
         ts_ms: Option<u64>,
@@ -412,9 +412,9 @@ impl AppState {
         if let Some(error) = &self.accounting_init_error {
             anyhow::bail!("accounting failed closed: {error}");
         }
-        validate_machine_id(name).map_err(anyhow::Error::msg)?;
-        let record = load_instance_record(&self.project_dir, name);
-        let lifecycle = load_lifecycle_record(&self.project_dir, name);
+        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+        let record = load_instance_record(&self.project_dir, machine_id);
+        let lifecycle = load_lifecycle_record(&self.project_dir, machine_id);
         let storage = if lifecycle.external_volume_id.is_some() {
             0.0
         } else {
@@ -422,7 +422,7 @@ impl AppState {
         };
         let total = self
             .instances
-            .get(name)
+            .get(machine_id)
             .map(|instance| instance.cost_per_hr)
             .or_else(|| record.as_ref().map(|record| record.cost_per_hr))
             .unwrap_or(0.0)
@@ -438,7 +438,7 @@ impl AppState {
         };
         let generation = self
             .instances
-            .get(name)
+            .get(machine_id)
             .and_then(|instance| instance.lease_generation)
             .unwrap_or(0);
         let stable_remote_uuid = uuid.clone();
@@ -453,21 +453,21 @@ impl AppState {
         let operation = stable_remote_uuid
             .map_or_else(|| format!("{kind:?}"), |uuid| format!("{kind:?}-{uuid}"));
         Ok(crate::ledger::EpochGuard::acquire(&self.project_dir)?
-            .append(name, &operation, event)?)
+            .append(machine_id, &operation, event)?)
     }
 
     /// Persist the first durable record and its billing interval under the
     /// epoch lock so an epoch close cannot land between them.
     pub fn admit_provision(
         &self,
-        name: &str,
+        machine_id: &str,
         record: &InstanceRecord,
         lifecycle: &LifecycleRecord,
     ) -> anyhow::Result<()> {
         if let Some(error) = &self.accounting_init_error {
             anyhow::bail!("accounting failed closed: {error}");
         }
-        validate_machine_id(name).map_err(anyhow::Error::msg)?;
+        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
         let guard = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
         let storage = if lifecycle.external_volume_id.is_some() {
             0.0
@@ -489,20 +489,20 @@ impl AppState {
                     .unwrap_or("storage pricing recorded")
             )),
         );
-        guard.prepare(name, "provisioned", event)?;
+        guard.prepare(machine_id, "provisioned", event)?;
         // The WAL is durable before either half of admission can be lost.
         // Startup recovers it when the record exists, or fails closed on an
         // orphan WAL rather than admitting untracked spend.
-        self.save_record(name, record)?;
-        save_lifecycle_record(&self.project_dir, name, lifecycle)?;
-        guard.commit_wal(name, "provisioned")?;
+        self.save_record(machine_id, record)?;
+        save_lifecycle_record(&self.project_dir, machine_id, lifecycle)?;
+        guard.commit_wal(machine_id, "provisioned")?;
         Ok(())
     }
 
     /// Write an instance's durable record. Called immediately after provider
     /// allocation (phase = Provisioning) and on every phase change.
-    pub fn save_record(&self, name: &str, record: &InstanceRecord) -> anyhow::Result<()> {
-        let dir = instance_dir(&self.project_dir, name);
+    pub fn save_record(&self, machine_id: &str, record: &InstanceRecord) -> anyhow::Result<()> {
+        let dir = instance_dir(&self.project_dir, machine_id);
         std::fs::create_dir_all(&dir)?;
         ensure_gitignore(&self.project_dir);
         let json = serde_json::to_string_pretty(record)?;
@@ -516,9 +516,9 @@ impl AppState {
     }
 
     /// Remove an instance's durable record (after terminate).
-    pub fn clear_record(&self, name: &str) -> anyhow::Result<()> {
+    pub fn clear_record(&self, machine_id: &str) -> anyhow::Result<()> {
         let epoch = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
-        let dir = instance_dir(&self.project_dir, name);
+        let dir = instance_dir(&self.project_dir, machine_id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
             if let Some(parent) = dir.parent() {
@@ -532,8 +532,8 @@ impl AppState {
     }
 
     /// The per-instance SSH key path.
-    pub fn ssh_key_path(&self, name: &str) -> PathBuf {
-        instance_dir(&self.project_dir, name).join("id_ed25519")
+    pub fn ssh_key_path(&self, machine_id: &str) -> PathBuf {
+        instance_dir(&self.project_dir, machine_id).join("id_ed25519")
     }
 
     /// The plugin's stable SSH key path, shared by all instances of runtimes
@@ -547,18 +547,18 @@ impl AppState {
     /// The per-instance SSH known-hosts file (TOFU pin — see
     /// [`crate::ssh_exec::SshEndpoint`]). Lives in the instance dir so
     /// terminate ([`Self::clear_record`]) removes it with the record.
-    pub fn known_hosts_path(&self, name: &str) -> PathBuf {
-        instance_dir(&self.project_dir, name).join("known_hosts")
+    pub fn known_hosts_path(&self, machine_id: &str) -> PathBuf {
+        instance_dir(&self.project_dir, machine_id).join("known_hosts")
     }
 
     /// Drop the pinned host key. Called whenever the provider may
     /// legitimately hand the instance a new host identity — a fresh
-    /// provision under a reused name, or a stop/resume cycle (vast can move
+    /// provision under a reused machine id, or a stop/resume cycle (vast can move
     /// the workload; `RunPod` pods can change public IP). Reconnecting to a
     /// machine that kept running does NOT reset: the surviving pin is
     /// exactly what protects that reconnect.
-    pub fn reset_known_hosts(&self, name: &str) {
-        let path = self.known_hosts_path(name);
+    pub fn reset_known_hosts(&self, machine_id: &str) {
+        let path = self.known_hosts_path(machine_id);
         if let Err(e) = std::fs::remove_file(&path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -597,7 +597,7 @@ impl AppState {
         self.instances
             .values()
             .find(|i| i.kernel_ids.iter().any(|k| k == kernel_id))
-            .map(|i| i.name.as_str())
+            .map(|i| i.machine_id.as_str())
     }
 
     pub fn instance_names_display(&self) -> String {
@@ -621,27 +621,27 @@ pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)
     };
     let mut records = Vec::new();
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(record) = load_instance_record(project_dir, &name) {
-            records.push((name, record));
+        let machine_id = entry.file_name().to_string_lossy().to_string();
+        if let Some(record) = load_instance_record(project_dir, &machine_id) {
+            records.push((machine_id, record));
         }
     }
     records.sort_by(|a, b| a.0.cmp(&b.0));
     records
 }
 
-pub fn load_instance_record(project_dir: &Path, name: &str) -> Option<InstanceRecord> {
-    validate_machine_id(name).ok()?;
-    let path = instance_dir(project_dir, name).join("state.json");
+pub fn load_instance_record(project_dir: &Path, machine_id: &str) -> Option<InstanceRecord> {
+    validate_machine_id(machine_id).ok()?;
+    let path = instance_dir(project_dir, machine_id).join("state.json");
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-pub fn load_lifecycle_record(project_dir: &Path, name: &str) -> LifecycleRecord {
-    if validate_machine_id(name).is_err() {
+pub fn load_lifecycle_record(project_dir: &Path, machine_id: &str) -> LifecycleRecord {
+    if validate_machine_id(machine_id).is_err() {
         return LifecycleRecord::default();
     }
-    let path = instance_dir(project_dir, name).join("lifecycle.json");
+    let path = instance_dir(project_dir, machine_id).join("lifecycle.json");
     std::fs::read_to_string(path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
@@ -650,11 +650,11 @@ pub fn load_lifecycle_record(project_dir: &Path, name: &str) -> LifecycleRecord 
 
 pub fn save_lifecycle_record(
     project_dir: &Path,
-    name: &str,
+    machine_id: &str,
     lifecycle: &LifecycleRecord,
 ) -> anyhow::Result<()> {
-    validate_machine_id(name).map_err(anyhow::Error::msg)?;
-    let dir = instance_dir(project_dir, name);
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    let dir = instance_dir(project_dir, machine_id);
     std::fs::create_dir_all(&dir)?;
     ensure_gitignore(project_dir);
     let temporary = dir.join(format!(".lifecycle.{}.tmp", std::process::id()));
@@ -665,9 +665,9 @@ pub fn save_lifecycle_record(
     Ok(())
 }
 
-pub fn clear_lifecycle_record(project_dir: &Path, name: &str) -> anyhow::Result<()> {
-    validate_machine_id(name).map_err(anyhow::Error::msg)?;
-    let path = instance_dir(project_dir, name).join("lifecycle.json");
+pub fn clear_lifecycle_record(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    let path = instance_dir(project_dir, machine_id).join("lifecycle.json");
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -944,12 +944,16 @@ fn migrate_legacy_state(project_dir: &Path) {
 mod tests {
     use super::*;
 
-    fn instance(name: &str, cost_per_hr: f64, running_for: std::time::Duration) -> InstanceState {
+    fn instance(
+        machine_id: &str,
+        cost_per_hr: f64,
+        running_for: std::time::Duration,
+    ) -> InstanceState {
         InstanceState {
-            name: name.to_string(),
+            machine_id: machine_id.to_string(),
             label: None,
             runtime: "runpod".to_string(),
-            external_id: format!("pod-{name}"),
+            external_id: format!("pod-{machine_id}"),
             phase: Phase::Running,
             gpu_name: "Test GPU".to_string(),
             cost_per_hr,
@@ -1101,12 +1105,12 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         assert!(state.total_spend().abs() < f64::EPSILON);
 
-        for (name, rate) in [("a", 0.5), ("b", 1.0)] {
-            let inst = instance(name, rate, std::time::Duration::ZERO);
+        for (machine_id, rate) in [("a", 0.5), ("b", 1.0)] {
+            let inst = instance(machine_id, rate, std::time::Duration::ZERO);
             let record = inst.record();
-            state.instances.insert(name.to_string(), inst);
+            state.instances.insert(machine_id.to_string(), inst);
             state
-                .admit_provision(name, &record, &LifecycleRecord::default())
+                .admit_provision(machine_id, &record, &LifecycleRecord::default())
                 .unwrap();
         }
         assert!((state.aggregate_cost_per_hr() - 1.5).abs() < f64::EPSILON);
@@ -1350,15 +1354,15 @@ mod tests {
         let root = dir.path().to_path_buf();
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut joins = Vec::new();
-        for name in ["one", "two"] {
+        for machine_id in ["one", "two"] {
             let root = root.clone();
             let barrier = barrier.clone();
             joins.push(std::thread::spawn(move || {
                 let state = AppState::new(root);
-                let record = instance(name, 1.0, std::time::Duration::ZERO).record();
+                let record = instance(machine_id, 1.0, std::time::Duration::ZERO).record();
                 barrier.wait();
                 state
-                    .admit_provision(name, &record, &LifecycleRecord::default())
+                    .admit_provision(machine_id, &record, &LifecycleRecord::default())
                     .unwrap();
             }));
         }
@@ -1375,11 +1379,11 @@ mod tests {
         let Ok(root) = std::env::var("RK_LEDGER_CHILD_DIR") else {
             return;
         };
-        let name = std::env::var("RK_LEDGER_CHILD_NAME").unwrap();
+        let machine_id = std::env::var("RK_LEDGER_CHILD_NAME").unwrap();
         let state = AppState::new(PathBuf::from(root));
-        let record = instance(&name, 1.0, std::time::Duration::ZERO).record();
+        let record = instance(&machine_id, 1.0, std::time::Duration::ZERO).record();
         state
-            .admit_provision(&name, &record, &LifecycleRecord::default())
+            .admit_provision(&machine_id, &record, &LifecycleRecord::default())
             .unwrap();
     }
 
@@ -1387,7 +1391,7 @@ mod tests {
     fn separate_processes_cannot_clobber_the_shared_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let executable = std::env::current_exe().unwrap();
-        let mut children = ["process-one", "process-two"].map(|name| {
+        let mut children = ["process-one", "process-two"].map(|machine_id| {
             std::process::Command::new(&executable)
                 .args([
                     "--exact",
@@ -1395,7 +1399,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env("RK_LEDGER_CHILD_DIR", dir.path())
-                .env("RK_LEDGER_CHILD_NAME", name)
+                .env("RK_LEDGER_CHILD_NAME", machine_id)
                 .spawn()
                 .unwrap()
         });
@@ -1439,10 +1443,10 @@ mod tests {
     fn terminated_machine_ledger_is_a_tombstone_while_epoch_remains_open() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(dir.path().to_path_buf());
-        for name in ["terminated", "survivor"] {
-            let record = instance(name, 1.0, std::time::Duration::ZERO).record();
+        for machine_id in ["terminated", "survivor"] {
+            let record = instance(machine_id, 1.0, std::time::Duration::ZERO).record();
             state
-                .admit_provision(name, &record, &LifecycleRecord::default())
+                .admit_provision(machine_id, &record, &LifecycleRecord::default())
                 .unwrap();
         }
         state

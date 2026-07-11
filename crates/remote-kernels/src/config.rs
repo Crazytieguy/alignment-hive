@@ -40,10 +40,11 @@ pub struct Config {
     #[serde_inline_default(45)]
     pub orphan_halt_mins: u64,
 
-    /// On-machine watchdog staleness threshold in seconds: how long after
-    /// the supervising server stops heartbeating does the machine clean
-    /// itself up. Lower saves money when a session dies; higher survives
-    /// longer network blips without killing a healthy machine.
+    /// DEPRECATED escape hatch, deliberately absent from the config template:
+    /// how long after the supervising server stops heartbeating the machine
+    /// arms its own drain-and-finalize (seconds). The default balances
+    /// money-safety against network blips; users have no better information
+    /// to tune it with.
     #[serde_inline_default(300)]
     pub watchdog_stale_secs: u64,
 
@@ -677,40 +678,39 @@ impl Config {
 # Runtime used by start() when none is specified.
 {default_runtime_lines}
 
-# Custom name prefix for machines.
+# Name prefix shown at the provider (machine identity is a separate
+# generated id).
 # Default: "{default_name}"
 # name = "{default_name}"
 
-# Per-session budget cap in dollars. Prefer setting REMOTE_KERNELS_BUDGET
-# in .claude/settings.json (Claude can't edit that) over this field.
-# A generous upper limit, not a spending target — machines should still be
-# stopped or terminated as soon as they're no longer in use.
+# Budget cap in dollars. Prefer setting REMOTE_KERNELS_BUDGET in
+# .claude/settings.json's env section over this field — it overrides this
+# file and cannot be waived by project config. The cap covers one run of
+# spend: from the first machine started until every machine is terminated
+# and settled (it survives server restarts; it is not a monthly cap). Treat
+# it as a generous upper limit, not a spending target — machines should
+# still be stopped or terminated as soon as they're no longer in use.
 # Requires cleanup != "disabled" on every metered runtime (runpod, vast) —
-# budget enforcement must be able to stop/terminate machines. Kubernetes is
-# unmetered and exempt.
+# startup fails otherwise, since budget enforcement must be able to
+# stop/terminate machines. Kubernetes is unmetered and exempt.
 # budget-cap = 5.0
 
-# Money-safety windows (runpod and vast; kubernetes is unmetered):
-# A machine no session ever reaches (the provisioning server crashed in the
-# first minutes) self-cleans this long after machine start. Too low kills
-# slow image pulls mid-provision; too high bills longer when orphaned. Must
-# exceed [vast] onstart-timeout-mins by 5+ minutes (the guard arms before
-# onstart and is disarmed only after it finishes).
+# Money-safety window (runpod and vast; kubernetes is unmetered):
+# how long a machine that no session ever reached waits before cleaning
+# itself up (minutes) — covers this MCP server crashing in the first minutes
+# after provisioning. Too low kills slow image pulls mid-provision; too high
+# bills longer when orphaned. Startup errors unless this exceeds [vast]
+# onstart-timeout-mins by 5+ minutes (the guard arms before onstart and is
+# disarmed only after it finishes).
 # Default: {default_orphan_halt_mins}
 # orphan-halt-mins = {default_orphan_halt_mins}
-# Once a session IS supervising a machine, a stale heartbeat arms drain and
-# finalization; it does not destroy the machine directly. Process replacement
-# after roughly an hour of background inactivity can be a normal event. A new
-# session can attach during the drain and take over safely.
-# Default: {default_watchdog_stale_secs}
-# watchdog-stale-secs = {default_watchdog_stale_secs}
 
 # Environment variable names to forward from the local environment to the
 # machine. Variables from .env and .env.local files are included automatically.
 # inherit-env = ["HF_TOKEN", "WANDB_API_KEY"]
 
-# Path to a dotenv file whose variables should be loaded onto the machine.
-# Resolved relative to the project root.
+# Path to a dotenv file of machine-only variables kept out of your local
+# .env files. Resolved relative to the project root.
 # env-file = ".env.machine"
 
 # Directory where kernel activity is saved as .ipynb notebooks (relative to
@@ -718,24 +718,28 @@ impl Config {
 # Default: "{default_notebook_dir}"
 # notebook-dir = "{default_notebook_dir}"
 
-# Extra paths to include when syncing, even if gitignored.
+# sync() sends the project's files, honoring .gitignore. Extra paths to
+# include anyway:
 # sync-include = ["data/small-dataset/"]
 
-# Commands to run on the machine after startup (e.g., install packages).
+# Commands run over SSH once the machine is reachable, on any runtime (e.g.
+# install packages). Compare [vast] onstart, which runs as root at first boot.
 # startup-commands = ["pip install my-package"]
 
-# Explicit environment variables to set on the machine.
+# Explicit environment variables to set on the machine. When the same
+# variable comes from several sources, later ones win: env-file,
+# inherit-env, then [env].
 # [env]
 # MY_VAR = "value"
 
 "#,
             default_name = d.name,
             default_orphan_halt_mins = d.orphan_halt_mins,
-            default_watchdog_stale_secs = d.watchdog_stale_secs,
             default_notebook_dir = d.notebook_dir.display(),
         )
     }
 
+    #[allow(clippy::too_many_lines)] // exhaustive commented runtime template
     fn template_runpod() -> String {
         let d = Self::defaults();
         format!(
@@ -749,21 +753,32 @@ impl Config {
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
 
-# Finalize lifecycle. On disconnect the machine waits for kernels to go idle,
-# runs the command matching the decided action, writes an outcome marker, then
-# tries its provider action. Self-terminate uses the pod-scoped credential and
-# falls back to self-stop; reconciliation completes a pending terminate.
+# Commands that save results before cleanup: the matching command runs on
+# the machine before it is stopped or terminated — whether by an explicit
+# stop()/terminate() call or by the disconnect safety net (session ends,
+# laptop closes, crash). On disconnect the machine first waits for running
+# kernels to go idle, then runs the command, then acts. If the command
+# fails, terminate degrades to stop so data stays collectable.
 # pre-stop-command = "rclone sync results remote:results"
 # pre-terminate-command = "rclone sync results remote:results"
-# Unset waits without a deadline for kernels to become idle.
+# How long to wait for running work to go idle before cleanup proceeds anyway.
+# Default: unlimited — budget exhaustion is the only thing that overrides
+# the wait. Set a value only to put a hard bound on it.
 # finalize-wait-secs = 3600
+# Time limit for the pre-stop/pre-terminate command itself.
 # Default: {default_finalize_timeout}
 # finalize-command-timeout-secs = {default_finalize_timeout}
-# Budget drain plus finalize command share this total grace window.
+# When the session budget runs out, the machine gets this one grace window to
+# finish saving: idle-wait plus finalize command must fit inside it before the
+# machine is stopped/terminated regardless.
 # Default: {default_budget_grace}
 # budget-grace-secs = {default_budget_grace}
-# Only a TOML budget-cap may waive enforcement when SSH is unavailable.
-# REMOTE_KERNELS_BUDGET is never waivable from project config.
+# A machine that can't run the on-machine watchdog (the process the plugin
+# installs over SSH to enforce cleanup and budget even after this server
+# disconnects) is normally refused when a budget is set — e.g. a COMMUNITY
+# pod without support-public-ip (below). Set true to allow such machines
+# anyway. Applies only to this file's budget-cap; a REMOTE_KERNELS_BUDGET
+# budget is never waivable from project config.
 # allow-unenforced-budget = false
 
 # GPU types to try, in order of preference.
@@ -791,23 +806,25 @@ impl Config {
 # volume-mount-path = "{default_volume_mount_path}"
 
 # Network volume ID (optional, for persistent data across pod terminations).
-# Must be in the same datacenter as the pod.
+# Must be in the same datacenter as the pod — pin one via a passthrough
+# field, e.g. data-center-id = "EU-RO-1".
 # network-volume-id = "vol_abc123"
 
 # Cloud type: "SECURE" or "COMMUNITY".
-# COMMUNITY is cheaper but may have less reliable availability.
+# COMMUNITY is cheaper but may have less reliable availability. COMMUNITY
+# pods get SSH (and the on-machine watchdog) only with a public IP — passed
+# through to the pod API:
+# support-public-ip = true
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 
-# The image's own start command (its Dockerfile CMD). When known, pod creation
-# wraps it with a pre-SSH orphan guard: a pod the provisioning server never
-# reaches (crash in the first minutes) cleans itself up after orphan-halt-mins
-# instead of billing until noticed. Applies automatically to the default
-# image; set this when using a custom image (must be its Dockerfile CMD — a
-# wrong value keeps SSH/Jupyter from starting). Set to "" to disable. The
-# guard is also skipped with disabled cleanup, on community cloud without
-# support-public-ip enabled (no SSH heartbeat to disarm it), and when
-# start(image=...) overrides the configured image.
+# The image's own start command (its Dockerfile CMD), which pod creation
+# wraps with the pre-SSH orphan guard (see orphan-halt-mins). Applies
+# automatically to the default image; set it when using a custom image — a
+# wrong value keeps SSH/Jupyter from starting — or to "" to disable the
+# guard. The guard is also skipped with disabled cleanup, on COMMUNITY
+# without support-public-ip (no SSH to disarm it), and when start(image=...)
+# overrides the configured image.
 # Default: "{default_image_start_cmd}" for the default image, unset otherwise (no guard).
 # image-start-cmd = "{default_image_start_cmd}"
 
@@ -860,29 +877,45 @@ impl Config {
 # 2FA enabled reject API writes: disable 2FA on the account (recommended;
 # plain keys then never expire), or mint a short-lived session key with a
 # TOTP code (POST /api/v0/tfa/; expires after ~1-2 days).
-# [vast]
+[vast]
 # Cleanup mode for vast machines when the session ends. "stop" is UNRELIABLE
 # on vast: the GPU may be re-rented while stopped (resume can hang forever)
 # and storage bills until terminated — prefer "terminate".
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
-# Finalize lifecycle. A stale heartbeat drains kernels and runs the matching
-# command before guest halt. Halt preserves data but storage keeps billing;
-# reconciliation later terminates when the outcome marker authorizes it.
+# Commands that save results before cleanup: the matching command runs on
+# the machine before it is stopped or terminated — whether by an explicit
+# stop()/terminate() call or by the disconnect safety net. On disconnect,
+# vast machines wait for kernels to go idle, run the command, then can only
+# halt themselves (data kept, storage still billing); the next session
+# terminates the machine the halt marked for termination.
 # pre-stop-command = "rclone sync results remote:results"
 # pre-terminate-command = "rclone sync results remote:results"
-# Unset waits without a deadline for kernels to become idle.
+# How long to wait for running work to go idle before cleanup proceeds anyway.
+# Default: unlimited — budget exhaustion is the only thing that overrides
+# the wait. Set a value only to put a hard bound on it.
 # finalize-wait-secs = 3600
+# Time limit for the pre-stop/pre-terminate command itself.
 # Default: {default_finalize_timeout}
 # finalize-command-timeout-secs = {default_finalize_timeout}
+# When the session budget runs out, the machine gets this one grace window to
+# finish saving: idle-wait plus finalize command must fit inside it before the
+# machine is halted regardless.
 # Default: {default_budget_grace}
 # budget-grace-secs = {default_budget_grace}
-# Only a TOML budget-cap may waive enforcement when supervision is unavailable.
+# A machine that can't run the on-machine watchdog (installed over SSH;
+# enforces cleanup and budget after a disconnect) is normally refused when a
+# budget is set — e.g. no SSH transport. Set true to allow such machines
+# anyway. Applies only to this file's budget-cap; a REMOTE_KERNELS_BUDGET
+# budget is never waivable from project config.
 # allow-unenforced-budget = false
-# GPU names to search for (vast naming).
+# GPU names to search for (vast naming; search_vast_offers() shows what
+# exists).
 # Default: ["{default_vast_gpu}"]
 # gpu-name = ["{default_vast_gpu}"]
-# Docker image, or a vastai/kvm:* image when vm = true.
+# Docker image, or a vastai/kvm:* image when vm = true. The @-tag macro in
+# the default resolves server-side to vast's recommended CUDA build (not a
+# typo).
 # Default: "{default_vast_image}"
 # image = "{default_vast_image}"
 # Disk size in GB. Stopped instances keep billing for storage — prefer terminate.
@@ -892,7 +925,8 @@ impl Config {
 # Docker workloads (e.g. Inspect's sandboxed evals) — containers can't run
 # Docker. VM images ship Docker preinstalled; VMs run on direct-port hosts.
 # vm = false
-# Price ceiling in $/hr for offer search.
+# Price ceiling in $/hr for offer search. Unset: no price ceiling is
+# applied — the cheapest-first ordering is the only guard.
 # max-dph = 0.5
 # Startup script lines (run as root at first boot). The pre-SSH orphan guard
 # (see orphan-halt-mins above) is prepended automatically: a machine no
@@ -915,7 +949,8 @@ impl Config {
 # SSH login user. Containers use root; some VM images use a different user.
 # Default: "{default_vast_ssh_user}"
 # ssh-user = "{default_vast_ssh_user}"
-# Command that launches Jupyter on the machine.
+# Command that launches Jupyter on the machine (standard server flags are
+# appended).
 # Default: "{default_jupyter_command}"
 # jupyter-command = "{default_jupyter_command}"
 # vast template hash to base instances on (optional; overrides image/env
@@ -924,11 +959,12 @@ impl Config {
 # Offers fetched per search, cheapest first.
 # Default: {default_vast_search_limit}
 # search-limit = {default_vast_search_limit}
-# Offers attempted per auto-selected start() before giving up.
+# When start() picks offers itself, it tries up to this many before giving
+# up (an offer can be rented out between search and accept).
 # Default: {default_vast_attempt_limit}
 # attempt-limit = {default_vast_attempt_limit}
 # Extra host-picking criteria for Claude, shown by search_vast_offers()
-# after the built-in advice. Filled in during setup.
+# after the built-in advice.
 # selection-guidance = "Prefer datacenter hosts in the EU. Avoid hosts under 500 Mbps."
 # Every offer search injects these baseline filters; a [vast.query] entry
 # with the same key overrides the baseline (per-call tool arguments override
@@ -974,19 +1010,23 @@ impl Config {
 # in a pod template YAML that you own. Template contract: the workload
 # container's image provides sh, tar, and Python with jupyter-server
 # + ipykernel; the pod keeps itself alive (e.g. command: ["sleep", "infinity"]).
+# Uncomment the [kubernetes] header together with the keys you set.
 # [kubernetes]
-# Cleanup mode when the session ends: "terminate" or "disabled" only (pods
-# have no stop concept; "stop" is rejected).
+# What the plugin may do to a pod it cleans up automatically — on Kubernetes
+# that is only a pod whose start failed: "terminate" deletes it, "disabled"
+# leaves it for you. ("stop" is rejected; pods have no stop concept.)
+# Disconnects and session ends never delete a pod either way; an explicit
+# terminate() always works.
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
-# Kubernetes has no machine-side watchdog in this release. Disconnect always
-# preserves the pod; max-lifetime-secs remains the only automatic lifetime bound.
-# Finalize commands apply only to explicit server-driven operations.
+# On Kubernetes, disconnecting always preserves the pod: cleanup happens when
+# stop()/terminate() is called explicitly, or when max-lifetime-secs (below)
+# fires. Before an explicit terminate, the pod runs this command — your chance
+# to push results somewhere that outlives it:
 # pre-terminate-command = "rclone sync results remote:results"
-# finalize-wait-secs = 3600
+# Time limit for that command.
+# Default: 600
 # finalize-command-timeout-secs = 600
-# budget-grace-secs = 900
-# allow-unenforced-budget = false
 # Path to the pod template YAML, relative to the project root. Required.
 # pod-template = "k8s/dev-pod.yaml"
 # kubeconfig context (default: current context).
@@ -997,7 +1037,8 @@ impl Config {
 # and runs the kernels. Default: the template's FIRST container. Set when the
 # template lists sidecars before the workload.
 # container-name = "workload"
-# Label set by start(priority=...). Default: Kueue's workload priority label.
+# Label set by start(priority=...). Default: Kueue's workload priority
+# label. (Alternatively, set a priorityClassName in the pod template.)
 # priority-label = "{default_priority_label}"
 # Maximum pod lifetime in seconds, applied as activeDeadlineSeconds when the
 # template doesn't set one. Kubernetes is unmetered (no budget applies), so
@@ -1010,7 +1051,8 @@ impl Config {
 # Directory in the pod that files sync to and kernels run in.
 # Default: "{default_k8s_workdir}"
 # workdir = "{default_k8s_workdir}"
-# Command that launches Jupyter inside the pod.
+# Command that launches Jupyter inside the pod (standard server flags are
+# appended).
 # Default: "{default_jupyter_command}"
 # jupyter-command = "{default_jupyter_command}"
 "#,
@@ -1178,9 +1220,11 @@ mod tests {
         ] {
             assert!(template.contains(line), "missing template line {line:?}");
         }
-        assert!(template.contains("Process replacement"));
-        assert!(template.contains("after roughly an hour of background inactivity"));
-        assert!(template.contains("storage keeps billing"));
+        assert!(template.contains("Default: unlimited"));
+        assert!(template.contains("grace window"));
+        assert!(template.contains("never waivable"));
+        // Deliberately absent: the watchdog staleness knob is not user-facing.
+        assert!(!template.contains("watchdog-stale-secs"));
     }
 
     #[test]

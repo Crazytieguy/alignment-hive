@@ -214,9 +214,11 @@ impl RunPodRuntime {
                 anyhow::bail!(
                     "{} this pod was created tunnel-only (no public 8888 mapping) but \
                      currently has no SSH endpoint, so its Jupyter is unreachable. The \
-                     machine was left untouched: retry attach() once it has an SSH \
-                     endpoint, or terminate() it and start fresh (set [runpod] \
-                     jupyter-access = \"proxy\" first if you want the public proxy).",
+                     machine was left untouched. Pods usually regain SSH within a couple \
+                     of minutes of starting — wait, then retry attach(); if this repeats, \
+                     ask the user to check the pod in the RunPod console, or terminate() \
+                     it and start fresh (set [runpod] jupyter-access = \"proxy\" first if \
+                     you want the public proxy).",
                     super::USER_ACTION_REQUIRED
                 );
             };
@@ -240,9 +242,11 @@ impl RunPodRuntime {
                     anyhow::bail!(
                         "{} jupyter-access = \"tunnel\" but the pod has no SSH endpoint — \
                          cannot tunnel to its Jupyter, and strict tunnel mode forbids the \
-                         public proxy. The machine was left untouched: retry attach() once \
-                         it has an SSH endpoint, terminate() it, or set [runpod] \
-                         jupyter-access = \"proxy\".",
+                         public proxy. The machine was left untouched. Pods usually regain \
+                         SSH within a couple of minutes of starting — wait, then retry \
+                         attach(); if this repeats, ask the user to check the pod in the \
+                         RunPod console, terminate() it, or set [runpod] jupyter-access = \
+                         \"proxy\".",
                         super::USER_ACTION_REQUIRED
                     );
                 }
@@ -412,7 +416,7 @@ impl Runtime for RunPodRuntime {
 
         for gpu_type in &gpu_type_ids {
             let input = PodCreateInput {
-                name: format!("{}-{}", self.name, req.name),
+                name: format!("{}-{}", self.name, req.machine_id),
                 image_name: image_name.clone(),
                 gpu_type_ids: vec![gpu_type.clone()],
                 gpu_count: Some(self.runpod.gpu_count),
@@ -787,7 +791,8 @@ impl Connection for RunPodConnection {
              over RunPod's public proxy (token-protected) instead of the SSH tunnel. \
              The endpoint is sticky for this session — live kernels cannot migrate — \
              so stop() and attach() again to get the tunnel back. If no SSH transport \
-             exists, supervision and lease fencing are unavailable and cleanup is manual."
+             exists, this machine has NO automatic shutdown: always stop() or terminate() \
+             it explicitly, or it bills until stopped at the provider dashboard."
                 .to_string()
         })
     }

@@ -331,7 +331,7 @@ dph_total = { gte = 0.268, lte = 0.45 }
                     kernel_id,
                     code,
                     timeout: Some(90),
-                    wait: None,
+                    wait_forever: None,
                     queue: None,
                 }))
                 .await
@@ -478,7 +478,7 @@ geolocation = { notin = ["CN"] }
                     kernel_id,
                     code,
                     timeout: Some(timeout),
-                    wait: None,
+                    wait_forever: None,
                     queue: None,
                 }))
                 .await

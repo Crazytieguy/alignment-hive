@@ -66,31 +66,11 @@ Cover these with the user regardless of runtime:
 - **Environment on the machine** — what does the workload need (HF_TOKEN,
   WANDB_API_KEY, ...)? `inherit-env` forwards local variables (including
   from `.env`/`.env.local`); explicit values go in `[env]`.
-- **Cleanup mode** — the per-runtime `cleanup` key (semantics in the template
-  comments). Cleanup no longer fires just because a session disconnects or a
-  laptop closes: the machine finishes running work, runs the finalize command
-  (below), and only then stops or terminates itself. Make sure the user
-  actively chooses: the default, terminate, deletes the machine and its data
-  once that sequence completes, which is only safe once the data-persistence
-  plan below is in place.
-- **Data persistence** — IMPORTANT: agree where remotely-generated data
-  (checkpoints, results, logs) should live, and make sure it reliably gets
-  there. The strongest pattern is continuous: have long-running jobs push
-  results to storage that outlives the machine *as they run*, so there is
-  never much unsynced work to lose — use whatever store the user's stack
-  already trusts. For shorter runs, `download` results back to the project
-  after each one. Terminate deletes anything still on the machine, on every
-  runtime; the plugin itself backs up nothing.
-- **Finalize commands** — the per-runtime `pre-terminate-command` /
-  `pre-stop-command` keys run on the machine after work drains and before
-  cleanup acts, as the safety net for whatever the continuous pattern above
-  didn't cover. Ask directly: "if a machine has to clean itself up while
-  you're away, where should results go?" — and set the command that puts
-  them there. Leaving it unset is a valid answer, spelled out plainly:
-  terminate may then lose unsynced work. If the command fails, terminate
-  degrades to stop so the data stays collectable.
 - **Budget** — set `REMOTE_KERNELS_BUDGET` in `.claude/settings.json`'s
-  `env` section (not in remote-kernels.toml, so Claude can't modify it).
+  `env` section rather than `budget-cap` in remote-kernels.toml: the env var
+  overrides the TOML and is harder for Claude to change (with auto-approved
+  edits Claude could technically edit either file, so it is a strong
+  guardrail, not an absolute one — be honest about that if asked).
   Optional: no budget means the user manages spend manually, and that is a
   supported choice. When set, it covers total provider spend across ALL
   concurrent machines — including storage that keeps billing on a stopped
@@ -98,14 +78,62 @@ Cover these with the user regardless of runtime:
   as a generous upper limit, not a spending target — Claude should always
   stop or terminate machines that are no longer in use, and the budget is
   the backstop for when that fails. The money-safety windows (orphan halt,
-  watchdog staleness, provision timeouts, budget grace) are also config with
-  sane defaults — mention they exist in the template rather than walking
-  through each.
+  provision timeouts, budget grace) are also config with sane defaults —
+  mention they exist in the template rather than walking through each.
 - **Notebooks** — everything executed on a kernel is saved as an `.ipynb`
   file under `remote-kernels/` at the project root (one notebook per kernel;
   configurable via `notebook-dir`). Decide with the user whether to commit
   these or gitignore the directory.
 
-Finish by telling the user to reload the MCP server (run `/mcp` or restart
-Claude Code) so the new config takes effect, then offer to try starting a
-machine for them.
+## 5. Data persistence & cleanup
+
+The most consequential conversation — have it explicitly. Two linked
+decisions: **where remotely-generated data (checkpoints, results, logs)
+lives**, and **what a machine may do to itself when the session ends** (the
+per-runtime `cleanup` key). They must be decided together: `terminate`, the
+default, deletes everything still on the machine — on every runtime — and
+the plugin itself backs up nothing.
+
+When a session ends or disconnects, the machine finishes running work, runs
+the matching finalize command, and only then applies the cleanup mode. So
+data can reach safety along three routes:
+
+- **Continuous push (strongest)** — long-running jobs write checkpoints and
+  results to storage that outlives the machine *as they run* (wandb, S3 via
+  rclone/s5cmd, git — whatever store the user's stack already trusts), so
+  there is never much unsynced work to lose. This pattern only protects
+  runs that actually follow it: encode it durably — best in reusable
+  project code that every job goes through (and that `sync()` ships to the
+  machine), otherwise in CLAUDE.md, a skill, or a memory — so future
+  sessions apply it without being reminded.
+- **Download after each run** — for shorter runs, `download()` results back
+  to the project right after they're produced. No machine-side setup, but a
+  disconnect between producing and downloading falls through to the
+  finalize command below.
+- **Finalize command (the safety net)** — the per-runtime
+  `pre-terminate-command` / `pre-stop-command` run on the machine after
+  work drains and before cleanup acts. Ask directly: "if a machine has to
+  clean itself up while you're away, where should results go?" — and set
+  the command that puts them there. If the command fails, terminate
+  degrades to stop so the data stays collectable. When the finalize command
+  reliably syncs everything, in-session downloads of the same artifacts are
+  redundant (and doubly transferred) — pick which route owns which data.
+
+Leaving all of this unset is a valid answer, spelled out plainly: terminate
+may then lose unsynced work.
+
+With the persistence plan settled, have the user actively choose the
+cleanup mode rather than silently keeping the default:
+
+- `terminate` (default) — machine and remaining data deleted, no residual
+  costs. Safe exactly to the extent the plan above is real.
+- `stop` — machine preserved for a later `attach()`; storage keeps billing
+  until someone terminates it, and on vast a stopped machine may never be
+  resumable (its GPU can be re-rented) — prefer terminate there.
+- `disabled` — nothing automatic; the user owns the lifecycle and the bill.
+
+## 6. Finish
+
+Tell the user to reload the MCP server (run `/mcp` or restart Claude Code)
+so the new config takes effect, then offer to try starting a machine for
+them.

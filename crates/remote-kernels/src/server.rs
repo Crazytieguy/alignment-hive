@@ -24,14 +24,17 @@ use crate::runtime::{
 };
 use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
 
-const RESTART_GUIDANCE: &str =
-    "The server restarted (the session may have been backgrounded or resumed).";
+const RESTART_GUIDANCE: &str = "This MCP server process restarted since these machines were \
+     created (normal when a session is backgrounded, resumed, or reloaded), so in-memory \
+     connections were dropped. The machines themselves are unaffected.";
 
 const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
 const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
 
 #[derive(Debug, thiserror::Error)]
-#[error("configured budget cannot be enforced: {0}")]
+#[error(
+    "a session budget is configured but this machine cannot enforce it after a disconnect ({0})"
+)]
 struct BudgetUnenforceable(String);
 
 #[derive(Debug, Deserialize)]
@@ -51,10 +54,18 @@ struct RecorderTail {
 
 struct HeldExecution {
     result_rx: tokio::sync::oneshot::Receiver<ExecutionOutput>,
-    instance_name: String,
+    machine_id: String,
     kernel_id: String,
     cell_number: Option<u32>,
     cleanup: Cleanup,
+}
+
+/// Result of holding one pending execution open (see `wait_execution`).
+enum WaitOutcome {
+    Completed(ExecutionOutput),
+    StillRunning,
+    Fenced(String),
+    ConnectionLost,
 }
 
 #[derive(Clone)]
@@ -85,7 +96,7 @@ pub struct RemoteKernelsServer {
 
 /// Coordinates for cleaning up one machine, pinned to its provider identity.
 struct CleanupTarget {
-    name: String,
+    machine_id: String,
     external_id: String,
     runtime: String,
 }
@@ -182,7 +193,10 @@ pub struct StartParams {
 pub struct AttachParams {
     /// Machine id from `start()` or `status()`. Legacy name ids are also accepted.
     pub machine_id: String,
-    /// Take over a fresh active lease owned by another server.
+    /// Take control of a machine that another live server process is still
+    /// driving (plain attach is refused while that process's claim is fresh),
+    /// cutting the other process off. Also required to revive a machine with
+    /// a pending terminate. Use only for an intentional takeover.
     pub force: Option<bool>,
 }
 
@@ -190,7 +204,9 @@ pub struct AttachParams {
 pub struct InstanceParams {
     /// Which machine to operate on. Optional when exactly one is active.
     pub instance: Option<String>,
-    /// Skip the configured pre-stop/pre-terminate command. Lease fencing still applies.
+    /// Skip the configured pre-stop/pre-terminate command (the step that
+    /// saves results off the machine before cleanup). Only safe when that
+    /// work is already done or the data is expendable.
     pub skip_finalize: Option<bool>,
 }
 
@@ -215,24 +231,29 @@ pub struct KernelIdParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)] // a stale caller sending the removed `wait` field must error, not silently degrade
 pub struct ExecuteParams {
     /// The kernel ID to execute in.
     pub kernel_id: String,
     /// Python code to execute.
     pub code: String,
-    /// Timeout in seconds (default: 30). Set to 0 to start the execution and return
-    /// immediately (collect it later with `get_output()`).
+    /// Timeout in seconds (default: 30). If it elapses, the code keeps running in the
+    /// background and the response includes a cell number for `get_output()`. Set to 0
+    /// to start the execution and return immediately (fire-and-forget). Note: 0 does
+    /// NOT mean "no timeout" — to block until completion, use `wait_forever`.
     pub timeout: Option<u64>,
-    /// If true, hold the call open until execution completes, ignoring `timeout`.
-    pub wait: Option<bool>,
+    /// Block until the execution completes, however long it takes. Mutually exclusive
+    /// with `timeout` — setting both is an error (pick a cap or no cap, not both).
+    pub wait_forever: Option<bool>,
     /// If true, queue behind the current execution instead of returning an error when busy.
     pub queue: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WaitParams {
-    /// The kernel whose oldest pending execution should be awaited.
-    pub kernel_id: String,
+    /// The kernel whose oldest pending execution should be awaited. Omit to
+    /// wait for every pending execution on every kernel.
+    pub kernel_id: Option<String>,
     /// Optional timeout in seconds. Omit it to wait without an internal cap.
     pub timeout: Option<u64>,
 }
@@ -425,12 +446,22 @@ impl RemoteKernelsServer {
     #[tool(name = "start")]
     pub async fn start(&self, params: Parameters<StartParams>) -> Result<CallToolResult, McpError> {
         // Remote watchdog transitions are accounting input, so import them
-        // before deciding whether this epoch can admit more spend.
-        let _ = self.reconcile().await;
+        // before deciding whether this epoch can admit more spend. Some
+        // outcomes are one-shot (e.g. "terminated and cost recorded"), so
+        // they are queued for status() first and reclaimed into this call's
+        // own response on success — an error return can't lose them, and a
+        // success doesn't leave duplicates for status() to repeat.
+        let reconcile_messages = self.reconcile().await;
+        if !reconcile_messages.is_empty() {
+            self.start_failures
+                .lock()
+                .await
+                .extend(reconcile_messages.iter().cloned());
+        }
         self.check_budget().await?;
         let params = params.0;
 
-        let name = crate::ulid::new();
+        let machine_id = crate::ulid::new();
         let label = params.label;
         if let Err(message) = validate_label(label.as_deref()) {
             return err_text(message);
@@ -466,7 +497,7 @@ impl RemoteKernelsServer {
             let keypair = if runtime.capabilities().account_ssh_keys {
                 crate::ssh::ensure_keypair(&state.stable_ssh_key_path())
             } else {
-                crate::ssh::generate_keypair(&state.ssh_key_path(&name))
+                crate::ssh::generate_keypair(&state.ssh_key_path(&machine_id))
             }
             .map_err(|e| {
                 McpError::internal_error(format!("Failed to prepare SSH keypair: {e}"), None)
@@ -476,7 +507,7 @@ impl RemoteKernelsServer {
         let jupyter_token = generate_token();
 
         let req = ProvisionRequest {
-            name: name.clone(),
+            machine_id: machine_id.clone(),
             gpu_type: params.gpu_type,
             image: params.image,
             vast_offers: params.vast_offers,
@@ -487,10 +518,10 @@ impl RemoteKernelsServer {
             cleanup,
         };
 
-        tracing::info!(instance = %name, runtime = %runtime_name, "Provisioning machine...");
-        // A fresh machine under a reused name must not inherit the previous
+        tracing::info!(instance = %machine_id, runtime = %runtime_name, "Provisioning machine...");
+        // A fresh machine under a reused machine id must not inherit the previous
         // machine's TOFU host-key pin (see SshEndpoint) — it WILL differ.
-        self.state.lock().await.reset_known_hosts(&name);
+        self.state.lock().await.reset_known_hosts(&machine_id);
         let handle = runtime
             .provision(&req)
             .await
@@ -518,7 +549,7 @@ impl RemoteKernelsServer {
         {
             let mut state = self.state.lock().await;
             let inst = InstanceState::provisioning(
-                name.clone(),
+                machine_id.clone(),
                 label.clone(),
                 runtime_name.clone(),
                 handle.external_id.clone(),
@@ -530,17 +561,17 @@ impl RemoteKernelsServer {
                 handle.proxy_port_mapped,
             );
             let record = inst.record();
-            state.instances.insert(name.clone(), inst);
-            if let Err(e) = state.admit_provision(&name, &record, &lifecycle) {
+            state.instances.insert(machine_id.clone(), inst);
+            if let Err(e) = state.admit_provision(&machine_id, &record, &lifecycle) {
                 // Accounting ambiguity must not turn into an unlisted paid
                 // machine. Preserve the recovery coordinates even though
                 // admission itself remains failed closed.
-                let _ = state.save_record(&name, &record);
-                let _ = crate::state::save_lifecycle_record(&project_dir, &name, &lifecycle);
+                let _ = state.save_record(&machine_id, &record);
+                let _ = crate::state::save_lifecycle_record(&project_dir, &machine_id, &lifecycle);
                 return Err(McpError::internal_error(
                     format!(
                         "Machine {} is provisioned and billing, but accounting admission failed closed: {e}. Its provider id is {}; terminate it explicitly.",
-                        name, handle.external_id
+                        machine_id, handle.external_id
                     ),
                     None,
                 ));
@@ -557,26 +588,30 @@ impl RemoteKernelsServer {
 
         if wait {
             match self
-                .finalize_start(&name, &handle.external_id, ConnectMode::Fresh, None)
+                .finalize_start(&machine_id, &handle.external_id, ConnectMode::Fresh, None)
                 .await
             {
-                Ok(summary) => Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel.{note}"
-                ))])),
+                Ok(summary) => {
+                    let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel.{note}{reconcile_note}"
+                    ))]))
+                }
                 Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
                     // Not a failure — the machine is queued/waiting for
                     // capacity. Keep it and keep finalizing in the background.
                     self.spawn_background_finalize(
-                        &name,
+                        &machine_id,
                         &handle.external_id,
                         &runtime_name,
                         ConnectMode::Fresh,
                     );
+                    let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
                     Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Machine {name} (provider id: {}) is still queued or waiting for capacity. \
+                        "Machine {machine_id} (provider id: {}) is still queued or waiting for capacity. \
                          It was NOT cleaned up — setup continues in the background. Poll \
-                         status() until it shows running, or terminate(instance=\"{name}\") \
-                         to give up.{note}",
+                         status() until it shows running, or terminate(instance=\"{machine_id}\") \
+                         to give up.{note}{reconcile_note}",
                         handle.external_id
                     ))]))
                 }
@@ -589,7 +624,7 @@ impl RemoteKernelsServer {
                     let force_terminate = e.is::<BudgetUnenforceable>();
                     let outcome = self
                         .cleanup_failed_start(
-                            &name,
+                            &machine_id,
                             &handle.external_id,
                             &runtime_name,
                             force_terminate,
@@ -604,14 +639,15 @@ impl RemoteKernelsServer {
         } else {
             // Finish setup in the background; failures are reported via status().
             self.spawn_background_finalize(
-                &name,
+                &machine_id,
                 &handle.external_id,
                 &runtime_name,
                 ConnectMode::Fresh,
             );
+            let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Machine {name} is provisioning (provider id: {}, GPU: {}). Setup continues in the \
-                 background — poll status() until it shows running before creating kernels.{note}",
+                "Machine {machine_id} is provisioning (provider id: {}, GPU: {}). Setup continues in the \
+                 background — poll status() until it shows running before creating kernels.{note}{reconcile_note}",
                 handle.external_id, handle.gpu_name
             ))]))
         }
@@ -645,13 +681,15 @@ impl RemoteKernelsServer {
             || (lifecycle.wants_terminate && !params.force.unwrap_or(false))
         {
             let reason = if lifecycle.wants_terminate {
-                "has a marker-confirmed pending terminate; attach refused without force"
+                format!(
+                    "Machine {machine_id} committed to terminating itself; its data may already be gone. attach(\"{machine_id}\", force=true) can revive it if it still exists at the provider."
+                )
             } else {
-                "has an unresolved finalizing operation; attach refused until provider-state reconciliation completes"
+                format!(
+                    "Machine {machine_id} has a self-cleanup whose outcome isn't known yet. Call status() to let the server check the provider and finish the bookkeeping, then retry."
+                )
             };
-            return err_text(format!(
-                "Machine {machine_id} {reason}. Reconcile or verify it at the provider first."
-            ));
+            return err_text(reason);
         }
         let operation_lock = Self::acquire_operation_lock(&project_dir, &machine_id).await?;
         let prior_fence = match self.claim_attach_slot(&machine_id).await {
@@ -861,14 +899,25 @@ impl RemoteKernelsServer {
             let state = self.state.lock().await;
             state.resolve_instance(requested.as_deref())
         };
-        let name = match resolved {
-            Ok(name) => name,
+        let machine_id = match resolved {
+            Ok(machine_id) => machine_id,
             Err(message) => {
-                if let Some(name) = self.resolve_record_only(requested.as_deref()).await {
-                    return err_text(format!(
-                        "Machine {name} is already stopped. Use attach(\"{name}\") to \
-                         resume it or terminate(instance=\"{name}\") to delete it."
-                    ));
+                if let Some(machine_id) = self.resolve_record_only(requested.as_deref()).await {
+                    let project_dir = self.state.lock().await.project_dir.clone();
+                    let stopped = crate::state::load_instance_record(&project_dir, &machine_id)
+                        .is_some_and(|record| record.phase == Phase::Stopped);
+                    return err_text(if stopped {
+                        format!(
+                            "Machine {machine_id} is already stopped. Use attach(\"{machine_id}\") to \
+                             resume it or terminate(instance=\"{machine_id}\") to delete it."
+                        )
+                    } else {
+                        format!(
+                            "Machine {machine_id} is not attached in this server, so stop() can't \
+                             reach it — it may still be running and billing. Use attach(\"{machine_id}\") \
+                             first, or terminate(instance=\"{machine_id}\") to delete it."
+                        )
+                    });
                 }
                 return err_text(message);
             }
@@ -876,16 +925,20 @@ impl RemoteKernelsServer {
 
         {
             let state = self.state.lock().await;
-            if let Some(message) = state.instances.get(&name).and_then(Self::fenced_message) {
+            if let Some(message) = state
+                .instances
+                .get(&machine_id)
+                .and_then(Self::fenced_message)
+            {
                 return err_text(message);
             }
         }
 
-        let Some(target) = self.live_target(&name).await else {
-            return err_text(format!("Machine {name:?} is no longer active."));
+        let Some(target) = self.live_target(&machine_id).await else {
+            return err_text(format!("Machine {machine_id:?} is no longer active."));
         };
 
-        tracing::info!(instance = %name, external_id = %target.external_id, "Stopping machine...");
+        tracing::info!(instance = %machine_id, external_id = %target.external_id, "Stopping machine...");
         let actual = self
             .explicit_cleanup_instance(&target, CleanupAction::Stop, skip_finalize)
             .await
@@ -893,8 +946,8 @@ impl RemoteKernelsServer {
 
         let spend = Self::format_spend_amount(self.state.lock().await.spend_summary());
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Machine {name} {}. Session cost: {spend}. \
-             Use attach(\"{name}\") to resume it or terminate(instance=\"{name}\") to delete it.",
+            "Machine {machine_id} {}. Session cost: {spend}. \
+             Use attach(\"{machine_id}\") to resume it or terminate(instance=\"{machine_id}\") to delete it.",
             actual.past_tense(),
         ))]))
     }
@@ -912,23 +965,26 @@ impl RemoteKernelsServer {
         let live_name = {
             let state = self.state.lock().await;
             match state.resolve_instance(requested.as_deref()) {
-                Ok(name) => {
-                    if let Some(message) = state.instances.get(&name).and_then(Self::fenced_message)
+                Ok(machine_id) => {
+                    if let Some(message) = state
+                        .instances
+                        .get(&machine_id)
+                        .and_then(Self::fenced_message)
                     {
                         return err_text(message);
                     }
-                    Some(name)
+                    Some(machine_id)
                 }
                 Err(_) => None,
             }
         };
-        let target = if let Some(name) = live_name {
-            self.live_target(&name).await
-        } else if let Some(name) = self.resolve_record_only(requested.as_deref()).await {
+        let target = if let Some(machine_id) = live_name {
+            self.live_target(&machine_id).await
+        } else if let Some(machine_id) = self.resolve_record_only(requested.as_deref()).await {
             let state = self.state.lock().await;
-            crate::state::load_instance_record(&state.project_dir, &name).map(|record| {
+            crate::state::load_instance_record(&state.project_dir, &machine_id).map(|record| {
                 CleanupTarget {
-                    name,
+                    machine_id,
                     external_id: record.external_id,
                     runtime: record.runtime,
                 }
@@ -940,7 +996,7 @@ impl RemoteKernelsServer {
             return err_text("No machine is attached in this server.");
         };
 
-        tracing::info!(instance = %target.name, external_id = %target.external_id, "Terminating machine...");
+        tracing::info!(instance = %target.machine_id, external_id = %target.external_id, "Terminating machine...");
         let actual = self
             .explicit_cleanup_instance(&target, CleanupAction::Terminate, skip_finalize)
             .await
@@ -952,12 +1008,12 @@ impl RemoteKernelsServer {
         let message = if actual == CleanupAction::Terminate {
             format!(
                 "Machine {:?} terminated. Session cost: {spend}. All machine data has been deleted.",
-                target.name
+                target.machine_id
             )
         } else {
             format!(
                 "Finalize command failed; machine {:?} stopped for preservation, not terminated. Session cost: {spend}. Storage may still bill until terminate() succeeds.",
-                target.name
+                target.machine_id
             )
         };
         Ok(CallToolResult::success(vec![Content::text(message)]))
@@ -995,8 +1051,11 @@ impl RemoteKernelsServer {
                         sections.push(message);
                     }
                 }
-                Err(error) => sections.push(format!(
-                    "Reconciliation {id}: provider state unknown; preserved ({error})"
+                Err(error) => sections.push(Self::lifecycle_check_incomplete(
+                    id,
+                    &format!("the provider could not report its state: {error}"),
+                    "untouched",
+                    "be billing",
                 )),
             }
             provider_states.insert(id.clone(), state);
@@ -1151,7 +1210,7 @@ impl RemoteKernelsServer {
             Err(error) => {
                 let _ = write!(
                     info,
-                    "\n\nAccounting failed closed: {error}. New spend is blocked."
+                    "\n\nSpend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Starting or attaching machines is blocked so untracked spend cannot accumulate. Existing machines are unaffected — they are still billing, and stop() and terminate() still work. Do NOT delete the ledger files (they are the only record of spend); tell the user so they can inspect or repair the ledger."
                 );
             }
         }
@@ -1171,19 +1230,19 @@ impl RemoteKernelsServer {
         self.check_budget().await?;
         let params = params.0;
 
-        let (instance_name, external_id, jupyter, ws_base, token, machine_connection) = {
+        let (machine_id, external_id, jupyter, ws_base, token, machine_connection) = {
             let state = self.state.lock().await;
-            let name = match state.resolve_instance(params.instance.as_deref()) {
+            let machine_id = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
                 Err(msg) => return err_text(Self::unknown_instance_message(&state, &msg)),
             };
-            let inst = &state.instances[&name];
+            let inst = &state.instances[&machine_id];
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
             }
             if inst.phase != Phase::Running {
                 return err_text(format!(
-                    "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
+                    "Machine {machine_id:?} is not ready yet (still provisioning). Poll status() first."
                 ));
             }
             let conn = inst
@@ -1191,7 +1250,7 @@ impl RemoteKernelsServer {
                 .as_ref()
                 .ok_or_else(|| McpError::internal_error("Machine has no connection", None))?;
             (
-                name,
+                machine_id,
                 inst.external_id.clone(),
                 inst.jupyter.clone(),
                 conn.jupyter().ws_base.clone(),
@@ -1199,7 +1258,7 @@ impl RemoteKernelsServer {
                 Arc::clone(conn),
             )
         };
-        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+        let _mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
             Ok(guard) => guard,
             Err(message) => return err_text(message),
         };
@@ -1231,7 +1290,7 @@ impl RemoteKernelsServer {
             let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
             let mut nb_path = None;
             let mut record = None;
-            if let Some(inst) = state.instances.get_mut(&instance_name) {
+            if let Some(inst) = state.instances.get_mut(&machine_id) {
                 inst.kernel_ids.push(kernel_id.clone());
                 inst.kernel_connections.insert(kernel_id.clone(), conn);
 
@@ -1252,7 +1311,7 @@ impl RemoteKernelsServer {
             }
             let save_error = record
                 .as_ref()
-                .and_then(|record| state.save_record(&instance_name, record).err());
+                .and_then(|record| state.save_record(&machine_id, record).err());
             (nb_path, save_error)
         };
 
@@ -1260,12 +1319,15 @@ impl RemoteKernelsServer {
             Some(n) => format!("{kernel_id} ({n})"),
             None => kernel_id.clone(),
         };
-        let mut msg = format!("Kernel created: {label} (machine: {instance_name})");
+        let mut msg = format!("Kernel created: {label} (machine: {machine_id})");
         if let Some(path) = notebook_path {
             let _ = write!(msg, "\nNotebook: {}", path.display());
         }
         if let Some(error) = record_save_error {
-            let _ = write!(msg, "\nRecovery record save failed: {error}");
+            let _ = write!(
+                msg,
+                "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
+            );
         }
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -1273,7 +1335,8 @@ impl RemoteKernelsServer {
     /// Execute Python code in a kernel. Returns the output (stdout, stderr, result,
     /// errors). If the timeout elapses, the execution keeps running and the response
     /// includes a cell number — pass it to `get_output()` to collect the result. Holding
-    /// the call open keeps a background session alive; prefer wait() over polling for long cells.
+    /// the call open keeps a background session alive; prefer wait_forever or a follow-up
+    /// wait() over polling for long cells, unless there is other work to do meanwhile.
     #[tool(name = "execute")]
     #[allow(clippy::doc_markdown, clippy::collapsible_if)]
     pub async fn execute_tool(
@@ -1300,23 +1363,30 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
 
+        let wait_uncapped = params.wait_forever.unwrap_or(false);
+        if wait_uncapped && params.timeout.is_some() {
+            return err_text(
+                "`wait_forever` and `timeout` are mutually exclusive. Use `timeout` for a capped \
+                 wait (the code keeps running past it), or `wait_forever: true` to block until \
+                 completion.",
+            );
+        }
         let timeout_secs = params.timeout.unwrap_or(30);
-        let wait_uncapped = params.wait.unwrap_or(false);
         let queue = params.queue.unwrap_or(false);
 
         let (guard_instance, guard_external_id) = {
             let state = self.state.lock().await;
-            let Some(instance_name) = state
+            let Some(machine_id) = state
                 .instance_for_kernel(&params.kernel_id)
                 .map(String::from)
             else {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
-            let instance = &state.instances[&instance_name];
+            let instance = &state.instances[&machine_id];
             if let Some(message) = Self::fenced_message(instance) {
                 return err_text(message);
             }
-            (instance_name, instance.external_id.clone())
+            (machine_id, instance.external_id.clone())
         };
         let mutation_guard = match self
             .mutation_guard(&guard_instance, &guard_external_id)
@@ -1326,15 +1396,15 @@ impl RemoteKernelsServer {
             Err(message) => return err_text(message),
         };
 
-        let (mut result_rx, cell_number, kernel_id, instance_name, cleanup) = {
+        let (mut result_rx, cell_number, kernel_id, machine_id, cleanup) = {
             let mut state = self.state.lock().await;
-            let Some(instance_name) = state
+            let Some(machine_id) = state
                 .instance_for_kernel(&params.kernel_id)
                 .map(String::from)
             else {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
-            let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            let inst = state.instances.get_mut(&machine_id).expect("resolved");
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
             }
@@ -1394,7 +1464,7 @@ impl RemoteKernelsServer {
                 return Ok(CallToolResult::success(vec![Content::text(msg)]));
             }
 
-            (rx, cell_number, kernel_id, instance_name, cleanup)
+            (rx, cell_number, kernel_id, machine_id, cleanup)
         };
         drop(mutation_guard);
         // State lock dropped here — we can await freely.
@@ -1404,7 +1474,7 @@ impl RemoteKernelsServer {
                 .wait_held(
                     HeldExecution {
                         result_rx,
-                        instance_name,
+                        machine_id,
                         kernel_id,
                         cell_number,
                         cleanup,
@@ -1434,7 +1504,7 @@ impl RemoteKernelsServer {
             // Store receiver for get_output().
             if let Some(cell_num) = cell_number {
                 let mut state = self.state.lock().await;
-                if let Some(inst) = state.instances.get_mut(&instance_name) {
+                if let Some(inst) = state.instances.get_mut(&machine_id) {
                     inst.pending_executions
                         .insert((kernel_id.clone(), cell_num), result_rx);
                 }
@@ -1464,29 +1534,15 @@ impl RemoteKernelsServer {
                 .await;
         }
 
-        let mut formatted = output.format();
         let is_error = output.error.is_some();
-
-        // Append spend/budget info and cleanup reminder.
-        let spend = self.state.lock().await.spend_summary();
-        if let Some(spend_line) = self.format_spend_line(spend) {
-            formatted.push_str(&spend_line);
-        }
-        if cleanup == Cleanup::Disabled {
-            formatted.push_str(
-                "\nNote: automatic cleanup is disabled. Remember to stop/terminate the machine when done.",
-            );
-        }
-
-        if is_error {
-            Ok(CallToolResult::error(vec![Content::text(formatted)]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(formatted)]))
-        }
+        self.finish_execution_reply(output.format(), cleanup == Cleanup::Disabled, is_error)
+            .await
     }
 
-    /// Wait for the kernel's oldest pending execution. Holding the call open keeps a
-    /// background session alive; prefer wait() over polling for long cells.
+    /// Wait for the kernel's oldest pending execution — or, with no kernel_id, for every
+    /// pending execution on every kernel. Holding the call open keeps a background session
+    /// alive; prefer wait() over polling for long cells, unless there is other work to do
+    /// meanwhile.
     #[tool(name = "wait")]
     #[allow(clippy::doc_markdown)]
     pub async fn wait_tool(
@@ -1503,48 +1559,42 @@ impl RemoteKernelsServer {
         self.wait_inner(params.0, None).await
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::collapsible_if,
-        clippy::too_many_lines
-    )]
     async fn wait_inner(
         &self,
         params: WaitParams,
         progress: Option<(Meta, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
+        let Some(kernel_id) = params.kernel_id else {
+            return self.wait_all(params.timeout, progress).await;
+        };
         let held = {
             let mut state = self.state.lock().await;
-            let Some(instance_name) = state
-                .instance_for_kernel(&params.kernel_id)
-                .map(String::from)
-            else {
-                return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
+            let Some(machine_id) = state.instance_for_kernel(&kernel_id).map(String::from) else {
+                return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
-            let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            let inst = state.instances.get_mut(&machine_id).expect("resolved");
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(format!("{message}; the execution continues on the machine"));
             }
             let Some(cell_number) = inst
                 .pending_executions
                 .keys()
-                .filter(|(kernel_id, _)| kernel_id == &params.kernel_id)
+                .filter(|(pending_kernel, _)| pending_kernel == &kernel_id)
                 .map(|(_, cell_number)| *cell_number)
                 .min()
             else {
                 return err_text(format!(
-                    "No available pending execution found for kernel {}. Start one with execute(timeout=0), use execute(wait=true), or wait for another active wait/get_output call to finish.",
-                    params.kernel_id
+                    "No available pending execution found for kernel {kernel_id}."
                 ));
             };
             let result_rx = inst
                 .pending_executions
-                .remove(&(params.kernel_id.clone(), cell_number))
+                .remove(&(kernel_id.clone(), cell_number))
                 .expect("selected pending execution");
             HeldExecution {
                 result_rx,
-                instance_name,
-                kernel_id: params.kernel_id,
+                machine_id,
+                kernel_id,
                 cell_number: Some(cell_number),
                 cleanup: inst.cleanup,
             }
@@ -1552,46 +1602,331 @@ impl RemoteKernelsServer {
         self.wait_held(held, params.timeout, progress).await
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::collapsible_if,
-        clippy::too_many_lines
-    )]
-    async fn wait_held(
+    /// Wait for every execution that was pending when the call was made,
+    /// concurrently — one slow cell doesn't delay collecting the others, and
+    /// outputs are reported in completion order. Executions queued after the
+    /// call starts need another `wait()`. The deadline (when given) caps the
+    /// whole batch, not each execution.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    async fn wait_all(
         &self,
-        mut held: HeldExecution,
         timeout_secs: Option<u64>,
         progress: Option<(Meta, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
+        let deadline = timeout_secs
+            .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+        let mut sections: Vec<String> = Vec::new();
+        let mut any_error = false;
+        // Executions on already-fenced machines stay in place, exactly like
+        // the single-kernel wait, which refuses before consuming a receiver.
+        let mut held: Vec<HeldExecution> =
+            {
+                let mut state = self.state.lock().await;
+                for (_, inst) in state.instances.iter().filter(|(_, inst)| {
+                    inst.fenced.is_some() && !inst.pending_executions.is_empty()
+                }) {
+                    let message = Self::fenced_message(inst).expect("filtered on fenced");
+                    any_error = true;
+                    sections.push(format!(
+                        "{message}; its pending executions were left in place"
+                    ));
+                }
+                let mut keys: Vec<(String, String, u32)> = state
+                    .instances
+                    .iter()
+                    .filter(|(_, inst)| inst.fenced.is_none())
+                    .flat_map(|(machine_id, inst)| {
+                        inst.pending_executions
+                            .keys()
+                            .map(|(kernel_id, cell)| (machine_id.clone(), kernel_id.clone(), *cell))
+                    })
+                    .collect();
+                keys.sort();
+                let mut held = Vec::new();
+                for (machine_id, kernel_id, cell_number) in keys {
+                    let inst = state.instances.get_mut(&machine_id).expect("listed");
+                    let result_rx = inst
+                        .pending_executions
+                        .remove(&(kernel_id.clone(), cell_number))
+                        .expect("listed pending execution");
+                    held.push(HeldExecution {
+                        result_rx,
+                        machine_id,
+                        kernel_id,
+                        cell_number: Some(cell_number),
+                        cleanup: inst.cleanup,
+                    });
+                }
+                held
+            };
+        if held.is_empty() && sections.is_empty() {
+            return err_text("No pending executions found on any kernel.");
+        }
+
+        let total = held.len();
+        let disabled_cleanup = held.iter().any(|entry| entry.cleanup == Cleanup::Disabled);
+        let started = std::time::Instant::now();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut next_progress = std::time::Duration::from_secs(60);
+
+        let batch_label = |entry: &HeldExecution| {
+            format!(
+                "kernel {} cell {}",
+                entry.kernel_id,
+                entry.cell_number.expect("held from pending map")
+            )
+        };
+        while !held.is_empty() {
+            // Collect everything that has finished since the last tick.
+            let mut index = 0;
+            while index < held.len() {
+                match held[index].result_rx.try_recv() {
+                    Ok(output) => {
+                        let done = held.swap_remove(index);
+                        let label = batch_label(&done);
+                        match self.park_if_fenced(&done, output).await {
+                            Ok(output) => {
+                                if let Some(cell_number) = done.cell_number {
+                                    self.update_notebook_cell(
+                                        &done.kernel_id,
+                                        cell_number,
+                                        &output,
+                                    )
+                                    .await;
+                                }
+                                any_error |= output.error.is_some();
+                                sections.push(format!("[{label}]\n{}", output.format()));
+                            }
+                            Err(message) => {
+                                any_error = true;
+                                sections.push(format!(
+                                    "[{label}] {message}; the execution continues on the machine"
+                                ));
+                            }
+                        }
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => index += 1,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        let done = held.swap_remove(index);
+                        any_error = true;
+                        // A takeover tears down connections; prefer its
+                        // guidance over a bare connection-lost line.
+                        let fence = {
+                            let state = self.state.lock().await;
+                            state
+                                .instances
+                                .get(&done.machine_id)
+                                .and_then(Self::fenced_message)
+                        };
+                        sections.push(match fence {
+                            Some(message) => format!(
+                                "[{}] {message}; the execution continues on the machine",
+                                batch_label(&done)
+                            ),
+                            None => {
+                                format!("[{}] Kernel connection was lost.", batch_label(&done))
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Stop waiting on machines this session no longer controls; their
+            // executions continue remotely (like the single-kernel wait, the
+            // receiver is dropped — attach recovery collects the output).
+            {
+                let state = self.state.lock().await;
+                let mut index = 0;
+                while index < held.len() {
+                    let message = state
+                        .instances
+                        .get(&held[index].machine_id)
+                        .and_then(Self::fenced_message);
+                    if let Some(message) = message {
+                        let dropped = held.swap_remove(index);
+                        any_error = true;
+                        sections.push(format!(
+                            "[{}] {message}; the execution continues on the machine",
+                            batch_label(&dropped)
+                        ));
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            if held.is_empty() {
+                break;
+            }
+
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                let mut reinserted = 0usize;
+                let mut orphaned = 0usize;
+                {
+                    let mut state = self.state.lock().await;
+                    for entry in held.drain(..) {
+                        if let Some(inst) = state.instances.get_mut(&entry.machine_id)
+                            && let Some(cell_number) = entry.cell_number
+                        {
+                            inst.pending_executions
+                                .insert((entry.kernel_id, cell_number), entry.result_rx);
+                            reinserted += 1;
+                        } else {
+                            orphaned += 1;
+                        }
+                    }
+                }
+                if reinserted > 0 {
+                    sections.push(format!(
+                        "Timed out after {}s with {reinserted} execution(s) still pending. Use wait() again to keep waiting.",
+                        timeout_secs.expect("deadline requires a timeout")
+                    ));
+                }
+                if orphaned > 0 {
+                    sections.push(format!(
+                        "{orphaned} execution(s) belonged to machines that are no longer active; their results are not collectable here."
+                    ));
+                }
+                break;
+            }
+
+            if let Some((meta, peer)) = &progress
+                && started.elapsed() >= next_progress
+            {
+                next_progress += std::time::Duration::from_secs(60);
+                if let Some(progress_token) = meta.get_progress_token() {
+                    let elapsed = started.elapsed().as_secs();
+                    let _ = peer
+                        .notify_progress(ProgressNotificationParam {
+                            progress_token,
+                            progress: elapsed as f64,
+                            total: None,
+                            message: Some(format!(
+                                "wait: elapsed={elapsed}s collected={}/{total}",
+                                total - held.len()
+                            )),
+                        })
+                        .await;
+                }
+            }
+            tick.tick().await;
+        }
+
+        self.finish_execution_reply(sections.join("\n\n"), disabled_cleanup, any_error)
+            .await
+    }
+
+    /// Shared footer for execution results: spend/budget line,
+    /// cleanup-disabled nudge, and error-vs-success wrapping.
+    async fn finish_execution_reply(
+        &self,
+        mut body: String,
+        cleanup_disabled: bool,
+        is_error: bool,
+    ) -> Result<CallToolResult, McpError> {
+        let spend = self.state.lock().await.spend_summary();
+        if let Some(spend_line) = self.format_spend_line(spend) {
+            body.push_str(&spend_line);
+        }
+        if cleanup_disabled {
+            body.push_str(
+                "\nNote: automatic cleanup is disabled. Remember to stop/terminate the machine when done.",
+            );
+        }
+        if is_error {
+            Ok(CallToolResult::error(vec![Content::text(body)]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(body)]))
+        }
+    }
+
+    /// Post-completion fence gate shared by the wait paths: a fenced machine
+    /// keeps the output in `recovered_executions` (for `get_output()` after a
+    /// takeover is resolved) and reports the fence instead of the result.
+    async fn park_if_fenced(
+        &self,
+        done: &HeldExecution,
+        output: ExecutionOutput,
+    ) -> Result<ExecutionOutput, String> {
+        let mut state = self.state.lock().await;
+        if let Some(inst) = state.instances.get_mut(&done.machine_id)
+            && let Some(message) = Self::fenced_message(inst)
+        {
+            if let Some(cell_number) = done.cell_number {
+                inst.recovered_executions
+                    .insert((done.kernel_id.clone(), cell_number), output);
+            }
+            return Err(message);
+        }
+        Ok(output)
+    }
+
+    async fn wait_held(
+        &self,
+        held: HeldExecution,
+        timeout_secs: Option<u64>,
+        progress: Option<(Meta, Peer<RoleServer>)>,
+    ) -> Result<CallToolResult, McpError> {
+        let cleanup = held.cleanup;
+        let deadline = timeout_secs
+            .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+        match self.wait_execution(held, deadline, progress.as_ref()).await {
+            WaitOutcome::Completed(output) => {
+                let is_error = output.error.is_some();
+                self.finish_execution_reply(output.format(), cleanup == Cleanup::Disabled, is_error)
+                    .await
+            }
+            WaitOutcome::StillRunning => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Execution still running after {}s. Use wait() again or get_output() to collect it.",
+                timeout_secs.expect("StillRunning requires a timeout")
+            ))])),
+            WaitOutcome::Fenced(message) => {
+                err_text(format!("{message}; the execution continues on the machine"))
+            }
+            WaitOutcome::ConnectionLost => err_text("Kernel connection was lost."),
+        }
+    }
+
+    /// Hold one pending execution to completion (the engine behind
+    /// `wait_held`; `wait_all` polls its batch directly). On `StillRunning`
+    /// the receiver has been reinserted into `pending_executions`; on
+    /// `Fenced` after completion the output is parked in
+    /// `recovered_executions` via `park_if_fenced`.
+    #[allow(clippy::cast_precision_loss, clippy::collapsible_if)]
+    async fn wait_execution(
+        &self,
+        mut held: HeldExecution,
+        deadline: Option<tokio::time::Instant>,
+        progress: Option<&(Meta, Peer<RoleServer>)>,
+    ) -> WaitOutcome {
         let started = std::time::Instant::now();
         let mut fence_check = tokio::time::interval(std::time::Duration::from_millis(200));
         fence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut progress_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         progress_tick.tick().await;
-        let mut timeout = timeout_secs
-            .map(|seconds| Box::pin(tokio::time::sleep(std::time::Duration::from_secs(seconds))));
+        let mut timeout = deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
 
         let output = loop {
             tokio::select! {
                 result = &mut held.result_rx => break result.ok(),
                 _ = fence_check.tick() => {
                     let state = self.state.lock().await;
-                    if let Some(inst) = state.instances.get(&held.instance_name) {
+                    if let Some(inst) = state.instances.get(&held.machine_id) {
                         if let Some(message) = Self::fenced_message(inst) {
-                            return err_text(format!(
-                                "{message}; the execution continues on the machine"
-                            ));
+                            return WaitOutcome::Fenced(message);
                         }
                     }
                 }
                 _ = progress_tick.tick(), if progress.is_some() => {
-                    let Some((meta, peer)) = &progress else { unreachable!() };
+                    let Some((meta, peer)) = progress else { unreachable!() };
                     if let Some(progress_token) = meta.get_progress_token() {
-                        let state = self.state.lock().await;
-                        let execution_state = state.instances.get(&held.instance_name)
-                            .and_then(|inst| inst.kernel_connections.get(&held.kernel_id))
-                            .map_or("connection unavailable", |conn| if conn.is_busy() { "running" } else { "queued" });
+                        let execution_state = {
+                            let state = self.state.lock().await;
+                            state.instances.get(&held.machine_id)
+                                .and_then(|inst| inst.kernel_connections.get(&held.kernel_id))
+                                .map_or("connection unavailable", |conn| if conn.is_busy() { "running" } else { "queued" })
+                        };
                         let elapsed = started.elapsed().as_secs();
                         let _ = peer.notify_progress(ProgressNotificationParam {
                             progress_token,
@@ -1603,9 +1938,9 @@ impl RemoteKernelsServer {
                 }
                 () = async { timeout.as_mut().expect("guarded timeout").as_mut().await }, if timeout.is_some() => {
                     let mut state = self.state.lock().await;
-                    if let Some(inst) = state.instances.get_mut(&held.instance_name) {
+                    if let Some(inst) = state.instances.get_mut(&held.machine_id) {
                         if let Some(message) = Self::fenced_message(inst) {
-                            return err_text(format!("{message}; the execution continues on the machine"));
+                            return WaitOutcome::Fenced(message);
                         }
                         if let Some(cell_number) = held.cell_number {
                             inst.pending_executions.insert(
@@ -1614,56 +1949,30 @@ impl RemoteKernelsServer {
                             );
                         }
                     }
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Execution still running after {}s. Use wait() again or get_output() to collect it.",
-                        timeout_secs.expect("timeout branch")
-                    ))]));
+                    return WaitOutcome::StillRunning;
                 }
             }
         };
 
         let Some(output) = output else {
             let state = self.state.lock().await;
-            if let Some(inst) = state.instances.get(&held.instance_name) {
+            if let Some(inst) = state.instances.get(&held.machine_id) {
                 if let Some(message) = Self::fenced_message(inst) {
-                    return err_text(format!("{message}; the execution continues on the machine"));
+                    return WaitOutcome::Fenced(message);
                 }
             }
-            return err_text("Kernel connection was lost.");
+            return WaitOutcome::ConnectionLost;
         };
 
-        {
-            let mut state = self.state.lock().await;
-            if let Some(inst) = state.instances.get_mut(&held.instance_name) {
-                if let Some(message) = Self::fenced_message(inst) {
-                    if let Some(cell_number) = held.cell_number {
-                        inst.recovered_executions
-                            .insert((held.kernel_id.clone(), cell_number), output);
-                    }
-                    return err_text(format!("{message}; the execution continues on the machine"));
+        match self.park_if_fenced(&held, output).await {
+            Err(message) => WaitOutcome::Fenced(message),
+            Ok(output) => {
+                if let Some(cell_number) = held.cell_number {
+                    self.update_notebook_cell(&held.kernel_id, cell_number, &output)
+                        .await;
                 }
+                WaitOutcome::Completed(output)
             }
-        }
-
-        if let Some(cell_number) = held.cell_number {
-            self.update_notebook_cell(&held.kernel_id, cell_number, &output)
-                .await;
-        }
-        let mut formatted = output.format();
-        let is_error = output.error.is_some();
-        let spend = self.state.lock().await.spend_summary();
-        if let Some(spend_line) = self.format_spend_line(spend) {
-            formatted.push_str(&spend_line);
-        }
-        if held.cleanup == Cleanup::Disabled {
-            formatted.push_str(
-                "\nNote: automatic cleanup is disabled. Remember to stop/terminate the machine when done.",
-            );
-        }
-        if is_error {
-            Ok(CallToolResult::error(vec![Content::text(formatted)]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(formatted)]))
         }
     }
 
@@ -1678,15 +1987,15 @@ impl RemoteKernelsServer {
         let wait = params.wait.unwrap_or(true);
         let timeout_secs = params.timeout.unwrap_or(30);
 
-        let (mut result_rx, instance_name) = {
+        let (mut result_rx, machine_id) = {
             let mut state = self.state.lock().await;
-            let Some(instance_name) = state
+            let Some(machine_id) = state
                 .instance_for_kernel(&params.kernel_id)
                 .map(String::from)
             else {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
-            let inst = state.instances.get_mut(&instance_name).expect("resolved");
+            let inst = state.instances.get_mut(&machine_id).expect("resolved");
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
             }
@@ -1706,7 +2015,7 @@ impl RemoteKernelsServer {
                     params.kernel_id, params.cell_number
                 ));
             };
-            (rx, instance_name)
+            (rx, machine_id)
         };
 
         if wait {
@@ -1728,7 +2037,7 @@ impl RemoteKernelsServer {
             if timed_out {
                 // Put it back.
                 let mut state = self.state.lock().await;
-                if let Some(inst) = state.instances.get_mut(&instance_name) {
+                if let Some(inst) = state.instances.get_mut(&machine_id) {
                     inst.pending_executions
                         .insert((params.kernel_id, params.cell_number), result_rx);
                 }
@@ -1768,7 +2077,7 @@ impl RemoteKernelsServer {
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     // Put it back.
                     let mut state = self.state.lock().await;
-                    if let Some(inst) = state.instances.get_mut(&instance_name) {
+                    if let Some(inst) = state.instances.get_mut(&machine_id) {
                         inst.pending_executions
                             .insert((params.kernel_id, params.cell_number), result_rx);
                     }
@@ -1800,29 +2109,29 @@ impl RemoteKernelsServer {
             return err_text(msg);
         }
 
-        let (name, external_id, project_dir, conn) = {
+        let (machine_id, external_id, project_dir, conn) = {
             let state = self.state.lock().await;
-            let name = match state.resolve_instance(params.instance.as_deref()) {
+            let machine_id = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
                 Err(msg) => return err_text(Self::unknown_instance_message(&state, &msg)),
             };
-            let inst = &state.instances[&name];
+            let inst = &state.instances[&machine_id];
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
             }
             let Some(conn) = inst.connection.clone() else {
                 return err_text(format!(
-                    "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
+                    "Machine {machine_id:?} is not ready yet (still provisioning). Poll status() first."
                 ));
             };
             (
-                name,
+                machine_id,
                 inst.external_id.clone(),
                 state.project_dir.clone(),
                 conn,
             )
         };
-        let _mutation_guard = match self.mutation_guard(&name, &external_id).await {
+        let _mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
             Ok(guard) => guard,
             Err(message) => return err_text(message),
         };
@@ -1852,17 +2161,17 @@ impl RemoteKernelsServer {
 
         let (project_dir, conn) = {
             let state = self.state.lock().await;
-            let name = match state.resolve_instance(params.instance.as_deref()) {
+            let machine_id = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(n) => n,
                 Err(msg) => return err_text(Self::unknown_instance_message(&state, &msg)),
             };
-            let inst = &state.instances[&name];
+            let inst = &state.instances[&machine_id];
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
             }
             let Some(conn) = inst.connection.clone() else {
                 return err_text(format!(
-                    "Machine {name:?} is not ready yet (still provisioning). Poll status() first."
+                    "Machine {machine_id:?} is not ready yet (still provisioning). Poll status() first."
                 ));
             };
             (state.project_dir.clone(), conn)
@@ -1884,19 +2193,19 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let (instance_name, external_id, jupyter) = {
+        let (machine_id, external_id, jupyter) = {
             let state = self.state.lock().await;
-            let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
+            let Some(machine_id) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
-            if let Some(message) = Self::fenced_message(&state.instances[&name]) {
+            if let Some(message) = Self::fenced_message(&state.instances[&machine_id]) {
                 return err_text(message);
             }
-            let jupyter = state.instances[&name].jupyter.clone();
-            let external_id = state.instances[&name].external_id.clone();
-            (name, external_id, jupyter)
+            let jupyter = state.instances[&machine_id].jupyter.clone();
+            let external_id = state.instances[&machine_id].external_id.clone();
+            (machine_id, external_id, jupyter)
         };
-        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+        let _mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
             Ok(guard) => guard,
             Err(message) => return err_text(message),
         };
@@ -1909,7 +2218,7 @@ impl RemoteKernelsServer {
         let record_save_error = {
             let mut state = self.state.lock().await;
             let mut record = None;
-            if let Some(inst) = state.instances.get_mut(&instance_name) {
+            if let Some(inst) = state.instances.get_mut(&machine_id) {
                 inst.kernel_ids.retain(|id| *id != kernel_id);
                 inst.kernels
                     .retain(|binding| binding.kernel_id != kernel_id);
@@ -1923,12 +2232,15 @@ impl RemoteKernelsServer {
             }
             record
                 .as_ref()
-                .and_then(|record| state.save_record(&instance_name, record).err())
+                .and_then(|record| state.save_record(&machine_id, record).err())
         };
 
         let mut message = format!("Kernel {kernel_id} shut down.");
         if let Some(error) = record_save_error {
-            let _ = write!(message, "\nRecovery record save failed: {error}");
+            let _ = write!(
+                message,
+                "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
+            );
         }
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
@@ -1941,21 +2253,21 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let (instance_name, external_id, jupyter) = {
+        let (machine_id, external_id, jupyter) = {
             let state = self.state.lock().await;
-            let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
+            let Some(machine_id) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
-            if let Some(message) = Self::fenced_message(&state.instances[&name]) {
+            if let Some(message) = Self::fenced_message(&state.instances[&machine_id]) {
                 return err_text(message);
             }
             (
-                name.clone(),
-                state.instances[&name].external_id.clone(),
-                state.instances[&name].jupyter.clone(),
+                machine_id.clone(),
+                state.instances[&machine_id].external_id.clone(),
+                state.instances[&machine_id].jupyter.clone(),
             )
         };
-        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+        let _mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
             Ok(guard) => guard,
             Err(message) => return err_text(message),
         };
@@ -1978,12 +2290,12 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let kernel_id = params.0.kernel_id;
 
-        let (instance_name, external_id, jupyter, ws_base, token, machine_connection, kernel_name) = {
+        let (machine_id, external_id, jupyter, ws_base, token, machine_connection, kernel_name) = {
             let state = self.state.lock().await;
-            let Some(name) = state.instance_for_kernel(&kernel_id).map(String::from) else {
+            let Some(machine_id) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
-            let inst = &state.instances[&name];
+            let inst = &state.instances[&machine_id];
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
             }
@@ -1991,7 +2303,7 @@ impl RemoteKernelsServer {
                 return err_text("Machine connection is not available.");
             };
             (
-                name,
+                machine_id,
                 inst.external_id.clone(),
                 inst.jupyter.clone(),
                 conn.jupyter().ws_base.clone(),
@@ -2003,7 +2315,7 @@ impl RemoteKernelsServer {
                     .and_then(|binding| binding.name.clone()),
             )
         };
-        let _mutation_guard = match self.mutation_guard(&instance_name, &external_id).await {
+        let _mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
             Ok(guard) => guard,
             Err(message) => return err_text(message),
         };
@@ -2048,7 +2360,7 @@ impl RemoteKernelsServer {
             let notebook_dir = state.project_dir.join(&self.config.notebook_dir);
             let mut notebook_path = None;
             let mut record = None;
-            if let Some(inst) = state.instances.get_mut(&instance_name) {
+            if let Some(inst) = state.instances.get_mut(&machine_id) {
                 inst.kernel_connections.insert(kernel_id.clone(), conn);
                 inst.pending_executions
                     .retain(|(pending_kernel, _), _| pending_kernel != &kernel_id);
@@ -2073,7 +2385,7 @@ impl RemoteKernelsServer {
             }
             let save_error = record
                 .as_ref()
-                .and_then(|record| state.save_record(&instance_name, record).err());
+                .and_then(|record| state.save_record(&machine_id, record).err());
             (notebook_path, save_error)
         };
 
@@ -2082,7 +2394,10 @@ impl RemoteKernelsServer {
             let _ = write!(msg, "\nNew notebook: {}", path.display());
         }
         if let Some(error) = record_save_error {
-            let _ = write!(msg, "\nRecovery record save failed: {error}");
+            let _ = write!(
+                msg,
+                "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
+            );
         }
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -2230,24 +2545,41 @@ impl RemoteKernelsServer {
         let mut notes = Vec::new();
         let path = std::path::PathBuf::from(&binding.notebook_path);
         if !path.is_absolute() || !path.starts_with(notebook_dir) {
-            return (0, vec!["notebook mapping rejected".to_string()]);
+            return (0, vec!["its saved notebook path was invalid".to_string()]);
         }
         let mut notebook = match crate::notebook::Notebook::load(&path) {
             Ok(mut notebook) => match notebook.bind_for_recovery(&binding.kernel_id) {
                 Ok(()) => notebook,
-                Err(error) => return (0, vec![format!("notebook unbindable ({error})")]),
+                Err(error) => {
+                    return (
+                        0,
+                        vec![format!("its notebook could not be reopened ({error})")],
+                    );
+                }
             },
-            Err(error) => return (0, vec![format!("notebook unreadable ({error})")]),
+            Err(error) => return (0, vec![format!("its notebook could not be read ({error})")]),
         };
         let tail = match Self::read_recorder_tail(connection, &binding.kernel_id).await {
             Ok(tail) => tail,
-            Err(error) => return (0, vec![format!("recorder log skipped ({error})")]),
+            Err(error) => {
+                return (
+                    0,
+                    vec![format!(
+                        "the machine's output log could not be read ({error})"
+                    )],
+                );
+            }
         };
         if tail.skipped_lines > 0 {
-            notes.push(format!("recorder lines skipped={}", tail.skipped_lines));
+            notes.push(format!(
+                "{} recorded output line(s) were unreadable and skipped",
+                tail.skipped_lines
+            ));
         }
         if tail.window_truncated {
-            notes.push("recorder window truncated".to_string());
+            notes.push(
+                "only the most recent outputs could be recovered (log truncated)".to_string(),
+            );
         }
         let mut recovered = 0;
         for (parent_msg_id, (output, complete)) in Self::fold_recorded_outputs(tail.messages) {
@@ -2257,7 +2589,9 @@ impl RemoteKernelsServer {
             match notebook.backfill_output(&parent_msg_id, &output, true) {
                 Ok(Some(_)) => recovered += 1,
                 Ok(None) => {}
-                Err(error) => notes.push(format!("catch-up write failed ({error})")),
+                Err(error) => notes.push(format!(
+                    "saving a disconnected output to the notebook failed ({error})"
+                )),
             }
         }
         (recovered, notes)
@@ -2272,7 +2606,7 @@ impl RemoteKernelsServer {
         let (jupyter, connection, ws_base, token, notebook_dir, fenced, external_id) = {
             let state = self.state.lock().await;
             let Some(instance) = state.instances.get(machine_id) else {
-                return "Recovery skipped: attached instance missing.".to_string();
+                return "Previous kernels were not reconnected (the machine is no longer attached); create new kernels if needed.".to_string();
             };
             (
                 instance.jupyter.clone(),
@@ -2288,21 +2622,29 @@ impl RemoteKernelsServer {
             )
         };
         if fenced.is_some() {
-            return "Recovery skipped: machine is fenced.".to_string();
+            return "Previous kernels were not reconnected (this session no longer controls the machine); create new kernels if needed.".to_string();
         }
         let _recovery_guard = match self.recovery_guard(machine_id, &external_id).await {
             Ok(guard) => guard,
-            Err(error) => return format!("Recovery skipped: authority unverified ({error})."),
+            Err(error) => {
+                return format!(
+                    "Previous kernels were not reconnected (could not confirm this session controls the machine: {error}); create new kernels if needed."
+                );
+            }
         };
         let Some(connection) = connection else {
-            return "Recovery skipped: machine connection missing.".to_string();
+            return "Previous kernels were not reconnected (no connection to the machine); create new kernels if needed.".to_string();
         };
         let Some(ws_base) = ws_base else {
-            return "Recovery skipped: Jupyter websocket endpoint missing.".to_string();
+            return "Previous kernels were not reconnected (no Jupyter connection endpoint); create new kernels if needed.".to_string();
         };
         let live_kernels = match jupyter.list_kernels().await {
             Ok(kernels) => kernels,
-            Err(error) => return format!("Recovery degraded: kernel list unreadable ({error})."),
+            Err(error) => {
+                return format!(
+                    "Previous kernels were not reconnected (the machine's kernel list could not be read: {error}); create new kernels if needed."
+                );
+            }
         };
         let mut report = Vec::new();
         let mut recovered_records = Vec::new();
@@ -2320,8 +2662,8 @@ impl RemoteKernelsServer {
             let (recovered, notes) =
                 Self::recover_dead_binding(&connection, binding, &notebook_dir).await;
             let mut line = format!(
-                "Kernel {}: gone; catch-up={recovered}; binding removed",
-                binding.kernel_id
+                "Kernel {}: no longer exists on the machine — create a new kernel; {recovered} output(s) produced while disconnected were saved to its notebook ({})",
+                binding.kernel_id, binding.notebook_path
             );
             if !notes.is_empty() {
                 let _ = write!(line, "; {}", notes.join("; "));
@@ -2338,19 +2680,19 @@ impl RemoteKernelsServer {
             let mut notebook = binding.as_ref().and_then(|binding| {
                 let path = std::path::PathBuf::from(&binding.notebook_path);
                 if !path.is_absolute() || !path.starts_with(&notebook_dir) {
-                    notes.push("notebook mapping rejected".to_string());
+                    notes.push("its saved notebook path was invalid".to_string());
                     return None;
                 }
                 match crate::notebook::Notebook::load(&path) {
                     Ok(mut notebook) => match notebook.bind_for_recovery(&kernel.id) {
                         Ok(()) => Some(notebook),
                         Err(error) => {
-                            notes.push(format!("notebook unbindable ({error})"));
+                            notes.push(format!("its notebook could not be reopened ({error})"));
                             None
                         }
                     },
                     Err(error) => {
-                        notes.push(format!("notebook unreadable ({error})"));
+                        notes.push(format!("its notebook could not be read ({error})"));
                         None
                     }
                 }
@@ -2368,10 +2710,13 @@ impl RemoteKernelsServer {
                     reason,
                 ) {
                     Ok(continuation) => {
-                        notes.push("continuation notebook created".to_string());
+                        notes.push(
+                            "a fresh notebook was created for it (the prior one couldn't be reused)"
+                                .to_string(),
+                        );
                         notebook = Some(continuation);
                     }
-                    Err(error) => notes.push(format!("continuation notebook failed ({error})")),
+                    Err(error) => notes.push(format!("creating a fresh notebook failed ({error})")),
                 }
             }
 
@@ -2381,7 +2726,7 @@ impl RemoteKernelsServer {
                 {
                     Ok(connection) => Some(connection),
                     Err(error) => {
-                        notes.push(format!("websocket failed ({error})"));
+                        notes.push(format!("live output connection failed ({error})"));
                         None
                     }
                 };
@@ -2391,10 +2736,16 @@ impl RemoteKernelsServer {
                 match Self::read_recorder_tail(&connection, &kernel.id).await {
                     Ok(tail) => {
                         if tail.skipped_lines > 0 {
-                            notes.push(format!("recorder lines skipped={}", tail.skipped_lines));
+                            notes.push(format!(
+                                "{} recorded output line(s) were unreadable and skipped",
+                                tail.skipped_lines
+                            ));
                         }
                         if tail.window_truncated {
-                            notes.push("recorder window truncated".to_string());
+                            notes.push(
+                                "only the most recent outputs could be recovered (log truncated)"
+                                    .to_string(),
+                            );
                         }
                         for (parent_msg_id, (output, complete)) in
                             Self::fold_recorded_outputs(tail.messages)
@@ -2412,7 +2763,9 @@ impl RemoteKernelsServer {
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
-                                    notes.push(format!("catch-up write failed ({error})"));
+                                    notes.push(format!(
+                                        "saving a disconnected output to the notebook failed ({error})"
+                                    ));
                                 }
                             }
                         }
@@ -2425,6 +2778,9 @@ impl RemoteKernelsServer {
             let notebook_path = notebook
                 .as_ref()
                 .map(|notebook| notebook.path().to_path_buf());
+            let notebook_display = notebook_path
+                .as_ref()
+                .map(|path| path.display().to_string());
             {
                 let mut state = self.state.lock().await;
                 if let Some(instance) = state.instances.get_mut(machine_id) {
@@ -2453,8 +2809,11 @@ impl RemoteKernelsServer {
             }
             let execution_state = kernel.execution_state.as_deref().unwrap_or("unknown");
             let mut line = format!(
-                "Kernel {}: {}; catch-up={recovered_count}",
-                kernel.id, execution_state
+                "Kernel {}: alive and reconnected ({execution_state}); {recovered_count} output(s) produced while disconnected were added to its notebook{} — read it to catch up",
+                kernel.id,
+                notebook_display
+                    .map(|path| format!(" ({path})"))
+                    .unwrap_or_default()
             );
             if !notes.is_empty() {
                 let _ = write!(line, "; {}", notes.join("; "));
@@ -2473,10 +2832,12 @@ impl RemoteKernelsServer {
             }
         };
         if let Some(error) = save_error {
-            report.push(format!("Recovery record save failed: {error}."));
+            report.push(format!(
+                "Warning: could not save the recovered kernel records to disk ({error}); after a server restart they won't reconnect automatically (the kernels themselves are fine now)."
+            ));
         }
         if report.is_empty() {
-            report.push("No live kernels or durable bindings.".to_string());
+            report.push("No previous kernels to reconnect.".to_string());
         }
         format!("Recovery:\n{}", report.join("\n"))
     }
@@ -2554,20 +2915,20 @@ impl RemoteKernelsServer {
         env
     }
 
-    /// Find a record-only instance (on disk but not in memory) by name, or the
-    /// sole record when unnamed.
+    /// Find a record-only instance (on disk but not in memory) by machine id,
+    /// or the sole record when none is requested.
     async fn resolve_record_only(&self, requested: Option<&str>) -> Option<String> {
         let state = self.state.lock().await;
         let records = crate::state::list_instance_records(&state.project_dir);
         let candidates: Vec<String> = records
             .into_iter()
-            .map(|(name, _)| name)
-            .filter(|name| !state.instances.contains_key(name))
+            .map(|(machine_id, _)| machine_id)
+            .filter(|machine_id| !state.instances.contains_key(machine_id))
             .collect();
         match requested {
-            Some(name) => candidates
-                .contains(&name.to_string())
-                .then(|| name.to_string()),
+            Some(machine_id) => candidates
+                .contains(&machine_id.to_string())
+                .then(|| machine_id.to_string()),
             None if candidates.len() == 1 => Some(candidates[0].clone()),
             None => None,
         }
@@ -2622,23 +2983,83 @@ impl RemoteKernelsServer {
         format!("{base}{restart}\nDurable machines:\n{machines}\nUse attach(<id>).")
     }
 
+    /// Reclaim alerts queued for `status()` into a successful `start()`'s
+    /// own response. Only alerts actually removed from the queue are
+    /// returned, so each is reported exactly once even if a concurrent
+    /// `status()` drained them first.
+    async fn reclaim_start_alerts(&self, messages: &[String]) -> String {
+        if messages.is_empty() {
+            return String::new();
+        }
+        let mut queued = self.start_failures.lock().await;
+        let mut reclaimed = Vec::new();
+        for message in messages {
+            if let Some(position) = queued.iter().position(|queued| queued == message) {
+                queued.remove(position);
+                reclaimed.push(message.as_str());
+            }
+        }
+        if reclaimed.is_empty() {
+            return String::new();
+        }
+        format!("\n\n{}", reclaimed.join("\n\n"))
+    }
+
+    /// One shape for every incomplete-lifecycle-check note; only the cause
+    /// and the machine's parked disposition vary per site.
+    fn lifecycle_check_incomplete(
+        machine_id: &str,
+        cause: &str,
+        parked: &str,
+        billing: &str,
+    ) -> String {
+        format!(
+            "Machine {machine_id}: a lifecycle check couldn't complete ({cause}); it was left {parked} and may still {billing}; this retries automatically on the next status() or attach()"
+        )
+    }
+
+    /// One shape for every money-at-risk alert; only the cause and the remedy
+    /// verb ("retry terminate" / "call stop") vary per site.
+    fn action_needed(machine_id: &str, provider_id: &str, cause: &str, remedy: &str) -> String {
+        format!(
+            "ACTION NEEDED — machine {machine_id} (provider id {provider_id}) may still be running and billing: {cause}. Check it at the provider dashboard or {remedy}(instance=\"{machine_id}\")."
+        )
+    }
+
+    /// Fence the instance and return the one canonical message for that
+    /// fence reason — never phrase takeover/authority guidance a second way.
+    async fn fence_and_message(&self, machine_id: &str, reason: FenceReason) -> String {
+        let mut state = self.state.lock().await;
+        if let Some(instance) = state.instances.get_mut(machine_id) {
+            instance.fence(reason);
+            Self::fenced_message(instance).expect("just fenced")
+        } else {
+            Self::fence_reason_message(reason, machine_id, None)
+        }
+    }
+
+    fn fence_reason_message(reason: FenceReason, machine_id: &str, label: Option<&str>) -> String {
+        let label = label.map(|label| format!(" ({label})")).unwrap_or_default();
+        match reason {
+            FenceReason::TakenOver => format!(
+                "another session took control of machine {machine_id}{label}; stop using it here — if the takeover was unintended, attach(\"{machine_id}\", force=true) takes it back (cutting that session off)"
+            ),
+            FenceReason::Finalizing => format!(
+                "machine {machine_id}{label} is running its automatic cleanup and will stop or delete itself; wait and call status() to see the result"
+            ),
+            FenceReason::AuthorityUnknown => format!(
+                "could not confirm this session still controls machine {machine_id}{label} (connection problem); its state-changing tools are disabled to avoid conflicting with another controller — attach(\"{machine_id}\") re-establishes control; the machine was not touched"
+            ),
+        }
+    }
+
     fn fenced_message(instance: &InstanceState) -> Option<String> {
         instance.fenced.map(|reason| {
-            let label = instance.label.as_deref().unwrap_or("no label");
-            match reason {
-                FenceReason::TakenOver => format!(
-                    "another session took over machine {} ({label})",
-                    instance.name
-                ),
-                FenceReason::Finalizing => format!(
-                    "machine {} ({label}) is finalizing; outcome/status must be resolved",
-                    instance.name
-                ),
-                FenceReason::AuthorityUnknown => format!(
-                    "lease authority is unknown for machine {} ({label}); no machine mutations are allowed",
-                    instance.name
-                ),
-            }
+            Self::fence_reason_message(
+                reason,
+                &instance.machine_id,
+                Some(instance.label.as_deref().unwrap_or("no label")),
+            )
         })
     }
 
@@ -2670,23 +3091,22 @@ impl RemoteKernelsServer {
         match crate::machine_scripts::refresh(&connection, generation, &self.owner_uuid).await {
             Ok(()) => Ok(()),
             Err(crate::machine_scripts::LeaseError::Fenced) => {
-                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.fence(FenceReason::TakenOver);
-                }
-                anyhow::bail!("another session took over machine {machine_id}")
+                anyhow::bail!(
+                    self.fence_and_message(machine_id, FenceReason::TakenOver)
+                        .await
+                )
             }
             Err(crate::machine_scripts::LeaseError::Finalizing) => {
-                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.fence(FenceReason::Finalizing);
-                }
-                anyhow::bail!("machine {machine_id} is finalizing")
+                anyhow::bail!(
+                    self.fence_and_message(machine_id, FenceReason::Finalizing)
+                        .await
+                )
             }
             Err(error) => {
-                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.fence(FenceReason::AuthorityUnknown);
-                }
                 anyhow::bail!(
-                    "could not verify lease authority for machine {machine_id}; no mutation issued: {error}"
+                    "{} ({error})",
+                    self.fence_and_message(machine_id, FenceReason::AuthorityUnknown)
+                        .await
                 )
             }
         }
@@ -2754,16 +3174,9 @@ impl RemoteKernelsServer {
             _ => None,
         };
         if let Some(reason) = reason {
-            if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                instance.fence(reason);
-            }
-            match reason {
-                FenceReason::TakenOver => format!("another session took over machine {machine_id}"),
-                FenceReason::Finalizing => format!("machine {machine_id} is finalizing"),
-                FenceReason::AuthorityUnknown => unreachable!(),
-            }
+            self.fence_and_message(machine_id, reason).await
         } else {
-            format!("lease refresh transient: {error}")
+            format!("a transient connection problem interrupted the control check ({error})")
         }
     }
 
@@ -2777,19 +3190,19 @@ impl RemoteKernelsServer {
     #[allow(clippy::too_many_lines)]
     async fn finalize_start(
         &self,
-        name: &str,
+        machine_id: &str,
         external_id: &str,
         mode: ConnectMode,
         operation_lock: Option<std::fs::File>,
     ) -> anyhow::Result<String> {
         fn same_generation<'a>(
             state: &'a mut AppState,
-            name: &str,
+            machine_id: &str,
             external_id: &str,
         ) -> anyhow::Result<&'a mut InstanceState> {
             state
                 .instances
-                .get_mut(name)
+                .get_mut(machine_id)
                 .filter(|i| i.external_id == external_id)
                 .ok_or_else(|| anyhow::anyhow!("instance was removed or replaced during start"))
         }
@@ -2805,8 +3218,8 @@ impl RemoteKernelsServer {
         ) = {
             let mut state = self.state.lock().await;
             let project_dir = state.project_dir.clone();
-            let known_hosts_path = state.known_hosts_path(name);
-            let inst = same_generation(&mut state, name, external_id)?;
+            let known_hosts_path = state.known_hosts_path(machine_id);
+            let inst = same_generation(&mut state, machine_id, external_id)?;
             (
                 project_dir,
                 inst.runtime.clone(),
@@ -2819,7 +3232,7 @@ impl RemoteKernelsServer {
         };
         let operation_lock = match operation_lock {
             Some(lock) => lock,
-            None => Self::acquire_operation_lock(&project_dir, name)
+            None => Self::acquire_operation_lock(&project_dir, machine_id)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error:?}"))?,
         };
@@ -2842,7 +3255,7 @@ impl RemoteKernelsServer {
             )
             .await?;
         let conn = Arc::new(conn);
-        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, name);
+        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
         let previous_storage_rate = lifecycle.storage_rate_per_hr.unwrap_or(0.0);
         if lifecycle.external_volume_id.is_none() {
             lifecycle.storage_rate_per_hr = Some(handle.storage_rate_per_hr);
@@ -2850,14 +3263,14 @@ impl RemoteKernelsServer {
                 .storage_rate_note
                 .clone_from(&handle.storage_rate_note);
         }
-        crate::state::save_lifecycle_record(&project_dir, name, &lifecycle)?;
+        crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)?;
         if matches!(mode, ConnectMode::Attach { resumed: true, .. })
             && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::CompletedStop)
             && let Some(op_id) = lifecycle.op_id.as_deref()
             && let Err(error) = crate::machine_scripts::complete_stop(&conn, op_id).await
         {
             tracing::warn!(
-                instance = name,
+                instance = machine_id,
                 "Could not clear prior stopped lease before fresh acquire: {error}"
             );
         }
@@ -2878,7 +3291,7 @@ impl RemoteKernelsServer {
         // Update instance details.
         let (previous_heartbeat, previous_compute_rate, new_compute_rate) = {
             let mut state = self.state.lock().await;
-            let inst = same_generation(&mut state, name, external_id)?;
+            let inst = same_generation(&mut state, machine_id, external_id)?;
             let previous_compute_rate = inst.cost_per_hr;
             inst.gpu_name.clone_from(&handle.gpu_name);
             inst.cost_per_hr = handle.cost_per_hr.unwrap_or(inst.cost_per_hr);
@@ -2895,7 +3308,7 @@ impl RemoteKernelsServer {
             || (previous_storage_rate - new_storage_rate).abs() > f64::EPSILON
         {
             self.state.lock().await.append_ledger_event(
-                name,
+                machine_id,
                 crate::ledger::EventKind::RateChanged,
                 None,
                 None,
@@ -2927,7 +3340,7 @@ impl RemoteKernelsServer {
         };
         let (hb, mut supervision) = crate::heartbeat::start(
             Arc::clone(&conn),
-            name.to_string(),
+            machine_id.to_string(),
             external_id.to_string(),
             watchdog_policy,
             acquire_mode,
@@ -2939,7 +3352,7 @@ impl RemoteKernelsServer {
         );
         {
             let mut state = self.state.lock().await;
-            match same_generation(&mut state, name, external_id) {
+            match same_generation(&mut state, machine_id, external_id) {
                 Ok(inst) => {
                     if let Some(old) = inst.heartbeat.take() {
                         old.stop();
@@ -2961,7 +3374,7 @@ impl RemoteKernelsServer {
                 .lock()
                 .await
                 .instances
-                .get_mut(name)
+                .get_mut(machine_id)
                 .and_then(|instance| instance.heartbeat.take());
             if let Some(heartbeat) = heartbeat {
                 heartbeat.stop();
@@ -2985,7 +3398,8 @@ impl RemoteKernelsServer {
                 && *supervision.borrow() != crate::heartbeat::SupervisionStatus::Pending;
             if !resolved && self.budget.is_some() {
                 return Err(BudgetUnenforceable(
-                    "supervision remained pending after 15 seconds".to_string(),
+                    "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
+                        .to_string(),
                 )
                 .into());
             }
@@ -2996,9 +3410,11 @@ impl RemoteKernelsServer {
                 anyhow::bail!(attach_refusal_message(mode, &message));
             }
             crate::heartbeat::SupervisionStatus::Pending => {
-                if let Some(instance) = self.state.lock().await.instances.get_mut(name) {
-                    instance.supervision_note =
-                        Some("supervision setup is retrying in the background".to_string());
+                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
+                    instance.supervision_note = Some(
+                        "automatic-shutdown setup is still retrying in the background; until status() stops showing this, stop or terminate the machine explicitly when done"
+                            .to_string(),
+                    );
                 }
             }
             crate::heartbeat::SupervisionStatus::Active => {}
@@ -3006,22 +3422,22 @@ impl RemoteKernelsServer {
                 let waiver = self.budget_source == Some(crate::config::BudgetSource::Toml)
                     && self.config.allow_unenforced_budget_for(&runtime_name);
                 if self.budget.is_some() && !waiver {
-                    return Err(BudgetUnenforceable(format!(
-                        "on this machine after disconnect ({caveat})"
-                    ))
-                    .into());
+                    let cause = caveat
+                        .strip_suffix(crate::heartbeat::NO_AUTO_SHUTDOWN_TAIL)
+                        .unwrap_or(&caveat);
+                    return Err(BudgetUnenforceable(cause.to_string()).into());
                 }
                 let note = if self.budget.is_some() {
                     format!(
-                        "{caveat}; budget not enforceable on this machine after disconnect; manual cleanup only"
+                        "{caveat}; the session budget also cannot be enforced on it after a disconnect"
                     )
                 } else {
                     caveat
                 };
-                let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, name);
+                let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
                 lifecycle.supervision_note = Some(note.clone());
-                crate::state::save_lifecycle_record(&project_dir, name, &lifecycle)?;
-                if let Some(instance) = self.state.lock().await.instances.get_mut(name) {
+                crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)?;
+                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
                     instance.supervision_note = Some(note);
                 }
             }
@@ -3031,7 +3447,7 @@ impl RemoteKernelsServer {
         // accounts from allocation; this Instant is only operational uptime.
         let (summary, record) = {
             let mut state = self.state.lock().await;
-            let inst = same_generation(&mut state, name, external_id)?;
+            let inst = same_generation(&mut state, machine_id, external_id)?;
             inst.phase = Phase::Running;
             let record = inst.record();
             // Declared by the runtime that built the endpoint — never
@@ -3046,13 +3462,13 @@ impl RemoteKernelsServer {
                 }
             };
             let mut summary = format!(
-                "- ID: {name}\n- Label: {}\n- Provider ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Jupyter: {access}\n- Status: RUNNING",
+                "- ID: {machine_id}\n- Label: {}\n- Provider ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Jupyter: {access}\n- Status: RUNNING",
                 inst.label.as_deref().unwrap_or("none"),
                 inst.external_id,
                 inst.runtime,
                 inst.gpu_name,
                 inst.cost_per_hr
-                    + crate::state::load_lifecycle_record(&project_dir, name)
+                    + crate::state::load_lifecycle_record(&project_dir, machine_id)
                         .storage_rate_per_hr
                         .unwrap_or(0.0)
             );
@@ -3078,7 +3494,7 @@ impl RemoteKernelsServer {
         };
         {
             let state = self.state.lock().await;
-            if let Err(e) = state.save_record(name, &record) {
+            if let Err(e) = state.save_record(machine_id, &record) {
                 tracing::warn!("Failed to persist instance record: {e}");
             }
         }
@@ -3096,13 +3512,13 @@ impl RemoteKernelsServer {
     /// failures clean up the machine and surface via `status()`.
     fn spawn_background_finalize(
         &self,
-        name: &str,
+        machine_id: &str,
         external_id: &str,
         runtime_name: &str,
         mode: ConnectMode,
     ) {
         let server = self.clone();
-        let name = name.to_string();
+        let machine_id = machine_id.to_string();
         let external_id = external_id.to_string();
         let runtime_name = runtime_name.to_string();
         tokio::spawn(async move {
@@ -3115,16 +3531,20 @@ impl RemoteKernelsServer {
             // provision timeout either, hence the small cap.
             let mut hard_failures = 0;
             loop {
-                let error = match server.finalize_start(&name, &external_id, mode, None).await {
+                let error = match server
+                    .finalize_start(&machine_id, &external_id, mode, None)
+                    .await
+                {
                     Ok(_) => return,
                     Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
                         // Bounded patience: metered machines bill while
                         // provisioning and have no on-machine watchdog yet
                         // (it installs after SSH), so a host stuck "loading"
                         // must eventually be cut loose, not waited on forever.
-                        let Some(elapsed) = server.provisioning_overdue(&name, &external_id).await
+                        let Some(elapsed) =
+                            server.provisioning_overdue(&machine_id, &external_id).await
                         else {
-                            tracing::info!(instance = %name, "Still provisioning, continuing to wait...");
+                            tracing::info!(instance = %machine_id, "Still provisioning, continuing to wait...");
                             continue;
                         };
                         anyhow::anyhow!(
@@ -3136,7 +3556,7 @@ impl RemoteKernelsServer {
                     Err(e) => {
                         hard_failures += 1;
                         let overdue = server
-                            .provisioning_overdue(&name, &external_id)
+                            .provisioning_overdue(&machine_id, &external_id)
                             .await
                             .is_some();
                         if hard_failures < 3
@@ -3144,7 +3564,7 @@ impl RemoteKernelsServer {
                             && server.machine_exists(&external_id, &runtime_name).await
                         {
                             tracing::warn!(
-                                instance = %name, hard_failures,
+                                instance = %machine_id, hard_failures,
                                 "Background start hit an error but the machine still exists — retrying: {e}"
                             );
                             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
@@ -3153,13 +3573,13 @@ impl RemoteKernelsServer {
                         e
                     }
                 };
-                tracing::warn!(instance = %name, "Background start failed: {error}");
+                tracing::warn!(instance = %machine_id, "Background start failed: {error}");
                 // "user action required" errors mean the machine is fine
                 // (host-key trust, config drift): keep it and its record,
                 // surface via status(), and let the user decide.
                 if crate::runtime::error_requires_user_action(&error) {
                     server.start_failures.lock().await.push(format!(
-                        "Machine {name:?} needs attention (machine kept): {error:#}"
+                        "Machine {machine_id:?} needs attention (machine kept): {error:#}"
                     ));
                     return;
                 }
@@ -3167,9 +3587,9 @@ impl RemoteKernelsServer {
                     let mut state = server.state.lock().await;
                     if state
                         .instances
-                        .get(&name)
+                        .get(&machine_id)
                         .is_some_and(|instance| instance.external_id == external_id)
-                        && let Some(mut instance) = state.instances.remove(&name)
+                        && let Some(mut instance) = state.instances.remove(&machine_id)
                     {
                         instance.stop_heartbeat();
                     }
@@ -3180,7 +3600,7 @@ impl RemoteKernelsServer {
                         ""
                     };
                     server.start_failures.lock().await.push(format!(
-                        "Attach to machine {name} failed; machine and record kept.{billing} {error:#}"
+                        "Attach to machine {machine_id} failed; machine and record kept.{billing} {error:#}"
                     ));
                     return;
                 }
@@ -3189,14 +3609,14 @@ impl RemoteKernelsServer {
                 // backstop for hosts that bill without becoming usable.
                 // Computed before cleanup drops the in-memory instance.
                 let force = server
-                    .provisioning_overdue(&name, &external_id)
+                    .provisioning_overdue(&machine_id, &external_id)
                     .await
                     .is_some();
                 let outcome = server
-                    .cleanup_failed_start(&name, &external_id, &runtime_name, force)
+                    .cleanup_failed_start(&machine_id, &external_id, &runtime_name, force)
                     .await;
                 server.start_failures.lock().await.push(format!(
-                    "Machine {name:?} failed to start: {error} ({})",
+                    "Machine {machine_id:?} failed to start: {error} ({})",
                     outcome.describe()
                 ));
                 return;
@@ -3215,19 +3635,19 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// How long instance `name` (generation `external_id`) has been
+    /// How long instance `machine_id` (generation `external_id`) has been
     /// provisioning, if that exceeds its runtime's provision timeout.
     /// `None` = keep waiting (no timeout, not overdue, or state changed).
     async fn provisioning_overdue(
         &self,
-        name: &str,
+        machine_id: &str,
         external_id: &str,
     ) -> Option<std::time::Duration> {
         let (started_at, runtime_name) = {
             let state = self.state.lock().await;
             let inst = state
                 .instances
-                .get(name)
+                .get(machine_id)
                 .filter(|i| i.external_id == external_id)?;
             (inst.started_at, inst.runtime.clone())
         };
@@ -3250,7 +3670,7 @@ impl RemoteKernelsServer {
     /// backstop cutting loose a stuck host that bills without ever becoming
     /// usable.
     ///
-    /// Only touches state belonging to `external_id` — if the name was
+    /// Only touches state belonging to `external_id` — if the machine id was
     /// already reused for a new machine, that machine is left alone (but the
     /// failed machine is still cleaned up at the provider).
     ///
@@ -3260,26 +3680,32 @@ impl RemoteKernelsServer {
     #[allow(clippy::too_many_lines)]
     async fn cleanup_failed_start(
         &self,
-        name: &str,
+        machine_id: &str,
         external_id: &str,
         runtime_name: &str,
         force_terminate: bool,
     ) -> FailedStartCleanup {
-        tracing::warn!(instance = %name, external_id, "Cleaning up after failed start");
+        tracing::warn!(instance = %machine_id, external_id, "Cleaning up after failed start");
 
         let project_dir = self.state.lock().await.project_dir.clone();
-        let _operation_lock = match Self::acquire_operation_lock(&project_dir, name).await {
+        let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
             Ok(lock) => lock,
             Err(error) => {
                 tracing::warn!(
-                    instance = name,
+                    instance = machine_id,
                     "Could not lock failed-start cleanup: {error:?}"
                 );
                 return FailedStartCleanup::Unconfirmed;
             }
         };
-        if let Err(error) = self.verify_mutation_authority(name, external_id).await {
-            tracing::warn!(instance = name, "Failed-start cleanup suppressed: {error}");
+        if let Err(error) = self
+            .verify_mutation_authority(machine_id, external_id)
+            .await
+        {
+            tracing::warn!(
+                instance = machine_id,
+                "Failed-start cleanup suppressed: {error}"
+            );
             return FailedStartCleanup::Unconfirmed;
         }
 
@@ -3291,15 +3717,15 @@ impl RemoteKernelsServer {
             let mut record = None;
             if state
                 .instances
-                .get(name)
+                .get(machine_id)
                 .is_some_and(|i| i.external_id == external_id)
-                && let Some(mut inst) = state.instances.remove(name)
+                && let Some(mut inst) = state.instances.remove(machine_id)
             {
                 inst.stop_heartbeat();
                 record = Some(inst.record());
             }
             record.or_else(|| {
-                crate::state::load_instance_record(&state.project_dir, name)
+                crate::state::load_instance_record(&state.project_dir, machine_id)
                     .filter(|r| r.external_id == external_id)
             })
         };
@@ -3323,7 +3749,7 @@ impl RemoteKernelsServer {
                 Ok(()) => {
                     let state = self.state.lock().await;
                     if let Err(error) = state.append_ledger_event(
-                        name,
+                        machine_id,
                         crate::ledger::EventKind::Terminated,
                         None,
                         None,
@@ -3331,14 +3757,14 @@ impl RemoteKernelsServer {
                         None,
                     ) {
                         tracing::warn!(
-                            instance = name,
+                            instance = machine_id,
                             "Termination ledger update failed closed: {error}"
                         );
                         return FailedStartCleanup::Unconfirmed;
                     }
-                    if crate::state::load_instance_record(&state.project_dir, name)
+                    if crate::state::load_instance_record(&state.project_dir, machine_id)
                         .is_some_and(|r| r.external_id == external_id)
-                        && let Err(e) = state.clear_record(name)
+                        && let Err(e) = state.clear_record(machine_id)
                     {
                         tracing::warn!("Failed to clear instance record after failed start: {e}");
                     }
@@ -3352,7 +3778,7 @@ impl RemoteKernelsServer {
             Cleanup::Stop => match runtime.stop(external_id).await {
                 Ok(()) => {
                     if let Err(error) = self.state.lock().await.append_ledger_event(
-                        name,
+                        machine_id,
                         crate::ledger::EventKind::Stopped,
                         None,
                         None,
@@ -3360,12 +3786,17 @@ impl RemoteKernelsServer {
                         None,
                     ) {
                         tracing::warn!(
-                            instance = name,
+                            instance = machine_id,
                             "Stop ledger update failed closed: {error}"
                         );
                     }
-                    self.persist_failed_start_record(name, external_id, record, Phase::Stopped)
-                        .await;
+                    self.persist_failed_start_record(
+                        machine_id,
+                        external_id,
+                        record,
+                        Phase::Stopped,
+                    )
+                    .await;
                     FailedStartCleanup::Stopped
                 }
                 Err(e) => {
@@ -3374,7 +3805,7 @@ impl RemoteKernelsServer {
                 }
             },
             Cleanup::Disabled => {
-                self.persist_failed_start_record(name, external_id, record, Phase::Running)
+                self.persist_failed_start_record(machine_id, external_id, record, Phase::Running)
                     .await;
                 FailedStartCleanup::LeftRunning
             }
@@ -3382,10 +3813,10 @@ impl RemoteKernelsServer {
     }
 
     /// Persist the kept record of a failed-start machine with its new phase,
-    /// guarding against the name having been reused by a newer generation.
+    /// guarding against the machine id having been reused by a newer generation.
     async fn persist_failed_start_record(
         &self,
-        name: &str,
+        machine_id: &str,
         external_id: &str,
         record: Option<InstanceRecord>,
         phase: Phase,
@@ -3393,9 +3824,9 @@ impl RemoteKernelsServer {
         let Some(mut record) = record else { return };
         record.phase = phase;
         let state = self.state.lock().await;
-        if crate::state::load_instance_record(&state.project_dir, name)
+        if crate::state::load_instance_record(&state.project_dir, machine_id)
             .is_some_and(|r| r.external_id == external_id)
-            && let Err(e) = state.save_record(name, &record)
+            && let Err(e) = state.save_record(machine_id, &record)
         {
             tracing::warn!("Failed to save instance record after failed start: {e}");
         }
@@ -3424,7 +3855,7 @@ impl RemoteKernelsServer {
             .map_err(|error| {
                 McpError::internal_error(
                     format!(
-                        "Accounting failed closed: {error}. New spend is blocked until the ledger is repaired."
+                        "Spend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Starting or attaching machines is blocked so untracked spend cannot accumulate. Existing machines are unaffected — they are still billing, and stop() and terminate() still work. Do NOT delete the ledger files (they are the only record of spend); tell the user so they can inspect or repair the ledger."
                     ),
                     None,
                 )
@@ -3471,10 +3902,10 @@ impl RemoteKernelsServer {
     }
 
     /// Snapshot a live instance's cleanup coordinates under one lock.
-    async fn live_target(&self, name: &str) -> Option<CleanupTarget> {
+    async fn live_target(&self, machine_id: &str) -> Option<CleanupTarget> {
         let state = self.state.lock().await;
-        state.instances.get(name).map(|inst| CleanupTarget {
-            name: inst.name.clone(),
+        state.instances.get(machine_id).map(|inst| CleanupTarget {
+            machine_id: inst.machine_id.clone(),
             external_id: inst.external_id.clone(),
             runtime: inst.runtime.clone(),
         })
@@ -3506,16 +3937,22 @@ impl RemoteKernelsServer {
         let runtime = match self.runtime_for(&record.runtime).await {
             Ok(runtime) => runtime,
             Err(error) => {
-                return Some(format!(
-                    "Reconciliation {machine_id}: provider unavailable; preserved ({error})"
+                return Some(Self::lifecycle_check_incomplete(
+                    machine_id,
+                    &format!("could not reach the provider: {error}"),
+                    "untouched",
+                    "be billing",
                 ));
             }
         };
         let provider_state = match runtime.describe(&record.external_id).await {
             Ok(state) => state,
             Err(error) => {
-                return Some(format!(
-                    "Reconciliation {machine_id}: provider state unknown; preserved ({error})"
+                return Some(Self::lifecycle_check_incomplete(
+                    machine_id,
+                    &format!("the provider could not report its state: {error}"),
+                    "untouched",
+                    "be billing",
                 ));
             }
         };
@@ -3535,8 +3972,11 @@ impl RemoteKernelsServer {
         let runtime = match self.runtime_for(&record.runtime).await {
             Ok(runtime) => runtime,
             Err(error) => {
-                return Some(format!(
-                    "Reconciliation {machine_id}: provider unavailable; preserved ({error})"
+                return Some(Self::lifecycle_check_incomplete(
+                    machine_id,
+                    &format!("could not reach the provider: {error}"),
+                    "untouched",
+                    "be billing",
                 ));
             }
         };
@@ -3544,11 +3984,11 @@ impl RemoteKernelsServer {
         if provider_state == InstanceStatus::Gone {
             if let Err(error) = self.record_terminated_and_clear(machine_id).await {
                 return Some(format!(
-                    "Reconciliation {machine_id}: provider confirms gone; record cleanup failed ({error})"
+                    "Machine {machine_id}: confirmed deleted at the provider, but clearing its local record failed ({error}); it may keep appearing in status() until the record is cleared"
                 ));
             }
             return Some(format!(
-                "Reconciliation {machine_id}: provider confirms gone; record cleared"
+                "Machine {machine_id}: confirmed deleted at the provider; local record cleared"
             ));
         }
 
@@ -3569,7 +4009,7 @@ impl RemoteKernelsServer {
                 && let Err(error) = self.record_stopped(machine_id, None).await
             {
                 return Some(format!(
-                    "Reconciliation {machine_id}: provider is stopped, but accounting correction failed closed ({error})"
+                    "Machine {machine_id}: the provider shows it stopped, but recording that in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
                 ));
             }
         }
@@ -3581,8 +4021,11 @@ impl RemoteKernelsServer {
             {
                 Ok(lock) => lock,
                 Err(error) => {
-                    return Some(format!(
-                        "Reconciliation {machine_id}: retrieval recovery lock unavailable; preserved ({error:?})"
+                    return Some(Self::lifecycle_check_incomplete(
+                        machine_id,
+                        &format!("another operation holds this machine's lock: {error}"),
+                        "untouched",
+                        "be billing",
                     ));
                 }
             };
@@ -3590,15 +4033,18 @@ impl RemoteKernelsServer {
                 runtime.describe(&record.external_id).await,
                 Ok(InstanceStatus::Running)
             ) {
-                return Some(format!(
-                    "Reconciliation {machine_id}: provider moved during retrieval recovery; preserved"
+                return Some(Self::lifecycle_check_incomplete(
+                    machine_id,
+                    "its provider state changed mid-check",
+                    "untouched",
+                    "be billing",
                 ));
             }
             return match runtime.stop(&record.external_id).await {
                 Ok(()) => {
                     if let Err(error) = self.record_stopped(machine_id, None).await {
                         return Some(format!(
-                            "Reconciliation {machine_id}: re-stopped after interrupted retrieval, but accounting failed closed ({error})"
+                            "Machine {machine_id}: it was stopped again after an interrupted self-cleanup check, but recording the stop in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
                         ));
                     }
                     let mut stopped = record.clone();
@@ -3610,11 +4056,16 @@ impl RemoteKernelsServer {
                     let _ =
                         crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
                     Some(format!(
-                        "Reconciliation {machine_id}: re-stopped after interrupted outcome retrieval"
+                        "Machine {machine_id}: it was stopped again after an interrupted attempt to read its self-cleanup result; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
                     ))
                 }
-                Err(error) => Some(format!(
-                    "Reconciliation {machine_id}: interrupted retrieval may still be running; manual provider stop required ({error})"
+                Err(error) => Some(Self::action_needed(
+                    machine_id,
+                    &record.external_id,
+                    &format!(
+                        "an earlier attempt to read its self-cleanup result left it running, and stopping it again failed ({error})"
+                    ),
+                    "retry terminate",
                 )),
             };
         }
@@ -3625,8 +4076,11 @@ impl RemoteKernelsServer {
                 now_epoch().saturating_sub(started) > FINALIZE_OP_TIMEOUT_SECS
             })
         {
-            return Some(format!(
-                "Reconciliation {machine_id}: stale finalizing outcome unknown; verify at provider"
+            return Some(Self::action_needed(
+                machine_id,
+                &record.external_id,
+                "its automatic self-cleanup started but never reported a result within the expected time",
+                "retry terminate",
             ));
         }
 
@@ -3642,7 +4096,7 @@ impl RemoteKernelsServer {
         {
             if let Err(error) = self.record_stopped(machine_id, None).await {
                 return Some(format!(
-                    "Reconciliation {machine_id}: provider confirmed stop, but accounting failed closed ({error})"
+                    "Machine {machine_id}: the provider confirms it stopped, but recording the stop in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
                 ));
             }
             let mut stopped = record.clone();
@@ -3652,7 +4106,7 @@ impl RemoteKernelsServer {
             lifecycle.outcome_unknown = false;
             let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
             return Some(format!(
-                "Reconciliation {machine_id}: provider confirmed stop; completed prior ambiguous stop"
+                "Machine {machine_id}: the provider confirms it stopped, completing an earlier stop whose result was unclear; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
             ));
         }
 
@@ -3665,21 +4119,30 @@ impl RemoteKernelsServer {
             lifecycle.action = Some(record.cleanup);
         }
         if lifecycle.finalize_phase == Some(crate::state::FinalizePhase::RetrievalUnavailable) {
-            return Some(format!(
-                "Reconciliation {machine_id}: stopped; outcome retrieval previously failed; preserved"
+            return Some(Self::lifecycle_check_incomplete(
+                machine_id,
+                "an earlier attempt to read its self-cleanup result failed",
+                "stopped and untouched",
+                "bill for storage",
             ));
         }
         if lifecycle.wants_terminate {
-            return Some(format!(
-                "Reconciliation {machine_id}: marker-confirmed terminate remains pending; preserved after an ambiguous provider outcome"
+            return Some(Self::lifecycle_check_incomplete(
+                machine_id,
+                "it committed to terminating itself, but the provider outcome was ambiguous, so the terminate is still pending",
+                "untouched",
+                "be billing",
             ));
         }
 
         let context = match connection_context_for_record(&project_dir, machine_id, &record) {
             Ok(context) => context,
             Err(error) => {
-                return Some(format!(
-                    "Reconciliation {machine_id}: stopped; outcome retrieval unavailable; preserved ({error})"
+                return Some(Self::lifecycle_check_incomplete(
+                    machine_id,
+                    &format!("could not connect to read its self-cleanup result: {error}"),
+                    "stopped and untouched",
+                    "bill for storage",
                 ));
             }
         };
@@ -3693,16 +4156,22 @@ impl RemoteKernelsServer {
         }
 
         if record.runtime != "runpod" || lifecycle.action != Some(Cleanup::Terminate) {
-            return Some(format!(
-                "Reconciliation {machine_id}: stopped; outcome retrieval unavailable; preserved"
+            return Some(Self::lifecycle_check_incomplete(
+                machine_id,
+                "could not connect to read its self-cleanup result",
+                "stopped and untouched",
+                "bill for storage",
             ));
         }
 
         let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
             Ok(lock) => lock,
             Err(error) => {
-                return Some(format!(
-                    "Reconciliation {machine_id}: retrieval lock unavailable; preserved ({error:?})"
+                return Some(Self::lifecycle_check_incomplete(
+                    machine_id,
+                    &format!("another operation holds this machine's lock: {error}"),
+                    "untouched",
+                    "bill for storage",
                 ));
             }
         };
@@ -3710,16 +4179,22 @@ impl RemoteKernelsServer {
             runtime.describe(&record.external_id).await,
             Ok(InstanceStatus::Stopped)
         ) {
-            return Some(format!(
-                "Reconciliation {machine_id}: provider moved before retrieval; preserved"
+            return Some(Self::lifecycle_check_incomplete(
+                machine_id,
+                "its provider state changed before its self-cleanup result could be read",
+                "untouched",
+                "be billing",
             ));
         }
         lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievingOutcome);
         if let Err(error) =
             crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle)
         {
-            return Some(format!(
-                "Reconciliation {machine_id}: could not persist retrieval phase; preserved ({error})"
+            return Some(Self::lifecycle_check_incomplete(
+                machine_id,
+                &format!("could not save local progress state: {error}"),
+                "untouched",
+                "bill for storage",
             ));
         }
         if let Err(error) = self
@@ -3733,8 +4208,11 @@ impl RemoteKernelsServer {
             lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
             lifecycle.outcome_unknown = true;
             let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
-            return Some(format!(
-                "Reconciliation {machine_id}: resume-to-read failed; preserved stopped ({error})"
+            return Some(Self::lifecycle_check_incomplete(
+                machine_id,
+                &format!("briefly resuming it to read its self-cleanup result failed: {error}"),
+                "stopped and untouched",
+                "bill for storage",
             ));
         }
         self.state.lock().await.reset_known_hosts(machine_id);
@@ -3764,7 +4242,7 @@ impl RemoteKernelsServer {
                     let _ =
                         crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
                     return Some(format!(
-                        "Reconciliation {machine_id}: marker import failed; re-stopped for preservation ({error})"
+                        "Machine {machine_id}: its self-cleanup result could not be recorded locally ({error}); it was stopped again to preserve its data and may still bill for storage; this retries automatically on the next status() or attach()"
                     ));
                 }
                 if let Err(error) = runtime.terminate(&record.external_id).await {
@@ -3776,18 +4254,23 @@ impl RemoteKernelsServer {
                     lifecycle.outcome_unknown = true;
                     let _ =
                         crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
-                    return Some(format!(
-                        "Reconciliation {machine_id}: terminate outcome unknown; {} ({error})",
-                        if restop.is_ok() {
-                            "re-stopped for preservation"
-                        } else {
-                            "manual provider verification required"
-                        }
+                    return Some(Self::action_needed(
+                        machine_id,
+                        &record.external_id,
+                        &format!(
+                            "terminating it failed ({error}); {}",
+                            if restop.is_ok() {
+                                "it was stopped again as a fallback, so its data is preserved, but storage may still bill"
+                            } else {
+                                "stopping it as a fallback also failed"
+                            }
+                        ),
+                        "retry terminate",
                     ));
                 }
                 let _ = self.record_terminated_and_clear(machine_id).await;
                 Some(format!(
-                    "Reconciliation {machine_id}: finalize marker authorized terminate; terminated"
+                    "Machine {machine_id}: its pending self-cleanup finished — it is now terminated (data deleted) and the cost is recorded"
                 ))
             }
             Ok(marker) => {
@@ -3801,14 +4284,18 @@ impl RemoteKernelsServer {
                 lifecycle.wants_terminate = false;
                 lifecycle.outcome_unknown = false;
                 let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
-                Some(format!(
-                    "Reconciliation {machine_id}: finalize did not authorize terminate; {}",
-                    if restop.is_ok() {
-                        "re-stopped for preservation"
-                    } else {
-                        "manual provider stop required"
-                    }
-                ))
+                Some(if restop.is_ok() {
+                    format!(
+                        "Machine {machine_id}: its self-cleanup chose to stop (preserve data) rather than terminate; it is stopped — its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
+                    )
+                } else {
+                    Self::action_needed(
+                        machine_id,
+                        &record.external_id,
+                        "its self-cleanup chose to stop rather than terminate, but stopping it again failed",
+                        "call stop",
+                    )
+                })
             }
             Err(error) => {
                 let restop = runtime.stop(&record.external_id).await;
@@ -3818,13 +4305,18 @@ impl RemoteKernelsServer {
                 lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
                 lifecycle.outcome_unknown = true;
                 let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
-                Some(format!(
-                    "Reconciliation {machine_id}: outcome unreadable; {} ({error})",
-                    if restop.is_ok() {
-                        "re-stopped for preservation"
-                    } else {
-                        "manual provider stop required"
-                    }
+                Some(Self::action_needed(
+                    machine_id,
+                    &record.external_id,
+                    &format!(
+                        "its self-cleanup result could not be read ({error}); {}",
+                        if restop.is_ok() {
+                            "it was stopped again as a fallback, so its data is preserved, but storage may still bill"
+                        } else {
+                            "stopping it as a fallback also failed"
+                        }
+                    ),
+                    "retry terminate",
                 ))
             }
         }
@@ -3841,8 +4333,11 @@ impl RemoteKernelsServer {
         let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
             Ok(lock) => lock,
             Err(error) => {
-                return format!(
-                    "Reconciliation {machine_id}: marker read; operation lock unavailable; preserved ({error:?})"
+                return Self::lifecycle_check_incomplete(
+                    machine_id,
+                    &format!("another operation holds this machine's lock: {error}"),
+                    "untouched",
+                    "bill for storage",
                 );
             }
         };
@@ -3850,15 +4345,21 @@ impl RemoteKernelsServer {
             runtime.describe(&record.external_id).await,
             Ok(InstanceStatus::Stopped)
         ) {
-            return format!(
-                "Reconciliation {machine_id}: provider moved after marker read; preserved"
+            return Self::lifecycle_check_incomplete(
+                machine_id,
+                "its provider state changed after its self-cleanup result was read",
+                "untouched",
+                "be billing",
             );
         }
         if let Err(error) =
             crate::state::import_pending_transition(&project_dir, machine_id, &marker)
         {
-            return format!(
-                "Reconciliation {machine_id}: transition import failed; preserved ({error})"
+            return Self::lifecycle_check_incomplete(
+                machine_id,
+                &format!("its self-cleanup result could not be recorded locally: {error}"),
+                "untouched",
+                "bill for storage",
             );
         }
         if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 {
@@ -3872,11 +4373,14 @@ impl RemoteKernelsServer {
                 Ok(()) => {
                     let _ = self.record_terminated_and_clear(machine_id).await;
                     format!(
-                        "Reconciliation {machine_id}: finalize marker authorized terminate; terminated"
+                        "Machine {machine_id}: its pending self-cleanup finished — it is now terminated (data deleted) and the cost is recorded"
                     )
                 }
-                Err(error) => format!(
-                    "Reconciliation {machine_id}: terminate outcome unknown; verify at provider ({error})"
+                Err(error) => Self::action_needed(
+                    machine_id,
+                    &record.external_id,
+                    &format!("terminating it failed ({error})"),
+                    "retry terminate",
                 ),
             };
         }
@@ -3890,7 +4394,9 @@ impl RemoteKernelsServer {
         lifecycle.wants_terminate = false;
         lifecycle.outcome_unknown = false;
         let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
-        format!("Reconciliation {machine_id}: stopped outcome imported; data preserved")
+        format!(
+            "Machine {machine_id}: it was stopped while disconnected; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
+        )
     }
 
     #[allow(clippy::too_many_lines)] // ordered pre-op, fencing, provider classification, bookkeeping
@@ -3910,7 +4416,7 @@ impl RemoteKernelsServer {
             let state = self.state.lock().await;
             state
                 .instances
-                .get(&target.name)
+                .get(&target.machine_id)
                 .map_or((None, None, false), |instance| {
                     (
                         instance.connection.clone(),
@@ -3929,10 +4435,10 @@ impl RemoteKernelsServer {
         // long finalize command. Authority is proved again immediately before
         // enter-finalizing/provider mutation.
         {
-            let _authority_lock = Self::acquire_operation_lock(&project_dir, &target.name)
+            let _authority_lock = Self::acquire_operation_lock(&project_dir, &target.machine_id)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-            self.verify_mutation_authority(&target.name, &target.external_id)
+            self.verify_mutation_authority(&target.machine_id, &target.external_id)
                 .await?;
         }
         if !skip_finalize
@@ -3950,16 +4456,16 @@ impl RemoteKernelsServer {
                 )
                 .await
         {
-            tracing::warn!(instance = %target.name, "Finalize command failed: {error}");
+            tracing::warn!(instance = %target.machine_id, "Finalize command failed: {error}");
             if requested == CleanupAction::Terminate {
                 actual = CleanupAction::Stop;
             }
         }
 
-        let _operation_lock = Self::acquire_operation_lock(&project_dir, &target.name)
+        let _operation_lock = Self::acquire_operation_lock(&project_dir, &target.machine_id)
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        self.verify_mutation_authority(&target.name, &target.external_id)
+        self.verify_mutation_authority(&target.machine_id, &target.external_id)
             .await?;
 
         let op_id = uuid::Uuid::new_v4().to_string();
@@ -3979,7 +4485,7 @@ impl RemoteKernelsServer {
             .await?;
         }
 
-        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &target.name);
+        let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &target.machine_id);
         lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
         lifecycle.op_id = Some(op_id.clone());
         lifecycle.action = Some(match actual {
@@ -3994,7 +4500,7 @@ impl RemoteKernelsServer {
         );
         lifecycle.outcome_unknown = false;
         lifecycle.wants_terminate = false;
-        crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+        crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
 
         let provider_result = match actual {
             CleanupAction::Stop => runtime.stop(&target.external_id).await,
@@ -4012,12 +4518,18 @@ impl RemoteKernelsServer {
                 lifecycle.finalize_phase = None;
                 lifecycle.op_id = None;
                 lifecycle.action = None;
-                crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+                crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
                 anyhow::bail!("provider rejected {}: {error}", actual.verb());
             }
             lifecycle.outcome_unknown = true;
-            crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
-            if let Some(instance) = self.state.lock().await.instances.get_mut(&target.name) {
+            crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
+            if let Some(instance) = self
+                .state
+                .lock()
+                .await
+                .instances
+                .get_mut(&target.machine_id)
+            {
                 instance.fence(FenceReason::Finalizing);
             }
             anyhow::bail!(
@@ -4031,7 +4543,7 @@ impl RemoteKernelsServer {
         if actual == CleanupAction::Stop {
             lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
             lifecycle.outcome_unknown = false;
-            crate::state::save_lifecycle_record(&project_dir, &target.name, &lifecycle)?;
+            crate::state::save_lifecycle_record(&project_dir, &target.machine_id, &lifecycle)?;
         }
         Ok(actual)
     }
@@ -4045,10 +4557,10 @@ impl RemoteKernelsServer {
         let mut state = self.state.lock().await;
         let is_current_generation = state
             .instances
-            .get(&target.name)
+            .get(&target.machine_id)
             .is_some_and(|instance| instance.external_id == target.external_id);
         state.append_ledger_event(
-            &target.name,
+            &target.machine_id,
             if action == CleanupAction::Stop {
                 crate::ledger::EventKind::Stopped
             } else {
@@ -4059,18 +4571,20 @@ impl RemoteKernelsServer {
             None,
             None,
         )?;
-        if is_current_generation && let Some(mut instance) = state.instances.remove(&target.name) {
+        if is_current_generation
+            && let Some(mut instance) = state.instances.remove(&target.machine_id)
+        {
             instance.stop_heartbeat();
             if action == CleanupAction::Stop {
                 instance.phase = Phase::Stopped;
-                state.save_record(&target.name, &instance.record())?;
+                state.save_record(&target.machine_id, &instance.record())?;
             }
         }
         if action == CleanupAction::Terminate
-            && crate::state::load_instance_record(&state.project_dir, &target.name)
+            && crate::state::load_instance_record(&state.project_dir, &target.machine_id)
                 .is_some_and(|record| record.external_id == target.external_id)
         {
-            state.clear_record(&target.name)?;
+            state.clear_record(&target.machine_id)?;
         }
         Ok(())
     }
@@ -4147,7 +4661,7 @@ impl RemoteKernelsServer {
                 crate::runtime::AnyRuntime::static_capabilities(&target.runtime, &self.config)
                     .is_none_or(|caps| caps.metered);
             if cost_per_hr <= 0.0 && !runtime_metered {
-                tracing::info!(instance = %target.name, runtime = %target.runtime, "Unmetered machine left alone on budget exhaustion");
+                tracing::info!(instance = %target.machine_id, runtime = %target.runtime, "Unmetered machine left alone on budget exhaustion");
                 continue;
             }
             // Budget + Disabled on metered runtimes is rejected at startup;
@@ -4158,10 +4672,10 @@ impl RemoteKernelsServer {
                 Cleanup::Terminate | Cleanup::Disabled => CleanupAction::Terminate,
             };
             match self.explicit_cleanup_instance(&target, action, false).await {
-                Ok(actual) => actions.push(format!("{}: {}", target.name, actual.past_tense())),
+                Ok(actual) => actions.push(format!("{}: {}", target.machine_id, actual.past_tense())),
                 Err(e) => actions.push(format!(
                     "{}: attempted to {} but failed: {e} — it is still tracked; retry or check the provider dashboard",
-                    target.name,
+                    target.machine_id,
                     action.verb()
                 )),
             }
@@ -4184,12 +4698,13 @@ impl RemoteKernelsServer {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        for name in names {
+        for machine_id in names {
             let project_dir = self.state.lock().await.project_dir.clone();
-            let operation_lock = match Self::acquire_operation_lock(&project_dir, &name).await {
+            let operation_lock = match Self::acquire_operation_lock(&project_dir, &machine_id).await
+            {
                 Ok(lock) => Some(lock),
                 Err(error) => {
-                    tracing::warn!(instance = %name, "Disconnect arm lock unavailable; preserving: {error:?}");
+                    tracing::warn!(instance = %machine_id, "Disconnect arm lock unavailable; preserving: {error:?}");
                     None
                 }
             };
@@ -4197,18 +4712,18 @@ impl RemoteKernelsServer {
                 let mut state = self.state.lock().await;
                 if state
                     .instances
-                    .get(&name)
+                    .get(&machine_id)
                     .is_some_and(|instance| instance.fenced.is_some())
                 {
-                    if let Some(instance) = state.instances.get_mut(&name)
+                    if let Some(instance) = state.instances.get_mut(&machine_id)
                         && let Some(heartbeat) = instance.heartbeat.take()
                     {
                         heartbeat.stop();
                     }
-                    tracing::info!(instance = %name, "Fenced disconnect discarded local state without touching durable records");
+                    tracing::info!(instance = %machine_id, "Fenced disconnect discarded local state without touching durable records");
                     continue;
                 }
-                let Some(mut instance) = state.instances.remove(&name) else {
+                let Some(mut instance) = state.instances.remove(&machine_id) else {
                     continue;
                 };
                 instance.stop_heartbeat();
@@ -4221,17 +4736,17 @@ impl RemoteKernelsServer {
                     instance.supervision_note.is_none(),
                     record.clone(),
                 );
-                if let Err(error) = state.save_record(&name, &record) {
-                    tracing::warn!(instance = %name, "Could not preserve disconnect record: {error}");
+                if let Err(error) = state.save_record(&machine_id, &record) {
+                    tracing::warn!(instance = %machine_id, "Could not preserve disconnect record: {error}");
                 }
                 values
             };
             if operation_lock.is_none() || !supervised || cleanup == Cleanup::Disabled {
-                tracing::info!(instance = %name, "Disconnect preserved machine without remote arm");
+                tracing::info!(instance = %machine_id, "Disconnect preserved machine without remote arm");
                 continue;
             }
             let (Some(connection), Some(generation)) = (connection, generation) else {
-                tracing::info!(instance = %name, "Disconnect preserved machine; no lease transport");
+                tracing::info!(instance = %machine_id, "Disconnect preserved machine; no lease transport");
                 continue;
             };
             let deadline = self
@@ -4246,7 +4761,8 @@ impl RemoteKernelsServer {
                 });
             match crate::machine_scripts::arm_disconnect(&connection, generation, deadline).await {
                 Ok(()) => {
-                    let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, &name);
+                    let mut lifecycle =
+                        crate::state::load_lifecycle_record(&project_dir, &machine_id);
                     lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Armed);
                     lifecycle.action = Some(cleanup);
                     lifecycle.wants_terminate = false;
@@ -4258,14 +4774,14 @@ impl RemoteKernelsServer {
                             .as_secs(),
                     );
                     if let Err(error) =
-                        crate::state::save_lifecycle_record(&project_dir, &name, &lifecycle)
+                        crate::state::save_lifecycle_record(&project_dir, &machine_id, &lifecycle)
                     {
-                        tracing::warn!(instance = %name, "Disconnect arm was remote-only: {error}");
+                        tracing::warn!(instance = %machine_id, "Disconnect arm was remote-only: {error}");
                     }
-                    tracing::info!(instance = %name, "Disconnect armed machine-side finalization");
+                    tracing::info!(instance = %machine_id, "Disconnect armed machine-side finalization");
                 }
                 Err(error) => {
-                    tracing::warn!(instance = %name, "Disconnect arm failed; machine preserved: {error}");
+                    tracing::warn!(instance = %machine_id, "Disconnect arm failed; machine preserved: {error}");
                 }
             }
         }
@@ -4282,7 +4798,7 @@ impl RemoteKernelsServer {
             .map(|i| {
                 (
                     CleanupTarget {
-                        name: i.name.clone(),
+                        machine_id: i.machine_id.clone(),
                         external_id: i.external_id.clone(),
                         runtime: i.runtime.clone(),
                     },
@@ -4301,12 +4817,12 @@ impl RemoteKernelsServer {
         output: &crate::jupyter::messages::ExecutionOutput,
     ) {
         let mut state = self.state.lock().await;
-        let Some(name) = state.instance_for_kernel(kernel_id).map(String::from) else {
+        let Some(machine_id) = state.instance_for_kernel(kernel_id).map(String::from) else {
             return;
         };
         if let Some(inst) = state
             .instances
-            .get_mut(&name)
+            .get_mut(&machine_id)
             .filter(|instance| instance.fenced.is_none())
             && let Some(nb) = inst.notebooks.get_mut(kernel_id)
             && let Err(e) = nb.update_cell_output(cell_number, output)
@@ -4740,7 +5256,11 @@ mod tests {
             RemoteKernelsServer::output_recorder_command(&connection, "kernel-1", "secret-token")
                 .unwrap();
         assert!(!command.contains("--token"), "{command}");
-        assert!(command.contains("REMOTE_KERNELS_JUPYTER_TOKEN='secret-token'"));
+        // shlex leaves shell-safe tokens unquoted; unusual tokens get quoted.
+        assert!(
+            command.contains("REMOTE_KERNELS_JUPYTER_TOKEN=secret-token"),
+            "{command}"
+        );
     }
 
     #[test]
@@ -4880,6 +5400,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_rejects_wait_forever_with_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let config: Config = toml::from_str("").unwrap();
+        let server = RemoteKernelsServer::new(config, state, None);
+        let result = server
+            .execute(Parameters(super::ExecuteParams {
+                kernel_id: "any-kernel".to_string(),
+                code: "1 + 1".to_string(),
+                timeout: Some(60),
+                wait_forever: Some(true),
+                queue: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert_eq!(result.is_error, Some(true));
+        assert!(text.contains("mutually exclusive"), "{text}");
+    }
+
+    #[tokio::test]
     async fn fenced_and_restarted_kernel_errors_use_shared_guidance() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
@@ -4916,13 +5457,13 @@ mod tests {
                 kernel_id: "kernel-1".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
-                wait: None,
+                wait_forever: None,
                 queue: None,
             }))
             .await
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
-        assert!(text.contains("another session took over"), "{text}");
+        assert!(text.contains("another session took control"), "{text}");
         assert!(
             text.contains(&machine_id) && text.contains("worker"),
             "{text}"
@@ -4933,13 +5474,13 @@ mod tests {
                 kernel_id: "missing-while-live".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
-                wait: None,
+                wait_forever: None,
                 queue: None,
             }))
             .await
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
-        assert!(!text.contains("server restarted"), "{text}");
+        assert!(!text.contains("server process restarted"), "{text}");
         assert!(text.contains("Durable machines"), "{text}");
 
         server.state.lock().await.instances.clear();
@@ -4948,13 +5489,13 @@ mod tests {
                 kernel_id: "missing-kernel".to_string(),
                 code: "1 + 1".to_string(),
                 timeout: None,
-                wait: None,
+                wait_forever: None,
                 queue: None,
             }))
             .await
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
-        assert!(text.contains("server restarted"), "{text}");
+        assert!(text.contains("server process restarted"), "{text}");
         assert!(
             text.contains(&machine_id) && text.contains("Use attach"),
             "{text}"
@@ -4996,7 +5537,7 @@ mod fencing_tests {
             .await
             .unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("Accounting failed closed"), "{message}");
+        assert!(message.contains("Spend tracking is broken"), "{message}");
         assert!(crate::state::list_instance_records(dir.path()).is_empty());
     }
     use crate::runtime::AnyConnection;
@@ -5103,7 +5644,7 @@ mod fencing_tests {
             .await
             .unwrap();
         assert!(stop.is_error.unwrap_or(false));
-        assert!(result_text(&stop).contains("another session took over"));
+        assert!(result_text(&stop).contains("another session took control"));
         let terminate = server
             .terminate(Parameters(InstanceParams {
                 instance: Some(machine_id.clone()),
@@ -5112,7 +5653,7 @@ mod fencing_tests {
             .await
             .unwrap();
         assert!(terminate.is_error.unwrap_or(false));
-        assert!(result_text(&terminate).contains("another session took over"));
+        assert!(result_text(&terminate).contains("another session took control"));
 
         server.shutdown_cleanup().await;
         assert!(
@@ -5190,7 +5731,7 @@ mod fencing_tests {
             instance
                 .supervision_note
                 .as_deref()
-                .is_some_and(|note| note.contains("flock unavailable"))
+                .is_some_and(|note| note.contains("lacks the flock utility"))
         );
         drop(state);
         assert!(server.all_live_targets().await.is_empty());

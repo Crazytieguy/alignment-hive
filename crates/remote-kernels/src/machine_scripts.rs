@@ -52,7 +52,7 @@ pub struct LeaseState {
 pub enum LeaseError {
     #[error("another session took over the machine")]
     Fenced,
-    #[error("machine is finalizing; outcome/status must be resolved before attach")]
+    #[error("machine is running its automatic cleanup; wait and call status()")]
     Finalizing,
     #[error("on-machine supervision unavailable: flock is required")]
     NoFlock,
@@ -211,9 +211,10 @@ fn cleanup_name(cleanup: crate::config::Cleanup) -> &'static str {
 /// the NUL-byte failure `shlex` guards against cannot occur; fall back to the
 /// input's POSIX single-quote wrap in that impossible case rather than panic.
 pub fn shell_quote(value: &str) -> String {
-    shlex::try_quote(value)
-        .map(std::borrow::Cow::into_owned)
-        .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "'\"'\"'")))
+    shlex::try_quote(value).map_or_else(
+        |_| format!("'{}'", value.replace('\'', "'\"'\"'")),
+        std::borrow::Cow::into_owned,
+    )
 }
 
 async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseError> {

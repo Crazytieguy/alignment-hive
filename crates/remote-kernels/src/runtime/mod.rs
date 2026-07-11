@@ -185,8 +185,8 @@ pub fn validate_config_with_budget_source(
 /// Request to provision a new machine.
 #[derive(Debug)]
 pub struct ProvisionRequest {
-    /// Instance name (used for provider-side labels).
-    pub name: String,
+    /// Machine id (used for provider-side labels).
+    pub machine_id: String,
     /// Override the configured GPU type list with a single type.
     pub gpu_type: Option<String>,
     /// Override the configured image.

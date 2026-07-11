@@ -102,7 +102,7 @@ async fn execute(server: &RemoteKernelsServer, kernel_id: &str, code: &str) -> (
             kernel_id: kernel_id.to_string(),
             code: code.to_string(),
             timeout: Some(60),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -202,7 +202,7 @@ async fn full_lifecycle_on_fake_runtime() {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(1); 'slow done'".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -262,7 +262,7 @@ async fn wait_returns_multi_second_execution_result() {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(2); 'wait complete'".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -271,7 +271,7 @@ async fn wait_returns_multi_second_execution_result() {
 
     let result = server
         .wait(Parameters(remote_kernels::server::WaitParams {
-            kernel_id: kernel_id.clone(),
+            kernel_id: Some(kernel_id.clone()),
             timeout: None,
         }))
         .await
@@ -284,8 +284,8 @@ async fn wait_returns_multi_second_execution_result() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(2); 'execute wait complete'".to_string(),
-            timeout: Some(1),
-            wait: Some(true),
+            timeout: None,
+            wait_forever: Some(true),
             queue: None,
         }))
         .await
@@ -299,7 +299,7 @@ async fn wait_returns_multi_second_execution_result() {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(1); 'older pending result'".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -314,8 +314,8 @@ async fn wait_returns_multi_second_execution_result() {
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: kernel_id.clone(),
             code: "'new directly-held result'".to_string(),
-            timeout: Some(1),
-            wait: Some(true),
+            timeout: None,
+            wait_forever: Some(true),
             queue: Some(true),
         }))
         .await
@@ -326,7 +326,7 @@ async fn wait_returns_multi_second_execution_result() {
     assert!(!text.contains("older pending result"), "{text}");
     let older = server
         .get_output(Parameters(remote_kernels::server::GetOutputParams {
-            kernel_id,
+            kernel_id: kernel_id.clone(),
             cell_number: older_cell,
             wait: Some(true),
             timeout: Some(30),
@@ -334,6 +334,57 @@ async fn wait_returns_multi_second_execution_result() {
         .await
         .unwrap();
     assert!(text_of(&older).contains("older pending result"));
+
+    // wait() with no kernel_id collects every pending execution, across
+    // kernels, with per-cell labels.
+    let second_kernel = create_kernel(&server, Some(&machine_id)).await;
+    for (kernel, code) in [
+        (
+            &kernel_id,
+            "import time; time.sleep(1); 'first kernel all-wait'",
+        ),
+        (&second_kernel, "'second kernel all-wait'"),
+    ] {
+        let started = server
+            .execute(Parameters(remote_kernels::server::ExecuteParams {
+                kernel_id: kernel.clone(),
+                code: code.to_string(),
+                timeout: Some(0),
+                wait_forever: None,
+                queue: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_error(&started), "{}", text_of(&started));
+    }
+    let all = server
+        .wait(Parameters(remote_kernels::server::WaitParams {
+            kernel_id: None,
+            timeout: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&all);
+    assert!(!is_error(&all), "{text}");
+    assert!(text.contains("first kernel all-wait"), "{text}");
+    assert!(text.contains("second kernel all-wait"), "{text}");
+    assert!(
+        text.contains(&format!("[kernel {kernel_id} cell")),
+        "{text}"
+    );
+    let none_left = server
+        .wait(Parameters(remote_kernels::server::WaitParams {
+            kernel_id: None,
+            timeout: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_error(&none_left), "{}", text_of(&none_left));
+    assert!(
+        text_of(&none_left).contains("No pending executions"),
+        "{}",
+        text_of(&none_left)
+    );
     terminate(&server, Some(&machine_id)).await;
 }
 
@@ -350,7 +401,7 @@ async fn wait_timeout_preserves_result_for_get_output() {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(2); 'collected later'".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -365,7 +416,7 @@ async fn wait_timeout_preserves_result_for_get_output() {
 
     let timed_out = server
         .wait(Parameters(remote_kernels::server::WaitParams {
-            kernel_id: kernel_id.clone(),
+            kernel_id: Some(kernel_id.clone()),
             timeout: Some(1),
         }))
         .await
@@ -399,7 +450,7 @@ async fn fence_during_wait_returns_promptly_and_execution_continues() {
             kernel_id: kernel_id.clone(),
             code: "import time; time.sleep(10); 'survived takeover'".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -412,7 +463,7 @@ async fn fence_during_wait_returns_promptly_and_execution_continues() {
         tokio::spawn(async move {
             server
                 .wait(Parameters(remote_kernels::server::WaitParams {
-                    kernel_id,
+                    kernel_id: Some(kernel_id),
                     timeout: None,
                 }))
                 .await
@@ -447,7 +498,7 @@ async fn fence_during_wait_returns_promptly_and_execution_continues() {
         .unwrap();
     let text = text_of(&result);
     assert!(is_error(&result), "{text}");
-    assert!(text.contains("another session took over"), "{text}");
+    assert!(text.contains("another session took control"), "{text}");
     assert!(
         text.contains("execution continues on the machine"),
         "{text}"
@@ -525,7 +576,7 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
             kernel_id: old_kernel.clone(),
             code: "import time; time.sleep(0.5); print('recovered-output')".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -551,7 +602,10 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
     let text = text_of(&result);
     assert!(!is_error(&result), "{text}");
     assert!(text.contains(&format!("Kernel {old_kernel}:")), "{text}");
-    assert!(text.contains("catch-up=1"), "{text}");
+    assert!(
+        text.contains("1 output(s) produced while disconnected"),
+        "{text}"
+    );
 
     let recovered = second
         .get_output(Parameters(remote_kernels::server::GetOutputParams {
@@ -756,7 +810,7 @@ async fn no_flock_start_degrades_but_keeps_machine_usable() {
     let (machine_id, text) = start_machine(&server, Some("no-flock")).await;
     unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_NO_FLOCK") };
 
-    assert!(text.contains("flock unavailable"), "{text}");
+    assert!(text.contains("lacks the flock utility"), "{text}");
     let kernel_id = create_kernel(&server, Some(&machine_id)).await;
     let (error, output) = execute(&server, &kernel_id, "6 * 7").await;
     assert!(!error, "{output}");
@@ -804,7 +858,7 @@ async fn disconnect_with_busy_kernel_leaves_machine_and_record() {
             kernel_id,
             code: "import time; time.sleep(30)".to_string(),
             timeout: Some(0),
-            wait: None,
+            wait_forever: None,
             queue: None,
         }))
         .await
@@ -1016,7 +1070,7 @@ async fn ambiguous_stop_refuses_attach_until_provider_state_converges() {
         .await
         .unwrap();
     assert!(is_error(&refused), "{}", text_of(&refused));
-    assert!(text_of(&refused).contains("attach refused"));
+    assert!(text_of(&refused).contains("self-cleanup whose outcome isn't known"));
 
     let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
     runtime.stop(&record.external_id).await.unwrap();
@@ -1027,7 +1081,7 @@ async fn ambiguous_stop_refuses_attach_until_provider_state_converges() {
         .await
         .unwrap();
     assert!(
-        text_of(&status).contains("provider confirmed stop"),
+        text_of(&status).contains("the provider confirms it stopped"),
         "{}",
         text_of(&status)
     );
@@ -1091,7 +1145,7 @@ async fn reconciliation_completes_server_death_terminate_marker_under_oplock() {
     let fresh = server_in(dir.path(), None);
     let messages = fresh.reconcile().await.join("\n");
     assert!(
-        messages.contains("authorized terminate; terminated"),
+        messages.contains("now terminated (data deleted)"),
         "{messages}"
     );
     assert!(remote_kernels::state::load_instance_record(dir.path(), &machine_id).is_none());
@@ -1133,7 +1187,7 @@ async fn unsupervisable_budget_fails_start_and_waiver_is_toml_only() {
     let (toml_dir, toml_server) = run(remote_kernels::config::BudgetSource::Toml, true);
     let (machine_id, text) = start_machine(&toml_server, Some("toml-waiver")).await;
     unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_NO_FLOCK") };
-    assert!(text.contains("budget not enforceable"), "{text}");
+    assert!(text.contains("budget also cannot be enforced"), "{text}");
     let record = remote_kernels::state::load_instance_record(toml_dir.path(), &machine_id).unwrap();
     remote_kernels::runtime::fake::FakeRuntime::new(toml_dir.path())
         .terminate(&record.external_id)

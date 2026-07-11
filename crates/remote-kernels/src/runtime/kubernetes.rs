@@ -98,7 +98,7 @@ impl KubernetesRuntime {
         let mut pod: Pod = serde_yaml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid pod template YAML: {e}"))?;
 
-        let pod_name = pod_name(&self.name_prefix, &req.name);
+        let pod_name = pod_name(&self.name_prefix, &req.machine_id);
         pod.metadata.name = Some(pod_name);
         pod.metadata.generate_name = None;
 
@@ -107,7 +107,10 @@ impl KubernetesRuntime {
             "app.kubernetes.io/managed-by".to_string(),
             "remote-kernels".to_string(),
         );
-        labels.insert("remote-kernels/instance".to_string(), req.name.clone());
+        labels.insert(
+            "remote-kernels/instance".to_string(),
+            req.machine_id.clone(),
+        );
         if let Some(priority) = &req.priority {
             labels.insert(self.config.priority_label.clone(), priority.clone());
         }
@@ -897,7 +900,7 @@ spec:
             toml::from_str("pod-template = \"pod.yaml\"\nmax-lifetime-secs = 43200").unwrap();
         let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
         let req = ProvisionRequest {
-            name: "main".to_string(),
+            machine_id: "main".to_string(),
             gpu_type: None,
             image: None,
             vast_offers: None,
@@ -1000,7 +1003,7 @@ spec:
         let config: KubernetesConfig = toml::from_str(config_toml).unwrap();
         let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
         rt.build_pod(&ProvisionRequest {
-            name: "main".to_string(),
+            machine_id: "main".to_string(),
             gpu_type: None,
             image: None,
             vast_offers: None,
@@ -1091,7 +1094,7 @@ spec:
         let config: KubernetesConfig = toml::from_str(r#"pod-template = "pod.yaml""#).unwrap();
         let rt = KubernetesRuntime::new(config, dir.path().to_path_buf(), "rk".to_string());
         let req = ProvisionRequest {
-            name: "main".to_string(),
+            machine_id: "main".to_string(),
             gpu_type: None,
             image: None,
             vast_offers: None,

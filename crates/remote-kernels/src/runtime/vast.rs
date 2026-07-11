@@ -595,7 +595,7 @@ impl Runtime for VastRuntime {
 
         let candidates = self.offer_candidates(req).await?;
 
-        let label = format!("{}-{}", self.name_prefix, req.name);
+        let label = format!("{}-{}", self.name_prefix, req.machine_id);
         let create = CreateInstanceRequest {
             image: image.clone(),
             disk: self.vast.disk_gb,
@@ -1361,7 +1361,7 @@ mod tests {
 
     fn shortlist_request(offers: Vec<i64>) -> super::ProvisionRequest {
         super::ProvisionRequest {
-            name: "main".to_string(),
+            machine_id: "main".to_string(),
             gpu_type: None,
             image: None,
             vast_offers: Some(offers),

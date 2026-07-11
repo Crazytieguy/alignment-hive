@@ -10,17 +10,22 @@ use std::path::Path;
 pub fn server_instructions(project_dir: &Path) -> String {
     format!(
         "Cloud GPU machines with persistent Jupyter kernels.\n\
-         start() always creates a fresh machine id; use its optional label only for display. \
-         Use status() to discover durable machines and attach(machine_id) after a server restart \
-         (including normal background/resume replacement). When several are active, machine-scoped tools take an `instance` \
-         argument (kernel-scoped tools never do — each kernel id routes to its machine \
-         automatically). A fenced error means another session took over; stop using that machine here.\n\
-         Everything executed on a kernel is auto-saved to a local .ipynb notebook (path shown \
-         when the kernel is created) — read it to recover context after conversation compaction.\n\
-         Holding the call open keeps a background session alive; prefer wait() over polling for long cells.\n\
-         sync() and download() are rooted at the project directory the server started in: \
-         {} (fixed for the server's lifetime — changing directories or entering a worktree \
-         does not move it).",
+         Typical flow: start() a machine → create_kernel() → sync() project files → execute() \
+         code (kernel state persists across calls) → download() results → stop() or terminate() \
+         when done (configured automatic cleanup is the backstop).\n\
+         start() always creates a fresh machine; its optional label is display-only. status() \
+         lists durable machines; attach(machine_id) reconnects to one — needed after this server \
+         process restarts. When several machines are active, machine-scoped tools take an \
+         `instance` argument; kernel-scoped tools never do (each kernel id routes to its machine \
+         automatically). A fenced error means another session took over that machine — stop \
+         using it here.\n\
+         Everything executed is auto-saved to a local .ipynb notebook (path shown at kernel \
+         creation) — read it to recover context after conversation compaction.\n\
+         For long cells, prefer wait() over polling — holding the call open keeps a background \
+         session alive; with no kernel_id, wait() covers every pending execution. Polling with \
+         get_output() is fine when there is other work to do meanwhile.\n\
+         sync() and download() are rooted at the project directory: {} (fixed for the server's \
+         lifetime — changing directories or entering a worktree does not move it).",
         project_dir.display()
     )
 }
