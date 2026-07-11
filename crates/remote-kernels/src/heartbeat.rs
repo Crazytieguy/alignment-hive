@@ -160,7 +160,15 @@ async fn establish_and_run(
         ));
         return Ok(());
     }
-    let lease = loop {
+    // The reachability wait can retry for a long time (a resumed community
+    // host may never bring SSH back) and needs no lock — holding the machine
+    // oplock across it starves explicit stop()/terminate() of the one lock
+    // they need to END a billing machine (observed live on RunPod). The lock
+    // is dropped here and re-acquired only around the lease-acquire critical
+    // section, then held through watchdog install as before.
+    drop(operation_lock);
+    let project_dir = state.lock().await.project_dir.clone();
+    let (lease, operation_lock) = loop {
         match conn.wait_reachable().await {
             Ok(()) => {}
             Err(error) if error.to_string().contains("no public IP") => {
@@ -186,9 +194,27 @@ async fn establish_and_run(
             }
         }
 
+        let lock = match crate::state::acquire_operation_lock(&project_dir, machine_id).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                mark_fenced(
+                    state,
+                    machine_id,
+                    external_id,
+                    FenceReason::AuthorityUnknown,
+                )
+                .await;
+                tracing::warn!(
+                    instance = machine_id,
+                    "Supervision setup stopped: operation lock unavailable: {error}"
+                );
+                return Ok(());
+            }
+        };
         match acquire_lease(conn, acquire_mode, lease_owner).await {
-            Ok(lease) => break lease,
+            Ok(lease) => break (lease, lock),
             Err(EstablishError::Retry(error)) => {
+                drop(lock);
                 tracing::warn!(
                     instance = machine_id,
                     "lease setup failed transiently — retrying in 60s: {error}"
