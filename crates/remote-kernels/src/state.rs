@@ -2,14 +2,10 @@
 //!
 //! Multiple concurrent machines are supported: each machine has its own state
 //! dir at `.claude/remote-kernels/instances/<id>/` holding its
-//! `state.json` (the durable record) and SSH key. Session spend is tracked
-//! globally and persisted to `.claude/remote-kernels/spend.json` — it is
-//! rehydrated at startup only while instance records exist, so a mid-session
-//! server restart keeps budget enforcement intact, while a fresh session after
-//! a clean terminate starts from zero (budget is per session, monotonic).
+//! `state.json` (the durable record) and SSH key. Provider spend is derived
+//! from the append-only per-machine ledger in `.claude/remote-kernels/ledger`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -101,6 +97,8 @@ pub struct LifecycleRecord {
     pub storage_rate_per_hr: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_rate_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_volume_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize_phase: Option<FinalizePhase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,17 +234,6 @@ impl InstanceState {
         }
     }
 
-    /// Cost incurred by this instance since it started (this process).
-    /// Provisioning time counts — providers bill from allocation, not from
-    /// when Jupyter becomes ready.
-    pub fn current_cost(&self) -> f64 {
-        if self.phase == Phase::Stopped {
-            0.0
-        } else {
-            self.cost_per_hr * self.started_at.elapsed().as_secs_f64() / 3600.0
-        }
-    }
-
     pub fn record(&self) -> InstanceRecord {
         InstanceRecord {
             machine_id: Some(self.name.clone()),
@@ -285,10 +272,7 @@ impl InstanceState {
 pub struct AppState {
     pub project_dir: PathBuf,
     pub instances: BTreeMap<String, InstanceState>,
-    /// Spend from instances that have been stopped/terminated (or accrued
-    /// before a server restart). Monotonically increasing, never resets
-    /// within a session.
-    pub accumulated_spend: f64,
+    accounting_init_error: Option<String>,
 }
 
 pub fn state_dir(project_dir: &Path) -> PathBuf {
@@ -359,84 +343,160 @@ pub fn validate_machine_id(machine_id: &str) -> Result<(), String> {
 }
 
 impl AppState {
-    /// Create the state for a project, hydrating persisted spend if any
-    /// instance records exist (machines may still be running/billed — a fresh
-    /// server must not forget the spend they already accrued).
+    /// Create project state and roll forward any interrupted epoch/migration.
     pub fn new(project_dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(state_dir(&project_dir));
+        ensure_gitignore(&project_dir);
         migrate_legacy_state(&project_dir);
-
-        let has_records = !list_instance_records(&project_dir).is_empty();
-        let accumulated_spend = if has_records {
-            load_spend(&project_dir)
-        } else {
-            // No machines left over — budget is per session, start fresh.
-            let _ = std::fs::remove_file(state_dir(&project_dir).join("spend.json"));
-            0.0
-        };
+        let accounting_init_error = migrate_legacy_spend(&project_dir)
+            .and_then(|()| migrate_pending_transitions(&project_dir))
+            .and_then(|()| migrate_existing_record_intervals(&project_dir))
+            .err()
+            .map(|error| error.to_string());
 
         Self {
             project_dir,
             instances: BTreeMap::new(),
-            accumulated_spend,
+            accounting_init_error,
         }
     }
 
-    /// Total session spend: accumulated + all running instances' current cost.
+    pub fn spend_summary(&self) -> Result<crate::ledger::SpendSummary, String> {
+        if let Some(error) = &self.accounting_init_error {
+            return Err(error.clone());
+        }
+        crate::ledger::fold(&self.project_dir, crate::ledger::now_ms())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Total epoch spend. A corrupt ledger returns the conservative valid
+    /// prefix with its last rate kept open; admission paths use
+    /// [`Self::spend_summary`] to surface and block on the corruption.
     pub fn total_spend(&self) -> f64 {
-        self.accumulated_spend
-            + self
-                .instances
-                .values()
-                .map(InstanceState::current_cost)
-                .sum::<f64>()
+        if self.accounting_init_error.is_some() {
+            return f64::INFINITY;
+        }
+        match crate::ledger::fold(&self.project_dir, crate::ledger::now_ms()) {
+            Ok(summary) => summary.total,
+            Err(crate::ledger::LedgerError::CorruptFold {
+                conservative_total, ..
+            }) => conservative_total,
+            Err(_) => f64::INFINITY,
+        }
     }
 
     /// Aggregate hourly burn rate across billing (provisioning or running)
     /// metered instances.
     pub fn aggregate_cost_per_hr(&self) -> f64 {
-        self.instances
-            .values()
-            .filter(|i| i.phase != Phase::Stopped)
-            .map(|i| i.cost_per_hr)
-            .sum()
+        if self.accounting_init_error.is_some() {
+            return f64::INFINITY;
+        }
+        match crate::ledger::fold(&self.project_dir, crate::ledger::now_ms()) {
+            Ok(summary) => summary.hourly_rate,
+            Err(crate::ledger::LedgerError::CorruptFold {
+                conservative_rate, ..
+            }) => conservative_rate,
+            Err(_) => f64::INFINITY,
+        }
     }
 
-    /// Fold one instance's running cost into the accumulated total (called
-    /// when it is stopped/terminated so the spend persists).
-    pub fn snapshot_spend_for(&mut self, name: &str) {
-        let cost = self
+    pub fn append_ledger_event(
+        &self,
+        name: &str,
+        kind: crate::ledger::EventKind,
+        uuid: Option<String>,
+        ts_ms: Option<u64>,
+        post_action_rate: Option<f64>,
+        note: Option<String>,
+    ) -> anyhow::Result<bool> {
+        if let Some(error) = &self.accounting_init_error {
+            anyhow::bail!("accounting failed closed: {error}");
+        }
+        validate_machine_id(name).map_err(anyhow::Error::msg)?;
+        let record = load_instance_record(&self.project_dir, name);
+        let lifecycle = load_lifecycle_record(&self.project_dir, name);
+        let storage = if lifecycle.external_volume_id.is_some() {
+            0.0
+        } else {
+            lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
+        };
+        let total = self
             .instances
             .get(name)
-            .map_or(0.0, InstanceState::current_cost);
-        self.accumulated_spend += cost;
-        if let Some(inst) = self.instances.get_mut(name) {
-            // Restart the cost clock so the cost isn't double-counted if the
-            // instance keeps running (e.g. snapshot on stop then resume).
-            inst.started_at = std::time::Instant::now();
-        }
-        self.persist_spend();
-    }
-
-    /// Fold every instance's running cost into the accumulated total.
-    pub fn snapshot_spend_all(&mut self) {
-        let names: Vec<String> = self.instances.keys().cloned().collect();
-        for name in names {
-            self.snapshot_spend_for(&name);
-        }
-    }
-
-    pub fn persist_spend(&self) {
-        let dir = state_dir(&self.project_dir);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        ensure_gitignore(&self.project_dir);
-        let spend = PersistedSpend {
-            accumulated_spend: self.total_spend(),
+            .map(|instance| instance.cost_per_hr)
+            .or_else(|| record.as_ref().map(|record| record.cost_per_hr))
+            .unwrap_or(0.0)
+            .max(0.0);
+        let (compute, storage) = match kind {
+            crate::ledger::EventKind::Provisioned | crate::ledger::EventKind::Resumed => {
+                (total, storage)
+            }
+            crate::ledger::EventKind::Stopped => (0.0, post_action_rate.unwrap_or(storage)),
+            crate::ledger::EventKind::RateChanged => post_action_rate
+                .map_or((total, storage), |post_action_rate| (0.0, post_action_rate)),
+            crate::ledger::EventKind::Terminated => (0.0, 0.0),
         };
-        if let Ok(json) = serde_json::to_string_pretty(&spend) {
-            let _ = std::fs::write(dir.join("spend.json"), json);
+        let generation = self
+            .instances
+            .get(name)
+            .and_then(|instance| instance.lease_generation)
+            .unwrap_or(0);
+        let stable_remote_uuid = uuid.clone();
+        let mut event = crate::ledger::event(kind, compute, storage, generation, uuid, note);
+        if let Some(ts_ms) = ts_ms {
+            event.ts_ms = ts_ms;
         }
+        // One in-flight WAL slot per transition kind. A retry after process
+        // death discovers and reuses that slot's UUID; after a confirmed
+        // append the slot is removed, so a later legitimate transition gets
+        // a fresh UUID.
+        let operation = stable_remote_uuid
+            .map_or_else(|| format!("{kind:?}"), |uuid| format!("{kind:?}-{uuid}"));
+        Ok(crate::ledger::EpochGuard::acquire(&self.project_dir)?
+            .append(name, &operation, event)?)
+    }
+
+    /// Persist the first durable record and its billing interval under the
+    /// epoch lock so an epoch close cannot land between them.
+    pub fn admit_provision(
+        &self,
+        name: &str,
+        record: &InstanceRecord,
+        lifecycle: &LifecycleRecord,
+    ) -> anyhow::Result<()> {
+        if let Some(error) = &self.accounting_init_error {
+            anyhow::bail!("accounting failed closed: {error}");
+        }
+        validate_machine_id(name).map_err(anyhow::Error::msg)?;
+        let guard = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
+        let storage = if lifecycle.external_volume_id.is_some() {
+            0.0
+        } else {
+            lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
+        };
+        let event = crate::ledger::event(
+            crate::ledger::EventKind::Provisioned,
+            record.cost_per_hr.max(0.0),
+            storage,
+            0,
+            None,
+            Some(format!(
+                "provider external_id={}; {}",
+                record.external_id,
+                lifecycle
+                    .storage_rate_note
+                    .as_deref()
+                    .unwrap_or("storage pricing recorded")
+            )),
+        );
+        guard.prepare(name, "provisioned", event)?;
+        // The WAL is durable before either half of admission can be lost.
+        // Startup recovers it when the record exists, or fails closed on an
+        // orphan WAL rather than admitting untracked spend.
+        self.save_record(name, record)?;
+        save_lifecycle_record(&self.project_dir, name, lifecycle)?;
+        guard.commit_wal(name, "provisioned")?;
+        Ok(())
     }
 
     /// Write an instance's durable record. Called immediately after provider
@@ -446,21 +506,27 @@ impl AppState {
         std::fs::create_dir_all(&dir)?;
         ensure_gitignore(&self.project_dir);
         let json = serde_json::to_string_pretty(record)?;
-        std::fs::write(dir.join("state.json"), json)?;
-        self.persist_spend();
+        let path = dir.join("state.json");
+        let temporary = dir.join(format!(".state.{}.tmp", std::process::id()));
+        std::fs::write(&temporary, json)?;
+        std::fs::File::open(&temporary)?.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        std::fs::File::open(&dir)?.sync_all()?;
         Ok(())
     }
 
     /// Remove an instance's durable record (after terminate).
     pub fn clear_record(&self, name: &str) -> anyhow::Result<()> {
+        let epoch = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
         let dir = instance_dir(&self.project_dir, name);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
+            if let Some(parent) = dir.parent() {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
         }
-        // Last machine gone → spend file's job is done; keep it while records
-        // remain so a restart hydrates correctly.
-        if list_instance_records(&self.project_dir).is_empty() {
-            let _ = std::fs::remove_file(state_dir(&self.project_dir).join("spend.json"));
+        if !epoch.has_instance_records()? {
+            epoch.close_epoch(crate::ledger::now_ms())?;
         }
         Ok(())
     }
@@ -593,7 +659,9 @@ pub fn save_lifecycle_record(
     ensure_gitignore(project_dir);
     let temporary = dir.join(format!(".lifecycle.{}.tmp", std::process::id()));
     std::fs::write(&temporary, serde_json::to_vec_pretty(lifecycle)?)?;
+    std::fs::File::open(&temporary)?.sync_all()?;
     std::fs::rename(temporary, dir.join("lifecycle.json"))?;
+    std::fs::File::open(&dir)?.sync_all()?;
     Ok(())
 }
 
@@ -613,43 +681,180 @@ pub fn import_pending_transition(
     marker: &OutcomeMarker,
 ) -> anyhow::Result<bool> {
     validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-    let path = state_dir(project_dir)
-        .join("ledger")
-        .join(format!("{machine_id}.pending-transitions.jsonl"));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    ensure_gitignore(project_dir);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing
-        .lines()
-        .filter_map(|line| serde_json::from_str::<PendingTransition>(line).ok())
-        .any(|entry| entry.uuid == marker.uuid)
-    {
-        return Ok(false);
-    }
-    let transition = PendingTransition {
-        uuid: marker.uuid.clone(),
-        ts: marker.ts,
-        action: marker.action,
-        post_action_rate: marker.post_action_rate,
-    };
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    serde_json::to_writer(&mut file, &transition)?;
-    file.write_all(b"\n")?;
-    file.sync_data()?;
-    Ok(true)
+    let state = AppState::new(project_dir.to_path_buf());
+    state
+        .spend_summary()
+        .map_err(|error| anyhow::anyhow!("accounting failed closed: {error}"))?;
+    let mut event = crate::ledger::event(
+        crate::ledger::EventKind::RateChanged,
+        0.0,
+        marker.post_action_rate.unwrap_or(0.0),
+        marker.generation,
+        Some(marker.uuid.clone()),
+        Some(format!("remote {:?} transition imported", marker.action)),
+    );
+    // Phase 4 markers carry whole seconds. Place them at the end of that
+    // wall-clock second so a provision/resume recorded earlier in the same
+    // second cannot sort after its remote stop.
+    event.ts_ms = marker.ts.saturating_mul(1_000).saturating_add(999);
+    Ok(crate::ledger::EpochGuard::acquire(project_dir)?.append(
+        machine_id,
+        &format!("remote-transition-{}", marker.uuid),
+        event,
+    )?)
 }
 
-fn load_spend(project_dir: &Path) -> f64 {
+fn migrate_legacy_spend(project_dir: &Path) -> anyhow::Result<()> {
     let path = state_dir(project_dir).join("spend.json");
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str::<PersistedSpend>(&c).ok())
-        .map_or(0.0, |s| s.accumulated_spend)
+    let Some(content) = std::fs::read_to_string(&path).map(Some).or_else(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })?
+    else {
+        let _ = crate::ledger::EpochGuard::acquire(project_dir)?;
+        return Ok(());
+    };
+    let spend: PersistedSpend = serde_json::from_str(&content)
+        .map_err(|error| anyhow::anyhow!("legacy spend.json is corrupt: {error}"))?;
+    if !spend.accumulated_spend.is_finite() || spend.accumulated_spend < 0.0 {
+        anyhow::bail!("legacy spend.json contains an invalid accumulated_spend");
+    }
+    let guard = crate::ledger::EpochGuard::acquire(project_dir)?;
+    let manifest = guard.manifest()?;
+    let mut event = crate::ledger::event(
+        crate::ledger::EventKind::RateChanged,
+        0.0,
+        0.0,
+        0,
+        Some("legacy-spend-json-migration".to_string()),
+        Some("migrated from legacy spend.json".to_string()),
+    );
+    event.epoch_id = manifest.epoch_id;
+    event.accrued_spend = spend.accumulated_spend;
+    guard.append("legacy-spend", "legacy-spend-json-migration", event)?;
+    std::fs::remove_file(&path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn migrate_pending_transitions(project_dir: &Path) -> anyhow::Result<()> {
+    let dir = state_dir(project_dir).join("ledger");
+    let guard = crate::ledger::EpochGuard::acquire(project_dir)?;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(machine_id) = file_name.strip_suffix(".pending-transitions.jsonl") else {
+            continue;
+        };
+        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+        let content = std::fs::read_to_string(&path)?;
+        for (index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let transition: PendingTransition = serde_json::from_str(line).map_err(|error| {
+                anyhow::anyhow!(
+                    "pending transition {} line {} is corrupt: {error}",
+                    path.display(),
+                    index + 1
+                )
+            })?;
+            let mut event = crate::ledger::event(
+                crate::ledger::EventKind::RateChanged,
+                0.0,
+                transition.post_action_rate.unwrap_or(0.0),
+                0,
+                Some(transition.uuid.clone()),
+                Some(format!(
+                    "migrated phase-4 remote {:?} transition",
+                    transition.action
+                )),
+            );
+            event.ts_ms = transition.ts.saturating_mul(1_000).saturating_add(999);
+            guard.append(
+                machine_id,
+                &format!("pending-transition-{}", transition.uuid),
+                event,
+            )?;
+        }
+        std::fs::remove_file(&path)?;
+        std::fs::File::open(&dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn migrate_existing_record_intervals(project_dir: &Path) -> anyhow::Result<()> {
+    let instances = state_dir(project_dir).join("instances");
+    let entries = match std::fs::read_dir(&instances) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let guard = crate::ledger::EpochGuard::acquire(project_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let machine_id = entry.file_name().to_string_lossy().into_owned();
+        validate_machine_id(&machine_id).map_err(anyhow::Error::msg)?;
+        let record_path = entry.path().join("state.json");
+        let has_record = match std::fs::metadata(&record_path) {
+            Ok(metadata) => metadata.is_file(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !has_record || guard.has_current_epoch_events(&machine_id)? {
+            continue;
+        }
+        let record: InstanceRecord = serde_json::from_slice(&std::fs::read(&record_path)?)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "cannot migrate accounting for {}: invalid record {}: {error}",
+                    machine_id,
+                    record_path.display()
+                )
+            })?;
+        let lifecycle_path = entry.path().join("lifecycle.json");
+        let lifecycle: LifecycleRecord = match std::fs::read(&lifecycle_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                anyhow::anyhow!(
+                    "cannot migrate accounting for {}: invalid lifecycle {}: {error}",
+                    machine_id,
+                    lifecycle_path.display()
+                )
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                LifecycleRecord::default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let storage_rate = if lifecycle.external_volume_id.is_some() {
+            0.0
+        } else {
+            lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
+        };
+        let (kind, compute_rate) = match record.phase {
+            Phase::Provisioning => (crate::ledger::EventKind::Provisioned, record.cost_per_hr),
+            Phase::Running => (crate::ledger::EventKind::Resumed, record.cost_per_hr),
+            Phase::Stopped => (crate::ledger::EventKind::Stopped, 0.0),
+        };
+        let event = crate::ledger::event(
+            kind,
+            compute_rate.max(0.0),
+            storage_rate,
+            0,
+            Some(format!("migration-{machine_id}")),
+            Some("opened interval for pre-phase-6 durable machine record".to_string()),
+        );
+        guard.append(&machine_id, &format!("migration-{machine_id}"), event)?;
+    }
+    Ok(())
 }
 
 /// Pre-multi-instance layout: a single `state.json` + `id_ed25519` directly in
@@ -846,16 +1051,18 @@ mod tests {
     }
 
     #[test]
-    fn clear_record_removes_instance_dir_and_spend_when_last() {
+    fn clear_record_closes_epoch_but_never_deletes_instance_state_early() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
         let inst = instance("main", 1.0, std::time::Duration::from_secs(3600));
         let record = inst.record();
         state.instances.insert("main".to_string(), inst);
-        state.save_record("main", &record).unwrap();
+        state
+            .admit_provision("main", &record, &LifecycleRecord::default())
+            .unwrap();
         assert!(
             dir.path()
-                .join(".claude/remote-kernels/spend.json")
+                .join(".claude/remote-kernels/ledger/main.jsonl")
                 .exists()
         );
 
@@ -863,7 +1070,7 @@ mod tests {
         assert!(load_instance_record(dir.path(), "main").is_none());
         assert!(
             !dir.path()
-                .join(".claude/remote-kernels/spend.json")
+                .join(".claude/remote-kernels/ledger/main.jsonl")
                 .exists()
         );
         // Clearing twice is fine.
@@ -889,54 +1096,86 @@ mod tests {
     }
 
     #[test]
-    fn spend_is_monotonic_across_instances() {
+    fn spend_fold_tracks_all_machine_rates_and_stop_tail() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
         assert!(state.total_spend().abs() < f64::EPSILON);
 
-        state.instances.insert(
-            "a".to_string(),
-            instance("a", 0.5, std::time::Duration::from_secs(3600)),
-        );
-        state.instances.insert(
-            "b".to_string(),
-            instance("b", 1.0, std::time::Duration::from_secs(1800)),
-        );
-
-        // $0.50 (1h @ 0.5) + $0.50 (0.5h @ 1.0)
-        let total = state.total_spend();
-        assert!((total - 1.0).abs() < 0.01, "total was {total}");
+        for (name, rate) in [("a", 0.5), ("b", 1.0)] {
+            let inst = instance(name, rate, std::time::Duration::ZERO);
+            let record = inst.record();
+            state.instances.insert(name.to_string(), inst);
+            state
+                .admit_provision(name, &record, &LifecycleRecord::default())
+                .unwrap();
+        }
         assert!((state.aggregate_cost_per_hr() - 1.5).abs() < f64::EPSILON);
-
-        state.snapshot_spend_for("a");
-        state.instances.remove("a");
-        let after = state.total_spend();
-        assert!((after - total).abs() < 0.01);
-        assert!(after >= total - 0.01, "spend never decreases");
+        state
+            .append_ledger_event(
+                "a",
+                crate::ledger::EventKind::Stopped,
+                None,
+                None,
+                Some(0.1),
+                None,
+            )
+            .unwrap();
+        assert!((state.aggregate_cost_per_hr() - 1.1).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn spend_hydrates_on_restart_while_records_exist() {
+    fn external_runpod_volume_is_excluded_from_running_and_stopped_rates() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
+        state
+            .admit_provision(
+                "main",
+                &record,
+                &LifecycleRecord {
+                    storage_rate_per_hr: Some(99.0),
+                    external_volume_id: Some("vol-user-owned".into()),
+                    storage_rate_note: Some(
+                        "external volume vol-user-owned: not budget-tracked".into(),
+                    ),
+                    ..LifecycleRecord::default()
+                },
+            )
+            .unwrap();
+        assert!((state.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
+        state
+            .append_ledger_event(
+                "main",
+                crate::ledger::EventKind::Stopped,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(state.aggregate_cost_per_hr().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ledger_is_authoritative_across_restart() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
         let inst = instance("main", 2.0, std::time::Duration::from_secs(3600));
         let record = inst.record();
         state.instances.insert("main".to_string(), inst);
-        state.save_record("main", &record).unwrap();
+        state
+            .admit_provision("main", &record, &LifecycleRecord::default())
+            .unwrap();
 
         // Server restart with the machine still recorded: spend is hydrated
         // so budget enforcement can't be reset by a crash.
         let restarted = AppState::new(dir.path().to_path_buf());
-        assert!(
-            (restarted.accumulated_spend - 2.0).abs() < 0.01,
-            "was {}",
-            restarted.accumulated_spend
-        );
+        assert!((restarted.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
 
         // After the machine is gone, a fresh session starts from zero.
         restarted.clear_record("main").unwrap();
         let fresh = AppState::new(dir.path().to_path_buf());
-        assert!(fresh.accumulated_spend.abs() < f64::EPSILON);
+        assert!(fresh.total_spend().abs() < f64::EPSILON);
     }
 
     #[test]
@@ -977,7 +1216,299 @@ mod tests {
         );
         // Old state file is gone; spend carried over.
         assert!(!state_dir.join("state.json").exists());
-        assert!((state.accumulated_spend - 1.25).abs() < 0.001);
+        assert!((state.total_spend() - 1.25).abs() < 0.001);
+        assert!(!state_dir.join("spend.json").exists());
+    }
+
+    #[test]
+    fn legacy_spend_corruption_blocks_accounting_instead_of_becoming_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = state_dir(dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("spend.json"), "{broken").unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        assert!(state.spend_summary().unwrap_err().contains("corrupt"));
+        assert!(state.total_spend().is_infinite());
+        assert!(root.join("spend.json").exists());
+    }
+
+    #[test]
+    fn upgrade_migration_opens_interval_for_eventless_live_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = AppState::new(dir.path().to_path_buf());
+        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
+        initial.save_record("main", &record).unwrap();
+        save_lifecycle_record(
+            dir.path(),
+            "main",
+            &LifecycleRecord {
+                storage_rate_per_hr: Some(0.25),
+                ..LifecycleRecord::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            state_dir(dir.path()).join("spend.json"),
+            serde_json::json!({"accumulated_spend": 1.5}).to_string(),
+        )
+        .unwrap();
+
+        let migrated = AppState::new(dir.path().to_path_buf());
+        let summary = migrated.spend_summary().unwrap();
+        assert!((summary.hourly_rate - 2.25).abs() < f64::EPSILON);
+        assert!(summary.total >= 1.5);
+        let ledger =
+            std::fs::read_to_string(state_dir(dir.path()).join("ledger/main.jsonl")).unwrap();
+        assert!(ledger.contains("migration-main"), "{ledger}");
+        assert!(!state_dir(dir.path()).join("spend.json").exists());
+    }
+
+    #[test]
+    fn eventless_instance_record_fails_fold_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
+        state.save_record("main", &record).unwrap();
+        let error = state.spend_summary().unwrap_err();
+        assert!(error.contains("no current-epoch ledger events"), "{error}");
+    }
+
+    #[test]
+    fn remote_transition_import_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
+        state
+            .admit_provision(
+                "main",
+                &record,
+                &LifecycleRecord {
+                    storage_rate_per_hr: Some(0.2),
+                    ..LifecycleRecord::default()
+                },
+            )
+            .unwrap();
+        let marker = OutcomeMarker {
+            uuid: "remote-stable-op".into(),
+            action: Cleanup::Stop,
+            finalize_exit: 0,
+            ts: crate::ledger::now_ms() / 1_000 + 1,
+            generation: 3,
+            post_action_rate: Some(0.2),
+        };
+        assert!(import_pending_transition(dir.path(), "main", &marker).unwrap());
+        assert!(!import_pending_transition(dir.path(), "main", &marker).unwrap());
+        assert!((state.aggregate_cost_per_hr() - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn phase4_pending_transition_file_migrates_before_accounting() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = AppState::new(dir.path().to_path_buf());
+        initial
+            .save_record(
+                "main",
+                &instance("main", 1.0, std::time::Duration::ZERO).record(),
+            )
+            .unwrap();
+        let path = state_dir(dir.path()).join("ledger/main.pending-transitions.jsonl");
+        let transition = PendingTransition {
+            uuid: "phase4-op".into(),
+            ts: crate::ledger::now_ms() / 1_000,
+            action: Cleanup::Stop,
+            post_action_rate: Some(0.15),
+        };
+        std::fs::write(&path, serde_json::to_string(&transition).unwrap() + "\n").unwrap();
+
+        let state = AppState::new(dir.path().to_path_buf());
+        assert!((state.aggregate_cost_per_hr() - 0.15).abs() < f64::EPSILON);
+        assert!(!path.exists());
+        let ledger =
+            std::fs::read_to_string(state_dir(dir.path()).join("ledger/main.jsonl")).unwrap();
+        assert_eq!(ledger.lines().count(), 1);
+    }
+
+    #[test]
+    fn corrupt_phase4_pending_transition_fails_closed_and_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = AppState::new(dir.path().to_path_buf());
+        let path = state_dir(dir.path()).join("ledger/main.pending-transitions.jsonl");
+        std::fs::write(&path, "{broken\n").unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        assert!(
+            state
+                .spend_summary()
+                .unwrap_err()
+                .contains("pending transition")
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn concurrent_app_states_cannot_lose_provision_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut joins = Vec::new();
+        for name in ["one", "two"] {
+            let root = root.clone();
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                let state = AppState::new(root);
+                let record = instance(name, 1.0, std::time::Duration::ZERO).record();
+                barrier.wait();
+                state
+                    .admit_provision(name, &record, &LifecycleRecord::default())
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        for join in joins {
+            join.join().unwrap();
+        }
+        let state = AppState::new(root);
+        assert!((state.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn multiprocess_append_helper() {
+        let Ok(root) = std::env::var("RK_LEDGER_CHILD_DIR") else {
+            return;
+        };
+        let name = std::env::var("RK_LEDGER_CHILD_NAME").unwrap();
+        let state = AppState::new(PathBuf::from(root));
+        let record = instance(&name, 1.0, std::time::Duration::ZERO).record();
+        state
+            .admit_provision(&name, &record, &LifecycleRecord::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn separate_processes_cannot_clobber_the_shared_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut children = ["process-one", "process-two"].map(|name| {
+            std::process::Command::new(&executable)
+                .args([
+                    "--exact",
+                    "state::tests::multiprocess_append_helper",
+                    "--nocapture",
+                ])
+                .env("RK_LEDGER_CHILD_DIR", dir.path())
+                .env("RK_LEDGER_CHILD_NAME", name)
+                .spawn()
+                .unwrap()
+        });
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
+        let state = AppState::new(dir.path().to_path_buf());
+        assert!((state.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn terminate_last_machine_opens_fresh_budget_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = AppState::new(dir.path().to_path_buf());
+        let record = instance("first", 5.0, std::time::Duration::ZERO).record();
+        first
+            .admit_provision("first", &record, &LifecycleRecord::default())
+            .unwrap();
+        first
+            .append_ledger_event(
+                "first",
+                crate::ledger::EventKind::Terminated,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        first.clear_record("first").unwrap();
+
+        let second = AppState::new(dir.path().to_path_buf());
+        assert!(second.total_spend().abs() < f64::EPSILON);
+        let record = instance("second", 1.0, std::time::Duration::ZERO).record();
+        second
+            .admit_provision("second", &record, &LifecycleRecord::default())
+            .unwrap();
+        assert!((second.aggregate_cost_per_hr() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn terminated_machine_ledger_is_a_tombstone_while_epoch_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        for name in ["terminated", "survivor"] {
+            let record = instance(name, 1.0, std::time::Duration::ZERO).record();
+            state
+                .admit_provision(name, &record, &LifecycleRecord::default())
+                .unwrap();
+        }
+        state
+            .append_ledger_event(
+                "terminated",
+                crate::ledger::EventKind::Terminated,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state.clear_record("terminated").unwrap();
+        assert!(
+            state_dir(dir.path())
+                .join("ledger/terminated.jsonl")
+                .exists()
+        );
+        assert!(state.total_spend() >= 0.0);
+    }
+
+    #[test]
+    fn epoch_close_and_concurrent_provision_never_delete_new_machine_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = AppState::new(dir.path().to_path_buf());
+        let old = instance("old", 1.0, std::time::Duration::ZERO).record();
+        initial
+            .admit_provision("old", &old, &LifecycleRecord::default())
+            .unwrap();
+        initial
+            .append_ledger_event(
+                "old",
+                crate::ledger::EventKind::Terminated,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let clear_root = dir.path().to_path_buf();
+        let clear_barrier = Arc::clone(&barrier);
+        let clear = std::thread::spawn(move || {
+            let state = AppState::new(clear_root);
+            clear_barrier.wait();
+            state.clear_record("old").unwrap();
+        });
+        let provision_root = dir.path().to_path_buf();
+        let provision_barrier = Arc::clone(&barrier);
+        let provision = std::thread::spawn(move || {
+            let state = AppState::new(provision_root);
+            let record = instance("new", 1.0, std::time::Duration::ZERO).record();
+            provision_barrier.wait();
+            state
+                .admit_provision("new", &record, &LifecycleRecord::default())
+                .unwrap();
+        });
+        barrier.wait();
+        clear.join().unwrap();
+        provision.join().unwrap();
+
+        let state = AppState::new(dir.path().to_path_buf());
+        assert!(load_instance_record(dir.path(), "new").is_some());
+        assert!(state_dir(dir.path()).join("ledger/new.jsonl").exists());
+        assert!((state.aggregate_cost_per_hr() - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -668,7 +668,34 @@ async fn budget_exhaustion_cleans_up_all_machines() {
         }))
         .await
         .expect_err("start() must be budget-gated");
-    assert!(format!("{err}").contains("budget"), "{err}");
+    assert!(format!("{err}").contains("already exhausted"), "{err}");
+
+    // The floor is process-local: a fresh server after full cleanup starts a
+    // clean epoch and may admit a new machine under the same configured cap.
+    let fresh = server_in(dir.path(), Some(0.30));
+    let result = fresh
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: Some("fresh-session".to_string()),
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(false),
+        }))
+        .await
+        .expect("fresh server session should admit against the new epoch");
+    assert!(
+        text_of(&result).contains("provisioning"),
+        "{}",
+        text_of(&result)
+    );
+    let fresh_machine = text_of(&result)
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let _ = terminate(&fresh, Some(&fresh_machine)).await;
 
     unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_COST_PER_HR") };
 }

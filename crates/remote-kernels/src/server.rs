@@ -67,6 +67,10 @@ pub struct RemoteKernelsServer {
     /// Effective budget cap (env var overrides config).
     budget: Option<f64>,
     budget_source: Option<crate::config::BudgetSource>,
+    /// Process-lifetime admission floor after this session observes budget
+    /// exhaustion. The plan's "budget is HARD" clause requires cleanup's
+    /// on-disk epoch reset not to reopen spend in the same server session.
+    budget_exhausted: Arc<std::sync::atomic::AtomicBool>,
     /// Failure messages from background (wait=false) starts, drained by `status()`.
     start_failures: Arc<Mutex<Vec<String>>>,
     /// One lease owner identity per server process. Attach rotates the remote
@@ -414,6 +418,7 @@ impl RemoteKernelsServer {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             budget: budget.map(|value| value.cap),
             budget_source: budget.map(|value| value.source),
+            budget_exhausted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             start_failures: Arc::new(Mutex::new(Vec::new())),
             owner_uuid: uuid::Uuid::new_v4().to_string(),
             instructions,
@@ -424,6 +429,9 @@ impl RemoteKernelsServer {
     /// Create a fresh GPU machine with a generated id. Use `attach()` to reconnect.
     #[tool(name = "start")]
     pub async fn start(&self, params: Parameters<StartParams>) -> Result<CallToolResult, McpError> {
+        // Remote watchdog transitions are accounting input, so import them
+        // before deciding whether this epoch can admit more spend.
+        let _ = self.reconcile().await;
         self.check_budget().await?;
         let params = params.0;
 
@@ -493,7 +501,24 @@ impl RemoteKernelsServer {
             .await
             .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
 
-        // Record the instance durably the moment it exists at the provider —
+        let external_volume_id = (runtime_name == "runpod")
+            .then(|| self.config.runpod.network_volume_id.clone())
+            .flatten();
+        let lifecycle = crate::state::LifecycleRecord {
+            storage_rate_per_hr: Some(if external_volume_id.is_some() {
+                0.0
+            } else {
+                handle.storage_rate_per_hr
+            }),
+            storage_rate_note: external_volume_id.as_ref().map_or_else(
+                || handle.storage_rate_note.clone(),
+                |id| Some(format!("external volume {id}: not budget-tracked")),
+            ),
+            external_volume_id,
+            ..crate::state::LifecycleRecord::default()
+        };
+
+        // Record the instance and first ledger event durably the moment it exists at the provider —
         // a crash from here on must not orphan a paid machine.
         {
             let mut state = self.state.lock().await;
@@ -511,17 +536,20 @@ impl RemoteKernelsServer {
             );
             let record = inst.record();
             state.instances.insert(name.clone(), inst);
-            if let Err(e) = state.save_record(&name, &record) {
-                tracing::warn!("Failed to persist instance record: {e}");
+            if let Err(e) = state.admit_provision(&name, &record, &lifecycle) {
+                // Accounting ambiguity must not turn into an unlisted paid
+                // machine. Preserve the recovery coordinates even though
+                // admission itself remains failed closed.
+                let _ = state.save_record(&name, &record);
+                let _ = crate::state::save_lifecycle_record(&project_dir, &name, &lifecycle);
+                return Err(McpError::internal_error(
+                    format!(
+                        "Machine {} is provisioned and billing, but accounting admission failed closed: {e}. Its provider id is {}; terminate it explicitly.",
+                        name, handle.external_id
+                    ),
+                    None,
+                ));
             }
-        }
-        let lifecycle = crate::state::LifecycleRecord {
-            storage_rate_per_hr: Some(handle.storage_rate_per_hr),
-            storage_rate_note: handle.storage_rate_note.clone(),
-            ..crate::state::LifecycleRecord::default()
-        };
-        if let Err(error) = crate::state::save_lifecycle_record(&project_dir, &name, &lifecycle) {
-            tracing::warn!(instance = %name, "Failed to persist storage pricing: {error}");
         }
 
         // Provisioning caveats (e.g. a money-safety guard that could not be
@@ -603,6 +631,7 @@ impl RemoteKernelsServer {
         let params = params.0;
         let machine_id = params.machine_id;
         let reconcile_message = self.reconcile_machine(&machine_id).await;
+        self.check_budget().await?;
         if let Err(message) = crate::state::validate_machine_id(&machine_id) {
             return err_text(message);
         }
@@ -650,10 +679,8 @@ impl RemoteKernelsServer {
             })?;
         match &provider_status {
             InstanceStatus::Gone => {
-                self.state
-                    .lock()
+                self.record_terminated_and_clear(&machine_id)
                     .await
-                    .clear_record(&machine_id)
                     .map_err(|error| {
                         McpError::internal_error(
                             format!("Failed to clear gone machine record: {error}"),
@@ -686,7 +713,13 @@ impl RemoteKernelsServer {
         let resumed = provider_status == InstanceStatus::Stopped;
         if resumed {
             self.state.lock().await.reset_known_hosts(&machine_id);
-            runtime.resume(&record.external_id).await.map_err(|error| {
+            self.accounted_resume(
+                &machine_id,
+                "resume provider call admitted",
+                runtime.resume(&record.external_id),
+            )
+            .await
+            .map_err(|error| {
                 McpError::internal_error(
                     format!("Failed to resume machine {machine_id}: {error}"),
                     None,
@@ -863,9 +896,9 @@ impl RemoteKernelsServer {
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to stop machine: {e}"), None))?;
 
-        let total = self.state.lock().await.total_spend();
+        let spend = Self::format_spend_amount(self.state.lock().await.spend_summary());
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Machine {name} {}. Session cost: ${total:.2}. \
+            "Machine {name} {}. Session cost: {spend}. \
              Use attach(\"{name}\") to resume it or terminate(instance=\"{name}\") to delete it.",
             actual.past_tense(),
         ))]))
@@ -920,15 +953,15 @@ impl RemoteKernelsServer {
                 McpError::internal_error(format!("Failed to terminate machine: {e}"), None)
             })?;
 
-        let total = self.state.lock().await.total_spend();
+        let spend = Self::format_spend_amount(self.state.lock().await.spend_summary());
         let message = if actual == CleanupAction::Terminate {
             format!(
-                "Machine {:?} terminated. Session cost: ${total:.2}. All machine data has been deleted.",
+                "Machine {:?} terminated. Session cost: {spend}. All machine data has been deleted.",
                 target.name
             )
         } else {
             format!(
-                "Finalize command failed; machine {:?} stopped for preservation, not terminated. Session cost: ${total:.2}. Storage may still bill until terminate() succeeds.",
+                "Finalize command failed; machine {:?} stopped for preservation, not terminated. Session cost: {spend}. Storage may still bill until terminate() succeeds.",
                 target.name
             )
         };
@@ -973,6 +1006,9 @@ impl RemoteKernelsServer {
             }
             provider_states.insert(id.clone(), state);
         }
+        if let Some(report) = self.non_mutating_budget_report().await {
+            sections.push(report);
+        }
         {
             let mut failures = self.start_failures.lock().await;
             sections.extend(failures.drain(..));
@@ -1001,6 +1037,7 @@ impl RemoteKernelsServer {
             (records, live)
         };
 
+        let has_records = !records.is_empty();
         for (id, record) in records
             .into_iter()
             .filter(|(id, _)| only.as_deref().is_none_or(|requested| requested == id))
@@ -1031,11 +1068,21 @@ impl RemoteKernelsServer {
             } else {
                 format!(" [{}]", annotations.join(", "))
             };
+            let tracked_storage_rate = if lifecycle.external_volume_id.is_some() {
+                0.0
+            } else {
+                lifecycle.storage_rate_per_hr.unwrap_or(0.0)
+            };
+            let displayed_rate = if provider_status == "Stopped" {
+                tracked_storage_rate
+            } else {
+                record.cost_per_hr + tracked_storage_rate
+            };
             let mut section = format!(
                 "Machine: {id}{annotation}\nLabel: {}\nPhase: {phase:?}\nProvider: {} ({provider_status})\nGPU: {gpu}\nCost: ${:.2}/hr",
                 record.label.as_deref().unwrap_or("none"),
                 record.runtime,
-                record.cost_per_hr,
+                displayed_rate,
             );
             if let Some((_, _, kernels, _, uptime_mins, supervision_note)) = live_info {
                 let _ = write!(
@@ -1056,7 +1103,9 @@ impl RemoteKernelsServer {
                     let _ = write!(section, "\nCaveat: {caveat}");
                 }
             }
-            if provider_status == "Stopped"
+            if let Some(volume_id) = &lifecycle.external_volume_id {
+                let _ = write!(section, "\nexternal volume {volume_id}: not budget-tracked");
+            } else if provider_status == "Stopped"
                 && let Some(storage_rate) = lifecycle.storage_rate_per_hr
             {
                 if storage_rate > 0.0 {
@@ -1086,21 +1135,30 @@ impl RemoteKernelsServer {
             sections.push(section);
         }
 
-        if sections.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "No durable machine records found.",
-            )]));
+        if !has_records {
+            sections.push("No durable machine records found.".to_string());
         }
 
-        let total_spend = self.state.lock().await.total_spend();
+        let spend = self.state.lock().await.spend_summary();
         let mut info = sections.join("\n\n");
-        let _ = write!(info, "\n\nSession cost: ${total_spend:.2}");
-        if let Some(budget) = self.budget {
-            let remaining = budget - total_spend;
-            let _ = write!(
-                info,
-                "\nBudget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
-            );
+        match spend {
+            Ok(summary) => {
+                let _ = write!(info, "\n\nSession cost: ${:.2}", summary.total);
+                if let Some(budget) = self.budget {
+                    let remaining = budget - summary.total;
+                    let _ = write!(
+                        info,
+                        "\nBudget: ${:.2} / ${budget:.2} (${remaining:.2} remaining)",
+                        summary.total
+                    );
+                }
+            }
+            Err(error) => {
+                let _ = write!(
+                    info,
+                    "\n\nAccounting failed closed: {error}. New spend is blocked."
+                );
+            }
         }
 
         Ok(CallToolResult::success(vec![Content::text(info)]))
@@ -1415,8 +1473,8 @@ impl RemoteKernelsServer {
         let is_error = output.error.is_some();
 
         // Append spend/budget info and cleanup reminder.
-        let total_spend = self.state.lock().await.total_spend();
-        if let Some(spend_line) = self.format_spend_line(total_spend) {
+        let spend = self.state.lock().await.spend_summary();
+        if let Some(spend_line) = self.format_spend_line(spend) {
             formatted.push_str(&spend_line);
         }
         if cleanup == Cleanup::Disabled {
@@ -1598,8 +1656,8 @@ impl RemoteKernelsServer {
         }
         let mut formatted = output.format();
         let is_error = output.error.is_some();
-        let total_spend = self.state.lock().await.total_spend();
-        if let Some(spend_line) = self.format_spend_line(total_spend) {
+        let spend = self.state.lock().await.spend_summary();
+        if let Some(spend_line) = self.format_spend_line(spend) {
             formatted.push_str(&spend_line);
         }
         if held.cleanup == Cleanup::Disabled {
@@ -2798,10 +2856,13 @@ impl RemoteKernelsServer {
             .await?;
         let conn = Arc::new(conn);
         let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, name);
-        lifecycle.storage_rate_per_hr = Some(handle.storage_rate_per_hr);
-        lifecycle
-            .storage_rate_note
-            .clone_from(&handle.storage_rate_note);
+        let previous_storage_rate = lifecycle.storage_rate_per_hr.unwrap_or(0.0);
+        if lifecycle.external_volume_id.is_none() {
+            lifecycle.storage_rate_per_hr = Some(handle.storage_rate_per_hr);
+            lifecycle
+                .storage_rate_note
+                .clone_from(&handle.storage_rate_note);
+        }
         crate::state::save_lifecycle_record(&project_dir, name, &lifecycle)?;
         if matches!(mode, ConnectMode::Attach { resumed: true, .. })
             && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::CompletedStop)
@@ -2828,15 +2889,33 @@ impl RemoteKernelsServer {
         let jupyter = JupyterClient::new(&endpoint.http_base, &jupyter_token);
 
         // Update instance details.
-        let previous_heartbeat = {
+        let (previous_heartbeat, previous_compute_rate, new_compute_rate) = {
             let mut state = self.state.lock().await;
             let inst = same_generation(&mut state, name, external_id)?;
+            let previous_compute_rate = inst.cost_per_hr;
             inst.gpu_name.clone_from(&handle.gpu_name);
             inst.cost_per_hr = handle.cost_per_hr.unwrap_or(inst.cost_per_hr);
             inst.jupyter = jupyter.clone();
             inst.connection = Some(Arc::clone(&conn));
-            inst.heartbeat.take()
+            (
+                inst.heartbeat.take(),
+                previous_compute_rate,
+                inst.cost_per_hr,
+            )
         };
+        let new_storage_rate = lifecycle.storage_rate_per_hr.unwrap_or(0.0);
+        if (previous_compute_rate - new_compute_rate).abs() > f64::EPSILON
+            || (previous_storage_rate - new_storage_rate).abs() > f64::EPSILON
+        {
+            self.state.lock().await.append_ledger_event(
+                name,
+                crate::ledger::EventKind::RateChanged,
+                None,
+                None,
+                None,
+                handle.storage_rate_note.clone(),
+            )?;
+        }
         if let Some(previous_heartbeat) = previous_heartbeat {
             previous_heartbeat.stop();
         }
@@ -2961,8 +3040,8 @@ impl RemoteKernelsServer {
             }
         }
 
-        // Mark Running and persist. The billing clock deliberately keeps its
-        // provisioning start time — providers bill from allocation.
+        // Mark Running and persist. The ledger's provisioned event already
+        // accounts from allocation; this Instant is only operational uptime.
         let (summary, record) = {
             let mut state = self.state.lock().await;
             let inst = same_generation(&mut state, name, external_id)?;
@@ -2986,17 +3065,27 @@ impl RemoteKernelsServer {
                 inst.runtime,
                 inst.gpu_name,
                 inst.cost_per_hr
+                    + crate::state::load_lifecycle_record(&project_dir, name)
+                        .storage_rate_per_hr
+                        .unwrap_or(0.0)
             );
             if let Some(caveat) = &inst.supervision_note {
                 let _ = write!(summary, "\n- Caveat: {caveat}");
             }
             if let Some(budget) = self.budget {
-                let total_spend = state.total_spend();
-                let remaining = budget - total_spend;
-                let _ = write!(
-                    summary,
-                    "\n- Budget: ${total_spend:.2} / ${budget:.2} (${remaining:.2} remaining)"
-                );
+                match state.spend_summary() {
+                    Ok(spend) => {
+                        let remaining = budget - spend.total;
+                        let _ = write!(
+                            summary,
+                            "\n- Budget: ${:.2} / ${budget:.2} (${remaining:.2} remaining)",
+                            spend.total
+                        );
+                    }
+                    Err(error) => {
+                        let _ = write!(summary, "\n- Accounting unavailable ({error})");
+                    }
+                }
             }
             (summary, record)
         };
@@ -3181,6 +3270,7 @@ impl RemoteKernelsServer {
     /// On terminate, the durable record is cleared only after a *confirmed*
     /// provider termination; otherwise it is kept so `status()`/`terminate()`
     /// can still see and retry the possibly-billing machine.
+    #[allow(clippy::too_many_lines)]
     async fn cleanup_failed_start(
         &self,
         name: &str,
@@ -3206,8 +3296,8 @@ impl RemoteKernelsServer {
             return FailedStartCleanup::Unconfirmed;
         }
 
-        // Drop the in-memory instance (snapshotting the billed provisioning
-        // time) and capture its record for the policy decision, falling back
+        // Drop the in-memory instance and capture its record for the policy
+        // decision, falling back
         // to the durable record for a generation no longer in memory.
         let record = {
             let mut state = self.state.lock().await;
@@ -3216,12 +3306,10 @@ impl RemoteKernelsServer {
                 .instances
                 .get(name)
                 .is_some_and(|i| i.external_id == external_id)
+                && let Some(mut inst) = state.instances.remove(name)
             {
-                state.snapshot_spend_for(name);
-                if let Some(mut inst) = state.instances.remove(name) {
-                    inst.stop_heartbeat();
-                    record = Some(inst.record());
-                }
+                inst.stop_heartbeat();
+                record = Some(inst.record());
             }
             record.or_else(|| {
                 crate::state::load_instance_record(&state.project_dir, name)
@@ -3247,6 +3335,20 @@ impl RemoteKernelsServer {
             Cleanup::Terminate => match runtime.terminate(external_id).await {
                 Ok(()) => {
                     let state = self.state.lock().await;
+                    if let Err(error) = state.append_ledger_event(
+                        name,
+                        crate::ledger::EventKind::Terminated,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            instance = name,
+                            "Termination ledger update failed closed: {error}"
+                        );
+                        return FailedStartCleanup::Unconfirmed;
+                    }
                     if crate::state::load_instance_record(&state.project_dir, name)
                         .is_some_and(|r| r.external_id == external_id)
                         && let Err(e) = state.clear_record(name)
@@ -3262,6 +3364,19 @@ impl RemoteKernelsServer {
             },
             Cleanup::Stop => match runtime.stop(external_id).await {
                 Ok(()) => {
+                    if let Err(error) = self.state.lock().await.append_ledger_event(
+                        name,
+                        crate::ledger::EventKind::Stopped,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            instance = name,
+                            "Stop ledger update failed closed: {error}"
+                        );
+                    }
                     self.persist_failed_start_record(name, external_id, record, Phase::Stopped)
                         .await;
                     FailedStartCleanup::Stopped
@@ -3302,20 +3417,70 @@ impl RemoteKernelsServer {
     /// Check if the session budget has been exceeded. If so, clean up ALL
     /// machines (per their cleanup policies) and return an error.
     async fn check_budget(&self) -> Result<(), McpError> {
+        if let Some(budget) = self.budget
+            && self
+                .budget_exhausted
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(McpError::internal_error(
+                format!(
+                    "Session budget of ${budget:.2} was already exhausted; new spend remains blocked for this server session."
+                ),
+                None,
+            ));
+        }
+        let total_spend = self
+            .state
+            .lock()
+            .await
+            .spend_summary()
+            .map_err(|error| {
+                McpError::internal_error(
+                    format!(
+                        "Accounting failed closed: {error}. New spend is blocked until the ledger is repaired."
+                    ),
+                    None,
+                )
+            })?
+            .total;
         let Some(budget) = self.budget else {
             return Ok(());
         };
-
-        let total_spend = self.state.lock().await.total_spend();
         if total_spend < budget {
             return Ok(());
         }
 
+        // The plan's "budget is HARD" contract is process-monotonic even
+        // though successful full cleanup closes the durable epoch.
+        self.budget_exhausted
+            .store(true, std::sync::atomic::Ordering::Release);
         let action = self.cleanup_all_for_budget().await;
         Err(McpError::internal_error(
             format!("Session budget of ${budget:.2} reached (spent ${total_spend:.2}). {action}"),
             None,
         ))
+    }
+
+    async fn non_mutating_budget_report(&self) -> Option<String> {
+        let budget = self.budget?;
+        if self
+            .budget_exhausted
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Some(format!(
+                "Budget: session limit ${budget:.2} is exhausted; new spend remains blocked for this server session"
+            ));
+        }
+        match self.state.lock().await.spend_summary() {
+            Ok(summary) if summary.total >= budget => Some(format!(
+                "Budget: ${:.2} / ${budget:.2} exhausted; status is observational and did not clean up machines",
+                summary.total
+            )),
+            Ok(_) => None,
+            Err(error) => Some(format!(
+                "Accounting unavailable ({error}); new spend is blocked"
+            )),
+        }
     }
 
     /// Snapshot a live instance's cleanup coordinates under one lock.
@@ -3390,7 +3555,7 @@ impl RemoteKernelsServer {
         };
 
         if provider_state == InstanceStatus::Gone {
-            if let Err(error) = self.state.lock().await.clear_record(machine_id) {
+            if let Err(error) = self.record_terminated_and_clear(machine_id).await {
                 return Some(format!(
                     "Reconciliation {machine_id}: provider confirms gone; record cleanup failed ({error})"
                 ));
@@ -3398,6 +3563,28 @@ impl RemoteKernelsServer {
             return Some(format!(
                 "Reconciliation {machine_id}: provider confirms gone; record cleared"
             ));
+        }
+
+        if provider_state == InstanceStatus::Stopped && record.phase == Phase::Stopped {
+            let expected_storage = if lifecycle.external_volume_id.is_some() {
+                0.0
+            } else {
+                lifecycle.storage_rate_per_hr.unwrap_or(0.0)
+            };
+            let open_rate = self
+                .state
+                .lock()
+                .await
+                .spend_summary()
+                .ok()
+                .and_then(|summary| summary.machine_rates.get(machine_id).copied());
+            if open_rate.is_some_and(|rate| rate > expected_storage + f64::EPSILON)
+                && let Err(error) = self.record_stopped(machine_id, None).await
+            {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider is stopped, but accounting correction failed closed ({error})"
+                ));
+            }
         }
 
         if provider_state == InstanceStatus::Running
@@ -3422,6 +3609,11 @@ impl RemoteKernelsServer {
             }
             return match runtime.stop(&record.external_id).await {
                 Ok(()) => {
+                    if let Err(error) = self.record_stopped(machine_id, None).await {
+                        return Some(format!(
+                            "Reconciliation {machine_id}: re-stopped after interrupted retrieval, but accounting failed closed ({error})"
+                        ));
+                    }
                     let mut stopped = record.clone();
                     stopped.phase = Phase::Stopped;
                     let _ = self.state.lock().await.save_record(machine_id, &stopped);
@@ -3461,6 +3653,11 @@ impl RemoteKernelsServer {
         if lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
             && lifecycle.action == Some(Cleanup::Stop)
         {
+            if let Err(error) = self.record_stopped(machine_id, None).await {
+                return Some(format!(
+                    "Reconciliation {machine_id}: provider confirmed stop, but accounting failed closed ({error})"
+                ));
+            }
             let mut stopped = record.clone();
             stopped.phase = Phase::Stopped;
             let _ = self.state.lock().await.save_record(machine_id, &stopped);
@@ -3538,7 +3735,14 @@ impl RemoteKernelsServer {
                 "Reconciliation {machine_id}: could not persist retrieval phase; preserved ({error})"
             ));
         }
-        if let Err(error) = runtime.resume(&record.external_id).await {
+        if let Err(error) = self
+            .accounted_resume(
+                machine_id,
+                "temporary resume to retrieve outcome marker",
+                runtime.resume(&record.external_id),
+            )
+            .await
+        {
             lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
             lifecycle.outcome_unknown = true;
             let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
@@ -3563,7 +3767,9 @@ impl RemoteKernelsServer {
                 if let Err(error) =
                     crate::state::import_pending_transition(&project_dir, machine_id, &marker)
                 {
-                    let _ = runtime.stop(&record.external_id).await;
+                    if runtime.stop(&record.external_id).await.is_ok() {
+                        let _ = self.record_stopped(machine_id, None).await;
+                    }
                     lifecycle.finalize_phase =
                         Some(crate::state::FinalizePhase::RetrievalUnavailable);
                     lifecycle.wants_terminate = false;
@@ -3576,6 +3782,9 @@ impl RemoteKernelsServer {
                 }
                 if let Err(error) = runtime.terminate(&record.external_id).await {
                     let restop = runtime.stop(&record.external_id).await;
+                    if restop.is_ok() {
+                        let _ = self.record_stopped(machine_id, None).await;
+                    }
                     lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
                     lifecycle.outcome_unknown = true;
                     let _ =
@@ -3589,7 +3798,7 @@ impl RemoteKernelsServer {
                         }
                     ));
                 }
-                let _ = self.state.lock().await.clear_record(machine_id);
+                let _ = self.record_terminated_and_clear(machine_id).await;
                 Some(format!(
                     "Reconciliation {machine_id}: finalize marker authorized terminate; terminated"
                 ))
@@ -3597,6 +3806,9 @@ impl RemoteKernelsServer {
             Ok(marker) => {
                 let _ = crate::state::import_pending_transition(&project_dir, machine_id, &marker);
                 let restop = runtime.stop(&record.external_id).await;
+                if restop.is_ok() {
+                    let _ = self.record_stopped(machine_id, None).await;
+                }
                 lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
                 lifecycle.action = Some(Cleanup::Stop);
                 lifecycle.wants_terminate = false;
@@ -3613,6 +3825,9 @@ impl RemoteKernelsServer {
             }
             Err(error) => {
                 let restop = runtime.stop(&record.external_id).await;
+                if restop.is_ok() {
+                    let _ = self.record_stopped(machine_id, None).await;
+                }
                 lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievalUnavailable);
                 lifecycle.outcome_unknown = true;
                 let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
@@ -3668,7 +3883,7 @@ impl RemoteKernelsServer {
             let _ = crate::state::save_lifecycle_record(&project_dir, machine_id, &lifecycle);
             return match runtime.terminate(&record.external_id).await {
                 Ok(()) => {
-                    let _ = self.state.lock().await.clear_record(machine_id);
+                    let _ = self.record_terminated_and_clear(machine_id).await;
                     format!(
                         "Reconciliation {machine_id}: finalize marker authorized terminate; terminated"
                     )
@@ -3824,7 +4039,8 @@ impl RemoteKernelsServer {
             );
         }
 
-        self.complete_provider_action(target, actual).await?;
+        self.complete_provider_action(target, actual, Some(op_id.clone()))
+            .await?;
         if actual == CleanupAction::Stop {
             lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
             lifecycle.outcome_unknown = false;
@@ -3837,20 +4053,30 @@ impl RemoteKernelsServer {
         &self,
         target: &CleanupTarget,
         action: CleanupAction,
+        ledger_uuid: Option<String>,
     ) -> anyhow::Result<()> {
         let mut state = self.state.lock().await;
         let is_current_generation = state
             .instances
             .get(&target.name)
             .is_some_and(|instance| instance.external_id == target.external_id);
-        if is_current_generation {
-            state.snapshot_spend_for(&target.name);
-            if let Some(mut instance) = state.instances.remove(&target.name) {
-                instance.stop_heartbeat();
-                if action == CleanupAction::Stop {
-                    instance.phase = Phase::Stopped;
-                    state.save_record(&target.name, &instance.record())?;
-                }
+        state.append_ledger_event(
+            &target.name,
+            if action == CleanupAction::Stop {
+                crate::ledger::EventKind::Stopped
+            } else {
+                crate::ledger::EventKind::Terminated
+            },
+            ledger_uuid,
+            None,
+            None,
+            None,
+        )?;
+        if is_current_generation && let Some(mut instance) = state.instances.remove(&target.name) {
+            instance.stop_heartbeat();
+            if action == CleanupAction::Stop {
+                instance.phase = Phase::Stopped;
+                state.save_record(&target.name, &instance.record())?;
             }
         }
         if action == CleanupAction::Terminate
@@ -3858,6 +4084,58 @@ impl RemoteKernelsServer {
                 .is_some_and(|record| record.external_id == target.external_id)
         {
             state.clear_record(&target.name)?;
+        }
+        Ok(())
+    }
+
+    async fn record_terminated_and_clear(&self, machine_id: &str) -> anyhow::Result<()> {
+        let state = self.state.lock().await;
+        state.append_ledger_event(
+            machine_id,
+            crate::ledger::EventKind::Terminated,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        state.clear_record(machine_id)
+    }
+
+    async fn record_stopped(&self, machine_id: &str, uuid: Option<String>) -> anyhow::Result<()> {
+        self.state.lock().await.append_ledger_event(
+            machine_id,
+            crate::ledger::EventKind::Stopped,
+            uuid,
+            None,
+            None,
+            None,
+        )?;
+        Ok(())
+    }
+
+    async fn accounted_resume<F>(
+        &self,
+        machine_id: &str,
+        note: &str,
+        resume: F,
+    ) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        self.state.lock().await.append_ledger_event(
+            machine_id,
+            crate::ledger::EventKind::Resumed,
+            None,
+            None,
+            None,
+            Some(note.to_string()),
+        )?;
+        if let Err(error) = resume.await {
+            // An authoritative failure closes the conservatively-opened
+            // interval. Process death leaves it open, which is the required
+            // fail-closed direction for an ambiguous provider outcome.
+            let _ = self.record_stopped(machine_id, None).await;
+            return Err(error);
         }
         Ok(())
     }
@@ -3908,7 +4186,7 @@ impl RemoteKernelsServer {
         format!("Machines cleaned up — {}.", actions.join("; "))
     }
 
-    /// A transport disconnect never calls a provider. It snapshots spend,
+    /// A transport disconnect never calls a provider. It preserves the open ledger interval,
     /// preserves Running records, and best-effort arms the machine-side drain.
     pub async fn shutdown_cleanup(&self) {
         let names = self
@@ -3943,7 +4221,6 @@ impl RemoteKernelsServer {
                     tracing::info!(instance = %name, "Fenced disconnect discarded local state without touching durable records");
                     continue;
                 }
-                state.snapshot_spend_for(&name);
                 let Some(mut instance) = state.instances.remove(&name) else {
                     continue;
                 };
@@ -4052,12 +4329,26 @@ impl RemoteKernelsServer {
     }
 
     /// Format a spend/budget line for tool responses.
-    fn format_spend_line(&self, total_spend: f64) -> Option<String> {
-        self.budget.map(|budget| {
-            let remaining = budget - total_spend;
-            format!(
-                "\n[Session: ${total_spend:.2} / ${budget:.2} budget (${remaining:.2} remaining)]"
-            )
+    fn format_spend_amount(spend: Result<crate::ledger::SpendSummary, String>) -> String {
+        spend.map_or_else(
+            |error| format!("accounting unavailable ({error})"),
+            |summary| format!("${:.2}", summary.total),
+        )
+    }
+
+    fn format_spend_line(
+        &self,
+        spend: Result<crate::ledger::SpendSummary, String>,
+    ) -> Option<String> {
+        self.budget.map(|budget| match spend {
+            Ok(summary) => {
+                let remaining = budget - summary.total;
+                format!(
+                    "\n[Session: ${:.2} / ${budget:.2} budget (${remaining:.2} remaining)]",
+                    summary.total
+                )
+            }
+            Err(error) => format!("\n[Session: accounting unavailable ({error})]"),
         })
     }
 }
@@ -4125,6 +4416,122 @@ mod tests {
         assert!(super::validate_label(Some("")).is_err());
         assert!(super::validate_label(Some("has space")).is_err());
         assert!(super::validate_label(Some(&"x".repeat(65))).is_err());
+    }
+
+    fn migrated_over_budget_state(dir: &std::path::Path) -> AppState {
+        let initial = AppState::new(dir.to_path_buf());
+        initial
+            .save_record("main", &test_instance("main").record())
+            .unwrap();
+        std::fs::write(
+            crate::state::state_dir(dir).join("spend.json"),
+            serde_json::json!({"accumulated_spend": 2.0}).to_string(),
+        )
+        .unwrap();
+        AppState::new(dir.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn session_budget_floor_survives_epoch_reset_until_fresh_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = RemoteKernelsServer::new(
+            toml::from_str("").unwrap(),
+            migrated_over_budget_state(dir.path()),
+            Some(1.0),
+        );
+        assert!(server.check_budget().await.is_err());
+        server.state.lock().await.clear_record("main").unwrap();
+        let error = server.check_budget().await.unwrap_err().to_string();
+        assert!(error.contains("already exhausted"), "{error}");
+
+        let fresh = RemoteKernelsServer::new(
+            toml::from_str("").unwrap(),
+            AppState::new(dir.path().to_path_buf()),
+            Some(1.0),
+        );
+        assert!(fresh.check_budget().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn status_budget_report_is_observational() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = RemoteKernelsServer::new(
+            toml::from_str("").unwrap(),
+            migrated_over_budget_state(dir.path()),
+            Some(1.0),
+        );
+        let report = server.non_mutating_budget_report().await.unwrap();
+        assert!(report.contains("did not clean up machines"), "{report}");
+        assert!(crate::state::load_instance_record(dir.path(), "main").is_some());
+        assert!(
+            !server
+                .budget_exhausted
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[tokio::test]
+    async fn accounted_resume_opens_ledger_before_provider_future_and_closes_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let mut instance = InstanceState::provisioning(
+            "main".to_string(),
+            None,
+            "runpod".to_string(),
+            "provider-id".to_string(),
+            "GPU".to_string(),
+            2.0,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/key".into(),
+            false,
+        );
+        instance.phase = Phase::Stopped;
+        let record = instance.record();
+        state
+            .admit_provision("main", &record, &crate::state::LifecycleRecord::default())
+            .unwrap();
+        state
+            .append_ledger_event(
+                "main",
+                crate::ledger::EventKind::Stopped,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let server = RemoteKernelsServer::new(toml::from_str("").unwrap(), state, None);
+        let shared = std::sync::Arc::clone(&server.state);
+        let provider_call = async move {
+            let rate = shared.lock().await.spend_summary().unwrap().hourly_rate;
+            assert!((rate - 2.0).abs() < f64::EPSILON);
+            anyhow::bail!("authoritative resume rejection")
+        };
+        assert!(
+            server
+                .accounted_resume("main", "test resume", provider_call)
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .state
+                .lock()
+                .await
+                .spend_summary()
+                .unwrap()
+                .hourly_rate
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn hard_accounting_error_spend_copy_never_prints_infinity() {
+        let rendered = RemoteKernelsServer::format_spend_amount(Err("hard failure".to_string()));
+        assert_eq!(rendered, "accounting unavailable (hard failure)");
+        assert!(!rendered.contains("inf"));
     }
 
     fn recorder_line(parent_msg_id: &str, msg_type: &str, content: &serde_json::Value) -> String {
@@ -4506,7 +4913,13 @@ mod tests {
         instance.kernel_ids.push("kernel-1".to_string());
         instance.fence(FenceReason::TakenOver);
         let record = instance.record();
-        state.save_record(&machine_id, &record).unwrap();
+        state
+            .admit_provision(
+                &machine_id,
+                &record,
+                &crate::state::LifecycleRecord::default(),
+            )
+            .unwrap();
         state.instances.insert(machine_id.clone(), instance);
         let config: Config = toml::from_str("default-runtime = \"runpod\"").unwrap();
         let server = RemoteKernelsServer::new(config, state, None);
@@ -4569,6 +4982,36 @@ mod fencing_tests {
     use rmcp::handler::server::wrapper::Parameters;
 
     use super::*;
+
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn corrupt_ledger_blocks_start_before_provider_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        std::fs::write(
+            dir.path()
+                .join(".claude/remote-kernels/ledger/corrupt.jsonl"),
+            "{broken\n",
+        )
+        .unwrap();
+        let config: Config = toml::from_str("default-runtime = \"fake\"").unwrap();
+        let server = RemoteKernelsServer::new(config, state, None);
+        let error = server
+            .start(Parameters(StartParams {
+                label: None,
+                runtime: None,
+                gpu_type: None,
+                image: None,
+                vast_offers: None,
+                priority: None,
+                wait: Some(false),
+            }))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Accounting failed closed"), "{message}");
+        assert!(crate::state::list_instance_records(dir.path()).is_empty());
+    }
     use crate::runtime::AnyConnection;
     use crate::runtime::fake::FakeConnection;
 

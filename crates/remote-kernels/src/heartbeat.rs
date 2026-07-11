@@ -53,14 +53,25 @@ pub struct BudgetFeed {
 
 impl BudgetFeed {
     /// Seconds until the session budget is exhausted if every running metered
-    /// instance keeps burning. `None` when nothing is currently metered.
+    /// instance keeps burning. `None` when nothing is currently metered or
+    /// accounting is unavailable; hard accounting errors must preserve the
+    /// last remote deadline, never synthesize a zero-second destruction arm.
     pub async fn remaining_secs(&self) -> Option<u64> {
         let state = self.state.lock().await;
-        let rate = state.aggregate_cost_per_hr();
+        let summary = match state.spend_summary() {
+            Ok(summary) => summary,
+            Err(error) => {
+                tracing::error!(
+                    "Budget deadline refresh skipped: accounting failed closed: {error}"
+                );
+                return None;
+            }
+        };
+        let rate = summary.hourly_rate;
         if rate <= 0.0 {
             return None;
         }
-        let remaining_dollars = self.budget - state.total_spend();
+        let remaining_dollars = self.budget - summary.total;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Some(((remaining_dollars / rate) * 3600.0).max(0.0) as u64)
     }
@@ -260,7 +271,12 @@ async fn establish_and_run(
             }
             Err(e) => tracing::warn!(instance, "Legacy heartbeat failed: {e}"),
         }
-        state.lock().await.persist_spend();
+        if let Err(error) = state.lock().await.spend_summary() {
+            tracing::error!(
+                instance,
+                "Accounting ledger failed closed on heartbeat: {error}"
+            );
+        }
         if watchdog_policy.cleanup != Cleanup::Disabled
             && let Some(feed) = &budget
             && let Some(secs) = feed.remaining_secs().await
@@ -456,5 +472,26 @@ pub struct HeartbeatState {
 impl HeartbeatState {
     pub fn stop(self) {
         self.task_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn hard_accounting_error_skips_budget_deadline_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        std::fs::write(
+            crate::state::state_dir(dir.path()).join("ledger/epoch.json"),
+            "{broken",
+        )
+        .unwrap();
+        let feed = BudgetFeed {
+            state: Arc::new(Mutex::new(state)),
+            budget: 1.0,
+        };
+        assert_eq!(feed.remaining_secs().await, None);
     }
 }
