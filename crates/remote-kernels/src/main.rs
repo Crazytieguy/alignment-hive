@@ -2,12 +2,12 @@ use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use std::path::PathBuf;
 
-use remote_kernels::{config, runpod, server, state};
+use remote_kernels::{config, server, state};
 
 #[derive(Parser)]
 #[command(
     name = "remote-kernels",
-    about = "MCP server for cloud GPU instances with Jupyter kernels"
+    about = "MCP server for cloud GPU machines with Jupyter kernels"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -21,7 +21,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print a commented TOML config template to stdout.
-    ConfigTemplate,
+    ConfigTemplate {
+        /// Only include this runtime's section (repeatable: runpod, vast,
+        /// kubernetes). Shared fields are always included; with exactly one
+        /// runtime, `default-runtime` is set to it. Default: all runtimes.
+        #[arg(long = "runtime")]
+        runtimes: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -29,8 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::ConfigTemplate) => {
-            print!("{}", config::Config::template());
+        Some(Command::ConfigTemplate { runtimes }) => {
+            let template = if runtimes.is_empty() {
+                config::Config::template()
+            } else {
+                let names: Vec<&str> = runtimes.iter().map(String::as_str).collect();
+                config::Config::template_for(&names)?
+            };
+            print!("{template}");
             return Ok(());
         }
         None => serve(cli.project_dir).await,
@@ -38,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    remote_kernels::init_tls();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -49,36 +62,39 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
     // Load .env.local (then .env) from project directory if present.
+    // Runtime credentials (RUNPOD_API_KEY, ...) are checked lazily at first
+    // use of each runtime, not here — a runtime you never touch needs no key.
     let _ = dotenvy::from_path(project_dir.join(".env.local"));
     let _ = dotenvy::from_path(project_dir.join(".env"));
 
-    let api_key = std::env::var("RUNPOD_API_KEY").map_err(|_| {
-        "RUNPOD_API_KEY environment variable not set. Get your API key from https://runpod.io/console/user/settings"
-    })?;
-
     let config = config::Config::load(&project_dir)?;
-    let cleanup = config.cleanup;
 
     // Budget: env var overrides config. Env var is typically set via .claude/settings.json
     // so Claude can't modify it.
-    let budget = std::env::var("REMOTE_KERNELS_BUDGET")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .or(config.budget_cap);
+    let budget = config.resolve_budget(std::env::var("REMOTE_KERNELS_BUDGET").ok().as_deref())?;
 
-    // Budget and cleanup:disabled are incompatible — disabled means the user wants the
-    // pod to keep running, which conflicts with budget enforcement stopping/terminating it.
-    if budget.is_some() && cleanup == config::Cleanup::Disabled {
-        return Err(
-            "Configuration error: budget-cap (or REMOTE_KERNELS_BUDGET) cannot be used with cleanup = \"disabled\". \
-             Budget enforcement requires the ability to stop/terminate the pod.".into()
-        );
+    // Cleanup modes are validated against each runtime's capabilities:
+    // explicit per-runtime keys eagerly, plus the budget/"disabled"
+    // incompatibility on metered runtimes.
+    if let Err(msg) = remote_kernels::runtime::validate_config_with_budget_source(
+        &config,
+        budget.map(|value| value.source),
+    ) {
+        return Err(format!("Configuration error: {msg}").into());
     }
 
     let app_state = state::AppState::new(project_dir);
+    let server = server::RemoteKernelsServer::new_with_budget(config, app_state, budget);
+    let shutdown_server = server.clone();
 
-    let server = server::RemoteKernelsServer::new(config, api_key.clone(), app_state, budget);
-    let shared_state = server.shared_state();
+    let reconcile_messages = server.reconcile().await;
+    for message in &reconcile_messages {
+        tracing::info!("{message}");
+    }
+    // Startup reconcile findings surface via status(), and this session's
+    // running machines are picked back up automatically in the background.
+    server.queue_alerts(reconcile_messages).await;
+    server.spawn_auto_reattach();
 
     tracing::info!("Starting remote-kernels MCP server");
 
@@ -89,50 +105,9 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     running.waiting().await?;
 
-    // Graceful shutdown: clean up pod if one is running.
-    tracing::info!("MCP server disconnected, cleaning up...");
-
-    let mut state = shared_state.lock().await;
-    if let Some(mut pod) = state.pod.take() {
-        let pod_id = pod.pod_id.clone();
-
-        // Stop heartbeat.
-        if let Some(hb) = pod.heartbeat.take() {
-            hb.stop();
-        }
-
-        // Stop or terminate the pod based on config.
-        match cleanup {
-            config::Cleanup::Disabled => {
-                tracing::info!(pod_id = %pod_id, "Cleanup disabled, leaving pod running");
-            }
-            _ => {
-                let runpod = runpod::client::RunPodClient::new(api_key);
-                let result = match cleanup {
-                    config::Cleanup::Stop => runpod.stop_pod(&pod_id).await,
-                    config::Cleanup::Terminate => runpod.terminate_pod(&pod_id).await,
-                    config::Cleanup::Disabled => unreachable!(),
-                };
-                match result {
-                    Ok(()) => tracing::info!(pod_id = %pod_id, ?cleanup, "Pod cleaned up"),
-                    Err(e) => {
-                        tracing::warn!(pod_id = %pod_id, "Failed to clean up pod: {e}");
-                    }
-                }
-            }
-        }
-
-        // For terminate: clear state since the pod is deleted.
-        // For stop/disabled: preserve pod_id so the next session can find/terminate it.
-        state.snapshot_spend();
-        let save_result = match cleanup {
-            config::Cleanup::Terminate => state.clear(),
-            _ => state.save_with_pod_id(Some(&pod_id), cleanup),
-        };
-        if let Err(e) = save_result {
-            tracing::warn!("Failed to save state file: {e}");
-        }
-    }
+    // A transport disconnect only arms remote finalization and preserves records.
+    tracing::info!("MCP server disconnected, arming finalization...");
+    shutdown_server.shutdown_cleanup().await;
 
     Ok(())
 }

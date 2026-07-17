@@ -293,11 +293,11 @@ async function discoverWorktreeTranscriptDirs(
     }
   }
 
-  // Single batch write if anything was discovered
+  // Single batch append if anything was discovered — the file is add-only and
+  // deduped on load, so appending avoids clobbering concurrent writers.
   if (discovered.length > 0) {
     await ensureStateDir(stateDir);
-    const all = [...existing, ...discovered];
-    writeFileSync(statePaths(stateDir).transcriptsDirs, all.join('\n') + '\n', 'utf-8');
+    writeFileSync(statePaths(stateDir).transcriptsDirs, discovered.join('\n') + '\n', { flag: 'a' });
   }
 
   return { existing: existing.length, discovered: discovered.length };

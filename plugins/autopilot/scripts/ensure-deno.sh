@@ -43,18 +43,23 @@ fi
 
 DOWNLOAD_URL="https://dl.deno.land/release/${DENO_VERSION}/deno-${ARCH_NAME}-${OS_NAME}.zip"
 
-TMPFILE=$(mktemp /tmp/deno-download-XXXXXXXX.zip)
-trap 'rm -f "$TMPFILE"' EXIT
-
 mkdir -p "$HOME/.deno/bin"
 
+# Download and extract into a temp dir under $HOME/.deno (same filesystem as
+# the final path — /tmp may not be, where mv degrades to a non-atomic copy),
+# then atomically rename into place — concurrent sessions run this hook at the
+# same time, and a half-written binary at $DENO_BIN would be executed by them.
+TMPDIR_EXTRACT=$(mktemp -d "$HOME/.deno/extract-XXXXXXXX")
+trap 'rm -rf "$TMPDIR_EXTRACT"' EXIT
+TMPFILE="$TMPDIR_EXTRACT/deno.zip"
+
 if curl -fSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
-  if unzip -o "$TMPFILE" -d "$HOME/.deno/bin" >/dev/null 2>&1; then
-    chmod +x "$DENO_BIN"
-    if "$DENO_BIN" --version >/dev/null 2>&1; then
+  if unzip -o "$TMPFILE" -d "$TMPDIR_EXTRACT" >/dev/null 2>&1; then
+    chmod +x "$TMPDIR_EXTRACT/deno"
+    if "$TMPDIR_EXTRACT/deno" --version >/dev/null 2>&1; then
+      mv -f "$TMPDIR_EXTRACT/deno" "$DENO_BIN"
       echo "{\"systemMessage\": \"${B}autopilot:${R} deno bootstrapped, sandboxed scripting is now available\"}"
     else
-      rm -f "$DENO_BIN"
       echo "{\"systemMessage\": \"${B}autopilot:${R} downloaded deno binary is corrupt, install deno manually\"}"
     fi
   else

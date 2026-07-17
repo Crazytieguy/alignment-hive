@@ -10,7 +10,7 @@ From the repo root: `bun run --filter '*' <script>` for all workspaces, or `bun 
 
 Register new plugins in `.claude-plugin/marketplace.json` (`name` must match the `plugins/` folder).
 
-Bump the plugin's `plugin.json` version whenever you change plugin content — the auto-updater compares versions. For `plugins/hive/`, also bump `plugins/hive/cli-version` to match `packages/hive-cli/package.json`.
+Bump the plugin's `plugin.json` version whenever you change plugin content — the auto-updater compares versions. For `plugins/hive/`, also bump `plugins/hive/cli-version` to match `packages/hive-cli/package.json`. For `plugins/remote-kernels/`, `binary-version` must point at a released `crates/remote-kernels` version — only change it alongside a binary release.
 
 ## Codebase Exploration
 

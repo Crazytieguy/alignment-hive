@@ -41,17 +41,22 @@ DOWNLOAD_URL="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq
 
 mkdir -p "$CACHE_DIR"
 
-if curl -fSL "$DOWNLOAD_URL" -o "$BINARY"; then
-  chmod +x "$BINARY"
+# Download to a temp file in the destination dir (same filesystem), then
+# atomically rename into place — concurrent sessions run this hook at the
+# same time, and a half-written binary at $BINARY would be executed by them.
+TMP_BINARY=$(mktemp "$CACHE_DIR/jq.XXXXXX")
+trap 'rm -f "$TMP_BINARY"' EXIT
+
+if curl -fSL "$DOWNLOAD_URL" -o "$TMP_BINARY"; then
+  chmod 755 "$TMP_BINARY"  # mktemp creates 0600; restore the usual binary mode
   # Verify the binary works (catches corrupt/partial downloads)
-  if ! "$BINARY" --version >/dev/null 2>&1; then
-    rm -f "$BINARY"
+  if ! "$TMP_BINARY" --version >/dev/null 2>&1; then
     echo "{\"systemMessage\": \"${B}autopilot:${R} downloaded jq binary is corrupt, install jq manually\"}"
     exit 0
   fi
+  mv -f "$TMP_BINARY" "$BINARY"
   echo "{\"systemMessage\": \"${B}autopilot:${R} jq bootstrapped, auto-deny is now active\"}"
 else
-  rm -f "$BINARY"
   echo "{\"systemMessage\": \"${B}autopilot:${R} failed to download jq, auto-deny disabled until jq is installed\"}"
   exit 0
 fi

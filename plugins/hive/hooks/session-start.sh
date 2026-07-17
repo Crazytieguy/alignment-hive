@@ -37,19 +37,25 @@ ERROR_LOG="$STATE_DIR/error.log"
 # Exit 0 on unexpected errors — log them for debugging
 trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error at line $LINENO" >> "$ERROR_LOG" 2>/dev/null; exit 0' ERR
 
+# --- Record git commit hash for this session id ---
+# Runs before the resume/compact early-exit: a forked session id (e.g. from
+# backgrounding with active subagents) first arrives as source:"resume" and
+# still needs its commit stamp. Same-id resumes keep their original hash via
+# the file-existence guard.
+
+if [ -n "$SESSION_ID" ]; then
+  if [ ! -f "$STATE_DIR/${SESSION_ID}-commit.txt" ]; then
+    COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
+    if [ -n "$COMMIT_HASH" ]; then
+      echo "$COMMIT_HASH" > "$STATE_DIR/${SESSION_ID}-commit.txt"
+    fi
+  fi
+fi
+
 # --- Skip for resume/compact (continuations don't need fresh state) ---
 
 if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ]; then
   exit 0
-fi
-
-# --- Record git commit hash at session start ---
-
-if [ -n "$SESSION_ID" ]; then
-  COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
-  if [ -n "$COMMIT_HASH" ]; then
-    echo "$COMMIT_HASH" > "$STATE_DIR/${SESSION_ID}-commit.txt"
-  fi
 fi
 
 # --- Register transcript directory for local retrieval ---

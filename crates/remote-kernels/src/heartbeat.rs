@@ -1,328 +1,596 @@
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
+//! Per-instance background heartbeat: bootstrap the machine, install the
+//! on-machine watchdog, and keep it fed.
+//!
+//! The heartbeat pipeline is runtime-agnostic — all machine specifics go
+//! through the instance's [`Connection`]:
+//! 1. Wait for the command transport (SSH / exec) to become reachable
+//! 2. Acquire fenced lease authority (or mark supervision unavailable)
+//! 3. Run startup commands (user commands from config)
+//! 4. Install the watchdog: self-cleanup on stale heartbeat
+//!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline
+//! 5. Every 60s: signal liveness, refresh the budget deadline from the shared
+//!    spend model (aggregate burn rate across all metered instances THIS
+//!    session owns, so its concurrent machines can't collectively exceed its
+//!    per-session budget)
+//!
+//! The lease owner value is the Claude session id, so a respawned server for
+//! the same session re-acquires its machines without force.
 
-use tokio::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Mutex;
+use tokio::sync::watch;
 
 use crate::config::Cleanup;
-use crate::runpod::client::RunPodClient;
+use crate::runtime::{AnyConnection, Connection, WatchdogPolicy};
+use crate::state::{AppState, FenceReason};
 
-/// Start the heartbeat system in the background.
-///
-/// Spawns a background task that:
-/// 1. Resolves SSH connection info via the `RunPod` GraphQL API
-/// 2. Waits for SSH to become reachable on the pod
-/// 3. Runs startup commands (rsync install + user commands) via SSH
-/// 4. Injects a watchdog process that checks `/tmp/heartbeat` every 30s
-///    and cleans up the pod if stale (>5 min)
-/// 5. Periodically touches `/tmp/heartbeat` via SSH to keep the watchdog alive
-///
-/// Returns immediately without blocking. If SSH info never becomes available
-/// (e.g. the machine has no public IP), the task logs a warning and exits.
+/// One shared consequence tail for every "machine cannot supervise itself"
+/// caveat — causes vary per call site, the money stake must not drift.
+macro_rules! no_auto_shutdown {
+    () => {
+        ", so it has NO automatic shutdown: if the session ends without stop() or terminate(), \
+         it bills until stopped at the provider dashboard — always stop or terminate it \
+         explicitly"
+    };
+    ($cause:literal) => {
+        concat!($cause, no_auto_shutdown!())
+    };
+}
+pub const NO_AUTO_SHUTDOWN_TAIL: &str = no_auto_shutdown!();
+pub const NO_SSH_CAVEAT: &str = no_auto_shutdown!("no SSH access");
+pub const NO_FLOCK_CAVEAT: &str = no_auto_shutdown!("the machine lacks the flock utility");
+pub const BAD_STATE_DIR_CAVEAT: &str =
+    no_auto_shutdown!("the machine has no writable persistent state directory");
+pub const UNSUPPORTED_CAVEAT: &str =
+    no_auto_shutdown!("this runtime cannot run an on-machine watchdog");
+
+#[derive(Debug, Clone, Copy)]
+pub enum AcquireMode {
+    Fresh,
+    Attach { force: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisionStatus {
+    Pending,
+    Active,
+    Unsupervisable(String),
+    Refused(String),
+}
+
+/// Computes the remaining budget as seconds-until-deadline at the current
+/// aggregate burn rate. Shared across all instance heartbeats.
+#[derive(Clone)]
+pub struct BudgetFeed {
+    pub state: Arc<Mutex<AppState>>,
+    pub budget: f64,
+}
+
+impl BudgetFeed {
+    /// Seconds until this session's budget is exhausted if every metered
+    /// machine it owns keeps burning (budgets are per Claude session: only
+    /// spend and rates attributed to this session count). `None` when this
+    /// session owns nothing metered or accounting is unavailable; hard
+    /// accounting errors must preserve the last remote deadline, never
+    /// synthesize a zero-second destruction arm.
+    pub async fn remaining_secs(&self) -> Option<u64> {
+        let state = self.state.lock().await;
+        let session = match state.session_spend() {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::error!(
+                    "Budget deadline refresh skipped: accounting failed closed: {error}"
+                );
+                return None;
+            }
+        };
+        let rate = session.hourly_rate;
+        if rate <= 0.0 {
+            return None;
+        }
+        let remaining_dollars = self.budget - session.spent;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(((remaining_dollars / rate) * 3600.0).max(0.0) as u64)
+    }
+}
+
+/// Start the heartbeat pipeline for one instance. Returns immediately.
+#[allow(clippy::too_many_arguments)] // lease, watchdog, connection, and spend contexts are independent
 pub fn start(
-    runpod: Arc<RunPodClient>,
-    pod_id: String,
-    ssh_key_path: PathBuf,
-    cleanup: Cleanup,
-    budget_remaining_secs: Option<u64>,
+    conn: Arc<AnyConnection>,
+    machine_id: String,
+    external_id: String,
+    watchdog_policy: WatchdogPolicy,
+    acquire_mode: AcquireMode,
+    lease_owner: String,
+    state: Arc<Mutex<AppState>>,
+    budget: Option<f64>,
     startup_commands: Vec<String>,
-) -> HeartbeatState {
+    operation_lock: std::fs::File,
+) -> (HeartbeatState, watch::Receiver<SupervisionStatus>) {
+    let (status_tx, status_rx) = watch::channel(SupervisionStatus::Pending);
     let handle = tokio::spawn(async move {
-        if let Err(e) = run(
-            &runpod,
-            &pod_id,
-            &ssh_key_path,
-            cleanup,
-            budget_remaining_secs,
+        if let Err(e) = establish_and_run(
+            &conn,
+            &machine_id,
+            &external_id,
+            watchdog_policy,
+            acquire_mode,
+            &lease_owner,
+            &state,
+            budget,
             &startup_commands,
+            operation_lock,
+            &status_tx,
         )
         .await
         {
-            tracing::warn!("Heartbeat task failed: {e}");
+            tracing::warn!(instance = machine_id, "Heartbeat task failed: {e}");
         }
     });
 
+    (
+        HeartbeatState {
+            task_handle: handle,
+        },
+        status_rx,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn establish_and_run(
+    conn: &AnyConnection,
+    machine_id: &str,
+    external_id: &str,
+    mut watchdog_policy: WatchdogPolicy,
+    acquire_mode: AcquireMode,
+    lease_owner: &str,
+    state: &Arc<Mutex<AppState>>,
+    budget: Option<f64>,
+    startup_commands: &[String],
+    operation_lock: std::fs::File,
+    status: &watch::Sender<SupervisionStatus>,
+) -> anyhow::Result<()> {
+    if !conn.supports_lease() {
+        mark_unsupervisable(state, machine_id, external_id, UNSUPPORTED_CAVEAT).await;
+        let _ = status.send(SupervisionStatus::Unsupervisable(
+            UNSUPPORTED_CAVEAT.to_string(),
+        ));
+        return Ok(());
+    }
+    // The reachability wait can retry for a long time (a resumed community
+    // host may never bring SSH back) and needs no lock — holding the machine
+    // oplock across it starves explicit stop()/terminate() of the one lock
+    // they need to END a billing machine (observed live on RunPod). The lock
+    // is dropped here and re-acquired only around the lease-acquire critical
+    // section, then held through watchdog install as before.
+    drop(operation_lock);
+    let project_dir = state.lock().await.project_dir.clone();
+    let (lease, operation_lock) = loop {
+        match conn.wait_reachable().await {
+            Ok(()) => {}
+            Err(error) if error.to_string().contains("no public IP") => {
+                mark_unsupervisable(state, machine_id, external_id, NO_SSH_CAVEAT).await;
+                let _ = status.send(SupervisionStatus::Unsupervisable(NO_SSH_CAVEAT.to_string()));
+                return Ok(());
+            }
+            Err(error) if crate::ssh_exec::is_host_key_mismatch(&error) => {
+                let caveat = format!(
+                    "SSH is blocked by a host-key mismatch ({error}){NO_AUTO_SHUTDOWN_TAIL}"
+                );
+                mark_unsupervisable(state, machine_id, external_id, &caveat).await;
+                let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    instance = machine_id,
+                    "machine not reachable for supervision yet — retrying in 60s: {error}"
+                );
+                tokio::time::sleep(Duration::from_mins(1)).await;
+                continue;
+            }
+        }
+
+        let lock = match crate::state::acquire_operation_lock(&project_dir, machine_id).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                mark_fenced(
+                    state,
+                    machine_id,
+                    external_id,
+                    FenceReason::AuthorityUnknown,
+                )
+                .await;
+                tracing::warn!(
+                    instance = machine_id,
+                    "Supervision setup stopped: operation lock unavailable: {error}"
+                );
+                return Ok(());
+            }
+        };
+        match acquire_lease(conn, acquire_mode, lease_owner).await {
+            Ok(lease) => break (lease, lock),
+            Err(EstablishError::Retry(error)) => {
+                drop(lock);
+                tracing::warn!(
+                    instance = machine_id,
+                    "lease setup failed transiently — retrying in 60s: {error}"
+                );
+                tokio::time::sleep(Duration::from_mins(1)).await;
+            }
+            Err(EstablishError::Unsupervisable(caveat)) => {
+                mark_unsupervisable(state, machine_id, external_id, &caveat).await;
+                let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+                return Ok(());
+            }
+            Err(EstablishError::Refused(reason, message)) => {
+                mark_fenced(state, machine_id, external_id, reason).await;
+                let _ = status.send(SupervisionStatus::Refused(message));
+                return Ok(());
+            }
+        }
+    };
+
+    let lease_generation = lease.generation;
+    mark_acquired(state, machine_id, external_id, lease_generation).await;
+    // Adoption commit: the lease acquire proved authority, so the ledger
+    // owner must match the lease owner (the session id). This runs BEFORE
+    // the budget feed computes the first deadline, so an adopter's deadline
+    // reflects the adopter's remaining budget — and it heals a crash that
+    // landed between a previous acquire and its owner-changed append. An
+    // append failure is conservative: spend stays with the prior owner,
+    // whose machine-side deadline remains armed.
+    {
+        let state_guard = state.lock().await;
+        let ledger_owner = state_guard.machine_ledger_owner(machine_id);
+        match ledger_owner {
+            Ok(Some(owner)) if owner != state_guard.session_owner => {
+                if let Err(error) = state_guard.append_owner_change(machine_id) {
+                    tracing::error!(
+                        instance = machine_id,
+                        "Adoption could not be recorded in the ledger \
+                         (spend stays attributed to {owner}): {error}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(
+                    instance = machine_id,
+                    "Ledger owner unavailable during acquire: {error}"
+                );
+            }
+        }
+    }
+    // All setup writes happen only after acquiring authority and while the
+    // local operation lock prevents another project server from rotating it.
+    run_startup_commands(conn, machine_id, startup_commands).await;
+
+    let budget = budget.map(|budget| BudgetFeed {
+        state: Arc::clone(state),
+        budget,
+    });
+    let initial_budget_secs = match &budget {
+        Some(feed) => feed.remaining_secs().await,
+        None => None,
+    };
+    watchdog_policy.initial_budget_secs = initial_budget_secs;
+    if watchdog_policy.cleanup == Cleanup::Disabled {
+        tracing::info!(instance = machine_id, "Cleanup disabled, skipping watchdog");
+    } else if !conn.supports_watchdog() {
+        tracing::info!(
+            instance = machine_id,
+            "Runtime supports lease fencing but not a detached watchdog"
+        );
+    } else if let Err(e) = conn.install_watchdog(watchdog_policy.clone()).await {
+        // A failed install means NO machine-side cleanup or budget
+        // enforcement exists — reporting Active here would bypass the
+        // BudgetUnenforceable gate and silently leave a budgeted machine
+        // able to bill unbounded after a disconnect.
+        tracing::warn!(instance = machine_id, "Failed to install watchdog: {e}");
+        let caveat = format!(
+            "installing the machine-side auto-cleanup failed ({e:#}){NO_AUTO_SHUTDOWN_TAIL}"
+        );
+        mark_unsupervisable(state, machine_id, external_id, &caveat).await;
+        let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+        return Ok(());
+    }
+    // A session with no budget must not inherit a previous owner's budget
+    // deadline: a stale deadline would stop the machine mid-work. Only an
+    // ACTIVE lease is cleared — a budget-armed lease keeps its inherited
+    // absolute deadline (takeover must not extend spend).
+    if budget.is_none()
+        && lease.state == "active"
+        && let Err(e) = crate::machine_scripts::clear_budget_deadline(conn).await
+    {
+        tracing::warn!(
+            instance = machine_id,
+            "Could not clear inherited budget deadline: {e:#}"
+        );
+    }
+    let _ = status.send(SupervisionStatus::Active);
+    drop(operation_lock);
+
+    tracing::info!(instance = machine_id, "Starting heartbeat loop");
+
+    let mut interval = tokio::time::interval(Duration::from_mins(1));
+    let mut host_key_alarm_raised = false;
+    loop {
+        interval.tick().await;
+        let project_dir = state.lock().await.project_dir.clone();
+        let _operation_lock =
+            match crate::state::acquire_operation_lock(&project_dir, machine_id).await {
+                Ok(lock) => lock,
+                Err(error) => {
+                    mark_fenced(
+                        state,
+                        machine_id,
+                        external_id,
+                        FenceReason::AuthorityUnknown,
+                    )
+                    .await;
+                    tracing::warn!(
+                        instance = machine_id,
+                        "Heartbeat stopped: operation lock unavailable: {error}"
+                    );
+                    return Ok(());
+                }
+            };
+        match crate::machine_scripts::refresh(conn, lease_generation, lease_owner).await {
+            Ok(()) => tracing::debug!(instance = machine_id, "Lease refreshed"),
+            Err(crate::machine_scripts::LeaseError::Fenced) => {
+                mark_fenced(state, machine_id, external_id, FenceReason::TakenOver).await;
+                tracing::warn!(
+                    instance = machine_id,
+                    "Heartbeat stopped: another session took over"
+                );
+                return Ok(());
+            }
+            Err(crate::machine_scripts::LeaseError::Finalizing) => {
+                mark_fenced(state, machine_id, external_id, FenceReason::Finalizing).await;
+                tracing::warn!(
+                    instance = machine_id,
+                    "Heartbeat stopped: machine is finalizing"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                mark_fenced(
+                    state,
+                    machine_id,
+                    external_id,
+                    FenceReason::AuthorityUnknown,
+                )
+                .await;
+                tracing::warn!(
+                    instance = machine_id,
+                    "Heartbeat stopped: lease authority is unknown: {error}"
+                );
+                return Ok(());
+            }
+        }
+        // Some runtimes retain a transport/tunnel heartbeat in addition to
+        // the fenced lease refresh.
+        match conn.heartbeat().await {
+            Ok(()) => tracing::debug!(instance = machine_id, "Legacy heartbeat sent"),
+            Err(e) if crate::ssh_exec::is_host_key_mismatch(&e) => {
+                if host_key_alarm_raised {
+                    tracing::warn!(
+                        instance = machine_id,
+                        "Heartbeat still blocked by host-key mismatch"
+                    );
+                } else {
+                    host_key_alarm_raised = true;
+                    tracing::error!(
+                        instance = machine_id,
+                        "heartbeat blocked by host-key mismatch: {e:#}"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(instance = machine_id, "Legacy heartbeat failed: {e}"),
+        }
+        if let Err(error) = state.lock().await.spend_summary() {
+            tracing::error!(
+                instance = machine_id,
+                "Accounting ledger failed closed on heartbeat: {error}"
+            );
+        }
+        if watchdog_policy.cleanup != Cleanup::Disabled
+            && let Some(feed) = &budget
+            && let Some(secs) = feed.remaining_secs().await
+            && let Err(e) = conn.set_budget_deadline(secs).await
+        {
+            tracing::warn!(
+                instance = machine_id,
+                "Failed to refresh budget deadline: {e}"
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+enum EstablishError {
+    Retry(String),
+    Unsupervisable(String),
+    Refused(FenceReason, String),
+}
+
+async fn acquire_lease(
+    conn: &AnyConnection,
+    mode: AcquireMode,
+    lease_owner: &str,
+) -> Result<crate::machine_scripts::LeaseState, EstablishError> {
+    if let AcquireMode::Attach { force } = mode {
+        let current = crate::machine_scripts::read(conn)
+            .await
+            .map_err(classify_lease_error)?;
+        if current.state == "finalizing" {
+            return Err(EstablishError::Refused(
+                FenceReason::Finalizing,
+                "machine is running its automatic cleanup; wait and call status() to see the result before attaching".to_string(),
+            ));
+        }
+        let age = crate::machine_scripts::age_secs(&current);
+        // An empty owner means the lease was cleanly released (complete-stop):
+        // nobody is driving the machine no matter how fresh the timestamp is.
+        if current.state == "active"
+            && current.generation > 0
+            && !current.owner_uuid.is_empty()
+            && current.owner_uuid != lease_owner
+            && age < 180
+            && !force
+        {
+            return Err(EstablishError::Refused(
+                FenceReason::TakenOver,
+                format!(
+                    "another session is actively controlling this machine (last activity {age}s ago); retry attach(force=true) only to deliberately take it over"
+                ),
+            ));
+        }
+    }
+    crate::machine_scripts::acquire(conn, lease_owner)
+        .await
+        .map_err(classify_lease_error)
+}
+
+fn classify_lease_error(error: crate::machine_scripts::LeaseError) -> EstablishError {
+    match error {
+        crate::machine_scripts::LeaseError::NoFlock => {
+            EstablishError::Unsupervisable(NO_FLOCK_CAVEAT.to_string())
+        }
+        crate::machine_scripts::LeaseError::BadStateDir => {
+            EstablishError::Unsupervisable(BAD_STATE_DIR_CAVEAT.to_string())
+        }
+        crate::machine_scripts::LeaseError::Fenced => EstablishError::Refused(
+            FenceReason::TakenOver,
+            "another session took over the machine".to_string(),
+        ),
+        crate::machine_scripts::LeaseError::Finalizing => EstablishError::Refused(
+            FenceReason::Finalizing,
+            "machine is running its automatic cleanup; wait and call status() to see the result before attaching".to_string(),
+        ),
+        crate::machine_scripts::LeaseError::Transport(error) => {
+            EstablishError::Retry(error.to_string())
+        }
+        crate::machine_scripts::LeaseError::Invalid(message) => {
+            EstablishError::Unsupervisable(format!(
+                "the machine's supervision state could not be read ({message}){NO_AUTO_SHUTDOWN_TAIL}"
+            ))
+        }
+    }
+}
+
+async fn mark_acquired(
+    state: &Arc<Mutex<AppState>>,
+    machine_id: &str,
+    external_id: &str,
+    generation: u64,
+) {
+    let mut state = state.lock().await;
+    if let Some(candidate) = state
+        .instances
+        .get_mut(machine_id)
+        .filter(|candidate| candidate.external_id == external_id)
+    {
+        candidate.fenced = None;
+        candidate.lease_generation = Some(generation);
+        candidate.supervision_note = None;
+        let prior = crate::state::load_lifecycle_record(&state.project_dir, machine_id);
+        let acquired = crate::state::LifecycleRecord {
+            storage_rate_per_hr: prior.storage_rate_per_hr,
+            storage_rate_note: prior.storage_rate_note,
+            // A queued finish() survives reconnects; attach resumes it.
+            finish_intent: prior.finish_intent,
+            ..crate::state::LifecycleRecord::default()
+        };
+        if let Err(error) =
+            crate::state::save_lifecycle_record(&state.project_dir, machine_id, &acquired)
+        {
+            tracing::warn!(
+                instance = machine_id,
+                "Fresh lease acquired but stale lifecycle state could not be cleared: {error}"
+            );
+        }
+    }
+}
+
+async fn mark_unsupervisable(
+    state: &Arc<Mutex<AppState>>,
+    machine_id: &str,
+    external_id: &str,
+    caveat: &str,
+) {
+    if let Some(instance) = state
+        .lock()
+        .await
+        .instances
+        .get_mut(machine_id)
+        .filter(|candidate| candidate.external_id == external_id)
+    {
+        instance.lease_generation = None;
+        instance.supervision_note = Some(caveat.to_string());
+    }
+}
+
+async fn mark_fenced(
+    state: &Arc<Mutex<AppState>>,
+    machine_id: &str,
+    external_id: &str,
+    reason: FenceReason,
+) {
+    if let Some(instance) = state
+        .lock()
+        .await
+        .instances
+        .get_mut(machine_id)
+        .filter(|candidate| candidate.external_id == external_id)
+    {
+        instance.fence(reason);
+    }
+}
+
+#[cfg(all(test, feature = "fake-runtime"))]
+pub fn start_owned_for_test(
+    conn: Arc<AnyConnection>,
+    machine_id: String,
+    external_id: String,
+    generation: u64,
+    lease_owner: String,
+    state: Arc<Mutex<AppState>>,
+) -> HeartbeatState {
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(10));
+        interval.tick().await;
+        if matches!(
+            crate::machine_scripts::refresh(&conn, generation, &lease_owner).await,
+            Err(crate::machine_scripts::LeaseError::Fenced)
+        ) {
+            mark_fenced(&state, &machine_id, &external_id, FenceReason::TakenOver).await;
+        }
+    });
     HeartbeatState {
         task_handle: handle,
     }
 }
 
-/// The main heartbeat pipeline: resolve SSH info, wait for SSH, run startup
-/// commands, inject watchdog, then send heartbeats.
-async fn run(
-    runpod: &RunPodClient,
-    pod_id: &str,
-    ssh_key_path: &Path,
-    cleanup: Cleanup,
-    budget_remaining_secs: Option<u64>,
-    startup_commands: &[String],
-) -> anyhow::Result<()> {
-    let (ip, port) = resolve_ssh_info(runpod, pod_id).await?;
-    wait_for_ssh(ssh_key_path, &ip, port).await?;
-
-    // Run startup commands (rsync install + user commands) via SSH.
-    // These run after the pod is fully up with services started.
-    run_startup_commands(ssh_key_path, &ip, port, startup_commands).await;
-
-    if cleanup == Cleanup::Disabled {
-        tracing::info!("Heartbeat: cleanup disabled, skipping watchdog injection");
-    } else {
-        inject_watchdog(ssh_key_path, &ip, port, cleanup).await?;
-        if let Some(secs) = budget_remaining_secs {
-            inject_budget_enforcer(ssh_key_path, &ip, port, cleanup, secs).await?;
-        }
+/// Run startup commands on the machine. Failures are logged but not fatal —
+/// the machine is still usable even if a startup command fails.
+async fn run_startup_commands(conn: &AnyConnection, machine_id: &str, commands: &[String]) {
+    if commands.is_empty() {
+        return;
     }
-
-    tracing::info!("Heartbeat: starting heartbeat loop");
-
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        match ssh_cmd(ssh_key_path, &ip, port, "touch /tmp/heartbeat").await {
-            Ok(_) => tracing::debug!("Heartbeat sent"),
-            Err(e) => tracing::warn!("Heartbeat failed: {e}"),
-        }
+    let combined = commands.join(" && ");
+    tracing::info!(instance = machine_id, "Running startup commands");
+    match conn.exec(&combined, Duration::from_mins(5)).await {
+        Ok(_) => tracing::info!(instance = machine_id, "Startup commands completed"),
+        Err(e) => tracing::warn!(instance = machine_id, "Startup commands failed: {e}"),
     }
 }
 
-/// Poll the GraphQL API until SSH connection info is available.
-async fn resolve_ssh_info(runpod: &RunPodClient, pod_id: &str) -> anyhow::Result<(String, u16)> {
-    for attempt in 1..=40 {
-        match runpod.get_ssh_info(pod_id).await {
-            Ok(Some((ip, port))) => {
-                tracing::info!(attempt, %ip, port, "Heartbeat: SSH info resolved");
-                return Ok((ip, port));
-            }
-            Ok(None) => {
-                tracing::debug!(attempt, "Heartbeat: SSH info not yet available");
-            }
-            Err(e) => {
-                tracing::debug!(attempt, error = %e, "Heartbeat: failed to query SSH info");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    }
-    anyhow::bail!(
-        "SSH info not available after 2 minutes — heartbeat not started. \
-         sync() and download() may still work (they resolve SSH info on demand)."
-    )
-}
-
-/// Wait for SSH to become reachable, retrying up to ~2 minutes.
-async fn wait_for_ssh(ssh_key_path: &Path, public_ip: &str, ssh_port: u16) -> anyhow::Result<()> {
-    for attempt in 1..=24 {
-        match ssh_cmd(ssh_key_path, public_ip, ssh_port, "echo ok").await {
-            Ok(_) => {
-                tracing::info!(attempt, "Heartbeat: SSH is reachable");
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::debug!(attempt, error = %e, "Heartbeat: SSH not ready yet");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        }
-    }
-    anyhow::bail!("SSH did not become reachable after 2 minutes")
-}
-
-/// Run startup commands on the pod via SSH.
-///
-/// Always installs rsync (needed for `sync()`). Then runs any user-specified
-/// startup commands from the config.
-///
-/// Failures are logged but not fatal — the pod is still usable even if a
-/// startup command fails (sync just won't work without rsync).
-async fn run_startup_commands(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    user_commands: &[String],
-) {
-    // Install rsync (not included in runpod/pytorch images).
-    let mut parts = vec!["apt-get update -qq && apt-get install -y -qq rsync".to_string()];
-    parts.extend(user_commands.iter().cloned());
-    let combined = parts.join(" && ");
-
-    tracing::info!("Heartbeat: running startup commands via SSH");
-    match ssh_cmd_long(ssh_key_path, public_ip, ssh_port, &combined).await {
-        Ok(_) => tracing::info!("Heartbeat: startup commands completed"),
-        Err(e) => tracing::warn!("Heartbeat: startup commands failed: {e}"),
-    }
-}
-
-/// Execute a potentially long-running command on the pod via SSH (120s timeout).
-async fn ssh_cmd_long(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    command: &str,
-) -> anyhow::Result<String> {
-    let key_path = ssh_key_path.display().to_string();
-    let port = ssh_port.to_string();
-    let host = format!("root@{public_ip}");
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        Command::new("ssh")
-            .args([
-                "-i",
-                &key_path,
-                "-p",
-                &port,
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
-                &host,
-                command,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("SSH command timed out (120s)"))?;
-
-    let output = output?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("SSH command failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Inject the watchdog process on the pod via SSH.
-///
-/// The watchdog runs as a detached background process that monitors `/tmp/heartbeat`.
-/// If the file is stale for >5 minutes, it cleans up the pod to prevent runaway costs.
-async fn inject_watchdog(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    cleanup: Cleanup,
-) -> anyhow::Result<()> {
-    let runpodctl_cmd = match cleanup {
-        Cleanup::Stop => "runpodctl stop pod $RUNPOD_POD_ID",
-        Cleanup::Terminate => "runpodctl remove pod $RUNPOD_POD_ID",
-        Cleanup::Disabled => {
-            unreachable!("inject_watchdog should not be called when cleanup is disabled")
-        }
-    };
-
-    // The script is wrapped in single quotes for bash -c, so $ expansions happen
-    // inside the inner bash (which inherits the pod's environment including RUNPOD_POD_ID).
-    // {{age}} is Rust format escaping that produces ${age} in the output.
-    let watchdog = format!(
-        concat!(
-            "nohup bash -c '",
-            "touch /tmp/heartbeat; ",
-            "while true; do ",
-            "sleep 30; ",
-            "age=$(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))); ",
-            r#"if [ "$age" -gt 300 ]; then "#,
-            r#"echo "Heartbeat stale (${{age}}s), cleaning up pod..." >> /tmp/watchdog.log; "#,
-            "{cmd}; ",
-            "exit 0; ",
-            "fi; ",
-            "done' </dev/null >/dev/null 2>&1 &",
-        ),
-        cmd = runpodctl_cmd
-    );
-
-    ssh_cmd(ssh_key_path, public_ip, ssh_port, &watchdog).await?;
-    tracing::info!("Heartbeat: watchdog injected on pod");
-    Ok(())
-}
-
-/// Inject a budget enforcement script on the pod via SSH.
-///
-/// Sleeps for the given number of seconds, then runs the cleanup action.
-/// This is a safety net — the MCP server also checks budget before each tool call.
-async fn inject_budget_enforcer(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    cleanup: Cleanup,
-    remaining_secs: u64,
-) -> anyhow::Result<()> {
-    let runpodctl_cmd = match cleanup {
-        Cleanup::Stop => "runpodctl stop pod $RUNPOD_POD_ID",
-        Cleanup::Terminate => "runpodctl remove pod $RUNPOD_POD_ID",
-        Cleanup::Disabled => {
-            unreachable!("budget enforcer should not be called when cleanup is disabled")
-        }
-    };
-
-    let script = format!(
-        concat!(
-            "nohup bash -c '",
-            "sleep {secs}; ",
-            r#"echo "Budget time limit reached ({secs}s), cleaning up pod..." >> /tmp/watchdog.log; "#,
-            "{cmd}",
-            "' </dev/null >/dev/null 2>&1 &",
-        ),
-        secs = remaining_secs,
-        cmd = runpodctl_cmd
-    );
-
-    ssh_cmd(ssh_key_path, public_ip, ssh_port, &script).await?;
-    tracing::info!(remaining_secs, "Heartbeat: budget enforcer injected on pod");
-    Ok(())
-}
-
-/// Execute a command on the pod via SSH.
-async fn ssh_cmd(
-    ssh_key_path: &Path,
-    public_ip: &str,
-    ssh_port: u16,
-    command: &str,
-) -> anyhow::Result<String> {
-    let key_path = ssh_key_path.display().to_string();
-    let port = ssh_port.to_string();
-    let host = format!("root@{public_ip}");
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        Command::new("ssh")
-            .args([
-                "-i",
-                &key_path,
-                "-p",
-                &port,
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
-                &host,
-                command,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("SSH command timed out"))??;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("SSH command failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Cleanup state for graceful shutdown.
+/// Handle for stopping an instance's heartbeat on shutdown.
 pub struct HeartbeatState {
     pub task_handle: tokio::task::JoinHandle<()>,
 }
@@ -330,5 +598,26 @@ pub struct HeartbeatState {
 impl HeartbeatState {
     pub fn stop(self) {
         self.task_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn hard_accounting_error_skips_budget_deadline_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        std::fs::write(
+            crate::state::state_dir(dir.path()).join("ledger/epoch.json"),
+            "{broken",
+        )
+        .unwrap();
+        let feed = BudgetFeed {
+            state: Arc::new(Mutex::new(state)),
+            budget: 1.0,
+        };
+        assert_eq!(feed.remaining_secs().await, None);
     }
 }

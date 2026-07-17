@@ -53,6 +53,11 @@ function timeLabel(ms: number, visitorZone: string, officeZone: string): string 
   return visitor === office ? visitor : `${visitor} (${office} at the office)`;
 }
 
+/** Suggested length by group size: 60 min solo, 90 for 2–3, 120 for 4+. */
+function suggestedDuration(attendees: number): Duration {
+  return attendees >= 4 ? 120 : attendees >= 2 ? 90 : 60;
+}
+
 interface Availability {
   busy: BusyInterval[];
   nowUtc: number;
@@ -81,7 +86,7 @@ function Booking({ office }: { office: OfficeSlug }) {
 
   const [avail, setAvail] = useState<Availability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [duration, setDuration] = useState<Duration>(90);
+  const [duration, setDuration] = useState<Duration>(60);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedStartUtc, setSelectedStartUtc] = useState<number | null>(null);
   const [cancelUrl, setCancelUrl] = useState<string | null>(null);
@@ -228,6 +233,13 @@ function Form({
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [durationTouched, setDurationTouched] = useState(false);
+
+  // Default the length to the group size until the visitor picks one themselves.
+  const attendees = 1 + participants.filter((p) => p.trim()).length;
+  useEffect(() => {
+    if (!durationTouched) onDuration(suggestedDuration(attendees));
+  }, [attendees, durationTouched, onDuration]);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -276,12 +288,18 @@ function Form({
         <span className="block text-sm font-medium text-slate-700 dark:text-slate-300">
           Meeting length
         </span>
+        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+          We suggest 60 min for one person, 90 for 2–3, and 120 for 4+ — but pick whatever works.
+        </p>
         <div className="mt-2 flex gap-2">
           {DURATIONS.map((d) => (
             <button
               key={d}
               type="button"
-              onClick={() => onDuration(d)}
+              onClick={() => {
+                setDurationTouched(true);
+                onDuration(d);
+              }}
               className={
                 d === duration
                   ? "rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"

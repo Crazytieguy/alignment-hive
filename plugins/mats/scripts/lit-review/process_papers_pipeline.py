@@ -19,6 +19,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -73,6 +74,16 @@ def get_pdf_url(paper: dict) -> str | None:
     return None
 
 
+# --- Atomic writes ---
+
+
+def write_atomic_text(path: Path, text: str) -> None:
+    """Write text via a temp file + atomic rename so partial files never land."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.part")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 # --- PDF conversion ---
 
 
@@ -82,7 +93,7 @@ def convert_pdf_to_markdown(pdf_path: Path, md_output_path: Path) -> bool:
         md_text = pymupdf4llm.to_markdown(
             str(pdf_path), write_images=False, embed_images=False
         )
-        md_output_path.write_text(md_text, encoding="utf-8")
+        write_atomic_text(md_output_path, md_text)
         return True
     except Exception as e:
         print(f"  Error converting {pdf_path.name}: {e}", file=sys.stderr)
@@ -155,8 +166,10 @@ async def download_pdf(
             if "pdf" not in content_type.lower() and not url.endswith(".pdf"):
                 if "html" in content_type.lower():
                     return False
-            async with aiofiles.open(output_path, "wb") as f:
+            tmp_path = output_path.with_name(f"{output_path.name}.{os.getpid()}.part")
+            async with aiofiles.open(tmp_path, "wb") as f:
                 await f.write(resp.content)
+            tmp_path.replace(output_path)
             return True
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404, 451):
@@ -300,7 +313,7 @@ async def run_pipeline(
                 continue
 
             markdown_content = convert_lw_post(post)
-            md_path.write_text(markdown_content)
+            write_atomic_text(md_path, markdown_content)
             stats["converted_lw"] += 1
             stats["ready_files"].append(str(md_path))
             print(str(md_path), flush=True)

@@ -1,28 +1,74 @@
 # remote-kernels
 
-Cloud GPU instances with Jupyter kernels for AI/ML workloads, powered by RunPod.
+Cloud GPU machines with Jupyter kernels for AI/ML workloads — on RunPod,
+vast.ai, or Kubernetes.
 
 ## Motivation
 
-Common alternatives are running Claude Code inside a cloud container, or having Claude run SSH commands against a remote machine. This plugin avoids both:
+This plugin decouples the agent from the execution environment, in the same
+spirit as Anthropic's [managed agents](https://www.anthropic.com/engineering/managed-agents)
+architecture: Claude and your session stay on your machine (the "brain"),
+while cloud GPUs are interchangeable "hands" it attaches, uses, and
+discards. Running Claude Code inside a cloud container couples the two
+outright; piping SSH commands at a long-lived dev box decouples them only
+awkwardly. Doing it properly buys:
 
-- **Dynamic instance management** — Claude can start, stop, and terminate GPU pods on demand rather than relying on a pre-provisioned machine.
-- **Multi-session isolation** — Multiple Claude sessions can each have their own GPU instance without interference.
-- **No reconfiguration** — Your local Claude Code setup (permissions, plugins, settings) stays the same regardless of which GPU you're using.
-- **No manual SSH** — Code runs through Jupyter kernels rather than piping commands over SSH, which is error-prone and tedious to set up.
+- **Less manual work** — Claude starts, stops, and terminates machines on
+  demand. No pre-provisioning, no manual SSH setup, and your local Claude
+  Code configuration (permissions, plugins, settings) applies unchanged
+  whichever GPU is in use.
+- **Cross-session persistence** — everything durable lives with the agent,
+  not on a disposable GPU box: transcripts, memories, downloaded results,
+  and an `.ipynb` notebook per kernel. A later session reconnects and picks
+  up where it left off; the machine itself is safe to lose.
+- **More autonomy** — machines are cattle, not pets. Claude can pick
+  marketplace hosts, run several machines concurrently, and clean up after
+  itself — inside budget and cleanup policies you set once.
 
 ## What This Plugin Does
 
-**Managed GPU pods** — Start, stop, and terminate RunPod GPU instances directly from Claude Code. Configure GPU type, Docker image, and startup commands via a `remote-kernels.toml` file.
+**Three runtimes, one interface** — RunPod (managed pods, reliable
+stop/resume), vast.ai (cheapest marketplace GPUs — Claude can search offers
+and pick hosts, or take the cheapest qualifying automatically; VM mode runs
+Docker inside, e.g. for UK AISI Inspect's sandboxed evals), and Kubernetes
+(lab clusters: pods from a lab-owned template, Kueue queue/priority aware).
+Configure via `remote-kernels.toml`; switch per machine with
+`start(runtime=...)`.
 
-**Jupyter kernel execution** — Run code on remote GPUs through Jupyter kernels. Claude can execute cells, inspect outputs, and iterate — all within the conversation. Kernel activity is saved as `.ipynb` files.
+**Multiple concurrent machines** — Every `start()` provisions a fresh
+machine with a unique id. A restarted server picks its own session's
+running machines back up automatically; resuming a stopped machine or
+adopting another session's is an explicit `attach(machine_id)`, with
+kernel state and output recovered across sessions. Machines start in
+parallel, each with its own kernels, and kernel calls route automatically —
+no instance bookkeeping.
 
-**File sync** — Sync local project files to the pod and download results back.
+**Jupyter kernel execution** — Run code on remote GPUs through persistent
+Jupyter kernels. Claude can execute cells, inspect outputs, and iterate — all
+within the conversation. Kernel activity is saved as `.ipynb` files.
 
-**Budget controls** — Set a spending limit via environment variable. The plugin tracks costs and enforces the limit — when the budget is reached, the running pod is stopped or terminated and further operations are blocked.
+**File sync** — Sync local project files to a machine (`.gitignore`-aware)
+and download results back, both rooted at the project directory.
 
-**Automatic cleanup** — Configurable cleanup modes: stop the pod (preserving state), terminate it (deleting everything), or leave it for manual management.
+**Budget controls** — Set a spending limit once and each Claude session
+gets its own cap, covering all the machines that session pays for —
+including storage that keeps billing on stopped ones. On exhaustion, that
+session's machines get a grace window to save their work before being
+stopped or terminated — enforced on the machine itself, so it holds even if
+your laptop dies.
+
+**Automatic cleanup that never races your work** — Disconnects (background
+sessions, closed laptops, crashes) never destroy a machine mid-work: it
+finishes what it's running, runs your configured command to push results
+out, and only then cleans itself up the way you chose — stop, terminate, or
+leave alone. If saving fails, the machine is preserved rather than deleted.
+A later session reattaches and picks up everything that happened while you
+were away.
 
 ## Requirements
 
-- A RunPod API key.
+- An API key for the runtime(s) you use: `RUNPOD_API_KEY` and/or
+  `VAST_API_KEY` (a plain console key; vast accounts with 2FA enabled reject
+  API writes — the setup skill explains the options, disabling 2FA being the
+  supported one), or a kubeconfig for Kubernetes.
+- Run the `setup` skill to configure interactively.

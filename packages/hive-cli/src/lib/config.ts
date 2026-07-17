@@ -249,13 +249,14 @@ export async function loadTranscriptsDirs(stateDir: string): Promise<Array<strin
 
 /**
  * Add a transcripts directory to the transcripts-dirs file.
- * Deduplicates entries.
+ * The file is add-only and loadTranscriptsDirs dedupes on read, so writers
+ * append (O_APPEND) rather than rewrite — concurrent writers can't clobber
+ * each other's entries. The includes() pre-check is best-effort dedup.
  */
 export async function addTranscriptsDir(stateDir: string, dir: string): Promise<void> {
   await ensureStateDir(stateDir);
   const existing = await loadTranscriptsDirs(stateDir);
   if (!existing.includes(dir)) {
-    existing.push(dir);
-    await writeFile(statePaths(stateDir).transcriptsDirs, existing.join('\n') + '\n', 'utf-8');
+    await writeFile(statePaths(stateDir).transcriptsDirs, dir + '\n', { flag: 'a' });
   }
 }

@@ -1,7 +1,10 @@
 use reqwest::Client;
 use serde::Deserialize;
 
-/// Client for the Jupyter Server REST API.
+/// Client for the Jupyter Server REST API. Cheap to clone (the inner reqwest
+/// client is reference-counted) — clone it out of the state lock rather than
+/// holding the lock across HTTP calls.
+#[derive(Clone)]
 pub struct JupyterClient {
     client: Client,
     base_url: String,
@@ -19,10 +22,13 @@ pub struct KernelInfo {
 }
 
 impl JupyterClient {
-    pub fn new(pod_id: &str, token: &str) -> Self {
+    /// `http_base` is the machine's Jupyter HTTP endpoint, provided by the
+    /// runtime's [`crate::runtime::JupyterEndpoint`] (`RunPod` proxy URL, SSH
+    /// tunnel, port-forward, ...).
+    pub fn new(http_base: &str, token: &str) -> Self {
         Self {
-            client: Client::new(),
-            base_url: format!("https://{pod_id}-8888.proxy.runpod.net"),
+            client: crate::api_http_client(),
+            base_url: http_base.trim_end_matches('/').to_string(),
             token: token.to_string(),
         }
     }
@@ -69,6 +75,23 @@ impl JupyterClient {
         }
     }
 
+    /// List kernels currently known to Jupyter, including execution state.
+    pub async fn list_kernels(&self) -> anyhow::Result<Vec<KernelInfo>> {
+        let url = format!("{}/api/kernels", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", format!("token {}", self.token))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to list kernels ({status}): {body}");
+        }
+        Ok(response.json().await?)
+    }
+
     /// Create a new Python kernel, returns its ID.
     ///
     /// Retries on 404 errors — the Jupyter kernel manager may not be fully
@@ -104,25 +127,6 @@ impl JupyterClient {
         }
 
         unreachable!()
-    }
-
-    /// List all running kernels.
-    pub async fn list_kernels(&self) -> anyhow::Result<Vec<KernelInfo>> {
-        let url = format!("{}/api/kernels", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("token {}", self.token))
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to list kernels ({status}): {body}");
-        }
-
-        Ok(resp.json().await?)
     }
 
     /// Delete (shut down) a kernel.

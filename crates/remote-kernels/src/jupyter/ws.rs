@@ -14,7 +14,7 @@ pub struct KernelConnection {
     /// Whether the kernel is currently executing code.
     is_busy: Arc<AtomicBool>,
     /// Background reader task handle.
-    _reader_handle: tokio::task::JoinHandle<()>,
+    reader_handle: tokio::task::JoinHandle<()>,
 }
 
 struct ExecuteCommand {
@@ -22,11 +22,19 @@ struct ExecuteCommand {
     result_tx: oneshot::Sender<ExecutionOutput>,
 }
 
+pub struct StartedExecution {
+    pub parent_msg_id: String,
+    pub result_rx: oneshot::Receiver<ExecutionOutput>,
+}
+
 impl KernelConnection {
-    /// Connect to a kernel's WebSocket channels endpoint.
-    pub async fn connect(pod_id: &str, kernel_id: &str, token: &str) -> anyhow::Result<Self> {
+    /// Connect to a kernel's WebSocket channels endpoint. `ws_base` is the
+    /// machine's Jupyter WebSocket endpoint from the runtime's
+    /// [`crate::runtime::JupyterEndpoint`].
+    pub async fn connect(ws_base: &str, kernel_id: &str, token: &str) -> anyhow::Result<Self> {
         let url = format!(
-            "wss://{pod_id}-8888.proxy.runpod.net/api/kernels/{kernel_id}/channels?token={token}"
+            "{}/api/kernels/{kernel_id}/channels?token={token}",
+            ws_base.trim_end_matches('/')
         );
 
         tracing::debug!(%kernel_id, "Connecting to kernel WebSocket");
@@ -49,7 +57,7 @@ impl KernelConnection {
         Ok(Self {
             request_tx,
             is_busy,
-            _reader_handle: reader_handle,
+            reader_handle,
         })
     }
 
@@ -60,20 +68,36 @@ impl KernelConnection {
 
     /// Start an execution without waiting for the result.
     /// Returns a receiver that will yield the final `ExecutionOutput` when complete.
+    #[allow(clippy::unused_async)] // callers treat submission as async; keep the signature stable
     pub async fn start_execution(
         &self,
         session_id: &str,
         code: &str,
-    ) -> anyhow::Result<oneshot::Receiver<ExecutionOutput>> {
+    ) -> anyhow::Result<StartedExecution> {
         let msg = JupyterMessage::execute_request(session_id, code);
+        let parent_msg_id = msg.header.msg_id.clone();
         let (result_tx, result_rx) = oneshot::channel();
 
+        // try_send, not send: callers hold the server state lock, and the ws
+        // loop only drains this queue between executions — a blocking send
+        // on a full queue would freeze every other tool call (including
+        // interrupt/stop) until the running cell finishes.
         self.request_tx
-            .send(ExecuteCommand { msg, result_tx })
-            .await
-            .map_err(|_| anyhow::anyhow!("Kernel connection closed"))?;
+            .try_send(ExecuteCommand { msg, result_tx })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => anyhow::anyhow!(
+                    "Kernel execution queue is full (16 pending executions) — wait() for \
+                     results or interrupt() before queueing more"
+                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    anyhow::anyhow!("Kernel connection closed")
+                }
+            })?;
 
-        Ok(result_rx)
+        Ok(StartedExecution {
+            parent_msg_id,
+            result_rx,
+        })
     }
 
     /// Execute code and wait for the result with a timeout.
@@ -83,7 +107,7 @@ impl KernelConnection {
         code: &str,
         timeout: std::time::Duration,
     ) -> anyhow::Result<ExecutionOutput> {
-        let result_rx = self.start_execution(session_id, code).await?;
+        let result_rx = self.start_execution(session_id, code).await?.result_rx;
 
         match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(output)) => Ok(output),
@@ -115,7 +139,19 @@ impl KernelConnection {
         mut request_rx: mpsc::Receiver<ExecuteCommand>,
         is_busy: Arc<AtomicBool>,
     ) {
-        let mut pending: Option<(String, ExecutionOutput, oneshot::Sender<ExecutionOutput>)> = None;
+        let mut pending: Option<(
+            String,
+            ExecutionOutput,
+            oneshot::Sender<ExecutionOutput>,
+            bool,
+            bool,
+        )> = None;
+        // Grace deadline armed when execute_reply has arrived but the iopub
+        // idle has not: idle normally lands milliseconds later, but it can be
+        // lost server-side (iopub HWM overflow under output floods, or a
+        // kernel crash in the reply→idle gap) — without a bound the kernel
+        // wedges busy forever and the queue jams.
+        let mut idle_grace: Option<tokio::time::Instant> = None;
 
         loop {
             tokio::select! {
@@ -139,7 +175,30 @@ impl KernelConnection {
                     }
 
                     is_busy.store(true, Ordering::Relaxed);
-                    pending = Some((msg_id, ExecutionOutput::default(), cmd.result_tx));
+                    pending = Some((
+                        msg_id,
+                        ExecutionOutput::default(),
+                        cmd.result_tx,
+                        false,
+                        false,
+                    ));
+                    idle_grace = None;
+                }
+
+                () = async {
+                    match idle_grace {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                }, if idle_grace.is_some() => {
+                    tracing::warn!(
+                        "iopub idle never arrived after execute_reply; completing with the output received so far"
+                    );
+                    idle_grace = None;
+                    is_busy.store(false, Ordering::Relaxed);
+                    if let Some((_, output, tx, _, _)) = pending.take() {
+                        let _ = tx.send(output);
+                    }
                 }
 
                 Some(msg_result) = ws_stream_rx.next() => {
@@ -169,13 +228,19 @@ impl KernelConnection {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    if let Some((ref expected_id, ref mut output, _)) = pending {
+                    let mut complete = false;
+                    if let Some((ref expected_id, ref mut output, _, ref mut shell_replied, ref mut idle)) = pending {
                         if parent_msg_id != expected_id {
                             continue;
                         }
                         match msg.channel.as_str() {
                             "iopub" => {
                                 output.process_iopub(&msg);
+                                if msg.header.msg_type == "status"
+                                    && msg.content["execution_state"].as_str() == Some("idle")
+                                {
+                                    *idle = true;
+                                }
                             }
                             "shell" if msg.header.msg_type == "execute_reply" => {
                                 let status = msg.content["status"].as_str().unwrap_or("ok");
@@ -185,12 +250,23 @@ impl KernelConnection {
                                     output.status = ExecutionStatus::Complete;
                                 }
 
-                                is_busy.store(false, Ordering::Relaxed);
-                                if let Some((_, output, tx)) = pending.take() {
-                                    let _ = tx.send(output);
-                                }
+                                *shell_replied = true;
                             }
                             _ => {}
+                        }
+                        complete = *shell_replied && *idle;
+                        idle_grace = if *shell_replied && !*idle {
+                            // Trailing iopub output is still expected — give
+                            // it a bounded window rather than forever.
+                            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10))
+                        } else {
+                            None
+                        };
+                    }
+                    if complete {
+                        is_busy.store(false, Ordering::Relaxed);
+                        if let Some((_, output, tx, _, _)) = pending.take() {
+                            let _ = tx.send(output);
                         }
                     }
                 }
@@ -201,7 +277,7 @@ impl KernelConnection {
 
         // If we exit with a pending execution, complete it with what we have.
         is_busy.store(false, Ordering::Relaxed);
-        if let Some((_, mut output, tx)) = pending.take() {
+        if let Some((_, mut output, tx, _, _)) = pending.take() {
             if output.status == ExecutionStatus::Running {
                 output.status = ExecutionStatus::Errored;
                 output
@@ -210,5 +286,34 @@ impl KernelConnection {
             }
             let _ = tx.send(output);
         }
+    }
+}
+
+impl Drop for KernelConnection {
+    fn drop(&mut self) {
+        self.reader_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{ExecuteCommand, KernelConnection};
+
+    #[tokio::test]
+    async fn dropping_fenced_connection_aborts_reader_task() {
+        let (request_tx, _request_rx) = tokio::sync::mpsc::channel::<ExecuteCommand>(1);
+        let reader_handle = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = reader_handle.abort_handle();
+        let connection = KernelConnection {
+            request_tx,
+            is_busy: Arc::new(AtomicBool::new(false)),
+            reader_handle,
+        };
+        drop(connection);
+        tokio::task::yield_now().await;
+        assert!(abort_handle.is_finished());
     }
 }

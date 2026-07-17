@@ -1,0 +1,29 @@
+# Example pod template for the kubernetes runtime — this is the "template
+# contract" a lab owns. remote-kernels injects: metadata.name, identity labels,
+# the priority label (start(priority=...)), env vars incl. the Jupyter token,
+# and activeDeadlineSeconds when unset.
+#
+# Contract for the first container's image: `sh`, `tar`, and Python with
+# `jupyter-server` + `ipykernel` available; the pod keeps itself alive.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    # Kueue: submit through the lab's LocalQueue. Remove for plain clusters.
+    kueue.x-k8s.io/queue-name: main
+spec:
+  restartPolicy: Never
+  containers:
+    - name: workload
+      image: quay.io/jupyter/base-notebook:latest
+      command: ["sleep", "infinity"]
+      workingDir: /home/jovyan/work
+      resources:
+        requests:
+          cpu: "500m"
+          memory: 512Mi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "2"
+          memory: 2Gi
+          nvidia.com/gpu: "1"
