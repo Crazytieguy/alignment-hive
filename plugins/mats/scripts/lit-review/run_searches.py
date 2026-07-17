@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
-def run_search(script_path: Path, queries_file: Path, output_file: Path, limit: int) -> tuple[str, int, str]:
+def run_search(script_path: Path, queries_file: Path, output_file: Path, limit: int, timeout: int) -> tuple[str, int, str]:
     """Run a single search script and return (name, exit_code, stderr)."""
     name = script_path.stem
     cmd = [
@@ -26,10 +26,10 @@ def run_search(script_path: Path, queries_file: Path, output_file: Path, limit: 
         "--limit", str(limit),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return name, result.returncode, result.stderr
     except subprocess.TimeoutExpired:
-        return name, -1, "Timeout after 300 seconds"
+        return name, -1, f"Timeout after {timeout} seconds"
     except Exception as e:
         return name, -1, str(e)
 
@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--arxiv-limit", type=int, default=100)
     parser.add_argument("--semantic-scholar-limit", type=int, default=100)
     parser.add_argument("--google-scholar-limit", type=int, default=50)
+    parser.add_argument("--timeout", type=int, default=1200,
+                        help="Per-search timeout in seconds (full-limit runs with many queries need well over 300s)")
     args = parser.parse_args()
 
     queries_file = Path(args.queries)
@@ -60,7 +62,7 @@ def main():
     results = []
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
-            executor.submit(run_search, script, queries_file, output, limit): script.stem
+            executor.submit(run_search, script, queries_file, output, limit, args.timeout): script.stem
             for script, output, limit in searches
         }
         for future in as_completed(futures):

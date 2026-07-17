@@ -56,40 +56,49 @@ def deduplicate_papers(papers: list[dict], threshold: float = 0.85) -> list[dict
     1. First pass: exact DOI matching
     2. Second pass: fuzzy title matching for papers without DOI or unmatched DOIs
     """
-    seen_dois: set[str] = set()
-    seen_titles: list[str] = []  # List of normalized titles for fuzzy matching
+    # Map dedup keys to their index in `deduplicated` so that when a
+    # duplicate is found, we can keep whichever record is richer (more
+    # fields) — e.g. a full lesswrong.json entry with html_content beats
+    # the bare {url, title} stub from lesswrong_urls.json.
+    seen_dois: dict[str, int] = {}
+    seen_titles: list[tuple[str, int]] = []  # (normalized title, index)
     deduplicated: list[dict] = []
     duplicates_removed = 0
+
+    def keep_richer(existing_idx: int, paper: dict) -> None:
+        if len(paper) > len(deduplicated[existing_idx]):
+            deduplicated[existing_idx] = paper
 
     for paper in papers:
         # Check DOI (exact match)
         doi = get_doi(paper)
-        if doi:
-            if doi in seen_dois:
-                duplicates_removed += 1
-                continue
-            seen_dois.add(doi)
+        if doi and doi in seen_dois:
+            keep_richer(seen_dois[doi], paper)
+            duplicates_removed += 1
+            continue
 
         # Check title (fuzzy match)
         title = get_title(paper)
-        if title:
-            normalized = normalize_title(title)
-            if normalized:
-                # Check against all seen titles
-                is_duplicate = False
-                for seen_title in seen_titles:
-                    # Use token_sort_ratio for better matching of reordered words
-                    similarity = fuzz.token_sort_ratio(normalized, seen_title) / 100
-                    if similarity >= threshold:
-                        is_duplicate = True
-                        duplicates_removed += 1
-                        break
+        normalized = normalize_title(title) if title else ""
+        if normalized:
+            duplicate_idx = None
+            for seen_title, idx in seen_titles:
+                # Use token_sort_ratio for better matching of reordered words
+                similarity = fuzz.token_sort_ratio(normalized, seen_title) / 100
+                if similarity >= threshold:
+                    duplicate_idx = idx
+                    break
 
-                if is_duplicate:
-                    continue
+            if duplicate_idx is not None:
+                keep_richer(duplicate_idx, paper)
+                duplicates_removed += 1
+                continue
 
-                seen_titles.append(normalized)
-
+        index = len(deduplicated)
+        if doi:
+            seen_dois[doi] = index
+        if normalized:
+            seen_titles.append((normalized, index))
         deduplicated.append(paper)
 
     print(f"  Removed {duplicates_removed} duplicates", file=sys.stderr)
