@@ -76,7 +76,7 @@ const WORKSHOPS_COPY =
   "Hands-on workshops for AI safety orgs and fellowships: Claude Code setup and best practices, agentic research workflows, and figuring out together what better tooling can do for your work. For a workshop, consulting, or a collaboration, email me.";
 
 const TOOLS_INTRO =
-  "Some of the most-used tools in the collection, open source and shaped by concrete bottlenecks in real research work.";
+  "Open source and shaped by concrete bottlenecks in real research work. Here are some of the most-used tools in the collection:";
 
 const TOOLS = [
   {
