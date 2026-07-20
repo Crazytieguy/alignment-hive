@@ -28,7 +28,11 @@ hook_input=$(cat)
 session_id=$(echo "$hook_input" | "$JQ" -r '.session_id // ""')
 hook_source=$(echo "$hook_input" | "$JQ" -r '.source // ""')
 
-# On resume, context window is intact and CLAUDE_ENV_FILE can't be overwritten
+# On resume, context window is intact and CLAUDE_ENV_FILE can't be overwritten.
+# "fork" (Claude Code >= 2.1.214) deliberately falls through: a fork is a new
+# session with a new session_id and needs its own CLAUDE_ENV_FILE entries and
+# per-session sandbox script. Known limitation: older Claude Code reports
+# forks as "resume", so they exit here and keep the parent's sandbox env.
 if [ "$hook_source" = "resume" ]; then
   exit 0
 fi

@@ -6,7 +6,8 @@ set -euo pipefail
 # Prefer exiting 0 — a non-zero exit just shows a small warning message to the user.
 #
 # Only runs full logic on "startup" and "clear" (fresh context).
-# Skips "resume" and "compact" (continuations where state is already recorded).
+# Skips "resume", "compact", and "fork" (continuations where state is already
+# recorded — a fork copies an existing conversation).
 
 PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
 
@@ -38,10 +39,11 @@ ERROR_LOG="$STATE_DIR/error.log"
 trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error at line $LINENO" >> "$ERROR_LOG" 2>/dev/null; exit 0' ERR
 
 # --- Record git commit hash for this session id ---
-# Runs before the resume/compact early-exit: a forked session id (e.g. from
-# backgrounding with active subagents) first arrives as source:"resume" and
-# still needs its commit stamp. Same-id resumes keep their original hash via
-# the file-existence guard.
+# Runs before the resume/compact/fork early-exit: a forked session has a new
+# session id that still needs its commit stamp. Forks report source:"fork" on
+# Claude Code >= 2.1.214 and source:"resume" on older versions; both are
+# skipped by the early-exit below. Same-id resumes keep their original hash
+# via the file-existence guard.
 
 if [ -n "$SESSION_ID" ]; then
   if [ ! -f "$STATE_DIR/${SESSION_ID}-commit.txt" ]; then
@@ -52,9 +54,9 @@ if [ -n "$SESSION_ID" ]; then
   fi
 fi
 
-# --- Skip for resume/compact (continuations don't need fresh state) ---
+# --- Skip for resume/compact/fork (continuations don't need fresh state) ---
 
-if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ]; then
+if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ] || [ "$SOURCE" = "fork" ]; then
   exit 0
 fi
 
