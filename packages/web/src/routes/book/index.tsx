@@ -9,10 +9,10 @@ export const Route = createFileRoute("/book/")({
 function BookIndex() {
   return (
     <BookingShell>
-      <h1 className="text-3xl font-serif font-bold text-slate-900 dark:text-slate-100">
+      <h1 className="text-3xl font-serif font-bold text-foreground">
         Book a meeting with Yoav
       </h1>
-      <p className="mt-2 text-slate-600 dark:text-slate-400">
+      <p className="mt-2 text-muted-foreground">
         Pick the office you'd like to meet at.
       </p>
       <div className="mt-8 grid gap-3">
@@ -21,7 +21,7 @@ function BookIndex() {
             key={slug}
             to="/book/$office"
             params={{ office: slug }}
-            className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-5 py-4 text-lg font-medium text-slate-900 dark:text-slate-100 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+            className="rounded-lg border bg-card px-5 py-4 text-lg font-medium text-card-foreground shadow-sm transition-colors hover:border-ring/50 hover:bg-accent"
           >
             {office.label}
           </Link>

@@ -23,10 +23,10 @@ function BookOfficeRoute() {
   if (!isOfficeSlug(office)) {
     return (
       <BookingShell>
-        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+        <h1 className="text-2xl font-semibold text-foreground">
           Office not found
         </h1>
-        <p className="mt-2 text-slate-600 dark:text-slate-400">
+        <p className="mt-2 text-muted-foreground">
           <a className="underline" href="/book">
             See the offices you can book.
           </a>
@@ -37,8 +37,7 @@ function BookOfficeRoute() {
   return <Booking office={office} />;
 }
 
-const inputClass =
-  "w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-slate-900 dark:text-slate-100";
+const inputClass = "w-full rounded-md border border-input bg-card px-3 py-2 text-foreground";
 
 function fmtTime(ms: number, zone: string): string {
   return DateTime.fromMillis(ms, { zone }).toFormat("h:mm a ZZZZ");
@@ -151,20 +150,20 @@ function Booking({ office }: { office: OfficeSlug }) {
   return (
     <BookingShell>
       <a
-        className="text-sm text-slate-500 underline hover:text-slate-700 dark:hover:text-slate-300"
+        className="text-sm text-muted-foreground underline hover:text-foreground"
         href="/book"
       >
         ← All offices
       </a>
-      <h1 className="mt-3 text-3xl font-serif font-bold text-slate-900 dark:text-slate-100">
+      <h1 className="mt-3 text-3xl font-serif font-bold text-foreground">
         Book a consulting session with Yoav
       </h1>
-      <p className="mt-1 text-slate-600 dark:text-slate-400">In-person at {config.label}.</p>
+      <p className="mt-1 text-muted-foreground">In-person at {config.label}.</p>
 
       {loadError ? (
-        <p className="mt-6 text-red-600 dark:text-red-400">{loadError}</p>
+        <p className="mt-6 text-destructive">{loadError}</p>
       ) : !avail ? (
-        <p className="mt-6 text-slate-500">Loading availability…</p>
+        <p className="mt-6 text-muted-foreground">Loading availability…</p>
       ) : (
         <Form
           office={office}
@@ -285,10 +284,10 @@ function Form({
     <form onSubmit={submit} className="mt-6 space-y-5">
       {/* Duration */}
       <div>
-        <span className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+        <span className="block text-sm font-medium text-foreground">
           Meeting length
         </span>
-        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        <p className="mt-0.5 text-xs text-muted-foreground">
           We suggest 60 min for one person, 90 for 2–3, and 120 for 4+ — but pick whatever works.
         </p>
         <div className="mt-2 flex gap-2">
@@ -302,8 +301,8 @@ function Form({
               }}
               className={
                 d === duration
-                  ? "rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"
-                  : "rounded-md border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  ? "rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+                  : "rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
               }
             >
               {d} min
@@ -313,11 +312,11 @@ function Form({
       </div>
 
       {dates.length === 0 ? (
-        <p className="text-slate-500">No open times in the next few weeks.</p>
+        <p className="text-muted-foreground">No open times in the next few weeks.</p>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label className="block">
-            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Date</span>
+            <span className="text-sm font-medium text-foreground">Date</span>
             <select
               className={inputClass}
               value={selectedDate ?? ""}
@@ -331,7 +330,7 @@ function Form({
             </select>
           </label>
           <label className="block">
-            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Time</span>
+            <span className="text-sm font-medium text-foreground">Time</span>
             <select
               className={inputClass}
               value={selectedStartUtc ?? ""}
@@ -348,18 +347,18 @@ function Form({
         </div>
       )}
 
-      <p className="text-sm text-slate-500 dark:text-slate-400">
+      <p className="text-sm text-muted-foreground">
         Times are shown in your timezone ({visitorZone}); the office is on Pacific time.
       </p>
 
-      <hr className="border-slate-200 dark:border-slate-800" />
+      <hr />
 
       <label className="block">
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Your name</span>
+        <span className="text-sm font-medium text-foreground">Your name</span>
         <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} required />
       </label>
       <label className="block">
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Your email</span>
+        <span className="text-sm font-medium text-foreground">Your email</span>
         <input
           className={inputClass}
           type="email"
@@ -371,8 +370,8 @@ function Form({
 
       {/* Additional participants — optional group booking */}
       <div>
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Participants</span>
-        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        <span className="text-sm font-medium text-foreground">Participants</span>
+        <p className="mt-0.5 text-xs text-muted-foreground">
           By default this is a 1:1 with Yoav. Booking as a group? Add the others' emails and they'll be
           invited too.
         </p>
@@ -401,14 +400,14 @@ function Form({
         <button
           type="button"
           onClick={() => setParticipants([...participants, ""])}
-          className="mt-2 text-sm font-medium text-slate-700 underline dark:text-slate-300"
+          className="mt-2 text-sm font-medium text-foreground underline"
         >
           + Add participant
         </button>
       </div>
 
       <label className="block">
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Notes (optional)</span>
+        <span className="text-sm font-medium text-foreground">Notes (optional)</span>
         <textarea
           className={inputClass}
           rows={3}
@@ -418,7 +417,7 @@ function Form({
         />
       </label>
 
-      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
       <Button type="submit" disabled={submitting || !selectedSlot}>
         {submitting ? "Booking…" : "Confirm booking"}
       </Button>
@@ -441,17 +440,17 @@ function Confirmation({
 }) {
   return (
     <BookingShell>
-      <h1 className="text-3xl font-serif font-bold text-slate-900 dark:text-slate-100">
+      <h1 className="text-3xl font-serif font-bold text-foreground">
         You're booked
       </h1>
-      <p className="mt-2 text-slate-700 dark:text-slate-300">
+      <p className="mt-2 text-foreground">
         {fmtDate(slot.startUtc, config.timezone)} · {fmtTime(slot.startUtc, visitorZone)} ({duration}{" "}
         min) · {config.label}
       </p>
-      <p className="mt-4 text-slate-600 dark:text-slate-400">
+      <p className="mt-4 text-muted-foreground">
         Calendar invites are on their way to everyone's email.
       </p>
-      <p className="mt-6 text-sm text-slate-600 dark:text-slate-400">
+      <p className="mt-6 text-sm text-muted-foreground">
         Need to cancel?{" "}
         <a className="underline" href={cancelUrl}>
           Cancel this booking

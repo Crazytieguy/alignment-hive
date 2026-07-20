@@ -47,16 +47,16 @@ function CancelPage() {
 
   return (
     <BookingShell>
-      <h1 className="text-3xl font-serif font-bold text-slate-900 dark:text-slate-100">
+      <h1 className="text-3xl font-serif font-bold text-foreground">
         Cancel booking
       </h1>
       {status === "done" ? (
-        <p className="mt-4 text-slate-700 dark:text-slate-300">Your booking has been cancelled.</p>
+        <p className="mt-4 text-foreground">Your booking has been cancelled.</p>
       ) : status === "error" ? (
-        <p className="mt-4 text-red-600 dark:text-red-400">{message}</p>
+        <p className="mt-4 text-destructive">{message}</p>
       ) : (
         <>
-          <p className="mt-4 text-slate-700 dark:text-slate-300">
+          <p className="mt-4 text-foreground">
             Are you sure you want to cancel this booking?
           </p>
           <div className="mt-6">
