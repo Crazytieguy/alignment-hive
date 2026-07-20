@@ -1017,29 +1017,35 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       if (secSame)
         for (let i = 0; i < secB.length; i++)
           if (Math.abs(secB[i] - st.secB[i]) >= 8) secSame = false;
-      if (
-        vw === st.w &&
-        vh === st.vh &&
-        Math.abs(docH - st.docH) < 24 &&
-        Math.abs(heroTop - st.heroTop) < 8 &&
-        Math.abs(heroH - st.heroH) < 8 &&
-        secSame
-      )
-        return;
+      // the field lattice lives in document coords and only depends on the
+      // structural measures below — viewport height is not one of them, so a
+      // mobile URL-bar show/hide (which changes innerHeight on every scroll
+      // direction flip) must not re-seed the formation
+      const structural =
+        vw !== st.w ||
+        Math.abs(docH - st.docH) >= 24 ||
+        Math.abs(heroTop - st.heroTop) >= 8 ||
+        Math.abs(heroH - st.heroH) >= 8 ||
+        !secSame;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      if (!structural && vh === st.vh && dpr === st.dpr) return;
       st.w = vw;
       st.vh = vh;
-      st.docH = docH;
-      st.heroTop = heroTop;
-      st.heroH = heroH;
-      st.secB = secB;
-      st.secC = secC;
-      st.cols = cols;
-      st.dpr = Math.min(2, window.devicePixelRatio || 1);
+      st.dpr = dpr;
       canvas.width = vw * st.dpr;
       canvas.height = vh * st.dpr;
       st.scrollY = window.scrollY;
-      build(st);
+      if (structural) {
+        st.docH = docH;
+        st.heroTop = heroTop;
+        st.heroH = heroH;
+        st.secB = secB;
+        st.secC = secC;
+        st.cols = cols;
+        build(st);
+      }
       if (reduced) still(st);
+      else if (st.N) paint(st); // backing-store resize cleared the canvas
     }
 
     resize();
