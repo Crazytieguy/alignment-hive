@@ -11,9 +11,13 @@ import "./kintsugi-hero.css";
  * sit — no drawn seams. Locking stars keep their size and color and simply
  * glow a little brighter.
  *
- * The field covers the whole document: a fixed viewport canvas (z-index -1
- * inside the page's isolated stacking context) draws particles laid out in
- * document coordinates, translated by scroll each frame.
+ * The field covers the whole document: a canvas one viewport plus a scroll
+ * margin tall (z-index -1 inside the page's isolated stacking context)
+ * scrolls WITH the document and draws particles laid out in document
+ * coordinates. Each simulation tick re-centers it over the viewport;
+ * between ticks the compositor moves canvas and text together, so stars
+ * never trail the text during native scrolling (a fixed canvas repainted
+ * at ~30fps lags scroll by 1-2 frames).
  *
  * Lattice: a conformally-mapped honeycomb. The comb is generated as a
  * perfect regular hexagonal lattice in a flat pre-image domain (hex radius
@@ -44,6 +48,11 @@ const NCOL = 5;
 const SPR = 96; // sprite canvas size (px)
 const DK = 5; // draw size = sz * DK (star arm span); core stays ~sz
 const SEC_F = 50; // section-boundary feather half-width (~100px soft edge)
+// Painted band beyond the viewport, px each side. The compositor scrolls
+// the canvas with the page between ~30fps repaints, so the margin only has
+// to cover the scroll of one tick (~33ms): 200px ≈ a 6000px/s fling. Cost:
+// ~(2·SCROLL_M)/vh more backing store and per-repaint draw work.
+const SCROLL_M = 200;
 
 // ---------- field configuration ----------
 // The owner's tuned look (July 2026 live-tuning sessions). Density values
@@ -273,6 +282,8 @@ interface HeroState {
   heroH: number;
   dpr: number;
   scrollY: number;
+  canvasTop: number; // painted band top, document coords (canvas scrolls with the page)
+  canvasH: number; // painted band height = vh + 2·SCROLL_M
   curOn: boolean;
   curX: number;
   curY: number;
@@ -831,11 +842,11 @@ function positions(st: HeroState, t: number, ymin: number, ymax: number): void {
 // size and instead brighten with a warm glow.
 function paint(st: HeroState): void {
   const { ctx, px, py, dsz, br, ma } = st;
-  const sc = st.scrollY;
-  ctx.setTransform(st.dpr, 0, 0, st.dpr, 0, -sc * st.dpr);
-  ctx.clearRect(0, sc, st.w, st.vh);
-  const ymin = sc - 40;
-  const ymax = sc + st.vh + 40;
+  const ct = st.canvasTop;
+  ctx.setTransform(st.dpr, 0, 0, st.dpr, 0, -ct * st.dpr);
+  ctx.clearRect(0, ct, st.w, st.canvasH);
+  const ymin = ct - 40;
+  const ymax = ct + st.canvasH + 40;
   for (let s = 0; s < NSEC; s++) {
     for (let c = 0; c < NCOL; c++) {
       const spr = st.sprites[s][c];
@@ -940,6 +951,8 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       heroH: 0,
       dpr: 1,
       scrollY: 0,
+      canvasTop: 0,
+      canvasH: 0,
       curOn: false,
       curX: 0,
       curY: 0,
@@ -977,6 +990,23 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       pi: new Uint8Array(0),
     };
 
+    // Re-center the painted band over the viewport. The canvas is absolute
+    // in the stage (document top = heroTop), so the compositor scrolls it
+    // with the text between repaints; the transform is only rewritten when
+    // the band actually moves. Returns whether it moved (caller repaints).
+    let placedY: number | null = null;
+    const place = (): boolean => {
+      const top = Math.max(
+        0,
+        Math.min(st.scrollY - SCROLL_M, st.docH - st.canvasH),
+      );
+      const ty = top - st.heroTop;
+      if (top === st.canvasTop && ty === placedY) return false;
+      st.canvasTop = top;
+      placedY = ty;
+      canvas.style.transform = `translate3d(0, ${ty}px, 0)`;
+      return true;
+    };
 
     function resize(): void {
       if (!stage || !canvas) return;
@@ -1032,8 +1062,10 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       st.w = vw;
       st.vh = vh;
       st.dpr = dpr;
+      st.canvasH = vh + 2 * SCROLL_M;
       canvas.width = vw * st.dpr;
-      canvas.height = vh * st.dpr;
+      canvas.height = st.canvasH * st.dpr;
+      canvas.style.height = `${st.canvasH}px`;
       st.scrollY = window.scrollY;
       if (structural) {
         st.docH = docH;
@@ -1044,6 +1076,7 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
         st.cols = cols;
         build(st);
       }
+      place();
       if (reduced) still(st);
       else if (st.N) paint(st); // backing-store resize cleared the canvas
     }
@@ -1080,18 +1113,47 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
 
     let raf = 0;
     let pendingScroll = 0;
-    const onScrollStill = (): void => {
+    // The compositor scrolls the canvas with the page, so ordinary scrolling
+    // needs no work here. Jumps (PageDown, scrollbar drags, anchor links,
+    // flings past SCROLL_M per tick) can move the viewport off the painted
+    // band between simulation ticks — catch those on the scroll event and
+    // re-center immediately rather than showing a starless band until the
+    // next tick.
+    const onScroll = (): void => {
       if (pendingScroll) return;
       pendingScroll = requestAnimationFrame(() => {
         pendingScroll = 0;
         st.scrollY = window.scrollY;
-        paint(st);
+        if (reduced) {
+          // re-center (and repaint — still() positioned every star) only
+          // when the viewport nears the painted band's edge
+          if (
+            st.scrollY - st.canvasTop < 40 ||
+            st.scrollY + st.vh > st.canvasTop + st.canvasH - 40
+          ) {
+            if (place()) paint(st);
+          }
+          return;
+        }
+        if (
+          st.N &&
+          (st.scrollY < st.canvasTop ||
+            st.scrollY + st.vh > st.canvasTop + st.canvasH) &&
+          place()
+        ) {
+          positions(
+            st,
+            (performance.now() / 1000) % T,
+            st.canvasTop - 160,
+            st.canvasTop + st.canvasH + 160,
+          );
+          paint(st);
+        }
       });
     };
+    window.addEventListener("scroll", onScroll, { passive: true });
 
-    if (reduced) {
-      window.addEventListener("scroll", onScrollStill, { passive: true });
-    } else {
+    if (!reduced) {
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerout", onPointerOut);
       window.addEventListener("blur", onBlur);
@@ -1115,8 +1177,9 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
         lastNow = now;
         if (st.N) {
           st.scrollY = window.scrollY;
+          place();
           targets(st, tsec, dt);
-          positions(st, t, st.scrollY - 160, st.scrollY + st.vh + 160);
+          positions(st, t, st.canvasTop - 160, st.canvasTop + st.canvasH + 160);
           paint(st);
         }
         raf = requestAnimationFrame(frame);
@@ -1130,7 +1193,7 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       if (pendingScroll) cancelAnimationFrame(pendingScroll);
       observer.disconnect();
       window.removeEventListener("resize", queueResize);
-      window.removeEventListener("scroll", onScrollStill);
+      window.removeEventListener("scroll", onScroll);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerout", onPointerOut);
       window.removeEventListener("blur", onBlur);

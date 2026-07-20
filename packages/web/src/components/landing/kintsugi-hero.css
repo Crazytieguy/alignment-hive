@@ -1,10 +1,13 @@
-/* Kintsugi Murmuration hero (G10). The star field lives on a fixed
- * full-viewport canvas at z-index -1 so it fills the whole page behind every
- * section; the page root (routes/index.tsx) is `isolate` so negative
- * z-indexes stay inside it. The page is one continuous dark ground — the
- * hero region is distinguished only by the starfield itself. The landing
- * page is dark-locked (.theme-dark on the page root), so only the dark
- * treatment exists here. */
+/* Kintsugi Murmuration hero (G10). The star field lives on a canvas at
+ * z-index -1 that scrolls WITH the document (absolute, not fixed) so the
+ * compositor keeps stars glued to the text between JS repaints; the page
+ * root (routes/index.tsx) is `isolate` so negative z-indexes stay inside
+ * it. The canvas is viewport-height plus a scroll margin; JS sets its
+ * height and re-centers it over the viewport via transform at the
+ * animation rate (kintsugi-hero.tsx). The page is one continuous dark
+ * ground — the hero region is distinguished only by the starfield itself.
+ * The landing page is dark-locked (.theme-dark on the page root), so only
+ * the dark treatment exists here. */
 
 .kintsugi-stage {
   position: relative;
@@ -14,13 +17,14 @@
 }
 
 .kintsugi-canvas {
-  position: fixed;
-  inset: 0;
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
-  height: 100%;
   z-index: -1;
   display: block;
   pointer-events: none;
+  will-change: transform;
 }
 
 .kintsugi-scrim {
