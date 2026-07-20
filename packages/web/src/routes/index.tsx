@@ -146,16 +146,18 @@ function Home() {
         <nav className="flex items-center justify-between gap-4 py-6">
           <a
             href="/"
-            className="inline-flex items-center gap-2 text-[1.05rem] font-semibold tracking-[0.01em]"
+            className="inline-flex items-baseline gap-2 text-[1.05rem] font-semibold tracking-[0.01em]"
           >
             {/* the favicon mark (public/favicon.svg): "Vertex Star" — one
-                comb cell, its upper corner catching moonlight; keep in sync */}
+                comb cell, its upper corner catching moonlight; keep in sync.
+                The viewBox crops to the hexagon's painted bounds (stroke
+                half-width 2.2 beyond the vertices) and the box is sized to
+                the cap height and baseline-aligned, so the hexagon spans
+                exactly the "A" while the star overflows to peek above it */}
             <svg
-              width="21"
-              height="21"
-              viewBox="0 0 64 64"
+              viewBox="6.8 16.48 44.4 39.04"
               aria-hidden="true"
-              className="-mt-px shrink-0"
+              className="h-[0.6656em] w-[0.757em] shrink-0 overflow-visible"
             >
               <defs>
                 <linearGradient id="ah-cell" x1="0" y1="1" x2="0.35" y2="0">
