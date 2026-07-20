@@ -2,42 +2,45 @@
 
 @source "../**/*.tsx";
 
+/* Kintsugi palette: ivory/ink light theme, umber/cream dark theme, amber
+ * family (#8C5A00 #B07A10 #C68F2A #E3A63C) as the primary/accent scale. */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.129 0.042 264.695);
+  --background: #fcf8ec;
+  --foreground: #302711;
   --radius: 0.625rem;
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.129 0.042 264.695);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.129 0.042 264.695);
-  --primary: oklch(0.208 0.042 265.755);
-  --primary-foreground: oklch(0.984 0.003 247.858);
-  --secondary: oklch(0.968 0.007 247.896);
-  --secondary-foreground: oklch(0.208 0.042 265.755);
-  --muted: oklch(0.968 0.007 247.896);
-  --muted-foreground: oklch(0.554 0.046 257.417);
-  --accent: oklch(0.968 0.007 247.896);
-  --accent-foreground: oklch(0.208 0.042 265.755);
+  --card: #fffdf4;
+  --card-foreground: #302711;
+  --popover: #fffdf4;
+  --popover-foreground: #302711;
+  --primary: #8c5a00;
+  --primary-foreground: #fcf8ec;
+  --secondary: #f4ecd5;
+  --secondary-foreground: #302711;
+  --muted: #f4ecd5;
+  --muted-foreground: #6e5f3c;
+  --accent: #f4ecd5;
+  --accent-foreground: #302711;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.929 0.013 255.508);
-  --input: oklch(0.929 0.013 255.508);
-  --ring: oklch(0.704 0.04 256.788);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.984 0.003 247.858);
-  --sidebar-foreground: oklch(0.129 0.042 264.695);
-  --sidebar-primary: oklch(0.208 0.042 265.755);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-accent: oklch(0.968 0.007 247.896);
-  --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
-  --sidebar-border: oklch(0.929 0.013 255.508);
-  --sidebar-ring: oklch(0.704 0.04 256.788);
+  --border: #e2d7b4;
+  --input: #e2d7b4;
+  --ring: #b07a10;
+  --chart-1: #8c5a00;
+  --chart-2: #b07a10;
+  --chart-3: #c68f2a;
+  --chart-4: #e3a63c;
+  --chart-5: #6e5f3c;
+  --sidebar: #f7f0dc;
+  --sidebar-foreground: #302711;
+  --sidebar-primary: #8c5a00;
+  --sidebar-primary-foreground: #fcf8ec;
+  --sidebar-accent: #f4ecd5;
+  --sidebar-accent-foreground: #302711;
+  --sidebar-border: #e2d7b4;
+  --sidebar-ring: #b07a10;
 }
 
 @theme inline {
+  --font-sans: "Seravek", "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-sidebar-ring: var(--sidebar-ring);
@@ -80,46 +83,88 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: oklch(0.129 0.042 264.695);
-    --foreground: oklch(0.984 0.003 247.858);
-    --card: oklch(0.208 0.042 265.755);
-    --card-foreground: oklch(0.984 0.003 247.858);
-    --popover: oklch(0.208 0.042 265.755);
-    --popover-foreground: oklch(0.984 0.003 247.858);
-    --primary: oklch(0.929 0.013 255.508);
-    --primary-foreground: oklch(0.208 0.042 265.755);
-    --secondary: oklch(0.279 0.041 260.031);
-    --secondary-foreground: oklch(0.984 0.003 247.858);
-    --muted: oklch(0.279 0.041 260.031);
-    --muted-foreground: oklch(0.704 0.04 256.788);
-    --accent: oklch(0.279 0.041 260.031);
-    --accent-foreground: oklch(0.984 0.003 247.858);
+    --background: #201a0f;
+    --foreground: #efe6cf;
+    --card: #2a2313;
+    --card-foreground: #efe6cf;
+    --popover: #2a2313;
+    --popover-foreground: #efe6cf;
+    --primary: #e3a63c;
+    --primary-foreground: #201a0f;
+    --secondary: #2a2313;
+    --secondary-foreground: #efe6cf;
+    --muted: #2a2313;
+    --muted-foreground: #bbab85;
+    --accent: #352c18;
+    --accent-foreground: #efe6cf;
     --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.551 0.027 264.364);
-    --chart-1: oklch(0.488 0.243 264.376);
-    --chart-2: oklch(0.696 0.17 162.48);
-    --chart-3: oklch(0.769 0.188 70.08);
-    --chart-4: oklch(0.627 0.265 303.9);
-    --chart-5: oklch(0.645 0.246 16.439);
-    --sidebar: oklch(0.208 0.042 265.755);
-    --sidebar-foreground: oklch(0.984 0.003 247.858);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-    --sidebar-accent: oklch(0.279 0.041 260.031);
-    --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.551 0.027 264.364);
+    --border: #3e3520;
+    --input: #4a3f26;
+    --ring: #c68f2a;
+    --chart-1: #e3a63c;
+    --chart-2: #c68f2a;
+    --chart-3: #b07a10;
+    --chart-4: #f0bc5f;
+    --chart-5: #bbab85;
+    --sidebar: #2a2313;
+    --sidebar-foreground: #efe6cf;
+    --sidebar-primary: #e3a63c;
+    --sidebar-primary-foreground: #201a0f;
+    --sidebar-accent: #352c18;
+    --sidebar-accent-foreground: #efe6cf;
+    --sidebar-border: #3e3520;
+    --sidebar-ring: #c68f2a;
   }
+}
+
+/* Opt-in dark lock: a page that must always render dark (the landing page)
+ * puts .theme-dark on its root element, overriding the OS preference for
+ * that subtree only. Keep these values in sync with the
+ * prefers-color-scheme block above. */
+.theme-dark {
+  color-scheme: dark;
+  --background: #201a0f;
+  --foreground: #efe6cf;
+  --card: #2a2313;
+  --card-foreground: #efe6cf;
+  --popover: #2a2313;
+  --popover-foreground: #efe6cf;
+  --primary: #e3a63c;
+  --primary-foreground: #201a0f;
+  --secondary: #2a2313;
+  --secondary-foreground: #efe6cf;
+  --muted: #2a2313;
+  --muted-foreground: #bbab85;
+  --accent: #352c18;
+  --accent-foreground: #efe6cf;
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: #3e3520;
+  --input: #4a3f26;
+  --ring: #c68f2a;
+  --chart-1: #e3a63c;
+  --chart-2: #c68f2a;
+  --chart-3: #b07a10;
+  --chart-4: #f0bc5f;
+  --chart-5: #bbab85;
+  --sidebar: #2a2313;
+  --sidebar-foreground: #efe6cf;
+  --sidebar-primary: #e3a63c;
+  --sidebar-primary-foreground: #201a0f;
+  --sidebar-accent: #352c18;
+  --sidebar-accent-foreground: #efe6cf;
+  --sidebar-border: #3e3520;
+  --sidebar-ring: #c68f2a;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    color-scheme: light dark;
+  }
   body {
     @apply bg-background text-foreground;
-    font-family: Arial, Helvetica, sans-serif;
+    font-family: "Seravek", "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
   }
 }

@@ -7,7 +7,7 @@
     },
     "packages/hive-cli": {
       "name": "@alignment-hive/hive-cli",
-      "version": "0.1.18",
+      "version": "0.1.21",
       "dependencies": {
         "@alignment-hive/session-data": "workspace:*",
         "@inquirer/prompts": "^7",
@@ -77,6 +77,7 @@
         "@alignment-hive/session-data": "workspace:*",
         "@alignment-hive/ui": "workspace:*",
         "@convex-dev/react-query": "^0.0.0-alpha.11",
+        "@fontsource-variable/fraunces": "^5.3.0",
         "@radix-ui/react-slot": "^1.2.4",
         "@tanstack/react-query": "^5.89.0",
         "@tanstack/react-router": "^1.132.41",
@@ -268,6 +269,8 @@
     "@floating-ui/react-dom": ["@floating-ui/react-dom@2.1.8", "", { "dependencies": { "@floating-ui/dom": "^1.7.6" }, "peerDependencies": { "react": ">=16.8.0", "react-dom": ">=16.8.0" } }, "sha512-cC52bHwM/n/CxS87FH0yWdngEZrjdtLW/qVruo68qg+prK7ZQ4YGdut2GyDVpoGeAYe/h899rVeOVm6Oi40k2A=="],
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.11", "", {}, "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg=="],
+
+    "@fontsource-variable/fraunces": ["@fontsource-variable/fraunces@5.3.0", "", {}, "sha512-9BYGySn4AHEJdgp9Z28tQ3X+laJMEOITXkQarZXeloWQZDq5oOvXJ3kDA8c7MGIfpogIaZfjrQBqmda8POOCKA=="],
 
     "@hono/standard-validator": ["@hono/standard-validator@0.2.2", "", { "peerDependencies": { "@standard-schema/spec": "^1.0.0", "hono": ">=3.9.0" } }, "sha512-mJ7W84Bt/rSvoIl63Ynew+UZOHAzzRAoAXb3JaWuxAkM/Lzg+ZHTCUiz77KOtn2e623WNN8LkD57Dk0szqUrIw=="],
 

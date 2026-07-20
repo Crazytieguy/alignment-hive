@@ -43,7 +43,11 @@ export const Route = createRootRouteWithContext<{
     ],
     links: [
       { rel: "stylesheet", href: appCssUrl },
-      { rel: "icon", href: "/favicon.svg" },
+      // svg for browsers that render it; png/ico fallback for Safari (which
+      // does not reliably render svg favicons). The 16px png is hand-tuned.
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+      { rel: "icon", href: "/favicon-32.png", type: "image/png", sizes: "32x32" },
+      { rel: "icon", href: "/favicon-16.png", type: "image/png", sizes: "16x16" },
     ],
   }),
   component: RootComponent,

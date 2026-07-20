@@ -1,0 +1,72 @@
+/* Kintsugi Murmuration hero (G10). The star field lives on a fixed
+ * full-viewport canvas at z-index -1 so it fills the whole page behind every
+ * section; the page root (routes/index.tsx) is `isolate` so negative
+ * z-indexes stay inside it. The page is one continuous dark ground — the
+ * hero region is distinguished only by the starfield itself. The landing
+ * page is dark-locked (.theme-dark on the page root), so only the dark
+ * treatment exists here. */
+
+.kintsugi-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1440 / 600;
+  min-height: 30rem;
+}
+
+.kintsugi-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  display: block;
+  pointer-events: none;
+}
+
+.kintsugi-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    620px 250px at 50% 46%,
+    rgba(32, 26, 15, 0.45),
+    transparent 72%
+  );
+}
+
+.kintsugi-copy {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 8%;
+  pointer-events: none;
+}
+
+.kintsugi-h {
+  font-size: clamp(1.85rem, 3.3vw, 3rem);
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.14;
+  margin: 0 0 1rem;
+  max-width: 22ch;
+  color: #efe6cf;
+  text-shadow:
+    0 0 18px #201a0f,
+    0 0 6px #201a0f;
+}
+
+.kintsugi-s {
+  font-size: clamp(0.94rem, 1.15vw, 1.09rem);
+  line-height: 1.58;
+  max-width: 64ch;
+  margin: 0;
+  font-weight: 400;
+  color: rgba(239, 230, 207, 0.85);
+  text-shadow:
+    0 0 14px #201a0f,
+    0 0 5px #201a0f;
+}

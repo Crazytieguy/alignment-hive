@@ -1,17 +1,15 @@
 # alignment-hive
 
-A shared tooling and knowledge layer for the AI alignment community.
+A shared tooling and knowledge layer for the AI alignment community. The repo behind [alignment-hive.com](https://alignment-hive.com).
 
 As soft takeoff picks up, the alignment community needs shared infrastructure to keep pace. Alignment Hive aims to provide the benefits of scale that large labs have, through shared tooling and accumulated knowledge. AI tooling is moving fast, and it's hard to keep up with what's available and what works.
 
-**Currently available:**
+**What's here:**
 
-- **Claude Code plugin marketplace.** Curated plugins built around concrete bottlenecks observed at MATS.
+- **Claude Code plugin marketplace.** Curated plugins shaped by concrete bottlenecks in real research work.
 - **Session sharing.** Opt-in system for sharing Claude Code session data with AI safety research organizations.
 
 ## Getting Started
-
-> **Alignment community members:** Check your email for an alignment-hive invite before installing. The invite lets you sign up and set your data sharing preferences. If you didn't receive one, contact yoav.tzfati@gmail.com.
 
 ### Prerequisites
 
@@ -26,24 +24,37 @@ curl -fsSL https://claude.ai/install.sh | bash
 curl -fsSL https://alignment-hive.com/install.sh | bash
 ```
 
-This adds the plugin marketplace, installs the hive plugin, authenticates you, and walks you through data sharing preferences and project selection.
+This adds the plugin marketplace, installs the hive plugin, and walks you through data sharing preferences and project selection.
 
-Then open Claude Code in your project and run `/hive:align`.
+Session sharing requires an alignment-hive invite; everything else works without one. If you'd like an invite, email yoav.tzfati@gmail.com.
+
+To add the plugin marketplace without the install script (no CLI, no hive plugin), run this inside Claude Code:
+
+```
+/plugin marketplace add Crazytieguy/alignment-hive
+```
+
+After installation open Claude Code in your project and run `/hive:align`.
 
 ## Available Plugins
 
 | Plugin | Description | Install |
 |--------|-------------|---------|
-| hive | Tooling recommendations + session sharing | Included in install script |
-| mats | MATS fellow handbook, lit review, best practices | `/plugin install mats@alignment-hive` |
-| github-action | GitHub Action for autonomous `@claude` on issues and PRs | `/plugin install github-action@alignment-hive` |
-| autopilot | Autonomous operation + permission management | `/plugin install autopilot@alignment-hive` |
-| llms-fetch-mcp | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `/plugin install llms-fetch-mcp@alignment-hive` |
-| remote-kernels | Cloud GPU instances with Jupyter kernels ([RunPod](https://runpod.io)) | `/plugin install remote-kernels@alignment-hive` |
+| [hive](plugins/hive) | Tooling recommendations, session memory + sharing | Included in install script |
+| [mats](plugins/mats) | MATS fellow handbook, lit review, best practices | `/plugin install mats@alignment-hive` |
+| [github-action](plugins/github-action) | GitHub Action for autonomous `@claude` on issues and PRs | `/plugin install github-action@alignment-hive` |
+| [llms-fetch-mcp](plugins/llms-fetch-mcp) | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `/plugin install llms-fetch-mcp@alignment-hive` |
+| [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `/plugin install remote-kernels@alignment-hive` |
+
+[Codex for Claude Code](https://github.com/Crazytieguy/codex-plugin-cc) — Codex reviews and task delegation without leaving Claude Code — is maintained in a separate repo.
+
+## Repo Layout
+
+- `plugins/` — the Claude Code plugins above
+- `packages/web/` — alignment-hive.com, including the data-sharing backend
+- `packages/hive-cli/` — CLI powering the hive plugin
+- `crates/remote-kernels/` — Rust binary behind the remote-kernels plugin
 
 ## Contributing
 
-The [plugin-dev](https://github.com/anthropics/claude-code-plugins) plugin auto-installs when you clone this repo, so Claude can help with plugin development.
-
 Feedback and suggestions welcome. Open an [issue](https://github.com/Crazytieguy/alignment-hive/issues) or email yoav.tzfati@gmail.com.
-

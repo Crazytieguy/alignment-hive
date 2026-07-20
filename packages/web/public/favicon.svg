@@ -1,8 +1,12 @@
-<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M24 4L42 14V34L24 44L6 34V14L24 4Z" fill="#475569"/>
-  <ellipse cx="24" cy="27" rx="7" ry="9" fill="#f59e0b"/>
-  <path d="M17 25h14M17 29h14" stroke="#1e293b" stroke-width="2.5" stroke-linecap="round"/>
-  <circle cx="24" cy="15" r="5" fill="#fbbf24"/>
-  <ellipse cx="17" cy="17" rx="5" ry="4" fill="white" opacity="0.7"/>
-  <ellipse cx="31" cy="17" rx="5" ry="4" fill="white" opacity="0.7"/>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Vertex Star: one comb cell, its upper corner catching moonlight -->
+  <defs>
+    <linearGradient id="ah-cell" x1="0" y1="1" x2="0.35" y2="0">
+      <stop offset="0" stop-color="#D89B30"/>
+      <stop offset="1" stop-color="#F0B44E"/>
+    </linearGradient>
+  </defs>
+  <path fill="none" stroke="url(#ah-cell)" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"
+        d="M44.5 28.2 L49 36 L39 53.32 L19 53.32 L9 36 L19 18.68 L25.5 18.68"/>
+  <path fill="#BFD2E4" d="M39 7.18 Q41.1 16.6 50.5 18.68 Q41.1 20.8 39 30.18 Q36.9 20.8 27.5 18.68 Q36.9 16.6 39 7.18 Z"/>
 </svg>
