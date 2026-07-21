@@ -1012,7 +1012,14 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       if (!stage || !canvas) return;
       const vw = Math.max(320, window.innerWidth);
       const vh = Math.max(200, window.innerHeight);
+      // The parked canvas's own footprint (absolute + translate3d, clamped
+      // to the previous docH) extends scrollHeight, which would ratchet
+      // docH — it could grow but never shrink after a reflow. Hide the
+      // canvas for the measurement; nothing paints mid-task, so the toggle
+      // is invisible.
+      canvas.style.display = "none";
       const docH = Math.max(vh, document.documentElement.scrollHeight);
+      canvas.style.display = "";
       const rect = stage.getBoundingClientRect();
       const scY = window.scrollY;
       const heroTop = rect.top + scY;
