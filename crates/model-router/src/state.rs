@@ -73,6 +73,13 @@ impl Dirs {
         self.state_dir.join("serve.lock")
     }
 
+    /// Identity of the last managed `CLIProxyAPI` child. Used only to reap a
+    /// positively verified orphan left behind by an interrupted router.
+    #[must_use]
+    pub fn upstream_child_file(&self) -> PathBuf {
+        self.state_dir.join("cliproxyapi-child.json")
+    }
+
     #[must_use]
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.join("logs")

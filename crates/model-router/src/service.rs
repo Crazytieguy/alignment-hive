@@ -129,7 +129,8 @@ pub fn refresh(dirs: &Dirs, plugin_root: Option<&Path>) -> anyhow::Result<()> {
              MODEL_ROUTER_BOOTSTRAP_SCRIPT and MODEL_ROUTER_VERSION_FILE"
         )
     })?;
-    refresh_at(dirs, platform, &sources, &SystemCommandRunner)?;
+    let unit_path = unit_path(platform)?;
+    refresh_at(dirs, platform, &unit_path, &sources, &SystemCommandRunner)?;
     println!(
         "Refreshed launcher to {} and restarted model-router service.",
         launcher_version(dirs)?
@@ -314,23 +315,77 @@ fn populate_launcher(
 fn refresh_at(
     dirs: &Dirs,
     platform: Platform,
+    unit_path: &Path,
     sources: &LauncherSources,
     runner: &dyn CommandRunner,
 ) -> anyhow::Result<()> {
     populate_launcher(dirs, Some(sources), true)?;
+    refresh_unit_if_stale(dirs, platform, unit_path, runner)?;
     restart_with(platform, runner)
 }
 
+fn refresh_unit_if_stale(
+    dirs: &Dirs,
+    platform: Platform,
+    path: &Path,
+    runner: &dyn CommandRunner,
+) -> anyhow::Result<()> {
+    let contents = unit_contents(dirs, platform);
+    let current = match fs::read(path) {
+        Ok(current) => Some(current),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read service unit {}", path.display()));
+        }
+    };
+    if current.as_deref() == Some(contents.as_bytes()) {
+        return Ok(());
+    }
+
+    write_unit_contents(path, contents.as_bytes())?;
+    match platform {
+        Platform::MacOs => {
+            let domain = launchd_domain();
+            let service = format!("{domain}/{LAUNCHD_LABEL}");
+            let _ = run_command(runner, "launchctl", &os_args(["bootout", &service]));
+            require_success(
+                &run_command(
+                    runner,
+                    "launchctl",
+                    &[
+                        OsString::from("bootstrap"),
+                        OsString::from(domain),
+                        path.as_os_str().to_owned(),
+                    ],
+                )?,
+                "launchctl bootstrap",
+            )
+        }
+        Platform::Linux => require_success(
+            &run_command(runner, "systemctl", &os_args(["--user", "daemon-reload"]))?,
+            "systemctl --user daemon-reload",
+        ),
+    }
+}
+
+fn unit_contents(dirs: &Dirs, platform: Platform) -> String {
+    match platform {
+        Platform::MacOs => launchd_plist(&dirs.launcher_dir(), &dirs.log_dir(), dirs),
+        Platform::Linux => systemd_user_unit(&dirs.launcher_dir(), &dirs.log_dir(), dirs),
+    }
+}
+
 fn write_unit(dirs: &Dirs, platform: Platform, path: &Path) -> anyhow::Result<()> {
+    write_unit_contents(path, unit_contents(dirs, platform).as_bytes())
+}
+
+fn write_unit_contents(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("unit path {} has no parent", path.display()))?;
     create_private_dir(parent)?;
-    let contents = match platform {
-        Platform::MacOs => launchd_plist(&dirs.launcher_dir(), &dirs.log_dir(), dirs),
-        Platform::Linux => systemd_user_unit(&dirs.launcher_dir(), &dirs.log_dir(), dirs),
-    };
-    write_private_atomic(path, contents.as_bytes())
+    write_private_atomic(path, contents)
         .with_context(|| format!("failed to write service unit {}", path.display()))
 }
 
@@ -511,6 +566,8 @@ pub fn launchd_plist(launcher_dir: &Path, log_dir: &Path, dirs: &Dirs) -> String
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
   <key>StandardOutPath</key>
   <string>{log}</string>
   <key>StandardErrorPath</key>
@@ -563,6 +620,7 @@ Type=simple\n\
 ExecStart=/bin/bash {bootstrap} serve\n\
 {env_lines}Restart=on-failure\n\
 RestartSec=2\n\
+TimeoutStopSec=60\n\
 StandardOutput=append:{log}\n\
 StandardError=append:{log}\n\
 \n\
@@ -662,6 +720,8 @@ mod tests {
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
   <key>StandardOutPath</key>
   <string>/state/logs/router.log</string>
   <key>StandardErrorPath</key>
@@ -694,6 +754,7 @@ Environment=XDG_STATE_HOME=/root\n\
 Environment=XDG_CACHE_HOME=/root\n\
 Restart=on-failure\n\
 RestartSec=2\n\
+TimeoutStopSec=60\n\
 StandardOutput=append:/state/logs/router.log\n\
 StandardError=append:/state/logs/router.log\n\
 \n\
@@ -828,10 +889,13 @@ WantedBy=default.target\n"
         )
         .unwrap();
         let runner = FakeRunner::default();
+        let unit = root.path().join("home/Library/LaunchAgents/router.plist");
+        write_unit(&dirs, Platform::MacOs, &unit).unwrap();
 
         refresh_at(
             &dirs,
             Platform::MacOs,
+            &unit,
             &LauncherSources::from_plugin_root(&new_plugin),
             &runner,
         )
@@ -846,6 +910,75 @@ WantedBy=default.target\n"
         let calls = runner.calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1[0], "kickstart");
+    }
+
+    #[test]
+    fn refresh_rewrites_a_stale_unit_and_reloads_before_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(root.path());
+        let plugin = root.path().join("plugin");
+        fs::create_dir_all(plugin.join("scripts")).unwrap();
+        fs::write(plugin.join("scripts/bootstrap.sh"), b"new script\n").unwrap();
+        fs::write(plugin.join("binary-version"), b"2.0.0\n").unwrap();
+        let unit = root.path().join("systemd/model-router.service");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(&unit, "stale unit").unwrap();
+        let runner = FakeRunner::default();
+
+        refresh_at(
+            &dirs,
+            Platform::Linux,
+            &unit,
+            &LauncherSources::from_plugin_root(&plugin),
+            &runner,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&unit).unwrap(),
+            systemd_user_unit(&dirs.launcher_dir(), &dirs.log_dir(), &dirs)
+        );
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1, os_args(["--user", "daemon-reload"]));
+        assert_eq!(calls[1].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
+    }
+
+    #[test]
+    fn refresh_leaves_a_current_unit_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(root.path());
+        let plugin = root.path().join("plugin");
+        fs::create_dir_all(plugin.join("scripts")).unwrap();
+        fs::write(plugin.join("scripts/bootstrap.sh"), b"new script\n").unwrap();
+        fs::write(plugin.join("binary-version"), b"2.0.0\n").unwrap();
+        let unit = root.path().join("systemd/model-router.service");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(&unit, unit_contents(&dirs, Platform::Linux)).unwrap();
+        #[cfg(unix)]
+        let inode_before = {
+            use std::os::unix::fs::MetadataExt as _;
+            fs::metadata(&unit).unwrap().ino()
+        };
+        let runner = FakeRunner::default();
+
+        refresh_at(
+            &dirs,
+            Platform::Linux,
+            &unit,
+            &LauncherSources::from_plugin_root(&plugin),
+            &runner,
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(fs::metadata(&unit).unwrap().ino(), inode_before);
+        }
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
     }
 
     #[test]

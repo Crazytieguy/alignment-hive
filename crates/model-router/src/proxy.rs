@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::future::Future;
+use std::future::{Future, IntoFuture as _};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -19,6 +19,11 @@ use crate::headers;
 use crate::routing::{Branch, RoutingDecision, decide, substitute_model};
 use crate::stub;
 use crate::usage::{SseUsageTransformer, estimate_input_tokens};
+
+/// Maximum time SIGINT/SIGTERM may spend draining in-flight connections.
+/// Leaves enough of the service manager's 60-second stop budget for managed
+/// child teardown.
+pub const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(50);
 
 #[derive(Clone)]
 struct AppState {
@@ -128,16 +133,59 @@ pub async fn serve_listener(
     managed: Option<crate::supervisor::ManagedHandle>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    serve_listener_with_drain(listener, config, managed, shutdown, SHUTDOWN_DRAIN_TIMEOUT).await
+}
+
+/// Serves with an explicit shutdown drain bound (primarily for tests).
+///
+/// # Errors
+/// Returns an error for non-loopback listeners, invalid configuration, or
+/// server failures.
+pub async fn serve_listener_with_drain(
+    listener: TcpListener,
+    config: Config,
+    managed: Option<crate::supervisor::ManagedHandle>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    drain_timeout: std::time::Duration,
+) -> anyhow::Result<()> {
     let address = listener.local_addr()?;
     anyhow::ensure!(
         address.ip().is_loopback(),
         "refusing non-loopback listener address {address}"
     );
     let app = app_with(config, managed).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    serve_app(listener, app, shutdown, drain_timeout).await?;
     Ok(())
+}
+
+async fn serve_app(
+    listener: TcpListener,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    drain_timeout: std::time::Duration,
+) -> std::io::Result<()> {
+    let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = graceful_rx.await;
+        })
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result,
+        () = shutdown => {
+            let _ = graceful_tx.send(());
+            if let Ok(result) = tokio::time::timeout(drain_timeout, &mut server).await {
+                result
+            } else {
+                tracing::warn!(
+                    timeout_seconds = drain_timeout.as_secs_f64(),
+                    "shutdown drain expired; dropping in-flight connections"
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Builds the gateway service without binding a socket (stub/external only).
@@ -790,6 +838,11 @@ mod tests {
     use crate::config::{CaptureConfig, ModelRoute, UpstreamConfig, UpstreamMode};
     use tower::ServiceExt;
 
+    async fn held_stream(State(started): State<Arc<tokio::sync::Notify>>) -> Body {
+        started.notify_one();
+        Body::from_stream(futures_util::stream::pending::<Result<Bytes, Infallible>>())
+    }
+
     #[test]
     fn upstream_url_preserves_encoded_path_and_query_text() {
         let uri: Uri = "/v1/messages?beta=true&raw=%2F&empty=".parse().unwrap();
@@ -819,6 +872,36 @@ mod tests {
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "degraded");
         assert_eq!(health["codex-upstream"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_drops_a_held_connection_at_the_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route("/held", axum::routing::get(held_stream))
+            .with_state(started.clone());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_app(
+            listener,
+            app,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            std::time::Duration::from_millis(50),
+        ));
+        let request = tokio::spawn(reqwest::get(format!("http://{address}/held")));
+        started.notified().await;
+        let response = request.await.unwrap().unwrap();
+
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(500), server)
+            .await
+            .expect("held connection blocked serve past the drain bound")
+            .unwrap()
+            .unwrap();
+        drop(response);
     }
 
     #[tokio::test]

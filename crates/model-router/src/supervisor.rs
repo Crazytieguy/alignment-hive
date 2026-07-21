@@ -1,16 +1,21 @@
 //! Managed-mode supervision of the `CLIProxyAPI` child process.
 //!
 //! Ownership rules (from the reviewed plan): the child port must be FREE
-//! before spawning; readiness is an authenticated application-level probe,
-//! never a bare TCP accept; the exact child PID/process group is tracked and
-//! killed on shutdown; restarts back off exponentially with a cap and reset
-//! after a healthy stretch.
+//! before spawning unless a persisted, identity-verified orphan from this
+//! supervisor is still alive; readiness is an authenticated
+//! application-level probe, never a bare TCP accept; the exact child PID,
+//! start identity, executable, and process group are tracked and killed on
+//! shutdown; restarts back off exponentially with a cap and reset after a
+//! healthy stretch. Unknown or ambiguous listeners are never adopted or
+//! killed.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 
@@ -20,6 +25,32 @@ use crate::state::{
 };
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const CHILD_IDENTITY_TIMEOUT: Duration = Duration::from_secs(1);
+const REAPER_PORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ChildRecord {
+    format_version: u8,
+    pid: i32,
+    pgid: i32,
+    executable: PathBuf,
+    /// Platform-native process start identity: `/proc/<pid>/stat` clock ticks
+    /// on Linux, and microseconds since the epoch on macOS. `None` marks the
+    /// minimal record written immediately after spawn.
+    start_time: Option<u64>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ProcessIdentity {
+    executable: PathBuf,
+    start_time: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChildRecordStatus {
+    Verified,
+    Dead,
+}
 
 /// Timing knobs, overridable in tests.
 #[derive(Clone, Debug)]
@@ -69,6 +100,7 @@ pub struct Supervisor {
     /// [`Supervisor::shutdown`] can force-kill it if the task does not stop
     /// in time (the pgid cannot be recycled while the child is unreaped).
     child_pgid: SharedPgid,
+    child_record_file: PathBuf,
 }
 
 type SharedPgid = std::sync::Arc<std::sync::Mutex<Option<i32>>>;
@@ -181,6 +213,7 @@ impl Supervisor {
             shutdown_tx,
             task,
             child_pgid,
+            child_record_file: dirs.upstream_child_file(),
         })
     }
 
@@ -191,12 +224,13 @@ impl Supervisor {
 
     /// Stops the supervision loop and terminates the child process group.
     /// Never returns with the child possibly alive: if the task does not
-    /// stop within the deadline (worst case: an in-flight probe plus the
-    /// `SIGTERM` grace), the tracked group is `SIGKILL`ed directly.
+    /// stop within the `SIGTERM` grace plus slack, the tracked group is
+    /// `SIGKILL`ed directly.
     pub async fn shutdown(mut self) {
         let _ = self.shutdown_tx.send(true);
-        // Probe timeout (5s) + SIGTERM grace (5s) + slack.
-        let deadline = SHUTDOWN_GRACE * 2 + Duration::from_secs(2);
+        // Child SIGTERM grace plus slack. Every other supervision await is
+        // cancellation-aware, keeping this below the service-manager budget.
+        let deadline = SHUTDOWN_GRACE + Duration::from_secs(2);
         if tokio::time::timeout(deadline, &mut self.task)
             .await
             .is_err()
@@ -221,6 +255,7 @@ impl Supervisor {
                 unsafe {
                     libc::killpg(pgid, libc::SIGKILL);
                 }
+                clear_child_record_path(&self.child_record_file);
             }
         }
     }
@@ -320,8 +355,9 @@ async fn attempt_child(
         }
     };
     // The port must be free before every spawn: a foreign listener here
-    // would receive prompts and the injected secret.
-    if port_in_use(paths.port).await {
+    // would receive prompts and the injected secret. The only exception is a
+    // process group whose persisted identity still matches in every field.
+    if port_in_use(paths.port).await && !reap_recorded_child(dirs, paths.port).await {
         tracing::error!(
             port = paths.port,
             "port is already in use; refusing to adopt an unknown listener as the codex \
@@ -346,7 +382,20 @@ async fn attempt_child(
         }
     };
     let pgid = child.id().map(|id| i32::try_from(id).unwrap_or(0));
+    let mut record = match persist_minimal_spawned_child(dirs, &binary, &child, pgid) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::error!(%error, "failed to persist cli-proxy-api child identity");
+            discard_unpersistable_child(dirs, child_pgid, &mut child, pgid).await;
+            return ChildAttempt::Failed;
+        }
+    };
     set_pgid(child_pgid, pgid);
+    if let Err(error) = enrich_spawned_child_record(dirs, &mut child, &mut record).await {
+        tracing::error!(%error, "failed to persist cli-proxy-api child identity");
+        discard_unpersistable_child(dirs, child_pgid, &mut child, pgid).await;
+        return ChildAttempt::Failed;
+    }
     tracing::info!(pid = ?child.id(), "cli-proxy-api started");
 
     // Readiness: authenticated /v1/models probe against our own child. The
@@ -358,12 +407,12 @@ async fn attempt_child(
     while std::time::Instant::now() < ready_deadline {
         if is_shutdown(shutdown_rx) {
             terminate(&mut child, pgid).await;
-            set_pgid(child_pgid, None);
+            clear_child_tracking(dirs, child_pgid);
             return ChildAttempt::Shutdown;
         }
         if let Ok(Some(status)) = child.try_wait() {
             tracing::error!(%status, "cli-proxy-api exited during startup");
-            set_pgid(child_pgid, None);
+            clear_child_tracking(dirs, child_pgid);
             exited_during_startup = true;
             break;
         }
@@ -376,13 +425,13 @@ async fn attempt_child(
             }
             _ = shutdown_rx.changed() => {
                 terminate(&mut child, pgid).await;
-                set_pgid(child_pgid, None);
+                clear_child_tracking(dirs, child_pgid);
                 return ChildAttempt::Shutdown;
             }
         }
         if wait_or_shutdown(shutdown_rx, tuning.readiness_poll).await {
             terminate(&mut child, pgid).await;
-            set_pgid(child_pgid, None);
+            clear_child_tracking(dirs, child_pgid);
             return ChildAttempt::Shutdown;
         }
     }
@@ -401,7 +450,7 @@ async fn attempt_child(
             "cli-proxy-api did not become ready in time; restarting it (see its log)"
         );
         terminate(&mut child, pgid).await;
-        set_pgid(child_pgid, None);
+        clear_child_tracking(dirs, child_pgid);
         return ChildAttempt::Ran { started_at };
     }
 
@@ -421,8 +470,391 @@ async fn attempt_child(
             ChildAttempt::Shutdown
         }
     };
-    set_pgid(child_pgid, None);
+    clear_child_tracking(dirs, child_pgid);
     attempt
+}
+
+fn persist_minimal_spawned_child(
+    dirs: &Dirs,
+    binary: &Path,
+    child: &tokio::process::Child,
+    pgid: Option<i32>,
+) -> anyhow::Result<ChildRecord> {
+    let record = minimal_child_record(dirs, binary, child, pgid)?;
+    write_child_record(dirs, &record)?;
+    Ok(record)
+}
+
+async fn enrich_spawned_child_record(
+    dirs: &Dirs,
+    child: &mut tokio::process::Child,
+    record: &mut ChildRecord,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + CHILD_IDENTITY_TIMEOUT;
+    let identity = loop {
+        if child.try_wait()?.is_some() {
+            anyhow::bail!("cli-proxy-api exited before its identity could be persisted");
+        }
+        if let Ok(identity) = process_identity(record.pid)
+            && identity.executable == record.executable
+            && process_group(record.pid).is_ok_and(|live_pgid| live_pgid == record.pgid)
+        {
+            break identity;
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("cli-proxy-api identity did not become verifiable after spawn");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    record.start_time = Some(identity.start_time);
+    write_child_record(dirs, record)
+}
+
+fn minimal_child_record(
+    dirs: &Dirs,
+    binary: &Path,
+    child: &tokio::process::Child,
+    pgid: Option<i32>,
+) -> anyhow::Result<ChildRecord> {
+    let child_pid = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
+        .context("spawned child has no valid PID")?;
+    let pgid = pgid
+        .filter(|pgid| *pgid == child_pid)
+        .context("spawned child is not the leader of the process group model-router created")?;
+    Ok(ChildRecord {
+        format_version: 1,
+        pid: child_pid,
+        pgid,
+        executable: canonical_cached_executable(&dirs.cache_dir, binary)?,
+        start_time: None,
+    })
+}
+
+fn write_child_record(dirs: &Dirs, record: &ChildRecord) -> anyhow::Result<()> {
+    let encoded = serde_json::to_vec_pretty(record).context("failed to encode child identity")?;
+    write_private_atomic(&dirs.upstream_child_file(), &encoded)
+        .context("failed to write child identity")
+}
+
+fn canonical_cached_executable(cache_dir: &Path, executable: &Path) -> anyhow::Result<PathBuf> {
+    let executable = fs::canonicalize(executable).with_context(|| {
+        format!(
+            "failed to resolve cli-proxy-api executable {}",
+            executable.display()
+        )
+    })?;
+    let cache_dir = fs::canonicalize(cache_dir)
+        .with_context(|| format!("failed to resolve cache dir {}", cache_dir.display()))?;
+    anyhow::ensure!(
+        executable.starts_with(&cache_dir),
+        "cli-proxy-api executable {} is outside model-router cache dir {}",
+        executable.display(),
+        cache_dir.display()
+    );
+    Ok(executable)
+}
+
+/// Reaps only a process whose PID, process group, executable, and recorded
+/// start time all still match a private record written after spawn. A minimal
+/// record safely omits only the start-time check. Any ambiguity leaves the
+/// listener untouched and preserves the existing refusal path.
+async fn reap_recorded_child(dirs: &Dirs, port: u16) -> bool {
+    let record = match load_child_record(dirs) {
+        Ok(Some(record)) => record,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "cannot verify recorded cli-proxy-api child; keeping child identity record"
+            );
+            return false;
+        }
+    };
+    match verify_child_record(dirs, &record) {
+        Ok(ChildRecordStatus::Verified) => {}
+        Ok(ChildRecordStatus::Dead) => {
+            tracing::warn!(
+                pid = record.pid,
+                "recorded cli-proxy-api PID is dead; clearing child identity record"
+            );
+            clear_child_record(dirs);
+            return false;
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                pid = record.pid,
+                "recorded child identity does not verify; keeping child identity record"
+            );
+            return false;
+        }
+    }
+
+    tracing::warn!(
+        pid = record.pid,
+        pgid = record.pgid,
+        port,
+        "reaping identity-verified stale cli-proxy-api process group"
+    );
+    match verify_child_record(dirs, &record) {
+        Ok(ChildRecordStatus::Verified) => {}
+        Ok(ChildRecordStatus::Dead) => {
+            tracing::warn!(
+                pid = record.pid,
+                "recorded cli-proxy-api PID died before reaping; clearing child identity record"
+            );
+            clear_child_record(dirs);
+            return false;
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                pid = record.pid,
+                "recorded child identity changed before reaping; keeping child identity record"
+            );
+            return false;
+        }
+    }
+    // SIGKILL avoids a later signal after the group leader exits, when the
+    // identity could no longer be checked against PID reuse.
+    if let Err(error) = kill_stale_process_group(record.pgid) {
+        tracing::warn!(
+            %error,
+            "failed to kill verified stale cli-proxy-api process group"
+        );
+        return false;
+    }
+    clear_child_record(dirs);
+
+    let deadline = std::time::Instant::now() + REAPER_PORT_TIMEOUT;
+    while port_in_use(port).await {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(port, "port remained occupied after stale-child reaping");
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    true
+}
+
+fn load_child_record(dirs: &Dirs) -> anyhow::Result<Option<ChildRecord>> {
+    let path = dirs.upstream_child_file();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        bytes.len() <= 16 * 1024,
+        "child identity record is too large"
+    );
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", path.display()))
+        .map(Some)
+}
+
+fn verify_child_record(dirs: &Dirs, record: &ChildRecord) -> anyhow::Result<ChildRecordStatus> {
+    anyhow::ensure!(record.format_version == 1, "unknown child record format");
+    anyhow::ensure!(record.pid > 0, "recorded PID is invalid");
+    anyhow::ensure!(
+        record.pgid == record.pid,
+        "recorded process group is invalid"
+    );
+    if !process_is_live(record.pid).context("failed to check recorded PID liveness")? {
+        return Ok(ChildRecordStatus::Dead);
+    }
+    let executable = canonical_cached_executable(&dirs.cache_dir, &record.executable)?;
+    anyhow::ensure!(
+        executable == record.executable,
+        "recorded executable is not a resolved path under the model-router cache"
+    );
+    let identity = process_identity(record.pid).context("recorded PID is not inspectable")?;
+    anyhow::ensure!(
+        identity.executable == record.executable,
+        "live executable does not match the record"
+    );
+    if let Some(start_time) = record.start_time {
+        anyhow::ensure!(
+            identity.start_time == start_time,
+            "live process start time does not match the record"
+        );
+    }
+    anyhow::ensure!(
+        process_group(record.pid).is_ok_and(|pgid| pgid == record.pgid),
+        "live process group does not match the record"
+    );
+    Ok(ChildRecordStatus::Verified)
+}
+
+fn clear_child_record(dirs: &Dirs) {
+    clear_child_record_path(&dirs.upstream_child_file());
+}
+
+async fn discard_unpersistable_child(
+    dirs: &Dirs,
+    child_pgid: &SharedPgid,
+    child: &mut tokio::process::Child,
+    pgid: Option<i32>,
+) {
+    // A persistence failure may mean no usable record exists; kill the child
+    // rather than risk leaving an unadoptable orphan.
+    terminate(child, pgid).await;
+    clear_child_tracking(dirs, child_pgid);
+}
+
+fn clear_child_tracking(dirs: &Dirs, child_pgid: &SharedPgid) {
+    clear_child_record(dirs);
+    set_pgid(child_pgid, None);
+}
+
+fn clear_child_record_path(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path = %path.display(), "failed to clear child identity record");
+    }
+}
+
+#[cfg(unix)]
+fn process_is_live(pid: i32) -> std::io::Result<bool> {
+    // SAFETY: signal 0 only checks whether the supplied PID exists and is
+    // signalable; it does not deliver a signal.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_live(_pid: i32) -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "process liveness checks are supported only on Unix",
+    ))
+}
+
+#[cfg(unix)]
+fn process_group(pid: i32) -> std::io::Result<i32> {
+    // SAFETY: `getpgid` only inspects the supplied PID.
+    let live_group = unsafe { libc::getpgid(pid) };
+    if live_group < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(live_group)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_group(_pid: i32) -> std::io::Result<i32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "process groups are supported only on Unix",
+    ))
+}
+
+#[cfg(unix)]
+fn kill_stale_process_group(pgid: i32) -> std::io::Result<()> {
+    // SAFETY: the caller has positively verified the recorded identity and
+    // dedicated process group immediately before this call.
+    if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_stale_process_group(_pgid: i32) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "process groups are supported only on Unix",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity(pid: i32) -> std::io::Result<ProcessIdentity> {
+    let executable = fs::read_link(format!("/proc/{pid}/exe"))?;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    // The parenthesized comm field may itself contain spaces or `)`, so split
+    // after its final closing parenthesis. The remainder starts at field 3;
+    // process start time is field 22, hence index 19.
+    let fields = stat
+        .rsplit_once(") ")
+        .map(|(_, fields)| fields)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid proc stat"))?;
+    let start_time = fields
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing start time"))?
+        .parse()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(ProcessIdentity {
+        executable,
+        start_time,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity(pid: i32) -> std::io::Result<ProcessIdentity> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // SAFETY: both calls receive correctly sized, writable buffers; successful
+    // byte counts are checked before any fields or path bytes are read.
+    unsafe {
+        let mut info = std::mem::zeroed::<libc::proc_bsdinfo>();
+        let info_size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+            .expect("proc_bsdinfo size fits i32");
+        let read = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            info_size,
+        );
+        if read != info_size {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut path = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let path_len = libc::proc_pidpath(
+            pid,
+            path.as_mut_ptr().cast(),
+            u32::try_from(path.len()).expect("process path buffer fits u32"),
+        );
+        if path_len <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        path.truncate(usize::try_from(path_len).expect("positive path length fits usize"));
+        let start_time = info
+            .pbi_start_tvsec
+            .checked_mul(1_000_000)
+            .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "start time overflow")
+            })?;
+        Ok(ProcessIdentity {
+            executable: PathBuf::from(OsStr::from_bytes(&path)),
+            start_time,
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_identity(_pid: i32) -> std::io::Result<ProcessIdentity> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "process identity is supported only on macOS and Linux",
+    ))
 }
 
 fn set_pgid(slot: &SharedPgid, pgid: impl Into<Option<i32>>) {
@@ -487,10 +919,10 @@ async fn terminate(child: &mut tokio::process::Child, pgid: Option<i32>) {
         unsafe {
             libc::killpg(pgid, libc::SIGTERM);
         }
-        if tokio::time::timeout(SHUTDOWN_GRACE, child.wait())
-            .await
-            .is_ok()
-        {
+        if matches!(
+            tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await,
+            Ok(Ok(_))
+        ) {
             return;
         }
         tracing::warn!("cli-proxy-api ignored SIGTERM; killing");
@@ -569,7 +1001,7 @@ mod tests {
         }
     }
 
-    fn dirs_with_fake_upstream(root: &std::path::Path, script_body: &str) -> Dirs {
+    fn dirs_with_fake_upstream(root: &std::path::Path, mode: &str) -> Dirs {
         let dirs = Dirs {
             config_dir: root.join("config"),
             state_dir: root.join("state"),
@@ -577,14 +1009,75 @@ mod tests {
         };
         let binary = dirs.upstream_binary(crate::acquire::UPSTREAM_VERSION);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, script_body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
+        std::fs::write(dirs.state_dir.join("test-mode"), mode).unwrap();
+        std::fs::copy(fake_upstream_binary(), &binary).unwrap();
         dirs
     }
+
+    fn fake_upstream_binary() -> &'static Path {
+        static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        BINARY.get_or_init(|| {
+            let root = tempfile::Builder::new()
+                .prefix("model-router-fake-upstream")
+                .tempdir()
+                .unwrap()
+                .keep();
+            let source = root.join("fake-upstream.rs");
+            let binary = root.join("fake-upstream");
+            std::fs::write(&source, FAKE_UPSTREAM_SOURCE).unwrap();
+            let output = std::process::Command::new("rustc")
+                .args(["--edition=2024", "-O"])
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "failed to compile fake upstream: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            binary
+        })
+    }
+
+    const FAKE_UPSTREAM_SOURCE: &str = r#"
+use std::fs::{self, OpenOptions};
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::time::Duration;
+
+unsafe extern "C" { fn signal(signal: i32, handler: usize) -> usize; }
+
+fn main() {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let config = args.windows(2).find(|pair| pair[0] == "-config")
+        .map(|pair| PathBuf::from(&pair[1])).expect("-config path");
+    let state = config.parent().expect("state dir");
+    let mode = fs::read_to_string(state.join("test-mode")).expect("test mode");
+    writeln!(OpenOptions::new().create(true).append(true)
+        .open(state.join("spawns")).unwrap(), "{}", std::process::id()).unwrap();
+    fs::write(state.join("child-pid"), std::process::id().to_string()).unwrap();
+    if mode.trim() == "ignore" {
+        unsafe { signal(15, 1); }
+    }
+    if mode.trim() != "ready" {
+        loop { std::thread::sleep(Duration::from_secs(60)); }
+    }
+    let yaml = fs::read_to_string(config).unwrap();
+    let port = yaml.lines().find_map(|line| line.strip_prefix("port: "))
+        .unwrap().parse::<u16>().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    for stream in listener.incoming() {
+        let mut stream = stream.unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+    }
+}
+"#;
 
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -597,14 +1090,10 @@ mod tests {
     #[tokio::test]
     async fn live_but_unready_child_is_terminated_and_respawned() {
         let root = tempfile::tempdir().unwrap();
-        let spawn_log = root.path().join("spawns");
         // A child that runs but never serves the port: readiness must time
         // out, the supervisor must kill it and spawn a fresh one.
-        let script = format!(
-            "#!/bin/sh\necho spawned >> {}\nexec sleep 60\n",
-            spawn_log.display()
-        );
-        let dirs = dirs_with_fake_upstream(root.path(), &script);
+        let dirs = dirs_with_fake_upstream(root.path(), "unready");
+        let spawn_log = dirs.state_dir.join("spawns");
         let upstream = UpstreamConfig {
             port: free_port(),
             ..UpstreamConfig::default()
@@ -625,14 +1114,10 @@ mod tests {
     #[tokio::test]
     async fn shutdown_never_leaves_a_live_child() {
         let root = tempfile::tempdir().unwrap();
-        let pid_file = root.path().join("child-pid");
         // A child that ignores SIGTERM: shutdown must escalate to SIGKILL
         // and never return with the process alive.
-        let script = format!(
-            "#!/bin/sh\ntrap '' TERM\necho $$ > {}\nexec sleep 60\n",
-            pid_file.display()
-        );
-        let dirs = dirs_with_fake_upstream(root.path(), &script);
+        let dirs = dirs_with_fake_upstream(root.path(), "ignore");
+        let pid_file = dirs.state_dir.join("child-pid");
         let upstream = UpstreamConfig {
             port: free_port(),
             ..UpstreamConfig::default()
@@ -652,12 +1137,8 @@ mod tests {
     #[tokio::test]
     async fn occupied_port_prevents_any_spawn() {
         let root = tempfile::tempdir().unwrap();
-        let spawn_log = root.path().join("spawns");
-        let script = format!(
-            "#!/bin/sh\necho spawned >> {}\nexec sleep 60\n",
-            spawn_log.display()
-        );
-        let dirs = dirs_with_fake_upstream(root.path(), &script);
+        let dirs = dirs_with_fake_upstream(root.path(), "unready");
+        let spawn_log = dirs.state_dir.join("spawns");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream = UpstreamConfig {
             port: listener.local_addr().unwrap().port(),
@@ -672,5 +1153,184 @@ mod tests {
         assert!(!supervisor.handle().is_ready());
         supervisor.shutdown().await;
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn recorded_leaked_child_is_reaped_and_respawned() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_fake_upstream(root.path(), "ready");
+        let upstream = UpstreamConfig {
+            port: free_port(),
+            ..UpstreamConfig::default()
+        };
+        let paths = prepare_managed_state(&dirs, &upstream).unwrap();
+        let binary = dirs.upstream_binary(crate::acquire::UPSTREAM_VERSION);
+        let mut leaked = spawn_child(&binary, &paths).await.unwrap();
+        let leaked_pid = i32::try_from(leaked.id().unwrap()).unwrap();
+        let mut record =
+            persist_minimal_spawned_child(&dirs, &binary, &leaked, Some(leaked_pid)).unwrap();
+        enrich_spawned_child_record(&dirs, &mut leaked, &mut record)
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if port_in_use(upstream.port).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(port_in_use(upstream.port).await);
+
+        let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
+        for _ in 0..200 {
+            let spawn_count = std::fs::read_to_string(dirs.state_dir.join("spawns"))
+                .unwrap_or_default()
+                .lines()
+                .count();
+            if spawn_count >= 2 && supervisor.handle().is_ready() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            supervisor.handle().is_ready(),
+            "fresh child never became ready"
+        );
+        assert!(
+            std::fs::read_to_string(dirs.state_dir.join("spawns"))
+                .unwrap()
+                .lines()
+                .count()
+                >= 2,
+            "stale child was not replaced"
+        );
+        leaked.wait().await.unwrap();
+        assert_ne!(
+            std::fs::read_to_string(dirs.state_dir.join("child-pid"))
+                .unwrap()
+                .trim()
+                .parse::<i32>()
+                .unwrap(),
+            leaked_pid
+        );
+        supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn minimal_recorded_child_is_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_fake_upstream(root.path(), "ready");
+        let upstream = UpstreamConfig {
+            port: free_port(),
+            ..UpstreamConfig::default()
+        };
+        let paths = prepare_managed_state(&dirs, &upstream).unwrap();
+        let binary = dirs.upstream_binary(crate::acquire::UPSTREAM_VERSION);
+        let mut leaked = spawn_child(&binary, &paths).await.unwrap();
+        let leaked_pid = i32::try_from(leaked.id().unwrap()).unwrap();
+        let record =
+            persist_minimal_spawned_child(&dirs, &binary, &leaked, Some(leaked_pid)).unwrap();
+        assert_eq!(record.start_time, None);
+        for _ in 0..100 {
+            if port_in_use(upstream.port).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(port_in_use(upstream.port).await);
+
+        assert!(reap_recorded_child(&dirs, upstream.port).await);
+        leaked.wait().await.unwrap();
+        assert!(!dirs.upstream_child_file().exists());
+    }
+
+    #[tokio::test]
+    async fn dead_pid_child_record_is_cleared() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_fake_upstream(root.path(), "unready");
+        let upstream = UpstreamConfig {
+            port: free_port(),
+            ..UpstreamConfig::default()
+        };
+        let paths = prepare_managed_state(&dirs, &upstream).unwrap();
+        let binary = dirs.upstream_binary(crate::acquire::UPSTREAM_VERSION);
+        let mut child = spawn_child(&binary, &paths).await.unwrap();
+        let child_pid = i32::try_from(child.id().unwrap()).unwrap();
+        persist_minimal_spawned_child(&dirs, &binary, &child, Some(child_pid)).unwrap();
+        child.kill().await.unwrap();
+        let _ = child.wait().await;
+
+        assert!(!reap_recorded_child(&dirs, upstream.port).await);
+        assert!(!dirs.upstream_child_file().exists());
+    }
+
+    #[tokio::test]
+    async fn identity_mismatch_is_never_killed_or_adopted() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_fake_upstream(root.path(), "unready");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = UpstreamConfig {
+            port: listener.local_addr().unwrap().port(),
+            ..UpstreamConfig::default()
+        };
+        let mut foreign = tokio::process::Command::new("sleep");
+        foreign.arg("60").process_group(0);
+        let mut foreign = foreign.spawn().unwrap();
+        let foreign_pid = i32::try_from(foreign.id().unwrap()).unwrap();
+        let identity = process_identity(foreign_pid).unwrap();
+        let mismatched = ChildRecord {
+            format_version: 1,
+            pid: foreign_pid,
+            pgid: foreign_pid,
+            executable: fs::canonicalize(dirs.upstream_binary(crate::acquire::UPSTREAM_VERSION))
+                .unwrap(),
+            start_time: Some(identity.start_time),
+        };
+        write_private_atomic(
+            &dirs.upstream_child_file(),
+            &serde_json::to_vec(&mismatched).unwrap(),
+        )
+        .unwrap();
+
+        let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            foreign.try_wait().unwrap().is_none(),
+            "mismatched process was killed"
+        );
+        assert!(
+            port_in_use(upstream.port).await,
+            "foreign listener was disturbed"
+        );
+        assert!(!dirs.state_dir.join("spawns").exists());
+        assert!(
+            dirs.upstream_child_file().exists(),
+            "ambiguous live-process records must be preserved"
+        );
+        supervisor.shutdown().await;
+        foreign.kill().await.unwrap();
+        let _ = foreign.wait().await;
+    }
+
+    #[tokio::test]
+    async fn child_record_is_cleared_after_clean_terminate() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_fake_upstream(root.path(), "ready");
+        let upstream = UpstreamConfig {
+            port: free_port(),
+            ..UpstreamConfig::default()
+        };
+        let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
+        for _ in 0..100 {
+            if supervisor.handle().is_ready() && dirs.upstream_child_file().exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(supervisor.handle().is_ready());
+        assert!(dirs.upstream_child_file().exists());
+
+        supervisor.shutdown().await;
+
+        assert!(!dirs.upstream_child_file().exists());
     }
 }
