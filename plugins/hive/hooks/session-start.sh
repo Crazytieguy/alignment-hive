@@ -54,13 +54,10 @@ if [ -n "$SESSION_ID" ]; then
   fi
 fi
 
-# --- Skip for resume/compact/fork (continuations don't need fresh state) ---
-
-if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ] || [ "$SOURCE" = "fork" ]; then
-  exit 0
-fi
-
 # --- Register transcript directory for local retrieval ---
+# Also runs before the early-exit: a fork/resume in a directory that never had
+# a plain startup (e.g. `claude --resume <id> --fork-session` from a fresh
+# checkout) still needs its transcript dir registered.
 
 TRANSCRIPT_DIR="$HOME/.claude/projects/$(echo "$CLAUDE_PROJECT_DIR" | tr '/' '-')"
 if [ -d "$TRANSCRIPT_DIR" ]; then
@@ -68,6 +65,12 @@ if [ -d "$TRANSCRIPT_DIR" ]; then
   if ! grep -qxF "$TRANSCRIPT_DIR" "$TRANSCRIPTS_FILE" 2>/dev/null; then
     echo "$TRANSCRIPT_DIR" >> "$TRANSCRIPTS_FILE"
   fi
+fi
+
+# --- Skip for resume/compact/fork (continuations don't need fresh state) ---
+
+if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ] || [ "$SOURCE" = "fork" ]; then
+  exit 0
 fi
 
 # --- Delegate to binary (handles version check, consent, uploads) ---
