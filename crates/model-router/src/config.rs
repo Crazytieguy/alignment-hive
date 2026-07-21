@@ -157,6 +157,9 @@ fn default_models() -> Vec<ModelRoute> {
         ("claude-gpt-5.6-sol", "gpt-5.6-sol", "GPT-5.6 Sol"),
         ("claude-gpt-5.6-terra", "gpt-5.6-terra", "GPT-5.6 Terra"),
         ("claude-gpt-5.6-luna", "gpt-5.6-luna", "GPT-5.6 Luna"),
+        ("gpt-5.6-sol", "gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6-terra", "gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", "gpt-5.6-luna", "GPT-5.6 Luna"),
     ]
     .into_iter()
     .map(|(routing_id, upstream_model, display_name)| ModelRoute {
@@ -305,7 +308,7 @@ impl Config {
 # ingress-token = "replace-with-a-random-token"
 
 # GPT routing is exact-match only. Requests for every other model go to
-# Anthropic. By default the three GPT-5.6 routes below are enabled; writing
+# Anthropic. By default the six GPT-5.6 routes below are enabled; writing
 # any [[models]] entry replaces the whole default list.
 {models}
 #[capture]
@@ -475,7 +478,10 @@ mod tests {
             [
                 "claude-gpt-5.6-sol",
                 "claude-gpt-5.6-terra",
-                "claude-gpt-5.6-luna"
+                "claude-gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna"
             ]
         );
         for example in [
@@ -485,6 +491,9 @@ mod tests {
             "#routing-id = \"claude-gpt-5.6-sol\"",
             "#routing-id = \"claude-gpt-5.6-terra\"",
             "#routing-id = \"claude-gpt-5.6-luna\"",
+            "#routing-id = \"gpt-5.6-sol\"",
+            "#routing-id = \"gpt-5.6-terra\"",
+            "#routing-id = \"gpt-5.6-luna\"",
         ] {
             assert!(template.contains(example), "missing {example:?}");
         }

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State};
@@ -136,7 +136,10 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
     assert_eq!(observed.headers["x-api-key"], "gateway-secret");
     assert!(!observed.headers.contains_key("anthropic-beta"));
 
-    let models_response = reqwest::get(format!("http://{router_address}/v1/models?source=gateway"))
+    let models_response = reqwest::Client::new()
+        .get(format!("http://{router_address}/v1/models?source=gateway"))
+        .header("authorization", "Bearer discovery-secret")
+        .send()
         .await
         .unwrap();
     let models: serde_json::Value =
@@ -148,7 +151,7 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
         .map(|model| model["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["claude-existing", "claude-gpt-test"]);
-    assert_eq!(models["data"][1]["display_name"], "GPT Test");
+    assert_eq!(models["data"][1]["display_name"], "Existing GPT Test");
 
     router_task.abort();
     fake_task.abort();
@@ -250,8 +253,9 @@ async fn fake_upstream(State(state): State<FakeState>, request: Request) -> Resp
     if parts.uri.path() == "/v1/models" {
         assert_eq!(parts.method, "GET");
         assert_eq!(parts.uri.query(), Some("source=gateway"));
+        assert_eq!(parts.headers["authorization"], "Bearer discovery-secret");
         let mut response = Response::new(Body::from(
-            r#"{"data":[{"id":"claude-existing","display_name":"Claude Existing","type":"model"}]}"#,
+            r#"{"data":[{"id":"claude-existing","display_name":"Claude Existing","type":"model"},{"id":"claude-gpt-test","display_name":"Existing GPT Test","type":"model"}]}"#,
         ));
         response
             .headers_mut()
@@ -419,4 +423,147 @@ async fn ingress_token_gates_all_routes_except_bare_health() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "path {path}");
     }
+}
+
+#[tokio::test]
+async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape() {
+    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_address = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new().fallback(any(|request: Request| async move {
+        match request.uri().query() {
+            Some("case=non200") => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("unavailable"))
+                .unwrap(),
+            Some("case=invalid") => Response::new(Body::from("not json")),
+            Some("case=missing") => Response::new(Body::from("{}")),
+            Some("case=slow") => {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Response::new(Body::from(r#"{"data":[]}"#))
+            }
+            other => panic!("unexpected discovery query: {other:?}"),
+        }
+    }));
+    let fake_task = tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let config = Config {
+        anthropic_upstream_base: format!("http://{fake_address}"),
+        upstreams: stub_upstreams(),
+        ingress_token: Some("discovery-token".to_string()),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "codex".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+        }],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+
+    for failure_case in ["non200", "invalid", "missing", "slow"] {
+        let started = Instant::now();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/t/discovery-token/v1/models?case={failure_case}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "case {failure_case}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "case {failure_case} exceeded Claude Code's discovery timeout"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(document["data"].as_array().unwrap().len(), 1);
+        assert_eq!(document["data"][0]["id"], "claude-gpt-test");
+        assert_eq!(document["data"][0]["type"], "model");
+        assert_eq!(document["data"][0]["display_name"], "GPT Test");
+    }
+
+    let ungated = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ungated.status(), StatusCode::NOT_FOUND);
+    fake_task.abort();
+}
+
+#[tokio::test]
+async fn gpt_sse_usage_rewrite_is_streamed_and_captured() {
+    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_address = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new().fallback(any(|| async {
+        let chunks = [
+            Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":"),
+            Bytes::from_static(b"0,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":42,\"cache_read_input_tokens\":5,\"output_tokens\":3}}\n\n"),
+        ];
+        let stream = futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<Bytes, std::convert::Infallible>),
+        );
+        let mut response = Response::new(Body::from_stream(stream));
+        response
+            .headers_mut()
+            .insert("content-type", "text/event-stream".parse().unwrap());
+        response
+    }));
+    let fake_task = tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let directory = tempfile::tempdir().unwrap();
+    let capture_file = directory.path().join("capture.jsonl");
+    let config = Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "codex".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+        }],
+        capture: CaptureConfig {
+            enabled: true,
+            file: capture_file.clone(),
+            ..CaptureConfig::default()
+        },
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"claude-gpt-test","stream":true,"system":"harness","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let client_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let client_text = String::from_utf8(client_body.to_vec()).unwrap();
+    assert!(client_text.contains("event: message_start"));
+    assert!(!client_text.contains(r#""input_tokens":0"#));
+    assert!(client_text.contains(r#""input_tokens":42"#));
+
+    let jsonl = tokio::fs::read_to_string(capture_file).await.unwrap();
+    let record: serde_json::Value = serde_json::from_str(jsonl.trim()).unwrap();
+    assert_eq!(record["response_body"], client_text);
+    fake_task.abort();
 }

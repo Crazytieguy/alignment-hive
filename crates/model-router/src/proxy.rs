@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -17,6 +18,7 @@ use crate::config::{Config, UpstreamMode};
 use crate::headers;
 use crate::routing::{Branch, RoutingDecision, decide, substitute_model};
 use crate::stub;
+use crate::usage::{SseUsageTransformer, estimate_input_tokens};
 
 #[derive(Clone)]
 struct AppState {
@@ -250,6 +252,7 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
                 false,
                 false,
                 None,
+                None,
                 capture,
             )
             .await
@@ -296,15 +299,11 @@ async fn gpt_response(
             .await;
         }
     };
+    let estimated_input_tokens = estimate_input_tokens(&rewritten);
 
     match &state.codex_upstream {
         CodexUpstream::Stub => {
-            let streaming = serde_json::from_slice::<serde_json::Value>(&rewritten)
-                .ok()
-                .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
-                .unwrap_or(false);
-            let (headers, chunks) = stub::response(&route.upstream_model, streaming);
-            local_response(state, StatusCode::OK, headers, chunks, capture).await
+            local_stub_response(state, &route.upstream_model, &rewritten, capture).await
         }
         CodexUpstream::External {
             base_url,
@@ -320,6 +319,7 @@ async fn gpt_response(
                 true,
                 true,
                 credential.as_ref(),
+                Some(estimated_input_tokens),
                 capture,
             )
             .await
@@ -357,11 +357,26 @@ async fn gpt_response(
                 true,
                 true,
                 Some(&handle.credential),
+                Some(estimated_input_tokens),
                 capture,
             )
             .await
         }
     }
+}
+
+async fn local_stub_response(
+    state: &AppState,
+    upstream_model: &str,
+    request_body: &[u8],
+    capture: Option<RequestCapture>,
+) -> Response {
+    let streaming = serde_json::from_slice::<serde_json::Value>(request_body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    let (headers, chunks) = stub::response(upstream_model, streaming);
+    local_response(state, StatusCode::OK, headers, chunks, capture).await
 }
 
 /// Ingress gate: with a token configured, only `/t/<token>/`-prefixed
@@ -458,6 +473,7 @@ async fn forward(
     strip_credentials: bool,
     body_changed: bool,
     gpt_credential: Option<&headers::GptUpstreamCredential>,
+    estimated_input_tokens: Option<u64>,
     mut capture: Option<RequestCapture>,
 ) -> Response {
     let url = upstream_url(upstream_base, uri);
@@ -478,7 +494,7 @@ async fn forward(
         .send()
         .await
     {
-        Ok(response) => upstream_response(state, response, capture),
+        Ok(response) => upstream_response(state, response, capture, estimated_input_tokens),
         Err(error) => {
             tracing::warn!(%error, "upstream request failed");
             local_error_response(
@@ -512,83 +528,90 @@ async fn models_response(
         .request(method.clone(), url)
         .headers(outgoing_headers)
         .body(body)
+        .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
     {
         Ok(response) => response,
         Err(error) => {
-            tracing::warn!(%error, "Anthropic models request failed");
-            return local_error_response(
-                state,
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                "upstream request failed",
-                capture,
-            )
-            .await;
+            tracing::warn!(%error, "Anthropic models request failed; returning routed models only");
+            return models_fallback_response(state, capture).await;
         }
     };
 
-    if !response.status().is_success() {
-        return upstream_response(state, response, capture);
+    if response.status() != reqwest::StatusCode::OK {
+        tracing::warn!(
+            status = response.status().as_u16(),
+            "Anthropic models request was not successful; returning routed models only"
+        );
+        return models_fallback_response(state, capture).await;
     }
 
-    let status = response.status();
     let response_headers = headers::response_headers(response.headers(), true);
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(error) => {
-            tracing::warn!(%error, "failed to read Anthropic models response");
-            return local_error_response(
-                state,
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                "invalid upstream models response",
-                capture,
-            )
-            .await;
+            tracing::warn!(%error, "failed to read Anthropic models response; returning routed models only");
+            return models_fallback_response(state, capture).await;
         }
     };
     let mut document = match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(document) => document,
         Err(error) => {
-            tracing::warn!(%error, "failed to parse Anthropic models response");
-            return local_error_response(
-                state,
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                "invalid upstream models response",
-                capture,
-            )
-            .await;
+            tracing::warn!(%error, "failed to parse Anthropic models response; returning routed models only");
+            return models_fallback_response(state, capture).await;
         }
     };
     let Some(data) = document
         .get_mut("data")
         .and_then(serde_json::Value::as_array_mut)
     else {
-        return local_error_response(
-            state,
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            "upstream models response has no data array",
-            capture,
-        )
-        .await;
+        tracing::warn!("Anthropic models response has no data array; returning routed models only");
+        return models_fallback_response(state, capture).await;
     };
-    data.extend(state.config.models.iter().map(|route| {
-        json!({
-            "id": route.routing_id,
-            "display_name": route.display_name,
-            "type": "model"
-        })
-    }));
+    let mut model_ids = data
+        .iter()
+        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+    for route in &state.config.models {
+        if model_ids.insert(route.routing_id.clone()) {
+            data.push(json!({
+                "id": route.routing_id,
+                "display_name": route.display_name,
+                "type": "model"
+            }));
+        }
+    }
     let merged = Bytes::from(serde_json::to_vec(&document).expect("JSON values always serialize"));
     local_response(
         state,
-        StatusCode::from_u16(status.as_u16()).expect("valid HTTP status"),
+        StatusCode::OK,
         response_headers,
         vec![merged],
+        capture,
+    )
+    .await
+}
+
+async fn models_fallback_response(state: &AppState, capture: Option<RequestCapture>) -> Response {
+    let document = json!({
+        "data": state.config.models.iter().map(|route| json!({
+            "id": route.routing_id,
+            "display_name": route.display_name,
+            "type": "model"
+        })).collect::<Vec<_>>()
+    });
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    local_response(
+        state,
+        StatusCode::OK,
+        response_headers,
+        vec![Bytes::from(document.to_string())],
         capture,
     )
     .await
@@ -598,12 +621,72 @@ fn upstream_response(
     state: &AppState,
     response: reqwest::Response,
     capture: Option<RequestCapture>,
+    estimated_input_tokens: Option<u64>,
 ) -> Response {
     let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
-    let response_headers = headers::response_headers(response.headers(), false);
+    let transform_usage = estimated_input_tokens.is_some_and(|_| {
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value.split(';').next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                })
+            })
+    });
+    let response_headers = headers::response_headers(response.headers(), transform_usage);
     let stream = response.bytes_stream();
 
-    let body = if let (Some(sink), Some(request_capture)) = (state.capture.clone(), capture) {
+    if let Some(estimated_input_tokens) = estimated_input_tokens.filter(|_| transform_usage) {
+        let transformed_stream = async_stream::stream! {
+            let mut stream = Box::pin(stream);
+            let mut transformer = SseUsageTransformer::new(estimated_input_tokens);
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        for transformed in transformer.push(&bytes) {
+                            yield Ok::<Bytes, reqwest::Error>(transformed);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(buffered) = transformer.finish() {
+                            yield Ok(buffered);
+                        }
+                        yield Err(error);
+                        return;
+                    }
+                }
+            }
+            if let Some(buffered) = transformer.finish() {
+                yield Ok(buffered);
+            }
+        };
+        let body = streaming_response_body(
+            state,
+            status,
+            &response_headers,
+            capture,
+            transformed_stream,
+        );
+        return build_response(status, response_headers, body);
+    }
+
+    let body = streaming_response_body(state, status, &response_headers, capture, stream);
+    build_response(status, response_headers, body)
+}
+
+fn streaming_response_body<S>(
+    state: &AppState,
+    status: StatusCode,
+    response_headers: &HeaderMap,
+    capture: Option<RequestCapture>,
+    stream: S,
+) -> Body
+where
+    S: futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    if let (Some(sink), Some(request_capture)) = (state.capture.clone(), capture) {
         let mut capture = StreamingCapture::new(
             sink,
             request_capture,
@@ -631,8 +714,7 @@ fn upstream_response(
         Body::from_stream(capture_stream)
     } else {
         Body::from_stream(stream)
-    };
-    build_response(status, response_headers, body)
+    }
 }
 
 async fn local_error_response(

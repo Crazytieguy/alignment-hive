@@ -214,6 +214,12 @@ raw SSE inspected.
   dual-route aliases (both prefixes → same upstream) would give each flow the
   right ID. Untested what happens if a conversation exceeds the real
   upstream limit.
+- Real GPT-5.6 context via Codex (researched 2026-07-21): the OpenAI API
+  advertises 1.05M for sol/terra (128K max output), but the Codex/ChatGPT
+  backend — our upstream — serves a reduced catalog: 272K input + 128K output
+  with a 95% multiplier, ~258.4K effective input (openai/codex#32806,
+  InfoWorld 2026-07). Chosen `CLAUDE_CODE_MAX_CONTEXT_TOKENS=250000` to stay
+  under that with margin. Revisit if Codex restores a larger window.
 - Display names (cosmetic UI question): two documented candidates behind a
   gateway — `ANTHROPIC_CUSTOM_MODEL_OPTION` + `_NAME`/`_DESCRIPTION` (single
   entry only), and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` with a
@@ -252,6 +258,36 @@ completion was 5/5 and output accuracy verified; recurring frictions:
 - Harness note for callers: subagent Writes of report/findings `.md` files
   are hard-blocked by Claude Code ("return findings as text"); ask GPT (and
   any) subagents for inline findings, not report files.
+
+Round 2 (2026-07-21, 20 probes: 5 tasks x {sol-med, sol-low, terra-high,
+luna-high}, Sonnet auditors + blind comparer): 20/20 task success, 20/20
+complete final messages, 0 self-forks, 0 hallucinated constraints — round
+1's terra final-message loss did not reproduce. Effort did not predict
+fumbles (sol-low was the cleanest and leanest: 54 tool calls vs sol-med 82,
+luna 112). n=1 incidents, tracking model family not effort: terra operated
+on its worktree cwd instead of the prompt-named path; luna wrote a file
+outside its assigned directory via a path bug and did not disclose it;
+sol-med satisfied a no-file-writes task via a disk-caching fetch tool.
+All-config artifact, not a model signal: the bundled claude-api skill's
+imperative trigger fires on any "Claude Code" mention in a prompt, costing
+a turn each time (once 784KB of context) — our probes were meta-tasks about
+Claude Code itself; typical research prompts won't mention it. Decision:
+keep sol, terra, and luna all recommended; no choosing-models copy changes
+(the observed failure modes are too incidental to teach from).
+
+Review-quality bake-off (2026-07-21, blind: sol-med/sol-high/terra-high each
+reviewed commits 9fad035 and f14896e; Sonnet judge with repo access verified
+claims before ranking). Result: sol-high 1st on both (found the one real,
+judge-verified bug in each commit with the tightest grounding, no padding);
+sol-med 2nd (same bugs, some speculative filler); terra-high 3rd — approved
+both commits with ~400-char reviews, missing the real bug both times.
+Transcript check: terra's tiny reviews were its entire written output (one
+text block each), not a lost-final-message artifact, despite heavy
+investigation activity. Steinberger's terra-for-review recommendation does
+not replicate through this integration. Action: reviewer agents switched to
+sol at high effort. Bonus: the bake-off surfaced two real repo bugs — the
+starfield docH self-pinning feedback loop (9fad035) and the hive fork-hook
+registration skip for first-seen directories (f14896e).
 
 ## Still open
 - Long sessions and heavy tool loops against real Codex; more ToolSearch

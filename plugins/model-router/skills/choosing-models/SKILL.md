@@ -46,19 +46,16 @@ Claude model review GPT work and vice versa.
 
 ## Model notes
 
-- **gpt-5.6-sol** — the GPT workhorse; best intelligence-per-cost of the
-  family. Effort: medium is a good default; high suits long tasks needing
-  self-verification loops; above high is rarely worth it — the model
-  overthinks and overengineers.
-- **gpt-5.6-terra** — unclear niche next to sol: on general
-  intelligence-per-cost benchmarks sol dominates (sol low beats terra high),
-  but in the don't-trust-benchmarks category, Peter Steinberger reports that
-  for his issue/code-review use case "Terra high *by far* delivers better
-  results than Sol low", while raising sol's effort helps little. Worth
-  considering for review-shaped work.
-- **gpt-5.6-luna** — high-volume mechanical work: reading piles of documents,
-  extraction, anything where judgement and peak capability barely matter.
-  Cheaper than Haiku, likely faster, and much more capable.
+- **gpt-5.6-sol** — the GPT workhorse and the default; best
+  intelligence-per-cost of the family. Effort: medium is a good default;
+  high suits long tasks needing self-verification loops; above high is
+  rarely worth it — the model overthinks and overengineers.
+- **gpt-5.6-terra** — available, but sol at low or medium is likely the
+  better choice: general benchmarks favor sol, and so did a blind review
+  bake-off through this integration.
+- **gpt-5.6-luna** — truly simple, high-volume mechanical work: reading
+  piles of documents, extraction, anything where judgement barely matters.
+  Cheaper than Haiku, likely faster, and more capable.
 - **Fable** — judgement- and taste-heavy work: design, writing, creative
   hypothesis generation, and difficult tasks that sol attempted and failed.
   Mind the Fable usage cap.
@@ -74,10 +71,17 @@ When the main agent is Fable, most delegation should go to GPT models
 (well-specified subtasks, review) or Fable itself (judgement-heavy work), with
 Sonnet/Opus covering the underspecified-but-token-heavy middle.
 
+Before diverging from the sol default for a recurring use case, run a small
+blind comparison on the actual task — a Workflow with anonymized outputs and
+a judge settles it cheaply.
+
 ## Mechanics
 
 The Agent tool's `model` parameter does not accept GPT models. Use the
 shipped agents instead — `gpt-5.6-sol(medium)`, `gpt-5.6-sol(high)`,
 `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` — or, for any other model/effort
 combination, Workflow's
-`agent(prompt, {model: 'claude-gpt-5.6-sol', effort: 'low'})`.
+`agent(prompt, {model: 'gpt-5.6-sol', effort: 'low'})`. Prefer the bare
+`gpt-5.6-*` routing IDs over the `claude-gpt-5.6-*` aliases: only the bare
+IDs pick up the declared GPT context window
+(`CLAUDE_CODE_MAX_CONTEXT_TOKENS`).
