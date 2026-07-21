@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/remote-kernels"]
+members = ["crates/model-router", "crates/remote-kernels"]
 resolver = "2"
 
 # The profile that 'dist' will build with

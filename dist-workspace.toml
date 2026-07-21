@@ -9,7 +9,11 @@ cargo-dist-version = "0.30.3"
 ci = "github"
 # The installers to generate for each app
 installers = []
-# Prefix for release tags (e.g., remote-kernels-v0.1.0)
-tag-namespace = "remote-kernels"
+# No tag-namespace: tags are package-qualified (remote-kernels-v0.2.1,
+# model-router-v0.1.0) and each package's release workflow filters its own.
+# The release workflows are hand-maintained (per-package tag filters,
+# workflow_dispatch for the auto-tag chain), so dist must not require its
+# regenerated CI to match.
+allow-dirty = ["ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]

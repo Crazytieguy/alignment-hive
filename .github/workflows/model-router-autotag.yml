@@ -1,0 +1,79 @@
+# Cuts the model-router release automatically: when a push to main changes
+# plugins/model-router/binary-version, create the model-router-v<version> tag
+# and dispatch the release workflow at it. Dispatching explicitly is required
+# because tag pushes made with GITHUB_TOKEN never trigger tag-push workflows.
+#
+# Idempotent and failure-recoverable: gated on the RELEASE WITH ASSETS
+# existing, not on the tag — if an earlier release run failed after tagging,
+# re-running this workflow re-dispatches instead of skipping forever.
+# (Re-run it from the Actions tab against main.)
+
+name: Auto-tag model-router release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/model-router/binary-version'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  autotag:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and verify version
+        id: version
+        run: |
+          set -euo pipefail
+          binary_version=$(tr -d '[:space:]' < plugins/model-router/binary-version)
+          crate_version=$(grep -m1 '^version = ' crates/model-router/Cargo.toml | cut -d'"' -f2)
+          if [ -z "$binary_version" ]; then
+            echo "::error::plugins/model-router/binary-version is empty"
+            exit 1
+          fi
+          if [ "$binary_version" != "$crate_version" ]; then
+            echo "::error::binary-version ($binary_version) != crates/model-router Cargo.toml version ($crate_version); bump them together"
+            exit 1
+          fi
+          echo "tag=model-router-v${binary_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when the release and its assets already exist
+        id: gate
+        run: |
+          set -euo pipefail
+          tag='${{ steps.version.outputs.tag }}'
+          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '[.assets[].name | select(endswith(".tar.xz"))] | length' 2>/dev/null || echo "0")
+          if [ "$assets" -ge 4 ]; then
+            echo "Release $tag already has $assets platform archives; nothing to do."
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag if missing
+        if: steps.gate.outputs.done == 'false'
+        run: |
+          set -euo pipefail
+          tag='${{ steps.version.outputs.tag }}'
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists (previous release run must have failed); re-dispatching."
+          else
+            git tag "$tag"
+            git push origin "refs/tags/$tag"
+          fi
+
+      - name: Dispatch release workflow at the tag
+        if: steps.gate.outputs.done == 'false'
+        run: |
+          gh workflow run model-router-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref 'refs/tags/${{ steps.version.outputs.tag }}'

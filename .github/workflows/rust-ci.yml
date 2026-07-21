@@ -7,16 +7,48 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'dist-workspace.toml'
+      - 'plugins/model-router/binary-version'
+      - 'plugins/remote-kernels/binary-version'
       - '.github/workflows/rust-ci.yml'
+      - '.github/workflows/model-router-release.yml'
+      - '.github/workflows/model-router-autotag.yml'
+      - '.github/workflows/remote-kernels-release.yml'
   pull_request:
     branches: [main]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'dist-workspace.toml'
+      - 'plugins/model-router/binary-version'
+      - 'plugins/remote-kernels/binary-version'
       - '.github/workflows/rust-ci.yml'
+      - '.github/workflows/model-router-release.yml'
+      - '.github/workflows/model-router-autotag.yml'
+      - '.github/workflows/remote-kernels-release.yml'
 
 jobs:
+  version-match:
+    # The autotag workflow enforces this on main, but only AFTER merge — and
+    # only when binary-version changed, so a lone Cargo.toml bump would never
+    # fail anywhere. Catch both mismatch directions at PR time, cheaply.
+    name: binary-version matches Cargo.toml
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare model-router versions
+        shell: bash
+        run: |
+          binary_version=$(tr -d '[:space:]' < plugins/model-router/binary-version)
+          crate_version=$(grep -m1 '^version = ' crates/model-router/Cargo.toml | cut -d'"' -f2)
+          echo "binary-version=$binary_version Cargo.toml=$crate_version"
+          if [ "$binary_version" != "$crate_version" ]; then
+            echo "::error::plugins/model-router/binary-version ($binary_version) != crates/model-router/Cargo.toml ($crate_version) — bump them together"
+            exit 1
+          fi
   check:
     name: Check crates
     runs-on: ubuntu-latest
@@ -29,6 +61,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
 
       - name: Format
         run: cargo fmt --check
@@ -47,3 +81,54 @@ jobs:
       - name: E2E (fake runtime, local Jupyter)
         run: cargo test --features fake-runtime --test fake_e2e -- --ignored --test-threads=1
         working-directory: crates/remote-kernels
+
+  check-model-router:
+    name: Check model-router
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
+
+      - name: Format
+        run: cargo fmt --check
+        working-directory: crates/model-router
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: crates/model-router
+
+      - name: Test
+        run: cargo test
+        working-directory: crates/model-router
+
+  dist-plan:
+    # Untagged `dist plan` fails when dist-able packages have different
+    # versions, so the release workflows no longer run on pull_request;
+    # validate each package's release plan tag-qualified here instead.
+    name: Validate dist release plans
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dist
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.3/cargo-dist-installer.sh | sh"
+
+      - name: Plan each dist package at its own version tag
+        shell: bash
+        run: |
+          for pkg in remote-kernels model-router; do
+            version=$(grep -m1 '^version = ' "crates/$pkg/Cargo.toml" | cut -d'"' -f2)
+            echo "::group::dist plan --tag=$pkg-v$version"
+            dist plan --tag="$pkg-v$version"
+            echo "::endgroup::"
+          done

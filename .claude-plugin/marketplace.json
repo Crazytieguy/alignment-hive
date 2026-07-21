@@ -36,6 +36,11 @@
       "name": "github-action",
       "source": "./plugins/github-action",
       "description": "Set up Claude Code GitHub Action for autonomous issue and PR handling"
+    },
+    {
+      "name": "model-router",
+      "source": "./plugins/model-router",
+      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway"
     }
   ]
 }
