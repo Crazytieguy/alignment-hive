@@ -202,17 +202,56 @@ raw SSE inspected.
   rewrite (estimated `input_tokens` in `message_start`, corrected in the
   final delta) or an upstream CLIProxyAPI patch; needs a harness-side test of
   which events Claude Code actually accumulates from.
-- Context length: no documented way to declare a custom model's context
-  window (checked model-config docs 2026-07-20;
-  `..._SUPPORTED_CAPABILITIES` has no context field). Unknown IDs get Claude
-  Code's default window assumption; auto-compact fires on that assumption.
-  Untested what happens if a conversation exceeds the real upstream limit.
+- Context length (binary-verified, 2.1.216): the default context window for
+  unknown model IDs is exactly 200000 (constant `EYt` in the window-sizing
+  function). Undocumented override: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applies
+  to any model whose normalized ID does NOT start with `claude-` (Claude
+  models keep their built-in windows). Our `claude-gpt-5.6-*` routing IDs are
+  excluded by the prefix check; bare `gpt-5.6-*` routing IDs (measured
+  working earlier) would accept it. Tension: gateway model discovery silently
+  drops IDs that don't start with `claude`/`anthropic`, so one routing ID
+  can't have both the context override and a discovery picker entry —
+  dual-route aliases (both prefixes → same upstream) would give each flow the
+  right ID. Untested what happens if a conversation exceeds the real
+  upstream limit.
 - Display names (cosmetic UI question): two documented candidates behind a
-  gateway — `ANTHROPIC_CUSTOM_MODEL_OPTION` + `_NAME`/`_DESCRIPTION`, and
-  `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` with a `/v1/models`
-  endpoint returning `display_name` (picker labels entries "From gateway").
-  The discovery probe never fired in `-p` sessions (see above); interactive
-  retest + a router `/v1/models` implementation are the natural experiment.
+  gateway — `ANTHROPIC_CUSTOM_MODEL_OPTION` + `_NAME`/`_DESCRIPTION` (single
+  entry only), and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` with a
+  `/v1/models` endpoint returning `display_name` (picker labels entries
+  "From gateway"). Binary-verified (2.1.216): discovery consumes ONLY
+  `id` + `display_name` — mapped to `{value, label, description: "From
+  gateway"}` for the /model picker; there is no context-length or
+  capabilities field, so discovery cannot declare a model's context window.
+  Discovery is gated on first-party auth + `ANTHROPIC_BASE_URL` + the env
+  flag, and skipped when nonessential traffic is disabled; it never fired in
+  `-p` sessions, consistent with an interactive-init-only fetch. Natural
+  experiment: implement router `/v1/models` (forward + append GPT routes'
+  id/display_name) and check the picker in one interactive session.
+
+## GPT tool-usage audits (2026-07-20, 5 transcripts, Sonnet auditors)
+
+Five probe tasks (sol x3, terra, luna) audited from raw transcripts. Task
+completion was 5/5 and output accuracy verified; recurring frictions:
+
+- Bash `timeout` parameter hits a `timeout:*` permission-deny rule (3/5
+  transcripts); always recovered in one retry. Decide: allow the parameter
+  or leave as-is.
+- Bash `rg`/`find` instead of Grep/Glob (sol once — caused two
+  output-overflow truncations on `.git/`; terra heavily; luna mildly).
+  Countermeasure: built-in-tools nudge added to all GPT agent bodies.
+- Final-message semantics (terra): produced a complete, sound review as a
+  mid-run text block, then let a late event push it to a stub final message —
+  the caller only receives the final message, so the review was lost.
+  Countermeasure: final-message nudge added to all GPT agent bodies.
+- Terra also self-forked a duplicate investigator on the same task (2x
+  compute, ignored the tool result's do-not-duplicate warning) and misparsed
+  its own Skill args ("Review …") as a PR branch name, then fetched local
+  files via `gh api` instead of `git show`/Read. Single sample; observe.
+- Luna is strictly serial: 27 calls, one per turn, no parallel batches on an
+  8-way-parallel task (sol batches well). Accuracy was still 100%.
+- Harness note for callers: subagent Writes of report/findings `.md` files
+  are hard-blocked by Claude Code ("return findings as text"); ask GPT (and
+  any) subagents for inline findings, not report files.
 
 ## Still open
 - Long sessions and heavy tool loops against real Codex; more ToolSearch
