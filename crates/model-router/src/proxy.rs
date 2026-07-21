@@ -30,11 +30,11 @@ struct AppState {
     config: Arc<Config>,
     client: reqwest::Client,
     capture: Option<CaptureSink>,
-    codex_upstream: CodexUpstream,
+    cliproxy_upstream: CliproxyUpstream,
 }
 
 #[derive(Clone)]
-enum CodexUpstream {
+enum CliproxyUpstream {
     Stub,
     External {
         base_url: String,
@@ -46,15 +46,12 @@ enum CodexUpstream {
     ManagedUnavailable,
 }
 
-impl CodexUpstream {
+impl CliproxyUpstream {
     fn resolve(
         config: &Config,
         managed: Option<crate::supervisor::ManagedHandle>,
     ) -> anyhow::Result<Self> {
-        let upstream = config
-            .upstreams
-            .get("codex")
-            .expect("validated config always contains the codex upstream");
+        let upstream = config.cliproxy_upstream();
         match upstream.mode {
             UpstreamMode::Stub => Ok(Self::Stub),
             UpstreamMode::External => Ok(Self::External {
@@ -75,11 +72,11 @@ impl CodexUpstream {
 
 impl AppState {
     async fn new(
-        config: Config,
+        mut config: Config,
         managed: Option<crate::supervisor::ManagedHandle>,
     ) -> anyhow::Result<Self> {
-        config.validate()?;
-        let codex_upstream = CodexUpstream::resolve(&config, managed)?;
+        config.prepare()?;
+        let cliproxy_upstream = CliproxyUpstream::resolve(&config, managed)?;
         let capture = if config.capture.enabled {
             Some(
                 CaptureSink::open(&config.capture.file, config.capture.max_response_body_bytes)
@@ -99,7 +96,7 @@ impl AppState {
             config: Arc::new(config),
             client,
             capture,
-            codex_upstream,
+            cliproxy_upstream,
         })
     }
 }
@@ -349,11 +346,11 @@ async fn gpt_response(
     };
     let estimated_input_tokens = estimate_input_tokens(&rewritten);
 
-    match &state.codex_upstream {
-        CodexUpstream::Stub => {
+    match &state.cliproxy_upstream {
+        CliproxyUpstream::Stub => {
             local_stub_response(state, &route.upstream_model, &rewritten, capture).await
         }
-        CodexUpstream::External {
+        CliproxyUpstream::External {
             base_url,
             credential,
         } => {
@@ -372,24 +369,24 @@ async fn gpt_response(
             )
             .await
         }
-        CodexUpstream::ManagedUnavailable => {
+        CliproxyUpstream::ManagedUnavailable => {
             local_error_response(
                 state,
                 StatusCode::BAD_GATEWAY,
                 "api_error",
-                "the codex upstream supervisor failed to start; Claude traffic is unaffected — \
+                "the cliproxy upstream supervisor failed to start; Claude traffic is unaffected — \
                  run `model-router doctor` to diagnose",
                 capture,
             )
             .await
         }
-        CodexUpstream::Managed(handle) => {
+        CliproxyUpstream::Managed(handle) => {
             if !handle.is_ready() {
                 return local_error_response(
                     state,
                     StatusCode::BAD_GATEWAY,
                     "api_error",
-                    "the codex upstream is not ready (starting up, unauthenticated, or crashed); \
+                    "the cliproxy upstream is not ready (starting up, unauthenticated, or crashed); \
                      run `model-router doctor` to diagnose",
                     capture,
                 )
@@ -477,11 +474,11 @@ fn apply_ingress_gate(
 
 /// Local liveness/version endpoint for the `SessionStart` hook and doctor.
 fn health_response(state: &AppState) -> Response {
-    let upstream = match &state.codex_upstream {
-        CodexUpstream::Stub => "stub",
-        CodexUpstream::External { .. } => "external",
-        CodexUpstream::ManagedUnavailable => "unavailable",
-        CodexUpstream::Managed(handle) => {
+    let upstream = match &state.cliproxy_upstream {
+        CliproxyUpstream::Stub => "stub",
+        CliproxyUpstream::External { .. } => "external",
+        CliproxyUpstream::ManagedUnavailable => "unavailable",
+        CliproxyUpstream::Managed(handle) => {
             if handle.is_ready() {
                 "ready"
             } else {
@@ -498,6 +495,10 @@ fn health_response(state: &AppState) -> Response {
         json!({
             "status": status,
             "version": env!("CARGO_PKG_VERSION"),
+            "cliproxy-upstream": upstream,
+            // Deprecated duplicate for the auto-update skew window: a pre-0.1.3
+            // doctor probing a newer service still reads the old key. Remove
+            // after one release.
             "codex-upstream": upstream,
         })
         .to_string(),
@@ -622,7 +623,7 @@ async fn models_response(
         .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
         .map(ToOwned::to_owned)
         .collect::<HashSet<_>>();
-    for route in &state.config.models {
+    for route in state.config.effective_models() {
         if model_ids.insert(route.routing_id.clone()) {
             data.push(json!({
                 "id": route.routing_id,
@@ -644,7 +645,7 @@ async fn models_response(
 
 async fn models_fallback_response(state: &AppState, capture: Option<RequestCapture>) -> Response {
     let document = json!({
-        "data": state.config.models.iter().map(|route| json!({
+        "data": state.config.effective_models().map(|route| json!({
             "id": route.routing_id,
             "display_name": route.display_name,
             "type": "model"
@@ -871,6 +872,9 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "degraded");
+        assert_eq!(health["cliproxy-upstream"], "unavailable");
+        // Deprecated duplicate key, kept for one release for update-skew
+        // tolerance (see health_response).
         assert_eq!(health["codex-upstream"], "unavailable");
     }
 

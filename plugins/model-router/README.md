@@ -26,6 +26,8 @@ present themselves as Claude.
   `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` — usable from any project,
   plus dynamic per-invocation model + effort choice in Workflow
   orchestration.
+- Optional open-weights subagents — add Kimi, GLM, or other models from any
+  OpenAI-compatible host you have an API key for during `/model-router:setup`.
 - A `choosing-models` skill that helps Claude pick the right model and
   effort when delegating.
 - An OS service (launchd/systemd user unit) that keeps the router alive.

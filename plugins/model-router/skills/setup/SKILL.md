@@ -58,6 +58,11 @@ macOS and Linux only.
    Offer to run a smoke test that works without a restart:
    `ANTHROPIC_BASE_URL=<base_url> claude -p 'reply with ok' --model
    claude-gpt-5.6-sol`.
+7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
+   served through an OpenAI-compatible host they have an API key for — if
+   yes, read `references/open-weights.md` and follow it; (b) agents for
+   other GPT model x effort combinations — if yes, follow
+   `references/custom-agents.md`.
 
 ## Repair
 

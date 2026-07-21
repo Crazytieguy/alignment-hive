@@ -33,6 +33,16 @@ enum Command {
     EnsureUpstream,
     /// Run `CLIProxyAPI`'s interactive Codex OAuth login for the managed upstream.
     Login,
+    /// Check configured openai-providers against their /models endpoints
+    /// (never prints API keys).
+    VerifyProviders {
+        /// Verify only this provider.
+        #[arg(long)]
+        name: Option<String>,
+        /// Emit the reports as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Diagnose config, binaries, auth, and the running router.
     Doctor {
         /// Emit the report as JSON.
@@ -100,6 +110,20 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Login => login(&dirs, &config_path).await,
+        Command::VerifyProviders { name, json } => {
+            let reports = model_router::verify::run(&config_path, name.as_deref()).await?;
+            let (rendered, all_ok) = model_router::verify::render(&reports);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reports)?);
+            } else {
+                print!("{rendered}");
+            }
+            if all_ok {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
+        }
         Command::Doctor { json } => {
             let report = doctor::run(&dirs, &config_path).await;
             if json {
@@ -158,22 +182,24 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
         );
     }
 
-    let managed_config = config
-        .upstreams
-        .get("codex")
-        .filter(|upstream| upstream.mode == UpstreamMode::Managed)
-        .cloned();
-    // A failing codex upstream must never take down Claude routing: on
+    let managed_config = Some(config.cliproxy_upstream().clone())
+        .filter(|upstream| upstream.mode == UpstreamMode::Managed);
+    // A failing cliproxy upstream must never take down Claude routing: on
     // supervisor-start failure we serve degraded (GPT requests get 502)
     // instead of exiting.
     let (handle, supervisor) = match managed_config {
         Some(upstream) => {
-            match Supervisor::start(dirs, &upstream, model_router::supervisor::Tuning::default()) {
+            match Supervisor::start(
+                dirs,
+                &upstream,
+                config.openai_providers.clone(),
+                model_router::supervisor::Tuning::default(),
+            ) {
                 Ok(supervisor) => (Some(supervisor.handle()), Some(supervisor)),
                 Err(error) => {
                     tracing::error!(
                         %error,
-                        "failed to start the codex upstream supervisor; serving Claude traffic \
+                        "failed to start the cliproxy upstream supervisor; serving Claude traffic \
                          only (GPT requests will return errors — run `model-router doctor`)"
                     );
                     (None, None)
@@ -185,7 +211,7 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
 
     let result = proxy::serve_listener(listener, config, handle, shutdown_signal()).await;
     if let Some(supervisor) = supervisor {
-        tracing::info!("shutting down codex upstream");
+        tracing::info!("shutting down cliproxy upstream");
         supervisor.shutdown().await;
     }
     result
@@ -213,17 +239,14 @@ async fn shutdown_signal() {
 
 async fn login(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()> {
     let config = Config::load(config_path)?;
-    let upstream = config
-        .upstreams
-        .get("codex")
-        .expect("validated config always contains codex");
+    let upstream = config.cliproxy_upstream().clone();
     anyhow::ensure!(
         upstream.mode == UpstreamMode::Managed,
-        "`model-router login` manages Codex auth for managed mode; [upstreams.codex] is {:?}",
+        "`model-router login` manages Codex auth for managed mode; [upstreams.cliproxy] is {:?}",
         upstream.mode
     );
     let binary = acquire::ensure_upstream(dirs).await?;
-    let paths = supervisor::prepare_managed_state(dirs, upstream)?;
+    let paths = supervisor::prepare_managed_state(dirs, &upstream, &config.openai_providers)?;
     if let Some(existing) = model_router::state::find_codex_auth(&paths.auth_dir) {
         println!(
             "A Codex login already exists at {}; continuing will add another.",

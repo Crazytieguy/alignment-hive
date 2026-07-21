@@ -75,6 +75,21 @@ Before diverging from the sol default for a recurring use case, run a small
 blind comparison on the actual task — a Workflow with anonymized outputs and
 a judge settles it cheaply.
 
+## Safeguards
+
+Deployment safeguards (bio/cyber classifiers, refusal behavior) differ
+sharply per model and per family. When the task might trip them — security
+research, biosecurity work, exploit-adjacent fixes, dual-use anything — read
+`references/safeguards.md` before choosing; for most tasks it doesn't
+matter.
+
+## Open-weights models
+
+Open-weights models (Kimi, GLM, ...) are optional; `model-router:setup`
+configures the routes and creates their agents. Use models outside the
+Claude and GPT families only when the user explicitly asks for them — there
+is no strengths/weaknesses guidance for them yet.
+
 ## Mechanics
 
 The Agent tool's `model` parameter does not accept GPT models. Use the

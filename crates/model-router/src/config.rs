@@ -9,6 +9,18 @@ use serde_inline_default::serde_inline_default;
 pub const DEFAULT_CAPTURE_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
 
+/// The single supported upstream name: the managed/external `CLIProxyAPI`
+/// gateway. Renamed from `codex` in 0.1.3 (the upstream carries more than
+/// Codex traffic now); `codex` is accepted as a deprecated alias at load.
+pub const CLIPROXY_UPSTREAM: &str = "cliproxy";
+const LEGACY_UPSTREAM: &str = "codex";
+
+/// Namespace prefix for the internal `CLIProxyAPI` model aliases derived from
+/// `[[openai-providers]]` entries. Guarantees derived aliases can never
+/// collide with native upstream model IDs; never user-visible. No `/` — that
+/// character has provider-prefix semantics in `CLIProxyAPI` model IDs.
+const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
+
 #[serde_inline_default]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -25,7 +37,8 @@ pub struct Config {
     #[serde_inline_default("https://api.anthropic.com".to_string())]
     pub anthropic_upstream_base: String,
 
-    /// Named model upstreams. Only `codex` is supported today.
+    /// Named model upstreams. Only `cliproxy` is supported today (`codex` is
+    /// the accepted deprecated alias).
     #[serde_inline_default(default_upstreams())]
     pub upstreams: BTreeMap<String, UpstreamConfig>,
 
@@ -43,9 +56,61 @@ pub struct Config {
     #[serde_inline_default(default_models())]
     pub models: Vec<ModelRoute>,
 
+    /// OpenAI-compatible providers exposed through the managed `CLIProxyAPI`
+    /// child (Fireworks, Together, ...). Empty by default.
+    #[serde(default, rename = "openai-providers")]
+    pub openai_providers: Vec<OpenAiProvider>,
+
     /// Optional request/response capture settings.
     #[serde(default)]
     pub capture: CaptureConfig,
+
+    /// Routes derived from `openai_providers` model entries; rebuilt by
+    /// [`Config::prepare`], never read from TOML.
+    #[serde(skip)]
+    pub derived_models: Vec<ModelRoute>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct OpenAiProvider {
+    pub name: String,
+    pub base_url: String,
+    pub models: Vec<ProviderModel>,
+
+    /// Loaded from the sibling `secrets.toml`, never from the config file
+    /// (`deny_unknown_fields` rejects an inline `api-key`). `None` means the
+    /// provider is configured but keyless: it is skipped in the generated
+    /// child config and flagged by doctor and `verify-providers`.
+    #[serde(skip)]
+    pub api_key: Option<String>,
+}
+
+/// `secrets.toml`, sibling of the config file: keeps API keys out of the
+/// freely-editable config. `[openai-providers]` maps provider name to key.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct SecretsFile {
+    #[serde(default)]
+    openai_providers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ProviderModel {
+    /// Exact model ID on the provider (e.g. `accounts/fireworks/models/...`).
+    pub name: String,
+    /// The model ID Claude Code requests (becomes a routed model).
+    pub routing_id: String,
+    pub display_name: String,
+}
+
+/// The internal `CLIProxyAPI` alias for a provider model. Routing IDs are
+/// globally unique and charset-restricted (validation), so prefixing alone is
+/// injective; the provider name would add nothing but ambiguity.
+#[must_use]
+pub fn derived_alias(routing_id: &str) -> String {
+    format!("{DERIVED_ALIAS_PREFIX}{routing_id}")
 }
 
 #[serde_inline_default]
@@ -54,7 +119,7 @@ pub struct Config {
 pub struct ModelRoute {
     pub routing_id: String,
 
-    #[serde_inline_default("codex".to_string())]
+    #[serde_inline_default(CLIPROXY_UPSTREAM.to_string())]
     pub upstream: String,
 
     pub upstream_model: String,
@@ -133,7 +198,7 @@ impl Default for UpstreamConfig {
 }
 
 fn default_upstreams() -> BTreeMap<String, UpstreamConfig> {
-    BTreeMap::from([("codex".to_string(), UpstreamConfig::default())])
+    BTreeMap::from([(CLIPROXY_UPSTREAM.to_string(), UpstreamConfig::default())])
 }
 
 /// Renders the commented `[[models]]` template section from the actual
@@ -164,7 +229,7 @@ fn default_models() -> Vec<ModelRoute> {
     .into_iter()
     .map(|(routing_id, upstream_model, display_name)| ModelRoute {
         routing_id: routing_id.to_string(),
-        upstream: "codex".to_string(),
+        upstream: CLIPROXY_UPSTREAM.to_string(),
         upstream_model: upstream_model.to_string(),
         display_name: display_name.to_string(),
     })
@@ -177,17 +242,117 @@ impl Config {
     /// # Errors
     /// Returns an error for unreadable, invalid, or unsafe configuration.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let config = if path.exists() {
+        let mut config = if path.exists() {
             let contents = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read config {}", path.display()))?;
-            toml::from_str(&contents)
-                .with_context(|| format!("failed to parse config {}", path.display()))?
+            parse_toml_sanitized(&contents, path)?
         } else {
             tracing::info!(config_path = %path.display(), "Config file not found; using defaults");
             Self::default()
         };
-        Self::validate(&config)?;
+        config.load_secrets(&path.with_file_name("secrets.toml"))?;
+        config.prepare()?;
         Ok(config)
+    }
+
+    /// Attaches API keys from `secrets.toml` to matching providers. A missing
+    /// file or missing entry is not an error (the provider runs degraded and
+    /// doctor/verify-providers point at it); an unreadable or invalid file is.
+    ///
+    /// # Errors
+    /// Returns an error when the secrets file exists but cannot be read or
+    /// parsed.
+    pub fn load_secrets(&mut self, path: &Path) -> anyhow::Result<()> {
+        if self.openai_providers.is_empty() || !path.exists() {
+            return Ok(());
+        }
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read secrets {}", path.display()))?;
+        let secrets: SecretsFile = parse_toml_sanitized(&contents, path)?;
+        for name in secrets.openai_providers.keys() {
+            if !self.openai_providers.iter().any(|p| &p.name == name) {
+                tracing::warn!(
+                    "secrets.toml names openai-provider {name:?} which is not in the config"
+                );
+            }
+        }
+        for provider in &mut self.openai_providers {
+            provider.api_key = secrets.openai_providers.get(&provider.name).cloned();
+        }
+        Ok(())
+    }
+
+    /// Normalizes legacy names, rebuilds derived routes, and validates.
+    /// Idempotent; every construction path (load, tests, embedding) must call
+    /// this before the config is used for routing.
+    ///
+    /// # Errors
+    /// Returns an error when any safety or consistency invariant is violated.
+    pub fn prepare(&mut self) -> anyhow::Result<()> {
+        self.normalize_legacy_upstream_name()?;
+        self.rebuild_derived_models();
+        self.validate()
+    }
+
+    /// The `cliproxy` upstream (present in every prepared config).
+    ///
+    /// # Panics
+    /// Panics when called on a config that failed or skipped [`Self::prepare`].
+    #[must_use]
+    pub fn cliproxy_upstream(&self) -> &UpstreamConfig {
+        self.upstreams
+            .get(CLIPROXY_UPSTREAM)
+            .expect("prepared config always contains the cliproxy upstream")
+    }
+
+    /// Every route the router serves: configured `[[models]]` plus routes
+    /// derived from `[[openai-providers]]`.
+    pub fn effective_models(&self) -> impl Iterator<Item = &ModelRoute> {
+        self.models.iter().chain(self.derived_models.iter())
+    }
+
+    fn normalize_legacy_upstream_name(&mut self) -> anyhow::Result<()> {
+        if let Some(legacy) = self.upstreams.remove(LEGACY_UPSTREAM) {
+            ensure!(
+                !self.upstreams.contains_key(CLIPROXY_UPSTREAM),
+                "config defines both [upstreams.{LEGACY_UPSTREAM}] and \
+                 [upstreams.{CLIPROXY_UPSTREAM}]; keep only `{CLIPROXY_UPSTREAM}`"
+            );
+            tracing::warn!(
+                "[upstreams.{LEGACY_UPSTREAM}] is deprecated; rename it to \
+                 [upstreams.{CLIPROXY_UPSTREAM}]"
+            );
+            self.upstreams.insert(CLIPROXY_UPSTREAM.to_string(), legacy);
+        }
+        let mut warned = false;
+        for route in &mut self.models {
+            if route.upstream == LEGACY_UPSTREAM {
+                if !warned {
+                    tracing::warn!(
+                        "model routes with upstream = \"{LEGACY_UPSTREAM}\" are deprecated; \
+                         rename to \"{CLIPROXY_UPSTREAM}\""
+                    );
+                    warned = true;
+                }
+                route.upstream = CLIPROXY_UPSTREAM.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_derived_models(&mut self) {
+        self.derived_models = self
+            .openai_providers
+            .iter()
+            .flat_map(|provider| {
+                provider.models.iter().map(|model| ModelRoute {
+                    routing_id: model.routing_id.clone(),
+                    upstream: CLIPROXY_UPSTREAM.to_string(),
+                    upstream_model: derived_alias(&model.routing_id),
+                    display_name: model.display_name.clone(),
+                })
+            })
+            .collect();
     }
 
     /// Validates loopback binding, upstream URLs, and routing entries.
@@ -216,17 +381,20 @@ impl Config {
 
         for name in self.upstreams.keys() {
             ensure!(
-                name == "codex",
-                "only the upstream name `codex` is supported today; found {name:?}"
+                name == CLIPROXY_UPSTREAM,
+                "only the upstream name `{CLIPROXY_UPSTREAM}` is supported today; found {name:?}"
             );
         }
-        let codex = self.upstreams.get("codex").ok_or_else(|| {
-            anyhow::anyhow!("upstreams must define `codex`; only `codex` is supported today")
+        let cliproxy = self.upstreams.get(CLIPROXY_UPSTREAM).ok_or_else(|| {
+            anyhow::anyhow!(
+                "upstreams must define `{CLIPROXY_UPSTREAM}`; only `{CLIPROXY_UPSTREAM}` is \
+                 supported today"
+            )
         })?;
-        validate_codex_upstream(codex)?;
+        validate_cliproxy_upstream(cliproxy)?;
 
         let mut routing_ids = HashSet::new();
-        for route in &self.models {
+        for route in self.effective_models() {
             ensure!(
                 !route.routing_id.is_empty(),
                 "model routing-id cannot be empty"
@@ -242,8 +410,8 @@ impl Config {
                 route.routing_id
             );
             ensure!(
-                route.upstream == "codex",
-                "model {} references upstream {:?}; only `codex` is supported today",
+                route.upstream == CLIPROXY_UPSTREAM,
+                "model {} references upstream {:?}; only `{CLIPROXY_UPSTREAM}` is supported today",
                 route.routing_id,
                 route.upstream
             );
@@ -252,6 +420,86 @@ impl Config {
                 "duplicate model routing-id: {}",
                 route.routing_id
             );
+        }
+
+        self.validate_openai_providers(cliproxy)
+    }
+
+    fn validate_openai_providers(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
+        if self.openai_providers.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            cliproxy.mode != UpstreamMode::External,
+            "[[openai-providers]] requires [upstreams.{CLIPROXY_UPSTREAM}] mode = \"managed\" \
+             (external CLIProxyAPI instances own their provider config; add the \
+             openai-compatibility section there instead)"
+        );
+        let mut names = HashSet::new();
+        for provider in &self.openai_providers {
+            ensure!(
+                !provider.name.is_empty(),
+                "openai-provider name cannot be empty"
+            );
+            ensure!(
+                provider
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+                "openai-provider name {:?} may only contain alphanumerics, -, _, .",
+                provider.name
+            );
+            ensure!(
+                names.insert(&provider.name),
+                "duplicate openai-provider name: {}",
+                provider.name
+            );
+            validate_provider_base_url(&provider.name, &provider.base_url)?;
+            if let Some(api_key) = &provider.api_key {
+                ensure!(
+                    !api_key.is_empty(),
+                    "openai-provider {} has an empty api-key in secrets.toml",
+                    provider.name
+                );
+            }
+            ensure!(
+                !provider.models.is_empty(),
+                "openai-provider {} defines no models",
+                provider.name
+            );
+            for model in &provider.models {
+                ensure!(
+                    !model.name.is_empty(),
+                    "openai-provider {} has a model with an empty name",
+                    provider.name
+                );
+                ensure!(
+                    !model.routing_id.is_empty()
+                        && model.routing_id.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                        }),
+                    "openai-provider {} model {} routing-id {:?} must be non-empty and contain \
+                     only alphanumerics, -, _, . (it becomes a CLIProxyAPI model alias)",
+                    provider.name,
+                    model.name,
+                    model.routing_id
+                );
+                ensure!(
+                    !model.display_name.is_empty(),
+                    "openai-provider {} model {} has an empty display-name",
+                    provider.name,
+                    model.name
+                );
+                ensure!(
+                    !model
+                        .display_name
+                        .bytes()
+                        .any(|byte| byte.is_ascii_control()),
+                    "openai-provider {} model {} display-name contains control characters",
+                    provider.name,
+                    model.name
+                );
+            }
         }
         Ok(())
     }
@@ -272,10 +520,11 @@ impl Config {
 # Default: "{anthropic_base}"
 # anthropic-upstream-base = "{anthropic_base}"
 
-# Named upstreams default to one managed Codex upstream when this table is
-# absent. Managed mode is started by the supervisor (implemented separately)
-# and binds its child to loopback on the configured port.
-#[upstreams.codex]
+# Named upstreams default to one managed CLIProxyAPI upstream when this table
+# is absent. Managed mode is started by the supervisor and binds its child to
+# loopback on the configured port. (`[upstreams.codex]` is the deprecated
+# pre-0.2 name for the same upstream and still loads, with a warning.)
+#[upstreams.cliproxy]
 #mode = "managed"
 #port = 8317
 
@@ -283,7 +532,7 @@ impl Config {
 # loopback IP literal (127.0.0.0/8 or ::1); hostnames including "localhost"
 # are rejected because this is the boundary that receives the injected GPT
 # gateway credential.
-#[upstreams.codex]
+#[upstreams.cliproxy]
 #mode = "external"
 #base-url = "http://127.0.0.1:8317"
 # Optional local CLIProxyAPI gateway secret. When set, GPT requests receive
@@ -292,8 +541,25 @@ impl Config {
 #api-key = "replace-with-a-local-secret"
 
 # Stub mode uses the built-in protocol smoke-test backend.
-#[upstreams.codex]
+#[upstreams.cliproxy]
 #mode = "stub"
+
+# OpenAI-compatible providers (managed mode only): the managed CLIProxyAPI
+# child gains these as `openai-compatibility` upstreams, and each model entry
+# below becomes a routed model automatically — no [[models]] entry needed.
+# `name` is the provider's exact model ID; `routing-id` is what Claude Code
+# requests. API keys do NOT go in this file: put them in secrets.toml next
+# to it (chmod 600), keyed by provider name:
+#   [openai-providers]
+#   openrouter = "sk-or-..."
+#[[openai-providers]]
+#name = "openrouter"
+#base-url = "https://openrouter.ai/api/v1"
+#
+#[[openai-providers.models]]
+#name = "moonshotai/kimi-k2.7"
+#routing-id = "kimi-k2.7"
+#display-name = "Kimi K2.7"
 
 # Maximum accepted inbound request-body size in bytes. Oversized requests get
 # a 413 error instead of being buffered without bound.
@@ -336,6 +602,31 @@ impl Config {
     }
 }
 
+/// Never surfaces the raw toml error: its Display quotes the offending
+/// source line, which can contain an api-key (e.g. an unterminated string
+/// while pasting one). Reports location + message only.
+fn parse_toml_sanitized<T: serde::de::DeserializeOwned>(
+    contents: &str,
+    path: &Path,
+) -> anyhow::Result<T> {
+    toml::from_str(contents).map_err(|error| {
+        let location = error
+            .span()
+            .map(|span| {
+                let prefix = &contents[..span.start.min(contents.len())];
+                let line = prefix.matches('\n').count() + 1;
+                let column = prefix.rsplit('\n').next().map_or(0, str::len) + 1;
+                format!(" at line {line}, column {column}")
+            })
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "failed to parse {}{location}: {}",
+            path.display(),
+            error.message()
+        )
+    })
+}
+
 fn validate_base_url(name: &str, value: &str) -> anyhow::Result<()> {
     ensure!(
         value.starts_with("http://") || value.starts_with("https://"),
@@ -376,34 +667,54 @@ fn validate_gpt_upstream_base(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_codex_upstream(upstream: &UpstreamConfig) -> anyhow::Result<()> {
+fn validate_cliproxy_upstream(upstream: &UpstreamConfig) -> anyhow::Result<()> {
     match upstream.mode {
         UpstreamMode::External => {
             let base_url = upstream.base_url.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("[upstreams.codex] base-url is required when mode = \"external\"")
+                anyhow::anyhow!(
+                    "[upstreams.{CLIPROXY_UPSTREAM}] base-url is required when mode = \"external\""
+                )
             })?;
             validate_gpt_upstream_base(base_url)?;
             if let Some(api_key) = &upstream.api_key {
                 ensure!(
                     !api_key.is_empty(),
-                    "[upstreams.codex] api-key cannot be empty"
+                    "[upstreams.{CLIPROXY_UPSTREAM}] api-key cannot be empty"
                 );
-                crate::headers::GptUpstreamCredential::new(api_key)
-                    .context("[upstreams.codex] api-key is not a valid HTTP header value")?;
+                crate::headers::GptUpstreamCredential::new(api_key).with_context(|| {
+                    format!(
+                        "[upstreams.{CLIPROXY_UPSTREAM}] api-key is not a valid HTTP header value"
+                    )
+                })?;
             }
         }
         mode @ (UpstreamMode::Managed | UpstreamMode::Stub) => {
             let mode = mode.as_str();
             ensure!(
                 upstream.base_url.is_none(),
-                "[upstreams.codex] base-url must be absent when mode = {mode:?}"
+                "[upstreams.{CLIPROXY_UPSTREAM}] base-url must be absent when mode = {mode:?}"
             );
             ensure!(
                 upstream.api_key.is_none(),
-                "[upstreams.codex] api-key must be absent when mode = {mode:?}"
+                "[upstreams.{CLIPROXY_UPSTREAM}] api-key must be absent when mode = {mode:?}"
             );
         }
     }
+    Ok(())
+}
+
+fn validate_provider_base_url(provider: &str, value: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(value)
+        .with_context(|| format!("openai-provider {provider} base-url is not a valid URL"))?;
+    ensure!(
+        url.scheme() == "https",
+        "openai-provider {provider} base-url must use https (remote host receiving your \
+         provider API key); found {value:?}"
+    );
+    ensure!(
+        url.host_str().is_some(),
+        "openai-provider {provider} base-url has no host"
+    );
     Ok(())
 }
 
@@ -411,10 +722,15 @@ fn validate_codex_upstream(upstream: &UpstreamConfig) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn parse_and_validate(source: &str) -> Config {
-        let config: Config = toml::from_str(source).unwrap();
-        config.validate().unwrap();
+    fn parse_and_prepare(source: &str) -> Config {
+        let mut config: Config = toml::from_str(source).unwrap();
+        config.prepare().unwrap();
         config
+    }
+
+    fn prepare_error(source: &str) -> String {
+        let mut config: Config = toml::from_str(source).unwrap();
+        format!("{:#}", config.prepare().unwrap_err())
     }
 
     #[test]
@@ -423,11 +739,11 @@ mod tests {
         assert_eq!(config.bind_address, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(config.port, 8787);
         assert_eq!(config.upstreams.len(), 1);
-        let codex = &config.upstreams["codex"];
-        assert_eq!(codex.mode, UpstreamMode::Managed);
-        assert_eq!(codex.port, 8317);
-        assert!(codex.base_url.is_none());
-        assert!(codex.api_key.is_none());
+        let cliproxy = &config.upstreams["cliproxy"];
+        assert_eq!(cliproxy.mode, UpstreamMode::Managed);
+        assert_eq!(cliproxy.port, 8317);
+        assert!(cliproxy.base_url.is_none());
+        assert!(cliproxy.api_key.is_none());
         assert!(!config.capture.enabled);
         assert_eq!(
             config.capture.max_response_body_bytes,
@@ -437,15 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn absent_upstreams_table_defaults_to_managed_codex() {
-        let config = parse_and_validate("port = 9000");
-        assert_eq!(config.upstreams.keys().collect::<Vec<_>>(), ["codex"]);
-        assert_eq!(config.upstreams["codex"], UpstreamConfig::default());
+    fn absent_upstreams_table_defaults_to_managed_cliproxy() {
+        let config = parse_and_prepare("port = 9000");
+        assert_eq!(config.upstreams.keys().collect::<Vec<_>>(), ["cliproxy"]);
+        assert_eq!(config.upstreams["cliproxy"], UpstreamConfig::default());
     }
 
     #[test]
-    fn route_references_default_codex_when_upstream_is_omitted() {
-        let config = parse_and_validate(
+    fn route_references_default_cliproxy_when_upstream_is_omitted() {
+        let config = parse_and_prepare(
             r#"
                 [[models]]
                 routing-id = "claude-gpt-test"
@@ -453,7 +769,7 @@ mod tests {
                 display-name = "GPT Test"
             "#,
         );
-        assert_eq!(config.models[0].upstream, "codex");
+        assert_eq!(config.models[0].upstream, "cliproxy");
     }
 
     #[test]
@@ -467,7 +783,7 @@ mod tests {
         let template = Config::template();
         let config: Config = toml::from_str(&template).unwrap();
         assert_eq!(config.port, Config::default().port);
-        assert_eq!(config.upstreams["codex"].mode, UpstreamMode::Managed);
+        assert_eq!(config.upstreams["cliproxy"].mode, UpstreamMode::Managed);
         assert_eq!(config.models, Config::default().models);
         assert_eq!(
             config
@@ -509,7 +825,7 @@ mod tests {
         )
         .unwrap();
         let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("only the upstream name `codex` is supported today"));
+        assert!(error.contains("only the upstream name `cliproxy` is supported today"));
         assert!(error.contains("other"));
     }
 
@@ -517,7 +833,7 @@ mod tests {
     fn route_referencing_unsupported_upstream_is_rejected() {
         let config: Config = toml::from_str(
             r#"
-                [upstreams.codex]
+                [upstreams.cliproxy]
                 mode = "stub"
 
                 [[models]]
@@ -529,15 +845,14 @@ mod tests {
         )
         .unwrap();
         let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("only `codex` is supported today"));
+        assert!(error.contains("only `cliproxy` is supported today"));
         assert!(error.contains("other"));
     }
 
     #[test]
     fn explicit_empty_upstreams_table_is_rejected() {
-        let config: Config = toml::from_str("[upstreams]").unwrap();
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("upstreams must define `codex`"));
+        let error = prepare_error("[upstreams]");
+        assert!(error.contains("upstreams must define `cliproxy`"));
     }
 
     #[test]
@@ -549,7 +864,7 @@ mod tests {
             ("stub", "api-key = \"secret\""),
         ] {
             let config: Config =
-                toml::from_str(&format!("[upstreams.codex]\nmode = {mode:?}\n{field}")).unwrap();
+                toml::from_str(&format!("[upstreams.cliproxy]\nmode = {mode:?}\n{field}")).unwrap();
             let error = config.validate().unwrap_err().to_string();
             let field_name = field.split_once(' ').unwrap().0;
             assert!(error.contains(field_name), "{error}");
@@ -561,7 +876,7 @@ mod tests {
     fn external_requires_base_url() {
         let config: Config = toml::from_str(
             r#"
-                [upstreams.codex]
+                [upstreams.cliproxy]
                 mode = "external"
             "#,
         )
@@ -577,17 +892,17 @@ mod tests {
             "http://127.42.0.9:8317",
             "http://[::1]:8317",
         ] {
-            let config = parse_and_validate(&format!(
+            let config = parse_and_prepare(&format!(
                 r#"
-                    [upstreams.codex]
+                    [upstreams.cliproxy]
                     mode = "external"
                     base-url = {base:?}
                     api-key = "local-gateway-secret"
                 "#
             ));
-            assert_eq!(config.upstreams["codex"].base_url.as_deref(), Some(base));
+            assert_eq!(config.upstreams["cliproxy"].base_url.as_deref(), Some(base));
             assert_eq!(
-                config.upstreams["codex"].api_key.as_deref(),
+                config.upstreams["cliproxy"].api_key.as_deref(),
                 Some("local-gateway-secret")
             );
         }
@@ -598,7 +913,7 @@ mod tests {
         for api_key in ["", "line\nfeed"] {
             let config: Config = toml::from_str(&format!(
                 r#"
-                    [upstreams.codex]
+                    [upstreams.cliproxy]
                     mode = "external"
                     base-url = "http://127.0.0.1:8317"
                     api-key = {api_key:?}
@@ -620,7 +935,7 @@ mod tests {
         ] {
             let config: Config = toml::from_str(&format!(
                 r#"
-                    [upstreams.codex]
+                    [upstreams.cliproxy]
                     mode = "external"
                     base-url = {base:?}
                 "#
@@ -637,7 +952,7 @@ mod tests {
         for source in [
             "gpt-upstream-base = \"stub\"",
             "gpt-upstream-api-key = \"secret\"",
-            "[upstreams.codex]\nmode = \"stub\"\nextra = true",
+            "[upstreams.cliproxy]\nmode = \"stub\"\nextra = true",
             "[[models]]\nrouting-id = \"route\"\nupstream-model = \"model\"\ndisplay-name = \"Model\"\nextra = true",
         ] {
             assert!(
@@ -645,6 +960,228 @@ mod tests {
                 "accepted {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_errors_never_echo_config_source() {
+        // An unterminated api-key string is the realistic slip while pasting
+        // a secret; the raw toml error would quote the whole source line.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[openai-providers]]\nname = \"p\"\napi-key = \"sk-SENTINEL-DO-NOT-PRINT\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", Config::load(&path).unwrap_err());
+        assert!(!error.contains("SENTINEL"), "{error}");
+        assert!(error.contains("failed to parse"), "{error}");
+        assert!(error.contains("line 3"), "{error}");
+
+        // The same sanitization covers secrets.toml (where keys actually live).
+        std::fs::write(
+            path.with_file_name("secrets.toml"),
+            "[openai-providers]\np = \"sk-SENTINEL\n",
+        )
+        .unwrap();
+        std::fs::write(&path, provider_toml(KIMI_MODEL)).unwrap();
+        let error = format!("{:#}", Config::load(&path).unwrap_err());
+        assert!(!error.contains("SENTINEL"), "{error}");
+        assert!(error.contains("secrets.toml"), "{error}");
+    }
+
+    #[test]
+    fn secrets_file_attaches_keys_by_provider_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, provider_toml(KIMI_MODEL)).unwrap();
+        // No secrets file: provider loads keyless.
+        assert_eq!(
+            Config::load(&path).unwrap().openai_providers[0].api_key,
+            None
+        );
+        // Matching entry attaches; unmatched names only warn.
+        std::fs::write(
+            path.with_file_name("secrets.toml"),
+            "[openai-providers]\nfireworks = \"fw-live\"\nghost = \"unused\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.openai_providers[0].api_key.as_deref(),
+            Some("fw-live")
+        );
+    }
+
+    #[test]
+    fn legacy_codex_upstream_and_routes_normalize_via_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+                [upstreams.codex]
+                mode = "stub"
+
+                [[models]]
+                routing-id = "claude-gpt-test"
+                upstream = "codex"
+                upstream-model = "gpt-test"
+                display-name = "GPT Test"
+            "#,
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.upstreams.keys().collect::<Vec<_>>(), ["cliproxy"]);
+        assert_eq!(config.upstreams["cliproxy"].mode, UpstreamMode::Stub);
+        assert_eq!(config.models[0].upstream, "cliproxy");
+        assert_eq!(config.cliproxy_upstream().mode, UpstreamMode::Stub);
+    }
+
+    #[test]
+    fn defining_both_legacy_and_new_upstream_keys_is_rejected() {
+        let error = prepare_error(
+            r#"
+                [upstreams.codex]
+                mode = "stub"
+                [upstreams.cliproxy]
+                mode = "managed"
+            "#,
+        );
+        assert!(error.contains("both"), "{error}");
+        assert!(error.contains("keep only `cliproxy`"), "{error}");
+    }
+
+    fn provider_toml(models: &str) -> String {
+        format!(
+            r#"
+                [[openai-providers]]
+                name = "fireworks"
+                base-url = "https://api.fireworks.ai/inference/v1"
+                {models}
+            "#
+        )
+    }
+
+    const KIMI_MODEL: &str = r#"
+        [[openai-providers.models]]
+        name = "accounts/fireworks/models/kimi-k2p7"
+        routing-id = "kimi-k2.7"
+        display-name = "Kimi K2.7"
+    "#;
+
+    #[test]
+    fn provider_models_become_derived_routes_with_namespaced_aliases() {
+        let config = parse_and_prepare(&provider_toml(KIMI_MODEL));
+        assert_eq!(config.derived_models.len(), 1);
+        let route = &config.derived_models[0];
+        assert_eq!(route.routing_id, "kimi-k2.7");
+        assert_eq!(route.upstream, "cliproxy");
+        assert_eq!(route.upstream_model, "openai-compat--kimi-k2.7");
+        assert_eq!(route.display_name, "Kimi K2.7");
+        // Derived routes participate in routing alongside the defaults.
+        let decision = crate::routing::decide(&config, br#"{"model":"kimi-k2.7"}"#);
+        assert_eq!(decision.branch, crate::routing::Branch::Gpt);
+        assert_eq!(
+            decision.route.unwrap().upstream_model,
+            "openai-compat--kimi-k2.7"
+        );
+        let default_still_routes = crate::routing::decide(&config, br#"{"model":"gpt-5.6-sol"}"#);
+        assert_eq!(default_still_routes.branch, crate::routing::Branch::Gpt);
+    }
+
+    #[test]
+    fn provider_routing_id_colliding_with_default_route_is_rejected() {
+        let error = prepare_error(&provider_toml(
+            r#"
+                [[openai-providers.models]]
+                name = "some/upstream-model"
+                routing-id = "gpt-5.6-sol"
+                display-name = "Impostor"
+            "#,
+        ));
+        assert!(
+            error.contains("duplicate model routing-id: gpt-5.6-sol"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn providers_are_rejected_in_external_mode_only() {
+        let toml = format!(
+            r#"
+                [upstreams.cliproxy]
+                mode = "external"
+                base-url = "http://127.0.0.1:8317"
+                {}
+            "#,
+            provider_toml(KIMI_MODEL)
+        );
+        let error = prepare_error(&toml);
+        assert!(error.contains("mode = \"managed\""), "{error}");
+        // Stub mode is the test backend; providers are allowed so routing can
+        // be exercised without a live child.
+        let toml = format!(
+            r#"
+                [upstreams.cliproxy]
+                mode = "stub"
+                {}
+            "#,
+            provider_toml(KIMI_MODEL)
+        );
+        parse_and_prepare(&toml);
+    }
+
+    #[test]
+    fn provider_base_url_must_be_https() {
+        for base in ["http://api.fireworks.ai/v1", "ftp://x.example", "not a url"] {
+            let toml =
+                provider_toml(KIMI_MODEL).replace("https://api.fireworks.ai/inference/v1", base);
+            let error = prepare_error(&toml);
+            assert!(error.contains("base-url"), "{base}: {error}");
+        }
+    }
+
+    #[test]
+    fn provider_field_validation_rejects_bad_values() {
+        let toml = provider_toml(KIMI_MODEL).replace("fireworks", "fire works!");
+        let error = prepare_error(&toml);
+        assert!(error.contains("may only contain"), "{error}");
+        // api-key belongs in secrets.toml, never in the config file.
+        let toml = provider_toml(KIMI_MODEL).replace(
+            "[[openai-providers]]",
+            "[[openai-providers]]\napi-key = \"nope\"",
+        );
+        assert!(
+            toml::from_str::<Config>(&toml).is_err(),
+            "inline api-key must be rejected"
+        );
+        let error = prepare_error(&provider_toml("models = []"));
+        assert!(error.contains("defines no models"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_provider_names_and_routing_ids_are_rejected() {
+        // Same provider name, distinct routing-ids: the provider-name check fires.
+        let second = provider_toml(KIMI_MODEL).replace("kimi-k2.7", "kimi-other");
+        let error = prepare_error(&format!("{}\n{}", provider_toml(KIMI_MODEL), second));
+        assert!(error.contains("duplicate openai-provider name"), "{error}");
+        // Distinct provider names, same routing-id: the routing-id check fires.
+        let second = provider_toml(KIMI_MODEL).replace("\"fireworks\"", "\"together\"");
+        let error = prepare_error(&format!("{}\n{}", provider_toml(KIMI_MODEL), second));
+        assert!(
+            error.contains("duplicate model routing-id: kimi-k2.7"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn prepare_is_idempotent() {
+        let mut config: Config = toml::from_str(&provider_toml(KIMI_MODEL)).unwrap();
+        config.prepare().unwrap();
+        let first = config.derived_models.clone();
+        config.prepare().unwrap();
+        assert_eq!(config.derived_models, first);
     }
 
     #[test]

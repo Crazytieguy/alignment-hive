@@ -24,6 +24,7 @@ pub struct Report {
 }
 
 /// Runs every check and returns the report.
+#[allow(clippy::too_many_lines)]
 pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     let mut checks = Vec::new();
 
@@ -61,8 +62,52 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
             .clone()
             .or_else(|| crate::state::load_or_create_ingress_token(dirs).ok());
         base_url = token.map(|token| crate::proxy::tokened_base_url(&address, &token));
-        if let Some(upstream) = config.upstreams.get("codex") {
+        if let Some(upstream) = config.upstreams.get(crate::config::CLIPROXY_UPSTREAM) {
             upstream_checks(dirs, upstream, &mut checks);
+        }
+        if !config.openai_providers.is_empty() {
+            let keyless = config
+                .openai_providers
+                .iter()
+                .filter(|provider| provider.api_key.is_none())
+                .count();
+            let detail = config
+                .openai_providers
+                .iter()
+                .map(|provider| {
+                    let key_note = if provider.api_key.is_some() {
+                        ""
+                    } else {
+                        ", NO KEY"
+                    };
+                    format!(
+                        "{} ({} models{key_note})",
+                        provider.name,
+                        provider.models.len()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Providers only ride the managed child; validation permits stub
+            // mode (test backend), so surface the mismatch here instead.
+            let managed = config
+                .upstreams
+                .get(crate::config::CLIPROXY_UPSTREAM)
+                .is_some_and(|upstream| upstream.mode == UpstreamMode::Managed);
+            checks.push(Check {
+                name: "openai-providers",
+                ok: managed && keyless == 0,
+                detail: if !managed {
+                    format!("{detail} — NOT served: [upstreams.cliproxy] mode is not \"managed\"")
+                } else if keyless > 0 {
+                    format!(
+                        "{detail} — add missing keys under [openai-providers] in \
+                         ~/.config/model-router/secrets.toml (chmod 600)"
+                    )
+                } else {
+                    detail
+                },
+            });
         }
     }
 
@@ -75,7 +120,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                     name: "router",
                     ok,
                     detail: format!(
-                        "running v{version} on {address}; status {status}, codex upstream \
+                        "running v{version} on {address}; status {status}, cliproxy upstream \
                          {upstream_state}"
                     ),
                 });
@@ -225,7 +270,9 @@ async fn probe_health(address: std::net::SocketAddr) -> Option<(String, String, 
         value.get("status")?.as_str()?.to_string(),
         value.get("version")?.as_str()?.to_string(),
         value
-            .get("codex-upstream")
+            .get("cliproxy-upstream")
+            // Pre-0.2 services only emit the legacy key.
+            .or_else(|| value.get("codex-upstream"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown")
             .to_string(),

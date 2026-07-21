@@ -458,6 +458,16 @@ async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape(
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
         }],
+        openai_providers: vec![model_router::config::OpenAiProvider {
+            name: "fireworks".to_string(),
+            base_url: "https://api.fireworks.ai/inference/v1".to_string(),
+            api_key: Some("unused-in-this-test".to_string()),
+            models: vec![model_router::config::ProviderModel {
+                name: "accounts/fireworks/models/kimi-k2p7".to_string(),
+                routing_id: "kimi-k2.7".to_string(),
+                display_name: "Kimi K2.7".to_string(),
+            }],
+        }],
         ..Config::default()
     };
     let app = model_router::proxy::app(config).await.unwrap();
@@ -482,10 +492,13 @@ async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape(
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(document["data"].as_array().unwrap().len(), 1);
+        // Both the configured route and the provider-derived route appear.
+        assert_eq!(document["data"].as_array().unwrap().len(), 2);
         assert_eq!(document["data"][0]["id"], "claude-gpt-test");
         assert_eq!(document["data"][0]["type"], "model");
         assert_eq!(document["data"][0]["display_name"], "GPT Test");
+        assert_eq!(document["data"][1]["id"], "kimi-k2.7");
+        assert_eq!(document["data"][1]["display_name"], "Kimi K2.7");
     }
 
     let ungated = app
