@@ -64,6 +64,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 | [github-action](plugins/github-action) | GitHub Action for autonomous `@claude` on issues and PRs | `github-action@alignment-hive` |
 | [llms-fetch-mcp](plugins/llms-fetch-mcp) | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `llms-fetch-mcp@alignment-hive` |
 | [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `remote-kernels@alignment-hive` |
+| [model-router](plugins/model-router) | GPT models as native Claude Code subagents via a local gateway (experimental) | `model-router@alignment-hive` |
 
 [Codex for Claude Code](https://github.com/Crazytieguy/codex-plugin-cc) — Codex reviews and task delegation without leaving Claude Code — is maintained in a separate repo.
 
@@ -73,6 +74,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 - `packages/web/` — alignment-hive.com, including the data-sharing backend
 - `packages/hive-cli/` — CLI powering the hive plugin
 - `crates/remote-kernels/` — Rust binary behind the remote-kernels plugin
+- `crates/model-router/` — Rust gateway behind the model-router plugin
 
 ## Contributing
 

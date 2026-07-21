@@ -87,6 +87,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
 - **Cross-model review**: `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code
+- **Cross-model subagents (experimental)**: `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental alternative to the codex plugin
 
 #### README URLs for "Tell me more"
 
@@ -97,6 +98,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 | remote-kernels | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/remote-kernels/README.md` |
 | precis | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
 | codex | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
+| model-router | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/model-router/README.md` |
 
 For non-alignment-hive plugins, write this block into the chosen settings file (shape is the same; values come from the table below):
 

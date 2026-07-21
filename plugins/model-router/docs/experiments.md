@@ -178,6 +178,42 @@ XDG-redirected root; real Codex OAuth reused from the earlier auth dir):
   real stop); the SessionStart hook's JSON validated with jq on every
   branch.
 
+## Usage + caching SSE measurements (2026-07-20, follow-up session)
+
+Method: two identical streamed `/v1/messages` requests (long system block with
+`cache_control`) sent through the running tokened router to `claude-gpt-5.6-sol`;
+raw SSE inspected.
+
+- Prompt caching on the GPT branch WORKS end to end: run 1 reported
+  `input_tokens: 2411`; run 2 `input_tokens: 619,
+  cache_read_input_tokens: 1792`. CLIProxyAPI strips `cache_control` but
+  Codex-side automatic prefix caching kicks in anyway, and cached-token
+  counts come back translated into the Anthropic usage field. No
+  `cache_creation_input_tokens` is ever reported (OpenAI doesn't expose it).
+- Live token ticking is broken by SSE shape, not by buffering:
+  `message_start` carries `usage: {input_tokens: 0, output_tokens: 0}` and
+  real usage (including `input_tokens` + cache fields — non-standard
+  placement) arrives only in the final `message_delta`. Claude Code seeds the
+  live subagent token display from `message_start` usage, so GPT subagent
+  counts sit at 0 mid-run and completion notifications report
+  `subagent_tokens: 0`. Root cause is structural: OpenAI streaming only
+  reports usage in the final chunk, so a translator cannot know exact input
+  tokens at `message_start` time. Fix directions: router GPT-branch SSE
+  rewrite (estimated `input_tokens` in `message_start`, corrected in the
+  final delta) or an upstream CLIProxyAPI patch; needs a harness-side test of
+  which events Claude Code actually accumulates from.
+- Context length: no documented way to declare a custom model's context
+  window (checked model-config docs 2026-07-20;
+  `..._SUPPORTED_CAPABILITIES` has no context field). Unknown IDs get Claude
+  Code's default window assumption; auto-compact fires on that assumption.
+  Untested what happens if a conversation exceeds the real upstream limit.
+- Display names (cosmetic UI question): two documented candidates behind a
+  gateway — `ANTHROPIC_CUSTOM_MODEL_OPTION` + `_NAME`/`_DESCRIPTION`, and
+  `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` with a `/v1/models`
+  endpoint returning `display_name` (picker labels entries "From gateway").
+  The discovery probe never fired in `-p` sessions (see above); interactive
+  retest + a router `/v1/models` implementation are the natural experiment.
+
 ## Still open
 - Long sessions and heavy tool loops against real Codex; more ToolSearch
   samples (single positive so far).
