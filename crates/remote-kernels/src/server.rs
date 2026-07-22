@@ -1332,6 +1332,8 @@ impl RemoteKernelsServer {
 
     #[allow(clippy::too_many_lines)]
     async fn finish_drain(&self, machine_id: &str) -> Result<Option<String>, String> {
+        const LOCAL_ONLY_VETO_SECS: u64 = 30;
+        const QUIET_POLLS_TO_PROCEED: u32 = 2;
         let project_dir = self.state.lock().await.project_dir.clone();
         let Some(intent) =
             crate::state::load_lifecycle_record(&project_dir, machine_id).finish_intent
@@ -1350,11 +1352,27 @@ impl RemoteKernelsServer {
 
         // Wait for quiet: every Jupyter kernel idle. A configured
         // finalize-wait cap forces progress.
+        //
+        // Tracks how long only the local in-flight signal (not Jupyter REST)
+        // has claimed busy. The local signal exists to cover the short window
+        // between accepting an execution and the kernel reporting busy — but a
+        // permit can wedge open forever (kernel crash eats the shell reply
+        // while the websocket stays up), and REST idle is authoritative once
+        // that window has passed, so a sustained local-only veto is overridden.
+        let mut local_only_since: Option<std::time::Instant> = None;
+        // A single idle sample is not proof of quiet: a request racing a
+        // connection abort (severing below) or a cross-process resume may
+        // have reached Jupyter but not yet surfaced as kernel busy. Requiring
+        // consecutive quiet polls covers that delivery lag structurally —
+        // every fresh drain worker (retry after a REST error, attach-resume)
+        // re-earns the streak, so the protection survives worker restarts
+        // without persisted state.
+        let mut quiet_streak: u32 = 0;
         loop {
             if !still_current() {
                 return Ok(Some("superseded by a newer finish() plan".to_string()));
             }
-            let (conn, jupyter, fenced, runtime_name) = {
+            let (conn, jupyter, fenced, runtime_name, local_busy) = {
                 let state = self.state.lock().await;
                 let Some(inst) = state.instances.get(machine_id) else {
                     return Err(
@@ -1367,6 +1385,9 @@ impl RemoteKernelsServer {
                     inst.jupyter.clone(),
                     inst.fenced.is_some(),
                     inst.runtime.clone(),
+                    inst.kernel_connections
+                        .values()
+                        .any(crate::jupyter::ws::KernelConnection::has_pending_work),
                 )
             };
             if fenced {
@@ -1382,7 +1403,7 @@ impl RemoteKernelsServer {
             // Jupyter's kernel state is the drain authority (same as the
             // machine-side watchdog) — a completed execution nobody has
             // collected yet must not hold the plan open.
-            let busy = match jupyter.list_kernels().await {
+            let rest_busy = match jupyter.list_kernels().await {
                 Ok(kernels) => kernels.iter().any(|kernel| {
                     kernel
                         .execution_state
@@ -1395,8 +1416,57 @@ impl RemoteKernelsServer {
                     ));
                 }
             };
-            if !busy {
-                break;
+            let busy = if rest_busy {
+                local_only_since = None;
+                true
+            } else if local_busy {
+                let since = *local_only_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed().as_secs() >= LOCAL_ONLY_VETO_SECS {
+                    tracing::warn!(
+                        instance = %machine_id,
+                        "finish(): local in-flight work never reached the kernel (Jupyter idle \
+                         for {LOCAL_ONLY_VETO_SECS}s) — severing the wedged kernel connections \
+                         and re-checking"
+                    );
+                    // Ignoring the wedged permits isn't enough: an
+                    // accepted-but-unsent request could still reach the kernel
+                    // if the stalled websocket recovers mid-download or
+                    // mid-stop. Dropping a connection aborts its ws task, so
+                    // nothing queued can be sent afterwards; a frame that
+                    // already reached Jupyter shows up as REST busy within the
+                    // quiet streak below. Healthy connections (no pending
+                    // work) are kept — a then=keep plan must not cost idle
+                    // kernels their in-memory state.
+                    let severed = {
+                        let mut state = self.state.lock().await;
+                        state.instances.get_mut(machine_id).map(|inst| {
+                            let wedged: Vec<String> = inst
+                                .kernel_connections
+                                .iter()
+                                .filter(|(_, conn)| conn.has_pending_work())
+                                .map(|(kernel_id, _)| kernel_id.clone())
+                                .collect();
+                            wedged
+                                .into_iter()
+                                .filter_map(|kernel_id| inst.kernel_connections.remove(&kernel_id))
+                                .collect::<Vec<_>>()
+                        })
+                    };
+                    drop(severed);
+                    true
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+            if busy {
+                quiet_streak = 0;
+            } else {
+                quiet_streak += 1;
+                if quiet_streak >= QUIET_POLLS_TO_PROCEED {
+                    break;
+                }
             }
             if let Some(cap) = self.config.finalize_wait_secs_for(&runtime_name)
                 && started.elapsed().as_secs() >= cap
@@ -1954,6 +2024,15 @@ impl RemoteKernelsServer {
             else {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
+            if crate::state::load_lifecycle_record(&state.project_dir, &machine_id)
+                .finish_intent
+                .is_some()
+            {
+                return err_text(
+                    "A finish() plan is queued for this machine. Wait for it to complete before \
+                     executing more code, or supersede it with a new finish() plan.",
+                );
+            }
             let inst = state.instances.get_mut(&machine_id).expect("resolved");
             if let Some(message) = Self::fenced_message(inst) {
                 return err_text(message);
@@ -1968,7 +2047,7 @@ impl RemoteKernelsServer {
             };
 
             // Check if kernel is busy.
-            if conn.is_busy() && !queue {
+            if conn.has_pending_work() && !queue {
                 return err_text(
                     "Kernel is busy. Use queue=true to wait, or interrupt() to cancel the current execution.",
                 );

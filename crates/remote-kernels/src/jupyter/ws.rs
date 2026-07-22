@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -13,6 +13,8 @@ pub struct KernelConnection {
     request_tx: mpsc::Sender<ExecuteCommand>,
     /// Whether the kernel is currently executing code.
     is_busy: Arc<AtomicBool>,
+    /// Executions accepted by this connection but not yet resolved.
+    in_flight: Arc<AtomicUsize>,
     /// Background reader task handle.
     reader_handle: tokio::task::JoinHandle<()>,
 }
@@ -20,6 +22,33 @@ pub struct KernelConnection {
 struct ExecuteCommand {
     msg: JupyterMessage,
     result_tx: oneshot::Sender<ExecutionOutput>,
+    permit: InFlightPermit,
+}
+
+struct InFlightPermit {
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl InFlightPermit {
+    fn new(in_flight: Arc<AtomicUsize>) -> Self {
+        in_flight.fetch_add(1, Ordering::Relaxed);
+        Self { in_flight }
+    }
+}
+
+impl Drop for InFlightPermit {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct PendingExecution {
+    msg_id: String,
+    output: ExecutionOutput,
+    result_tx: oneshot::Sender<ExecutionOutput>,
+    shell_replied: bool,
+    idle: bool,
+    _permit: InFlightPermit,
 }
 
 pub struct StartedExecution {
@@ -44,6 +73,7 @@ impl KernelConnection {
 
         let (request_tx, request_rx) = mpsc::channel::<ExecuteCommand>(16);
         let is_busy = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(AtomicUsize::new(0));
 
         let reader_handle = tokio::spawn(Self::run_ws_loop(
             ws_sink,
@@ -57,6 +87,7 @@ impl KernelConnection {
         Ok(Self {
             request_tx,
             is_busy,
+            in_flight,
             reader_handle,
         })
     }
@@ -64,6 +95,11 @@ impl KernelConnection {
     /// Check if the kernel is currently executing code.
     pub fn is_busy(&self) -> bool {
         self.is_busy.load(Ordering::Relaxed)
+    }
+
+    /// Check if an execution is queued or running on this connection.
+    pub fn has_pending_work(&self) -> bool {
+        self.in_flight.load(Ordering::Relaxed) > 0
     }
 
     /// Start an execution without waiting for the result.
@@ -77,13 +113,18 @@ impl KernelConnection {
         let msg = JupyterMessage::execute_request(session_id, code);
         let parent_msg_id = msg.header.msg_id.clone();
         let (result_tx, result_rx) = oneshot::channel();
+        let permit = InFlightPermit::new(Arc::clone(&self.in_flight));
 
         // try_send, not send: callers hold the server state lock, and the ws
         // loop only drains this queue between executions — a blocking send
         // on a full queue would freeze every other tool call (including
         // interrupt/stop) until the running cell finishes.
         self.request_tx
-            .try_send(ExecuteCommand { msg, result_tx })
+            .try_send(ExecuteCommand {
+                msg,
+                result_tx,
+                permit,
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => anyhow::anyhow!(
                     "Kernel execution queue is full (16 pending executions) — wait() for \
@@ -124,28 +165,17 @@ impl KernelConnection {
     /// Only accepts new requests when no execution is pending (select guard).
     /// Messages queue in the mpsc channel until the current execution completes.
     #[allow(clippy::too_many_lines)]
-    async fn run_ws_loop(
-        mut ws_sink: futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            Message,
-        >,
-        mut ws_stream_rx: futures::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-        >,
+    async fn run_ws_loop<S, R>(
+        mut ws_sink: S,
+        mut ws_stream_rx: R,
         mut request_rx: mpsc::Receiver<ExecuteCommand>,
         is_busy: Arc<AtomicBool>,
-    ) {
-        let mut pending: Option<(
-            String,
-            ExecutionOutput,
-            oneshot::Sender<ExecutionOutput>,
-            bool,
-            bool,
-        )> = None;
+    ) where
+        S: Sink<Message> + Unpin,
+        S::Error: std::fmt::Display,
+        R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let mut pending: Option<PendingExecution> = None;
         // Grace deadline armed when execute_reply has arrived but the iopub
         // idle has not: idle normally lands milliseconds later, but it can be
         // lost server-side (iopub HWM overflow under output floods, or a
@@ -175,13 +205,14 @@ impl KernelConnection {
                     }
 
                     is_busy.store(true, Ordering::Relaxed);
-                    pending = Some((
+                    pending = Some(PendingExecution {
                         msg_id,
-                        ExecutionOutput::default(),
-                        cmd.result_tx,
-                        false,
-                        false,
-                    ));
+                        output: ExecutionOutput::default(),
+                        result_tx: cmd.result_tx,
+                        shell_replied: false,
+                        idle: false,
+                        _permit: cmd.permit,
+                    });
                     idle_grace = None;
                 }
 
@@ -196,12 +227,16 @@ impl KernelConnection {
                     );
                     idle_grace = None;
                     is_busy.store(false, Ordering::Relaxed);
-                    if let Some((_, output, tx, _, _)) = pending.take() {
-                        let _ = tx.send(output);
+                    if let Some(pending) = pending.take() {
+                        let _ = pending.result_tx.send(pending.output);
                     }
                 }
 
-                Some(msg_result) = ws_stream_rx.next() => {
+                msg_result = ws_stream_rx.next() => {
+                    let Some(msg_result) = msg_result else {
+                        tracing::info!("WebSocket stream ended");
+                        break;
+                    };
                     let msg = match msg_result {
                         Ok(Message::Text(text)) => {
                             match serde_json::from_str::<JupyterMessage>(&text) {
@@ -229,33 +264,35 @@ impl KernelConnection {
                         .unwrap_or("");
 
                     let mut complete = false;
-                    if let Some((ref expected_id, ref mut output, _, ref mut shell_replied, ref mut idle)) = pending {
-                        if parent_msg_id != expected_id {
+                    if let Some(ref mut pending) = pending {
+                        if parent_msg_id != pending.msg_id {
                             continue;
                         }
                         match msg.channel.as_str() {
                             "iopub" => {
-                                output.process_iopub(&msg);
+                                pending.output.process_iopub(&msg);
                                 if msg.header.msg_type == "status"
                                     && msg.content["execution_state"].as_str() == Some("idle")
                                 {
-                                    *idle = true;
+                                    pending.idle = true;
                                 }
                             }
                             "shell" if msg.header.msg_type == "execute_reply" => {
                                 let status = msg.content["status"].as_str().unwrap_or("ok");
-                                if status == "error" && output.status != ExecutionStatus::Errored {
-                                    output.status = ExecutionStatus::Errored;
-                                } else if output.status == ExecutionStatus::Running {
-                                    output.status = ExecutionStatus::Complete;
+                                if status == "error"
+                                    && pending.output.status != ExecutionStatus::Errored
+                                {
+                                    pending.output.status = ExecutionStatus::Errored;
+                                } else if pending.output.status == ExecutionStatus::Running {
+                                    pending.output.status = ExecutionStatus::Complete;
                                 }
 
-                                *shell_replied = true;
+                                pending.shell_replied = true;
                             }
                             _ => {}
                         }
-                        complete = *shell_replied && *idle;
-                        idle_grace = if *shell_replied && !*idle {
+                        complete = pending.shell_replied && pending.idle;
+                        idle_grace = if pending.shell_replied && !pending.idle {
                             // Trailing iopub output is still expected — give
                             // it a bounded window rather than forever.
                             Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10))
@@ -265,8 +302,8 @@ impl KernelConnection {
                     }
                     if complete {
                         is_busy.store(false, Ordering::Relaxed);
-                        if let Some((_, output, tx, _, _)) = pending.take() {
-                            let _ = tx.send(output);
+                        if let Some(pending) = pending.take() {
+                            let _ = pending.result_tx.send(pending.output);
                         }
                     }
                 }
@@ -275,16 +312,24 @@ impl KernelConnection {
             }
         }
 
+        request_rx.close();
+
         // If we exit with a pending execution, complete it with what we have.
         is_busy.store(false, Ordering::Relaxed);
-        if let Some((_, mut output, tx, _, _)) = pending.take() {
-            if output.status == ExecutionStatus::Running {
-                output.status = ExecutionStatus::Errored;
-                output
+        if let Some(mut pending) = pending.take() {
+            if pending.output.status == ExecutionStatus::Running {
+                pending.output.status = ExecutionStatus::Errored;
+                pending
+                    .output
                     .stderr
                     .push_str("\nWebSocket connection closed unexpectedly.");
             }
-            let _ = tx.send(output);
+            let _ = pending.result_tx.send(pending.output);
+        }
+        while let Ok(cmd) = request_rx.try_recv() {
+            let _ = cmd.result_tx.send(ExecutionOutput::error(
+                "WebSocket connection closed before execution started.".to_string(),
+            ));
         }
     }
 }
@@ -298,9 +343,215 @@ impl Drop for KernelConnection {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
+    use futures::channel::mpsc as futures_mpsc;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::super::messages::{ExecutionStatus, Header, JupyterMessage};
     use super::{ExecuteCommand, KernelConnection};
+
+    fn connection_with_channels() -> (
+        KernelConnection,
+        futures_mpsc::Receiver<Message>,
+        futures_mpsc::Sender<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    ) {
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<ExecuteCommand>(16);
+        let is_busy = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let (ws_sink, sent_rx) = futures_mpsc::channel(16);
+        let (incoming_tx, ws_stream_rx) = futures_mpsc::channel(16);
+        let reader_handle = tokio::spawn(KernelConnection::run_ws_loop(
+            ws_sink,
+            ws_stream_rx,
+            request_rx,
+            Arc::clone(&is_busy),
+        ));
+        (
+            KernelConnection {
+                request_tx,
+                is_busy,
+                in_flight,
+                reader_handle,
+            },
+            sent_rx,
+            incoming_tx,
+        )
+    }
+
+    fn response(
+        parent_msg_id: &str,
+        channel: &str,
+        msg_type: &str,
+        content: serde_json::Value,
+    ) -> Message {
+        Message::Text(
+            serde_json::to_string(&JupyterMessage {
+                channel: channel.to_string(),
+                header: Header {
+                    msg_id: uuid::Uuid::new_v4().to_string(),
+                    msg_type: msg_type.to_string(),
+                    username: "test".to_string(),
+                    session: "test-session".to_string(),
+                    date: String::new(),
+                    version: "5.3".to_string(),
+                },
+                parent_header: serde_json::json!({"msg_id": parent_msg_id}),
+                metadata: serde_json::json!({}),
+                content,
+                buffers: vec![],
+            })
+            .expect("serialize test response")
+            .into(),
+        )
+    }
+
+    async fn wait_for_reader_exit(connection: &KernelConnection) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !connection.reader_handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("websocket reader should exit");
+    }
+
+    #[tokio::test]
+    async fn permit_returns_to_zero_on_completion() {
+        let (connection, mut sent_rx, mut incoming_tx) = connection_with_channels();
+        let started = connection
+            .start_execution("test-session", "1 + 1")
+            .await
+            .unwrap();
+        assert!(connection.has_pending_work());
+
+        sent_rx.next().await.expect("execute request sent");
+        incoming_tx
+            .send(Ok(response(
+                &started.parent_msg_id,
+                "shell",
+                "execute_reply",
+                serde_json::json!({"status": "ok"}),
+            )))
+            .await
+            .unwrap();
+        incoming_tx
+            .send(Ok(response(
+                &started.parent_msg_id,
+                "iopub",
+                "status",
+                serde_json::json!({"execution_state": "idle"}),
+            )))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while connection.has_pending_work() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed execution should release its permit");
+        assert!(!connection.has_pending_work());
+
+        let output = started.result_rx.await.unwrap();
+        assert_eq!(output.status, ExecutionStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn permit_returns_to_zero_on_send_error() {
+        let (connection, sent_rx, _incoming_tx) = connection_with_channels();
+        drop(sent_rx);
+        let started = connection
+            .start_execution("test-session", "1 + 1")
+            .await
+            .unwrap();
+        assert!(connection.has_pending_work());
+
+        let output = tokio::time::timeout(Duration::from_secs(1), started.result_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(output.stderr.contains("WebSocket send error"));
+        tokio::task::yield_now().await;
+        assert!(!connection.has_pending_work());
+    }
+
+    #[tokio::test]
+    async fn loop_exit_resolves_pending_and_queued_commands() {
+        let (connection, mut sent_rx, incoming_tx) = connection_with_channels();
+        let first = connection
+            .start_execution("test-session", "first")
+            .await
+            .unwrap();
+        let second = connection
+            .start_execution("test-session", "second")
+            .await
+            .unwrap();
+        let third = connection
+            .start_execution("test-session", "third")
+            .await
+            .unwrap();
+        assert!(connection.has_pending_work());
+        sent_rx.next().await.expect("first execute request sent");
+
+        drop(incoming_tx);
+        wait_for_reader_exit(&connection).await;
+
+        let first_output = first.result_rx.await.unwrap();
+        assert!(
+            first_output
+                .stderr
+                .contains("connection closed unexpectedly")
+        );
+        for queued in [second, third] {
+            let output = queued.result_rx.await.unwrap();
+            assert!(
+                output
+                    .stderr
+                    .contains("connection closed before execution started")
+            );
+        }
+        assert!(!connection.has_pending_work());
+    }
+
+    #[tokio::test]
+    async fn clean_eof_closes_request_receiver() {
+        let (connection, _sent_rx, incoming_tx) = connection_with_channels();
+        drop(incoming_tx);
+        wait_for_reader_exit(&connection).await;
+
+        let Err(error) = connection.start_execution("test-session", "1 + 1").await else {
+            panic!("closed connection must reject execution");
+        };
+        assert!(error.to_string().contains("Kernel connection closed"));
+        assert!(!connection.has_pending_work());
+    }
+
+    #[tokio::test]
+    async fn queued_command_is_pending_before_reader_picks_it_up() {
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<ExecuteCommand>(1);
+        let reader_handle = tokio::spawn(std::future::pending::<()>());
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let connection = KernelConnection {
+            request_tx,
+            is_busy: Arc::new(AtomicBool::new(false)),
+            in_flight: Arc::clone(&in_flight),
+            reader_handle,
+        };
+
+        let _started = connection
+            .start_execution("test-session", "1 + 1")
+            .await
+            .unwrap();
+        assert!(connection.has_pending_work());
+        assert!(!connection.is_busy());
+
+        drop(request_rx);
+        assert_eq!(in_flight.load(Ordering::Relaxed), 0);
+    }
 
     #[tokio::test]
     async fn dropping_fenced_connection_aborts_reader_task() {
@@ -310,6 +561,7 @@ mod tests {
         let connection = KernelConnection {
             request_tx,
             is_busy: Arc::new(AtomicBool::new(false)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
             reader_handle,
         };
         drop(connection);

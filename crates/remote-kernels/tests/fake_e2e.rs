@@ -992,6 +992,76 @@ with open('results/out.txt', 'w') as f:
     terminate(&server, Some(&machine_id)).await;
 }
 
+/// A queued finish() plan closes the execute submission gate until the plan
+/// completes and clears its intent.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn finish_rejects_execute_while_plan_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in_session(dir.path(), None, "finish-gate-session");
+    let (machine_id, _) = start_machine(&server, Some("finish-gate")).await;
+    let kernel = create_kernel(&server, Some(&machine_id)).await;
+
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel.clone(),
+            code: "import time; time.sleep(3)".to_string(),
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    let result = server
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: Some(machine_id.clone()),
+            download: None,
+            then: "keep".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel.clone(),
+            code: "6 * 7".to_string(),
+            timeout: Some(60),
+            background: None,
+            queue: Some(true),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(is_error(&result), "execute unexpectedly passed: {text}");
+    assert!(text.contains("finish() plan is queued"), "{text}");
+    assert!(
+        text.contains("Wait for it") && text.contains("supersede"),
+        "{text}"
+    );
+
+    let mut cleared = false;
+    for _ in 0..40 {
+        if remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id)
+            .finish_intent
+            .is_none()
+        {
+            cleared = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(cleared, "finish(then=keep) did not clear its intent");
+
+    let (is_err, output) = execute(&server, &kernel, "6 * 7").await;
+    assert!(!is_err, "execute stayed gated after finish: {output}");
+    assert!(output.contains("42"), "{output}");
+
+    terminate(&server, Some(&machine_id)).await;
+}
+
 /// The core finish() promise: a queued plan survives server death and a
 /// fresh server's attach() resumes it to completion (downloads collected,
 /// action applied, intent cleared).
@@ -1035,6 +1105,25 @@ with open('results/late.txt','w') as f:
         .await
         .unwrap();
     assert!(!is_error(&result), "{}", text_of(&result));
+
+    let jupyter = {
+        let state = first.shared_state();
+        let state = state.lock().await;
+        state.instances[&machine_id].jupyter.clone()
+    };
+    let mut kernel_busy = false;
+    for _ in 0..60 {
+        if jupyter.list_kernels().await.is_ok_and(|kernels| {
+            kernels
+                .iter()
+                .any(|info| info.id == kernel && info.execution_state.as_deref() == Some("busy"))
+        }) {
+            kernel_busy = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(kernel_busy, "long cell never became busy in Jupyter REST");
     drop(first); // server dies with the plan queued and the kernel busy
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert!(
