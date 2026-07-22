@@ -313,6 +313,12 @@ impl InstanceState {
 /// Runtime state held in memory by the MCP server.
 pub struct AppState {
     pub project_dir: PathBuf,
+    /// Root for generated SSH private keys. Deliberately NOT under the
+    /// project dir: project state can sit on a filesystem that cannot hold
+    /// 0600 (WSL `/mnt/c` drvfs, FAT), where OpenSSH refuses the key and
+    /// auth silently degrades. Defaults to the user-state dir (see
+    /// [`default_keys_root`]); overridable only for tests.
+    pub keys_root: PathBuf,
     pub instances: BTreeMap<String, InstanceState>,
     /// Budget/ownership scope: the Claude session driving this server
     /// (`CLAUDE_CODE_SESSION_ID`, stable across resume and relaunch), or a
@@ -349,6 +355,65 @@ pub struct SessionSpend {
 
 pub fn state_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude/remote-kernels")
+}
+
+/// Default per-project root for generated SSH private keys:
+/// `$XDG_STATE_HOME|~/.local/state`/`remote-kernels/keys/<project-id>`.
+/// Keys must live on a filesystem where 0600 is real, which the project dir
+/// cannot guarantee (WSL `/mnt/c`); the user-state dir can.
+pub fn default_keys_root(project_dir: &Path) -> PathBuf {
+    // Explicit override — the escape hatch when the computed location is
+    // wrong for an environment (e.g. an unusual HOME).
+    if let Some(root) = std::env::var_os("REMOTE_KERNELS_KEYS_ROOT")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return root.join(project_key_id(project_dir));
+    }
+    // Unit tests and the fake-runtime e2e suite churn through throwaway
+    // tempdir projects; they must not write into the real user-state dir.
+    if cfg!(any(test, feature = "fake-runtime")) {
+        return std::env::temp_dir()
+            .join("remote-kernels-test-keys")
+            .join(project_key_id(project_dir));
+    }
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))
+        // No resolvable home: keep the old in-project location (it worked
+        // everywhere except broken-permission mounts).
+        .unwrap_or_else(|| state_dir(project_dir));
+    state_home
+        .join("remote-kernels/keys")
+        .join(project_key_id(project_dir))
+}
+
+/// Stable, collision-resistant identity for a project dir: a readable slug
+/// (last path component) plus a hash of the full canonical path. The hash is
+/// the identity — same-named projects in different parents must never share
+/// key directories (the stable vast key is per-project, and terminate deletes
+/// per-instance key dirs).
+fn project_key_id(project_dir: &Path) -> String {
+    use sha2::Digest as _;
+    let canonical = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let digest = sha2::Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let hash = hex::encode(&digest[..6]);
+    let slug: String = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .take(40)
+        .collect();
+    if slug.is_empty() {
+        hash
+    } else {
+        format!("{slug}-{hash}")
+    }
 }
 
 fn instance_dir(project_dir: &Path, machine_id: &str) -> PathBuf {
@@ -417,6 +482,13 @@ pub fn validate_machine_id(machine_id: &str) -> Result<(), String> {
 impl AppState {
     /// Create project state and roll forward any interrupted epoch/migration.
     pub fn new(project_dir: PathBuf) -> Self {
+        let keys_root = default_keys_root(&project_dir);
+        Self::new_with_keys_root(project_dir, keys_root)
+    }
+
+    /// [`Self::new`] with an explicit key root — tests must not write into
+    /// the real user-state dir.
+    pub fn new_with_keys_root(project_dir: PathBuf, keys_root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(state_dir(&project_dir));
         ensure_gitignore(&project_dir);
         migrate_legacy_state(&project_dir);
@@ -426,12 +498,79 @@ impl AppState {
             .err()
             .map(|error| error.to_string());
 
-        Self {
+        let state = Self {
             project_dir,
+            keys_root,
             instances: BTreeMap::new(),
             session_owner: resolve_session_owner(),
             reattaching: std::collections::HashSet::new(),
             accounting_init_error,
+        };
+        // After the legacy layout migration (it may have just moved a key
+        // into instances/main) and before any caller can reattach: records
+        // must stop pointing at in-project keys.
+        state.migrate_key_locations();
+        state
+    }
+
+    /// Move each record's private key from the project state dir to the
+    /// user-state key root, byte-exact (an existing machine's key must NEVER
+    /// be regenerated — the public half lives in the machine's
+    /// `authorized_keys`). Every step is conservative: any failure leaves the
+    /// record on its old path (still fine on healthy filesystems; the
+    /// fail-closed [`crate::ssh::validate_private_key_file`] check will name
+    /// the problem if that key is actually unusable). Old key files are left
+    /// in place — another live session may still be using them.
+    fn migrate_key_locations(&self) {
+        let project_state = state_dir(&self.project_dir);
+        for (machine_id, mut record) in list_instance_records(&self.project_dir) {
+            let Some(old) = record.ssh_key_path.as_ref().map(PathBuf::from) else {
+                continue;
+            };
+            if !old.starts_with(&project_state) || !old.exists() {
+                continue;
+            }
+            let new_path = self.ssh_key_path(&machine_id);
+            match crate::ssh::copy_key_file(&old, &new_path) {
+                Ok(()) => {
+                    record.ssh_key_path = Some(new_path.display().to_string());
+                    if let Err(error) = self.save_record(&machine_id, &record) {
+                        tracing::warn!(
+                            instance = machine_id,
+                            "key migrated to {} but the record could not be rewritten: {error:#}",
+                            new_path.display()
+                        );
+                    } else {
+                        tracing::info!(
+                            instance = machine_id,
+                            "migrated SSH key out of the project dir to {}",
+                            new_path.display()
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        instance = machine_id,
+                        "could not migrate SSH key {} to {} — record keeps the old path: {error:#}",
+                        old.display(),
+                        new_path.display()
+                    );
+                }
+            }
+        }
+        // The stable (vast) key: same byte-exact copy; the account-registered
+        // public half must keep matching. The old file stays for concurrent
+        // older servers.
+        let old_stable = project_state.join("id_ed25519");
+        if old_stable.exists() {
+            let new_stable = self.stable_ssh_key_path();
+            if let Err(error) = crate::ssh::copy_key_file(&old_stable, &new_stable) {
+                tracing::warn!(
+                    "could not migrate stable SSH key {} to {}: {error:#}",
+                    old_stable.display(),
+                    new_stable.display()
+                );
+            }
         }
     }
 
@@ -668,6 +807,18 @@ impl AppState {
     /// Remove an instance's durable record (after terminate).
     pub fn clear_record(&self, machine_id: &str) -> anyhow::Result<()> {
         let epoch = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
+        // The key may live outside the instance dir (keys_root). Delete it
+        // only when the record's persisted path is this machine's managed
+        // per-instance location — never the stable key, never an external or
+        // hand-edited path, never another machine's dir.
+        if let Some(record) = load_instance_record(&self.project_dir, machine_id)
+            && let Some(key_path) = record.ssh_key_path.map(PathBuf::from)
+        {
+            let managed_dir = self.keys_root.join("instances").join(machine_id);
+            if key_path.starts_with(&managed_dir) {
+                let _ = std::fs::remove_dir_all(&managed_dir);
+            }
+        }
         let dir = instance_dir(&self.project_dir, machine_id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
@@ -681,17 +832,22 @@ impl AppState {
         Ok(())
     }
 
-    /// The per-instance SSH key path.
+    /// The per-instance SSH key path, under [`Self::keys_root`] (NOT the
+    /// project state dir — see the field doc). The record persists whatever
+    /// absolute path was actually used, so older records keep working.
     pub fn ssh_key_path(&self, machine_id: &str) -> PathBuf {
-        instance_dir(&self.project_dir, machine_id).join("id_ed25519")
+        self.keys_root
+            .join("instances")
+            .join(machine_id)
+            .join("id_ed25519")
     }
 
     /// The plugin's stable SSH key path, shared by all instances of runtimes
-    /// with account-level key registries (vast.ai). Lives at the state-dir
-    /// root, outside any instance dir, so terminating an instance
+    /// with account-level key registries (vast.ai). Lives at the key-root
+    /// top level, outside any instance dir, so terminating an instance
     /// ([`Self::clear_record`]) never deletes it.
     pub fn stable_ssh_key_path(&self) -> PathBuf {
-        state_dir(&self.project_dir).join("id_ed25519")
+        self.keys_root.join("id_ed25519")
     }
 
     /// The per-instance SSH known-hosts file (TOFU pin — see
@@ -1358,6 +1514,96 @@ mod tests {
         assert!(fresh.total_spend().abs() < f64::EPSILON);
     }
 
+    /// Same-named projects under different parents must never share a key
+    /// root: the stable vast key is per-project, and terminate deletes
+    /// per-instance key dirs.
+    #[test]
+    fn project_key_roots_are_distinct_for_same_named_projects() {
+        let base = tempfile::tempdir().unwrap();
+        let a = base.path().join("parent-a/proj");
+        let b = base.path().join("parent-b/proj");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_ne!(default_keys_root(&a), default_keys_root(&b));
+    }
+
+    /// Records written before the key relocation point at keys inside the
+    /// project dir (unusable on WSL /mnt/c). Startup must move the exact
+    /// bytes out and rewrite the record — never regenerate (the public half
+    /// is in the machine's `authorized_keys`).
+    #[test]
+    fn startup_migrates_in_project_keys_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = tempfile::tempdir().unwrap();
+        let machine_id = crate::ulid::new();
+
+        let old_key = instance_dir(dir.path(), &machine_id).join("id_ed25519");
+        std::fs::create_dir_all(old_key.parent().unwrap()).unwrap();
+        std::fs::write(&old_key, "exact-key-bytes").unwrap();
+        let mut record = {
+            let staging =
+                AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("staging"));
+            let inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
+            let mut record = inst.record();
+            record.ssh_key_path = Some(old_key.display().to_string());
+            staging.save_record(&machine_id, &record).unwrap();
+            record
+        };
+
+        let state =
+            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("real"));
+        let migrated = load_instance_record(dir.path(), &machine_id).unwrap();
+        let new_key = state.ssh_key_path(&machine_id);
+        assert_eq!(
+            migrated.ssh_key_path.as_deref(),
+            Some(new_key.to_str().unwrap())
+        );
+        assert_eq!(std::fs::read(&new_key).unwrap(), b"exact-key-bytes");
+        // The old file stays — another live session may still be using it.
+        assert!(old_key.exists());
+
+        // An external / hand-managed key path is never touched.
+        let external = dir.path().join("my-own-key");
+        std::fs::write(&external, "user-key").unwrap();
+        record.ssh_key_path = Some(external.display().to_string());
+        state.save_record(&machine_id, &record).unwrap();
+        let state =
+            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("real"));
+        let untouched = load_instance_record(dir.path(), &machine_id).unwrap();
+        assert_eq!(
+            untouched.ssh_key_path.as_deref(),
+            Some(external.to_str().unwrap())
+        );
+        drop(state);
+    }
+
+    /// Terminate removes only that machine's managed key dir; the stable
+    /// (vast, account-registered) key and other machines' keys survive.
+    #[test]
+    fn clear_record_removes_managed_key_dir_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = tempfile::tempdir().unwrap();
+        let state =
+            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().to_path_buf());
+
+        let machine_id = crate::ulid::new();
+        let key_path = state.ssh_key_path(&machine_id);
+        crate::ssh::generate_keypair(&key_path).unwrap();
+        crate::ssh::ensure_keypair(&state.stable_ssh_key_path()).unwrap();
+        let other_id = crate::ulid::new();
+        crate::ssh::generate_keypair(&state.ssh_key_path(&other_id)).unwrap();
+
+        let inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
+        let mut record = inst.record();
+        record.ssh_key_path = Some(key_path.display().to_string());
+        state.save_record(&machine_id, &record).unwrap();
+
+        state.clear_record(&machine_id).unwrap();
+        assert!(!key_path.exists());
+        assert!(state.stable_ssh_key_path().exists());
+        assert!(state.ssh_key_path(&other_id).exists());
+    }
+
     #[test]
     fn legacy_single_instance_state_migrates_to_main() {
         let dir = tempfile::tempdir().unwrap();
@@ -1385,11 +1631,12 @@ mod tests {
         assert_eq!(record.external_id, "legacy-pod");
         assert_eq!(record.cleanup, Cleanup::Stop);
         assert_eq!(record.gpu_name.as_deref(), Some("RTX 4090"));
-        // SSH key moved into the instance dir.
-        let new_key = dir
-            .path()
-            .join(".claude/remote-kernels/instances/main/id_ed25519");
-        assert!(new_key.exists());
+        // SSH key ends up under keys_root (legacy layout migration moves it
+        // into the instance dir, then the key-location migration moves it —
+        // byte-exact — out of the project dir entirely).
+        let new_key = state.ssh_key_path("main");
+        assert!(!new_key.starts_with(dir.path()));
+        assert_eq!(std::fs::read(&new_key).unwrap(), b"fake-key");
         assert_eq!(
             record.ssh_key_path.as_deref(),
             Some(new_key.to_str().unwrap())

@@ -429,8 +429,11 @@ fn connection_context_for_record(
         .ssh_key_path
         .as_ref()
         .map(std::path::PathBuf::from)
-        .filter(|path| path.exists())
         .ok_or_else(|| anyhow::anyhow!("missing SSH key"))?;
+    // Fail closed on a key OpenSSH would silently refuse (see
+    // validate_private_key_file) — connecting would otherwise degrade into
+    // auth failures with no pointer at the key file.
+    crate::ssh::validate_private_key_file(&ssh_key_path)?;
     Ok(ConnectionContext {
         ssh_key_path,
         known_hosts_path: crate::state::state_dir(project_dir)
@@ -797,17 +800,23 @@ impl RemoteKernelsServer {
             InstanceStatus::Stopped | InstanceStatus::Running | InstanceStatus::Provisioning => {}
         }
 
-        let Some((jupyter_token, ssh_key_path)) = record.jupyter_token.clone().zip(
-            record
-                .ssh_key_path
-                .clone()
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.exists()),
-        ) else {
+        let Some((jupyter_token, ssh_key_path)) = record
+            .jupyter_token
+            .clone()
+            .zip(record.ssh_key_path.clone().map(std::path::PathBuf::from))
+        else {
             return err_text(format!(
                 "Machine {machine_id} is missing its SSH key or Jupyter token; record kept."
             ));
         };
+        // Fail closed BEFORE any resume: resuming restarts billing, and a
+        // key OpenSSH refuses (missing, or mode not enforceable — WSL
+        // /mnt/c) means the machine would bill without being controllable.
+        if let Err(error) = crate::ssh::validate_private_key_file(&ssh_key_path) {
+            return err_text(format!(
+                "Machine {machine_id} cannot be attached: {error:#}; record kept."
+            ));
+        }
         let resumed = provider_status == InstanceStatus::Stopped;
         if resumed && auto {
             // Startup re-attach never resumes: resuming restarts billing and
@@ -4038,7 +4047,7 @@ impl RemoteKernelsServer {
                 .map(ToString::to_string),
             storage_rate_per_hr: lifecycle.storage_rate_per_hr,
         };
-        let (hb, mut supervision) = crate::heartbeat::start(
+        let (hb, mut supervision, setup_diagnostics) = crate::heartbeat::start(
             Arc::clone(&conn),
             machine_id.to_string(),
             external_id.to_string(),
@@ -4097,11 +4106,19 @@ impl RemoteKernelsServer {
             .is_ok()
                 && *supervision.borrow() != crate::heartbeat::SupervisionStatus::Pending;
             if !resolved && self.budget.is_some() {
-                return Err(BudgetUnenforceable(
-                    "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
-                        .to_string(),
-                )
-                .into());
+                // Setup is usually still deep inside its SSH retry loop at
+                // this point — the latest recorded attempt error is the only
+                // actionable cause available (e.g. a rejected key file).
+                let cause = match setup_diagnostics.latest() {
+                    Some(last) => format!(
+                        "the automatic-shutdown watchdog could not be confirmed within 15 seconds; last error: {last}"
+                    ),
+                    None => {
+                        "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
+                            .to_string()
+                    }
+                };
+                return Err(BudgetUnenforceable(cause).into());
             }
         }
         let supervision_status = supervision.borrow().clone();
@@ -6736,7 +6753,7 @@ mod fencing_tests {
                 finalize_command: None,
                 storage_rate_per_hr: None,
             };
-            let (heartbeat, mut supervision) = crate::heartbeat::start(
+            let (heartbeat, mut supervision, _diagnostics) = crate::heartbeat::start(
                 Arc::clone(&connection),
                 machine_id.clone(),
                 external_id.to_string(),
@@ -6949,7 +6966,7 @@ mod fencing_tests {
         let operation_lock = RemoteKernelsServer::acquire_operation_lock(dir.path(), &machine_id)
             .await
             .unwrap();
-        let (heartbeat, mut status) = crate::heartbeat::start(
+        let (heartbeat, mut status, _diagnostics) = crate::heartbeat::start(
             connection,
             machine_id.clone(),
             external_id.to_string(),

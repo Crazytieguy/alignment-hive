@@ -609,7 +609,10 @@ impl Runtime for RunPodRuntime {
             // short window (~90s) before degrading; without one, wait the
             // full window (24 attempts ≈ up to 6 minutes).
             let attempts = if proxy_fallback { 6 } else { 24 };
-            match tunnel_ssh.wait_reachable(attempts).await {
+            match tunnel_ssh
+                .wait_reachable(attempts, &crate::ssh_exec::SetupDiagnostics::default())
+                .await
+            {
                 Ok(()) => {
                     let tunnel =
                         crate::ssh_exec::SshTunnel::open(&tunnel_ssh, RUNPOD_JUPYTER_PORT).await?;
@@ -803,10 +806,13 @@ impl Connection for RunPodConnection {
     }
 
     /// Wait for SSH to become reachable, retrying up to ~2 minutes.
-    async fn wait_reachable(&self) -> anyhow::Result<()> {
+    async fn wait_reachable(
+        &self,
+        diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> anyhow::Result<()> {
         // Fail fast when the machine has no SSH at all — the heartbeat
         // pipeline logs this and exits (kernels still work via the proxy).
-        self.ssh_endpoint()?.wait_reachable(24).await
+        self.ssh_endpoint()?.wait_reachable(24, diagnostics).await
     }
 
     async fn upload(

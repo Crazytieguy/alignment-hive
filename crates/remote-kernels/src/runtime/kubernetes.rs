@@ -637,7 +637,10 @@ impl Connection for K8sConnection {
         .await
     }
 
-    async fn wait_reachable(&self) -> anyhow::Result<()> {
+    async fn wait_reachable(
+        &self,
+        _diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> anyhow::Result<()> {
         // open() already exec'd successfully; nothing further to wait for.
         Ok(())
     }

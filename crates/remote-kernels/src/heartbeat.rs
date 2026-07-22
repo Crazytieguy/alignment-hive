@@ -109,8 +109,14 @@ pub fn start(
     budget: Option<f64>,
     startup_commands: Vec<String>,
     operation_lock: std::fs::File,
-) -> (HeartbeatState, watch::Receiver<SupervisionStatus>) {
+) -> (
+    HeartbeatState,
+    watch::Receiver<SupervisionStatus>,
+    crate::ssh_exec::SetupDiagnostics,
+) {
     let (status_tx, status_rx) = watch::channel(SupervisionStatus::Pending);
+    let diagnostics = crate::ssh_exec::SetupDiagnostics::default();
+    let task_diagnostics = diagnostics.clone();
     let handle = tokio::spawn(async move {
         if let Err(e) = establish_and_run(
             &conn,
@@ -124,6 +130,7 @@ pub fn start(
             &startup_commands,
             operation_lock,
             &status_tx,
+            &task_diagnostics,
         )
         .await
         {
@@ -136,6 +143,7 @@ pub fn start(
             task_handle: handle,
         },
         status_rx,
+        diagnostics,
     )
 }
 
@@ -152,6 +160,7 @@ async fn establish_and_run(
     startup_commands: &[String],
     operation_lock: std::fs::File,
     status: &watch::Sender<SupervisionStatus>,
+    diagnostics: &crate::ssh_exec::SetupDiagnostics,
 ) -> anyhow::Result<()> {
     if !conn.supports_lease() {
         mark_unsupervisable(state, machine_id, external_id, UNSUPPORTED_CAVEAT).await;
@@ -169,7 +178,7 @@ async fn establish_and_run(
     drop(operation_lock);
     let project_dir = state.lock().await.project_dir.clone();
     let (lease, operation_lock) = loop {
-        match conn.wait_reachable().await {
+        match conn.wait_reachable(diagnostics).await {
             Ok(()) => {}
             Err(error) if error.to_string().contains("no public IP") => {
                 mark_unsupervisable(state, machine_id, external_id, NO_SSH_CAVEAT).await;
@@ -185,6 +194,7 @@ async fn establish_and_run(
                 return Ok(());
             }
             Err(error) => {
+                diagnostics.record(&error);
                 tracing::warn!(
                     instance = machine_id,
                     "machine not reachable for supervision yet — retrying in 60s: {error}"
@@ -214,6 +224,7 @@ async fn establish_and_run(
         match acquire_lease(conn, acquire_mode, lease_owner).await {
             Ok(lease) => break (lease, lock),
             Err(EstablishError::Retry(error)) => {
+                diagnostics.record(&anyhow::anyhow!("{error:#}"));
                 drop(lock);
                 tracing::warn!(
                     instance = machine_id,

@@ -445,7 +445,10 @@ impl Connection for FakeConnection {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    async fn wait_reachable(&self) -> anyhow::Result<()> {
+    async fn wait_reachable(
+        &self,
+        _diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 

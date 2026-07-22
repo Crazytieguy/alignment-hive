@@ -2435,7 +2435,7 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "remote-kernels"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2455,6 +2455,7 @@ dependencies = [
  "serde-inline-default",
  "serde_json",
  "serde_yaml",
+ "sha2 0.11.0",
  "shlex 2.0.1",
  "ssh-key",
  "tempfile",

@@ -386,8 +386,14 @@ pub trait Connection: Send + Sync {
         timeout: Duration,
     ) -> impl Future<Output = anyhow::Result<String>> + Send;
 
-    /// Wait until the machine's command transport is reachable.
-    fn wait_reachable(&self) -> impl Future<Output = anyhow::Result<()>> + Send;
+    /// Wait until the machine's command transport is reachable. Failed
+    /// attempts are published to `diagnostics` as they happen, so callers
+    /// with their own deadlines (the server's budget-enforceability gate)
+    /// can report the underlying cause while this is still retrying.
+    fn wait_reachable(
+        &self,
+        diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     /// Sync the project directory to the machine's working directory.
     fn upload(
@@ -664,8 +670,11 @@ impl Connection for AnyConnection {
         dispatch!(self, c => c.exec(command, timeout).await)
     }
 
-    async fn wait_reachable(&self) -> anyhow::Result<()> {
-        dispatch!(self, c => c.wait_reachable().await)
+    async fn wait_reachable(
+        &self,
+        diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> anyhow::Result<()> {
+        dispatch!(self, c => c.wait_reachable(diagnostics).await)
     }
 
     async fn upload(

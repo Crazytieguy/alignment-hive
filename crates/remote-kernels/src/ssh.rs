@@ -33,6 +33,93 @@ fn keypair_result(private_key: &PrivateKey, key_path: &Path) -> anyhow::Result<S
     })
 }
 
+/// Fail-closed check that a private key file is actually usable by OpenSSH:
+/// on unix its mode must have no group/other bits. On filesystems where chmod
+/// is a silent no-op (a WSL `/mnt/c` drvfs mount without the `metadata`
+/// option, FAT drives), the key sits at an effective 0777 and OpenSSH ignores
+/// it — auth then fails with nothing pointing at the key file. Every path
+/// that is about to hand a key to `ssh` (fresh generation, load, and
+/// record-based reconnect/attach — the latter BEFORE any billing resume)
+/// calls this so the user gets the cause and the fix instead.
+// The octal mask mirrors how OpenSSH states the rule; a trailing_zeros
+// comparison would obscure it.
+#[allow(clippy::verbose_bit_mask)]
+pub fn validate_private_key_file(key_path: &Path) -> anyhow::Result<()> {
+    let metadata = std::fs::metadata(key_path).map_err(|error| {
+        anyhow::anyhow!(
+            "SSH private key {} is unusable: {error}",
+            key_path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode() & 0o777;
+        anyhow::ensure!(
+            mode & 0o077 == 0,
+            "SSH private key {} has mode {mode:o} (group/other-accessible), so OpenSSH \
+             will refuse to use it. This usually means the file sits on a filesystem \
+             where permissions cannot be enforced — e.g. a WSL /mnt/c mount. Fix: move \
+             the project into the Linux filesystem, or remount the drive with the \
+             `metadata` option, then delete the key file so it is regenerated.",
+            key_path.display(),
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = metadata;
+    Ok(())
+}
+
+/// Write private-key material with owner-only access from the first byte
+/// (`create_new` + mode 0600 — never write-then-chmod, which leaves a
+/// permissive window under ordinary umasks). With `overwrite`, an existing
+/// file is removed first; without it, `AlreadyExists` is returned untouched
+/// for the caller's cross-session race handling.
+fn write_key_file(key_path: &Path, pem: &[u8], overwrite: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if overwrite {
+        match std::fs::remove_file(key_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(key_path)?;
+    file.write_all(pem)
+}
+
+/// Copy private-key bytes to a new location, owner-only from the first byte.
+/// Migration helper: an existing machine's key must keep its exact material
+/// (the public half is in the machine's `authorized_keys` / provider
+/// registry). A destination that already holds the SAME bytes is success (a
+/// re-run migration or a concurrent session won the race); different bytes is
+/// an error — key material is never overwritten.
+pub fn copy_key_file(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let bytes = std::fs::read(src)?;
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    match write_key_file(dst, &bytes, false) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::ensure!(
+                std::fs::read(dst)? == bytes,
+                "destination {} already holds a different key",
+                dst.display()
+            );
+        }
+        Err(e) => return Err(e.into()),
+    }
+    validate_private_key_file(dst)
+}
+
 /// Generate an Ed25519 SSH keypair for machine access.
 ///
 /// The private key is written to `key_path` (overwriting any existing file).
@@ -44,14 +131,12 @@ pub fn generate_keypair(key_path: &Path) -> anyhow::Result<SshKeypair> {
     }
 
     let private_key = new_private_key();
-    std::fs::write(key_path, private_key.to_openssh(LineEnding::LF)?.as_str())?;
-
-    // Restrict permissions (owner read-only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_key_file(
+        key_path,
+        private_key.to_openssh(LineEnding::LF)?.as_bytes(),
+        true,
+    )?;
+    validate_private_key_file(key_path)?;
 
     tracing::info!(?key_path, "Generated SSH keypair");
     keypair_result(&private_key, key_path)
@@ -75,17 +160,9 @@ pub fn ensure_keypair(key_path: &Path) -> anyhow::Result<SshKeypair> {
     if !key_path.exists() {
         let private_key = new_private_key();
         let pem = private_key.to_openssh(LineEnding::LF)?;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        match opts.open(key_path) {
-            Ok(mut file) => {
-                use std::io::Write as _;
-                file.write_all(pem.as_bytes())?;
+        match write_key_file(key_path, pem.as_bytes(), false) {
+            Ok(()) => {
+                validate_private_key_file(key_path)?;
                 tracing::info!(?key_path, "Generated stable SSH keypair");
                 return keypair_result(&private_key, key_path);
             }
@@ -96,6 +173,7 @@ pub fn ensure_keypair(key_path: &Path) -> anyhow::Result<SshKeypair> {
         }
     }
 
+    validate_private_key_file(key_path)?;
     Ok(SshKeypair {
         public_key_openssh: public_key_for(key_path).with_context(|| {
             format!(
@@ -151,6 +229,67 @@ mod tests {
         let first = generate_keypair(&path).unwrap();
         let second = generate_keypair(&path).unwrap();
         assert_ne!(first.public_key_openssh, second.public_key_openssh);
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// Keys must be owner-only from the first byte — never write-then-chmod.
+    #[cfg(unix)]
+    #[test]
+    fn keys_are_created_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = dir.path().join("per-instance");
+        generate_keypair(&generated).unwrap();
+        assert_eq!(mode_of(&generated) & 0o077, 0);
+        let stable = dir.path().join("stable");
+        ensure_keypair(&stable).unwrap();
+        assert_eq!(mode_of(&stable) & 0o077, 0);
+    }
+
+    /// A group/other-accessible key is one OpenSSH will silently ignore
+    /// (the WSL /mnt/c failure) — loading it must fail loudly, before any
+    /// machine is allocated or resumed.
+    #[cfg(unix)]
+    #[test]
+    fn insecure_key_mode_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_ed25519");
+        generate_keypair(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = match ensure_keypair(&path) {
+            Ok(_) => panic!("insecure key must not load"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("group/other-accessible"), "{error}");
+        assert!(validate_private_key_file(&path).is_err());
+        // Missing file is also a validation error, not a panic.
+        assert!(validate_private_key_file(&dir.path().join("absent")).is_err());
+    }
+
+    /// Migration copies key material byte-exact and never overwrites a
+    /// different key already at the destination.
+    #[test]
+    fn copy_key_file_preserves_material_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        generate_keypair(&src).unwrap();
+        let dst = dir.path().join("nested/dst");
+        copy_key_file(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&src).unwrap(), std::fs::read(&dst).unwrap());
+        // Re-running (or losing a cross-session race to the same bytes) is
+        // fine...
+        copy_key_file(&src, &dst).unwrap();
+        // ...but a different key at the destination is untouchable.
+        let other = dir.path().join("other");
+        generate_keypair(&other).unwrap();
+        let error = format!("{:#}", copy_key_file(&other, &dst).unwrap_err());
+        assert!(error.contains("different key"), "{error}");
+        assert_eq!(std::fs::read(&src).unwrap(), std::fs::read(&dst).unwrap());
     }
 
     #[test]

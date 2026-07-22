@@ -17,6 +17,33 @@ pub fn is_host_key_mismatch(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("SSH host key mismatch")
 }
 
+/// Shared latest-setup-error slot. Supervision setup can sit inside a
+/// minutes-long reachability retry loop while the server's 15-second
+/// budget-enforceability gate expires; without this, the gate's error is a
+/// generic "watchdog could not be confirmed" and the actual cause (e.g.
+/// `Permission denied (publickey)` from an unusable key file) exists only as
+/// a debug log. Each failed attempt records its full error chain here BEFORE
+/// sleeping, so the gate can name the real problem.
+#[derive(Debug, Clone, Default)]
+pub struct SetupDiagnostics(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl SetupDiagnostics {
+    pub fn record(&self, error: &anyhow::Error) {
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(format!("{error:#}"));
+    }
+
+    pub fn latest(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// One machine's SSH coordinates plus the client-side trust material. The
 /// single source of truth for every SSH invocation — direct commands, rsync's
 /// `-e` transport, and `-N -L` tunnels — so option drift between call sites
@@ -61,6 +88,12 @@ impl SshEndpoint {
             ),
             ("LogLevel=ERROR".into(), false),
             ("ConnectTimeout=5".into(), false),
+            // Never fall back to interactive auth: without this, a rejected
+            // key (e.g. OpenSSH ignoring a private key whose 0600 chmod was a
+            // silent no-op on a WSL /mnt/c mount) drops to a password prompt
+            // on the controlling TTY — hijacking the user's terminal — and
+            // every command hangs to its timeout instead of failing loudly.
+            ("BatchMode=yes".into(), false),
             // Offer only the -i key: default identities pollute the machine's
             // auth log and can trip MaxAuthTries before the right key is
             // tried.
@@ -141,7 +174,12 @@ impl SshEndpoint {
     /// pod the mapping reappears seconds before sshd does). Needed before
     /// spawning a tunnel: `ssh -N` started against a booting sshd just dies,
     /// and the keepalive only respawns it on heartbeat ticks.
-    pub async fn wait_reachable(&self, attempts: u32) -> anyhow::Result<()> {
+    pub async fn wait_reachable(
+        &self,
+        attempts: u32,
+        diagnostics: &SetupDiagnostics,
+    ) -> anyhow::Result<()> {
+        let mut last_error = None;
         for attempt in 1..=attempts {
             match self.cmd("echo ok", Duration::from_secs(10)).await {
                 Ok(_) => {
@@ -151,13 +189,28 @@ impl SshEndpoint {
                 // A pin mismatch cannot heal by retrying — every attempt
                 // verifies against the same file. Surface it immediately.
                 Err(e) if is_host_key_mismatch(&e) => return Err(e),
+                // Auth rejections ARE retried: on a fresh boot sshd can come
+                // up before the injected public key lands in authorized_keys.
+                // But each one is published so watchers (the 15s budget gate)
+                // can name the cause while this loop is still running.
                 Err(e) => {
+                    diagnostics.record(&e);
                     tracing::debug!(attempt, error = %e, "SSH not ready yet");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    last_error = Some(e);
+                    if attempt < attempts {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                 }
             }
         }
-        anyhow::bail!("SSH did not become reachable after {attempts} attempts")
+        // Carry the last real error: "did not become reachable" alone sends
+        // the user hunting network problems when the cause may be auth.
+        Err(match last_error {
+            Some(e) => e.context(format!(
+                "SSH did not become reachable after {attempts} attempts"
+            )),
+            None => anyhow::anyhow!("SSH did not become reachable after {attempts} attempts"),
+        })
     }
 }
 
@@ -381,6 +434,8 @@ mod tests {
         };
         let opts = ep.opts().join(" ");
         assert!(opts.contains("StrictHostKeyChecking=accept-new"));
+        // Auth failures must error out, never prompt on the user's TTY.
+        assert!(opts.contains("BatchMode=yes"));
         assert!(opts.contains("UserKnownHostsFile=/state/instances/main/known_hosts"));
         assert!(!opts.contains("StrictHostKeyChecking=no"));
         assert!(!opts.contains("/dev/null"));
@@ -410,6 +465,34 @@ mod tests {
         // kind e2e drive kernels + websockets through this launch line.
         let script = jupyter_launch_script("/workspace", "jupyter server", 18888);
         assert!(!script.contains("disable_check_xsrf"));
+    }
+
+    /// The 15s budget gate reads the slot while the reachability loop is
+    /// still retrying — each failed attempt must be visible immediately.
+    #[tokio::test]
+    async fn wait_reachable_publishes_each_attempt_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A just-released loopback port: connection refused instantly,
+        // nothing real is contacted.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let ep = SshEndpoint {
+            key_path: dir.path().join("missing_key"),
+            known_hosts_path: dir.path().join("known_hosts"),
+            user: "root".into(),
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let diagnostics = SetupDiagnostics::default();
+        assert!(diagnostics.latest().is_none());
+        let result = ep.wait_reachable(1, &diagnostics).await;
+        assert!(result.is_err());
+        let recorded = diagnostics.latest().expect("attempt error recorded");
+        // The final error carries the last attempt's cause, not only the
+        // generic reachability message.
+        assert!(format!("{:#}", result.unwrap_err()).contains(&recorded));
     }
 
     /// Config money-windows must reach the generated scripts verbatim.

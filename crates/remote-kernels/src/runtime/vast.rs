@@ -1023,7 +1023,10 @@ impl Connection for VastConnection {
     }
 
     /// SSH reachability was already established in `open()`.
-    async fn wait_reachable(&self) -> anyhow::Result<()> {
+    async fn wait_reachable(
+        &self,
+        _diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
