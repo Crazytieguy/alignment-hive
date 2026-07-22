@@ -451,6 +451,23 @@ pub async fn acquire_operation_lock(
     .await?
 }
 
+/// Non-blocking variant for synchronous startup work (key migration): the
+/// same flock, but an already-held lock returns `None` instead of waiting —
+/// startup must not block behind another session's long-running operation.
+fn try_operation_lock(project_dir: &Path, machine_id: &str) -> Option<std::fs::File> {
+    let path = operation_lock_path(project_dir, machine_id);
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).ok()?;
+    Some(file)
+}
+
 /// New ids are canonical 26-character Crockford-base32 ULIDs. Every other
 /// safe directory key is a legacy id and remains addressable for migration.
 pub fn is_legacy_machine_id(machine_id: &str) -> bool {
@@ -523,7 +540,23 @@ impl AppState {
     /// in place — another live session may still be using them.
     fn migrate_key_locations(&self) {
         let project_state = state_dir(&self.project_dir);
-        for (machine_id, mut record) in list_instance_records(&self.project_dir) {
+        for (machine_id, _) in list_instance_records(&self.project_dir) {
+            // The record is reloaded and rewritten UNDER the machine's
+            // operation lock — a concurrent server (e.g. an older binary
+            // finishing a stop, or binding a kernel) may write this record,
+            // and saving a stale snapshot would silently revert its update.
+            // An unavailable lock means a live server is driving the
+            // machine; skip — the next startup migrates it.
+            let Some(_lock) = try_operation_lock(&self.project_dir, &machine_id) else {
+                tracing::warn!(
+                    instance = machine_id,
+                    "key migration skipped: machine is busy in another session"
+                );
+                continue;
+            };
+            let Some(mut record) = load_instance_record(&self.project_dir, &machine_id) else {
+                continue;
+            };
             let Some(old) = record.ssh_key_path.as_ref().map(PathBuf::from) else {
                 continue;
             };
@@ -1575,6 +1608,37 @@ mod tests {
             Some(external.to_str().unwrap())
         );
         drop(state);
+    }
+
+    /// A machine whose operation lock is held (a live session is driving it)
+    /// is skipped by key migration — rewriting its record from a snapshot
+    /// could revert that session's concurrent update.
+    #[test]
+    fn key_migration_skips_machines_locked_by_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = tempfile::tempdir().unwrap();
+        let machine_id = crate::ulid::new();
+
+        let old_key = instance_dir(dir.path(), &machine_id).join("id_ed25519");
+        std::fs::create_dir_all(old_key.parent().unwrap()).unwrap();
+        std::fs::write(&old_key, "held-key").unwrap();
+        {
+            let staging =
+                AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("staging"));
+            let inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
+            let mut record = inst.record();
+            record.ssh_key_path = Some(old_key.display().to_string());
+            staging.save_record(&machine_id, &record).unwrap();
+        }
+
+        let _held = try_operation_lock(dir.path(), &machine_id).unwrap();
+        let _state =
+            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("real"));
+        let record = load_instance_record(dir.path(), &machine_id).unwrap();
+        assert_eq!(
+            record.ssh_key_path.as_deref(),
+            Some(old_key.to_str().unwrap())
+        );
     }
 
     /// Terminate removes only that machine's managed key dir; the stable

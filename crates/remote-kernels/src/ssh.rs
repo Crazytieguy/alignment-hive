@@ -59,9 +59,11 @@ pub fn validate_private_key_file(key_path: &Path) -> anyhow::Result<()> {
             mode & 0o077 == 0,
             "SSH private key {} has mode {mode:o} (group/other-accessible), so OpenSSH \
              will refuse to use it. This usually means the file sits on a filesystem \
-             where permissions cannot be enforced — e.g. a WSL /mnt/c mount. Fix: move \
-             the project into the Linux filesystem, or remount the drive with the \
-             `metadata` option, then delete the key file so it is regenerated.",
+             that cannot enforce permissions — e.g. a WSL /mnt/c mount. Fix: remount \
+             the drive with the `metadata` option (or move the key to a Linux \
+             filesystem and update the record) and chmod 600 the file. Do NOT delete \
+             or regenerate the key — a machine that already uses it would become \
+             unreachable.",
             key_path.display(),
         );
     }
@@ -101,22 +103,38 @@ fn write_key_file(key_path: &Path, pem: &[u8], overwrite: bool) -> std::io::Resu
 /// registry). A destination that already holds the SAME bytes is success (a
 /// re-run migration or a concurrent session won the race); different bytes is
 /// an error — key material is never overwritten.
+///
+/// Crash-atomic: the bytes are staged in a private temp file (synced), then
+/// installed via `hard_link`, which never replaces an existing destination.
+/// A death at any point leaves either no destination or a complete one —
+/// never a partial key that would poison every later migration attempt.
 pub fn copy_key_file(src: &Path, dst: &Path) -> anyhow::Result<()> {
     let bytes = std::fs::read(src)?;
-    if let Some(dir) = dst.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    match write_key_file(dst, &bytes, false) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::ensure!(
-                std::fs::read(dst)? == bytes,
-                "destination {} already holds a different key",
-                dst.display()
-            );
+    let dir = dst
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("key destination {} has no parent", dst.display()))?;
+    std::fs::create_dir_all(dir)?;
+    if !dst.exists() {
+        let staging = dir.join(format!(".key-staging.{}", std::process::id()));
+        write_key_file(&staging, &bytes, true)?;
+        std::fs::File::open(&staging)?.sync_all()?;
+        let linked = std::fs::hard_link(&staging, dst);
+        let _ = std::fs::remove_file(&staging);
+        match linked {
+            Ok(()) => {
+                // Directory entry durable before the caller can persist a
+                // record pointing at it.
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => return Err(e.into()),
     }
+    anyhow::ensure!(
+        std::fs::read(dst)? == bytes,
+        "destination {} already holds a different key",
+        dst.display()
+    );
     validate_private_key_file(dst)
 }
 
