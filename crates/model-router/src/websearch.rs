@@ -202,6 +202,338 @@ pub fn links_from_alpha_results(results: &[Value]) -> Vec<Link> {
     links
 }
 
+/// Byte prefilter for the response tap: does this request declare Claude
+/// Code's client-side `WebSearch` tool? Keyed on the serialized `"name"`
+/// field (the harness emits compact JSON); false positives merely enable the
+/// passive tap, false negatives degrade to main-model-matched routing.
+#[must_use]
+pub fn declares_websearch_tool(body: &[u8]) -> bool {
+    memchr::memmem::find(body, b"\"name\":\"WebSearch\"").is_some()
+}
+
+/// Extracts the session id from a Messages request's top-level
+/// `metadata.user_id` (a JSON-encoded string). The `metadata` value is
+/// located with the DOM-free top-level scanner, so multi-megabyte main-loop
+/// bodies are never fully parsed and session-id-shaped text inside message
+/// content cannot spoof the key.
+#[must_use]
+pub fn session_id(body: &[u8]) -> Option<String> {
+    let range = crate::routing::find_top_level_value_range(body, "metadata")?;
+    let metadata = serde_json::from_slice::<Value>(&body[range]).ok()?;
+    let user_id = metadata.get("user_id")?.as_str()?;
+    let user_id = serde_json::from_str::<Value>(user_id).ok()?;
+    user_id.get("session_id")?.as_str().map(ToOwned::to_owned)
+}
+
+/// A `WebSearch` tool invocation observed in a model response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SniffedSearch {
+    pub query: String,
+    pub allowed_domains: Option<Vec<String>>,
+    pub blocked_domains: Option<Vec<String>>,
+}
+
+impl SniffedSearch {
+    fn from_input(input: &Value) -> Option<Self> {
+        let query = input.get("query")?.as_str()?.trim().to_string();
+        (!query.is_empty()).then(|| Self {
+            query,
+            allowed_domains: string_list(input.get("allowed_domains")),
+            blocked_domains: string_list(input.get("blocked_domains")),
+        })
+    }
+}
+
+/// Overall cap on bytes buffered per tapped response; overflowing disables
+/// sniffing for that response (forwarding is unaffected).
+const MAX_SNIFF_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+/// Cap on one accumulated `tool_use` input.
+const MAX_SNIFF_INPUT_BYTES: usize = 64 * 1024;
+
+/// Passive observer of a `/v1/messages` response, yielding `WebSearch` tool
+/// invocations as they complete. Feed the raw response bytes in arrival
+/// order; the caller must commit the yielded searches BEFORE forwarding the
+/// chunk that produced them (the client can act on the completing event the
+/// moment it sees it).
+pub struct ToolUseSniffer {
+    sse: bool,
+    buffer: Vec<u8>,
+    /// SSE: `content_block` index → accumulated `input_json_delta` fragments
+    /// for blocks named `WebSearch`.
+    pending_inputs: std::collections::HashMap<u64, String>,
+    disabled: bool,
+}
+
+impl ToolUseSniffer {
+    #[must_use]
+    pub fn new(sse: bool) -> Self {
+        Self {
+            sse,
+            buffer: Vec::new(),
+            pending_inputs: std::collections::HashMap::new(),
+            disabled: false,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<SniffedSearch> {
+        if self.disabled {
+            return Vec::new();
+        }
+        if self.buffer.len().saturating_add(chunk.len()) > MAX_SNIFF_BUFFER_BYTES {
+            self.disabled = true;
+            self.buffer = Vec::new();
+            self.pending_inputs.clear();
+            return Vec::new();
+        }
+        self.buffer.extend_from_slice(chunk);
+        if self.sse {
+            self.drain_sse_events()
+        } else {
+            self.try_parse_json()
+        }
+    }
+
+    fn drain_sse_events(&mut self) -> Vec<SniffedSearch> {
+        let mut found = Vec::new();
+        while let Some(event_end) = crate::usage::event_boundary(&self.buffer) {
+            let event = self.buffer.drain(..event_end).collect::<Vec<_>>();
+            let Ok(text) = std::str::from_utf8(&event) else {
+                continue;
+            };
+            let Some((_, data_range)) = crate::usage::event_fields(text) else {
+                continue;
+            };
+            let Ok(data) = serde_json::from_str::<Value>(&text[data_range]) else {
+                continue;
+            };
+            let index = data.get("index").and_then(Value::as_u64);
+            match data.get("type").and_then(Value::as_str) {
+                Some("content_block_start") => {
+                    let Some(block) = data.get("content_block") else {
+                        continue;
+                    };
+                    if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && block.get("name").and_then(Value::as_str) == Some("WebSearch")
+                        && let Some(index) = index
+                    {
+                        self.pending_inputs.insert(index, String::new());
+                    }
+                }
+                Some("content_block_delta") => {
+                    if let Some(index) = index
+                        && let Some(accumulated) = self.pending_inputs.get_mut(&index)
+                        && let Some(fragment) = data
+                            .get("delta")
+                            .filter(|delta| {
+                                delta.get("type").and_then(Value::as_str)
+                                    == Some("input_json_delta")
+                            })
+                            .and_then(|delta| delta.get("partial_json"))
+                            .and_then(Value::as_str)
+                    {
+                        if accumulated.len().saturating_add(fragment.len()) > MAX_SNIFF_INPUT_BYTES
+                        {
+                            self.pending_inputs.remove(&index);
+                        } else {
+                            accumulated.push_str(fragment);
+                        }
+                    }
+                }
+                Some("content_block_stop") => {
+                    if let Some(index) = index
+                        && let Some(accumulated) = self.pending_inputs.remove(&index)
+                        && let Ok(input) = serde_json::from_str::<Value>(&accumulated)
+                        && let Some(search) = SniffedSearch::from_input(&input)
+                    {
+                        found.push(search);
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    fn try_parse_json(&mut self) -> Vec<SniffedSearch> {
+        // Trailing whitespace after the closing brace is valid JSON framing.
+        let last_meaningful = self
+            .buffer
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        if last_meaningful != Some(&b'}') {
+            return Vec::new();
+        }
+        let Ok(document) = serde_json::from_slice::<Value>(&self.buffer) else {
+            return Vec::new();
+        };
+        self.disabled = true;
+        self.buffer = Vec::new();
+        let Some(content) = document.get("content").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        content
+            .iter()
+            .filter(|block| {
+                block.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && block.get("name").and_then(Value::as_str) == Some("WebSearch")
+            })
+            .filter_map(|block| block.get("input").and_then(SniffedSearch::from_input))
+            .collect()
+    }
+}
+
+/// Builds the normalized Anthropic-native request that answers a sub-call on
+/// behalf of a Claude-origin agent. Fields are allowlisted from the original
+/// body because its tuning fields (`output_config.effort`, `thinking`, ...)
+/// target the session's main-loop model and may be invalid for the origin
+/// model; `max_tokens` is clamped to a value every current Claude model
+/// accepts (search results fit comfortably), and streaming is disabled so
+/// the response can be buffered and re-framed.
+#[must_use]
+pub fn native_request_body(original: &[u8], origin_model: &str) -> Option<Vec<u8>> {
+    const MAX_NATIVE_OUTPUT_TOKENS: u64 = 8192;
+    let document = serde_json::from_slice::<Value>(original).ok()?;
+    let mut normalized = serde_json::Map::new();
+    normalized.insert("model".into(), json!(origin_model));
+    normalized.insert("stream".into(), json!(false));
+    for field in [
+        "max_tokens",
+        "messages",
+        "system",
+        "tools",
+        "tool_choice",
+        "metadata",
+    ] {
+        if let Some(value) = document.get(field) {
+            normalized.insert(field.into(), value.clone());
+        }
+    }
+    let max_tokens = normalized
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(MAX_NATIVE_OUTPUT_TOKENS)
+        .min(MAX_NATIVE_OUTPUT_TOKENS);
+    normalized.insert("max_tokens".into(), json!(max_tokens));
+    serde_json::to_vec(&Value::Object(normalized)).ok()
+}
+
+/// Which model asked for a pending web search.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Gpt { routing_id: String },
+    Claude { model: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PendingKey {
+    pub session_id: String,
+    pub query: String,
+    pub allowed_domains: Vec<String>,
+    pub blocked_domains: Vec<String>,
+}
+
+impl PendingKey {
+    #[must_use]
+    pub fn new(
+        session_id: String,
+        query: &str,
+        allowed_domains: Option<&[String]>,
+        blocked_domains: Option<&[String]>,
+    ) -> Self {
+        fn canonical(domains: Option<&[String]>) -> Vec<String> {
+            let mut domains = domains
+                .unwrap_or_default()
+                .iter()
+                .map(|domain| domain.to_lowercase())
+                .collect::<Vec<_>>();
+            domains.sort();
+            domains
+        }
+        Self {
+            session_id,
+            query: query.trim().to_string(),
+            allowed_domains: canonical(allowed_domains),
+            blocked_domains: canonical(blocked_domains),
+        }
+    }
+}
+
+/// Entries expire after this long; the harness issues the sub-call within
+/// seconds of the `tool_use` reaching it.
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_mins(2);
+/// Total queued entries across all keys; oldest dropped first.
+const MAX_PENDING_TOTAL: usize = 256;
+
+struct PendingEntry {
+    origin: Origin,
+    inserted: std::time::Instant,
+}
+
+/// Observed-but-not-yet-consumed `WebSearch` invocations, keyed by session,
+/// query, and domain filters. Same-key entries queue FIFO so concurrent
+/// identical queries degrade to an ordering heuristic instead of losing
+/// entries.
+#[derive(Default)]
+pub struct PendingSearches {
+    inner: std::sync::Mutex<
+        std::collections::HashMap<PendingKey, std::collections::VecDeque<PendingEntry>>,
+    >,
+}
+
+impl PendingSearches {
+    pub fn insert(&self, key: PendingKey, origin: Origin) {
+        let now = std::time::Instant::now();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.retain(|_, queue| {
+            queue.retain(|entry| now.duration_since(entry.inserted) < PENDING_TTL);
+            !queue.is_empty()
+        });
+        let total: usize = inner.values().map(std::collections::VecDeque::len).sum();
+        if total >= MAX_PENDING_TOTAL {
+            // Drop the globally oldest entry.
+            if let Some(oldest_key) = inner
+                .iter()
+                .filter_map(|(key, queue)| queue.front().map(|entry| (key, entry.inserted)))
+                .min_by_key(|(_, inserted)| *inserted)
+                .map(|(key, _)| key.clone())
+                && let Some(queue) = inner.get_mut(&oldest_key)
+            {
+                queue.pop_front();
+                if queue.is_empty() {
+                    inner.remove(&oldest_key);
+                }
+            }
+        }
+        inner.entry(key).or_default().push_back(PendingEntry {
+            origin,
+            inserted: now,
+        });
+    }
+
+    pub fn consume(&self, key: &PendingKey) -> Option<Origin> {
+        let now = std::time::Instant::now();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queue = inner.get_mut(key)?;
+        while let Some(entry) = queue.pop_front() {
+            if now.duration_since(entry.inserted) < PENDING_TTL {
+                if queue.is_empty() {
+                    inner.remove(key);
+                }
+                return Some(entry.origin);
+            }
+        }
+        inner.remove(key);
+        None
+    }
+}
+
 /// Strips the search backend's private-use citation markers
 /// (`U+E200 … U+E201`, with `U+E202` separators) and `[wordlim: N]`
 /// annotations from rendered search output, and truncates on a char
@@ -719,5 +1051,198 @@ mod tests {
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(body.contains("input_json_delta"));
         assert!(body.contains("web_search_tool_result"));
+    }
+
+    #[test]
+    fn session_id_is_read_from_top_level_metadata() {
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "metadata": {"user_id":
+                "{\"device_id\":\"abc\",\"session_id\":\"8c259a6a-fc88-47d0\"}"},
+            "messages": [],
+        })
+        .to_string();
+        assert_eq!(
+            session_id(body.as_bytes()).as_deref(),
+            Some("8c259a6a-fc88-47d0")
+        );
+        assert_eq!(session_id(b"{\"messages\":[]}"), None);
+    }
+
+    #[test]
+    fn session_id_ignores_decoys_in_message_content_even_in_large_bodies() {
+        // A session inspecting router captures can carry serialized metadata
+        // inside message text; only the genuine top-level metadata counts.
+        let decoy = "here is a capture: {\\\"user_id\\\": \\\"{\\\\\\\"session_id\\\\\\\":\\\\\\\"decoy-session\\\\\\\"}\\\"}";
+        let padding = "x".repeat(300 * 1024);
+        let body = format!(
+            "{{\"model\":\"gpt-5.6-sol\",\"messages\":[{{\"role\":\"user\",\"content\":\"{decoy} {padding}\"}}],\"metadata\":{{\"user_id\":\"{{\\\"session_id\\\":\\\"real-session\\\"}}\"}}}}"
+        );
+        // Sanity: the decoy pattern appears before the real metadata.
+        assert!(body.contains("decoy-session"));
+        assert!(body.len() > 300 * 1024);
+        assert_eq!(session_id(body.as_bytes()).as_deref(), Some("real-session"));
+    }
+
+    #[test]
+    fn declares_websearch_tool_matches_compact_tool_entries() {
+        assert!(declares_websearch_tool(
+            br#"{"tools":[{"name":"WebSearch","input_schema":{}}]}"#
+        ));
+        assert!(!declares_websearch_tool(
+            br#"{"tools":[{"name":"Read"}],"messages":[{"content":"WebSearch is a tool"}]}"#
+        ));
+    }
+
+    fn sse_event(data: &Value) -> String {
+        format!("event: x\ndata: {data}\n\n")
+    }
+
+    #[test]
+    fn sniffer_accumulates_split_sse_deltas_and_ignores_other_tools() {
+        let events = [
+            sse_event(&json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"t1","name":"WebSearch","input":{}}})),
+            sse_event(&json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\"query\":\"ru"}})),
+            sse_event(&json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"st axum\"}"}})),
+            sse_event(&json!({"type":"content_block_start","index":1,
+                "content_block":{"type":"tool_use","id":"t2","name":"Bash","input":{}}})),
+            sse_event(&json!({"type":"content_block_delta","index":1,
+                "delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls\"}"}})),
+            sse_event(&json!({"type":"content_block_stop","index":1})),
+            sse_event(&json!({"type":"content_block_stop","index":0})),
+        ]
+        .concat();
+        // Feed in 7-byte chunks to exercise event reassembly across chunk
+        // boundaries.
+        let mut sniffer = ToolUseSniffer::new(true);
+        let mut found = Vec::new();
+        for chunk in events.as_bytes().chunks(7) {
+            found.extend(sniffer.push(chunk));
+        }
+        assert_eq!(
+            found,
+            vec![SniffedSearch {
+                query: "rust axum".into(),
+                allowed_domains: None,
+                blocked_domains: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn sniffer_reads_non_streaming_json_bodies_once() {
+        let body = json!({
+            "type": "message",
+            "content": [
+                {"type": "text", "text": "searching"},
+                {"type": "tool_use", "id": "t1", "name": "WebSearch",
+                 "input": {"query": "bun release", "allowed_domains": ["bun.sh"]}},
+            ],
+        })
+        .to_string();
+        let mut sniffer = ToolUseSniffer::new(false);
+        let (first, second) = body.as_bytes().split_at(body.len() / 2);
+        assert_eq!(sniffer.push(first), vec![]);
+        let found = sniffer.push(second);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].query, "bun release");
+        assert_eq!(
+            found[0].allowed_domains.as_deref(),
+            Some(&["bun.sh".to_string()][..])
+        );
+        // A second complete document is not re-parsed.
+        assert_eq!(sniffer.push(body.as_bytes()), vec![]);
+    }
+
+    #[test]
+    fn sniffer_accepts_json_bodies_with_trailing_whitespace() {
+        let body = json!({
+            "type": "message",
+            "content": [{"type": "tool_use", "id": "t1", "name": "WebSearch",
+                         "input": {"query": "bun release"}}],
+        })
+        .to_string()
+            + "\r\n";
+        let mut sniffer = ToolUseSniffer::new(false);
+        let found = sniffer.push(body.as_bytes());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].query, "bun release");
+    }
+
+    #[test]
+    fn sniffer_disables_itself_on_oversized_buffers() {
+        let mut sniffer = ToolUseSniffer::new(true);
+        let big = vec![b'x'; MAX_SNIFF_BUFFER_BYTES + 1];
+        assert_eq!(sniffer.push(&big), vec![]);
+        // Later well-formed events are ignored once disabled.
+        let event = sse_event(&json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"tool_use","id":"t","name":"WebSearch","input":{}}}));
+        assert_eq!(sniffer.push(event.as_bytes()), vec![]);
+    }
+
+    #[test]
+    fn pending_searches_queue_fifo_and_expire() {
+        let pending = PendingSearches::default();
+        let key = PendingKey::new("session".into(), " q ", None, None);
+        assert_eq!(key.query, "q");
+        pending.insert(
+            key.clone(),
+            Origin::Claude {
+                model: "haiku".into(),
+            },
+        );
+        pending.insert(
+            key.clone(),
+            Origin::Gpt {
+                routing_id: "gpt-5.6-sol".into(),
+            },
+        );
+        assert_eq!(
+            pending.consume(&key),
+            Some(Origin::Claude {
+                model: "haiku".into()
+            })
+        );
+        assert_eq!(
+            pending.consume(&key),
+            Some(Origin::Gpt {
+                routing_id: "gpt-5.6-sol".into()
+            })
+        );
+        assert_eq!(pending.consume(&key), None);
+    }
+
+    #[test]
+    fn pending_key_canonicalizes_domains() {
+        let a = PendingKey::new(
+            "s".into(),
+            "q",
+            Some(&["B.com".into(), "a.com".into()]),
+            None,
+        );
+        let b = PendingKey::new(
+            "s".into(),
+            "q",
+            Some(&["a.com".into(), "b.com".into()]),
+            None,
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pending_searches_enforce_the_total_cap() {
+        let pending = PendingSearches::default();
+        for i in 0..=MAX_PENDING_TOTAL {
+            let key = PendingKey::new("s".into(), &format!("q{i}"), None, None);
+            pending.insert(key, Origin::Claude { model: "m".into() });
+        }
+        // The oldest entry (q0) was evicted to admit the newest.
+        let oldest = PendingKey::new("s".into(), "q0", None, None);
+        assert_eq!(pending.consume(&oldest), None);
+        let newest = PendingKey::new("s".into(), &format!("q{MAX_PENDING_TOTAL}"), None, None);
+        assert!(pending.consume(&newest).is_some());
     }
 }

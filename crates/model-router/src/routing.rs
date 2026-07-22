@@ -68,8 +68,19 @@ pub fn substitute_model(body: &[u8], upstream_model: &str) -> anyhow::Result<Vec
 }
 
 fn find_top_level_model_range(body: &[u8]) -> Option<Range<usize>> {
+    // For a string value the raw token range IS the encoded string range;
+    // a non-string model value yields no range, as before.
+    let range = find_top_level_value_range(body, "model")?;
+    serde_json::from_slice::<String>(&body[range.clone()]).ok()?;
+    Some(range)
+}
+
+/// Byte range of the raw top-level value for `target_key` (any JSON type),
+/// using the same DOM-free skipping scan — and last-key-wins semantics — as
+/// the model lookup.
+pub(crate) fn find_top_level_value_range(body: &[u8], target_key: &str) -> Option<Range<usize>> {
     let mut cursor = skip_whitespace(body, 0);
-    let mut model_range = None;
+    let mut found_range = None;
     if body.get(cursor) != Some(&b'{') {
         return None;
     }
@@ -78,7 +89,7 @@ fn find_top_level_model_range(body: &[u8]) -> Option<Range<usize>> {
     loop {
         cursor = skip_whitespace(body, cursor);
         if body.get(cursor) == Some(&b'}') {
-            return model_range;
+            return found_range;
         }
 
         let key_start = cursor;
@@ -91,15 +102,14 @@ fn find_top_level_model_range(body: &[u8]) -> Option<Range<usize>> {
         let value_start = cursor;
 
         let (_, value_len) = parse_one::<IgnoredAny>(&body[value_start..])?;
-        if key == "model" {
-            model_range = parse_one::<String>(&body[value_start..])
-                .map(|(_, string_len)| value_start..value_start + string_len);
+        if key == target_key {
+            found_range = Some(value_start..value_start + value_len);
         }
         cursor = skip_whitespace(body, value_start + value_len);
         if body.get(cursor) == Some(&b',') {
             cursor += 1;
         } else if body.get(cursor) == Some(&b'}') {
-            return model_range;
+            return found_range;
         } else {
             return None;
         }

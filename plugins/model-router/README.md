@@ -33,7 +33,10 @@ present themselves as Claude.
 - Working WebSearch on GPT sessions: Claude Code's WebSearch runs a side
   LLM call that loses its links through the Codex translation (and takes
   20–70s). The gateway answers it from the Codex search backend instead —
-  structured links in ~1–3s (`[web-search]` in the config to opt out).
+  structured links in ~1–3s (`[web-search]` in the config to opt out). The
+  backend follows whichever agent asked: a GPT subagent's search uses the
+  Codex backend even under a Claude main session, and a Claude subagent's
+  search stays on Anthropic even under a GPT main session.
 - An OS service (launchd/systemd user unit) that keeps the router alive.
   macOS and Linux only.
 

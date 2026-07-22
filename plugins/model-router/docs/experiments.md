@@ -333,3 +333,31 @@ registration skip for first-seen directories (f14896e).
   ~2s; identical query on the passthrough router returned "No links found."
   after 20–70s. `/v1/alpha/search` is an undocumented endpoint — retest on
   Codex/CLIProxyAPI upgrades.
+
+## Origin-matched WebSearch backend (2026-07-22, follow-up on the above)
+
+- The sub-call always runs on the session's **main-loop model** even when a
+  subagent invoked WebSearch (verified by capture: gpt-5.6-sol subagent under
+  a haiku main produced a Claude-branch sub-call on haiku). The sub-call
+  carries `cc_is_subagent=true` in its billing-header block but nothing
+  identifying the requesting agent's model.
+- The router therefore correlates: it passively taps `/v1/messages` responses
+  of requests that declare the client `WebSearch` tool, watches for the
+  `WebSearch` tool_use (SSE `input_json_delta` accumulation), and records
+  `(session_id, query, domains) → origin model` before the completing event
+  reaches the client. The follow-up sub-call consumes the entry and routes to
+  the origin-matched backend: GPT origin → `alpha/search` (or the LLM+scrape
+  path in `scrape` mode), Claude origin → Anthropic native.
+- Claude-origin sub-calls arriving on the GPT branch are re-issued to
+  Anthropic as a **normalized** request (allowlisted fields, origin model,
+  `max_tokens` clamped, main-model tuning fields like `output_config`
+  dropped, inbound OAuth + `anthropic-beta` preserved, no identity block),
+  buffered non-streaming and re-framed. 400/401/403/404 from Anthropic are
+  surfaced unchanged; transport/5xx failures fall back to the GPT path.
+- Correlation is heuristic: identical concurrent queries in one session
+  consume FIFO; a miss (TTL 120s, restart, main-loop search) degrades to the
+  previous main-model-matched behavior.
+- Live e2e (2026-07-22): haiku main + gpt-5.6-sol subagent → subagent's
+  search answered from `alpha/search`; gpt-5.6-sol main + haiku subagent →
+  subagent's search answered by Anthropic native with a populated Links
+  array. Both verified in router logs and session transcripts.

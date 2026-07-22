@@ -801,3 +801,659 @@ async fn websearch_falls_back_to_buffered_llm_call_with_scraped_links() {
         "Bearer gateway-secret"
     );
 }
+
+// ---- origin-matched backend routing ----
+
+const SESSION_METADATA: &str =
+    "{\"device_id\":\"d\",\"account_uuid\":\"a\",\"session_id\":\"sess-1\"}";
+
+/// A main-loop-shaped request declaring the client WebSearch tool.
+fn websearch_declaring_body(model: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "max_tokens": 8192,
+        "stream": true,
+        "metadata": {"user_id": SESSION_METADATA},
+        "messages": [{"role": "user", "content": "find bun release notes"}],
+        "tools": [{"name": "WebSearch", "description": "Search the web",
+                   "input_schema": {"type": "object"}},
+                  {"name": "Bash", "description": "Run a command",
+                   "input_schema": {"type": "object"}}],
+    })
+    .to_string()
+}
+
+/// The sub-call the harness issues after a WebSearch tool_use, on the main
+/// model. Includes main-model tuning fields to exercise normalization.
+fn origin_subcall_body(main_model: &str) -> String {
+    serde_json::json!({
+        "model": main_model,
+        "max_tokens": 32000,
+        "stream": true,
+        "output_config": {"effort": "medium"},
+        "metadata": {"user_id": SESSION_METADATA},
+        "messages": [{"role": "user",
+            "content": [{"type": "text",
+                "text": "Perform a web search for the query: bun release notes"}]}],
+        "system": [{"type": "text", "text": "You are an assistant for performing a web search tool use"}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+        "tool_choice": {"type": "auto"},
+    })
+    .to_string()
+}
+
+/// SSE events for a response whose model calls the WebSearch tool.
+fn websearch_tool_use_sse() -> Vec<Bytes> {
+    [
+        serde_json::json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"tool_use","id":"toolu_1","name":"WebSearch","input":{}}}),
+        serde_json::json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"input_json_delta",
+                     "partial_json":"{\"query\":\"bun release notes\"}"}}),
+        serde_json::json!({"type":"content_block_stop","index":0}),
+    ]
+    .iter()
+    .map(|data| Bytes::from(format!("event: x\ndata: {data}\n\n")))
+    .collect()
+}
+
+fn sse_response(chunks: Vec<Bytes>, hold_open: bool) -> Response {
+    let stream = futures_util::stream::iter(
+        chunks
+            .into_iter()
+            .map(Ok::<Bytes, std::convert::Infallible>),
+    );
+    let body = if hold_open {
+        Body::from_stream(stream.chain(futures_util::stream::pending()))
+    } else {
+        Body::from_stream(stream)
+    };
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        "content-type",
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    response
+}
+
+fn alpha_results_response() -> Response {
+    Response::new(Body::from(
+        serde_json::json!({
+            "output": "Bun releases (https://bun.sh/blog)\nsnippets",
+            "results": [{"type": "text_result", "title": "Bun releases",
+                         "url": "https://bun.sh/blog", "domain": "bun.sh"}],
+        })
+        .to_string(),
+    ))
+}
+
+/// Reads the client-visible body stream until `marker` appears; panics after
+/// too many chunks. Returns without consuming the rest of the stream.
+async fn read_until(body: &mut axum::body::BodyDataStream, marker: &str) {
+    let mut seen = String::new();
+    for _ in 0..64 {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stream chunk should arrive")
+            .expect("stream should not end before the marker")
+            .expect("stream chunk should be Ok");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+        if seen.contains(marker) {
+            return;
+        }
+    }
+    panic!("marker {marker:?} not found in stream");
+}
+
+/// Claude main + GPT subagent: the WebSearch tool_use is observed on the GPT
+/// branch, and the follow-up sub-call — arriving on the CLAUDE branch with
+/// the main model — is answered from alpha/search. Structured as an ordering
+/// race: the GPT response stream is held open and the sub-call is sent the
+/// moment the client sees the completing event.
+#[tokio::test]
+async fn gpt_origin_subcall_on_claude_branch_is_answered_from_alpha() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/alpha/search" => alpha_results_response(),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+
+    // GPT subagent turn: response streams the WebSearch tool_use, then stays
+    // open (the model may keep generating).
+    let gpt_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gpt_turn.status(), StatusCode::OK);
+    let mut gpt_stream = gpt_turn.into_body().into_data_stream();
+    read_until(&mut gpt_stream, "content_block_stop").await;
+
+    // The harness reacts immediately: the sub-call arrives on the Claude
+    // branch (main model) while the GPT stream is still open.
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body("claude-sonnet-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains(r#""type":"web_search_tool_result""#));
+    assert!(body.contains("https://bun.sh/blog"));
+
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+    let cpa_requests = cpa_observed.lock().await;
+    assert_eq!(
+        cpa_requests
+            .iter()
+            .map(|request| request.uri.as_str())
+            .collect::<Vec<_>>(),
+        ["/v1/messages", "/v1/alpha/search"]
+    );
+}
+
+/// GPT main + Claude subagent: the WebSearch tool_use is observed on the
+/// Claude branch, and the sub-call — arriving on the GPT branch with the
+/// main (GPT) model — is forwarded to Anthropic as a normalized request for
+/// the origin Claude model.
+#[tokio::test]
+async fn claude_origin_subcall_on_gpt_branch_goes_to_anthropic_native() {
+    fn anthropic(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        assert_eq!(parts.uri.path(), "/v1/messages");
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            // The Claude subagent's own turn: stream a WebSearch tool_use.
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        // The redirected sub-call: assert normalization.
+        assert_eq!(document["model"], "claude-haiku-4-5");
+        assert_eq!(document["stream"], false);
+        assert_eq!(document["max_tokens"], 8192, "max_tokens must be clamped");
+        assert!(
+            document.get("output_config").is_none(),
+            "tuning fields must be dropped"
+        );
+        assert!(
+            !body_contains(body, "GPT Test"),
+            "identity block must not reach Anthropic"
+        );
+        assert_eq!(parts.headers["authorization"], "Bearer user-oauth");
+        assert_eq!(parts.headers["anthropic-beta"], "oauth-2025-04-20");
+        Response::new(Body::from(
+            serde_json::json!({
+                "id": "msg_native", "type": "message", "role": "assistant",
+                "model": "claude-haiku-4-5", "stop_reason": "end_turn",
+                "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_n", "name": "web_search",
+                     "input": {"query": "bun release notes"}},
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_n",
+                     "content": [{"type": "web_search_result", "title": "Bun releases",
+                                  "url": "https://bun.sh/blog"}]},
+                ],
+                "usage": {"input_tokens": 100, "output_tokens": 200},
+            })
+            .to_string(),
+        ))
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!(
+            "the GPT upstream must not be called, got {}",
+            parts.uri.path()
+        );
+    }
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+
+    // Claude subagent turn (Claude branch): emits the WebSearch tool_use.
+    let claude_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer user-oauth")
+                .body(Body::from(websearch_declaring_body("claude-haiku-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    to_bytes(claude_turn.into_body(), usize::MAX).await.unwrap();
+
+    // The sub-call arrives on the GPT branch (main model is GPT).
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer user-oauth")
+                .header("anthropic-beta", "oauth-2025-04-20")
+                .body(Body::from(origin_subcall_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    assert_eq!(subcall.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains(r#""type":"web_search_tool_result""#));
+    assert!(body.contains("https://bun.sh/blog"));
+
+    assert_eq!(cpa_observed.lock().await.len(), 0);
+    assert_eq!(anthropic_observed.lock().await.len(), 2);
+}
+
+fn body_contains(body: &Bytes, needle: &str) -> bool {
+    String::from_utf8_lossy(body).contains(needle)
+}
+
+/// Anthropic caller-error statuses on the native redirect are surfaced, not
+/// hidden behind a silent provider switch.
+#[tokio::test]
+async fn claude_origin_auth_errors_are_surfaced_not_fallen_back() {
+    fn anthropic(_parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        let mut response = Response::new(Body::from(
+            r#"{"type":"error","error":{"type":"authentication_error","message":"bad token"}}"#,
+        ));
+        *response.status_mut() = StatusCode::UNAUTHORIZED;
+        response
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!(
+            "the GPT upstream must not be called, got {}",
+            parts.uri.path()
+        );
+    }
+    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let claude_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-haiku-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    to_bytes(claude_turn.into_body(), usize::MAX).await.unwrap();
+
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::UNAUTHORIZED);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("authentication_error"));
+    assert_eq!(cpa_observed.lock().await.len(), 0);
+}
+
+/// A transient Anthropic failure on the native redirect falls back to the
+/// GPT path (alpha) — nothing has been streamed yet, so the switch is
+/// lossless.
+#[tokio::test]
+async fn claude_origin_falls_back_to_gpt_path_on_transient_anthropic_failure() {
+    fn anthropic(_parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        let mut response = Response::new(Body::from("overloaded"));
+        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+        response
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/alpha/search" => alpha_results_response(),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let claude_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-haiku-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    to_bytes(claude_turn.into_body(), usize::MAX).await.unwrap();
+
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("https://bun.sh/blog"));
+    // The Claude turn, then the failed native redirect.
+    assert_eq!(anthropic_observed.lock().await.len(), 2);
+    assert_eq!(
+        cpa_observed
+            .lock()
+            .await
+            .iter()
+            .map(|request| request.uri.as_str())
+            .collect::<Vec<_>>(),
+        ["/v1/alpha/search"]
+    );
+}
+
+/// `off` mode disables tapping and interception on both branches.
+#[tokio::test]
+async fn off_mode_passes_subcalls_through_unchanged() {
+    fn upstream(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        assert_eq!(parts.uri.path(), "/v1/messages");
+        Response::new(Body::from(
+            r#"{"id":"msg","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))
+    }
+    let Some((address, observed)) = spawn_fake(upstream).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{address}"),
+        web_search: model_router::config::WebSearchConfig {
+            mode: model_router::config::WebSearchMode::Off,
+        },
+        ..websearch_config(address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    // A GPT-branch sub-call is forwarded to the GPT upstream untouched
+    // (no alpha call), and a Claude-branch sub-call passes through.
+    for model in ["claude-gpt-test", "claude-sonnet-4-5"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(origin_subcall_body(model)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    }
+    let observed = observed.lock().await;
+    assert_eq!(observed.len(), 2);
+    assert!(observed.iter().all(|request| request.uri == "/v1/messages"));
+}
+
+/// The Anthropic-native redirect needs no GPT upstream: it must work even
+/// while the managed upstream is unavailable.
+#[tokio::test]
+async fn claude_origin_native_works_without_a_gpt_upstream() {
+    fn anthropic(_parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        assert_eq!(document["model"], "claude-haiku-4-5");
+        Response::new(Body::from(
+            serde_json::json!({
+                "id": "msg_native", "type": "message", "role": "assistant",
+                "model": "claude-haiku-4-5", "stop_reason": "end_turn",
+                "content": [{"type": "web_search_tool_result", "tool_use_id": "s",
+                             "content": [{"type": "web_search_result", "title": "Bun",
+                                          "url": "https://bun.sh/blog"}]}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            })
+            .to_string(),
+        ))
+    }
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    // Default upstreams = managed mode; `app()` provides no managed handle,
+    // so the GPT target is ManagedUnavailable.
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+        }],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let claude_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-haiku-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    to_bytes(claude_turn.into_body(), usize::MAX).await.unwrap();
+
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("https://bun.sh/blog"));
+    assert_eq!(anthropic_observed.lock().await.len(), 2);
+}
+
+/// A complete 200 whose body is not an Anthropic message (e.g. an
+/// intermediary's HTML error page) is a protocol defect, surfaced rather
+/// than silently re-routed to the GPT backend.
+#[tokio::test]
+async fn claude_origin_malformed_200_is_surfaced() {
+    fn anthropic(_parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        Response::new(Body::from("<html>intermediary error page</html>"))
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!(
+            "the GPT upstream must not be called, got {}",
+            parts.uri.path()
+        );
+    }
+    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let claude_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-haiku-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    to_bytes(claude_turn.into_body(), usize::MAX).await.unwrap();
+
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("intermediary error page"));
+    assert_eq!(cpa_observed.lock().await.len(), 0);
+}
+
+/// Non-transient statuses outside the happy path — not just auth errors —
+/// are surfaced rather than hidden behind a provider switch.
+#[tokio::test]
+async fn claude_origin_unlisted_client_errors_are_surfaced() {
+    fn anthropic(_parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        let mut response = Response::new(Body::from(
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"unprocessable"}}"#,
+        ));
+        *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+        response
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!(
+            "the GPT upstream must not be called, got {}",
+            parts.uri.path()
+        );
+    }
+    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let claude_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-haiku-4-5")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    to_bytes(claude_turn.into_body(), usize::MAX).await.unwrap();
+
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("unprocessable"));
+    assert_eq!(cpa_observed.lock().await.len(), 0);
+}

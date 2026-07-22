@@ -611,12 +611,14 @@ impl Config {
 # any [[models]] entry replaces the whole default list.
 {models}
 # Claude Code implements its WebSearch tool as a side call that runs the
-# server-side web_search tool on the session model. On the GPT branch the
-# router answers that call from the Codex search backend (/v1/alpha/search)
-# in a few seconds with structured links — "alpha", the default. "scrape"
-# forwards to the LLM upstream and recovers links from the response text
-# (also the automatic fallback when the alpha call fails). "off" passes the
-# sub-call through untouched (slow, and Claude Code shows "No links found.").
+# server-side web_search tool on the session model. The router matches the
+# search backend to the agent that asked: GPT-origin searches are answered
+# from the Codex search backend (/v1/alpha/search) in a few seconds with
+# structured links, Claude-origin searches stay on Anthropic — that is
+# "alpha", the default. "scrape" answers GPT-origin searches through the LLM
+# upstream and recovers links from the response text (also the automatic
+# fallback when the alpha call fails). "off" disables all of it (GPT-session
+# searches become slow and Claude Code shows "No links found.").
 #[web-search]
 # Default: "alpha"
 #mode = "alpha"

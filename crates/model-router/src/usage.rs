@@ -105,7 +105,7 @@ impl SseUsageTransformer {
     }
 }
 
-fn event_boundary(buffer: &[u8]) -> Option<usize> {
+pub(crate) fn event_boundary(buffer: &[u8]) -> Option<usize> {
     (0..buffer.len()).find_map(|index| {
         if buffer[index..].starts_with(b"\r\n\r\n") {
             Some(index + 4)
@@ -163,7 +163,7 @@ fn transform_event(event: Vec<u8>, estimated_input_tokens: u64) -> Vec<u8> {
     rewritten
 }
 
-fn event_fields(event: &str) -> Option<(&str, std::ops::Range<usize>)> {
+pub(crate) fn event_fields(event: &str) -> Option<(&str, std::ops::Range<usize>)> {
     let mut event_name = None;
     let mut data_range = None;
     let mut offset = 0;

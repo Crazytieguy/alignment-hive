@@ -32,6 +32,18 @@ struct AppState {
     client: reqwest::Client,
     capture: Option<CaptureSink>,
     cliproxy_upstream: CliproxyUpstream,
+    /// `WebSearch` invocations observed in model responses, awaiting their
+    /// side calls (origin-matched backend routing).
+    pending_searches: Arc<websearch::PendingSearches>,
+}
+
+/// Passive response tap: watches a forwarded `/v1/messages` response for
+/// `WebSearch` `tool_use` blocks and records who asked, so the follow-up
+/// sub-call can be routed to the matching backend.
+struct SniffTap {
+    pending: Arc<websearch::PendingSearches>,
+    session_id: String,
+    origin: websearch::Origin,
 }
 
 #[derive(Clone)]
@@ -98,6 +110,24 @@ impl AppState {
             client,
             capture,
             cliproxy_upstream,
+            pending_searches: Arc::new(websearch::PendingSearches::default()),
+        })
+    }
+
+    /// Builds the response tap for a `/v1/messages` request when the
+    /// web-search feature is on and the request declares the client
+    /// `WebSearch` tool (cheap byte prefilter; a false positive merely arms
+    /// the passive tap).
+    fn websearch_tap(&self, body: &[u8], origin: websearch::Origin) -> Option<SniffTap> {
+        if self.config.web_search.mode == WebSearchMode::Off
+            || !websearch::declares_websearch_tool(body)
+        {
+            return None;
+        }
+        Some(SniffTap {
+            pending: self.pending_searches.clone(),
+            session_id: websearch::session_id(body)?,
+            origin,
         })
     }
 }
@@ -287,24 +317,161 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
     }
 
     match decision.branch {
-        Branch::Claude => {
-            forward(
-                &state,
-                &state.config.anthropic_upstream_base,
-                &parts.method,
-                &parts.uri,
-                &parts.headers,
-                body,
-                false,
-                false,
-                None,
-                None,
-                capture,
-            )
-            .await
-        }
+        Branch::Claude => claude_response(&state, &parts, body, &decision, capture).await,
         Branch::Gpt => gpt_response(&state, &parts, body, &decision, capture).await,
     }
+}
+
+async fn claude_response(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: Bytes,
+    decision: &RoutingDecision<'_>,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let is_messages_post = parts.method == Method::POST && parts.uri.path() == "/v1/messages";
+    let mut tap = None;
+    if state.config.web_search.mode != WebSearchMode::Off && is_messages_post {
+        if let Some(subcall) = websearch::detect(&body) {
+            let origin = websearch::session_id(&body).and_then(|session_id| {
+                state.pending_searches.consume(&websearch::PendingKey::new(
+                    session_id,
+                    &subcall.query,
+                    subcall.allowed_domains.as_deref(),
+                    subcall.blocked_domains.as_deref(),
+                ))
+            });
+            if let Some(websearch::Origin::Gpt { routing_id }) = origin {
+                return gpt_origin_on_claude_branch(
+                    state,
+                    parts,
+                    body,
+                    &routing_id,
+                    &subcall,
+                    capture,
+                )
+                .await;
+            }
+            // Claude origin or no observation: native passthrough below.
+        } else if let Some(model) = decision.model.clone() {
+            tap = state.websearch_tap(&body, websearch::Origin::Claude { model });
+        }
+    }
+    forward(
+        state,
+        &state.config.anthropic_upstream_base,
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+        body,
+        false,
+        false,
+        None,
+        None,
+        capture,
+        tap,
+    )
+    .await
+}
+
+/// A sub-call arriving on the Claude branch whose `WebSearch` was invoked by a
+/// GPT agent: answer from the matching backend. `alpha` mode asks the Codex
+/// search backend; `scrape` mode runs the buffered GPT LLM + link-scraping
+/// path through the origin's route. Every failure falls back to the native
+/// Anthropic passthrough (available and better than nothing).
+async fn gpt_origin_on_claude_branch(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: Bytes,
+    routing_id: &str,
+    subcall: &websearch::Subcall,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let route = state
+        .config
+        .effective_models()
+        .find(|route| route.routing_id == routing_id);
+    let target = gpt_forward_target(&state.cliproxy_upstream);
+    if let (Some(route), Some((base_url, credential))) = (route, target) {
+        match state.config.web_search.mode {
+            WebSearchMode::Alpha => {
+                match alpha_search(
+                    state,
+                    &base_url,
+                    credential.as_ref(),
+                    &route.upstream_model,
+                    subcall,
+                )
+                .await
+                {
+                    Ok((links, output)) => {
+                        tracing::info!(
+                            links = links.len(),
+                            origin = routing_id,
+                            "answered GPT-origin web search from alpha/search"
+                        );
+                        let message = websearch::synthesize_message(
+                            &route.routing_id,
+                            subcall,
+                            &links,
+                            &output,
+                            estimate_input_tokens(&body),
+                        );
+                        return message_response(state, &message, subcall.stream, capture).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "alpha web search failed; passing the sub-call through to Anthropic");
+                    }
+                }
+            }
+            WebSearchMode::Scrape => match substitute_model(&body, &route.upstream_model) {
+                Ok(rewritten) => {
+                    match legacy_websearch(
+                        state,
+                        parts,
+                        &Bytes::from(rewritten),
+                        &base_url,
+                        credential.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(mut message) => {
+                            let filled = websearch::fill_empty_web_search_results(&mut message);
+                            tracing::info!(
+                                filled,
+                                origin = routing_id,
+                                "scraped links into the GPT-origin web search response"
+                            );
+                            return message_response(state, &message, subcall.stream, capture)
+                                .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "GPT web search forward failed; passing the sub-call through to Anthropic");
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to rewrite sub-call model; passing through to Anthropic");
+                }
+            },
+            WebSearchMode::Off => {}
+        }
+    }
+    forward(
+        state,
+        &state.config.anthropic_upstream_base,
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+        body,
+        false,
+        false,
+        None,
+        None,
+        capture,
+        None,
+    )
+    .await
 }
 
 async fn gpt_response(
@@ -350,24 +517,60 @@ async fn gpt_response(
     if state.config.web_search.mode != WebSearchMode::Off
         && parts.method == Method::POST
         && parts.uri.path() == "/v1/messages"
-        && let Some((base_url, credential)) = gpt_forward_target(&state.cliproxy_upstream)
         && let Some(subcall) = websearch::detect(&rewritten)
     {
-        return websearch_response(
+        let origin = websearch::session_id(&rewritten).and_then(|session_id| {
+            state.pending_searches.consume(&websearch::PendingKey::new(
+                session_id,
+                &subcall.query,
+                subcall.allowed_domains.as_deref(),
+                subcall.blocked_domains.as_deref(),
+            ))
+        });
+        let mut capture = capture;
+        // The Anthropic-native path needs no GPT upstream — attempt it even
+        // when the GPT target is unavailable.
+        if let Some(websearch::Origin::Claude { model }) = origin {
+            match claude_origin_on_gpt_branch(state, parts, &body, &model, &subcall, capture).await
+            {
+                Ok(response) => return response,
+                Err(returned) => capture = returned,
+            }
+        }
+        if let Some((base_url, credential)) = gpt_forward_target(&state.cliproxy_upstream) {
+            return websearch_response(
+                state,
+                parts,
+                rewritten,
+                &route.routing_id,
+                &route.upstream_model,
+                &subcall,
+                &base_url,
+                credential.as_ref(),
+                estimated_input_tokens,
+                capture,
+            )
+            .await;
+        }
+        // No GPT target (stub / unready managed): existing handling.
+        return forward_gpt(
             state,
             parts,
             rewritten,
-            &route.routing_id,
             &route.upstream_model,
-            &subcall,
-            &base_url,
-            credential.as_ref(),
             estimated_input_tokens,
             capture,
+            None,
         )
         .await;
     }
 
+    let tap = state.websearch_tap(
+        &rewritten,
+        websearch::Origin::Gpt {
+            routing_id: route.routing_id.clone(),
+        },
+    );
     forward_gpt(
         state,
         parts,
@@ -375,12 +578,121 @@ async fn gpt_response(
         &route.upstream_model,
         estimated_input_tokens,
         capture,
+        tap,
     )
     .await
 }
 
+/// A sub-call arriving on the GPT branch whose `WebSearch` was invoked by a
+/// Claude agent: answer it from Anthropic natively. `Err` returns the
+/// capture record so the caller can continue with the GPT path (transport /
+/// transient failures only; caller-error statuses are surfaced).
+async fn claude_origin_on_gpt_branch(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: &Bytes,
+    origin_model: &str,
+    subcall: &websearch::Subcall,
+    capture: Option<RequestCapture>,
+) -> Result<Response, Option<RequestCapture>> {
+    match anthropic_native_websearch(state, parts, body, origin_model).await {
+        NativeOutcome::Message(message) => {
+            tracing::info!(origin = %origin_model, "answered Claude-origin web search from Anthropic");
+            Ok(message_response(state, &message, subcall.stream, capture).await)
+        }
+        NativeOutcome::Surface(status, response_headers, body) => {
+            Ok(local_response(state, status, response_headers, vec![body], capture).await)
+        }
+        NativeOutcome::Fallback(error) => {
+            tracing::warn!(%error, "Anthropic-native web search failed; using the GPT path");
+            Err(capture)
+        }
+    }
+}
+
+/// What came of forwarding a Claude-origin sub-call to Anthropic natively.
+enum NativeOutcome {
+    /// A complete Anthropic message, ready for re-framing.
+    Message(serde_json::Value),
+    /// A non-transient Anthropic response that must reach the client
+    /// unchanged — silently switching providers would mask config/auth/
+    /// request defects.
+    Surface(StatusCode, HeaderMap, Bytes),
+    /// Transport failure or transient upstream error (429/5xx): eligible for
+    /// the GPT fallback (nothing has been streamed to the client yet).
+    Fallback(anyhow::Error),
+}
+
+/// Forwards a sub-call to Anthropic on behalf of a Claude-origin agent, as a
+/// buffered non-streaming request built for the origin model (see
+/// [`websearch::native_request_body`]). Inbound Anthropic credentials and
+/// `anthropic-beta` are preserved (Claude-branch header semantics).
+async fn anthropic_native_websearch(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    original_body: &Bytes,
+    origin_model: &str,
+) -> NativeOutcome {
+    let Some(body) = websearch::native_request_body(original_body, origin_model) else {
+        return NativeOutcome::Fallback(anyhow::anyhow!(
+            "sub-call body could not be normalized for the origin model"
+        ));
+    };
+    let mut outgoing_headers = headers::request_headers(&parts.headers, false, true, None);
+    // The body is parsed here, and the reqwest client does no decompression.
+    outgoing_headers.remove(header::ACCEPT_ENCODING);
+    let result = state
+        .client
+        .request(
+            parts.method.clone(),
+            upstream_url(&state.config.anthropic_upstream_base, &parts.uri),
+        )
+        .headers(outgoing_headers)
+        .body(body)
+        .timeout(std::time::Duration::from_mins(4))
+        .send()
+        .await;
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => return NativeOutcome::Fallback(error.into()),
+    };
+    let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
+    let response_headers = headers::response_headers(response.headers(), true);
+    let fallback_eligible = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => return NativeOutcome::Fallback(error.into()),
+    };
+    if status != StatusCode::OK {
+        if fallback_eligible {
+            return NativeOutcome::Fallback(anyhow::anyhow!(
+                "Anthropic returned HTTP {}",
+                status.as_u16()
+            ));
+        }
+        // Everything else — 4xx, redirects, unexpected statuses — reflects
+        // the request or configuration, not transience: surface it.
+        return NativeOutcome::Surface(status, response_headers, bytes);
+    }
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(message)
+            if message.get("type").and_then(serde_json::Value::as_str) == Some("message") =>
+        {
+            NativeOutcome::Message(message)
+        }
+        // A complete 200 with a body that is not an Anthropic message is a
+        // protocol/configuration defect (e.g. an intermediary's HTML error
+        // page), not transience: surface it rather than switch providers.
+        Ok(_) | Err(_) => {
+            tracing::warn!("Anthropic returned HTTP 200 with a non-message body; surfacing it");
+            NativeOutcome::Surface(status, response_headers, bytes)
+        }
+    }
+}
+
 /// Sends an already-rewritten GPT-branch request to the configured cliproxy
 /// upstream (or the stub / an actionable local error).
+#[allow(clippy::too_many_arguments)]
 async fn forward_gpt(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -388,6 +700,7 @@ async fn forward_gpt(
     upstream_model: &str,
     estimated_input_tokens: u64,
     capture: Option<RequestCapture>,
+    tap: Option<SniffTap>,
 ) -> Response {
     match &state.cliproxy_upstream {
         CliproxyUpstream::Stub => {
@@ -409,6 +722,7 @@ async fn forward_gpt(
                 credential.as_ref(),
                 Some(estimated_input_tokens),
                 capture,
+                tap,
             )
             .await
         }
@@ -447,6 +761,7 @@ async fn forward_gpt(
                 Some(&handle.credential),
                 Some(estimated_input_tokens),
                 capture,
+                tap,
             )
             .await
         }
@@ -529,6 +844,7 @@ async fn websearch_response(
                 upstream_model,
                 estimated_input_tokens,
                 capture,
+                None,
             )
             .await
         }
@@ -759,14 +1075,20 @@ async fn forward(
     gpt_credential: Option<&headers::GptUpstreamCredential>,
     estimated_input_tokens: Option<u64>,
     mut capture: Option<RequestCapture>,
+    tap: Option<SniffTap>,
 ) -> Response {
     let url = upstream_url(upstream_base, uri);
-    let outgoing_headers = headers::request_headers(
+    let mut outgoing_headers = headers::request_headers(
         inbound_headers,
         strip_credentials,
         body_changed,
         gpt_credential,
     );
+    if tap.is_some() {
+        // The sniffer parses raw response bytes and the reqwest client does
+        // no decompression, so tapped responses must be identity-encoded.
+        outgoing_headers.remove(header::ACCEPT_ENCODING);
+    }
     if strip_credentials && let Some(request_capture) = &mut capture {
         request_capture.headers = redact_headers(&outgoing_headers);
     }
@@ -778,7 +1100,7 @@ async fn forward(
         .send()
         .await
     {
-        Ok(response) => upstream_response(state, response, capture, estimated_input_tokens),
+        Ok(response) => upstream_response(state, response, capture, estimated_input_tokens, tap),
         Err(error) => {
             tracing::warn!(%error, "upstream request failed");
             local_error_response(
@@ -906,21 +1228,50 @@ fn upstream_response(
     response: reqwest::Response,
     capture: Option<RequestCapture>,
     estimated_input_tokens: Option<u64>,
+    tap: Option<SniffTap>,
 ) -> Response {
     let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
-    let transform_usage = estimated_input_tokens.is_some_and(|_| {
-        response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value.split(';').next().is_some_and(|media_type| {
-                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
-                })
+    let is_sse = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("text/event-stream")
             })
-    });
+        });
+    let transform_usage = estimated_input_tokens.is_some() && is_sse;
     let response_headers = headers::response_headers(response.headers(), transform_usage);
     let stream = response.bytes_stream();
+    let stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
+        if let Some(tap) = tap.filter(|_| status == StatusCode::OK) {
+            // Passive tee: parse each chunk and commit any completed
+            // WebSearch observations BEFORE yielding it, so the client can
+            // never issue the follow-up sub-call ahead of the pending entry.
+            // Bytes are forwarded unchanged whether or not parsing succeeds.
+            let mut sniffer = websearch::ToolUseSniffer::new(is_sse);
+            Box::pin(async_stream::stream! {
+                let mut inner = Box::pin(stream);
+                while let Some(item) = inner.next().await {
+                    if let Ok(bytes) = &item {
+                        for search in sniffer.push(bytes) {
+                            tap.pending.insert(
+                                websearch::PendingKey::new(
+                                    tap.session_id.clone(),
+                                    &search.query,
+                                    search.allowed_domains.as_deref(),
+                                    search.blocked_domains.as_deref(),
+                                ),
+                                tap.origin.clone(),
+                            );
+                        }
+                    }
+                    yield item;
+                }
+            })
+        } else {
+            Box::pin(stream)
+        };
 
     if let Some(estimated_input_tokens) = estimated_input_tokens.filter(|_| transform_usage) {
         let transformed_stream = async_stream::stream! {
