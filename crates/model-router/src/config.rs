@@ -65,10 +65,37 @@ pub struct Config {
     #[serde(default)]
     pub capture: CaptureConfig,
 
+    /// `WebSearch` sub-call handling for routed GPT models.
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+
     /// Routes derived from `openai_providers` model entries; rebuilt by
     /// [`Config::prepare`], never read from TOML.
     #[serde(skip)]
     pub derived_models: Vec<ModelRoute>,
+}
+
+#[serde_inline_default]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct WebSearchConfig {
+    #[serde_inline_default(WebSearchMode::Alpha)]
+    pub mode: WebSearchMode,
+}
+
+/// How the router answers Claude Code's `WebSearch` sub-call on the GPT branch.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebSearchMode {
+    /// Answer from the Codex search backend (`/v1/alpha/search`), falling
+    /// back to `scrape` when that call fails.
+    #[default]
+    Alpha,
+    /// Forward to the LLM upstream as-is, then scrape links from the response
+    /// text into empty `web_search_tool_result` blocks.
+    Scrape,
+    /// Pass `WebSearch` sub-calls through untouched.
+    Off,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -188,6 +215,12 @@ impl Default for Config {
 impl Default for CaptureConfig {
     fn default() -> Self {
         toml::from_str("").expect("every CaptureConfig field must have a serde default")
+    }
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        toml::from_str("").expect("every WebSearchConfig field must have a serde default")
     }
 }
 
@@ -577,6 +610,17 @@ impl Config {
 # Anthropic. By default the six GPT-5.6 routes below are enabled; writing
 # any [[models]] entry replaces the whole default list.
 {models}
+# Claude Code implements its WebSearch tool as a side call that runs the
+# server-side web_search tool on the session model. On the GPT branch the
+# router answers that call from the Codex search backend (/v1/alpha/search)
+# in a few seconds with structured links — "alpha", the default. "scrape"
+# forwards to the LLM upstream and recovers links from the response text
+# (also the automatic fallback when the alpha call fails). "off" passes the
+# sub-call through untouched (slow, and Claude Code shows "No links found.").
+#[web-search]
+# Default: "alpha"
+#mode = "alpha"
+
 #[capture]
 # Capture is off by default. Captures include prompt and response bodies; keep
 # the file private. Credential and cookie header values are always redacted.
@@ -770,6 +814,20 @@ mod tests {
             "#,
         );
         assert_eq!(config.models[0].upstream, "cliproxy");
+    }
+
+    #[test]
+    fn web_search_defaults_to_alpha_and_parses_every_mode() {
+        assert_eq!(Config::default().web_search.mode, WebSearchMode::Alpha);
+        for (source, mode) in [
+            ("alpha", WebSearchMode::Alpha),
+            ("scrape", WebSearchMode::Scrape),
+            ("off", WebSearchMode::Off),
+        ] {
+            let config = parse_and_prepare(&format!("[web-search]\nmode = \"{source}\""));
+            assert_eq!(config.web_search.mode, mode);
+        }
+        assert!(toml::from_str::<Config>("[web-search]\nmode = \"bogus\"").is_err());
     }
 
     #[test]

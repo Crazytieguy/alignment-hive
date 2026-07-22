@@ -14,11 +14,12 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 use crate::capture::{CaptureSink, RequestCapture, StreamingCapture, redact_headers};
-use crate::config::{Config, UpstreamMode};
+use crate::config::{Config, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::routing::{Branch, RoutingDecision, decide, substitute_model};
 use crate::stub;
 use crate::usage::{SseUsageTransformer, estimate_input_tokens};
+use crate::websearch;
 
 /// Maximum time SIGINT/SIGTERM may spend draining in-flight connections.
 /// Leaves enough of the service manager's 60-second stop budget for managed
@@ -346,9 +347,51 @@ async fn gpt_response(
     };
     let estimated_input_tokens = estimate_input_tokens(&rewritten);
 
+    if state.config.web_search.mode != WebSearchMode::Off
+        && parts.method == Method::POST
+        && parts.uri.path() == "/v1/messages"
+        && let Some((base_url, credential)) = gpt_forward_target(&state.cliproxy_upstream)
+        && let Some(subcall) = websearch::detect(&rewritten)
+    {
+        return websearch_response(
+            state,
+            parts,
+            rewritten,
+            &route.routing_id,
+            &route.upstream_model,
+            &subcall,
+            &base_url,
+            credential.as_ref(),
+            estimated_input_tokens,
+            capture,
+        )
+        .await;
+    }
+
+    forward_gpt(
+        state,
+        parts,
+        rewritten,
+        &route.upstream_model,
+        estimated_input_tokens,
+        capture,
+    )
+    .await
+}
+
+/// Sends an already-rewritten GPT-branch request to the configured cliproxy
+/// upstream (or the stub / an actionable local error).
+async fn forward_gpt(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    rewritten: Bytes,
+    upstream_model: &str,
+    estimated_input_tokens: u64,
+    capture: Option<RequestCapture>,
+) -> Response {
     match &state.cliproxy_upstream {
         CliproxyUpstream::Stub => {
-            local_stub_response(state, &route.upstream_model, &rewritten, capture).await
+            local_stub_response(state, upstream_model, &rewritten, capture).await
         }
         CliproxyUpstream::External {
             base_url,
@@ -408,6 +451,198 @@ async fn gpt_response(
             .await
         }
     }
+}
+
+/// The (base URL, credential) pair GPT-branch requests are forwarded to, when
+/// one exists. Stub and not-yet-ready managed upstreams return `None` and
+/// keep their existing handling.
+fn gpt_forward_target(
+    upstream: &CliproxyUpstream,
+) -> Option<(String, Option<headers::GptUpstreamCredential>)> {
+    match upstream {
+        CliproxyUpstream::External {
+            base_url,
+            credential,
+        } => Some((base_url.clone(), credential.clone())),
+        CliproxyUpstream::Managed(handle) if handle.is_ready() => {
+            Some((handle.base_url.clone(), Some(handle.credential.clone())))
+        }
+        CliproxyUpstream::Stub
+        | CliproxyUpstream::Managed(_)
+        | CliproxyUpstream::ManagedUnavailable => None,
+    }
+}
+
+/// Answers a detected `WebSearch` sub-call: from the Codex search backend in
+/// `alpha` mode, else (or on failure) via the LLM upstream with links scraped
+/// into the empty result blocks, else plain forwarding as the last resort.
+#[allow(clippy::too_many_arguments)]
+async fn websearch_response(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    rewritten: Bytes,
+    routing_id: &str,
+    upstream_model: &str,
+    subcall: &websearch::Subcall,
+    base_url: &str,
+    credential: Option<&headers::GptUpstreamCredential>,
+    estimated_input_tokens: u64,
+    capture: Option<RequestCapture>,
+) -> Response {
+    if state.config.web_search.mode == WebSearchMode::Alpha {
+        match alpha_search(state, base_url, credential, upstream_model, subcall).await {
+            Ok((links, output)) => {
+                tracing::info!(links = links.len(), "answered web search from alpha/search");
+                let message = websearch::synthesize_message(
+                    routing_id,
+                    subcall,
+                    &links,
+                    &output,
+                    estimated_input_tokens,
+                );
+                return message_response(state, &message, subcall.stream, capture).await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "alpha web search failed; falling back to the LLM web search path");
+            }
+        }
+    }
+    match legacy_websearch(state, parts, &rewritten, base_url, credential).await {
+        Ok(mut message) => {
+            if let Some(input_tokens) = message
+                .get_mut("usage")
+                .and_then(|usage| usage.get_mut("input_tokens"))
+                && input_tokens.as_u64() == Some(0)
+            {
+                *input_tokens = serde_json::Value::from(estimated_input_tokens);
+            }
+            let filled = websearch::fill_empty_web_search_results(&mut message);
+            tracing::info!(filled, "scraped links into the LLM web search response");
+            message_response(state, &message, subcall.stream, capture).await
+        }
+        Err(error) => {
+            tracing::warn!(%error, "buffered web search forward failed; passing the sub-call through");
+            forward_gpt(
+                state,
+                parts,
+                rewritten,
+                upstream_model,
+                estimated_input_tokens,
+                capture,
+            )
+            .await
+        }
+    }
+}
+
+/// One search round-trip against the Codex search backend. Returns the
+/// deduplicated links and the rendered search output. Empty results are not
+/// an error (some query classes legitimately have no link results), but an
+/// entirely empty response is.
+async fn alpha_search(
+    state: &AppState,
+    base_url: &str,
+    credential: Option<&headers::GptUpstreamCredential>,
+    upstream_model: &str,
+    subcall: &websearch::Subcall,
+) -> anyhow::Result<(Vec<websearch::Link>, String)> {
+    let url = format!("{}/v1/alpha/search", base_url.trim_end_matches('/'));
+    let body = serde_json::to_vec(&websearch::alpha_request_body(subcall, upstream_model))?;
+    let mut request = state
+        .client
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .timeout(std::time::Duration::from_secs(30));
+    if let Some(credential) = credential {
+        request = credential.apply(request);
+    }
+    let response = request.send().await?;
+    anyhow::ensure!(
+        response.status() == reqwest::StatusCode::OK,
+        "alpha search returned HTTP {}",
+        response.status().as_u16()
+    );
+    let document = serde_json::from_slice::<serde_json::Value>(&response.bytes().await?)?;
+    let output = document
+        .get("output")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let links = document
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .map(|results| websearch::links_from_alpha_results(results))
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !links.is_empty() || !output.trim().is_empty(),
+        "alpha search returned neither links nor output"
+    );
+    Ok((links, output))
+}
+
+/// Forwards the sub-call to the LLM upstream with streaming disabled and
+/// buffers the complete message so its links can be repaired.
+async fn legacy_websearch(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    rewritten: &Bytes,
+    base_url: &str,
+    credential: Option<&headers::GptUpstreamCredential>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut document = serde_json::from_slice::<serde_json::Value>(rewritten)?;
+    document["stream"] = serde_json::Value::Bool(false);
+    let mut outgoing_headers = headers::request_headers(&parts.headers, true, true, credential);
+    // The body is parsed here, and the reqwest client does no decompression.
+    outgoing_headers.remove(header::ACCEPT_ENCODING);
+    let response = state
+        .client
+        .request(parts.method.clone(), upstream_url(base_url, &parts.uri))
+        .headers(outgoing_headers)
+        .body(serde_json::to_vec(&document)?)
+        .timeout(std::time::Duration::from_mins(4))
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status() == reqwest::StatusCode::OK,
+        "web search upstream returned HTTP {}",
+        response.status().as_u16()
+    );
+    let message = serde_json::from_slice::<serde_json::Value>(&response.bytes().await?)?;
+    anyhow::ensure!(
+        message.get("type").and_then(serde_json::Value::as_str) == Some("message"),
+        "web search upstream returned a non-message body"
+    );
+    Ok(message)
+}
+
+/// Serves a complete Anthropic message in the framing the client asked for:
+/// the SSE event sequence for streaming requests, plain JSON otherwise.
+async fn message_response(
+    state: &AppState,
+    message: &serde_json::Value,
+    streaming: bool,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let mut response_headers = HeaderMap::new();
+    let chunks = if streaming {
+        response_headers.insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        response_headers.insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        websearch::message_to_sse(message)
+    } else {
+        response_headers.insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        vec![Bytes::from(message.to_string())]
+    };
+    local_response(state, StatusCode::OK, response_headers, chunks, capture).await
 }
 
 async fn local_stub_response(

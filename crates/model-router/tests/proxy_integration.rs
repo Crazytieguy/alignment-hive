@@ -580,3 +580,224 @@ async fn gpt_sse_usage_rewrite_is_streamed_and_captured() {
     assert_eq!(record["response_body"], client_text);
     fake_task.abort();
 }
+
+/// Spawns a single-purpose fake upstream returning `handler`'s response and
+/// recording every request. Returns `None` when the sandbox forbids loopback
+/// listeners.
+async fn spawn_fake(
+    handler: fn(&axum::http::request::Parts, &Bytes) -> Response,
+) -> Option<(std::net::SocketAddr, Arc<Mutex<Vec<ObservedRequest>>>)> {
+    #[derive(Clone)]
+    struct HandlerState {
+        observed: Arc<Mutex<Vec<ObservedRequest>>>,
+        handler: fn(&axum::http::request::Parts, &Bytes) -> Response,
+    }
+    async fn serve(State(state): State<HandlerState>, request: Request) -> Response {
+        let (parts, body) = request.into_parts();
+        let body = to_bytes(body, usize::MAX).await.unwrap();
+        state.observed.lock().await.push(ObservedRequest {
+            method: parts.method.to_string(),
+            uri: parts.uri.to_string(),
+            headers: parts.headers.clone(),
+            body: body.clone(),
+        });
+        (state.handler)(&parts, &body)
+    }
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping: sandbox prohibits loopback listeners");
+            return None;
+        }
+        Err(error) => panic!("failed to bind fake upstream: {error}"),
+    };
+    let address = listener.local_addr().unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let state = HandlerState {
+        observed: observed.clone(),
+        handler,
+    };
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().fallback(any(serve)).with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    Some((address, observed))
+}
+
+fn websearch_subcall_body() -> String {
+    serde_json::json!({
+        "model": "claude-gpt-test",
+        "max_tokens": 4096,
+        "stream": true,
+        "messages": [{"role": "user",
+            "content": "Perform a web search for the query: rust axum shutdown"}],
+        "system": [{"type": "text",
+            "text": "You are an assistant for performing a web search tool use"}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+        "tool_choice": {"type": "tool", "name": "web_search"},
+    })
+    .to_string()
+}
+
+fn websearch_config(fake_address: std::net::SocketAddr) -> Config {
+    Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "codex".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+        }],
+        ..Config::default()
+    }
+}
+
+#[tokio::test]
+async fn websearch_subcall_is_answered_from_alpha_search() {
+    fn handler(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        assert_eq!(parts.uri.path(), "/v1/alpha/search");
+        Response::new(Body::from(
+            serde_json::json!({
+                "encrypted_output": "opaque",
+                "output": "Axum docs (https://docs.rs/axum)\n\u{E200}cite\u{E202}turn0search0\u{E201} [wordlim: 200] Graceful shutdown notes.",
+                "results": [
+                    {"type": "text_result", "title": "Axum docs", "url": "https://docs.rs/axum",
+                     "domain": "docs.rs", "ref_id": "turn0search0",
+                     "snippet": "Graceful shutdown"},
+                    {"type": "text_result", "title": "Axum docs", "url": "https://docs.rs/axum"},
+                ],
+            })
+            .to_string(),
+        ))
+    }
+    let Some((fake_address, observed)) = spawn_fake(handler).await else {
+        return;
+    };
+    let app = model_router::proxy::app(websearch_config(fake_address))
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_subcall_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    for event in [
+        "event: message_start",
+        "event: content_block_start",
+        "event: message_delta",
+        "event: message_stop",
+    ] {
+        assert!(body.contains(event), "missing {event} in {body}");
+    }
+    assert!(body.contains(r#""type":"server_tool_use""#));
+    assert!(body.contains(r#""type":"web_search_tool_result""#));
+    assert!(body.contains("https://docs.rs/axum"));
+    assert!(body.contains("Graceful shutdown notes."));
+    assert!(
+        !body.contains('\u{E200}'),
+        "citation markers must be stripped"
+    );
+    assert!(body.contains(r#""stop_reason":"end_turn""#));
+
+    let observed = observed.lock().await;
+    assert_eq!(observed.len(), 1);
+    let request = &observed[0];
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.uri, "/v1/alpha/search");
+    assert_eq!(request.headers["authorization"], "Bearer gateway-secret");
+    let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(document["model"], "gpt-test");
+    assert_eq!(
+        document["commands"]["search_query"][0]["q"],
+        "rust axum shutdown"
+    );
+}
+
+#[tokio::test]
+async fn websearch_falls_back_to_buffered_llm_call_with_scraped_links() {
+    fn handler(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        if parts.uri.path() == "/v1/alpha/search" {
+            let mut response = Response::new(Body::from("search backend down"));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            return response;
+        }
+        assert_eq!(parts.uri.path(), "/v1/messages");
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(
+            document["stream"], false,
+            "fallback must buffer the response"
+        );
+        Response::new(Body::from(
+            serde_json::json!({
+                "id": "msg_upstream",
+                "type": "message",
+                "role": "assistant",
+                "model": "gpt-test",
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_x", "name": "web_search",
+                     "input": {"query": "rust axum shutdown"}},
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_x",
+                     "content": []},
+                    {"type": "text",
+                     "text": "See ([docs.rs](https://docs.rs/axum?utm_source=openai))."},
+                ],
+                "usage": {"input_tokens": 0, "output_tokens": 50},
+            })
+            .to_string(),
+        ))
+    }
+    let Some((fake_address, observed)) = spawn_fake(handler).await else {
+        return;
+    };
+    let app = model_router::proxy::app(websearch_config(fake_address))
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_subcall_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains(r#""type":"web_search_tool_result""#));
+    // The empty result block was filled from the text citation, with the
+    // tracking parameter stripped (the prose text block keeps its original
+    // wording).
+    assert!(body.contains(r#""url":"https://docs.rs/axum""#));
+    assert!(body.contains(r#""title":"docs.rs""#));
+    // The zero input-token report was replaced by the estimate.
+    assert!(!body.contains(r#""input_tokens":0"#));
+    assert!(body.contains("event: message_stop"));
+
+    let observed = observed.lock().await;
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].uri, "/v1/alpha/search");
+    assert_eq!(observed[1].uri, "/v1/messages");
+    assert_eq!(
+        observed[1].headers["authorization"],
+        "Bearer gateway-secret"
+    );
+}

@@ -298,3 +298,38 @@ registration skip for first-seen directories (f14896e).
   the risk (2026-07-20); revisit before any public release of the plugin.
 - The Workflow `opts.model` string-typing is an implementation detail, not a
   documented contract — retest on Claude Code upgrades.
+
+## WebSearch on GPT main-loop sessions (2026-07-21, Claude Code 2.1.217, v0.1.4)
+
+- Mechanism (2.1.217 bundle): the WebSearch tool issues a side `/v1/messages`
+  call on the session's **main-loop model** whose only tool is the
+  server-side `web_search_20250305` tool, then parses links out of
+  `web_search_tool_result` blocks; a result block with empty `content`
+  renders as "No links found." (A statsig gate, `tengu_plum_vx3`, would
+  switch the side call to the small-fast model; observed off.) The bundle
+  source sets `tool_choice: {type: tool, name: web_search}`, but the live
+  captured request carries `tool_choice: auto` — detection accepts both,
+  keying on the prefixed "Perform a web search for the query: " user message
+  and the tools list containing only the server tool.
+- Through CLIProxyAPI 7.2.92, Codex runs the search but returns links only as
+  inline text citations; CLIProxyAPI (PR #3868) maps the `web_search_call`
+  into the Anthropic block pair with `content: []`. Upstream declined to go
+  further (issue #3132, closed NOT_PLANNED) — the Codex Responses endpoint
+  exposes no structured sources on that path (`annotations` empty,
+  `include: ["web_search_call.action.sources"]` not honored).
+- The Codex CLI itself (gpt-5.6) doesn't use that path: its `web.run` tool
+  POSTs to `{provider}/alpha/search` and gets structured `results` back.
+- Benchmark (3 queries, via the gateway): legacy LLM side call 20.8–71.7s
+  with 2–4 scraped-able inline links; `alpha/search` 0.9–2.6s with 32–35
+  structured results. One UA quirk: the backend 403s `Python-urllib/*`
+  user agents (curl and no-UA pass).
+- v0.1.4 therefore intercepts the recognized sub-call shape on the GPT
+  branch and answers it from `/v1/alpha/search` via the same CLIProxyAPI
+  child; on failure it falls back to the buffered LLM call with links
+  scraped from the text into the empty result block. `[web-search]
+  mode = "alpha" | "scrape" | "off"` in the config.
+- Live e2e (2026-07-21): `claude -p --model gpt-5.6-sol` WebSearch through
+  the intercepting router returned a fully populated Links array in
+  ~2s; identical query on the passthrough router returned "No links found."
+  after 20–70s. `/v1/alpha/search` is an undocumented endpoint — retest on
+  Codex/CLIProxyAPI upgrades.

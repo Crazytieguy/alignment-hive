@@ -14,3 +14,4 @@ pub mod stub;
 pub mod supervisor;
 mod usage;
 pub mod verify;
+pub mod websearch;
