@@ -1001,6 +1001,31 @@ mod tests {
         }
     }
 
+    /// Tuning for tests whose child is expected to become ready: under a
+    /// loaded machine a 300ms readiness window can expire before the child
+    /// even binds, sending the supervisor into kill/backoff/respawn cycles.
+    fn ready_tuning() -> Tuning {
+        Tuning {
+            readiness_timeout: Duration::from_secs(10),
+            ..fast_tuning()
+        }
+    }
+
+    /// Polls `condition` until it holds or a deadline generous enough for a
+    /// heavily loaded machine passes. Returns whether it held.
+    async fn wait_for(mut condition: impl AsyncFnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if condition().await {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     fn dirs_with_fake_upstream(root: &std::path::Path, mode: &str) -> Dirs {
         let dirs = Dirs {
             config_dir: root.join("config"),
@@ -1057,12 +1082,15 @@ fn main() {
         .map(|pair| PathBuf::from(&pair[1])).expect("-config path");
     let state = config.parent().expect("state dir");
     let mode = fs::read_to_string(state.join("test-mode")).expect("test mode");
-    writeln!(OpenOptions::new().create(true).append(true)
-        .open(state.join("spawns")).unwrap(), "{}", std::process::id()).unwrap();
-    fs::write(state.join("child-pid"), std::process::id().to_string()).unwrap();
+    // Install the SIGTERM-ignore handler BEFORE the pid becomes observable:
+    // tests synchronize on child-pid, and shutdown must find a child that
+    // already ignores SIGTERM or the SIGKILL escalation is never exercised.
     if mode.trim() == "ignore" {
         unsafe { signal(15, 1); }
     }
+    writeln!(OpenOptions::new().create(true).append(true)
+        .open(state.join("spawns")).unwrap(), "{}", std::process::id()).unwrap();
+    fs::write(state.join("child-pid"), std::process::id().to_string()).unwrap();
     if mode.trim() != "ready" {
         loop { std::thread::sleep(Duration::from_secs(60)); }
     }
@@ -1100,13 +1128,22 @@ fn main() {
         };
         let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
         let handle = supervisor.handle();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let restarted = wait_for(async || {
+            std::fs::read_to_string(&spawn_log)
+                .unwrap_or_default()
+                .lines()
+                .count()
+                >= 2
+        })
+        .await;
         assert!(!handle.is_ready());
-        let spawns = std::fs::read_to_string(&spawn_log).unwrap_or_default();
         assert!(
-            spawns.lines().count() >= 2,
+            restarted,
             "expected the hung child to be restarted, saw {} spawn(s)",
-            spawns.lines().count()
+            std::fs::read_to_string(&spawn_log)
+                .unwrap_or_default()
+                .lines()
+                .count()
         );
         supervisor.shutdown().await;
     }
@@ -1122,16 +1159,34 @@ fn main() {
             port: free_port(),
             ..UpstreamConfig::default()
         };
-        let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
-        // Let the child spawn, then shut down mid-readiness.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The generous readiness timeout keeps the supervisor's own
+        // readiness-expiry terminate from killing the child first, which
+        // would let the assertion pass without exercising shutdown at all.
+        let supervisor = Supervisor::start(&dirs, &upstream, ready_tuning()).unwrap();
+        // Wait until a spawned child is observably LIVE (a fixed sleep can
+        // miss the spawn under load, passing vacuously); the fake installs
+        // its SIGTERM-ignore handler before publishing its pid, so a live
+        // pid here guarantees shutdown must escalate to SIGKILL.
+        let child_pid = async || {
+            std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+        };
+        assert!(
+            wait_for(async || {
+                // SAFETY: signal 0 only checks liveness.
+                child_pid()
+                    .await
+                    .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+            })
+            .await,
+            "child never spawned"
+        );
         supervisor.shutdown().await;
-        if let Ok(pid_text) = std::fs::read_to_string(&pid_file) {
-            let pid: i32 = pid_text.trim().parse().unwrap();
-            // SAFETY: signal 0 only checks liveness.
-            let alive = unsafe { libc::kill(pid, 0) } == 0;
-            assert!(!alive, "child {pid} survived shutdown");
-        }
+        let pid = child_pid().await.unwrap();
+        // SAFETY: signal 0 only checks liveness.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "child {pid} survived shutdown");
     }
 
     #[tokio::test]
@@ -1172,29 +1227,19 @@ fn main() {
         enrich_spawned_child_record(&dirs, &mut leaked, &mut record)
             .await
             .unwrap();
-        for _ in 0..100 {
-            if port_in_use(upstream.port).await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(port_in_use(upstream.port).await);
+        assert!(wait_for(async || port_in_use(upstream.port).await).await);
 
-        let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
-        for _ in 0..200 {
-            let spawn_count = std::fs::read_to_string(dirs.state_dir.join("spawns"))
+        let supervisor = Supervisor::start(&dirs, &upstream, ready_tuning()).unwrap();
+        let replaced = wait_for(async || {
+            std::fs::read_to_string(dirs.state_dir.join("spawns"))
                 .unwrap_or_default()
                 .lines()
-                .count();
-            if spawn_count >= 2 && supervisor.handle().is_ready() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            supervisor.handle().is_ready(),
-            "fresh child never became ready"
-        );
+                .count()
+                >= 2
+                && supervisor.handle().is_ready()
+        })
+        .await;
+        assert!(replaced, "fresh child never became ready");
         assert!(
             std::fs::read_to_string(dirs.state_dir.join("spawns"))
                 .unwrap()
@@ -1230,13 +1275,7 @@ fn main() {
         let record =
             persist_minimal_spawned_child(&dirs, &binary, &leaked, Some(leaked_pid)).unwrap();
         assert_eq!(record.start_time, None);
-        for _ in 0..100 {
-            if port_in_use(upstream.port).await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(port_in_use(upstream.port).await);
+        assert!(wait_for(async || port_in_use(upstream.port).await).await);
 
         assert!(reap_recorded_child(&dirs, upstream.port).await);
         leaked.wait().await.unwrap();
@@ -1319,15 +1358,14 @@ fn main() {
             port: free_port(),
             ..UpstreamConfig::default()
         };
-        let supervisor = Supervisor::start(&dirs, &upstream, fast_tuning()).unwrap();
-        for _ in 0..100 {
-            if supervisor.handle().is_ready() && dirs.upstream_child_file().exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(supervisor.handle().is_ready());
-        assert!(dirs.upstream_child_file().exists());
+        let supervisor = Supervisor::start(&dirs, &upstream, ready_tuning()).unwrap();
+        assert!(
+            wait_for(async || {
+                supervisor.handle().is_ready() && dirs.upstream_child_file().exists()
+            })
+            .await,
+            "child never became ready with a persisted record"
+        );
 
         supervisor.shutdown().await;
 
