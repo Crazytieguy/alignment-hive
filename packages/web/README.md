@@ -65,7 +65,7 @@ From `web/` directory:
 
 ### Data access
 
-Session data is available via the web UI and HTTP API (`/api/*`). All paths require a signed data accessor agreement and apply consent-based session filtering.
+Session data is available via the web UI and HTTP API (`/api/*`). Both apply consent-based session filtering, and both are behind the data accessor agreement — signing it is what grants the WorkOS role that can mint an API key. The two differ in when that is checked: the web UI re-checks on every request, the API key carries the grant it was minted with.
 
 The HTTP API authenticates with WorkOS organization API keys. An API key stays valid until it is deleted in WorkOS, so revoking someone's access (or bumping the agreement version) means revoking their keys by hand. API key management uses the WorkOS `<ApiKeys />` widget embedded on the authorized index page. One-time WorkOS dashboard setup is required: create organizations, configure CORS, and create a `data-accessor` role with the `widgets:api-keys:manage` permission.
 
