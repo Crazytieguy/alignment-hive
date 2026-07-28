@@ -1,5 +1,7 @@
 # github-action
 
+> **Deprecated — no longer maintained.** It still works, but it is no longer recommended by `/hive:align` and won't get further updates.
+
 Set up the Claude Code GitHub Action so `@claude` mentions on issues and PRs trigger autonomous Claude sessions.
 
 ## Motivation

@@ -166,7 +166,7 @@ function verifyHashesAgainstRepo(hashes: Array<string>, projectDir: string): boo
   return false;
 }
 
-interface TranscriptScanData {
+export interface TranscriptScanData {
   /** Map from main worktree path to transcript dirs (for dirs with existing cwds) */
   mainPathMap: Map<string, Array<string>>;
   /** Map from transcript dir path to extracted cwd */
@@ -230,7 +230,7 @@ export interface DiscoverResult {
   discovered: number;
 }
 
-async function discoverWorktreeTranscriptDirs(
+export async function discoverWorktreeTranscriptDirs(
   projectDir: string,
   stateDir: string,
   scanData?: TranscriptScanData,
@@ -273,10 +273,17 @@ async function discoverWorktreeTranscriptDirs(
     addIfNew(dir);
   }
 
-  // Strategy 3: subpath matching for deleted worktrees
+  // Strategy 3: subpath matching for deleted worktrees.
+  // Deleted cwds only — a live cwd under projectDir may belong to a nested
+  // independent repo (or a submodule) with its own project consent, and
+  // Strategy 2 has already claimed the ones that really are this project's,
+  // by repo identity. Sessions land in the registry of whichever project
+  // discovered them and are uploaded stamped with that project's consent, so
+  // matching on path prefix alone shares data under the wrong consent.
   const projectDirPrefix = projectDir + '/';
   for (const [transcriptDir, cwd] of cwdMap) {
     if (existingSet.has(transcriptDir)) continue;
+    if (existsSync(cwd)) continue;
     if (cwd === projectDir || cwd.startsWith(projectDirPrefix)) {
       addIfNew(transcriptDir);
     }
