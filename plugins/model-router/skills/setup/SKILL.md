@@ -37,11 +37,24 @@ macOS and Linux only.
    ingress token, so requests from other local processes are rejected):
    ```json
    "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
+   "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
    "ENABLE_TOOL_SEARCH": "true",
    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "250000",
    "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-sol",
    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol"
    ```
+   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude models' native 1M
+   context windows. Claude Code grants those only when the base URL is
+   `api.anthropic.com`, so behind the gateway Fable 5, Opus 5 and Sonnet 5
+   silently fall back to 200K wherever the model string carries no `[1m]`
+   suffix — including agent definitions the user did not write. The flag is
+   undocumented (Claude Code names it in its own copy, for proxies that front
+   the real API — which is what the Claude branch is); it also restores the
+   rest of Claude Code's first-party behaviour, including error reporting,
+   refusal fallback and first-party billing headers, and it disables
+   `/v1/models` gateway discovery. GPT routing is unaffected: the router
+   strips `anthropic-beta` and credentials on that branch, and the GPT window
+   still comes from `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
    `ENABLE_TOOL_SEARCH` matters: tool search silently disables itself behind
    a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
    context window — it only applies to model IDs that don't start with
@@ -57,7 +70,10 @@ macOS and Linux only.
    and that the GPT agents and `choosing-models` skill are now available.
    Offer to run a smoke test that works without a restart:
    `ANTHROPIC_BASE_URL=<base_url> claude -p 'reply with ok' --model
-   claude-gpt-5.6-sol`.
+   claude-gpt-5.6-sol`. To confirm the 1M windows survive the current Claude
+   Code version, run `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1 claude -p
+   'say ok' --model claude-fable-5 --output-format json | jq
+   '.modelUsage[].contextWindow'` — it must print 1000000, not 200000.
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) agents for
@@ -68,12 +84,15 @@ macOS and Linux only.
 
 `$ROUTER doctor` names the failing layer (config, binary cache, auth,
 service, upstream). Fix only that layer using the matching step above;
-`$ROUTER service restart` after config changes.
+`$ROUTER service restart` after config changes. Doctor does not see Claude
+Code's env block: if Claude models report a 200K window, re-check step 5's
+`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` with the step 6 window check —
+a Claude Code release could drop the flag.
 
 ## Disable / uninstall
 
-1. Remove `ANTHROPIC_BASE_URL` (and optionally `ENABLE_TOOL_SEARCH`) from
-   the settings file it was written to — this alone restores direct
+1. Remove `ANTHROPIC_BASE_URL` (and optionally the other keys step 5 added)
+   from the settings file it was written to — this alone restores direct
    Anthropic access.
 2. `$ROUTER service uninstall`.
 3. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,

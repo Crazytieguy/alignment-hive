@@ -214,6 +214,50 @@ raw SSE inspected.
   dual-route aliases (both prefixes → same upstream) would give each flow the
   right ID. Untested what happens if a conversation exceeds the real
   upstream limit.
+- Claude context windows behind the gateway (measured 2026-07-28, Claude Code
+  2.1.220). Claude Code grants a natively-1M Claude model its 1M window only
+  when `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`; behind the
+  router that check fails, so `claude-fable-5`, `claude-opus-5` and
+  `claude-sonnet-5` report 200000. Measured with
+  `claude -p --output-format json | jq '.modelUsage[].contextWindow'`, which
+  returns the same number that drives auto-compaction, the model's own
+  remaining-budget reminders, and file-read caps (`max(40000, window × 0.05 ×
+  3)`). Not cosmetic: a 200K window compacts a Fable session five times too
+  early. Three routes to 1M, all measured: (a) a `[1m]` suffix on the model
+  string — `fable[1m]`, `claude-fable-5[1m]` and the alias forms all give
+  1000000, and the suffix never reaches the wire (the router logs
+  `model="claude-fable-5"`); (b) `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE}_MODEL`
+  set to a `[1m]`-suffixed concrete ID — works but pins the model version, and
+  the alias form (`fable[1m]`) breaks, sending a literal `model: "fable"`
+  upstream; (c) `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, which satisfies
+  the base-URL check itself and fixes bare IDs everywhere, including agent
+  definitions the user does not control — chosen for setup step 5.
+  `ANTHROPIC_BETAS=context-1m-2025-08-07` is a no-op: it reaches the wire but
+  never the window calculation. The `/model` picker is unaffected either way —
+  the server ships its Fable entry as `claude-fable-5[1m]` already
+  (`additionalModelOptionsCache` in `~/.claude.json`), and subagents that omit
+  `model` inherit the parent's suffixed string. The gap the flag closes is
+  subagents with an explicit model: an agent defined `model: fable` measured
+  200000 while its parent ran at 1000000 in the same session.
+- GPT-branch safety of `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` (verified
+  2026-07-28). Structural: the GPT branch calls `request_headers(...,
+  strip_credentials = true, ...)`, which drops every credential header and
+  `anthropic-beta` wholesale, so no beta the flag adds can reach the GPT
+  upstream. Per behaviour: the 1M window is registry-gated and GPT IDs have no
+  registry entry (measured: `gpt-5.6-sol` still reports 250000 with the flag
+  on); refusal fallback is gated on the `refusal_fallback` model capability,
+  which only `claude-opus-5`/`claude-fable-5` carry, and is not a wire
+  parameter; the extra `auto-mode-classifier` beta applies only to auto-mode
+  classifier queries, which run on a Claude model; the prompt-cache-scope beta
+  was already being sent (`DH()` is true regardless of the flag) and the
+  `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` sentinel does not leak into the GPT
+  system prompt (asked the model directly). Not structurally blocked: non-beta
+  headers (`traceparent`, first-party billing `cch=00000;`) do reach the GPT
+  upstream, and two behaviours behind their own experiment flags
+  (fine-grained tool streaming `tengu_fgts`, image limits
+  `tengu_crimson_vector`, both default off) would apply session-wide if
+  Anthropic enables them. End-to-end check: a GPT-5.6 Sol request with tool
+  use succeeded with the flag on.
 - Real GPT-5.6 context via Codex (researched 2026-07-21): the OpenAI API
   advertises 1.05M for sol/terra (128K max output), but the Codex/ChatGPT
   backend — our upstream — serves a reduced catalog: 272K input + 128K output

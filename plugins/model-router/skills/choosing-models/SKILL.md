@@ -100,3 +100,8 @@ combination, Workflow's
 `gpt-5.6-*` routing IDs over the `claude-gpt-5.6-*` aliases: only the bare
 IDs pick up the declared GPT context window
 (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`).
+
+For Claude models, include the `[1m]` suffix — `fable[1m]`, `sonnet[1m]`,
+`opus[1m]` — in agent definitions and Workflow `model` params, or omit
+`model` to inherit the parent's. It is harmless when the model already has
+its full window, and the difference between 1M and 200K when it doesn't.
