@@ -31,6 +31,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # Pin to the PR's base commit. On pull_request_review the default
+          # ref is refs/pull/N/merge, which already contains the fork's
+          # changes — the install step below would then run the PR author's
+          # dependency hooks in a job that holds this repo's secrets.
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
 
       # CACHE_STEP
@@ -56,9 +61,29 @@ jobs:
 
       - name: Checkout PR branch
         if: steps.check.outputs.skip != 'true'
-        run: gh pr checkout ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          # The PR head is untrusted — a fork can change any file except the
+          # ones under .github/workflows/, and this job holds write-capable
+          # tokens. Disable git hooks first: checking out fork content is
+          # otherwise enough to run a fork-supplied post-checkout hook when
+          # the install step above configured core.hooksPath (husky et al).
+          git config core.hooksPath /dev/null
+          gh pr checkout ${{ github.event.pull_request.number || github.event.issue.number }}
+          # Put back the files that steer Claude, so the prompt it runs, the
+          # script it is allowed to run, and the instructions and permissions
+          # it loads all come from the base repo. .mcp.json is dropped rather
+          # than restored: a project MCP server would launch its command from
+          # the PR's tree. The PR's own code stays — that is what Claude is
+          # here to review.
+          rm -f .mcp.json
+          git checkout "$BASE_SHA" -- .github/prompts .github/scripts
+          for path in .claude CLAUDE.md CLAUDE.local.md; do
+            rm -rf "$path"
+            git checkout "$BASE_SHA" -- "$path" 2>/dev/null || true
+          done
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
 
       - name: Initialize comment tracking
         if: steps.check.outputs.skip != 'true'

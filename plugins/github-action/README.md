@@ -1,6 +1,18 @@
 # github-action
 
+> **Deprecated — no longer maintained.** It still works, but it is no longer recommended by `/hive:align` and won't get further updates. If you already installed the PR review workflow, re-run `/github-action:setup` to pick up the fix described below.
+
 Set up the Claude Code GitHub Action so `@claude` mentions on issues and PRs trigger autonomous Claude sessions.
+
+## Security note
+
+The PR review workflow runs in the base repository with its secrets, and checks out the pull request's branch so Claude can read the code under review. A fork can change any file outside `.github/workflows/`, so three things in that workflow are load-bearing and should stay if you edit it:
+
+- The initial checkout is pinned to the PR's base commit. On `pull_request_review` the default ref is the merge ref, which already contains the fork's changes — the dependency install step would run the PR author's install hooks.
+- `core.hooksPath` is disabled before `gh pr checkout`. Otherwise, in a repo where the install step configures hooks (husky and friends), checking the branch out is by itself enough to run a fork-supplied hook, and Claude's later `git commit`/`git push` would run more.
+- The prompt, `update-comment.sh`, `.claude/` and `CLAUDE.md` are restored from the base commit afterwards, and `.mcp.json` is dropped. Otherwise a fork supplies Claude's instructions, its tool permissions, and the script the allowlist lets it run.
+
+Known limits, none of which this deprecated plugin will fix. Reviewing untrusted code is inherently exposed to prompt injection from the diff itself. If your base `.claude/settings.json` defines Claude hooks that run scripts from the repo, or your base `CLAUDE.md` `@import`s files outside `.claude/`, those targets still come from the PR's tree. And because the restore writes to the index, a PR that legitimately edits `CLAUDE.md`, the prompt, or `update-comment.sh` can have that edit reverted if Claude commits. If you want a review bot on a repo that takes fork PRs, use one that keeps the untrusted checkout out of the workspace root entirely.
 
 ## Motivation
 
