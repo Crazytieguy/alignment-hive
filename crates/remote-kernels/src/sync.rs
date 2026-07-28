@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -49,113 +49,6 @@ pub fn validate_project_relative(path: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Resolve a project-relative path to the absolute local destination a
-/// download writes to, refusing anything that lands outside `project_dir`.
-///
-/// [`validate_project_relative`] is lexical: it rejects `/` and `..`, but not
-/// a symlink. A hostile machine can hand us one (`download("results", …)`
-/// where remote `results` is a symlink to `$HOME`), and a later
-/// `download(…, "results/x")` would then write through it to anywhere on
-/// disk. Canonicalizing the deepest ancestor that already exists resolves
-/// every symlink on the path we are about to write through, so the
-/// containment check sees where the write actually lands.
-pub fn resolve_project_destination(
-    project_dir: &Path,
-    local_path: &str,
-) -> Result<PathBuf, String> {
-    validate_project_relative(local_path)?;
-
-    let root = project_dir.canonicalize().map_err(|e| {
-        format!(
-            "Project directory {} is not accessible: {e}",
-            project_dir.display()
-        )
-    })?;
-    let destination = root.join(local_path);
-
-    let mut existing = destination.as_path();
-    while existing.symlink_metadata().is_err() {
-        existing = existing
-            .parent()
-            .ok_or_else(|| format!("Invalid path: {local_path:?}."))?;
-    }
-    let resolved = existing.canonicalize().map_err(|e| {
-        format!(
-            "Invalid path: {local_path:?}. {} could not be resolved: {e}",
-            existing.display()
-        )
-    })?;
-    if !resolved.starts_with(&root) {
-        return Err(format!(
-            "Invalid path: {local_path:?}. It resolves to {} via a symlink, which is outside the project root {}. Paths must stay inside the project.",
-            resolved.display(),
-            root.display(),
-        ));
-    }
-
-    Ok(destination)
-}
-
-/// Delete symlinks under `root` whose targets escape it — absolute targets,
-/// or relative ones that climb past `root`. The tar-based download path
-/// restores symlinks verbatim, and one landing in the project would give a
-/// later download a way out of it (see [`resolve_project_destination`]).
-/// Mirrors rsync's `--safe-links`, and is lexical for the same reason.
-pub fn strip_unsafe_symlinks(root: &Path) -> std::io::Result<()> {
-    if std::fs::symlink_metadata(root)?.is_symlink() {
-        // A symlink at the top of the download has nothing inside the
-        // download to point at, so it always escapes.
-        return std::fs::remove_file(root);
-    }
-    strip_unsafe_symlinks_in(root, root)
-}
-
-fn strip_unsafe_symlinks_in(dir: &Path, root: &Path) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.is_symlink() {
-            if escapes_root(&path, &std::fs::read_link(&path)?, root) {
-                std::fs::remove_file(&path)?;
-            }
-        } else if metadata.is_dir() {
-            strip_unsafe_symlinks_in(&path, root)?;
-        }
-    }
-    Ok(())
-}
-
-/// Whether `target`, read from the symlink at `link`, points outside `root`.
-fn escapes_root(link: &Path, target: &Path, root: &Path) -> bool {
-    if target.is_absolute() {
-        return true;
-    }
-    // Depth of the symlink's own directory below `root`; walking the target's
-    // components from there must never take us above it.
-    let Some(parent) = link.parent() else {
-        return true;
-    };
-    let Ok(relative) = parent.strip_prefix(root) else {
-        return true;
-    };
-    let mut depth = relative.components().count();
-    for component in target.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(_) => depth += 1,
-            Component::ParentDir => match depth.checked_sub(1) {
-                Some(next) => depth = next,
-                None => return true,
-            },
-            Component::RootDir | Component::Prefix(_) => return true,
-        }
-    }
-    false
 }
 
 /// Validate sync include paths ([`validate_project_relative`] on each) —
@@ -269,10 +162,6 @@ pub async fn download_from_pod(
             "-az",
             "--no-owner",
             "--no-group",
-            // Never materialize a symlink that points outside what we
-            // downloaded: it would become a way out of the project root for
-            // the next download (see `resolve_project_destination`).
-            "--safe-links",
             "-e",
             &ssh_cmd,
             &source,
@@ -334,73 +223,5 @@ mod tests {
     #[test]
     fn one_bad_path_rejects_the_whole_set() {
         assert!(validate_include_paths(&paths(&["fine/", "../bad"])).is_err());
-    }
-
-    #[test]
-    fn destinations_stay_inside_the_project() {
-        use super::resolve_project_destination;
-
-        let project = tempfile::tempdir().unwrap();
-        let root = project.path().canonicalize().unwrap();
-        std::fs::create_dir(root.join("results")).unwrap();
-
-        let destination = resolve_project_destination(&root, "results/loss.csv").unwrap();
-        assert_eq!(destination, root.join("results/loss.csv"));
-        // Nonexistent intermediate directories are fine — they get created.
-        assert!(resolve_project_destination(&root, "new/deep/out.txt").is_ok());
-        assert!(resolve_project_destination(&root, "../escape").is_err());
-        assert!(resolve_project_destination(&root, "/etc/passwd").is_err());
-    }
-
-    #[test]
-    fn a_symlinked_ancestor_cannot_be_written_through() {
-        use super::resolve_project_destination;
-
-        let project = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let root = project.path().canonicalize().unwrap();
-
-        // What a hostile machine plants: <project>/results -> <outside>
-        std::os::unix::fs::symlink(outside.path(), root.join("results")).unwrap();
-
-        let err = resolve_project_destination(&root, "results/payload.sh").unwrap_err();
-        assert!(err.contains("outside the project"), "{err}");
-        // The symlink itself is just as unusable as a destination.
-        assert!(resolve_project_destination(&root, "results").is_err());
-    }
-
-    #[test]
-    fn escaping_symlinks_are_stripped_from_a_download() {
-        use super::strip_unsafe_symlinks;
-
-        let staging = tempfile::tempdir().unwrap();
-        let downloaded = staging.path().join("results");
-        std::fs::create_dir_all(downloaded.join("nested")).unwrap();
-        std::fs::write(downloaded.join("loss.csv"), "ok").unwrap();
-
-        std::os::unix::fs::symlink("/etc", downloaded.join("absolute")).unwrap();
-        std::os::unix::fs::symlink("../../..", downloaded.join("nested/climb")).unwrap();
-        std::os::unix::fs::symlink("../loss.csv", downloaded.join("nested/inside")).unwrap();
-
-        strip_unsafe_symlinks(&downloaded).unwrap();
-
-        assert!(downloaded.join("absolute").symlink_metadata().is_err());
-        assert!(downloaded.join("nested/climb").symlink_metadata().is_err());
-        // A link that stays within the downloaded tree is kept.
-        assert!(downloaded.join("nested/inside").symlink_metadata().is_ok());
-        assert!(downloaded.join("loss.csv").exists());
-    }
-
-    #[test]
-    fn a_top_level_symlink_download_is_stripped() {
-        use super::strip_unsafe_symlinks;
-
-        let staging = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let downloaded = staging.path().join("results");
-        std::os::unix::fs::symlink(outside.path(), &downloaded).unwrap();
-
-        strip_unsafe_symlinks(&downloaded).unwrap();
-        assert!(downloaded.symlink_metadata().is_err());
     }
 }

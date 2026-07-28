@@ -1,7 +1,43 @@
 use bytes::Bytes;
 use serde_json::Value;
 
+use crate::client_window::UsageScale;
+
 const TOKENS_PER_MESSAGE: u64 = 4;
+
+/// The usage fields Claude Code's auto-compact gate sums (verified in the
+/// 2.1.220 bundle: `input_tokens + cache_creation_input_tokens +
+/// cache_read_input_tokens + output_tokens` of the most recent message that
+/// carries usage). Scaling exactly these moves the compaction point.
+///
+/// Deliberately not a recursive walk of the usage object: sibling fields like
+/// `server_tool_use.web_search_requests` are request counts, not tokens.
+const SCALED_USAGE_FIELDS: [&str; 4] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+];
+
+/// Rewrites a `usage` object into the client's coordinate system. Absent
+/// fields stay absent. Returns whether anything was actually rewritten, so an
+/// event that gains nothing is forwarded byte-identical rather than
+/// re-serialized.
+fn scale_usage(usage: &mut Value, scale: UsageScale) -> bool {
+    let Some(object) = usage.as_object_mut() else {
+        return false;
+    };
+    let mut rewritten = false;
+    for field in SCALED_USAGE_FIELDS {
+        if let Some(value) = object.get_mut(field)
+            && let Some(tokens) = value.as_u64()
+        {
+            *value = Value::from(scale.apply(tokens));
+            rewritten = true;
+        }
+    }
+    rewritten
+}
 
 #[must_use]
 pub(crate) fn estimate_input_tokens(body: &[u8]) -> u64 {
@@ -74,16 +110,27 @@ fn count_serialized_tokens(encoding: &tiktoken_rs::CoreBPE, value: &Value) -> u6
         .map_or(0, |text| count_text_tokens(encoding, &text))
 }
 
+/// How one routed request's token usage is reported back to Claude Code.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UsagePolicy {
+    /// Stands in for the `input_tokens: 0` that `CLIProxyAPI` reports at
+    /// `message_start`.
+    pub(crate) estimate: u64,
+    /// Set when the route's real context window differs from the one Claude
+    /// Code believes it has.
+    pub(crate) scale: Option<UsageScale>,
+}
+
 pub(crate) struct SseUsageTransformer {
     buffer: Vec<u8>,
-    estimated_input_tokens: u64,
+    policy: UsagePolicy,
 }
 
 impl SseUsageTransformer {
-    pub(crate) const fn new(estimated_input_tokens: u64) -> Self {
+    pub(crate) const fn new(policy: UsagePolicy) -> Self {
         Self {
             buffer: Vec::new(),
-            estimated_input_tokens,
+            policy,
         }
     }
 
@@ -92,10 +139,7 @@ impl SseUsageTransformer {
         let mut output = Vec::new();
         while let Some(event_end) = event_boundary(&self.buffer) {
             let event = self.buffer.drain(..event_end).collect::<Vec<_>>();
-            output.push(Bytes::from(transform_event(
-                event,
-                self.estimated_input_tokens,
-            )));
+            output.push(Bytes::from(transform_event(event, self.policy)));
         }
         output
     }
@@ -117,7 +161,8 @@ pub(crate) fn event_boundary(buffer: &[u8]) -> Option<usize> {
     })
 }
 
-fn transform_event(event: Vec<u8>, estimated_input_tokens: u64) -> Vec<u8> {
+fn transform_event(event: Vec<u8>, policy: UsagePolicy) -> Vec<u8> {
+    let UsagePolicy { estimate, scale } = policy;
     let Ok(text) = std::str::from_utf8(&event) else {
         return event;
     };
@@ -131,22 +176,28 @@ fn transform_event(event: Vec<u8>, estimated_input_tokens: u64) -> Vec<u8> {
         return event;
     };
 
-    if event_name == "message_delta" {
-        log_actual_usage(&data, estimated_input_tokens);
-        return event;
-    }
-
-    let Some(input_tokens) = data
-        .get_mut("message")
-        .and_then(|message| message.get_mut("usage"))
-        .and_then(|usage| usage.get_mut("input_tokens"))
-    else {
-        return event;
+    // The two event shapes differ only in where the usage object lives.
+    let usage = if event_name == "message_delta" {
+        // Calibration logging must see the upstream's own numbers, so it runs
+        // before any scaling.
+        log_actual_usage(&data, estimate);
+        data.get_mut("usage")
+    } else {
+        data.get_mut("message")
+            .and_then(|message| message.get_mut("usage"))
     };
-    if input_tokens.as_u64() != Some(0) {
+    let changed = match usage {
+        Some(usage) => {
+            let injected =
+                event_name == "message_start" && inject_estimated_input_tokens(usage, estimate);
+            let scaled = scale.is_some_and(|scale| scale_usage(usage, scale));
+            injected || scaled
+        }
+        None => false,
+    };
+    if !changed {
         return event;
     }
-    *input_tokens = Value::from(estimated_input_tokens);
 
     let Ok(rewritten_data) = serde_json::to_vec(&data) else {
         return event;
@@ -161,6 +212,22 @@ fn transform_event(event: Vec<u8>, estimated_input_tokens: u64) -> Vec<u8> {
     rewritten.extend_from_slice(&rewritten_data);
     rewritten.extend_from_slice(&event[data_range.end..]);
     rewritten
+}
+
+/// Substitutes the router's estimate for the `input_tokens: 0` that
+/// `CLIProxyAPI` reports before the upstream has counted anything (`OpenAI`
+/// streaming only reports usage in its final chunk). Claude Code seeds its
+/// running total from that first number, so leaving it at zero would strand
+/// the context meter. Returns whether it rewrote anything.
+pub(crate) fn inject_estimated_input_tokens(usage: &mut Value, estimate: u64) -> bool {
+    let Some(input_tokens) = usage.get_mut("input_tokens") else {
+        return false;
+    };
+    if input_tokens.as_u64() != Some(0) {
+        return false;
+    }
+    *input_tokens = Value::from(estimate);
+    true
 }
 
 pub(crate) fn event_fields(event: &str) -> Option<(&str, std::ops::Range<usize>)> {
@@ -215,7 +282,11 @@ mod tests {
     use super::*;
 
     fn transformed(chunks: &[&[u8]], estimate: u64) -> Vec<u8> {
-        let mut transformer = SseUsageTransformer::new(estimate);
+        transformed_with(chunks, estimate, None)
+    }
+
+    fn transformed_with(chunks: &[&[u8]], estimate: u64, scale: Option<UsageScale>) -> Vec<u8> {
+        let mut transformer = SseUsageTransformer::new(UsagePolicy { estimate, scale });
         let mut output = Vec::new();
         for chunk in chunks {
             for bytes in transformer.push(chunk) {
@@ -263,6 +334,90 @@ mod tests {
     fn nonzero_message_start_input_tokens_is_not_rewritten() {
         let input = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n";
         assert_eq!(transformed(&[input], 99), input);
+    }
+
+    /// A real 1M-token window reported into a believed 250K one.
+    fn quarter_scale() -> Option<UsageScale> {
+        UsageScale::new(250_000, 1_000_000)
+    }
+
+    #[test]
+    fn scaling_applies_to_an_injected_message_start_estimate() {
+        let output = transformed_with(
+            &[b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"],
+            4000,
+            quarter_scale(),
+        );
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(r#""input_tokens":1000"#), "{text}");
+    }
+
+    #[test]
+    fn scaling_applies_when_upstream_reports_real_input_tokens() {
+        // The injection branch is skipped here; scaling must still happen.
+        let output = transformed_with(
+            &[b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":800,\"output_tokens\":40}}}\n\n"],
+            99,
+            quarter_scale(),
+        );
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(r#""input_tokens":200"#), "{text}");
+        assert!(text.contains(r#""output_tokens":10"#), "{text}");
+    }
+
+    #[test]
+    fn scaling_covers_every_field_the_compact_gate_sums() {
+        let output = transformed_with(
+            &[br#"event: message_delta
+data: {"type":"message_delta","usage":{"input_tokens":400,"output_tokens":80,"cache_read_input_tokens":8000,"cache_creation_input_tokens":40,"server_tool_use":{"web_search_requests":3}}}
+
+"#],
+            99,
+            quarter_scale(),
+        );
+        let text = String::from_utf8(output).unwrap();
+        for expected in [
+            r#""input_tokens":100"#,
+            r#""output_tokens":20"#,
+            r#""cache_read_input_tokens":2000"#,
+            r#""cache_creation_input_tokens":10"#,
+        ] {
+            assert!(text.contains(expected), "{expected} missing from {text}");
+        }
+        // A request count, not tokens.
+        assert!(text.contains(r#""web_search_requests":3"#), "{text}");
+    }
+
+    #[test]
+    fn partial_usage_shapes_keep_absent_fields_absent() {
+        let output = transformed_with(
+            &[b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":80}}\n\n"],
+            99,
+            quarter_scale(),
+        );
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(r#""output_tokens":20"#), "{text}");
+        assert!(!text.contains("cache_read_input_tokens"), "{text}");
+        assert!(!text.contains("input_tokens\":"), "{text}");
+    }
+
+    #[test]
+    fn small_windows_scale_up_and_round_half_away_from_zero() {
+        // Real 125K into a believed 250K: report double.
+        let scale = UsageScale::new(250_000, 125_000).unwrap();
+        assert_eq!(scale.apply(7), 14);
+        // 1/3 of a token rounds to the nearest whole one.
+        let third = UsageScale::new(1, 3).unwrap();
+        assert_eq!(third.apply(1), 0);
+        assert_eq!(third.apply(2), 1);
+        assert_eq!(third.apply(5), 2);
+        assert!(UsageScale::new(1, 0).is_none());
+    }
+
+    #[test]
+    fn without_a_scale_events_are_byte_identical() {
+        let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":42,\"output_tokens\":3}}\n\n";
+        assert_eq!(transformed(&[delta], 99), delta);
     }
 
     #[test]

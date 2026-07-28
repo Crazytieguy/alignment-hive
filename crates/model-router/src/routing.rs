@@ -75,6 +75,16 @@ fn find_top_level_model_range(body: &[u8]) -> Option<Range<usize>> {
     Some(range)
 }
 
+/// Whether the request asks for a streamed response. Uses the same DOM-free
+/// scan as the model lookup, so a multi-MB body is not parsed to read one
+/// boolean.
+#[must_use]
+pub(crate) fn is_streaming(body: &[u8]) -> bool {
+    find_top_level_value_range(body, "stream")
+        .and_then(|range| serde_json::from_slice::<bool>(&body[range]).ok())
+        .unwrap_or(false)
+}
+
 /// Byte range of the raw top-level value for `target_key` (any JSON type),
 /// using the same DOM-free skipping scan — and last-key-wins semantics — as
 /// the model lookup.
@@ -146,6 +156,7 @@ mod tests {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         });
         config
     }

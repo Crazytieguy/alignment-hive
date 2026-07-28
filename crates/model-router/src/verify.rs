@@ -25,6 +25,24 @@ pub struct ModelCheck {
     pub name: String,
     pub routing_id: String,
     pub found: bool,
+    /// The window this host actually guarantees, when it reports one. Hosts
+    /// vary: many OpenAI-compatible catalogs omit the field entirely.
+    pub host_context_length: Option<u64>,
+    /// The catalog's headline number, when it is larger than the guaranteed
+    /// one — i.e. when sub-providers disagree.
+    pub advertised_context_length: Option<u64>,
+    /// The `context-window` configured for this model, when set.
+    pub configured_context_window: Option<u64>,
+}
+
+impl ModelCheck {
+    /// `(configured, host)` when the configured window claims more than the
+    /// host serves — the direction that licences requests the host rejects.
+    /// A host that reports no window cannot contradict anything.
+    fn oversized(&self) -> Option<(u64, u64)> {
+        let (configured, host) = (self.configured_context_window?, self.host_context_length?);
+        (configured > host).then_some((configured, host))
+    }
 }
 
 /// Verifies all configured providers (or just `name`).
@@ -113,45 +131,91 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
         report.detail = scrub(&format!("HTTP {status}: {snippet}"), api_key);
         return report;
     }
-    let Some(ids) = parse_model_ids(&body) else {
+    let Some(catalog) = parse_catalog(&body) else {
         report.detail = "HTTP 200 but the response has no data[].id list".to_string();
         return report;
     };
+    let base = provider.base_url.trim_end_matches('/');
     for model in &provider.models {
+        let entry = catalog.iter().find(|entry| entry.id == model.name);
+        let advertised = entry.and_then(|entry| entry.context_length);
+        let guaranteed = match advertised {
+            Some(advertised) => Some(
+                crate::discovery::host_window(client, base, api_key, &model.name, advertised).await,
+            ),
+            None => None,
+        };
         report.models.push(ModelCheck {
-            found: ids.iter().any(|id| id == &model.name),
+            found: entry.is_some(),
+            host_context_length: guaranteed,
+            advertised_context_length: advertised
+                .filter(|advertised| Some(*advertised) != guaranteed),
+            configured_context_window: model.context_window,
             name: model.name.clone(),
             routing_id: model.routing_id.clone(),
         });
     }
     let missing = report.models.iter().filter(|check| !check.found).count();
-    report.ok = missing == 0;
-    report.detail = if missing == 0 {
+    let oversized = report
+        .models
+        .iter()
+        .filter(|check| check.oversized().is_some())
+        .count();
+    report.ok = missing == 0 && oversized == 0;
+    report.detail = if missing > 0 {
+        format!(
+            "{missing} of {} configured models not in the provider's /models list",
+            report.models.len()
+        )
+    } else if oversized == 0 {
         format!("all {} configured models found", report.models.len())
     } else {
         format!(
-            "{missing} of {} configured models not in the provider's /models list",
+            "all {} configured models found, but {oversized} configured context-window(s) \
+             exceed the host's own limit",
             report.models.len()
         )
     };
     report
 }
 
-fn parse_model_ids(body: &[u8]) -> Option<Vec<String>> {
+/// One entry of a provider's `/models` catalog.
+pub(crate) struct CatalogEntry {
+    pub(crate) id: String,
+    pub(crate) context_length: Option<u64>,
+}
+
+pub(crate) fn parse_catalog(body: &[u8]) -> Option<Vec<CatalogEntry>> {
+    /// Spellings seen across OpenAI-compatible catalogs, most common first.
+    const CONTEXT_KEYS: [&str; 3] = ["context_length", "context_window", "max_context_length"];
+
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     Some(
         value
             .get("data")?
             .as_array()?
             .iter()
-            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
-            .map(ToOwned::to_owned)
+            .filter_map(|model| {
+                let id = model.get("id").and_then(serde_json::Value::as_str)?;
+                Some(CatalogEntry {
+                    id: id.to_owned(),
+                    context_length: CONTEXT_KEYS
+                        .iter()
+                        .find_map(|key| model.get(key).and_then(serde_json::Value::as_u64)),
+                })
+            })
             .collect(),
     )
 }
 
 fn scrub(text: &str, api_key: &str) -> String {
     text.replace(api_key, "[redacted]")
+}
+
+/// Renders an error without echoing the key. reqwest never includes request
+/// headers in its Display, but this is the one place a mistake would leak.
+pub(crate) fn scrub_key(error: &impl std::fmt::Display, api_key: &str) -> String {
+    scrub(&format!("{error}"), api_key)
 }
 
 /// Renders human-readable output; returns whether every provider verified.
@@ -169,9 +233,23 @@ pub fn render(reports: &[ProviderReport]) -> (String, bool) {
             report.provider, report.base_url, report.detail
         );
         for check in &report.models {
+            let context = match (check.oversized(), check.host_context_length) {
+                (Some((configured, host)), _) => {
+                    format!("  (host context {host}, configured {configured} — TOO LARGE)")
+                }
+                (None, Some(host)) => match check.advertised_context_length {
+                    // The catalog headline is only reachable once the account
+                    // restricts routing to the sub-providers that serve it.
+                    Some(advertised) => format!(
+                        "  (host context {host} guaranteed, {advertised} advertised — varies by                          sub-provider)"
+                    ),
+                    None => format!("  (host context {host})"),
+                },
+                (None, None) => String::new(),
+            };
             let _ = writeln!(
                 out,
-                "       {} {} -> {}",
+                "       {} {} -> {}{context}",
                 if check.found { "found  " } else { "missing" },
                 check.name,
                 check.routing_id
@@ -194,10 +272,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_model_ids_reads_openai_shape() {
+    fn parse_catalog_reads_openai_shape() {
         let body = br#"{"object":"list","data":[{"id":"a"},{"id":"b"},{"no_id":true}]}"#;
-        assert_eq!(parse_model_ids(body).unwrap(), ["a", "b"]);
-        assert!(parse_model_ids(b"[]").is_none());
-        assert!(parse_model_ids(b"not json").is_none());
+        let catalog = parse_catalog(body).unwrap();
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(catalog.iter().all(|entry| entry.context_length.is_none()));
+        assert!(parse_catalog(b"[]").is_none());
+        assert!(parse_catalog(b"not json").is_none());
+    }
+
+    #[test]
+    fn parse_catalog_reads_the_host_context_length() {
+        let body = br#"{"data":[{"id":"a","context_length":1048576},{"id":"b","context_window":128000},{"id":"c"}]}"#;
+        let catalog = parse_catalog(body).unwrap();
+        assert_eq!(catalog[0].context_length, Some(1_048_576));
+        assert_eq!(catalog[1].context_length, Some(128_000));
+        assert_eq!(catalog[2].context_length, None);
+    }
+
+    fn check(host: Option<u64>, configured: Option<u64>) -> ModelCheck {
+        ModelCheck {
+            name: "m".to_string(),
+            routing_id: "m".to_string(),
+            found: true,
+            host_context_length: host,
+            advertised_context_length: None,
+            configured_context_window: configured,
+        }
+    }
+
+    #[test]
+    fn only_a_window_the_host_contradicts_counts_as_oversized() {
+        assert_eq!(
+            check(Some(256_000), Some(1_000_000)).oversized(),
+            Some((1_000_000, 256_000))
+        );
+        assert!(check(Some(1_000_000), Some(256_000)).oversized().is_none());
+        assert!(check(Some(256_000), Some(256_000)).oversized().is_none());
+        // A host that reports nothing cannot contradict the configuration.
+        assert!(check(None, Some(1_000_000)).oversized().is_none());
     }
 }

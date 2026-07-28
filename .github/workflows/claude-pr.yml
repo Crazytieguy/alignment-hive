@@ -33,8 +33,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      # CACHE_STEP
-      # INSTALL_STEP
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Check if already handled
         id: check
@@ -88,13 +99,11 @@ jobs:
         uses: anthropics/claude-code-action@v1
         env:
           ISSUE_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          # PLUGIN_ENV
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           additional_permissions: |
             actions: read
           prompt: ${{ steps.prompt.outputs.content }}
-          # PLUGINS
           claude_args: |
             --model claude-opus-4-7
             --permission-mode acceptEdits

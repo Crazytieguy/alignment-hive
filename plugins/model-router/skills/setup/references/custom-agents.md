@@ -19,9 +19,12 @@ Complete the task you are given.
 
 - GPT example: `name: gpt-5.6-sol(low)`, `model: gpt-5.6-sol`,
   `effort: low`, file `gpt-5.6-sol-low.md`.
-- Open-weights models: drop the `effort:` line and the `(<effort>)` suffix
-  (the route ignores effort), e.g. `name: kimi-k2.7`, `model: kimi-k2.7`,
-  file `kimi-k2.7.md`.
+- Open-weights models: `effort:` is optional. It does reach the host, as
+  OpenAI's `reasoning_effort` — every Claude Code level is accepted, including
+  ones outside a model's documented set — but how much a level actually
+  changes the model's behavior varies by host, so don't promise a user that
+  it will. Leaving the line out doesn't disable it either; the session's own
+  level is forwarded instead.
 - The `model:` value must be a routing ID the router serves (`[[models]]`
   entry or `[[openai-providers.models]]` routing-id); anything else falls
   through to Anthropic and fails with model-not-found.

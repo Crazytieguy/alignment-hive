@@ -82,6 +82,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 
 #### Plugin list
 
+- **GitHub Action**: `github-action@alignment-hive` — `@claude` mentions on issues/PRs for autonomous work
 - **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod)
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
@@ -92,6 +93,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 
 | Plugin | README URL |
 |---|---|
+| github-action | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/github-action/README.md` |
 | mats | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/mats/README.md` |
 | remote-kernels | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/remote-kernels/README.md` |
 | precis | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
@@ -123,7 +125,7 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 ```json
 {
   "enabledPlugins": {
-    "model-router@alignment-hive": true
+    "github-action@alignment-hive": true
   },
   "extraKnownMarketplaces": {
     "alignment-hive": {

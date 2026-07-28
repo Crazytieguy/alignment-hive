@@ -4,8 +4,6 @@
 import type { QueryCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 
-// Bumping this locks data accessors out of the web app but not out of existing
-// WorkOS API keys — revoke those by hand in the WorkOS dashboard.
 export const CURRENT_AGREEMENT_VERSION = "2026-03";
 
 /** Check whether a user has signed the current agreement version. */

@@ -114,7 +114,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     if let Some(address) = router_address {
         let health = probe_health(address).await;
         match health {
-            Some((status, version, upstream_state)) => {
+            Some((status, version, upstream_state, running_window)) => {
                 let ok = status == "ok";
                 checks.push(Check {
                     name: "router",
@@ -141,6 +141,22 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                              started?); run `model-router service restart`"
                                 .to_string()
                         },
+                    });
+                }
+                // The running service resolved its context declaration at
+                // startup; a settings edit since then silently moves every
+                // scaled route's compaction point until it restarts.
+                if let (Some(running), Some(current)) = (running_window, client_window_value())
+                    && running != current
+                {
+                    checks.push(Check {
+                        name: "context-declaration",
+                        ok: false,
+                        detail: format!(
+                            "the running service resolved {running} but {} is now {current}; run \
+                             `model-router service restart`",
+                            crate::client_window::ENV_VAR
+                        ),
                     });
                 }
                 // A healthy-but-stale service is otherwise invisible: the
@@ -170,6 +186,15 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         }
     }
 
+    if let Some(config) = &config {
+        let home = crate::state::home_dir();
+        let client = crate::client_window::resolve(
+            home.as_deref(),
+            &std::env::current_dir().unwrap_or_default(),
+        );
+        checks.extend(crate::context_check::check(config, client));
+    }
+
     let healthy = checks.iter().all(|check| check.ok);
     Report {
         version: env!("CARGO_PKG_VERSION"),
@@ -177,6 +202,17 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         base_url,
         checks,
     }
+}
+
+/// The context window Claude Code is configured with right now, as this
+/// process can see it.
+fn client_window_value() -> Option<u64> {
+    let home = crate::state::home_dir();
+    crate::client_window::resolve(
+        home.as_deref(),
+        &std::env::current_dir().unwrap_or_default(),
+    )
+    .value()
 }
 
 fn upstream_checks(dirs: &Dirs, upstream: &crate::config::UpstreamConfig, checks: &mut Vec<Check>) {
@@ -255,7 +291,9 @@ fn launcher_version(dirs: &Dirs) -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-async fn probe_health(address: std::net::SocketAddr) -> Option<(String, String, String)> {
+async fn probe_health(
+    address: std::net::SocketAddr,
+) -> Option<(String, String, String, Option<u64>)> {
     let client = probe_client()?;
     let body = client
         .get(format!("http://{address}{}", crate::proxy::HEALTH_PATH))
@@ -276,6 +314,9 @@ async fn probe_health(address: std::net::SocketAddr) -> Option<(String, String, 
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown")
             .to_string(),
+        value
+            .get("declared-context-window")
+            .and_then(serde_json::Value::as_u64),
     ))
 }
 

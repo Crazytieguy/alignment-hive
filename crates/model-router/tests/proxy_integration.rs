@@ -58,6 +58,7 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         ..Config::default()
     };
@@ -168,6 +169,7 @@ async fn stub_stream_and_capture_are_valid_and_redacted() {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         capture: CaptureConfig {
             enabled: true,
@@ -307,6 +309,7 @@ async fn managed_unavailable_serves_claude_and_rejects_gpt() {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         ..Config::default()
     };
@@ -360,6 +363,7 @@ async fn ingress_token_gates_all_routes_except_bare_health() {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         ..Config::default()
     };
@@ -457,6 +461,7 @@ async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape(
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         openai_providers: vec![model_router::config::OpenAiProvider {
             name: "fireworks".to_string(),
@@ -466,6 +471,8 @@ async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape(
                 name: "accounts/fireworks/models/kimi-k2p7".to_string(),
                 routing_id: "kimi-k2.7".to_string(),
                 display_name: "Kimi K2.7".to_string(),
+                context_window: None,
+                context_window_scaling: false,
             }],
         }],
         ..Config::default()
@@ -546,6 +553,7 @@ async fn gpt_sse_usage_rewrite_is_streamed_and_captured() {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         capture: CaptureConfig {
             enabled: true,
@@ -578,6 +586,73 @@ async fn gpt_sse_usage_rewrite_is_streamed_and_captured() {
     let jsonl = tokio::fs::read_to_string(capture_file).await.unwrap();
     let record: serde_json::Value = serde_json::from_str(jsonl.trim()).unwrap();
     assert_eq!(record["response_body"], client_text);
+    fake_task.abort();
+}
+
+/// A route whose real window is four times what Claude Code believes reports a
+/// quarter of its real usage, so the client's auto-compact gate — which sums
+/// the usage of the last message carrying one — trips at the real limit.
+#[tokio::test]
+async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
+    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_address = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new().fallback(any(|| async {
+        let chunks = [
+            Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"),
+            Bytes::from_static(b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":400000,\"cache_read_input_tokens\":80000,\"output_tokens\":4000}}\n\n"),
+        ];
+        let stream = futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<Bytes, std::convert::Infallible>),
+        );
+        let mut response = Response::new(Body::from_stream(stream));
+        response
+            .headers_mut()
+            .insert("content-type", "text/event-stream".parse().unwrap());
+        response
+    }));
+    let fake_task = tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let mut config = Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        declared_context_window: Some(250_000),
+        models: vec![ModelRoute {
+            routing_id: "kimi-k3".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "kimi-k3".to_string(),
+            display_name: "Kimi K3".to_string(),
+            context_window: Some(1_000_000),
+            context_window_scaling: true,
+            usage_scale: None,
+        }],
+        ..Config::default()
+    };
+    config.prepare().unwrap();
+    let app = model_router::proxy::app(config).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"kimi-k3","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    for expected in [
+        r#""input_tokens":100000"#,
+        r#""cache_read_input_tokens":20000"#,
+        r#""output_tokens":1000"#,
+    ] {
+        assert!(text.contains(expected), "{expected} missing from {text}");
+    }
     fake_task.abort();
 }
 
@@ -651,6 +726,7 @@ fn websearch_config(fake_address: std::net::SocketAddr) -> Config {
             upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         ..Config::default()
     }
@@ -1300,6 +1376,7 @@ async fn claude_origin_native_works_without_a_gpt_upstream() {
             upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
+            ..Default::default()
         }],
         ..Config::default()
     };

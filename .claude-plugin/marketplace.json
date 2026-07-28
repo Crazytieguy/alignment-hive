@@ -35,7 +35,7 @@
     {
       "name": "github-action",
       "source": "./plugins/github-action",
-      "description": "Deprecated: no longer maintained. Set up Claude Code GitHub Action for autonomous issue and PR handling."
+      "description": "Set up Claude Code GitHub Action for autonomous issue and PR handling"
     },
     {
       "name": "model-router",

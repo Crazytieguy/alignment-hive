@@ -2,7 +2,10 @@
 
 pub mod acquire;
 pub mod capture;
+pub mod client_window;
 pub mod config;
+mod context_check;
+pub mod discovery;
 pub mod doctor;
 pub mod headers;
 pub mod identity;

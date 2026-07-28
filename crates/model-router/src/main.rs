@@ -161,6 +161,11 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
     if config.capture.enabled && config.capture.file.is_relative() {
         config.capture.file = dirs.state_dir.join(&config.capture.file);
     }
+    // Ask the hosts for the windows of any route that opted into scaling
+    // without naming one. Best-effort: an unreachable host leaves the route
+    // unscaled rather than blocking Claude traffic.
+    model_router::discovery::fill_context_windows(&mut config, dirs).await;
+    config.prepare()?;
     let _lock = InstanceLock::acquire(dirs)?;
 
     // Bind the router port BEFORE spawning the managed child so a taken port

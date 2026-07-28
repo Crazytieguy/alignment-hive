@@ -18,7 +18,7 @@ use crate::config::{Config, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::routing::{Branch, RoutingDecision, decide, substitute_model};
 use crate::stub;
-use crate::usage::{SseUsageTransformer, estimate_input_tokens};
+use crate::usage::{SseUsageTransformer, UsagePolicy, estimate_input_tokens};
 use crate::websearch;
 
 /// Maximum time SIGINT/SIGTERM may spend draining in-flight connections.
@@ -512,7 +512,7 @@ async fn gpt_response(
             .await;
         }
     };
-    let estimated_input_tokens = estimate_input_tokens(&rewritten);
+    let usage_policy = usage_policy(&rewritten, route);
 
     if state.config.web_search.mode != WebSearchMode::Off
         && parts.method == Method::POST
@@ -547,7 +547,7 @@ async fn gpt_response(
                 &subcall,
                 &base_url,
                 credential.as_ref(),
-                estimated_input_tokens,
+                usage_policy,
                 capture,
             )
             .await;
@@ -558,7 +558,7 @@ async fn gpt_response(
             parts,
             rewritten,
             &route.upstream_model,
-            estimated_input_tokens,
+            usage_policy,
             capture,
             None,
         )
@@ -576,11 +576,28 @@ async fn gpt_response(
         parts,
         rewritten,
         &route.upstream_model,
-        estimated_input_tokens,
+        usage_policy,
         capture,
         tap,
     )
     .await
+}
+
+/// How this request's usage is reported back.
+///
+/// The estimate only ever reaches the client through the streamed
+/// `message_start`, and counting it is the most expensive thing on this path
+/// (a full tiktoken encode of the body, tools included), so a non-streaming
+/// request skips it — the buffered web-search paths compute their own.
+fn usage_policy(rewritten: &Bytes, route: &crate::config::ModelRoute) -> UsagePolicy {
+    UsagePolicy {
+        estimate: if crate::routing::is_streaming(rewritten) {
+            estimate_input_tokens(rewritten)
+        } else {
+            0
+        },
+        scale: route.usage_scale,
+    }
 }
 
 /// A sub-call arriving on the GPT branch whose `WebSearch` was invoked by a
@@ -698,7 +715,7 @@ async fn forward_gpt(
     parts: &axum::http::request::Parts,
     rewritten: Bytes,
     upstream_model: &str,
-    estimated_input_tokens: u64,
+    usage_policy: UsagePolicy,
     capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
 ) -> Response {
@@ -720,7 +737,7 @@ async fn forward_gpt(
                 true,
                 true,
                 credential.as_ref(),
-                Some(estimated_input_tokens),
+                Some(usage_policy),
                 capture,
                 tap,
             )
@@ -759,7 +776,7 @@ async fn forward_gpt(
                 true,
                 true,
                 Some(&handle.credential),
-                Some(estimated_input_tokens),
+                Some(usage_policy),
                 capture,
                 tap,
             )
@@ -801,7 +818,7 @@ async fn websearch_response(
     subcall: &websearch::Subcall,
     base_url: &str,
     credential: Option<&headers::GptUpstreamCredential>,
-    estimated_input_tokens: u64,
+    usage_policy: UsagePolicy,
     capture: Option<RequestCapture>,
 ) -> Response {
     if state.config.web_search.mode == WebSearchMode::Alpha {
@@ -813,7 +830,9 @@ async fn websearch_response(
                     subcall,
                     &links,
                     &output,
-                    estimated_input_tokens,
+                    // Sub-call responses are not conversation context, so they
+                    // are reported unscaled.
+                    estimate_input_tokens(&rewritten),
                 );
                 return message_response(state, &message, subcall.stream, capture).await;
             }
@@ -824,12 +843,13 @@ async fn websearch_response(
     }
     match legacy_websearch(state, parts, &rewritten, base_url, credential).await {
         Ok(mut message) => {
-            if let Some(input_tokens) = message
-                .get_mut("usage")
-                .and_then(|usage| usage.get_mut("input_tokens"))
-                && input_tokens.as_u64() == Some(0)
-            {
-                *input_tokens = serde_json::Value::from(estimated_input_tokens);
+            if let Some(usage) = message.get_mut("usage") {
+                // Sub-call responses are conversation context for nobody, so
+                // they get the estimate but never the route's scale.
+                crate::usage::inject_estimated_input_tokens(
+                    usage,
+                    estimate_input_tokens(&rewritten),
+                );
             }
             let filled = websearch::fill_empty_web_search_results(&mut message);
             tracing::info!(filled, "scraped links into the LLM web search response");
@@ -842,7 +862,7 @@ async fn websearch_response(
                 parts,
                 rewritten,
                 upstream_model,
-                estimated_input_tokens,
+                usage_policy,
                 capture,
                 None,
             )
@@ -1047,6 +1067,10 @@ fn health_response(state: &AppState) -> Response {
             "status": status,
             "version": env!("CARGO_PKG_VERSION"),
             "cliproxy-upstream": upstream,
+            // What this process resolved at startup. Doctor compares it with
+            // a fresh read so a settings change that the running service has
+            // not picked up is visible rather than silently mis-scaling.
+            "declared-context-window": state.config.declared_context_window,
             // Deprecated duplicate for the auto-update skew window: a pre-0.1.3
             // doctor probing a newer service still reads the old key. Remove
             // after one release.
@@ -1073,7 +1097,7 @@ async fn forward(
     strip_credentials: bool,
     body_changed: bool,
     gpt_credential: Option<&headers::GptUpstreamCredential>,
-    estimated_input_tokens: Option<u64>,
+    usage_policy: Option<UsagePolicy>,
     mut capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
 ) -> Response {
@@ -1100,7 +1124,7 @@ async fn forward(
         .send()
         .await
     {
-        Ok(response) => upstream_response(state, response, capture, estimated_input_tokens, tap),
+        Ok(response) => upstream_response(state, response, capture, usage_policy, tap),
         Err(error) => {
             tracing::warn!(%error, "upstream request failed");
             local_error_response(
@@ -1227,7 +1251,7 @@ fn upstream_response(
     state: &AppState,
     response: reqwest::Response,
     capture: Option<RequestCapture>,
-    estimated_input_tokens: Option<u64>,
+    usage_policy: Option<UsagePolicy>,
     tap: Option<SniffTap>,
 ) -> Response {
     let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
@@ -1240,7 +1264,7 @@ fn upstream_response(
                 media_type.trim().eq_ignore_ascii_case("text/event-stream")
             })
         });
-    let transform_usage = estimated_input_tokens.is_some() && is_sse;
+    let transform_usage = usage_policy.is_some() && is_sse;
     let response_headers = headers::response_headers(response.headers(), transform_usage);
     let stream = response.bytes_stream();
     let stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
@@ -1273,10 +1297,10 @@ fn upstream_response(
             Box::pin(stream)
         };
 
-    if let Some(estimated_input_tokens) = estimated_input_tokens.filter(|_| transform_usage) {
+    if let Some(usage_policy) = usage_policy.filter(|_| transform_usage) {
         let transformed_stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
-            let mut transformer = SseUsageTransformer::new(estimated_input_tokens);
+            let mut transformer = SseUsageTransformer::new(usage_policy);
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(bytes) => {
@@ -1512,6 +1536,7 @@ mod tests {
                 upstream: "codex".to_string(),
                 upstream_model: "gpt-test".to_string(),
                 display_name: "GPT Test".to_string(),
+                ..Default::default()
             }],
             capture: CaptureConfig {
                 enabled: true,

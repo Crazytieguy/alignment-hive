@@ -1058,6 +1058,7 @@ mod tests {
                 name: format!("upstream/{routing_id}"),
                 routing_id: routing_id.to_string(),
                 display_name: routing_id.to_string(),
+                ..Default::default()
             }],
         }
     }

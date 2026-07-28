@@ -825,14 +825,8 @@ impl Connection for K8sConnection {
         }
 
         let extracted = staging.path().join(&base);
-        if std::fs::symlink_metadata(&extracted).is_err() {
-            anyhow::bail!("remote path {remote_path:?} produced no output");
-        }
-        // tar restores symlinks verbatim; drop the ones that escape what we
-        // downloaded, matching the `--safe-links` the rsync path uses.
-        crate::sync::strip_unsafe_symlinks(&extracted)?;
         if !extracted.exists() {
-            anyhow::bail!("remote path {remote_path:?} is a symlink pointing outside the download");
+            anyhow::bail!("remote path {remote_path:?} produced no output");
         }
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent)?;

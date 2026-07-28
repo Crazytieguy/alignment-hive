@@ -201,9 +201,7 @@ fn resolve_sources(plugin_root: Option<&Path>) -> anyhow::Result<Option<Launcher
 }
 
 fn unit_path(platform: Platform) -> anyhow::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+    let home = crate::state::home_dir()
         .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot locate the user service unit"))?;
     Ok(match platform {
         Platform::MacOs => home

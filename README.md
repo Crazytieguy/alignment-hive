@@ -61,6 +61,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 |--------|-------------|----------------------|
 | [hive](plugins/hive) | Tooling recommendations, session memory + sharing | Included in install script |
 | [mats](plugins/mats) | MATS fellow handbook, lit review, best practices | `mats@alignment-hive` |
+| [github-action](plugins/github-action) | GitHub Action for autonomous `@claude` on issues and PRs | `github-action@alignment-hive` |
 | [llms-fetch-mcp](plugins/llms-fetch-mcp) | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `llms-fetch-mcp@alignment-hive` |
 | [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `remote-kernels@alignment-hive` |
 | [model-router](plugins/model-router) | GPT models as native Claude Code subagents via a local gateway (experimental) | `model-router@alignment-hive` |

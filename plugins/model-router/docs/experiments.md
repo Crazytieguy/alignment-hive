@@ -234,6 +234,50 @@ raw SSE inspected.
   experiment: implement router `/v1/models` (forward + append GPT routes'
   id/display_name) and check the picker in one interactive session.
 
+## Auto-compact accounting (binary-verified, 2026-07-27, Claude Code 2.1.220)
+
+Method: symbol search and disassembly-adjacent string extraction from the
+installed 2.1.220 binary. Motivated by the previous section's open question —
+"needs a harness-side test of which events Claude Code actually accumulates
+from" — because per-model context sizing depends on the answer.
+
+- The auto-compact gate computes its token total as
+  `YA(messages, model) = dIe(usage of the most recent message carrying usage)
+  + tP(messages after that anchor)`. The first term is **API-reported usage**;
+  only the trailing messages are estimated client-side.
+- `dIe(u) = u.input_tokens + (u.cache_creation_input_tokens ?? 0) +
+  (u.cache_read_input_tokens ?? 0) + u.output_tokens` — exactly four fields.
+- The total is compared against
+  `CSe(model, window) = aY(model, window).window - min(outputReserve, 20000)`.
+- `countTokensWithFallback` (API `count_tokens` with a haiku fallback) backs
+  the `/context` display and the system-prompt / CLAUDE.md size analysis, and
+  is **not** on the compact path. So the router's `count_tokens` 404 does not
+  affect compaction.
+- Consequence: rescaling the four reported usage fields moves the compaction
+  trigger point, which is what `context-window-scaling` does. The unscaled
+  post-anchor tail is in real tokens while the anchor is scaled, so a
+  scaled-down route over-counts its tail slightly and compacts marginally
+  early — the safe direction.
+- Prefix rule re-verified on this version:
+  `if (n !== undefined && n > 0 && !normalized.startsWith("claude-")) return n;
+  return <200000 default>`.
+- Also observed: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (clamped to [1e5, 1e6]) and
+  an `autoCompactWindow` setting can *lower* the compaction window but never
+  raise it above the model's max; both are global, so neither gives per-model
+  sizing.
+- Not verified: end-to-end behavior on a live scaled route against a real
+  open-weights host (no provider key available). **Retest trigger:** any Claude
+  Code upgrade — this is undocumented, reverse-engineered behavior, and a
+  version that starts sizing context differently would turn scaling into
+  silent overruns.
+
+Externally sourced catalog facts (not measured here, 2026-07-27): GLM-5.2
+advertises a 1M-token window under the separate `glm-5.2[1m]` model ID
+(base ID serves less); Kimi K3 is listed at 1,048,576 on OpenRouter. Host-
+served windows can be lower than the vendor's advertised number — the Codex
+backend serving 272K of GPT-5.6's advertised 1.05M is the same pattern — and
+OpenRouter's `context_length` is the maximum across its sub-providers.
+
 ## GPT tool-usage audits (2026-07-20, 5 transcripts, Sonnet auditors)
 
 Five probe tasks (sol x3, terra, luna) audited from raw transcripts. Task
@@ -288,6 +332,58 @@ not replicate through this integration. Action: reviewer agents switched to
 sol at high effort. Bonus: the bake-off surfaced two real repo bugs — the
 starfield docH self-pinning feedback loop (9fad035) and the hive fork-hook
 registration skip for first-seen directories (f14896e).
+
+## Effort and windows on openai-compatibility upstreams (2026-07-28, CLIProxyAPI 7.2.92)
+
+Method: ran the cached CLIProxyAPI binary against a local fake
+OpenAI-compatible host that logs the exact body it receives, with one
+`openai-compatibility` provider configured. No provider account involved.
+
+- `output_config.effort` **is** forwarded, as OpenAI's top-level
+  `reasoning_effort`, verbatim: low/medium/high/xhigh/max each arrived
+  unchanged. The previous skill claim that open-weights routes ignore effort
+  was wrong (and had never been measured).
+- With `thinking: {type: adaptive}` and **no** effort, the forwarded body
+  carries `reasoning_effort: "xhigh"` — the same adaptive-defaults-to-xhigh
+  behavior noted for the Codex path, and it reaches openai-compat hosts too.
+  With neither field, no `reasoning_effort` is sent.
+- Live follow-up against OpenRouter + Kimi K3 (real key, ~$0.05): all five
+  Claude Code levels (low/medium/high/xhigh/max) return 200. Values outside
+  Kimi's documented low/high/max are NOT rejected, so the feared 400 does not
+  happen. Whether a level changes behavior is a different question and the
+  answer is "sometimes": pinned to Together on one prompt, low/medium/high
+  were identical (68 reasoning tokens), xhigh 74, max 64-but-139-completion;
+  on an earlier prompt max produced 92 reasoning tokens against 13 for low.
+  So effort is forwarded and accepted, and its effect is host- and
+  model-dependent — worth measuring per host before promising anything.
+- Incidental confirmation of the routing lottery: five identical one-token
+  requests were served by DigitalOcean, Together (x3) and Fireworks.
+- Also visible in the forwarded body: `stream_options: {include_usage: true}`,
+  so real usage does come back on the openai-compat path, not just the Codex
+  one.
+
+### OpenRouter sub-provider windows vary enormously (2026-07-28)
+
+`GET /api/v1/models/moonshotai/kimi-k3/endpoints` (public, no key) lists seven
+endpoints: BaseTen, DigitalOcean, Fireworks x2, Together, Moonshot AI all at
+1,000,000–1,048,576 — and **Nebius at 8,000**. The aggregate `/models` entry
+reports 1,048,576. OpenRouter's provider-routing docs describe filtering on
+`max_tokens` and on supported parameters, but say nothing about routing by
+prompt size, so a long conversation can be handed to the 8K endpoint. Every
+endpoint lists `reasoning_effort` in `supported_parameters`.
+
+Provider pinning is only available two ways, both outside the request the
+router controls: the per-request `provider.only`/`order` fields (CLIProxyAPI
+builds that body, so the router cannot inject them) and account-wide
+allowed/ignored providers at `https://openrouter.ai/settings/privacy`, which
+merge with the per-request lists and apply to every API call. There is no
+model-slug pin — `:nitro` and `:floor` only change sorting.
+
+Consequence: discovery takes the narrowest endpoint on OpenRouter, which for
+this model means it declines to scale rather than promising 1M. Pinning
+account-side (then setting `context-window` by hand, since the catalog the
+router reads is unaware of account settings), or using a direct host, is what
+makes the advertised window real.
 
 ## Still open
 - Long sessions and heavy tool loops against real Codex; more ToolSearch

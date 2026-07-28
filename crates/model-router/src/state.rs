@@ -13,6 +13,15 @@ use anyhow::Context;
 ///
 /// XDG-style on both macOS and Linux (deliberately not
 /// `~/Library/Application Support` — one layout to document and debug).
+/// The user's home directory, treating an empty `HOME` as unset. One
+/// implementation so every caller agrees on that edge case.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
 #[derive(Clone, Debug)]
 pub struct Dirs {
     pub config_dir: PathBuf,
@@ -28,7 +37,7 @@ impl Dirs {
     /// Returns an error when `$HOME` is unset and no XDG override covers a
     /// directory.
     pub fn resolve() -> anyhow::Result<Self> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = home_dir();
         let base = |xdg: &str, home_suffix: &str| -> anyhow::Result<PathBuf> {
             if let Some(dir) = std::env::var_os(xdg).filter(|dir| !dir.is_empty()) {
                 return Ok(PathBuf::from(dir));
@@ -321,8 +330,7 @@ pub fn import_legacy_auth(dirs: &Dirs) -> anyhow::Result<Option<String>> {
     if find_codex_auth(&auth_dir).is_some() {
         return Ok(None);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let legacy_dirs = home
+    let legacy_dirs = home_dir()
         .into_iter()
         .flat_map(|home| {
             [
