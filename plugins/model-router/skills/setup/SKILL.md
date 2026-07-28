@@ -68,12 +68,21 @@ macOS and Linux only.
    declaration skips — prefer the custom-model entry.)
 6. Tell the user to restart Claude Code sessions (env is read at startup),
    and that the GPT agents and `choosing-models` skill are now available.
-   Offer to run a smoke test that works without a restart:
-   `ANTHROPIC_BASE_URL=<base_url> claude -p 'reply with ok' --model
-   claude-gpt-5.6-sol`. To confirm the 1M windows survive the current Claude
-   Code version, run `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1 claude -p
-   'say ok' --model claude-fable-5 --output-format json | jq
-   '.modelUsage[].contextWindow'` — it must print 1000000, not 200000.
+   Offer to run smoke tests. A fresh `claude -p` reads the step 5 settings
+   at its own startup, so they work without restarting the current session.
+   Don't env-prefix the step 5 variables onto them: once the settings env
+   block exists it silently overrides shell-provided values. (If the user
+   declined step 5, prefixing `ANTHROPIC_BASE_URL=<base_url>` onto the
+   routing test is instead required, and the window check is meaningless —
+   against the direct Anthropic API it prints 1000000 regardless of the
+   flag.)
+   Routing: `claude -p 'reply with ok' --model claude-gpt-5.6-sol`.
+   1M windows, to confirm they survive the current Claude Code version:
+   `claude -p 'say ok' --model claude-fable-5 --output-format json | jq
+   '.modelUsage[].contextWindow'` — it must print 1000000. On 200000,
+   re-check the step 5 wiring first (right settings file; run from inside
+   the project if the wiring is project-scoped); only if it is correct did
+   a Claude Code release drop the flag.
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) agents for

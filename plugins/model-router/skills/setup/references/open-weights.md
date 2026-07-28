@@ -46,9 +46,11 @@ vendor.
 6. Create a subagent per model so Claude can delegate to it: copy the
    template in `references/custom-agents.md`.
 7. `$ROUTER service restart`, then smoke-test every configured routing-id
-   with a direct request through the gateway (do NOT use `claude -p
-   --model <routing-id>` — Claude Code validates new model IDs against a
-   stale list and rejects them):
+   with a direct request through the gateway — curl rather than `claude -p
+   --model <routing-id>`, because curl isolates the router→provider chain
+   from Claude Code's own wiring (`claude -p` also works once the restarted
+   service knows the route, provided the main setup's settings env block
+   points Claude Code at the gateway):
    ```
    curl -s <base_url from doctor --json>/v1/messages \
      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
