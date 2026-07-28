@@ -1509,7 +1509,8 @@ impl RemoteKernelsServer {
                         .to_string(),
                 );
             };
-            conn.download(&path, &project_dir.join(&path))
+            let destination = crate::sync::resolve_project_destination(&project_dir, &path)?;
+            conn.download(&path, &destination)
                 .await
                 .map_err(|error| {
                     format!("downloading {path:?} failed ({error:#}); the plan stays queued — retry with attach() or finish()")
@@ -2830,12 +2831,6 @@ impl RemoteKernelsServer {
         self.check_budget().await?;
         let params = params.0;
 
-        // Same constraint as sync includes: the destination must stay inside
-        // the project.
-        if let Err(msg) = crate::sync::validate_project_relative(&params.local_path) {
-            return err_text(msg);
-        }
-
         let (project_dir, conn) = {
             let state = self.state.lock().await;
             let machine_id = match state.resolve_instance(params.instance.as_deref()) {
@@ -2854,8 +2849,16 @@ impl RemoteKernelsServer {
             (state.project_dir.clone(), conn)
         };
 
+        // Same constraint as sync includes: the destination must stay inside
+        // the project.
+        let destination =
+            match crate::sync::resolve_project_destination(&project_dir, &params.local_path) {
+                Ok(destination) => destination,
+                Err(msg) => return err_text(msg),
+            };
+
         let result = conn
-            .download(&params.remote_path, &project_dir.join(&params.local_path))
+            .download(&params.remote_path, &destination)
             .await
             .map_err(|e| McpError::internal_error(format!("Download failed: {e}"), None))?;
 
