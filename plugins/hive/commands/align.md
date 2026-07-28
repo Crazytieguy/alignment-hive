@@ -123,7 +123,7 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 ```json
 {
   "enabledPlugins": {
-    "mats@alignment-hive": true
+    "model-router@alignment-hive": true
   },
   "extraKnownMarketplaces": {
     "alignment-hive": {
