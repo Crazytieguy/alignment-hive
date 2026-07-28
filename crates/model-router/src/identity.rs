@@ -13,9 +13,8 @@ pub fn identity_text(display_name: &str) -> String {
          Claude. The rest of this system prompt is Claude Code's standard \
          system prompt, so it may address the assistant as Claude; read it \
          as applying to you. Claude Code's built-in tools likely differ from \
-         the tool harness you were trained with. Read tool descriptions closely \
-         and prefer the dedicated tools (such as Read, Edit, Grep, Glob) over \
-         shell equivalents."
+         the tool harness you were trained with. Read tool descriptions \
+         closely."
     )
 }
 
@@ -95,8 +94,7 @@ mod tests {
         assert!(text.contains("Claude Code's standard system prompt"));
         assert!(text.contains(
             "Claude Code's built-in tools likely differ from the tool harness you were trained \
-             with. Read tool descriptions closely and prefer the dedicated tools (such as Read, \
-             Edit, Grep, Glob) over shell equivalents."
+             with. Read tool descriptions closely."
         ));
     }
 

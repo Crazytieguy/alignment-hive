@@ -377,6 +377,31 @@ sol at high effort. Bonus: the bake-off surfaced two real repo bugs — the
 starfield docH self-pinning feedback loop (9fad035) and the hive fork-hook
 registration skip for first-seen directories (f14896e).
 
+### Correction: Grep/Glob did not exist in the audited sessions (2026-07-28)
+
+Claude Code 2.1.117 removed the standalone Grep/Glob tools on native
+macOS/Linux builds — search moved to embedded `bfs`/`ugrep` via Bash
+(2.1.162 restores the tools only when `--tools` names them explicitly).
+The audits above ran on 2.1.217, so "Bash `rg`/`find` instead of
+Grep/Glob" was the models using the only search path available, and the
+`bash_over_dedicated` rubric penalized tools absent from the request.
+The router-side nudge shipped as countermeasure pointed GPT models at
+Grep/Glob; 0.1.6 cuts the whole "prefer the dedicated tools … over
+shell equivalents" clause — the cat/sed-vs-Read half of the audit
+finding is already stated verbatim in the Bash tool description every
+request carries — keeping only the trained-harness-differs /
+read-descriptions-closely warning. Last transcript on this machine
+with a real Grep/Glob call: 2026-04-27, v2.1.119.
+
+Verified in a live Bash session (2.1.220): plain `find`/`grep` are
+shadowed by shell-snapshot functions re-execing the `claude` multicall
+binary as bfs/ugrep, the `grep` shim defaulting to `--ignore-files
+--hidden -I --exclude-dir=.git` (+ .svn/.hg/.bzr/.jj/.sl) — which would
+have prevented the audit's `rg --hidden` overflow on `.git/`. `rg`
+resolves to the user's real ripgrep when installed, so `--hidden`
+sweeping `.git/` remains possible there. Shell search is the sanctioned
+path; there is nothing to nudge GPT models away from.
+
 ## Effort and windows on openai-compatibility upstreams (2026-07-28, CLIProxyAPI 7.2.92)
 
 Method: ran the cached CLIProxyAPI binary against a local fake
