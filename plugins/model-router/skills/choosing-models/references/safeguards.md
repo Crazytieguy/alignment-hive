@@ -8,10 +8,21 @@ classifiers refuse). Anthropic tiers per model under
 Kimi and GLM publish no vendor safety framework.
 
 - **Fable 5 / Mythos 5** — ASL-3 plus a Mythos-class classifier layer that
-  reroutes cyber, bio/chem, and distillation queries to Opus 4.8 (<5% of
-  sessions, user notified), tuned deliberately over-cautious.
+  reroutes cyber, bio/chem, and distillation queries (<5% of sessions,
+  user notified), tuned deliberately over-cautious. Since Opus 5's launch,
+  blocked biology/chem requests route to Opus 5; cyber and other flagged
+  categories still route to Opus 4.8.
   [Anthropic, 2026-06-09](https://www.anthropic.com/news/claude-fable-5-mythos-5);
-  [redeploy update, 2026-07-01](https://www.anthropic.com/news/redeploying-fable-5).
+  [redeploy update, 2026-07-01](https://www.anthropic.com/news/redeploying-fable-5);
+  [Opus 5 announcement, 2026-07-24](https://www.anthropic.com/news/claude-opus-5).
+- **Opus 5** — defensive security work allowed (source-code vulnerability
+  scanning, triage, secure coding); classifiers block exploit generation,
+  binary vulnerability scanning, and penetration testing — ~85% less
+  intervention than Fable 5, with blocked requests falling back to
+  Opus 4.8 on Claude surfaces (API: `fallbacks: "default"` beta). No bio
+  fallback: biology/chem stays on Opus 5 under Opus-4.8-level safeguards.
+  [Support, 2026-07](https://support.claude.com/en/articles/16049681-why-claude-switched-models-in-your-conversation-with-opus-5);
+  [Anthropic, 2026-07-24](https://www.anthropic.com/news/claude-opus-5).
 - **Opus 4.8 / Sonnet 5** — same posture: ASL-3 ("equal to or stronger than
   historical ASL-3"), narrow CBRN classifiers only, no blocking cyber
   classifier.

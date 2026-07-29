@@ -12,14 +12,15 @@ rules mechanically.
 
 ## Cost dynamics
 
-Token price and token *usage* are different axes. GPT-5.6 models complete a
-typical task in fewer tokens than Claude models, so they are cheaper per
-task than the price sheet suggests — a typical Fable task at xhigh effort
-costs more than twice gpt-5.6-sol at max effort. The same pattern holds for
-Sonnet and, less strongly, Opus. OpenAI subscriptions are also more generous
-per dollar, and GPT delegation bills the separate Codex subscription — it
-preserves Claude usage, which matters because Claude subscriptions cap
-Fable-specific usage (currently up to ~50% of the weekly limit).
+Token price and token *usage* are different axes. At a given effort level,
+Opus 5 spends more tokens than gpt-5.6-sol and produces a slightly better
+result; Fable's token usage is comparable to Opus 5's, but at twice the
+token price and slower. OpenAI subscriptions are also more generous per
+dollar, and GPT delegation bills the separate Codex subscription — it
+preserves Claude usage entirely. Within the Claude family, Opus 5 costs
+half of Fable per token ($5/$25 vs $10/$50) and does not draw from the
+Fable-specific usage cap (currently up to ~50% of the weekly limit);
+Sonnet 5 is cheaper still ($3/$15, introductory $2/$10 through 2026-08).
 
 ## Character differences
 
@@ -44,36 +45,47 @@ Claude and GPT models also have de-correlated strengths and weaknesses: the
 mistakes one family makes, the other tends to catch. For best results, have a
 Claude model review GPT work and vice versa.
 
+Opus 5 is by a wide margin the hardest model to prompt-inject measured to
+date — relevant when a task involves browsing untrusted websites or
+processing untrusted content.
+
 ## Model notes
 
-- **gpt-5.6-sol** — the GPT workhorse and the default; best
-  intelligence-per-cost of the family. Effort: medium is a good default;
-  high suits long tasks needing self-verification loops; above high is
-  rarely worth it — the model overthinks and overengineers.
+- **Opus 5** — the default Claude choice below Fable, and the pick over
+  sol for implementation work where code quality, taste, and judgement
+  matter: near-Fable coding and agentic performance at half the token
+  price. Also excellent at animations and 3D scenes. Effort: medium and
+  high are the sweet spot; above high it tends to spin in circles.
+  Hallucinates more than Fable.
+- **gpt-5.6-sol** — the pick for lower-stakes or tightly specified work:
+  faster and cheaper than Opus 5 there and just as capable, and it
+  preserves Claude usage. Effort: low and medium are sol's territory —
+  prefer sol at medium over Opus 5 at low; if a task warrants high effort,
+  it probably warrants Opus 5. Above high, sol overthinks and
+  overengineers.
 - **gpt-5.6-terra** — available, but sol at low or medium is likely the
   better choice: general benchmarks favor sol, and so did a blind review
   bake-off through this integration.
 - **gpt-5.6-luna** — truly simple, high-volume mechanical work: reading
   piles of documents, extraction, anything where judgement barely matters.
   Cheaper than Haiku, likely faster, and more capable.
-- **Fable** — judgement- and taste-heavy work: design, writing, creative
-  hypothesis generation, and difficult tasks that sol attempted and failed.
-  Mind the Fable usage cap.
-- **Sonnet 5 / Opus 4.8** — roughly on par: Opus makes fewer mistakes and is
-  more reliable; Sonnet writes a little more nicely, asks good questions, and
-  delegates well. Use them where many tokens will be spent but the task isn't
-  specified tightly enough to hand to a GPT model, or where reward-hacking is
-  a concern.
-- **Haiku** — almost never the right call; it's outdated and Sonnet is cheap
-  enough.
+- **Fable** — judgement- and taste-heavy work: design, writing (including
+  any copy that persists — prompts, skills, docs), seeing the big picture,
+  creative hypothesis generation, and difficult tasks that Opus 5 or sol
+  attempted and failed. Mind the Fable usage cap.
+- **Sonnet 5** — very high input-token-volume tasks where judgement still
+  matters; the intro pricing makes it the cheapest capable Claude.
+- **Haiku** — almost never the right call; it's outdated and Sonnet is
+  cheap enough.
 
-When the main agent is Fable, most delegation should go to GPT models
-(well-specified subtasks, review) or Fable itself (judgement-heavy work), with
-Sonnet/Opus covering the underspecified-but-token-heavy middle.
+When the main agent is Fable: implementation subtasks go to Opus 5 when
+quality and taste matter, to sol when the task is lower stakes or tightly
+specified; judgement-heavy and writing work stays on Fable. Cross-family
+review still pays — have a GPT model review Claude work and vice versa.
 
-Before diverging from the sol default for a recurring use case, run a small
-blind comparison on the actual task — a Workflow with anonymized outputs and
-a judge settles it cheaply.
+This guidance draws on broad usage reports; for a recurring use case of
+your own, a small blind comparison on the actual task — a Workflow with
+anonymized outputs and a judge — settles it.
 
 ## Safeguards
 
