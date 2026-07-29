@@ -54,8 +54,12 @@ processing untrusted content.
 - **Opus 5** — the default Claude choice below Fable, and the pick over
   sol for implementation work where code quality, taste, and judgement
   matter: near-Fable coding and agentic performance at half the token
-  price. Also excellent at animations and 3D scenes. Effort: medium and
-  high are the sweet spot; above high it tends to spin in circles.
+  price. Also excellent at animations and 3D scenes. Effort: medium for most
+  tasks, high for especially difficult ones; above high, gains are
+  likely small or negative — each top rung buys about one Artificial
+  Analysis index point at 1.3–1.9x the cost, and on scope-penalizing
+  evals (FrontierCode) Opus 5 peaks at medium because at higher effort
+  it tends to do more than the task asked.
   Hallucinates more than Fable. Verifies its own work unprompted: if
   verification isn't wanted, say so explicitly, and if there's a preferred
   method (run the tests, build, a specific check), name it — otherwise it
@@ -63,9 +67,11 @@ processing untrusted content.
 - **gpt-5.6-sol** — the pick for lower-stakes or tightly specified work:
   faster and cheaper than Opus 5 there and just as capable, and it
   preserves Claude usage. Effort: low and medium are sol's territory —
-  prefer sol at medium over Opus 5 at low; if a task warrants high effort,
-  it probably warrants Opus 5. Above high, sol overthinks and
-  overengineers.
+  prefer sol at medium over Opus 5 at low; on especially difficult tasks
+  go high, or hand the task to Opus 5. Sol's benchmark gains above high
+  are similarly thin, and its failure mode there is different: users
+  report overengineering — over-verifying, testing everything,
+  over-defensive code.
 - **gpt-5.6-terra** — available, but sol at low or medium is likely the
   better choice: general benchmarks favor sol, and so did a blind review
   bake-off through this integration.
@@ -89,6 +95,19 @@ review still pays — have a GPT model review Claude work and vice versa.
 This guidance draws on broad usage reports; for a recurring use case of
 your own, a small blind comparison on the actual task — a Workflow with
 anonymized outputs and a judge — settles it.
+
+## Synthesizing independent runs
+
+When the deliverable is a set of findings rather than one holistic
+artifact — research, security or code review, test-case design,
+conclusions from data — two agents run independently plus a third that
+merges their answers reliably beats any single agent: independent runs
+cover different ground, and their disagreements mark exactly what the
+synthesizer should verify with a few targeted checks. Cross-family
+pairs gain the most from the de-correlated strengths above; have the
+synthesizer write a standalone answer with no references to its inputs.
+For holistic artifacts (implementations, designs, long-form writing),
+pick the best candidate and graft ideas from the rest instead.
 
 ## Safeguards
 
