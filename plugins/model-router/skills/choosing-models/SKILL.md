@@ -56,7 +56,10 @@ processing untrusted content.
   matter: near-Fable coding and agentic performance at half the token
   price. Also excellent at animations and 3D scenes. Effort: medium and
   high are the sweet spot; above high it tends to spin in circles.
-  Hallucinates more than Fable.
+  Hallucinates more than Fable. Verifies its own work unprompted: if
+  verification isn't wanted, say so explicitly, and if there's a preferred
+  method (run the tests, build, a specific check), name it — otherwise it
+  may pick the wrong one.
 - **gpt-5.6-sol** — the pick for lower-stakes or tightly specified work:
   faster and cheaper than Opus 5 there and just as capable, and it
   preserves Claude usage. Effort: low and medium are sol's territory —
