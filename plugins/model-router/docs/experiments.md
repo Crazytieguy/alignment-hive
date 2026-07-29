@@ -454,6 +454,20 @@ account-side (then setting `context-window` by hand, since the catalog the
 router reads is unaware of account settings), or using a direct host, is what
 makes the advertised window real.
 
+## Per-session WebSearch budget (2026-07-29, Claude Code 2.1.220)
+
+Observed during the web-research bake-off (not documented anywhere we
+found): a Claude Code session has a ~200-call WebSearch budget shared
+across the main loop, subagents, and Workflow agents. Once exhausted,
+WebSearch calls return a budget-exhausted notice ("200 of 200 WebSearch
+calls") and agents silently degrade to WebFetch-only — this invalidated a
+36-agent judging round mid-run before it was noticed; the only in-band
+signal is the notice in each affected agent's transcript. Fresh `claude
+-p` sessions each get their own budget, so search-heavy multi-agent
+evaluations should run searchers as independent `-p` sessions (the
+bake-off's rescue scripts follow this pattern). Undocumented harness
+behavior — recheck the cap and its scope on Claude Code upgrades.
+
 ## Still open
 - Long sessions and heavy tool loops against real Codex; more ToolSearch
   samples (single positive so far).
