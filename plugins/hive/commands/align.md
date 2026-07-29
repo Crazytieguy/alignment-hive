@@ -159,6 +159,12 @@ Skip the sweep entirely if no candidates remain after filtering.
 
 Read the `alignment-hive` entry in `~/.claude/plugins/known_marketplaces.json`. If `autoUpdate` is not `true`, mention once that the install script (`curl -fsSL https://alignment-hive.com/install.sh | bash`) is supposed to set this and recommend re-running it. Do not auto-fix.
 
+### Transcript Retention
+
+Claude Code deletes local session transcripts after `cleanupPeriodDays` (default 30). Session retrieval searches these transcripts, so the default silently caps how far back it can reach.
+
+Check `cleanupPeriodDays` in all four settings files (`~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude/settings.json`, `.claude/settings.local.json`). If it's unset or below 365 everywhere, recommend setting it to `99999` in `~/.claude/settings.json` (transcript cleanup is per-machine, not per-project). Explain the tradeoff briefly: transcripts are plain text on disk and accumulate over time, but keeping them makes session retrieval useful long-term. If declined, record it in the rejected file.
+
 ### Tooling (varies by project)
 
 Use your judgement to recommend modern, well-maintained tooling appropriate for the project. Consider dependency management, build tools, linters, typecheckers, formatters, and anything else that would improve the development workflow.
