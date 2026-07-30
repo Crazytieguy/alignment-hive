@@ -121,16 +121,25 @@ pub(crate) struct UsagePolicy {
     pub(crate) scale: Option<UsageScale>,
 }
 
+/// Everything the GPT branch rewrites in one request's response: usage
+/// reporting, plus (for routes where it is known-correct) the
+/// context-overflow error translation.
+#[derive(Clone, Debug)]
+pub(crate) struct GptPolicies {
+    pub(crate) usage: UsagePolicy,
+    pub(crate) overflow: Option<crate::overflow::OverflowRewrite>,
+}
+
 pub(crate) struct SseUsageTransformer {
     buffer: Vec<u8>,
-    policy: UsagePolicy,
+    policies: GptPolicies,
 }
 
 impl SseUsageTransformer {
-    pub(crate) const fn new(policy: UsagePolicy) -> Self {
+    pub(crate) const fn new(policies: GptPolicies) -> Self {
         Self {
             buffer: Vec::new(),
-            policy,
+            policies,
         }
     }
 
@@ -139,7 +148,7 @@ impl SseUsageTransformer {
         let mut output = Vec::new();
         while let Some(event_end) = event_boundary(&self.buffer) {
             let event = self.buffer.drain(..event_end).collect::<Vec<_>>();
-            output.push(Bytes::from(transform_event(event, self.policy)));
+            output.push(Bytes::from(transform_event(event, &self.policies)));
         }
         output
     }
@@ -161,39 +170,50 @@ pub(crate) fn event_boundary(buffer: &[u8]) -> Option<usize> {
     })
 }
 
-fn transform_event(event: Vec<u8>, policy: UsagePolicy) -> Vec<u8> {
-    let UsagePolicy { estimate, scale } = policy;
+fn transform_event(event: Vec<u8>, policies: &GptPolicies) -> Vec<u8> {
+    let UsagePolicy { estimate, scale } = policies.usage;
     let Ok(text) = std::str::from_utf8(&event) else {
         return event;
     };
     let Some((event_name, data_range)) = event_fields(text) else {
         return event;
     };
-    if event_name != "message_start" && event_name != "message_delta" {
+    if event_name != "message_start" && event_name != "message_delta" && event_name != "error" {
         return event;
     }
     let Ok(mut data) = serde_json::from_str::<Value>(&text[data_range.clone()]) else {
         return event;
     };
 
-    // The two event shapes differ only in where the usage object lives.
-    let usage = if event_name == "message_delta" {
-        // Calibration logging must see the upstream's own numbers, so it runs
-        // before any scaling.
-        log_actual_usage(&data, estimate);
-        data.get_mut("usage")
+    let changed = if event_name == "error" {
+        // A streamed request that overflows the backend's context window
+        // fails as an in-stream error event on a 200 response; translate it
+        // the same way the buffered 400 path does.
+        policies
+            .overflow
+            .as_ref()
+            .is_some_and(|overflow| overflow.rewrite_envelope(&mut data))
     } else {
-        data.get_mut("message")
-            .and_then(|message| message.get_mut("usage"))
-    };
-    let changed = match usage {
-        Some(usage) => {
-            let injected =
-                event_name == "message_start" && inject_estimated_input_tokens(usage, estimate);
-            let scaled = scale.is_some_and(|scale| scale_usage(usage, scale));
-            injected || scaled
+        // The two usage-bearing event shapes differ only in where the usage
+        // object lives.
+        let usage = if event_name == "message_delta" {
+            // Calibration logging must see the upstream's own numbers, so it
+            // runs before any scaling.
+            log_actual_usage(&data, estimate);
+            data.get_mut("usage")
+        } else {
+            data.get_mut("message")
+                .and_then(|message| message.get_mut("usage"))
+        };
+        match usage {
+            Some(usage) => {
+                let injected =
+                    event_name == "message_start" && inject_estimated_input_tokens(usage, estimate);
+                let scaled = scale.is_some_and(|scale| scale_usage(usage, scale));
+                injected || scaled
+            }
+            None => false,
         }
-        None => false,
     };
     if !changed {
         return event;
@@ -286,7 +306,17 @@ mod tests {
     }
 
     fn transformed_with(chunks: &[&[u8]], estimate: u64, scale: Option<UsageScale>) -> Vec<u8> {
-        let mut transformer = SseUsageTransformer::new(UsagePolicy { estimate, scale });
+        transformed_policies(
+            chunks,
+            GptPolicies {
+                usage: UsagePolicy { estimate, scale },
+                overflow: None,
+            },
+        )
+    }
+
+    fn transformed_policies(chunks: &[&[u8]], policies: GptPolicies) -> Vec<u8> {
+        let mut transformer = SseUsageTransformer::new(policies);
         let mut output = Vec::new();
         for chunk in chunks {
             for bytes in transformer.push(chunk) {
@@ -297,6 +327,53 @@ mod tests {
             output.extend_from_slice(&bytes);
         }
         output
+    }
+
+    /// The in-stream error shape captured live from `CLIProxyAPI` 7.2.92: a
+    /// streamed overflow fails as `event: error` on a 200 response.
+    const OVERFLOW_ERROR_EVENT: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your input exceeds the context window of this model. Please adjust your input and try again.\"}}\n\n";
+
+    fn overflow_policies(estimate: u64) -> GptPolicies {
+        GptPolicies {
+            usage: UsagePolicy {
+                estimate,
+                scale: None,
+            },
+            overflow: Some(crate::overflow::OverflowRewrite::new(
+                258_400,
+                crate::overflow::Estimate::Computed(estimate),
+            )),
+        }
+    }
+
+    #[test]
+    fn in_stream_overflow_error_is_rewritten_and_neighbors_pass_through() {
+        let mut chunks: Vec<&[u8]> = vec![
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+        ];
+        chunks.push(OVERFLOW_ERROR_EVENT);
+        let output = transformed_policies(&chunks, overflow_policies(300_000));
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(r#""input_tokens":300000"#));
+        assert!(text.contains("prompt is too long: 300000 tokens > 258400 maximum"));
+        assert!(!text.contains("exceeds the context window"));
+    }
+
+    #[test]
+    fn in_stream_unrelated_error_passes_through_byte_identical() {
+        let input: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Our servers are currently overloaded.\"}}\n\n";
+        assert_eq!(
+            transformed_policies(&[input], overflow_policies(300_000)),
+            input
+        );
+    }
+
+    #[test]
+    fn without_an_overflow_rewrite_error_events_pass_through() {
+        assert_eq!(
+            transformed(&[OVERFLOW_ERROR_EVENT], 300_000),
+            OVERFLOW_ERROR_EVENT
+        );
     }
 
     #[test]

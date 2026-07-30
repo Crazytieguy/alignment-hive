@@ -23,12 +23,30 @@ const LEGACY_UPSTREAM: &str = "codex";
 /// character has provider-prefix semantics in `CLIProxyAPI` model IDs.
 const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
 
-/// The Codex backend's effective input limit for the built-in GPT routes.
-/// The backend serves 272K with a 95% multiplier (~258.4K); 250000 is the
-/// value setup declares under that ceiling, and matching it here lets
-/// `doctor` flag a raised `declared-context-window` that would let bare GPT
-/// routing IDs overrun the backend.
-const GPT_CONTEXT_WINDOW: u64 = 250_000;
+/// The Codex backend's effective input limit for the built-in GPT routes:
+/// 272K served with a 95% usable multiplier (backend-advertised
+/// `effective_context_window_percent`, verified in the codex-rs client).
+/// Load-bearing as the `M` in the translated `prompt is too long` overflow
+/// error (see [`crate::overflow`]). Setup declares
+/// `CLAUDE_CODE_MAX_CONTEXT_TOKENS=250000` under it deliberately, so
+/// auto-compaction (declared − 20K output reserve = 230K) leads this cap by
+/// ~28K; `doctor` still flags a declaration raised past the cap itself.
+const GPT_CONTEXT_WINDOW: u64 = 258_400;
+
+/// The Codex-native upstream model IDs behind the built-in routes. The
+/// context-overflow translation applies only to requests forwarded to these
+/// models: the overflow message it matches is verified for the Codex
+/// backend alone, and a false positive on some other provider's error would
+/// re-create the compact-and-retry loop the translation exists to fix.
+const CODEX_NATIVE_MODELS: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+
+/// Whether `upstream_model` is served by the Codex backend. Derived aliases
+/// (`openai-compat--*`) and hand-written `[[models]]` entries pointing at
+/// other backends do not qualify.
+#[must_use]
+pub(crate) fn is_codex_native_model(upstream_model: &str) -> bool {
+    CODEX_NATIVE_MODELS.contains(&upstream_model)
+}
 
 #[serde_inline_default]
 #[derive(Clone, Debug, Deserialize)]
@@ -345,13 +363,14 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 "#;
 
 fn default_models() -> Vec<ModelRoute> {
+    let [sol, terra, luna] = CODEX_NATIVE_MODELS;
     [
-        ("claude-gpt-5.6-sol", "gpt-5.6-sol", "GPT-5.6 Sol"),
-        ("claude-gpt-5.6-terra", "gpt-5.6-terra", "GPT-5.6 Terra"),
-        ("claude-gpt-5.6-luna", "gpt-5.6-luna", "GPT-5.6 Luna"),
-        ("gpt-5.6-sol", "gpt-5.6-sol", "GPT-5.6 Sol"),
-        ("gpt-5.6-terra", "gpt-5.6-terra", "GPT-5.6 Terra"),
-        ("gpt-5.6-luna", "gpt-5.6-luna", "GPT-5.6 Luna"),
+        ("claude-gpt-5.6-sol", sol, "GPT-5.6 Sol"),
+        ("claude-gpt-5.6-terra", terra, "GPT-5.6 Terra"),
+        ("claude-gpt-5.6-luna", luna, "GPT-5.6 Luna"),
+        ("gpt-5.6-sol", sol, "GPT-5.6 Sol"),
+        ("gpt-5.6-terra", terra, "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", luna, "GPT-5.6 Luna"),
     ]
     .into_iter()
     .map(|(routing_id, upstream_model, display_name)| ModelRoute {
@@ -1499,6 +1518,22 @@ mod context_window_tests {
         let route = route(&config, "gpt-5.6-sol");
         assert_eq!(route.context_window, Some(GPT_CONTEXT_WINDOW));
         assert!(route.usage_scale.is_none());
+    }
+
+    #[test]
+    fn every_default_route_is_codex_native() {
+        // Drift guard: overflow translation is armed per-route by this
+        // predicate, so a default route pointing at a model missing from
+        // CODEX_NATIVE_MODELS would silently lose overflow recovery.
+        for route in Config::default().models {
+            assert!(
+                is_codex_native_model(&route.upstream_model),
+                "{} is not registered as Codex-native",
+                route.upstream_model
+            );
+        }
+        assert!(!is_codex_native_model("openai-compat--kimi-k3"));
+        assert!(!is_codex_native_model("kimi-k3"));
     }
 
     #[test]

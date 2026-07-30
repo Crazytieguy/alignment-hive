@@ -16,9 +16,10 @@ use tokio::net::TcpListener;
 use crate::capture::{CaptureSink, RequestCapture, StreamingCapture, redact_headers};
 use crate::config::{Config, UpstreamMode, WebSearchMode};
 use crate::headers;
+use crate::overflow::OverflowRewrite;
 use crate::routing::{Branch, RoutingDecision, decide, substitute_model};
 use crate::stub;
-use crate::usage::{SseUsageTransformer, UsagePolicy, estimate_input_tokens};
+use crate::usage::{GptPolicies, SseUsageTransformer, UsagePolicy, estimate_input_tokens};
 use crate::websearch;
 
 /// Maximum time SIGINT/SIGTERM may spend draining in-flight connections.
@@ -512,7 +513,7 @@ async fn gpt_response(
             .await;
         }
     };
-    let usage_policy = usage_policy(&rewritten, route);
+    let policies = gpt_policies(&rewritten, route);
 
     if state.config.web_search.mode != WebSearchMode::Off
         && parts.method == Method::POST
@@ -547,7 +548,7 @@ async fn gpt_response(
                 &subcall,
                 &base_url,
                 credential.as_ref(),
-                usage_policy,
+                policies,
                 capture,
             )
             .await;
@@ -558,7 +559,7 @@ async fn gpt_response(
             parts,
             rewritten,
             &route.upstream_model,
-            usage_policy,
+            policies,
             capture,
             None,
         )
@@ -576,7 +577,7 @@ async fn gpt_response(
         parts,
         rewritten,
         &route.upstream_model,
-        usage_policy,
+        policies,
         capture,
         tap,
     )
@@ -598,6 +599,28 @@ fn usage_policy(rewritten: &Bytes, route: &crate::config::ModelRoute) -> UsagePo
         },
         scale: route.usage_scale,
     }
+}
+
+/// Everything the GPT branch rewrites in this request's response. Overflow
+/// translation is armed only for Codex-native upstream models with a known
+/// real window. A streaming request carries its already-computed estimate;
+/// a non-streaming one carries the body (a refcount, not a copy) for lazy
+/// estimation — never both, so a long-lived response stream does not pin
+/// its request's payload.
+fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPolicies {
+    let usage = usage_policy(rewritten, route);
+    let overflow = route
+        .context_window
+        .filter(|_| crate::config::is_codex_native_model(&route.upstream_model))
+        .map(|window| {
+            let estimate = if crate::routing::is_streaming(rewritten) {
+                crate::overflow::Estimate::Computed(usage.estimate)
+            } else {
+                crate::overflow::Estimate::Deferred(rewritten.clone())
+            };
+            OverflowRewrite::new(window, estimate)
+        });
+    GptPolicies { usage, overflow }
 }
 
 /// A sub-call arriving on the GPT branch whose `WebSearch` was invoked by a
@@ -656,8 +679,12 @@ async fn anthropic_native_websearch(
         ));
     };
     let mut outgoing_headers = headers::request_headers(&parts.headers, false, true, None);
-    // The body is parsed here, and the reqwest client does no decompression.
-    outgoing_headers.remove(header::ACCEPT_ENCODING);
+    // The body is parsed here, and the reqwest client does no decompression;
+    // explicitly `identity` — an absent Accept-Encoding permits any coding.
+    outgoing_headers.insert(
+        header::ACCEPT_ENCODING,
+        axum::http::HeaderValue::from_static("identity"),
+    );
     let result = state
         .client
         .request(
@@ -715,7 +742,7 @@ async fn forward_gpt(
     parts: &axum::http::request::Parts,
     rewritten: Bytes,
     upstream_model: &str,
-    usage_policy: UsagePolicy,
+    policies: GptPolicies,
     capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
 ) -> Response {
@@ -737,7 +764,7 @@ async fn forward_gpt(
                 true,
                 true,
                 credential.as_ref(),
-                Some(usage_policy),
+                Some(policies),
                 capture,
                 tap,
             )
@@ -776,7 +803,7 @@ async fn forward_gpt(
                 true,
                 true,
                 Some(&handle.credential),
-                Some(usage_policy),
+                Some(policies),
                 capture,
                 tap,
             )
@@ -818,7 +845,7 @@ async fn websearch_response(
     subcall: &websearch::Subcall,
     base_url: &str,
     credential: Option<&headers::GptUpstreamCredential>,
-    usage_policy: UsagePolicy,
+    policies: GptPolicies,
     capture: Option<RequestCapture>,
 ) -> Response {
     if state.config.web_search.mode == WebSearchMode::Alpha {
@@ -862,7 +889,7 @@ async fn websearch_response(
                 parts,
                 rewritten,
                 upstream_model,
-                usage_policy,
+                policies,
                 capture,
                 None,
             )
@@ -929,8 +956,12 @@ async fn legacy_websearch(
     let mut document = serde_json::from_slice::<serde_json::Value>(rewritten)?;
     document["stream"] = serde_json::Value::Bool(false);
     let mut outgoing_headers = headers::request_headers(&parts.headers, true, true, credential);
-    // The body is parsed here, and the reqwest client does no decompression.
-    outgoing_headers.remove(header::ACCEPT_ENCODING);
+    // The body is parsed here, and the reqwest client does no decompression;
+    // explicitly `identity` — an absent Accept-Encoding permits any coding.
+    outgoing_headers.insert(
+        header::ACCEPT_ENCODING,
+        axum::http::HeaderValue::from_static("identity"),
+    );
     let response = state
         .client
         .request(parts.method.clone(), upstream_url(base_url, &parts.uri))
@@ -1097,7 +1128,7 @@ async fn forward(
     strip_credentials: bool,
     body_changed: bool,
     gpt_credential: Option<&headers::GptUpstreamCredential>,
-    usage_policy: Option<UsagePolicy>,
+    policies: Option<GptPolicies>,
     mut capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
 ) -> Response {
@@ -1108,10 +1139,17 @@ async fn forward(
         body_changed,
         gpt_credential,
     );
-    if tap.is_some() {
-        // The sniffer parses raw response bytes and the reqwest client does
-        // no decompression, so tapped responses must be identity-encoded.
-        outgoing_headers.remove(header::ACCEPT_ENCODING);
+    if tap.is_some() || policies.is_some() {
+        // The sniffer and the overflow-error translator parse raw response
+        // bytes and the reqwest client does no decompression, so GPT-branch
+        // and tapped responses must be identity-encoded. Explicitly
+        // `identity`, not merely absent — an absent Accept-Encoding permits
+        // the server to pick any coding. Loopback traffic; compression buys
+        // nothing here.
+        outgoing_headers.insert(
+            header::ACCEPT_ENCODING,
+            axum::http::HeaderValue::from_static("identity"),
+        );
     }
     if strip_credentials && let Some(request_capture) = &mut capture {
         request_capture.headers = redact_headers(&outgoing_headers);
@@ -1124,7 +1162,7 @@ async fn forward(
         .send()
         .await
     {
-        Ok(response) => upstream_response(state, response, capture, usage_policy, tap),
+        Ok(response) => upstream_response(state, response, capture, policies, tap).await,
         Err(error) => {
             tracing::warn!(%error, "upstream request failed");
             local_error_response(
@@ -1149,10 +1187,13 @@ async fn models_response(
 ) -> Response {
     let url = upstream_url(&state.config.anthropic_upstream_base, uri);
     let mut outgoing_headers = headers::request_headers(inbound_headers, false, false, None);
-    // This is the one path that parses the upstream body (to merge routed GPT
-    // models in), and the reqwest client does no decompression — request an
-    // identity response instead of forwarding the client's accept-encoding.
-    outgoing_headers.remove(header::ACCEPT_ENCODING);
+    // This path parses the upstream body (to merge routed GPT models in),
+    // and the reqwest client does no decompression — request an identity
+    // response explicitly (absence would permit any coding).
+    outgoing_headers.insert(
+        header::ACCEPT_ENCODING,
+        axum::http::HeaderValue::from_static("identity"),
+    );
     let response = match state
         .client
         .request(method.clone(), url)
@@ -1247,11 +1288,11 @@ async fn models_fallback_response(state: &AppState, capture: Option<RequestCaptu
     .await
 }
 
-fn upstream_response(
+async fn upstream_response(
     state: &AppState,
     response: reqwest::Response,
     capture: Option<RequestCapture>,
-    usage_policy: Option<UsagePolicy>,
+    policies: Option<GptPolicies>,
     tap: Option<SniffTap>,
 ) -> Response {
     let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
@@ -1264,7 +1305,15 @@ fn upstream_response(
                 media_type.trim().eq_ignore_ascii_case("text/event-stream")
             })
         });
-    let transform_usage = usage_policy.is_some() && is_sse;
+    if status == StatusCode::BAD_REQUEST
+        && !is_sse
+        && let Some(overflow) = policies
+            .as_ref()
+            .and_then(|policies| policies.overflow.as_ref())
+    {
+        return overflow_translated_response(state, status, response, overflow, capture).await;
+    }
+    let transform_usage = policies.is_some() && is_sse;
     let response_headers = headers::response_headers(response.headers(), transform_usage);
     let stream = response.bytes_stream();
     let stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
@@ -1297,10 +1346,10 @@ fn upstream_response(
             Box::pin(stream)
         };
 
-    if let Some(usage_policy) = usage_policy.filter(|_| transform_usage) {
+    if let Some(policies) = policies.filter(|_| transform_usage) {
         let transformed_stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
-            let mut transformer = SseUsageTransformer::new(usage_policy);
+            let mut transformer = SseUsageTransformer::new(policies);
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(bytes) => {
@@ -1333,6 +1382,70 @@ fn upstream_response(
 
     let body = streaming_response_body(state, status, &response_headers, capture, stream);
     build_response(status, response_headers, body)
+}
+
+/// Upper bound on a buffered GPT error body. The captured overflow error is
+/// ~160 bytes; anything past this bound is not the error we are looking for
+/// and streams through untouched.
+const OVERFLOW_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// A non-streaming 400 on a route with overflow translation armed: buffer
+/// the (small) body, rewrite it when it is the Codex context-overflow error
+/// (see [`crate::overflow`]), and pass everything else through unchanged.
+async fn overflow_translated_response(
+    state: &AppState,
+    status: StatusCode,
+    response: reqwest::Response,
+    overflow: &OverflowRewrite,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let passthrough_headers = headers::response_headers(response.headers(), false);
+    let rewritten_headers = headers::response_headers(response.headers(), true);
+    let mut stream = response.bytes_stream();
+    let mut chunks: Vec<Bytes> = Vec::new();
+    let mut total = 0usize;
+    loop {
+        match stream.next().await {
+            Some(Ok(bytes)) => {
+                total = total.saturating_add(bytes.len());
+                chunks.push(bytes);
+                if total > OVERFLOW_BUFFER_LIMIT {
+                    let rest = futures_util::stream::iter(
+                        chunks.into_iter().map(Ok::<Bytes, reqwest::Error>),
+                    )
+                    .chain(stream);
+                    let body =
+                        streaming_response_body(state, status, &passthrough_headers, capture, rest);
+                    return build_response(status, passthrough_headers, body);
+                }
+            }
+            Some(Err(error)) => {
+                // Forward the prefix and the failure exactly as pass-through
+                // streaming would have.
+                let rest =
+                    futures_util::stream::iter(chunks.into_iter().map(Ok).chain([Err(error)]));
+                let body =
+                    streaming_response_body(state, status, &passthrough_headers, capture, rest);
+                return build_response(status, passthrough_headers, body);
+            }
+            None => break,
+        }
+    }
+    let body = chunks.concat();
+    if let Some(rewritten) = overflow.rewrite_body(&body) {
+        tracing::info!("translated a GPT context-overflow error to the canonical Anthropic form");
+        // The body changed length; rewritten_headers dropped the upstream's
+        // Content-Length so the axum layer restates it.
+        return local_response(state, status, rewritten_headers, vec![rewritten], capture).await;
+    }
+    local_response(
+        state,
+        status,
+        passthrough_headers,
+        vec![Bytes::from(body)],
+        capture,
+    )
+    .await
 }
 
 fn streaming_response_body<S>(

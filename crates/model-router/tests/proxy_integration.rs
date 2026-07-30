@@ -656,6 +656,183 @@ async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
     fake_task.abort();
 }
 
+/// The overflow error body captured live from CLIProxyAPI 7.2.92
+/// (2026-07-29): what the Codex backend's `context_length_exceeded` looks
+/// like after CLIProxyAPI's translation drops the error code.
+const CODEX_OVERFLOW_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}"#;
+
+/// A non-streaming overflow 400 from the Codex backend is rewritten into
+/// Anthropic's canonical `prompt is too long` error — the shape Claude
+/// Code's reactive compact-and-retry recovery is keyed on — with the
+/// upstream's stale Content-Length dropped alongside the body change.
+#[tokio::test]
+async fn gpt_overflow_400_is_translated_to_the_canonical_anthropic_error() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        let mut response = Response::new(Body::from(CODEX_OVERFLOW_BODY));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response.headers_mut().insert(
+            "content-type",
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        response
+    }
+    let Some((fake_address, observed)) = spawn_fake(handler).await else {
+        return;
+    };
+
+    // Default config: the built-in `gpt-5.6-sol` route is Codex-native with
+    // the measured 258400 window.
+    let config = Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("accept-encoding", "gzip")
+                .body(Body::from(
+                    r#"{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.headers().get("content-length").is_none());
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    // The tiny request body estimates under the window, so N is the clamp.
+    assert_eq!(
+        message,
+        "prompt is too long: 258401 tokens > 258400 maximum"
+    );
+
+    // The overflow translator parses raw response bytes, so the GPT branch
+    // must request identity explicitly — an absent Accept-Encoding would
+    // still permit the server to compress.
+    let observed = observed.lock().await;
+    assert_eq!(
+        observed
+            .last()
+            .unwrap()
+            .headers
+            .get("accept-encoding")
+            .map(|value| value.to_str().unwrap().to_string()),
+        Some("identity".to_string())
+    );
+}
+
+/// A streamed overflow fails as an in-stream `error` event on a 200
+/// response (captured live); it is rewritten the same way, and the
+/// surrounding events stream through.
+#[tokio::test]
+async fn gpt_overflow_sse_error_event_is_translated() {
+    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_address = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new().fallback(any(|| async {
+        let chunks = [
+            Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"),
+            Bytes::from(format!("event: error\ndata: {CODEX_OVERFLOW_BODY}\n\n")),
+        ];
+        let stream = futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<Bytes, std::convert::Infallible>),
+        );
+        let mut response = Response::new(Body::from_stream(stream));
+        response
+            .headers_mut()
+            .insert("content-type", "text/event-stream".parse().unwrap());
+        response
+    }));
+    let fake_task = tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let config = Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("event: message_start"), "{text}");
+    assert!(
+        text.contains("prompt is too long: 258401 tokens > 258400 maximum"),
+        "{text}"
+    );
+    assert!(!text.contains("exceeds the context window"), "{text}");
+    fake_task.abort();
+}
+
+/// Overflow translation is verified for the Codex backend alone; a route to
+/// any other upstream model passes its errors through untouched even when
+/// the message happens to match.
+#[tokio::test]
+async fn non_codex_route_overflow_passes_through_untouched() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        let mut response = Response::new(Body::from(CODEX_OVERFLOW_BODY));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response.headers_mut().insert(
+            "content-type",
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        response
+    }
+    let Some((fake_address, _observed)) = spawn_fake(handler).await else {
+        return;
+    };
+
+    let config = Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        models: vec![ModelRoute {
+            routing_id: "kimi-k3".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "kimi-k3".to_string(),
+            display_name: "Kimi K3".to_string(),
+            context_window: Some(250_000),
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"kimi-k3","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body, Bytes::from(CODEX_OVERFLOW_BODY));
+}
+
 /// Spawns a single-purpose fake upstream returning `handler`'s response and
 /// recording every request. Returns `None` when the sandbox forbids loopback
 /// listeners.

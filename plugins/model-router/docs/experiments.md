@@ -540,3 +540,103 @@ behavior — recheck the cap and its scope on Claude Code upgrades.
   search answered from `alpha/search`; gpt-5.6-sol main + haiku subagent →
   subagent's search answered by Anthropic native with a populated Links
   array. Both verified in router logs and session transcripts.
+
+## Context-overflow translation (2026-07-29, Claude Code 2.1.220 + codex-rs HEAD 6493417150 + CLIProxyAPI 7.2.92)
+
+Motivated by a live failure: a workflow-heavy session on `gpt-5.6-sol` hit
+the Codex backend's input limit and retried the identical oversized request
+14 times over ~14 minutes with no recovery.
+
+### Claude Code's overflow recovery (binary-verified, 2.1.220)
+
+- Claude Code has an error-driven recovery layer — "reactive compact" — on
+  top of the preventive auto-compact gate: classify the failure as
+  `prompt_too_long`, summarize the oldest message groups (gap-guided by the
+  parsed `N tokens > M` numbers; an unparseable gap degrades to step-1
+  progressive compaction), then re-enter the query loop
+  (`reactive_compact_retry`) and retry the round trip. One reactive attempt
+  per request; the flag resets each round trip.
+- Classification is string-matched and reaches `prompt_too_long` only via:
+  HTTP 400 with message containing `prompt is too long` / `input is too long
+  for requested model` / `` input length and `max_tokens` exceed context
+  limit `` (Anthropic/Bedrock phrasings), or HTTP 413 with message
+  containing `context window`.
+- Eligibility (`QRs`): auto-compact enabled (`DISABLE_COMPACT` /
+  `DISABLE_AUTO_COMPACT` / `autoCompactEnabled` off disable it), not the
+  compaction request itself (that path has its own trim-oldest retry loop,
+  `tengu_compact_ptl_retry`), not summary side-calls. The session-type gate
+  (`wSe`) is TRUE for all local sessions — interactive, `-p`, and subagents;
+  only `CLAUDE_CODE_REMOTE` cloud sessions sit behind a statsig gate.
+  "Compaction impossible" = fewer than 2 message groups (an oversized first
+  request), which surfaces an explanatory error instead.
+- The preventive gate runs per round trip, not per user turn: the agentic
+  driver re-enters itself after each tool batch
+  (`transition:{reason:"next_turn"}`) and evaluates the gate
+  (`query_autocompact_start`) at the top of every iteration. Exposure per
+  check is one round trip's growth — which parallel tool results routinely
+  push past any fixed margin, so the error backstop is load-bearing, not a
+  corner case.
+
+### Codex's own handling (repo-verified at HEAD 6493417150)
+
+- Windows are backend-advertised via `GET /models`: `context_window: 272000`
+  for GPT-5.x plus `effective_context_window_percent: 95` (default) → hard
+  cap 258400, and `auto_compact_token_limit` clamped to 90% of raw → soft
+  compact trigger ≈244800, checked pre-turn and after every sampling
+  response. Codex runs with ~13.6K preventive slack and leans on its
+  backstop.
+- Overflow detection is exclusively `error.code == "context_length_exceeded"`
+  inside a `response.failed` SSE event on a 200 stream — never HTTP status,
+  never message text (their tests include a message with an embedded newline
+  to keep it that way). Recovery: pin accounted usage to the full window
+  (`set_total_tokens_full`) so the next turn force-compacts; no in-turn
+  retry. Inside compaction only: a drop-oldest-item retry loop.
+
+### The wire shapes at our boundary (captured live, 2026-07-29)
+
+CLIProxyAPI drops `context_length_exceeded` in translation. What the router
+receives from a `gpt-5.6-sol` overflow:
+
+- Non-streaming: HTTP 400,
+  `{"type":"error","error":{"type":"invalid_request_error","message":"Your
+  input exceeds the context window of this model. Please adjust your input
+  and try again."}}`
+- Streaming: HTTP 200 `text/event-stream` — `message_start` (with the
+  router-estimated `input_tokens`), then `event: error` carrying the same
+  JSON error object.
+
+Neither shape matches any of Claude Code's `prompt_too_long` patterns (right
+phrase for the 413 rule but wrong status; wrong phrase for the 400 rules),
+so no recovery ran — the observed retry loop.
+
+### Router fix (0.1.7): translate to Anthropic's canonical error
+
+`crate::overflow` rewrites the message to `prompt is too long: N tokens >
+M maximum` on both wire shapes — emulating Anthropic's public error surface,
+not any client's internals. `M` = the route's real window
+(`GPT_CONTEXT_WINDOW` raised 250000 → 258400, now load-bearing); `N` = the
+router's o200k input estimate (computed lazily for non-streaming requests),
+clamped to `max(N, M+1)` because the estimator ignores non-text content and
+a false `N ≤ M` would starve gap-guided compaction. Scope: Codex-native
+upstream models only (`gpt-5.6-sol/terra/luna`) — the matched phrase is
+verified for that backend alone, and a false positive elsewhere would
+re-create the retry loop this removes. Detection requires
+`invalid_request_error` plus whitespace-normalized, case-insensitive
+`input exceeds the context window` (subject-bearing: a `max_tokens ...`
+variant must not match). GPT-branch forwards now always request identity
+encoding (loopback traffic; response bytes must be parseable).
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` stays 250000: with recovery restored the
+declaration is an efficiency dial, and the 230K gate under the 258.4K cap
+(~28K slack) deliberately keeps more preventive headroom than Codex — Claude
+Code's 20K output reserve and compaction-prompt sizes are tuned for its own
+behaviors, not this backend's.
+
+Live e2e (2026-07-29, patched router in external mode against the running
+CLIProxyAPI child): oversized requests on `gpt-5.6-sol` and
+`claude-gpt-5.6-sol`, streaming and non-streaming, all four returned
+`prompt is too long: 1680090 tokens > 258400 maximum` (real lazy estimate on
+the non-streaming path). **Retest triggers:** any Claude Code upgrade (the
+classifier strings and recovery behavior are reverse-engineered), any
+CLIProxyAPI upgrade (its error translation may change shape — if it starts
+preserving `context_length_exceeded`, detection can tighten to the code),
+and Codex backend window changes (272K/95% → update `GPT_CONTEXT_WINDOW`).
