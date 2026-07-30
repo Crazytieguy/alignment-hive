@@ -12,26 +12,26 @@ use sha2::Digest;
 use crate::state::{Dirs, create_private_dir};
 
 /// The exact `CLIProxyAPI` version this router release is validated against.
-pub const UPSTREAM_VERSION: &str = "7.2.92";
+pub const UPSTREAM_VERSION: &str = "7.2.110";
 
 /// sha256 of each release archive, vendored so downloads are verified
 /// against the pin rather than trusting the network or the release page.
 const CHECKSUMS: &[(&str, &str)] = &[
     (
         "darwin_aarch64",
-        "fc9d2020c0961d097e0b8082d043006af534df261537a6a73756c6d60b4d6524",
+        "e6dac60c5740677c2bd8147666c290d79686d1a5b93264590897fffd036d1bba",
     ),
     (
         "darwin_amd64",
-        "7eb101925741b4080fe2fae3a7d630f41445c4fd5bf8174672dcaf1f637212b9",
+        "1d2a30512f9b9f458af95509cc3343afc08ccf1aa02dcb8b25760c02ef872aa3",
     ),
     (
         "linux_aarch64",
-        "4cf0c1febc6a62e77181f5fa3fd334070a0d859d8824d51f7854aa50d52b98b1",
+        "587e0ae7f2dd5cabd41d1be68ddebc812f6b49d18e4127ca2d68486af351e2f0",
     ),
     (
         "linux_amd64",
-        "18ef0621b42bd12fd040789affa7d596343fea70359f59719c8c82d4f9ac0886",
+        "65504386611af722c2b103a6f7fbb38efd2d1822658008a03797e76e4f6bf738",
     ),
 ];
 
