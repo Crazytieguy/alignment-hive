@@ -78,6 +78,12 @@ pub fn request_headers(
     if strip_credentials && let Some(credential) = gpt_credential {
         output.insert("x-api-key", credential.api_key.clone());
         output.insert(header::AUTHORIZATION, credential.authorization.clone());
+        // The Codex backend load-sheds gpt-5.6-sol requests whose Originator
+        // is CLIProxyAPI's hardcoded "codex-tui" (in-stream
+        // `server_is_overloaded` despite HTTP 200); "codex_cli_rs" — what the
+        // real Codex CLI sends — passes. CLIProxyAPI forwards an inbound
+        // Originator instead of its default, so set it here.
+        output.insert("originator", HeaderValue::from_static("codex_cli_rs"));
     }
     output
 }
@@ -186,5 +192,20 @@ mod tests {
         assert_eq!(headers["x-api-key"], "local-gateway-secret");
         assert!(!headers.contains_key("anthropic-beta"));
         assert_eq!(headers["anthropic-version"], "2023-06-01");
+    }
+
+    #[test]
+    fn gpt_sets_codex_cli_originator_overriding_inbound() {
+        let credential = GptUpstreamCredential::new("local-gateway-secret").unwrap();
+        let mut inbound = sample_headers();
+        inbound.insert("originator", HeaderValue::from_static("codex-tui"));
+        let headers = request_headers(&inbound, true, true, Some(&credential));
+        assert_eq!(headers["originator"], "codex_cli_rs");
+    }
+
+    #[test]
+    fn claude_branch_gets_no_originator() {
+        let headers = request_headers(&sample_headers(), false, false, None);
+        assert!(!headers.contains_key("originator"));
     }
 }

@@ -683,3 +683,35 @@ conservative M over-compacts slightly, the safe direction), and chasing an
 in-flight rollout would bake in a number measured on one evening. Retest
 when the backend's `GET /models` catalog (via codex-rs) stabilizes on a new
 window.
+
+## Sol Originator gating (2026-07-30, CLIProxyAPI 7.2.92)
+
+`gpt-5.6-sol` through the router failed near-100% while luna/terra worked
+and the real Codex CLI (0.146.0) reached sol fine. Surface symptoms were
+misleading twice over: agents saw `503 auth_unavailable` (CLIProxyAPI
+quarantines the OAuth entry after each upstream failure, so most requests
+fast-fail on quarantine), and the underlying failure was an HTTP **200**
+whose SSE stream immediately emits `event: error` with
+`code: "server_is_overloaded"` + `response.failed` — visible only with
+`request-log: true` in the CLIProxyAPI config (records bearer tokens;
+enable briefly, delete the logs after).
+
+A/B probes isolated the trigger to the `Originator` header. CLIProxyAPI
+hardcodes `Originator: codex-tui` (`codex_executor_request.go`) unless the
+inbound request supplies one; the Codex backend load-sheds sol requests
+with that fingerprint (4/4 success with `codex_cli_rs`, immediate
+"overloaded" with defaults, UA irrelevant — spoofing the CLI User-Agent
+alone still failed, `Originator: codex_cli_rs` alone succeeded even with
+`curl/8.7.1`). Ruled out along the way: auth/token health (occasional 200s,
+CLI works), the injected `image_generation` tool
+(`disable-image-generation: "passthrough"` changed nothing), stray
+temp-dir cliproxy instances refreshing the same account (killing them
+changed nothing), and OpenAI-wide incidents (status pages green).
+
+Fix (0.1.8): the GPT branch sets `Originator: codex_cli_rs` in
+`headers::request_headers`, overriding any inbound value. Watch for the
+backend tightening the fingerprint check (e.g. requiring a matching
+`codex_cli_rs/<version>` User-Agent or minimum client version — sol's
+catalog entry declares `minimal_client_version: 0.144.0`); if sol-only
+"overloaded" errors return, re-run the A/B probes with a current CLI
+fingerprint.
