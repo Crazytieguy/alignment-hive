@@ -645,3 +645,41 @@ classifier strings and recovery behavior are reverse-engineered), any
 CLIProxyAPI upgrade (its error translation may change shape — if it starts
 preserving `context_length_exceeded`, detection can tighten to the code),
 and Codex backend window changes (272K/95% → update `GPT_CONTEXT_WINDOW`).
+
+### Full recovery e2e: Claude Code compacting on the GPT branch (2026-07-29 evening)
+
+Verified end to end with real `claude -p` sessions on `gpt-5.6-sol` through
+the patched router: a session with ~221K of multi-turn history took an
+under-estimated ~160K tool result (token-dense CJK: o200k ≈ 1.9 tokens/char
+vs the client's ~chars/4 estimate, so the preventive gate passes), the
+request overflowed the backend, the router translated the error, and Claude
+Code ran the whole recovery invisibly — reactive-compact summarize 9ms after
+the error, `compact_boundary` event, retry succeeded, task completed. Total
+recovery ~9s; nothing surfaced to the user. Engineering the failure took
+several attempts, which mapped the protective layers:
+
+- **Micro-compaction** evicts old *tool results* well before the gate
+  (observed: anchors pinned at ~76K across five 21K reads), so tool-result
+  bulk alone cannot build overflow pressure; user-message content is not
+  evicted.
+- The **per-round-trip gate** catches any jump its estimate can see; only
+  under-estimated content (non-text blocks; CJK-dense text) gets past it.
+- Reactive compact **bails without an assistant message in the compactable
+  prefix** ("no assistant messages in summarize set") — a single-exchange
+  session with one giant user message surfaces the error instead.
+- Bulk in the **current turn** is kept verbatim through compaction (you
+  cannot summarize the turn being answered), so a current-turn payload that
+  alone exceeds the window is unrecoverable by design — true for Anthropic
+  models too.
+
+Separate finding, same evening: the backend's enforcement boundary **moved**.
+Morning sessions and recon 400'd at ~260K, but by evening uncached probes
+passed at 300K/340K and failed at 380K+ — enforcement now sits somewhere in
+(340K, 380K), well above the advertised 272K×95% = 258.4K. Looks like a
+rollout in progress (openai/codex#32806 anticipated a restore).
+`GPT_CONTEXT_WINDOW` stays 258400 deliberately: it is the *documented*
+served limit, the translated `M` only guides compaction sizing (a
+conservative M over-compacts slightly, the safe direction), and chasing an
+in-flight rollout would bake in a number measured on one evening. Retest
+when the backend's `GET /models` catalog (via codex-rs) stabilizes on a new
+window.
