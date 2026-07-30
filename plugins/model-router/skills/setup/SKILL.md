@@ -39,7 +39,7 @@ macOS and Linux only.
    "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
    "ENABLE_TOOL_SEARCH": "true",
-   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "250000",
+   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "258400",
    "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-sol",
    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol"
    ```
@@ -59,13 +59,16 @@ macOS and Linux only.
    a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
    context window — it only applies to model IDs that don't start with
    `claude-` (the bare `gpt-5.6-*` routes), so Claude models keep their
-   built-in windows; 250000 stays under the Codex backend's ~258K effective
-   input limit. The custom-model pair adds one "GPT-5.6 Sol" entry to the
-   /model picker using the bare routing ID, so main-model GPT use gets the
-   declared context window too; terra and luna stay subagent-only. (The
-   router also serves `/v1/models` for gateway model discovery, but
-   discovery only accepts `claude-`-prefixed IDs, which the context
-   declaration skips — prefer the custom-model entry.)
+   built-in windows; 258400 is the Codex backend's effective input limit.
+   On an existing install with configured open-weights routes, run
+   `$ROUTER doctor` after raising the value — it fails with the fix
+   spelled out if a route's window no longer fits under the new
+   declaration. The custom-model pair adds one
+   "GPT-5.6 Sol" entry to the /model picker using the bare routing ID, so
+   main-model GPT use gets the declared context window too; terra and luna
+   stay subagent-only. (The router also serves `/v1/models` for gateway
+   model discovery, but discovery only accepts `claude-`-prefixed IDs,
+   which the context declaration skips — prefer the custom-model entry.)
 6. Tell the user to restart Claude Code sessions (env is read at startup),
    and that the GPT agents and `choosing-models` skill are now available.
    Offer to run smoke tests. A fresh `claude -p` reads the step 5 settings

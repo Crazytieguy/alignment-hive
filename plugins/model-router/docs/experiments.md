@@ -264,6 +264,8 @@ raw SSE inspected.
   with a 95% multiplier, ~258.4K effective input (openai/codex#32806,
   InfoWorld 2026-07). Chosen `CLAUDE_CODE_MAX_CONTEXT_TOKENS=250000` to stay
   under that with margin. Revisit if Codex restores a larger window.
+  (Superseded in 0.1.7: the declaration moved to the cap itself, 258400 —
+  see the context-overflow translation section.)
 - Display names (cosmetic UI question): two documented candidates behind a
   gateway — `ANTHROPIC_CUSTOM_MODEL_OPTION` + `_NAME`/`_DESCRIPTION` (single
   entry only), and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` with a
@@ -625,11 +627,14 @@ re-create the retry loop this removes. Detection requires
 `input exceeds the context window` (subject-bearing: a `max_tokens ...`
 variant must not match). GPT-branch forwards now always request identity
 encoding (loopback traffic; response bytes must be parseable).
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` stays 250000: with recovery restored the
-declaration is an efficiency dial, and the 230K gate under the 258.4K cap
-(~28K slack) deliberately keeps more preventive headroom than Codex — Claude
-Code's 20K output reserve and compaction-prompt sizes are tuned for its own
-behaviors, not this backend's.
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` moves to the cap itself, 258400 (setup
+skill, `DEFAULT_DECLARED_CONTEXT_WINDOW`, config template): with recovery
+restored the declaration is an efficiency dial, and the 238.4K gate under
+the 258.4K cap keeps 20K of preventive slack — Claude Code's own output
+reserve, and still more headroom than Codex's 13.6K. Existing scaled
+open-weights routes with windows in [250000, 258400) would fail validation
+under the raised declaration; setup must check configured provider windows
+before rewriting the value (open-weights.md documents the thresholds).
 
 Live e2e (2026-07-29, patched router in external mode against the running
 CLIProxyAPI child): oversized requests on `gpt-5.6-sol` and

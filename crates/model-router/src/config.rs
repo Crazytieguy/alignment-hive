@@ -28,9 +28,10 @@ const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
 /// `effective_context_window_percent`, verified in the codex-rs client).
 /// Load-bearing as the `M` in the translated `prompt is too long` overflow
 /// error (see [`crate::overflow`]). Setup declares
-/// `CLAUDE_CODE_MAX_CONTEXT_TOKENS=250000` under it deliberately, so
-/// auto-compaction (declared − 20K output reserve = 230K) leads this cap by
-/// ~28K; `doctor` still flags a declaration raised past the cap itself.
+/// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` at this same value: auto-compaction
+/// (declared − 20K output reserve) still leads the cap by 20K, and the
+/// overflow backstop covers the rest; `doctor` flags a declaration raised
+/// past the cap.
 const GPT_CONTEXT_WINDOW: u64 = 258_400;
 
 /// The Codex-native upstream model IDs behind the built-in routes. The
@@ -359,7 +360,7 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 # no entry here — set it only when a settings file the service cannot see
 # holds the real value. Note the variable is ignored for model IDs starting
 # with `claude-`, which always get Claude Code's built-in 200000 default.
-# declared-context-window = 250000
+# declared-context-window = 258400
 "#;
 
 fn default_models() -> Vec<ModelRoute> {
@@ -1555,7 +1556,7 @@ mod context_window_tests {
     fn template_documents_the_fields_and_still_parses() {
         let template = Config::template();
         assert!(template.contains("#context-window-scaling = true"));
-        assert!(template.contains("# declared-context-window = 250000"));
+        assert!(template.contains("# declared-context-window = 258400"));
         parse_and_prepare(&template);
     }
 }

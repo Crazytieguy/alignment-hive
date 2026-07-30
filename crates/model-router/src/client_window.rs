@@ -19,9 +19,13 @@ pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 /// Binary-verified against 2.1.220.
 pub const UNKNOWN_MODEL_CONTEXT_WINDOW: u64 = 200_000;
 
-/// The [`ENV_VAR`] value the setup skill writes. Used only where the real
-/// value cannot be observed; scaling requires an explicit declaration.
-pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = 250_000;
+/// The [`ENV_VAR`] value the setup skill writes: the Codex backend's real
+/// effective input cap, so the declaration and the built-in GPT routes'
+/// windows agree (the overflow-error backstop makes running the declaration
+/// at the cap safe — auto-compact still leads it by the 20K output reserve).
+/// Used only where the real value cannot be observed; scaling requires an
+/// explicit declaration.
+pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = 258_400;
 
 /// The model-ID prefix [`ENV_VAR`] never applies to.
 const CLAUDE_PREFIX: &str = "claude-";

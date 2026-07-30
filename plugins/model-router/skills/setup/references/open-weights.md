@@ -71,11 +71,11 @@ ID**. The router has no say, and no API response can tell it otherwise:
 - A model ID Claude Code doesn't recognize gets **200000** tokens.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` overrides that, but it is **one global
   value** and it is **ignored for any ID starting with `claude-`**.
-- Setup writes `CLAUDE_CODE_MAX_CONTEXT_TOKENS=250000`, sized for the Codex
-  backend behind the GPT routes (~258K effective input).
+- Setup writes `CLAUDE_CODE_MAX_CONTEXT_TOKENS=258400`, the Codex backend's
+  effective input limit behind the GPT routes (272K × 95%).
 
 Every bare routing ID shares that one number — GPT's and every open-weights
-model's. Kimi K3 and GLM-5.2 have 1M-token windows, so a 250000 declaration
+model's. Kimi K3 and GLM-5.2 have 1M-token windows, so a 258400 declaration
 clips them to a quarter of their capacity.
 
 **Raising the global value is not an option**, so don't offer it: the shipped
@@ -90,17 +90,17 @@ controls the reported numbers. That is what the second option below uses.
 
 ### The two options
 
-**A. Leave it alone.** The model is clipped to 250000 and every number Claude
+**A. Leave it alone.** The model is clipped to 258400 and every number Claude
 Code displays is true.
 
 **B. Scale the route's reported usage.** Add to the model's entry:
 ```toml
 context-window-scaling = true
 ```
-The router divides that route's reported usage by `real window / 250000`, so
-Claude Code compacts at the model's real limit instead of at 250000. It reads
+The router divides that route's reported usage by `real window / 258400`, so
+Claude Code compacts at the model's real limit instead of at 258400. It reads
 the real window from the host's catalog at startup and leaves the route
-unscaled if what it finds is no larger than 250000 anyway. `doctor` lists the
+unscaled if what it finds is no larger than 258400 anyway. `doctor` lists the
 window it settled on for each route, and fails when a route asked for scaling
 and nothing was found — then set `context-window = <tokens>` in that model's
 entry, using the host's own number as-is (Claude Code holds back up to 20000
@@ -121,11 +121,11 @@ publish one — gets the same result without the dashboard.
 
 Cost: for a scaled route the token counts Claude Code shows are in the
 declared coordinate system, not the real one — at 1M real tokens the meter
-reads 250000 and calls it full. Percentages stay right; absolute token counts
+reads 258400 and calls it full. Percentages stay right; absolute token counts
 and that route's cost telemetry do not. Nothing outside the router config
 changes.
 
-### Models whose window is *below* 250000
+### Models whose window is *below* 258400
 
 Scaling cannot help here and the router rejects it: reporting more tokens
 than were really used would still miss, because Claude Code mixes in its own
