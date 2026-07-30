@@ -4,6 +4,11 @@ set -euo pipefail
 # Bootstrap script for the model-router gateway: resolves the pinned binary
 # (downloading it on first use) and execs it with all arguments.
 #
+# `bootstrap.sh prefetch` stops after ensuring the binary is on disk instead
+# of exec'ing it. `service refresh` runs the new plugin's bootstrap this way
+# before switching the launcher, so a not-yet-published release aborts the
+# refresh while the current service keeps running.
+#
 # Runs from two locations with identical behavior: the plugin's scripts/ dir
 # (binary-version in the parent dir) and the service launcher copy in the
 # state dir (binary-version next to this script). `model-router service`
@@ -27,8 +32,11 @@ fi
 export MODEL_ROUTER_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 export MODEL_ROUTER_VERSION_FILE="$VERSION_FILE"
 
-# Dev mode: point MODEL_ROUTER_DEV at a locally built executable.
-if [ -n "${MODEL_ROUTER_DEV:-}" ] && [ -x "$MODEL_ROUTER_DEV" ]; then
+# Dev mode: point MODEL_ROUTER_DEV at a locally built executable. Prefetch
+# deliberately ignores it: refresh inherits the variable from the invoking
+# shell, but the OS service it is about to restart never sees it, so the
+# prefetch must validate the pinned release download the service will perform.
+if [ "${1:-}" != "prefetch" ] && [ -n "${MODEL_ROUTER_DEV:-}" ] && [ -x "$MODEL_ROUTER_DEV" ]; then
   exec "$MODEL_ROUTER_DEV" "$@"
 fi
 
@@ -78,6 +86,10 @@ if [ ! -x "$BINARY" ]; then
   mv -f "$FOUND" "$BINARY"
   rm -rf "$STAGING"
   trap - EXIT
+fi
+
+if [ "${1:-}" = "prefetch" ]; then
+  exit 0
 fi
 
 exec "$BINARY" "$@"

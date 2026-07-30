@@ -53,8 +53,9 @@ if [ -n "$HEALTH" ]; then
     # in the background so session start never blocks on the binary
     # download (the download itself is atomic, so an interrupt is safe).
     # Silent either way — on failure (release may still be building) the
-    # current service keeps running and the next session retries; a stuck
-    # mismatch is surfaced by `model-router doctor`.
+    # refresh aborts before touching the launcher, the current service keeps
+    # running, and the next session retries; a stuck mismatch is surfaced by
+    # `model-router doctor`.
     (nohup bash "$BOOTSTRAP" service refresh --plugin-root "$CLAUDE_PLUGIN_ROOT" >/dev/null 2>&1 &) 2>/dev/null
   fi
   exit 0

@@ -317,9 +317,29 @@ fn refresh_at(
     sources: &LauncherSources,
     runner: &dyn CommandRunner,
 ) -> anyhow::Result<()> {
+    prefetch_binary(sources, runner)?;
     populate_launcher(dirs, Some(sources), true)?;
     refresh_unit_if_stale(dirs, platform, unit_path, runner)?;
     restart_with(platform, runner)
+}
+
+/// Downloads the new version's binary via the source bootstrap's `prefetch`
+/// mode before the launcher is switched or the service restarted, so a
+/// version whose release is not yet published (the plugin update can land
+/// minutes before the release assets) aborts the refresh while the current
+/// service keeps serving.
+fn prefetch_binary(sources: &LauncherSources, runner: &dyn CommandRunner) -> anyhow::Result<()> {
+    require_success(
+        &run_command(
+            runner,
+            "bash",
+            &[
+                sources.bootstrap.as_os_str().to_owned(),
+                OsString::from("prefetch"),
+            ],
+        )?,
+        "binary prefetch (the release may still be building; retried next session)",
+    )
 }
 
 fn refresh_unit_if_stale(
@@ -906,8 +926,62 @@ WantedBy=default.target\n"
         );
         assert_eq!(launcher_version(&dirs).unwrap().as_deref(), Some("2.0.0"));
         let calls = runner.calls.borrow();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1[0], "kickstart");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "bash");
+        assert_eq!(
+            calls[0].1,
+            vec![
+                new_plugin.join("scripts/bootstrap.sh").into_os_string(),
+                OsString::from("prefetch"),
+            ]
+        );
+        assert_eq!(calls[1].1[0], "kickstart");
+    }
+
+    #[test]
+    fn failed_prefetch_aborts_refresh_before_touching_the_launcher() {
+        struct FailingPrefetchRunner;
+        impl CommandRunner for FailingPrefetchRunner {
+            fn output(&self, program: &str, _args: &[OsString]) -> anyhow::Result<CommandOutput> {
+                assert_eq!(
+                    program, "bash",
+                    "no service commands may run after a failed prefetch"
+                );
+                Ok(CommandOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "Failed to download".to_string(),
+                })
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(root.path());
+        let plugin = root.path().join("plugin");
+        fs::create_dir_all(plugin.join("scripts")).unwrap();
+        fs::write(plugin.join("scripts/bootstrap.sh"), b"new script\n").unwrap();
+        fs::write(plugin.join("binary-version"), b"2.0.0\n").unwrap();
+        create_private_dir(&dirs.launcher_dir()).unwrap();
+        fs::write(dirs.launcher_dir().join("bootstrap.sh"), "old script").unwrap();
+        fs::write(dirs.launcher_dir().join("binary-version"), "1.0.0").unwrap();
+        let unit = root.path().join("systemd/model-router.service");
+
+        let error = refresh_at(
+            &dirs,
+            Platform::Linux,
+            &unit,
+            &LauncherSources::from_plugin_root(&plugin),
+            &FailingPrefetchRunner,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("prefetch"));
+        assert_eq!(
+            fs::read_to_string(dirs.launcher_dir().join("bootstrap.sh")).unwrap(),
+            "old script"
+        );
+        assert_eq!(launcher_version(&dirs).unwrap().as_deref(), Some("1.0.0"));
+        assert!(!unit.exists());
     }
 
     #[test]
@@ -937,9 +1011,10 @@ WantedBy=default.target\n"
             systemd_user_unit(&dirs.launcher_dir(), &dirs.log_dir(), &dirs)
         );
         let calls = runner.calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].1, os_args(["--user", "daemon-reload"]));
-        assert_eq!(calls[1].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0, "bash");
+        assert_eq!(calls[1].1, os_args(["--user", "daemon-reload"]));
+        assert_eq!(calls[2].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
     }
 
     #[test]
@@ -975,8 +1050,9 @@ WantedBy=default.target\n"
             assert_eq!(fs::metadata(&unit).unwrap().ino(), inode_before);
         }
         let calls = runner.calls.borrow();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "bash");
+        assert_eq!(calls[1].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
     }
 
     #[test]

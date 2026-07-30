@@ -49,6 +49,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Exit successfully; `bootstrap.sh prefetch` normally stops before exec,
+    /// but an older bootstrap passes the argument through to the binary and
+    /// this keeps that combination a successful no-op.
+    #[command(hide = true)]
+    Prefetch,
     /// Install and manage the OS user service.
     Service {
         #[command(subcommand)]
@@ -109,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Prefetch => Ok(()),
         Command::Login => login(&dirs, &config_path).await,
         Command::VerifyProviders { name, json } => {
             let reports = model_router::verify::run(&config_path, name.as_deref()).await?;
