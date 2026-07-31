@@ -1,6 +1,6 @@
 ---
 name: choosing-models
-description: Use when delegating work to subagents or Workflow agents and choosing which model and effort level to run them on — covers Claude vs GPT model strengths, cost dynamics, effort levels, and the mechanics of routing to GPT models through model-router.
+description: This skill should be read before delegating work to subagents or Workflow agents, unless the user has already named a model. Covers the strengths, cost dynamics, and effort levels of the available models — Claude and GPT families — and the mechanics of routing to GPT models through model-router.
 ---
 
 # Choosing models for delegation
