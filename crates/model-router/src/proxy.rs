@@ -584,6 +584,20 @@ async fn gpt_response(
     .await
 }
 
+/// The inbound headers a GPT-bound forward should carry: rewritten to the
+/// shared-prefix prompt-cache identity of the forwarded body
+/// ([`crate::prompt_cache`]), or `None` (use the originals) when no key
+/// could be derived. Called by the two GPT egress paths — [`forward_gpt`]
+/// and [`legacy_websearch`] — so every GPT-bound request is covered
+/// structurally, and Anthropic-bound forwards never are.
+fn cache_identity_headers(
+    parts: &axum::http::request::Parts,
+    forwarded_body: &Bytes,
+) -> Option<HeaderMap> {
+    let key = crate::prompt_cache::shared_prefix_key(forwarded_body)?;
+    headers::with_cache_identity(&parts.headers, &key)
+}
+
 /// How this request's usage is reported back.
 ///
 /// The estimate only ever reaches the client through the streamed
@@ -746,6 +760,8 @@ async fn forward_gpt(
     capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
 ) -> Response {
+    let cache_headers = cache_identity_headers(parts, &rewritten);
+    let inbound_headers = cache_headers.as_ref().unwrap_or(&parts.headers);
     match &state.cliproxy_upstream {
         CliproxyUpstream::Stub => {
             local_stub_response(state, upstream_model, &rewritten, capture).await
@@ -759,7 +775,7 @@ async fn forward_gpt(
                 base_url,
                 &parts.method,
                 &parts.uri,
-                &parts.headers,
+                inbound_headers,
                 rewritten,
                 true,
                 true,
@@ -798,7 +814,7 @@ async fn forward_gpt(
                 &handle.base_url,
                 &parts.method,
                 &parts.uri,
-                &parts.headers,
+                inbound_headers,
                 rewritten,
                 true,
                 true,
@@ -955,7 +971,13 @@ async fn legacy_websearch(
 ) -> anyhow::Result<serde_json::Value> {
     let mut document = serde_json::from_slice::<serde_json::Value>(rewritten)?;
     document["stream"] = serde_json::Value::Bool(false);
-    let mut outgoing_headers = headers::request_headers(&parts.headers, true, true, credential);
+    let cache_headers = cache_identity_headers(parts, rewritten);
+    let mut outgoing_headers = headers::request_headers(
+        cache_headers.as_ref().unwrap_or(&parts.headers),
+        true,
+        true,
+        credential,
+    );
     // The body is parsed here, and the reqwest client does no decompression;
     // explicitly `identity` — an absent Accept-Encoding permits any coding.
     outgoing_headers.insert(

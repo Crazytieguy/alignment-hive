@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod headers;
 pub mod identity;
 mod overflow;
+pub mod prompt_cache;
 pub mod proxy;
 pub mod routing;
 pub mod service;

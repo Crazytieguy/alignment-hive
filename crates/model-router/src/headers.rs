@@ -62,6 +62,25 @@ impl GptUpstreamCredential {
     }
 }
 
+/// The Claude Code headers `CLIProxyAPI` reads the prompt-cache identity
+/// (and reasoning-replay scope) from.
+pub const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
+pub const AGENT_ID_HEADER: &str = "x-claude-code-agent-id";
+
+/// A copy of `input` whose session header carries the shared-prefix
+/// prompt-cache key and whose agent header is removed — the pair
+/// `CLIProxyAPI` folds into the upstream `prompt_cache_key`
+/// ([`crate::prompt_cache`]). `None` when the key is not a valid header
+/// value.
+#[must_use]
+pub fn with_cache_identity(input: &HeaderMap, key: &str) -> Option<HeaderMap> {
+    let value = axum::http::HeaderValue::from_str(key).ok()?;
+    let mut output = input.clone();
+    output.insert(SESSION_ID_HEADER, value);
+    output.remove(AGENT_ID_HEADER);
+    Some(output)
+}
+
 #[must_use]
 pub fn request_headers(
     input: &HeaderMap,

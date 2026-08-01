@@ -1711,3 +1711,71 @@ async fn claude_origin_unlisted_client_errors_are_surfaced() {
     assert!(String::from_utf8_lossy(&body).contains("unprocessable"));
     assert_eq!(cpa_observed.lock().await.len(), 0);
 }
+
+#[tokio::test]
+async fn gpt_branch_rewrites_cache_identity_headers_to_the_shared_prefix_key() {
+    fn handler(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        if parts.uri.path() == "/v1/models" {
+            return Response::new(Body::from(r#"{"data":[]}"#));
+        }
+        Response::new(Body::from(
+            r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"gpt-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))
+    }
+    let Some((fake_address, observed)) = spawn_fake(handler).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{fake_address}"),
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "codex".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+
+    for (session, system) in [
+        ("session-a", r#""shared agent prompt""#),
+        ("session-b", r#""shared agent prompt""#),
+        ("session-c", r#""a different agent prompt""#),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("x-claude-code-session-id", session)
+                    .header("x-claude-code-agent-id", format!("agent-of-{session}"))
+                    .body(Body::from(format!(
+                        r#"{{"model":"claude-gpt-test","system":{system},"messages":[]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let observed = observed.lock().await;
+    let forwarded: Vec<_> = observed
+        .iter()
+        .filter(|request| request.uri.contains("/v1/messages"))
+        .collect();
+    assert_eq!(forwarded.len(), 3);
+    // Different conversations, same system head: one upstream identity.
+    let key = forwarded[0].headers["x-claude-code-session-id"].clone();
+    assert!(key.to_str().unwrap().starts_with("prefix-"), "{key:?}");
+    assert_eq!(forwarded[1].headers["x-claude-code-session-id"], key);
+    for request in &forwarded {
+        assert!(!request.headers.contains_key("x-claude-code-agent-id"));
+    }
+    // A different system head is a different identity.
+    assert_ne!(forwarded[2].headers["x-claude-code-session-id"], key);
+}

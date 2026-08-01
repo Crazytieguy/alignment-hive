@@ -18,15 +18,19 @@ pub fn identity_text(display_name: &str) -> String {
     )
 }
 
-/// Appends the identity system block to an Anthropic Messages request body.
+/// Prepends the identity system block to an Anthropic Messages request body.
+///
+/// The block leads the system prompt because its copy frames everything
+/// after it ("the rest of this system prompt is Claude Code's standard
+/// one"). The injection is deterministic, so leading with it is exactly as
+/// prompt-cache-stable as appending it was.
 ///
 /// Normalization rules (uniform for `/v1/messages` and, if ever forwarded,
 /// `count_tokens` — parity is required):
 /// - `system` absent → one-element content-block array with the identity block
-/// - `system` string → `[{type:text, text:<original>}, <identity block>]`
-/// - `system` array → identity block pushed at the end (existing blocks,
-///   ordering, and metadata untouched; appending keeps the original prefix
-///   stable)
+/// - `system` string → `[<identity block>, {type:text, text:<original>}]`
+/// - `system` array → identity block inserted first (existing blocks,
+///   ordering, and metadata untouched)
 /// - any other `system` shape → error (the caller must reject the request
 ///   rather than forward a body it could not rewrite)
 ///
@@ -46,10 +50,10 @@ pub fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8
     let system = match object.remove("system") {
         None => json!([identity_block]),
         Some(Value::String(original)) => {
-            json!([{"type": "text", "text": original}, identity_block])
+            json!([identity_block, {"type": "text", "text": original}])
         }
         Some(Value::Array(mut blocks)) => {
-            blocks.push(identity_block);
+            blocks.insert(0, identity_block);
             Value::Array(blocks)
         }
         Some(other) => {
@@ -99,13 +103,13 @@ mod tests {
     }
 
     #[test]
-    fn string_system_is_preserved_as_leading_block() {
+    fn string_system_is_preserved_after_the_identity_block() {
         let body = br#"{"model":"gpt-test","system":"original instructions","messages":[]}"#;
         let result = parsed(&inject_identity(body, "GPT Test").unwrap());
         let system = result["system"].as_array().unwrap();
         assert_eq!(system.len(), 2);
-        assert_eq!(system[0]["text"], "original instructions");
-        assert!(system[1]["text"].as_str().unwrap().contains("GPT Test"));
+        assert!(system[0]["text"].as_str().unwrap().contains("GPT Test"));
+        assert_eq!(system[1]["text"], "original instructions");
     }
 
     #[test]
@@ -114,9 +118,9 @@ mod tests {
         let result = parsed(&inject_identity(body, "GPT Test").unwrap());
         let system = result["system"].as_array().unwrap();
         assert_eq!(system.len(), 2);
-        assert_eq!(system[0]["text"], "harness prompt");
-        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert!(system[1].get("cache_control").is_none());
+        assert!(system[0].get("cache_control").is_none());
+        assert_eq!(system[1]["text"], "harness prompt");
+        assert_eq!(system[1]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
