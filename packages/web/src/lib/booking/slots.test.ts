@@ -222,24 +222,27 @@ describe("schedule override", () => {
     expect(days).toContain("2026-06-25");
   });
 
-  // Pins the 2026-07 schedule; delete together with the mats `override` once it has passed.
-  test("real mats schedule: Tue+Thu, plus Fri the week of 2026-07-13", () => {
-    const slots = generateSlots(OFFICES.mats, 90, [], ms("2026-07-06T00:00"));
-    expect(onLocalDate(slots, "2026-07-07").length).toBeGreaterThan(0); // Tue this week
-    expect(onLocalDate(slots, "2026-07-09").length).toBeGreaterThan(0); // Thu this week
-    expect(onLocalDate(slots, "2026-07-10")).toHaveLength(0); // Fri this week: closed
-    // Tue 2026-07-14 stays open in config; Yoav closes it with a calendar block.
-    expect(onLocalDate(slots, "2026-07-14").length).toBeGreaterThan(0);
-    expect(onLocalDate(slots, "2026-07-16").length).toBeGreaterThan(0); // Thu next week
-    expect(onLocalDate(slots, "2026-07-17").length).toBeGreaterThan(0); // Fri next week: open
-    expect(onLocalDate(slots, "2026-07-21").length).toBeGreaterThan(0); // Tue the week after
-    expect(onLocalDate(slots, "2026-07-24")).toHaveLength(0); // Fri the week after: closed
+  // Pins the 2026-08 schedule; delete together with the mats `override` once it has passed.
+  test("real mats schedule: Tue+Thu, but Mon+Tue the week of 2026-08-10", () => {
+    const slots = generateSlots(OFFICES.mats, 90, [], ms("2026-08-03T00:00"));
+    expect(onLocalDate(slots, "2026-08-04").length).toBeGreaterThan(0); // Tue this week
+    expect(onLocalDate(slots, "2026-08-06").length).toBeGreaterThan(0); // Thu this week
+    expect(onLocalDate(slots, "2026-08-10").length).toBeGreaterThan(0); // Mon next week: open
+    expect(onLocalDate(slots, "2026-08-11").length).toBeGreaterThan(0); // Tue next week
+    expect(onLocalDate(slots, "2026-08-13")).toHaveLength(0); // Thu next week: closed
+    expect(onLocalDate(slots, "2026-08-17")).toHaveLength(0); // Mon the week after: closed
+    expect(onLocalDate(slots, "2026-08-18").length).toBeGreaterThan(0); // Tue the week after
+    expect(onLocalDate(slots, "2026-08-20").length).toBeGreaterThan(0); // Thu the week after
   });
 
-  test("real far-labs schedule: Wednesdays", () => {
-    const slots = generateSlots(OFFICES["far-labs"], 90, [], ms("2026-07-06T00:00"));
+  // Pins the 2026-08 schedule; delete together with the far-labs `override` once it has passed.
+  test("real far-labs schedule: Wednesdays, skipping the week of 2026-08-10", () => {
+    const slots = generateSlots(OFFICES["far-labs"], 90, [], ms("2026-08-03T00:00"));
     expect(slots.length).toBeGreaterThan(0);
     for (const s of slots) expect(local(s).weekday).toBe(3);
+    expect(onLocalDate(slots, "2026-08-05").length).toBeGreaterThan(0); // Wed this week
+    expect(onLocalDate(slots, "2026-08-12")).toHaveLength(0); // Wed next week: skipped
+    expect(onLocalDate(slots, "2026-08-19").length).toBeGreaterThan(0); // Wed the week after
   });
 });
 

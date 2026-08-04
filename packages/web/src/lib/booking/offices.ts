@@ -48,9 +48,8 @@ export const OFFICES = {
     label: "MATS office",
     timezone: "America/Los_Angeles",
     weekdays: [2, 4], // Tue, Thu
-    // Week of 2026-07-13: Fri added. That week's Tue stays open in config — Yoav
-    // closes it with a calendar block instead.
-    override: { from: "2026-07-13", until: "2026-07-19", weekdays: [2, 4, 5] },
+    // Week of 2026-08-10: Mon + Tue instead of Tue + Thu.
+    override: { from: "2026-08-10", until: "2026-08-16", weekdays: [1, 2] },
     start: "10:30",
     end: "18:00",
   },
@@ -58,6 +57,8 @@ export const OFFICES = {
     label: "Far Labs",
     timezone: "America/Los_Angeles",
     weekdays: [3], // Wed
+    // Week of 2026-08-10: skipped entirely.
+    override: { from: "2026-08-10", until: "2026-08-16", weekdays: [] },
     start: "10:30",
     end: "18:00",
   },
