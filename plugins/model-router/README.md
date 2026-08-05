@@ -28,6 +28,9 @@ present themselves as Claude.
   orchestration.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
+- Optional Grok family — grok-4.5 under your own xAI subscription OAuth
+  login (no API key), riding the same CLIProxyAPI instance. Off by
+  default; opt in during `/model-router:setup`.
 - A `choosing-models` skill that helps Claude pick the right model and
   effort when delegating.
 - Working WebSearch on GPT sessions: Claude Code's WebSearch runs a side
@@ -35,8 +38,9 @@ present themselves as Claude.
   20–70s). The gateway answers it from the Codex search backend instead —
   structured links in ~1–3s (`[web-search]` in the config to opt out). The
   backend follows whichever agent asked: a GPT subagent's search uses the
-  Codex backend even under a Claude main session, and a Claude subagent's
-  search stays on Anthropic even under a GPT main session.
+  Codex backend even under a Claude main session, a Grok agent's search
+  uses xAI's, and a Claude subagent's search stays on Anthropic even under
+  a GPT main session.
 - An OS service (launchd/systemd user unit) that keeps the router alive.
   macOS and Linux only.
 

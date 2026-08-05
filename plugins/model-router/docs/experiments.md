@@ -715,3 +715,491 @@ backend tightening the fingerprint check (e.g. requiring a matching
 catalog entry declares `minimal_client_version: 0.144.0`); if sol-only
 "overloaded" errors return, re-run the A/B probes with a current CLI
 fingerprint.
+
+## Grok (xAI) phase-4 wire measurements (2026-07-31, CLIProxyAPI 7.2.110, model-router 0.1.9+grok)
+
+Method: a throwaway second router instance (isolated XDG dirs, port 8899) in
+external mode against a private CLIProxyAPI child (port 8399) started with
+`request-log: true`, its own auth dir holding *copies* of the live
+`codex-*.json` / `xai-*.json`. The live gateway (8787/8317) was untouched and
+re-verified healthy afterwards. Evidence:
+`~/.claude/jobs/13cfa33f/tmp/phase4/evidence/`.
+
+### Reasoning effort does NOT survive on the xAI path (decides D12)
+
+`output_config.effort` — the field an agent file's `effort:` frontmatter
+produces — is forwarded verbatim on the Codex and openai-compat paths, but
+is **dropped for xAI**. 9/9 requests (low/medium/high x3) against
+`grok-4.5` arrived upstream as `reasoning.effort: "medium"`, the default:
+
+```
+inbound  {"model":"grok-4.5","output_config":{"effort":"low"},...}
+upstream {"model":"grok-4.5","reasoning":{"effort":"medium","summary":"auto"},...}
+         -> https://cli-chat-proxy.grok.com/v1/responses
+```
+
+Other channels tried, all ineffective: Anthropic `thinking.budget_tokens`,
+top-level `reasoning_effort`. The parenthesised model-id suffix
+(`internal/thinking/suffix.go`) is the only one that works:
+
+| request model | upstream model | upstream reasoning.effort |
+|---|---|---|
+| `grok-4.5(low)` | `grok-4.5` | `low` |
+| `grok-4.5(high)` | `grok-4.5` | `high` |
+| `grok-4.5(xhigh)` | `grok-4.5` | `high` (clamped) |
+| `grok-4.5(max)` | `grok-4.5` | `high` (clamped) |
+| `grok-4.5(none)` | `grok-4.5` | `low` (4.5 forbids zero) |
+| `grok-4.3(none)` | `grok-4.3` | `none` (4.3 allows zero) |
+| `grok-4.5(bogus)` | `grok-4.5` | `medium` (default; no error) |
+
+The child owns the clamping table and never errors on an out-of-range value,
+so the router forwards the requested effort unvalidated.
+
+**Router fix:** `routing::effort_qualified_model` appends the suffix for
+Grok-family routes only. Verified end-to-end through the dev router:
+low/medium/high each arrive as the matching `reasoning.effort`. Bare routes
+and the existing agent-frontmatter channel are preserved — no suffixed
+routes, no new agent files, no user-visible concept.
+
+### Alpha-search model pin, live (D7.1)
+
+> Still true for GPT and open-weights origins. Grok origins no longer reach
+> `/v1/alpha/search` at all (2026-08-04, see "Grok-native WebSearch").
+
+A `WebSearch` sub-call on a `grok-4.5` route reached `/v1/alpha/search` and
+returned **33 structured links**. The payload carried the pinned Codex slug,
+not the Grok one:
+
+```
+{"model":"gpt-5.6-sol","q":"rust axum graceful shutdown"}
+```
+
+### Context-overflow error (GT-8): translatable
+
+697K tokens to `grok-4.5` (500K window) — HTTP 400:
+
+```json
+{"type":"error","error":{"type":"invalid_request_error","message":
+ "{\"code\":\"invalid-argument\",\"error\":\"This model's maximum prompt length is 500000 but the request contains 620215 tokens.\"}"}}
+```
+
+Subject-bearing and unambiguous, so `OverflowRewrite` is now armed for the
+built-in Grok models via a second dialect phrase (`maximum prompt length
+is`). The Codex arming rule is unchanged.
+
+### `max_tokens` has no ceiling to hit
+
+`max_tokens` is **dropped in translation** — the upstream body carries
+`max_output_tokens: null`. 65536, 65537 and 100000 all succeeded on both
+`grok-4.5` and `grok-4.3`. The registry's 65,536 `max_completion_tokens` is
+never exercised by an Anthropic-protocol request, so no clamp is needed.
+
+### Identity block reaches xAI (gate 6)
+
+The injected block arrives as a `developer` message in `input[0]`:
+
+> You are Grok 4.5, a Grok model working inside Claude Code's agent
+> harness alongside Claude models. Do not present yourself as Claude. ...
+
+### Family-switch: a foreign thinking signature hard-fails
+
+Contrary to the source reading that `sanitizeXAIInputEncryptedContent`
+merely strips invalid content, a thinking block carrying a non-xAI
+signature produced HTTP 400:
+
+```
+{"code":"invalid-argument","error":"Could not decrypt the provided encrypted_content. ..."}
+```
+
+Continuation variants, same history (the model must recall a number it
+picked in turn 1):
+
+| history shape | result |
+|---|---|
+| Grok's own signed thinking | recalled correctly |
+| foreign (Claude-shaped) signature | **HTTP 400** |
+| thinking block with `signature` removed | recalled correctly |
+| thinking blocks dropped, text kept | recalled correctly |
+
+So a mitigation exists (drop the signature) and costs nothing measurable on
+a short session. **Not implemented**: whether Claude Code actually replays
+another family's thinking blocks on a mid-session `/model` switch is a
+harness question, not a wire question, and shipping a body rewrite for an
+unconfirmed trigger would be speculative. Phase 5 must answer it — see the
+verification suite. Also note the 400 quarantined the sandbox child's xAI
+credential (`auth_unavailable` on the next call) until restart, which is how
+a single bad request can look like an auth outage.
+
+### Incidental
+
+- A request for `grok-3-mini-fast` was forwarded as `grok-3-mini-fast` but
+  answered by `grok-4.3`; `grok-4.5` answers as `grok-4.5-build`. Response
+  `model` is not the requested slug, and routing is not identity.
+- The child hot-loaded the copied auth files with no restart.
+
+## Grok phase-5 harness measurements (2026-07-31, Claude Code 2.1.220)
+
+Sandbox: second router (8898) + private CLIProxyAPI child (8398, `request-log:
+true`) under `~/.claude/jobs/13cfa33f/tmp/phase5/`, credentials copied. Live
+gateway untouched and re-verified healthy after.
+
+### Driving Claude Code at a non-default gateway needs `--settings`
+
+`~/.claude/settings.json`'s `env` block **silently overrides shell-provided**
+`ANTHROPIC_BASE_URL` (the setup skill already warns about this for smoke
+tests). Runs launched with a shell `ANTHROPIC_BASE_URL` went to the *live*
+gateway instead, which reads as "the sandbox works" while measuring nothing.
+`claude --settings <file>` with its own `env` block is the reliable override;
+`ANTHROPIC_CUSTOM_MODEL_OPTION` in that block is also what makes `--model
+<routing-id>` accepted (an unregistered ID is rejected with "issue with the
+selected model", regardless of `/v1/models` discovery).
+
+### GATE 5 — foreign thinking signatures are NOT reachable (no mitigation needed)
+
+Phase 4 measured a hard 400 when a non-xAI thinking signature reaches Grok.
+Driving the real harness shows Claude Code never sends one.
+
+A genuine mid-session family switch (`-p` turn on `claude-sonnet-4-5`, then
+`--resume` with `--model grok-4.5`) **succeeded**, recalling the number from
+the Claude turn. The forwarded body carries:
+
+```json
+"context_management":{"edits":[{"keep":"all","type":"clear_thinking_20251015"}]}
+```
+
+and its 12-message history contains **zero thinking blocks** — the harness
+strips them from replayed history itself. The reverse switch (Grok turn
+first, then `--resume --model claude-sonnet-4-5`) also succeeded.
+
+**Verdict: the phase-4 wire failure is unreachable through Claude Code. No
+router-side signature stripping is warranted** — it would be a body rewrite
+for a trigger the harness prevents.
+
+### WebSearch: the 2x2 collapses to a 1x2, and cell 4 does NOT land on Grok
+
+> **Superseded for Grok origins (2026-08-04).** Both rows below describe the
+> pre-0.1.11 behaviour. Grok-origin searches no longer reach `alpha/search`
+> and no longer fall back to Anthropic; they run on xAI's own hosted
+> `web_search` and fail visibly when they cannot. The recommendation this
+> section ends with is resolved: D7.5 was funded, via `web_search` rather than
+> `x_search`. See "Grok-native WebSearch" below. The measurements stay as the
+> record of what the alpha path did.
+
+The `WebSearch` side call runs on a **Claude small-fast model**
+(`claude-haiku-4-5`) even in a Grok-main session, so it always arrives on the
+**Claude branch** and is matched to its origin by the correlation tap. The
+"Grok main" and "Grok subagent under Claude main" rows therefore exercise the
+same code path — the topology axis is not independent.
+
+| alpha | observed |
+|---|---|
+| up | `answered routed-origin web search from alpha/search links=12..40 origin="grok-4.5"`, payload `{"model":"gpt-5.6-sol"}` (the D7.1 pin) |
+| down (codex auth removed) | alpha 503 → **falls back to the origin route's scrape path** (the D7.2 fix fires) → that forward **422s** → passes through to Anthropic |
+
+The 422 body:
+
+```
+Failed to deserialize the JSON body into the target type:
+data did not match any variant of untagged enum ModelToolChoice
+```
+
+The sub-call carries Anthropic's server-side `web_search_20250305` tool and
+its `tool_choice`; xAI cannot deserialize them. So **the required cell-4
+behaviour (land on Grok `legacy_websearch`) is not achievable as-is**, and
+the plan's assumption that the scrape path is a usable Grok fallback is
+wrong.
+
+Stripping the tool to stop the 422 is **not** an improvement worth making:
+without the tool the request is a plain completion and Grok has no web
+access, so it would answer a search query from training data — the suite's
+own T7 fail signal is a fabricated URL. Anthropic answering correctly is
+strictly better for the user than Grok guessing. The principled fix is xAI's
+native `x_search` (plan D7.5), still out of scope. **Recommendation for
+Fable/the user:** either accept and document the Anthropic fallback for
+Grok-origin searches when alpha is unavailable, or fund D7.5. [copy: Fable]
+
+### Effort is effective end-to-end (preliminary)
+
+`grok-4.5`, one reasoning-heavy word problem, through the dev router (so the
+model-ID suffix mapping is in play), n=2 per level:
+
+| effort | latency | output tokens | reasoning chars |
+|---|---|---|---|
+| low | 42s, 59s | 3350, 4277 | 2282, 2716 |
+| medium | 62s, 191s | 4932, 14148 | 2761, 7952 |
+| high | 184s | 13656 | 7657 |
+
+Reasoning volume and latency scale with the requested effort, confirming the
+phase-4 fix works in practice and that effort is worth exposing. Sample is
+too small for pass-rate or per-tier guidance; the full suite matrix is still
+outstanding (see below).
+
+### Operational notes
+
+- Repeated back-to-back Grok requests drove the sandbox child into
+  `auth_not_found: no auth available (providers=xai)`; a child restart
+  cleared it. Quarantine after upstream failures is the same behaviour
+  recorded for Codex — one bad or rate-limited request can look like an auth
+  outage.
+- Neither the live nor the copied auth file was modified at any point
+  (mtimes unchanged, same `expired` timestamp).
+
+## Grok verification suite T1–T8, full matrix (2026-07-31, Claude Code 2.1.220)
+
+Sandbox: third router (8899) + its own `CLIProxyAPI` 7.2.110 child (8399),
+isolated `XDG_*` under `~/.claude/jobs/13cfa33f/tmp/suite/`, auth **copied**
+from the live state dir (both live and copied files unchanged afterwards —
+same mtimes). Live gateway untouched and re-verified healthy after.
+
+24 cells, run twice (48 uncoached single attempts): all 8 tasks on
+`grok-4.5` @ medium; the four diagnostic tasks (T1, T4, T5, T6) also @ low
+and @ high; the same four @ medium on `grok-4.3` and on a **sandbox-only
+hand-written `[[models]]` probe route** for `grok-4.20-0309-reasoning`.
+`grok-3-mini-fast` was dropped (phase 4 saw it answered by another model).
+Every cell was scored by fresh Claude auditors against the suite rubric,
+independent of the executor.
+
+### Driving effort from the CLI: `--effort` is the session-level control
+
+`claude --effort <low|medium|high|xhigh|max>` sets effort for a `-p` session;
+the capture tap confirms it arrives as top-level `output_config.effort` and
+the router rewrites it to the `model(effort)` suffix on the xAI path. An
+`--agents` JSON block carrying `"effort"` did **not** take effect (the body
+still carried Claude Code's default `medium`) — the flag is the reliable
+channel. Claude Code sends `output_config.effort: medium` even when no
+effort is requested, so "no effort" is not observable from the wire.
+
+### Served models
+
+`grok-4.5` is answered by **`grok-4.5-build`** in every response body
+(annotate accordingly; the `-build` suffix is the only served-vs-named
+divergence seen). `grok-4.3` and the `grok-4.20-0309-reasoning` probe are
+each answered by their own name. The undocumented 4.20 snapshot is reachable
+through a hand-written route with `family = "grok"` and needs no other
+plumbing.
+
+### Results (round 2 — isolated scratch dirs; auditor verdicts)
+
+| Task | grok-4.5 low | grok-4.5 medium | grok-4.5 high | grok-4.3 med | grok-4.20 med |
+|---|---|---|---|---|---|
+| T1 exact-match edit | PASS | PASS | PASS | PASS (demerit) | PASS |
+| T2 bash output | — | PASS | — | — | — |
+| T3 grep/glob | — | PASS | — | — | — |
+| T4 multi-step fix | PASS | PASS | PASS | PASS (demerits) | PASS (demerits) |
+| T5 identity/format | PASS | PASS | PASS | PASS | PASS |
+| T6 degeneracy | SOFT | PASS (contaminated) | SOFT | SOFT | **FAIL** |
+| T7 WebSearch | — | PASS | — | — | — |
+| T8 long context | — | SOFT | — | — | — |
+
+Round 1 (same cells, before the scratch-isolation fix) agreed everywhere
+except T6, where 4.5-low was SOFT, 4.5-medium and 4.5-high PASS, 4.3 SOFT,
+4.20 FAIL — i.e. only the low/high T6 verdicts moved, and the 4.20 fabrication
+reproduced in both rounds.
+
+- **T1** — every cell fixed the single line, `tests`-style byte-compare clean,
+  no full-file `Write`, zero failed Edits, tab-indented function preserved.
+  `grok-4.3` needed 5 extra calls recovering from a path it mangled (below).
+- **T2** — reported mean/exit/skip exactly matched the real Bash result block
+  (59.50 / 3 / 2) and `results.txt` carried them.
+- **T3** — `rg -n -w` word-boundary search; ground-truth file/line map matched
+  exactly, plural decoys excluded, comment-only reference identified.
+- **T4** — all five cells ran pytest before their first edit, left `tests/`
+  byte-identical, ended on a real `6 passed` result block, and summarized both
+  seeded bugs correctly; exactly one edit/test cycle each.
+- **T5** — identity held everywhere: "I am Grok 4.5 … created by xAI",
+  "Grok 4.3 … created by xAI", "Grok 4.20 … created by xAI". No cell claimed
+  to be Claude or GPT; one thinking block framed itself as "working inside
+  Claude Code's agent harness", which is the allowed framing. Zero tool calls
+  in all five, lists alphabetized. The *contents* of the tool list vary by
+  cell (11 vs 25 vs 70 entries) — it reflects what the prompt exposed, not the
+  harness roster.
+- **T7** — three `WebSearch` calls, 11.7–14.0 s each (pass bar 30 s), answered
+  by the Codex alpha backend with `origin="grok-4.5"` and 12–40 links; the
+  reported URL appears verbatim in a result block. Per phase 5 this measures
+  the user-visible search experience inside a Grok session, not a
+  Grok-executed search.
+- **T8** — correct file, line, and code (`log-f.txt`, `08773f4b`), no
+  overflow or truncation error; `Read`'s token cap truncated four reads and
+  the model resumed by offset rather than assuming coverage. Downgraded to
+  SOFT because it delegated four of the eight files to `Agent` subagents that
+  ran on `claude-haiku-4-5` — the probe therefore measures Grok on about half
+  the corpus. Round 1's cell read all files itself and passed clean.
+
+### Effort-effectiveness (grok-4.5, round 2, n=1 per cell)
+
+| model | effort | cells | pass/soft/fail | mean wall | mean thinking chars | mean tool calls | tool errors |
+|---|---|---|---|---|---|---|---|
+| grok-4.5 | low | T1,T4,T5,T6 | 3/1/0 | 23.9 s | 638 | 6.2 | 1 |
+| grok-4.5 | medium | T1,T4,T5,T6 | 4/0/0 | 28.9 s | 576 | 4.8 | 1 |
+| grok-4.5 | high | T1,T4,T5,T6 | 3/1/0 | 16.4 s | 580 | 4.5 | 1 |
+| grok-4.3 | medium | T1,T4,T5,T6 | 3/1/0 | 15.1 s | 762 | 8.2 | 12 |
+| grok-4.20-0309-reasoning | medium | T1,T4,T5,T6 | 3/0/1 | 17.6 s | 697 | 6.5 | 4 |
+
+Per task on `grok-4.5` (low → medium → high): T1 588/609/609 thinking chars,
+T4 303/458/535, T5 57/142/139, T6 1606/1093/1038. **Effort produced no
+monotonic effect on outcome, latency, or reasoning volume on these tasks** —
+the only verdict spread (T6) does not order by effort, and the one T6
+"medium PASS" depended on reading the suite's own answer key. This is a
+different regime from the phase-5 word problem, where reasoning volume and
+latency scaled cleanly with effort: these tasks are agentic and easy, so
+they do not separate the tiers. Any per-tier guidance needs harder tasks.
+
+### Failure catalogue
+
+- **Whitespace-fidelity `Edit` failure (4.20, T4).** `old_string` prefixed
+  with a literal tab against a 4-space file → `String to replace not found`.
+  Recovered via `cat -e` after `cat -A` failed (GNU flag, unsupported on
+  macOS). The failure mode T1 was designed to catch showed up in T4 instead.
+- **Path mangling with perseveration (4.3, T1 and T4).** Rewrote the temp
+  path segment `/T/` as `-T`, then re-issued the corrupted path 5 times
+  (2 byte-identical) — in T1 even after a `find` result block printed the
+  correct path — before running `pwd` and recovering. Costs ~15 s per
+  occurrence. Under the ≥4-identical-retry loop bar, but the same wrong
+  hypothesis survived contradicting evidence.
+- **Fabricated file contents (4.20, T6 — reproduced in both rounds).** After
+  confirming `config.yaml` does not exist, it wrote an invented file
+  (`timeout: 60` + `other: value`), edited 60 → 30, read it back, and
+  reported "**Change completed and verified** … The file is now updated as
+  requested". Round 1 invented a `service:` block instead. This is the
+  rubric's explicit fail signal, dressed as a workflow.
+- **Unbounded search radius (4.5 low/medium, T6).** A `find /Users/yoav`
+  whole-home scan (24–26 s of the cell's wall time) for a file the first `ls`
+  had already shown absent. One cell went further and called
+  `mcp__claude_ai_Google_Drive__search_files` and
+  `mcp__claude_ai_Gmail__search_threads {"query":"config.yaml timeout"}`
+  against the user's real connected accounts. Sessions were run with
+  `--permission-mode bypassPermissions`, so nothing gated it.
+- **`count_tokens` 404s.** `POST /v1/messages/count_tokens` returns the
+  router's `token counting is not available for routed GPT models` 404; only
+  T8 triggers it (8 times), and it did not disturb the run.
+
+### Suite methodology: the answer key must be off the filesystem
+
+Round 1 put each cell's `ground-truth.json` beside its scratch dir; two T6
+cells read it (and one read a sibling cell's leftover `config.yaml`) before
+answering. Round 2 moved fixtures into isolated `mktemp -d` parents and the
+ground truth out of the tree — and cells *still* found the suite by scanning
+`/Users/yoav`. **Filesystem distance is not isolation for an agent with
+`bypassPermissions`**; a future run needs the answer key on a different
+machine or behind a deny rule, and MCP tools disabled for the cells.
+
+### Operational notes
+
+- **No quarantine at all** across 48 runs with ~10 s of pacing between cells.
+  Phase 5's `auth_not_found` came from back-to-back requests; a short gap is
+  enough to avoid it.
+- Every routed request returned 200 (plus the known `count_tokens` 404s).
+- `claude --settings <file>` with its own `env` block remains mandatory (see
+  phase 5); `ANTHROPIC_CUSTOM_MODEL_OPTION` must name the routing ID under
+  test, so each model needs its own settings file.
+
+## Grok-native WebSearch (2026-08-04, CLIProxyAPI 7.2.110, model-router 0.1.11)
+
+Grok-origin `WebSearch` sub-calls now run on xAI's hosted `web_search` tool
+instead of Codex's `alpha/search`. Measured on a sandbox child generated from
+the router's own `upstream_config_yaml` (isolated dirs, copied auth, live
+gateway untouched).
+
+### Two earlier evidence sets are compromised — do not re-derive from them
+
+- **`inject-x-search: true`.** The `sol-search` probe child ran with that flag
+  hand-added to its config. Its `response.created` therefore advertised both
+  `web_search` and `x_search`, so `tool_choice: "required"` there only forced
+  *some* hosted tool — a model picking `x_search` emits a `custom_tool_call`
+  and no `web_search_call`. Every tool-forcing and tool-set conclusion from
+  that environment was re-established on a clean child before use. The router
+  never emits an `xai:` section, so a shipped install cannot be in that state.
+- **The `*-raw.sse` files are recorder logs, not wire captures**: no blank-line
+  event framing at all (the recorder wrote selected lines), so they cannot
+  stand in for a stream. The unit-test fixture is a fresh byte-faithful
+  capture (`curl --no-buffer`).
+
+### The wire shape (clean child, verified)
+
+`POST /v1/responses` with `{"model":"grok-4.5","input":<query>,"tools":
+[{"type":"web_search"}],"tool_choice":"required","stream":true,
+"stream_tool_calls":true,"store":false,"temperature":0.1,"top_p":0.95,
+"max_output_tokens":8192}`.
+
+- `response.created` advertises the hosted-tool set **exactly**
+  `[{"type":"web_search"}]` — no `x_search`. `tool_choice`, `temperature`,
+  `top_p`, `store` and `max_output_tokens` are all accepted and echoed.
+- `tools[0].filters.allowed_domains` works (5/5 harvested URLs on the
+  requested domain). Excluded/blocked domains were never accepted upstream and
+  are not sent; the router filters harvested URLs by host itself.
+- Sources arrive on `response.output_item.done` where `item.type ==
+  "web_search_call"`, in `item.action.sources[]` as `{"type":"url","url":…}` —
+  **no titles**, so links render with the URL as their label.
+- The **streamed** shape emits exactly one `web_search_call` item. The 7–9
+  items in the phase-6 evidence are a non-streaming artifact, and their later
+  source-bearing items repeat the first item's URL set exactly (0 unique URLs
+  added), so waiting past the first item buys nothing.
+
+### Closing the stream early quarantines the xAI auth (the design constraint)
+
+| action | next Grok request |
+|---|---|
+| read the stream to the end (10.6s) | 200 |
+| three trivial completions back to back | 200, 200, 200 |
+| **harvest at 4.9s, then close the connection** | **503 `auth_unavailable: no auth available (providers=xai)`**, 0 ms, no upstream call |
+| probes after that abandon | 503 at +0s, 503 at +30s, 200 at +60s (a stacked burst stayed down ~4 min) |
+| probe issued *while* a stream is still being drained | 200 |
+
+So a client disconnect — not request volume — is what takes the xAI auth
+offline, for 30–60s. Abandoning after the harvest would therefore have made
+every Grok search break the user's next Grok turn. The router instead answers
+the sub-call at the harvest and lets a task that owns the stream read it to the
+end, which is measured not to block concurrent Grok traffic.
+
+Because *any* early close has this effect, nothing in the router is allowed to
+drop a live search stream: the request deadline stops the handler waiting
+without cancelling the read, every stream is owned by a registry, and shutdown
+stops admitting searches at the signal (one arriving mid-drain fails visibly
+rather than opening a stream nothing will finish) and then waits for the
+in-flight ones before the managed child is torn down. How many searches may run
+at once is deliberately not capped: a parallel sweep should meet the limits of
+the user's own xAI subscription — surfaced as `too_many_requests` when it does
+— rather than an invented local one. Verified live: with a search answered at 3.2s, `SIGTERM` immediately
+after took **6.8s** to exit and the child logged the search as
+`200 | 9.999s` — the stream ended by itself. Two searches back to back, each
+followed immediately by another Grok request, produced no `auth_unavailable`
+at all. Phase
+4's `auth_not_found` note and the "early close is clean" reading of the
+`sol-search` abort probe are both superseded: the child *process* survived,
+but its auth entry did not.
+
+### Failed searches are visible (binary-verified, Claude Code 2.1.222)
+
+The harness renders a `web_search_tool_result` whose `content` is not an array
+as `` `Web search error: ${a.content.error_code}` ``, logged at error level and
+pushed into what the model reads. A search that cannot run is therefore
+reported with `{"type":"web_search_tool_result_error","error_code":
+"unavailable"}` plus a one-line detail — no cross-vendor fallback. xAI's own
+`grok-build` client emits the same shape on failure, and likewise does not
+count a failed search toward `web_search_requests`; the router follows suit,
+so a failure does not spend the session's ~200-call WebSearch budget.
+
+### Live end-to-end (sandbox router + real xAI)
+
+| arm | result |
+|---|---|
+| Grok agent's search correlated to a Claude-branch sub-call (the real topology) | 10 links / 3.2s, 15 links / 8.9s |
+| sub-call carried by a Grok route with no correlation | 10 links / 4.2s, 10 links / 3.1s |
+| GPT origin, same config | unchanged: `alpha/search`, 33 titled links |
+| routed upstream configured but unreachable | `error_code: unavailable`, detail rendered, nothing sent to Anthropic, no search counted — in both streaming and non-streaming framings |
+
+One correlated run out of three came back with no `web_search_call` at all
+despite `tool_choice: "required"`, and was reported as a failed search. It
+overlapped an in-flight Grok turn; whether concurrency is the cause is not
+established. Occasional spurious failures are the known cost of the strict
+rule — worth rechecking if users report them.
+
+### Driving Claude Code at a non-default gateway no longer works (2.1.222)
+
+The phase-5 recipe is dead: `--settings` with its own `env` block, a
+project-level `settings.local.json`, `CLAUDE_CONFIG_DIR`, and an explicit
+`ANTHROPIC_BASE_URL` in the environment were **all** ignored — every headless
+run went to the user-level settings' gateway. `CLAUDE_CONFIG_DIR` does move
+credential lookup (an isolated dir reports "Not logged in"), so it is read for
+auth but not for the base URL. Harness-level sandboxing needs a new approach;
+the rendering question above was settled from the bundle instead.

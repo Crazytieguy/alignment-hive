@@ -8,11 +8,16 @@
 //! `content` empty — Claude Code renders that as "No links found." and the
 //! call spends an LLM round-trip (20–70s observed) on a search.
 //!
-//! This module recognizes that sub-call shape and answers it from Codex's
-//! own search backend (`/v1/alpha/search`, the endpoint the Codex CLI's
-//! `web.run` tool uses), which returns structured results in ~1–3s. When
-//! that fails, the legacy LLM path is used with links scraped from the
-//! response text into the empty result blocks.
+//! This module recognizes that sub-call shape and answers it from the
+//! requesting agent's own family's search backend:
+//!
+//! - GPT and open-weights origins: Codex's `/v1/alpha/search` (the endpoint
+//!   the Codex CLI's `web.run` tool uses), structured results in ~1–3s, with
+//!   the legacy LLM path plus link scraping as the fallback.
+//! - Grok origins: xAI's hosted `web_search` tool on `/v1/responses`,
+//!   harvesting the source URLs out of the streamed `web_search_call` item.
+//!   That path is strict — a search that cannot be performed is reported as a
+//!   failed search rather than quietly answered by another vendor.
 
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -129,6 +134,68 @@ fn string_list(value: Option<&Value>) -> Option<Vec<String>> {
     (!list.is_empty()).then_some(list)
 }
 
+/// Whether this family's searches run on xAI's hosted `web_search` rather
+/// than Codex's `/v1/alpha/search`.
+///
+/// Matched exhaustively on purpose: a new family must decide which backend it
+/// belongs to rather than silently inheriting the Codex one.
+#[must_use]
+pub fn uses_native_search(family: crate::config::ModelFamily) -> bool {
+    match family {
+        crate::config::ModelFamily::Grok => true,
+        crate::config::ModelFamily::Gpt | crate::config::ModelFamily::OpenAiCompat => false,
+    }
+}
+
+/// The route whose family sends this sub-call to xAI's own search, if any.
+///
+/// Keyed off the ORIGIN, never the carrier: the carrying request's model is
+/// the harness's small-fast pick, not the requesting agent's choice. `Some`
+/// only when the origin is unambiguously Grok —
+/// - a Claude origin never reaches xAI, including when it reaches this point
+///   after a transient Anthropic failure;
+/// - an origin whose route has left the config inherits nothing from the
+///   carrier;
+/// - with no correlation at all, the carrier is the only family signal there
+///   is, so it decides.
+///
+/// `None` leaves every existing path exactly as it was.
+pub fn native_search_route<'a>(
+    origin: Option<&Origin>,
+    carrier: &'a crate::config::ModelRoute,
+    lookup: impl FnOnce(&str) -> Option<&'a crate::config::ModelRoute>,
+) -> Option<&'a crate::config::ModelRoute> {
+    let is_native = |route: &&'a crate::config::ModelRoute| uses_native_search(route.family);
+    match origin {
+        Some(Origin::Gpt { routing_id }) => lookup(routing_id).filter(is_native),
+        Some(Origin::Claude { .. }) => None,
+        None => Some(carrier).filter(is_native),
+    }
+}
+
+/// The Codex slug the alpha-search backend is addressed with when the
+/// requesting route is not itself Codex-native.
+const ALPHA_SEARCH_DEFAULT_MODEL: &str = "gpt-5.6-sol";
+
+/// The model id to put in an `alpha/search` payload for a request coming
+/// from `upstream_model`.
+///
+/// `/v1/alpha/search` is served by `ChatGPT`'s Codex backend under the Codex
+/// credential, and `CLIProxyAPI` forwards the body unchanged — so an
+/// open-weights slug has no meaning to it. (Grok origins no longer reach this
+/// endpoint at all; see [`uses_native_search`].) The requesting route's own model
+/// is only usable when it is Codex-native; otherwise the call is addressed
+/// with a known-good Codex slug. This is about the *search backend*, never
+/// about which model answers the user.
+#[must_use]
+pub fn alpha_search_model(upstream_model: &str) -> &str {
+    if crate::config::is_codex_native_model(upstream_model) {
+        upstream_model
+    } else {
+        ALPHA_SEARCH_DEFAULT_MODEL
+    }
+}
+
 /// Builds the `alpha/search` request body (the shape the Codex CLI's
 /// `web.run` tool sends; see `codex-rs/codex-api/src/search.rs`).
 #[must_use]
@@ -202,6 +269,383 @@ pub fn links_from_alpha_results(results: &[Value]) -> Vec<Link> {
     links
 }
 
+// ---------------------------------------------------------------------------
+// xAI-native search (Grok origins)
+// ---------------------------------------------------------------------------
+
+/// xAI caps a hosted `web_search` allow-list; beyond this the filter is left
+/// off the request and enforced locally instead (a rejected field would turn a
+/// working search into a failed one).
+const MAX_REQUEST_ALLOWED_DOMAINS: usize = 5;
+
+/// The domain constraints a harvested URL must satisfy, taken from the
+/// sub-call's `allowed_domains` / `blocked_domains`.
+///
+/// This is the authoritative filter: the request-side `filters.allowed_domains`
+/// only steers the upstream search, and blocked domains are never sent at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DomainPolicy {
+    allowed: Vec<String>,
+    blocked: Vec<String>,
+}
+
+/// Canonical form of a domain rule or a URL host: IDNA/punycode, lowercase,
+/// no trailing root dot. `None` for anything that is not a bare hostname.
+///
+/// Rules and hosts go through the same function on purpose — comparing a
+/// human-typed rule against a parsed host is only sound if both are in the
+/// same form. Parsing through a URL is what applies IDNA, so `рф.example` and
+/// its punycode spelling canonicalize alike.
+fn canonical_domain(domain: &str) -> Option<String> {
+    let domain = domain.trim().trim_start_matches('.');
+    // A rule is a bare hostname: no scheme, path, userinfo, port, or query.
+    // Backslash matters as much as slash — for special schemes the URL parser
+    // treats `\` as a path separator, so `example.com\evil` would otherwise
+    // canonicalize to `example.com` and turn a malformed restriction into
+    // whole-domain permission. Control characters matter too: the parser
+    // strips tabs and newlines outright, so `exa<TAB>mple.com` would parse as
+    // `example.com`.
+    if domain.is_empty()
+        || domain.contains(['/', '\\', '@', ':', '?', '#'])
+        || domain
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    let url = reqwest::Url::parse(&format!("https://{domain}/")).ok()?;
+    // The rule must have been exactly a host, not something the parser
+    // rearranged into other components.
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
+    (!host.is_empty() && host != ".").then_some(host)
+}
+
+/// A domain rule the sub-call asked for that cannot be honored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidDomainRule(pub String);
+
+impl std::fmt::Display for InvalidDomainRule {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "unusable domain filter {:?}", self.0)
+    }
+}
+
+impl DomainPolicy {
+    /// The policy this sub-call asks for.
+    ///
+    /// # Errors
+    /// Returns the offending rule when any filter cannot be canonicalized. A
+    /// filter that cannot be honored must fail the search: silently dropping
+    /// a malformed allow-list would widen it to allow-all, and dropping a
+    /// malformed block-list would admit what the caller excluded.
+    pub fn from_subcall(subcall: &Subcall) -> Result<Self, InvalidDomainRule> {
+        fn normalize(domains: Option<&Vec<String>>) -> Result<Vec<String>, InvalidDomainRule> {
+            domains
+                .into_iter()
+                .flatten()
+                .map(|domain| {
+                    canonical_domain(domain).ok_or_else(|| InvalidDomainRule(domain.clone()))
+                })
+                .collect()
+        }
+        Ok(Self {
+            allowed: normalize(subcall.allowed_domains.as_ref())?,
+            blocked: normalize(subcall.blocked_domains.as_ref())?,
+        })
+    }
+
+    /// The allow-list to put on the request, when it is small enough to be
+    /// accepted; `None` leaves filtering entirely to [`Self::admits`].
+    #[must_use]
+    pub fn request_filter(&self) -> Option<&[String]> {
+        (!self.allowed.is_empty() && self.allowed.len() <= MAX_REQUEST_ALLOWED_DOMAINS)
+            .then_some(self.allowed.as_slice())
+    }
+
+    /// Whether a harvested URL may be shown.
+    ///
+    /// Host-based, never substring-based: the URL is parsed and only its
+    /// canonical host is compared, so `https://allowed.example@evil.example/`,
+    /// `https://allowed.example.evil.example/` and `https://evil.example./`
+    /// are all rejected for an `allowed.example` allow-list. Comparison is by
+    /// whole label. Blocked wins over allowed.
+    #[must_use]
+    pub fn admits(&self, url: &str) -> bool {
+        let Ok(parsed) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return false;
+        }
+        let Some(host) = parsed.host_str().and_then(canonical_domain) else {
+            return false;
+        };
+        // Whole-label suffix match without building a string per rule.
+        let matches = |domain: &String| {
+            host == *domain
+                || host
+                    .strip_suffix(domain.as_str())
+                    .is_some_and(|parent| parent.ends_with('.'))
+        };
+        if self.blocked.iter().any(matches) {
+            return false;
+        }
+        self.allowed.is_empty() || self.allowed.iter().any(matches)
+    }
+}
+
+/// Builds the xAI Responses body that runs one hosted `web_search`.
+///
+/// Mirrors the shape the official grok-build CLI's fallback search client
+/// sends, plus the streaming fields the harvest depends on. `tool_choice`
+/// is `required` so a missing `web_search_call` means the search failed
+/// rather than that the model chose not to search — verified against a child
+/// whose advertised hosted-tool set is exactly `web_search`.
+#[must_use]
+pub fn xai_search_request_body(
+    subcall: &Subcall,
+    policy: &DomainPolicy,
+    upstream_model: &str,
+) -> Value {
+    let mut tool = json!({"type": "web_search"});
+    if let Some(allowed) = policy.request_filter() {
+        tool["filters"] = json!({"allowed_domains": allowed});
+    }
+    json!({
+        "model": upstream_model,
+        "input": subcall.query,
+        "instructions": "Search the web for the query. Reply with the source URLs only.",
+        "tools": [tool],
+        "tool_choice": "required",
+        "stream": true,
+        "stream_tool_calls": true,
+        "store": false,
+        "temperature": 0.1,
+        "top_p": 0.95,
+        "max_output_tokens": 8192,
+    })
+}
+
+/// What a chunk fed to [`XaiSourceHarvester`] produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Harvested {
+    /// The first completed hosted search carrying admissible URLs.
+    Sources(Vec<Link>),
+    /// A terminal event arrived with no admissible URL; the reason is for logs.
+    Ended(&'static str),
+}
+
+/// Streams an xAI Responses SSE body and yields the source URLs of the first
+/// completed hosted `web_search_call` that carries any admissible one.
+///
+/// Event-name agnostic — only the `data:` payload's `type` field is trusted.
+/// The child has always been observed to send `event:` lines; tolerating their
+/// absence is defensive, since SSE permits it.
+pub struct XaiSourceHarvester {
+    policy: DomainPolicy,
+    events: crate::usage::SseEventBuffer,
+}
+
+impl XaiSourceHarvester {
+    #[must_use]
+    pub fn new(policy: DomainPolicy) -> Self {
+        Self {
+            policy,
+            events: crate::usage::SseEventBuffer::default(),
+        }
+    }
+
+    /// Feeds raw response bytes in arrival order.
+    ///
+    /// Returns `Some` exactly once: either the harvest, or the terminal state
+    /// that rules one out. Items that complete with no admissible source
+    /// (`open_page` actions, fully filtered searches) are skipped and the
+    /// stream keeps being read.
+    pub fn push(&mut self, chunk: &[u8]) -> Option<Harvested> {
+        if self.events.is_disabled() {
+            return None;
+        }
+        if !self.events.push(chunk) {
+            return Some(Harvested::Ended("oversized stream"));
+        }
+        let Self { policy, events } = self;
+        let found = events.drain(|event| {
+            let payload = crate::usage::parse_event(event)?.data;
+            if payload.trim() == "[DONE]" {
+                return Some(Harvested::Ended("stream done without sources"));
+            }
+            let data = serde_json::from_str::<Value>(&payload).ok()?;
+            match data.get("type").and_then(Value::as_str) {
+                Some("response.output_item.done") => {
+                    let links = links_from_item(policy, data.get("item"));
+                    (!links.is_empty()).then_some(Harvested::Sources(links))
+                }
+                Some("response.failed" | "response.error" | "error") => {
+                    Some(Harvested::Ended("stream failed"))
+                }
+                Some("response.completed" | "response.incomplete") => {
+                    Some(Harvested::Ended("stream completed without sources"))
+                }
+                _ => None,
+            }
+        });
+        if found.is_some() {
+            // One outcome per stream: everything after it is the drain's
+            // business, not the harvest's.
+            self.events.disable();
+        }
+        found
+    }
+}
+
+/// The admissible, deduplicated URLs of a completed `web_search_call` item.
+/// Titles do not exist on this path, so the URL is its own label.
+fn links_from_item(policy: &DomainPolicy, item: Option<&Value>) -> Vec<Link> {
+    let Some(item) = item else {
+        return Vec::new();
+    };
+    if item.get("type").and_then(Value::as_str) != Some("web_search_call")
+        || item.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return Vec::new();
+    }
+    let Some(sources) = item
+        .get("action")
+        .and_then(|action| action.get("sources"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut links = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for source in sources {
+        let kind = source.get("type").and_then(Value::as_str);
+        if !matches!(kind, None | Some("url")) {
+            continue;
+        }
+        let Some(url) = source.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        if !policy.admits(url) || !seen.insert(url.to_string()) {
+            continue;
+        }
+        links.push(Link {
+            title: url.to_string(),
+            url: url.to_string(),
+        });
+        if links.len() >= MAX_LINKS {
+            break;
+        }
+    }
+    links
+}
+
+/// Anthropic's error codes for a server-side search that could not run.
+pub mod search_error {
+    pub const UNAVAILABLE: &str = "unavailable";
+    pub const TOO_MANY_REQUESTS: &str = "too_many_requests";
+    pub const INVALID_INPUT: &str = "invalid_input";
+}
+
+/// Builds the sub-call answer for a search that could not be performed.
+///
+/// Claude Code renders a `web_search_tool_result` whose `content` is not an
+/// array as `Web search error: <error_code>` (verified in the 2.1.222 bundle),
+/// so this is a visibly failed search rather than an empty one. The text block
+/// carries the detail to the model, and `server_tool_use` is left out of usage
+/// entirely: the session's `WebSearch` budget counts successful searches, and
+/// xAI's own client does not count failures either.
+#[must_use]
+pub fn synthesize_error_message(
+    model: &str,
+    subcall: &Subcall,
+    error_code: &str,
+    detail: &str,
+    input_tokens: u64,
+) -> Value {
+    let text = format!("Web search failed: {detail}");
+    websearch_message(
+        model,
+        subcall,
+        &json!({"type": "web_search_tool_result_error", "error_code": error_code}),
+        &text,
+        estimated_output_tokens(&text),
+        input_tokens,
+        // A failed search must not spend the session's WebSearch budget.
+        false,
+    )
+}
+
+/// The router's output-token estimate for a synthesized message.
+///
+/// Taken from the text the upstream actually produced, not from what survives
+/// rendering: the success path's commentary is cleaned of citation markers and
+/// `[wordlim: N]` annotations (and may be truncated), none of which changes
+/// what the upstream spent.
+fn estimated_output_tokens(accounted_text: &str) -> usize {
+    (accounted_text.len() / 4).max(1)
+}
+
+/// The message envelope both sub-call answers share: the `server_tool_use` +
+/// `web_search_tool_result` pair Claude Code reads, optional commentary, and
+/// the usage block. `counts_as_search` decides whether the answer reports a
+/// `web_search_requests` count at all; `output_tokens` is the caller's
+/// estimate, since the text billed for is not always the text shown.
+fn websearch_message(
+    model: &str,
+    subcall: &Subcall,
+    result_content: &Value,
+    commentary: &str,
+    output_tokens: usize,
+    input_tokens: u64,
+    counts_as_search: bool,
+) -> Value {
+    let tool_use_id = "srvtoolu_model_router_websearch";
+    let mut content = vec![
+        json!({
+            "type": "server_tool_use",
+            "id": tool_use_id,
+            "name": "web_search",
+            "input": {"query": subcall.query},
+        }),
+        json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": tool_use_id,
+            "content": result_content.clone(),
+        }),
+    ];
+    if !commentary.trim().is_empty() {
+        content.push(json!({"type": "text", "text": commentary}));
+    }
+    let mut usage = json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    });
+    if counts_as_search {
+        usage["server_tool_use"] = json!({"web_search_requests": 1});
+    }
+    json!({
+        "id": "msg_model_router_websearch",
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+        "model": model,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": usage,
+    })
+}
+
 /// Byte prefilter for the response tap: does this request declare Claude
 /// Code's client-side `WebSearch` tool? Keyed on the serialized `"name"`
 /// field (the harness emits compact JSON); false positives merely enable the
@@ -244,9 +688,6 @@ impl SniffedSearch {
     }
 }
 
-/// Overall cap on bytes buffered per tapped response; overflowing disables
-/// sniffing for that response (forwarding is unaffected).
-const MAX_SNIFF_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 /// Cap on one accumulated `tool_use` input.
 const MAX_SNIFF_INPUT_BYTES: usize = 64 * 1024;
 
@@ -257,11 +698,10 @@ const MAX_SNIFF_INPUT_BYTES: usize = 64 * 1024;
 /// moment it sees it).
 pub struct ToolUseSniffer {
     sse: bool,
-    buffer: Vec<u8>,
+    events: crate::usage::SseEventBuffer,
     /// SSE: `content_block` index → accumulated `input_json_delta` fragments
     /// for blocks named `WebSearch`.
     pending_inputs: std::collections::HashMap<u64, String>,
-    disabled: bool,
 }
 
 impl ToolUseSniffer {
@@ -269,23 +709,16 @@ impl ToolUseSniffer {
     pub fn new(sse: bool) -> Self {
         Self {
             sse,
-            buffer: Vec::new(),
+            events: crate::usage::SseEventBuffer::default(),
             pending_inputs: std::collections::HashMap::new(),
-            disabled: false,
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SniffedSearch> {
-        if self.disabled {
-            return Vec::new();
-        }
-        if self.buffer.len().saturating_add(chunk.len()) > MAX_SNIFF_BUFFER_BYTES {
-            self.disabled = true;
-            self.buffer = Vec::new();
+        if self.events.is_disabled() || !self.events.push(chunk) {
             self.pending_inputs.clear();
             return Vec::new();
         }
-        self.buffer.extend_from_slice(chunk);
         if self.sse {
             self.drain_sse_events()
         } else {
@@ -294,34 +727,30 @@ impl ToolUseSniffer {
     }
 
     fn drain_sse_events(&mut self) -> Vec<SniffedSearch> {
+        let Self {
+            events,
+            pending_inputs,
+            ..
+        } = self;
         let mut found = Vec::new();
-        while let Some(event_end) = crate::usage::event_boundary(&self.buffer) {
-            let event = self.buffer.drain(..event_end).collect::<Vec<_>>();
-            let Ok(text) = std::str::from_utf8(&event) else {
-                continue;
-            };
-            let Some((_, data_range)) = crate::usage::event_fields(text) else {
-                continue;
-            };
-            let Ok(data) = serde_json::from_str::<Value>(&text[data_range]) else {
-                continue;
-            };
+        // The closure never returns `Some`, so every buffered event is seen.
+        events.drain(|event| {
+            let data =
+                serde_json::from_str::<Value>(&crate::usage::parse_event(event)?.data).ok()?;
             let index = data.get("index").and_then(Value::as_u64);
             match data.get("type").and_then(Value::as_str) {
                 Some("content_block_start") => {
-                    let Some(block) = data.get("content_block") else {
-                        continue;
-                    };
+                    let block = data.get("content_block")?;
                     if block.get("type").and_then(Value::as_str) == Some("tool_use")
                         && block.get("name").and_then(Value::as_str) == Some("WebSearch")
                         && let Some(index) = index
                     {
-                        self.pending_inputs.insert(index, String::new());
+                        pending_inputs.insert(index, String::new());
                     }
                 }
                 Some("content_block_delta") => {
                     if let Some(index) = index
-                        && let Some(accumulated) = self.pending_inputs.get_mut(&index)
+                        && let Some(accumulated) = pending_inputs.get_mut(&index)
                         && let Some(fragment) = data
                             .get("delta")
                             .filter(|delta| {
@@ -333,7 +762,7 @@ impl ToolUseSniffer {
                     {
                         if accumulated.len().saturating_add(fragment.len()) > MAX_SNIFF_INPUT_BYTES
                         {
-                            self.pending_inputs.remove(&index);
+                            pending_inputs.remove(&index);
                         } else {
                             accumulated.push_str(fragment);
                         }
@@ -341,7 +770,7 @@ impl ToolUseSniffer {
                 }
                 Some("content_block_stop") => {
                     if let Some(index) = index
-                        && let Some(accumulated) = self.pending_inputs.remove(&index)
+                        && let Some(accumulated) = pending_inputs.remove(&index)
                         && let Ok(input) = serde_json::from_str::<Value>(&accumulated)
                         && let Some(search) = SniffedSearch::from_input(&input)
                     {
@@ -350,25 +779,27 @@ impl ToolUseSniffer {
                 }
                 _ => {}
             }
-        }
+            None::<()>
+        });
         found
     }
 
     fn try_parse_json(&mut self) -> Vec<SniffedSearch> {
         // Trailing whitespace after the closing brace is valid JSON framing.
         let last_meaningful = self
-            .buffer
+            .events
+            .bytes()
             .iter()
             .rev()
             .find(|byte| !byte.is_ascii_whitespace());
         if last_meaningful != Some(&b'}') {
             return Vec::new();
         }
-        let Ok(document) = serde_json::from_slice::<Value>(&self.buffer) else {
+        let Ok(document) = serde_json::from_slice::<Value>(self.events.bytes()) else {
             return Vec::new();
         };
-        self.disabled = true;
-        self.buffer = Vec::new();
+        // One complete document per response: nothing after it is read.
+        self.events.disable();
         let Some(content) = document.get("content").and_then(Value::as_array) else {
             return Vec::new();
         };
@@ -579,39 +1010,17 @@ pub fn synthesize_message(
     output_text: &str,
     input_tokens: u64,
 ) -> Value {
-    let tool_use_id = "srvtoolu_model_router_websearch";
-    let mut content = vec![
-        json!({
-            "type": "server_tool_use",
-            "id": tool_use_id,
-            "name": "web_search",
-            "input": {"query": subcall.query},
-        }),
-        json!({
-            "type": "web_search_tool_result",
-            "tool_use_id": tool_use_id,
-            "content": links.iter().map(Link::block).collect::<Vec<_>>(),
-        }),
-    ];
-    let text = clean_search_output(output_text);
-    if !text.trim().is_empty() {
-        content.push(json!({"type": "text", "text": text}));
-    }
-    let output_tokens = (output_text.len() / 4).max(1);
-    json!({
-        "id": "msg_model_router_websearch",
-        "type": "message",
-        "role": "assistant",
-        "content": content,
-        "model": model,
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "server_tool_use": {"web_search_requests": 1},
-        },
-    })
+    websearch_message(
+        model,
+        subcall,
+        &json!(links.iter().map(Link::block).collect::<Vec<_>>()),
+        &clean_search_output(output_text),
+        // Accounted from what the upstream produced, not from what survives
+        // cleaning and truncation.
+        estimated_output_tokens(output_text),
+        input_tokens,
+        true,
+    )
 }
 
 /// Scrapes `[text](url)` markdown links and bare URLs from prose, in order,
@@ -1175,7 +1584,7 @@ mod tests {
     #[test]
     fn sniffer_disables_itself_on_oversized_buffers() {
         let mut sniffer = ToolUseSniffer::new(true);
-        let big = vec![b'x'; MAX_SNIFF_BUFFER_BYTES + 1];
+        let big = vec![b'x'; crate::usage::MAX_SCAN_BUFFER_BYTES + 1];
         assert_eq!(sniffer.push(&big), vec![]);
         // Later well-formed events are ignored once disabled.
         let event = sse_event(&json!({"type":"content_block_start","index":0,
@@ -1244,5 +1653,536 @@ mod tests {
         assert_eq!(pending.consume(&oldest), None);
         let newest = PendingKey::new("s".into(), &format!("q{MAX_PENDING_TOTAL}"), None, None);
         assert!(pending.consume(&newest).is_some());
+    }
+
+    // ---- xAI-native search ----
+
+    const BASIC_FIXTURE: &str = include_str!("testdata/xai-websearch-basic.sse");
+    const DATA_ONLY_FIXTURE: &str = include_str!("testdata/xai-websearch-dataonly.sse");
+
+    fn harvest_all(fixture: &str, policy: DomainPolicy, chunk_size: usize) -> Option<Harvested> {
+        let mut harvester = XaiSourceHarvester::new(policy);
+        let mut outcome = None;
+        for chunk in fixture.as_bytes().chunks(chunk_size) {
+            if let Some(found) = harvester.push(chunk) {
+                outcome = Some(found);
+                break;
+            }
+        }
+        outcome
+    }
+
+    fn xai_event(data: &Value) -> String {
+        format!("event: x\ndata: {data}\n\n")
+    }
+
+    fn search_item(sources: &[Value]) -> Value {
+        json!({"type": "response.output_item.done", "item": {
+            "id": "ws_1", "type": "web_search_call", "status": "completed",
+            "action": {"type": "search", "query": "q", "sources": sources}}})
+    }
+
+    #[test]
+    fn harvests_sources_from_the_captured_stream() {
+        // The fixture is a byte-faithful excerpt of a real child response.
+        let Some(Harvested::Sources(links)) =
+            harvest_all(BASIC_FIXTURE, DomainPolicy::default(), 64 * 1024)
+        else {
+            panic!("expected a harvest from the captured stream");
+        };
+        assert_eq!(links.len(), 10);
+        assert_eq!(
+            links[0].url,
+            "https://github.com/tokio-rs/axum/blob/main/examples/graceful-shutdown/src/main.rs"
+        );
+        // No titles exist on this path: the URL is its own label.
+        assert!(links.iter().all(|link| link.title == link.url));
+        // The harvest fires before the stream is exhausted: the fixture's
+        // trailing output_text deltas are never needed.
+        assert!(BASIC_FIXTURE.contains("response.output_text.delta"));
+    }
+
+    #[test]
+    fn harvests_across_chunk_boundaries() {
+        let Some(Harvested::Sources(links)) =
+            harvest_all(BASIC_FIXTURE, DomainPolicy::default(), 7)
+        else {
+            panic!("expected a harvest when fed in 7-byte chunks");
+        };
+        assert_eq!(links.len(), 10);
+    }
+
+    #[test]
+    fn harvests_from_data_only_events_and_joins_split_data_lines() {
+        // Defensive coverage: the child has not been observed to omit `event:`
+        // lines or split one event's JSON across two `data:` lines, but SSE
+        // permits both.
+        let Some(Harvested::Sources(links)) =
+            harvest_all(DATA_ONLY_FIXTURE, DomainPolicy::default(), 5)
+        else {
+            panic!("expected a harvest from the data-only fixture");
+        };
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            ["https://example.test/a", "https://example.test/b"]
+        );
+    }
+
+    #[test]
+    fn skips_source_less_items_and_takes_the_first_search_with_sources() {
+        let stream = [
+            xai_event(&json!({"type": "response.output_item.done", "item": {
+                "type": "web_search_call", "status": "completed",
+                "action": {"type": "open_page", "url": "https://a.example"}}})),
+            xai_event(&search_item(&[
+                json!({"type": "url", "url": "https://first.example/1"}),
+            ])),
+            xai_event(&search_item(&[
+                json!({"type": "url", "url": "https://second.example/2"}),
+            ])),
+        ]
+        .concat();
+        let Some(Harvested::Sources(links)) = harvest_all(&stream, DomainPolicy::default(), 9)
+        else {
+            panic!("expected the first sources-bearing item");
+        };
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://first.example/1");
+    }
+
+    #[test]
+    fn ignores_incomplete_items_and_foreign_tool_calls() {
+        let stream = [
+            // Still running.
+            xai_event(&json!({"type": "response.output_item.done", "item": {
+                "type": "web_search_call", "status": "in_progress",
+                "action": {"type": "search", "sources": [{"type": "url", "url": "https://early.example"}]}}})),
+            // x_search shape: a custom tool call, never a web_search_call.
+            xai_event(&json!({"type": "response.output_item.done", "item": {
+                "type": "custom_tool_call", "status": "completed", "name": "x_search",
+                "input": "{\"query\":\"q\"}"}})),
+            // The progress signal carries no sources.
+            xai_event(&json!({"type": "response.web_search_call.completed", "item_id": "ws_1"})),
+            xai_event(&json!({"type": "response.completed"})),
+        ]
+        .concat();
+        assert_eq!(
+            harvest_all(&stream, DomainPolicy::default(), 13),
+            Some(Harvested::Ended("stream completed without sources"))
+        );
+    }
+
+    #[test]
+    fn terminal_events_without_sources_are_reported() {
+        for (event, reason) in [
+            (
+                xai_event(&json!({"type": "response.completed"})),
+                "stream completed without sources",
+            ),
+            (
+                xai_event(&json!({"type": "response.failed", "error": {"code": "x"}})),
+                "stream failed",
+            ),
+            (
+                "event: x\ndata: [DONE]\n\n".to_string(),
+                "stream done without sources",
+            ),
+        ] {
+            assert_eq!(
+                harvest_all(&event, DomainPolicy::default(), 11),
+                Some(Harvested::Ended(reason)),
+                "{event}"
+            );
+        }
+    }
+
+    #[test]
+    fn deduplicates_and_drops_non_url_entries() {
+        let stream = xai_event(&search_item(&[
+            json!({"type": "url", "url": "https://a.example/x"}),
+            json!({"type": "url", "url": "https://a.example/x"}),
+            json!({"type": "x_post", "url": "https://x.com/post/1"}),
+            json!({"type": "url", "url": "ftp://a.example/file"}),
+            json!({"type": "url"}),
+            json!({"url": "https://b.example/y"}),
+        ]));
+        let Some(Harvested::Sources(links)) = harvest_all(&stream, DomainPolicy::default(), 17)
+        else {
+            panic!("expected a harvest");
+        };
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            ["https://a.example/x", "https://b.example/y"]
+        );
+    }
+
+    #[test]
+    fn oversized_streams_end_the_harvest() {
+        let mut harvester = XaiSourceHarvester::new(DomainPolicy::default());
+        let big = vec![b'x'; crate::usage::MAX_SCAN_BUFFER_BYTES + 1];
+        assert_eq!(
+            harvester.push(&big),
+            Some(Harvested::Ended("oversized stream"))
+        );
+        // Later well-formed events are ignored once disabled.
+        let event = xai_event(&search_item(&[
+            json!({"type": "url", "url": "https://a.example"}),
+        ]));
+        assert_eq!(harvester.push(event.as_bytes()), None);
+    }
+
+    #[test]
+    fn xai_body_carries_the_query_tool_and_streaming_fields() {
+        let subcall = detect(&subcall_body(true)).unwrap();
+        let policy = DomainPolicy::from_subcall(&subcall).unwrap();
+        let body = xai_search_request_body(&subcall, &policy, "grok-4.5");
+        assert_eq!(body["model"], "grok-4.5");
+        assert_eq!(body["input"], "rust axum");
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_tool_calls"], true);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["temperature"], 0.1);
+        assert_eq!(body["top_p"], 0.95);
+        assert_eq!(body["max_output_tokens"], 8192);
+        // A short allow-list is sent as a filter; the sub-call fixture has one.
+        assert_eq!(body["tools"][0]["filters"]["allowed_domains"][0], "docs.rs");
+    }
+
+    #[test]
+    fn oversized_or_absent_allow_lists_send_no_filter() {
+        let mut subcall = detect(&subcall_body(true)).unwrap();
+        subcall.allowed_domains = Some(
+            (0..=MAX_REQUEST_ALLOWED_DOMAINS)
+                .map(|index| format!("d{index}.example"))
+                .collect(),
+        );
+        let policy = DomainPolicy::from_subcall(&subcall).unwrap();
+        assert!(
+            xai_search_request_body(&subcall, &policy, "grok-4.5")["tools"][0]
+                .get("filters")
+                .is_none()
+        );
+        subcall.allowed_domains = None;
+        subcall.blocked_domains = Some(vec!["blocked.example".into()]);
+        // Blocked domains are never sent upstream — only enforced locally.
+        let policy = DomainPolicy::from_subcall(&subcall).unwrap();
+        let body = xai_search_request_body(&subcall, &policy, "grok-4.5");
+        assert!(body["tools"][0].get("filters").is_none());
+        assert!(!body.to_string().contains("blocked.example"));
+    }
+
+    #[test]
+    fn domain_rules_and_hosts_canonicalize_the_same_way() {
+        let policy = |allowed: &[&str], blocked: &[&str]| {
+            DomainPolicy::from_subcall(&Subcall {
+                query: "q".into(),
+                user_text: "q".into(),
+                allowed_domains: (!allowed.is_empty())
+                    .then(|| allowed.iter().map(|d| (*d).to_string()).collect()),
+                blocked_domains: (!blocked.is_empty())
+                    .then(|| blocked.iter().map(|d| (*d).to_string()).collect()),
+                stream: false,
+            })
+            .unwrap()
+        };
+        // A trailing DNS root dot is the same host, on either side of the
+        // comparison, and must not slip past a block-list.
+        let blocked = policy(&[], &["example.com"]);
+        assert!(!blocked.admits("https://example.com./page"));
+        assert!(!blocked.admits("https://www.example.com./page"));
+        assert!(blocked.admits("https://example.org/page"));
+        let blocked_with_dot = policy(&[], &["example.com."]);
+        assert!(!blocked_with_dot.admits("https://example.com/page"));
+        assert!(!blocked_with_dot.admits("https://example.com./page"));
+        // A rule spelled in Unicode matches the punycode host the URL parser
+        // produces, and vice versa.
+        let unicode_rule = policy(&["bücher.example"], &[]);
+        assert!(unicode_rule.admits("https://xn--bcher-kva.example/page"));
+        assert!(unicode_rule.admits("https://bücher.example/page"));
+        let punycode_rule = policy(&["xn--bcher-kva.example"], &[]);
+        assert!(punycode_rule.admits("https://bücher.example/page"));
+        assert!(!punycode_rule.admits("https://other.example/page"));
+    }
+
+    #[test]
+    fn an_unusable_domain_filter_is_an_error_not_an_open_filter() {
+        let subcall = |allowed: Option<Vec<String>>, blocked: Option<Vec<String>>| Subcall {
+            query: "q".into(),
+            user_text: "q".into(),
+            allowed_domains: allowed,
+            blocked_domains: blocked,
+            stream: false,
+        };
+        // A malformed allow-list must never collapse into allow-all.
+        for rule in [
+            "https://example.com/path",
+            "example.com/path",
+            "user@example.com",
+            "example.com:8443",
+            "  ",
+            "..",
+            // For special schemes the URL parser treats a backslash as a path
+            // separator, so these would otherwise canonicalize to
+            // `example.com` — turning a malformed restriction into permission
+            // for the whole domain.
+            "example.com\\path",
+            "example.com\\",
+            "example.com\\\\evil.example",
+            // The parser strips tabs and newlines outright, so these would
+            // otherwise canonicalize to `example.com` as well.
+            "exa\tmple.com",
+            "exa\nmple.com",
+            "exa\rmple.com",
+            "example.com\u{0}",
+            "exam\u{7}ple.com",
+        ] {
+            let call = subcall(Some(vec![rule.to_string()]), None);
+            assert_eq!(
+                DomainPolicy::from_subcall(&call),
+                Err(InvalidDomainRule(rule.to_string())),
+                "rule {rule:?} must be rejected"
+            );
+        }
+        // Nor may a malformed block-list quietly admit what it excluded.
+        assert!(DomainPolicy::from_subcall(&subcall(None, Some(vec!["a b".into()]))).is_err());
+        // A leading dot is a normal spelling, not an error.
+        let policy =
+            DomainPolicy::from_subcall(&subcall(Some(vec![".example.com".into()]), None)).unwrap();
+        assert!(policy.admits("https://www.example.com/page"));
+    }
+
+    #[test]
+    fn domain_policy_admits_by_host_not_by_substring() {
+        let policy = |allowed: &[&str], blocked: &[&str]| DomainPolicy {
+            allowed: allowed.iter().map(|d| (*d).to_string()).collect(),
+            blocked: blocked.iter().map(|d| (*d).to_string()).collect(),
+        };
+        let allow = policy(&["allowed.example"], &[]);
+        assert!(allow.admits("https://allowed.example/page"));
+        assert!(allow.admits("https://docs.allowed.example/page"));
+        assert!(allow.admits("https://ALLOWED.example/page"));
+        assert!(allow.admits("https://allowed.example:8443/page"));
+        // Deceptive suffix and userinfo host spoofing must not pass.
+        assert!(!allow.admits("https://allowed.example.evil.example/page"));
+        assert!(!allow.admits("https://allowed.example@evil.example/page"));
+        assert!(!allow.admits("https://notallowed.example/page"));
+        assert!(!allow.admits("ftp://allowed.example/file"));
+        assert!(!allow.admits("not a url"));
+        assert!(!allow.admits("/relative/path"));
+        // Blocked wins over allowed.
+        let both = policy(&["a.example"], &["bad.a.example"]);
+        assert!(both.admits("https://a.example/x"));
+        assert!(!both.admits("https://bad.a.example/x"));
+        // An empty policy admits any http(s) URL.
+        assert!(DomainPolicy::default().admits("https://anything.example"));
+        assert!(!DomainPolicy::default().admits("mailto:someone@example.com"));
+    }
+
+    #[test]
+    fn harvest_continues_when_every_source_is_inadmissible() {
+        // A fully-filtered item must not end the stream: a later admissible
+        // item is still reachable (and closing early would strand the search).
+        let stream = [
+            xai_event(&search_item(&[
+                json!({"type": "url", "url": "https://blocked.example/1"}),
+            ])),
+            xai_event(&search_item(&[
+                json!({"type": "url", "url": "https://blocked.example/2"}),
+                json!({"type": "url", "url": "https://kept.example/3"}),
+            ])),
+        ]
+        .concat();
+        let policy = DomainPolicy {
+            allowed: Vec::new(),
+            blocked: vec!["blocked.example".into()],
+        };
+        let Some(Harvested::Sources(links)) = harvest_all(&stream, policy, 23) else {
+            panic!("expected the later admissible item to be harvested");
+        };
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://kept.example/3");
+    }
+
+    #[test]
+    fn error_message_renders_as_a_failed_search() {
+        let subcall = detect(&subcall_body(true)).unwrap();
+        let message = synthesize_error_message(
+            "grok-4.5",
+            &subcall,
+            search_error::UNAVAILABLE,
+            "xAI search returned no sources",
+            42,
+        );
+        assert_eq!(message["content"][0]["type"], "server_tool_use");
+        // Claude Code renders a non-array result content as
+        // `Web search error: <error_code>`.
+        assert_eq!(message["content"][1]["type"], "web_search_tool_result");
+        assert_eq!(
+            message["content"][1]["content"]["type"],
+            "web_search_tool_result_error"
+        );
+        assert_eq!(
+            message["content"][1]["content"]["error_code"],
+            "unavailable"
+        );
+        assert!(!message["content"][1]["content"].is_array());
+        assert_eq!(
+            message["content"][2]["text"],
+            "Web search failed: xAI search returned no sources"
+        );
+        // A failed search must not spend the session's WebSearch budget.
+        assert!(message["usage"].get("server_tool_use").is_none());
+        assert_eq!(message["usage"]["input_tokens"], 42);
+
+        let body = message_to_sse(&message)
+            .iter()
+            .map(|chunk| String::from_utf8(chunk.to_vec()).unwrap())
+            .collect::<String>();
+        assert!(body.contains("web_search_tool_result_error"));
+        assert!(body.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn output_tokens_are_estimated_from_the_upstream_text_not_the_cleaned_one() {
+        // Citation markers, a `[wordlim: N]` annotation and the truncation
+        // suffix are all rendering concerns; the upstream still produced the
+        // original text, so the estimate must not shrink with them.
+        let subcall = detect(&subcall_body(true)).unwrap();
+        let raw = "Title (https://a.example)\n\u{E200}cite\u{E202}turn0search0\u{E201} \
+                   [wordlim: 200] Published: today; body text.";
+        let cleaned = clean_search_output(raw);
+        assert!(
+            cleaned.len() < raw.len(),
+            "the fixture must actually shrink"
+        );
+
+        let message = synthesize_message("gpt-5.6-sol", &subcall, &[], raw, 7);
+        // The pre-refactor value for this fixture; cleaning it first would
+        // report 14.
+        assert_eq!(message["usage"]["output_tokens"], 23);
+        assert_eq!(message["usage"]["output_tokens"], raw.len() / 4);
+        assert_ne!(message["usage"]["output_tokens"], cleaned.len() / 4);
+        // The rendered commentary is still the cleaned text.
+        assert_eq!(message["content"][2]["text"], cleaned);
+
+        // Truncation is the same story, one order of magnitude up.
+        let long = "x".repeat(MAX_OUTPUT_TEXT_CHARS * 2);
+        let message = synthesize_message("gpt-5.6-sol", &subcall, &[], &long, 7);
+        assert_eq!(message["usage"]["output_tokens"], long.len() / 4);
+
+        // A failure accounts for the text it actually renders.
+        let failure = synthesize_error_message(
+            "grok-4.5",
+            &subcall,
+            search_error::UNAVAILABLE,
+            "xAI search returned no sources",
+            7,
+        );
+        let text = failure["content"][2]["text"].as_str().unwrap();
+        assert_eq!(failure["usage"]["output_tokens"], text.len() / 4);
+    }
+
+    #[test]
+    fn a_successful_search_counts_exactly_one_request() {
+        let subcall = detect(&subcall_body(true)).unwrap();
+        let message = synthesize_message("grok-4.5", &subcall, &[], "", 1);
+        assert_eq!(
+            message["usage"]["server_tool_use"]["web_search_requests"],
+            1
+        );
+    }
+
+    #[test]
+    fn native_search_route_is_decided_by_the_origin_never_the_carrier() {
+        use crate::config::{ModelFamily, ModelRoute};
+        fn resolve<'a>(
+            known: &'a [ModelRoute],
+            origin: Option<&Origin>,
+            carrier: &'a ModelRoute,
+        ) -> Option<String> {
+            native_search_route(origin, carrier, |routing_id| {
+                known.iter().find(|route| route.routing_id == routing_id)
+            })
+            .map(|route| route.routing_id.clone())
+        }
+        let route = |routing_id: &str, family| ModelRoute {
+            routing_id: routing_id.to_string(),
+            family,
+            ..Default::default()
+        };
+        let known = [
+            route("grok-4.5", ModelFamily::Grok),
+            route("claude-grok-4.5", ModelFamily::Grok),
+            route("gpt-5.6-sol", ModelFamily::Gpt),
+        ];
+        let (grok, gpt) = (&known[0], &known[2]);
+        let resolve = |origin: Option<Origin>, carrier| resolve(&known, origin.as_ref(), carrier);
+        let gpt_origin = |routing_id: &str| {
+            Some(Origin::Gpt {
+                routing_id: routing_id.to_string(),
+            })
+        };
+        let is = |routing_id: &str| Some(routing_id.to_string());
+        // A Grok origin decides, whatever it is riding on.
+        assert_eq!(resolve(gpt_origin("grok-4.5"), gpt), is("grok-4.5"));
+        // The generated `claude-`-prefixed alias is gated by family, not by
+        // the routing-id string.
+        assert_eq!(
+            resolve(gpt_origin("claude-grok-4.5"), gpt),
+            is("claude-grok-4.5")
+        );
+        // A GPT origin never does — not even on a Grok carrier, and the
+        // carrier's own arguments are left to the existing arms.
+        assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), grok), None);
+        // An origin whose route has left the config inherits nothing.
+        assert_eq!(resolve(gpt_origin("vanished"), grok), None);
+        // A Claude origin never reaches xAI, even carried by a Grok route
+        // (this is the state after a transient Anthropic failure).
+        assert_eq!(
+            resolve(
+                Some(Origin::Claude {
+                    model: "claude-haiku-4-5".into()
+                }),
+                grok
+            ),
+            None
+        );
+        // With no correlation, the carrier is the only signal there is.
+        assert_eq!(resolve(None, grok), is("grok-4.5"));
+        assert_eq!(resolve(None, gpt), None);
+    }
+
+    #[test]
+    fn native_search_is_chosen_by_family() {
+        use crate::config::ModelFamily;
+        assert!(uses_native_search(ModelFamily::Grok));
+        assert!(!uses_native_search(ModelFamily::Gpt));
+        assert!(!uses_native_search(ModelFamily::OpenAiCompat));
+    }
+
+    #[test]
+    fn alpha_search_model_pins_a_codex_slug_for_non_codex_routes() {
+        // A Codex-native route addresses the backend with its own model.
+        for codex in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert_eq!(alpha_search_model(codex), codex);
+        }
+        // Everything else must not: the endpoint is ChatGPT's Codex search
+        // backend and a foreign slug has no meaning to it.
+        for foreign in [
+            "grok-4.5",
+            "grok-4.20-0309-reasoning",
+            "openai-compat--kimi-k3",
+            "gpt-test",
+        ] {
+            assert_eq!(alpha_search_model(foreign), ALPHA_SEARCH_DEFAULT_MODEL);
+        }
     }
 }

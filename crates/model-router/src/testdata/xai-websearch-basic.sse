@@ -1,0 +1,36 @@
+event: response.created
+data: {"sequence_number":0,"type":"response.created","response":{"created_at":0,"completed_at":null,"id":"77c3d193-b4f7-95b9-9147-ec379052fa7a","max_output_tokens":8192,"model":"grok-4.5-build","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":0.10000000149011612,"text":{"format":{"type":"text"}},"tool_choice":"required","tools":[{"type":"web_search"}],"top_p":0.949999988079071,"usage":null,"user":null,"incomplete_details":null,"status":"in_progress","store":false,"metadata":{"system_fingerprint":"fp_a39489019fa99b6e"},"background":false,"service_tier":"default","truncation":"disabled","top_logprobs":0,"presence_penalty":0.0,"frequency_penalty":0.0,"prompt_cache_key":"18d78ffb-f9ad-55a2-b965-7416918fae09","max_tool_calls":null,"safety_identifier":null,"error":null,"instructions":"Search the web for the query. Reply with the source URLs only."}}
+
+event: response.in_progress
+data: {"sequence_number":1,"type":"response.in_progress","response":{"created_at":0,"completed_at":null,"id":"77c3d193-b4f7-95b9-9147-ec379052fa7a","max_output_tokens":8192,"model":"grok-4.5-build","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"temperature":0.10000000149011612,"text":{"format":{"type":"text"}},"tool_choice":"required","tools":[{"type":"web_search"}],"top_p":0.949999988079071,"usage":null,"user":null,"incomplete_details":null,"status":"in_progress","store":false,"metadata":{"system_fingerprint":"fp_a39489019fa99b6e"},"background":false,"service_tier":"default","truncation":"disabled","top_logprobs":0,"presence_penalty":0.0,"frequency_penalty":0.0,"prompt_cache_key":"18d78ffb-f9ad-55a2-b965-7416918fae09","max_tool_calls":null,"safety_identifier":null,"error":null,"instructions":"Search the web for the query. Reply with the source URLs only."}}
+
+event: response.output_item.added
+data: {"sequence_number":19,"type":"response.output_item.added","item":{"id":"ws_77c3d193-b4f7-95b9-9147-ec379052fa7a_call-9d385a82-6d21-4a2b-b29a-85315f0dae8f-0","type":"web_search_call","status":"in_progress","action":{"type":"search","query":"","sources":[]}},"output_index":1}
+
+event: response.web_search_call.completed
+data: {"sequence_number":22,"type":"response.web_search_call.completed","item_id":"ws_77c3d193-b4f7-95b9-9147-ec379052fa7a_call-9d385a82-6d21-4a2b-b29a-85315f0dae8f-0","output_index":1}
+
+event: response.output_item.done
+data: {"sequence_number":23,"type":"response.output_item.done","item":{"id":"ws_77c3d193-b4f7-95b9-9147-ec379052fa7a_call-9d385a82-6d21-4a2b-b29a-85315f0dae8f-0","type":"web_search_call","status":"completed","action":{"type":"search","query":"rust axum graceful shutdown","sources":[{"type":"url","url":"https://github.com/tokio-rs/axum/blob/main/examples/graceful-shutdown/src/main.rs"},{"type":"url","url":"https://docs.rs/axum/latest/axum/serve/struct.WithGracefulShutdown.html"},{"type":"url","url":"https://www.reddit.com/r/rust/comments/1ljy18a/is_there_an_easy_way_to_implement_tokio_graceful/"},{"type":"url","url":"https://medium.com/@lysender/graceful-shutdown-with-ctrl-c-for-axum-4a79999a7dc9"},{"type":"url","url":"https://oneuptime.com/blog/post/2026-01-07-rust-graceful-shutdown/view"},{"type":"url","url":"https://github.com/tokio-rs/axum/discussions/1500"},{"type":"url","url":"https://github.com/tokio-rs/axum/blob/main/examples/tls-graceful-shutdown/src/main.rs"},{"type":"url","url":"https://tokio.rs/tokio/topics/shutdown"},{"type":"url","url":"https://docs.rs/axum-server/latest/axum_server/struct.Handle.html"},{"type":"url","url":"https://medium.com/@wedevare/rust-async-graceful-shutdown-for-axum-servers-signals-draining-cleanup-done-right-3b52375412ec"}]}},"output_index":1}
+
+event: response.output_text.delta
+data: {"sequence_number":30,"type":"response.output_text.delta","content_index":0,"delta":"https","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+
+event: response.output_text.delta
+data: {"sequence_number":31,"type":"response.output_text.delta","content_index":0,"delta":"://","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+
+event: response.output_text.delta
+data: {"sequence_number":32,"type":"response.output_text.delta","content_index":0,"delta":"github","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+
+event: response.output_text.delta
+data: {"sequence_number":33,"type":"response.output_text.delta","content_index":0,"delta":".com","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+
+event: response.output_text.delta
+data: {"sequence_number":34,"type":"response.output_text.delta","content_index":0,"delta":"/","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+
+event: response.output_text.delta
+data: {"sequence_number":35,"type":"response.output_text.delta","content_index":0,"delta":"tokio","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+
+event: response.output_text.delta
+data: {"sequence_number":36,"type":"response.output_text.delta","content_index":0,"delta":"-","item_id":"msg_77c3d193-b4f7-95b9-9147-ec379052fa7a","output_index":4,"logprobs":[]}
+

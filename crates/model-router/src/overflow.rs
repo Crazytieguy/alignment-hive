@@ -22,14 +22,39 @@
 use bytes::Bytes;
 use serde_json::Value;
 
-/// Identifies the Codex overflow message, compared with normalized
-/// whitespace and case so a rewording of the surrounding sentences or an
-/// embedded newline (observed in Codex's own test fixtures) does not break
-/// detection. Deliberately subject-bearing: a hypothetical "`max_tokens`
-/// exceeds the context window" must NOT match, because compaction cannot
-/// fix an output-limit error and a false positive would re-create the very
-/// retry loop this module removes.
-const OVERFLOW_PHRASE: &str = "input exceeds the context window";
+/// Which backend's overflow dialect a route speaks.
+///
+/// Each variant owns exactly one verified phrase, and a rewrite only ever
+/// tests its own. Matching the union would let a Codex route classify the
+/// xAI phrase (and vice versa) as overflow — reintroducing, across
+/// backends, the false positive the narrow gating exists to prevent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverflowDialect {
+    /// Codex backend, verified against `CLIProxyAPI` 7.2.92 (2026-07-29).
+    Codex,
+    /// xAI backend, verified against `CLIProxyAPI` 7.2.110 (2026-07-31):
+    /// `This model's maximum prompt length is 500000 but the request
+    /// contains 620215 tokens.`
+    Xai,
+}
+
+impl OverflowDialect {
+    /// The phrase identifying this backend's overflow message, compared with
+    /// normalized whitespace and case so a rewording of the surrounding
+    /// sentences or an embedded newline (observed in Codex's own test
+    /// fixtures) does not break detection.
+    ///
+    /// Deliberately subject-bearing: a hypothetical "`max_tokens` exceeds
+    /// the context window" must NOT match, because compaction cannot fix an
+    /// output-limit error and a false positive would re-create the very
+    /// retry loop this module removes.
+    const fn phrase(self) -> &'static str {
+        match self {
+            Self::Codex => "input exceeds the context window",
+            Self::Xai => "maximum prompt length is",
+        }
+    }
+}
 
 /// The `N` for one request, in whichever form is cheaper to carry.
 ///
@@ -47,19 +72,25 @@ pub(crate) enum Estimate {
 }
 
 /// Everything needed to rewrite one request's overflow error. Built only
-/// for routes whose upstream model is Codex-native (the phrase above is
-/// verified for that backend alone) and whose real window is known.
+/// for routes whose backend dialect is verified (see [`OverflowDialect`])
+/// and whose real window is known.
 #[derive(Clone, Debug)]
 pub(crate) struct OverflowRewrite {
     /// The route's real context window: the `M` in `N tokens > M maximum`.
     window: u64,
     /// The request's estimated input tokens.
     estimate: Estimate,
+    /// The only dialect this rewrite will recognize.
+    dialect: OverflowDialect,
 }
 
 impl OverflowRewrite {
-    pub(crate) const fn new(window: u64, estimate: Estimate) -> Self {
-        Self { window, estimate }
+    pub(crate) const fn new(window: u64, estimate: Estimate, dialect: OverflowDialect) -> Self {
+        Self {
+            window,
+            estimate,
+            dialect,
+        }
     }
 
     /// The canonical Anthropic message. `N` is the request's estimated
@@ -94,7 +125,7 @@ impl OverflowRewrite {
         let Some(message) = error.get("message").and_then(Value::as_str) else {
             return false;
         };
-        if !is_overflow_message(message) {
+        if !is_overflow_message(message, self.dialect) {
             return false;
         }
         error["message"] = Value::from(self.message());
@@ -112,13 +143,13 @@ impl OverflowRewrite {
     }
 }
 
-fn is_overflow_message(message: &str) -> bool {
+fn is_overflow_message(message: &str, dialect: OverflowDialect) -> bool {
     let normalized = message
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
-    normalized.contains(OVERFLOW_PHRASE)
+    normalized.contains(dialect.phrase())
 }
 
 #[cfg(test)]
@@ -129,7 +160,11 @@ mod tests {
     const CAPTURED_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}"#;
 
     fn rewrite(estimate: u64) -> OverflowRewrite {
-        OverflowRewrite::new(258_400, Estimate::Computed(estimate))
+        OverflowRewrite::new(
+            258_400,
+            Estimate::Computed(estimate),
+            OverflowDialect::Codex,
+        )
     }
 
     fn message_of(body: &Bytes) -> String {
@@ -179,9 +214,13 @@ mod tests {
             r#"{{"model":"gpt-test","messages":[{{"role":"user","content":"{}"}}]}}"#,
             "alpha bravo charlie delta echo ".repeat(60_000)
         );
-        let rewritten = OverflowRewrite::new(258_400, Estimate::Deferred(Bytes::from(request)))
-            .rewrite_body(CAPTURED_BODY.as_bytes())
-            .unwrap();
+        let rewritten = OverflowRewrite::new(
+            258_400,
+            Estimate::Deferred(Bytes::from(request)),
+            OverflowDialect::Codex,
+        )
+        .rewrite_body(CAPTURED_BODY.as_bytes())
+        .unwrap();
         let message = message_of(&rewritten);
         let n: u64 = message
             .strip_prefix("prompt is too long: ")
@@ -211,6 +250,89 @@ mod tests {
             assert!(
                 rewrite(300_000).rewrite_body(body.as_bytes()).is_none(),
                 "must pass through: {body}"
+            );
+        }
+    }
+
+    /// The exact body captured live from `CLIProxyAPI` 7.2.110 against xAI
+    /// (2026-07-31): 697K tokens sent to grok-4.5's 500K window.
+    const CAPTURED_XAI_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"{\"code\":\"invalid-argument\",\"error\":\"This model's maximum prompt length is 500000 but the request contains 620215 tokens.\"}"}}"#;
+
+    #[test]
+    fn captured_xai_overflow_body_is_translated() {
+        let rewrite =
+            OverflowRewrite::new(500_000, Estimate::Computed(620_215), OverflowDialect::Xai);
+        let rewritten = rewrite
+            .rewrite_body(&Bytes::from(CAPTURED_XAI_BODY))
+            .expect("xai overflow body is rewritten");
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            value["error"]["message"],
+            "prompt is too long: 620215 tokens > 500000 maximum"
+        );
+    }
+
+    #[test]
+    fn an_output_limit_error_is_never_mistaken_for_overflow() {
+        // Compaction cannot fix an output-limit error, so these must not
+        // match either dialect's phrase.
+        for message in [
+            "max_tokens exceeds the model's output limit",
+            "This model's maximum output length is 65536",
+            "requested max_tokens is too large",
+        ] {
+            for dialect in [OverflowDialect::Codex, OverflowDialect::Xai] {
+                assert!(
+                    !is_overflow_message(message, dialect),
+                    "{message} / {dialect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rewrite_never_matches_the_other_backends_dialect() {
+        // The whole point of the dialect: a Codex route seeing xAI's wording
+        // (or vice versa) must NOT classify it as overflow, or the client
+        // compacts and retries a request that was never too long.
+        let codex =
+            OverflowRewrite::new(258_400, Estimate::Computed(300_000), OverflowDialect::Codex);
+        let xai = OverflowRewrite::new(500_000, Estimate::Computed(620_215), OverflowDialect::Xai);
+
+        // Each accepts its own captured body ...
+        assert!(codex.rewrite_body(&Bytes::from(CAPTURED_BODY)).is_some());
+        assert!(xai.rewrite_body(&Bytes::from(CAPTURED_XAI_BODY)).is_some());
+
+        // ... and rejects the other's.
+        assert!(
+            codex
+                .rewrite_body(&Bytes::from(CAPTURED_XAI_BODY))
+                .is_none(),
+            "Codex rewrite must not claim the xAI overflow body"
+        );
+        assert!(
+            xai.rewrite_body(&Bytes::from(CAPTURED_BODY)).is_none(),
+            "xAI rewrite must not claim the Codex overflow body"
+        );
+    }
+
+    #[test]
+    fn dialect_phrases_are_disjoint_on_the_captured_bodies() {
+        for (dialect, own, other) in [
+            (OverflowDialect::Codex, CAPTURED_BODY, CAPTURED_XAI_BODY),
+            (OverflowDialect::Xai, CAPTURED_XAI_BODY, CAPTURED_BODY),
+        ] {
+            let message = |body: &str| -> String {
+                serde_json::from_str::<Value>(body).unwrap()["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            assert!(is_overflow_message(&message(own), dialect), "{dialect:?}");
+            assert!(
+                !is_overflow_message(&message(other), dialect),
+                "{dialect:?}"
             );
         }
     }

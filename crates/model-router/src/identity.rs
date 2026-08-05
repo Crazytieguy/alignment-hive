@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-/// Builds the honest-identity system text for a routed GPT model.
+/// Builds the honest-identity system text for a routed model.
 ///
 /// Copy is deliberately short: identity (never present as Claude) plus
 /// context that the surrounding system prompt is Claude Code's standard one,
@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 #[must_use]
 pub fn identity_text(display_name: &str) -> String {
     format!(
-        "You are {display_name}, a GPT model working inside Claude Code's \
+        "You are {display_name}, working inside Claude Code's \
          agent harness alongside Claude models. Do not present yourself as \
          Claude. The rest of this system prompt is Claude Code's standard \
          system prompt, so it may address the assistant as Claude; read it \

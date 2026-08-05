@@ -1,6 +1,6 @@
 ---
 name: choosing-models
-description: This skill should be read before delegating work to subagents or Workflow agents, unless the user has already named a model. Covers the strengths, cost dynamics, and effort levels of the available models — Claude and GPT families — and the mechanics of routing to GPT models through model-router.
+description: This skill should be read before delegating work to subagents or Workflow agents, unless the user has already named a model. Covers the strengths, cost dynamics, and effort levels of the available models — Claude, GPT, and optionally Grok families — and the mechanics of routing to non-Claude models through model-router.
 ---
 
 # Choosing models for delegation
@@ -117,6 +117,18 @@ research, biosecurity work, exploit-adjacent fixes, dual-use anything — read
 `references/safeguards.md` before choosing; for most tasks it doesn't
 matter.
 
+## Grok models (optional)
+
+Like open-weights models, use Grok on the user's request or stated
+preference, not autonomously. The usual reasons they ask: lighter
+deployment safeguards (see `references/safeguards.md`) and a third billing
+pool, preserving both Claude and Codex usage — capability-wise grok-4.5
+has no measured edge over sol or Opus 5. Give it clear stop conditions and
+boundaries, same as the GPT models. Effort: xAI defaults grok-4.5 to high,
+and subscription billing makes latency its only cost. Its web search
+returns fewer, title-less results than the Claude and GPT backends —
+prefer another family for search-heavy tasks.
+
 ## Open-weights models
 
 Open-weights models (Kimi, GLM, ...) are optional; `model-router:setup`
@@ -130,9 +142,10 @@ The Agent tool's `model` parameter does not accept GPT models. Use the
 shipped agents instead — `gpt-5.6-sol(medium)`, `gpt-5.6-sol(high)`,
 `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` — or, for any other model/effort
 combination, Workflow's
-`agent(prompt, {model: 'gpt-5.6-sol', effort: 'low'})`. Prefer the bare
-`gpt-5.6-*` routing IDs over the `claude-gpt-5.6-*` aliases: only the bare
-IDs pick up the declared GPT context window
+`agent(prompt, {model: 'gpt-5.6-sol', effort: 'low'})` — likewise
+`{model: 'grok-4.5', effort: 'high'}` when the Grok family is configured.
+Prefer the bare `gpt-5.6-*` / `grok-*` routing IDs over the `claude-`
+aliases: only the bare IDs pick up the declared context window
 (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`).
 
 For Claude models, include the `[1m]` suffix — `fable[1m]`, `sonnet[1m]`,

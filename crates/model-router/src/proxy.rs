@@ -36,6 +36,8 @@ struct AppState {
     /// `WebSearch` invocations observed in model responses, awaiting their
     /// side calls (origin-matched backend routing).
     pending_searches: Arc<websearch::PendingSearches>,
+    /// In-flight xAI search streams, owned so shutdown can wait for them.
+    xai_searches: Arc<XaiSearchTasks>,
 }
 
 /// Passive response tap: watches a forwarded `/v1/messages` response for
@@ -106,12 +108,14 @@ impl AppState {
             // streams are fine while a blackholed upstream still times out.
             .read_timeout(std::time::Duration::from_mins(10))
             .build()?;
+        let xai_searches = Arc::new(XaiSearchTasks::new(config.xai_search));
         Ok(Self {
             config: Arc::new(config),
             client,
             capture,
             cliproxy_upstream,
             pending_searches: Arc::new(websearch::PendingSearches::default()),
+            xai_searches,
         })
     }
 
@@ -182,14 +186,15 @@ pub async fn serve_listener_with_drain(
         address.ip().is_loopback(),
         "refusing non-loopback listener address {address}"
     );
-    let app = app_with(config, managed).await?;
-    serve_app(listener, app, shutdown, drain_timeout).await?;
+    let (app, searches) = build(config, managed).await?;
+    serve_app(listener, app, searches, shutdown, drain_timeout).await?;
     Ok(())
 }
 
 async fn serve_app(
     listener: TcpListener,
     app: Router,
+    searches: Arc<XaiSearchTasks>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     drain_timeout: std::time::Duration,
 ) -> std::io::Result<()> {
@@ -203,8 +208,13 @@ async fn serve_app(
     tokio::select! {
         result = &mut server => result,
         () = shutdown => {
+            // Admission closes first, before connections drain: a search
+            // arriving mid-drain must fail visibly rather than open a stream
+            // that nothing is left to finish.
+            searches.close();
             let _ = graceful_tx.send(());
-            if let Ok(result) = tokio::time::timeout(drain_timeout, &mut server).await {
+            let started = std::time::Instant::now();
+            let result = if let Ok(result) = tokio::time::timeout(drain_timeout, &mut server).await {
                 result
             } else {
                 tracing::warn!(
@@ -212,7 +222,16 @@ async fn serve_app(
                     "shutdown drain expired; dropping in-flight connections"
                 );
                 Ok(())
-            }
+            };
+            // Search streams outlive their requests, so the already-admitted
+            // ones are waited for here — with whatever budget the connection
+            // drain left, and before the caller tears the managed child down.
+            // Dropping one would disconnect it mid-response and quarantine
+            // the xAI auth.
+            searches
+                .wait(drain_timeout.saturating_sub(started.elapsed()))
+                .await;
+            result
         }
     }
 }
@@ -235,8 +254,21 @@ pub async fn app_with(
     config: Config,
     managed: Option<crate::supervisor::ManagedHandle>,
 ) -> anyhow::Result<Router> {
+    Ok(build(config, managed).await?.0)
+}
+
+/// The router plus the handle shutdown needs to wait for in-flight xAI search
+/// streams.
+async fn build(
+    config: Config,
+    managed: Option<crate::supervisor::ManagedHandle>,
+) -> anyhow::Result<(Router, Arc<XaiSearchTasks>)> {
     let state = AppState::new(config, managed).await?;
-    Ok(Router::new().fallback(any(handle)).with_state(state))
+    let searches = Arc::clone(&state.xai_searches);
+    Ok((
+        Router::new().fallback(any(handle)).with_state(state),
+        searches,
+    ))
 }
 
 async fn handle(State(state): State<AppState>, request: Request) -> Response {
@@ -275,6 +307,7 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
     let decision = decide(&state.config, &body);
     let capture = state.capture.as_ref().map(|_| RequestCapture {
         branch: decision.branch.as_str().to_string(),
+        family: decision.family_label().to_string(),
         model: decision.model.clone(),
         method: parts.method.to_string(),
         path: parts.uri.path().to_string(),
@@ -287,6 +320,7 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
         method = %parts.method,
         path = %parts.uri.path(),
         branch = decision.branch.as_str(),
+        family = decision.family_label(),
         model = decision.model.as_deref().unwrap_or("<none>"),
         "routing request"
     );
@@ -375,11 +409,55 @@ async fn claude_response(
     .await
 }
 
-/// A sub-call arriving on the Claude branch whose `WebSearch` was invoked by a
-/// GPT agent: answer from the matching backend. `alpha` mode asks the Codex
-/// search backend; `scrape` mode runs the buffered GPT LLM + link-scraping
-/// path through the origin's route. Every failure falls back to the native
-/// Anthropic passthrough (available and better than nothing).
+/// Answers a sub-call on the origin's own route by forwarding it to that
+/// route's upstream and scraping links out of the response text.
+///
+/// Shared by the `scrape` mode arm and by `alpha` mode's failure path, so
+/// the two degrade identically — the sub-call stays with the vendor the
+/// user picked for the work. `Err` returns the capture so the caller can
+/// continue to the Anthropic passthrough.
+#[allow(clippy::too_many_arguments)] // mirrors websearch_response's shape
+async fn scrape_on_origin_route(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: &Bytes,
+    route: &crate::config::ModelRoute,
+    subcall: &websearch::Subcall,
+    base_url: &str,
+    credential: Option<&headers::GptUpstreamCredential>,
+    capture: Option<RequestCapture>,
+) -> Result<Response, Option<RequestCapture>> {
+    let rewritten = match substitute_model(body, &route.upstream_model) {
+        Ok(rewritten) => Bytes::from(rewritten),
+        Err(error) => {
+            tracing::warn!(%error, "failed to rewrite sub-call model; passing through to Anthropic");
+            return Err(capture);
+        }
+    };
+    match legacy_websearch(state, parts, &rewritten, base_url, credential).await {
+        Ok(mut message) => {
+            let filled = websearch::fill_empty_web_search_results(&mut message);
+            tracing::info!(
+                filled,
+                origin = %route.routing_id,
+                "scraped links into the routed-origin web search response"
+            );
+            Ok(message_response(state, &message, subcall.stream, capture).await)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "routed web search forward failed; passing the sub-call through to Anthropic");
+            Err(capture)
+        }
+    }
+}
+
+/// A sub-call arriving on the Claude branch whose `WebSearch` was invoked by
+/// a routed agent (GPT, Grok, or open-weights): answer from the matching
+/// backend. `alpha` mode asks the Codex search backend and, on failure,
+/// falls back to the origin route's own scrape path — never straight to
+/// Anthropic, which would silently move the work and the bill to a vendor
+/// the user did not choose. `scrape` mode goes to that same path directly.
+/// The native Anthropic passthrough is the last resort only.
 async fn gpt_origin_on_claude_branch(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -388,74 +466,70 @@ async fn gpt_origin_on_claude_branch(
     subcall: &websearch::Subcall,
     capture: Option<RequestCapture>,
 ) -> Response {
+    let mut capture = capture;
     let route = state
         .config
         .effective_models()
         .find(|route| route.routing_id == routing_id);
+    // A Grok origin is served by xAI's own search, strictly: no alpha, no
+    // scrape, no Anthropic — not even when the gateway is unavailable. An
+    // origin whose route has since left the config has no known family, so it
+    // keeps the existing behaviour below.
+    if let Some(route) = route
+        && websearch::uses_native_search(route.family)
+    {
+        return grok_native_websearch_response(state, &body, route, subcall, capture).await;
+    }
     let target = gpt_forward_target(&state.cliproxy_upstream);
     if let (Some(route), Some((base_url, credential))) = (route, target) {
-        match state.config.web_search.mode {
-            WebSearchMode::Alpha => {
-                match alpha_search(
-                    state,
-                    &base_url,
-                    credential.as_ref(),
-                    &route.upstream_model,
-                    subcall,
-                )
-                .await
-                {
-                    Ok((links, output)) => {
-                        tracing::info!(
-                            links = links.len(),
-                            origin = routing_id,
-                            "answered GPT-origin web search from alpha/search"
-                        );
-                        let message = websearch::synthesize_message(
-                            &route.routing_id,
-                            subcall,
-                            &links,
-                            &output,
-                            estimate_input_tokens(&body),
-                        );
-                        return message_response(state, &message, subcall.stream, capture).await;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "alpha web search failed; passing the sub-call through to Anthropic");
-                    }
-                }
-            }
-            WebSearchMode::Scrape => match substitute_model(&body, &route.upstream_model) {
-                Ok(rewritten) => {
-                    match legacy_websearch(
-                        state,
-                        parts,
-                        &Bytes::from(rewritten),
-                        &base_url,
-                        credential.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(mut message) => {
-                            let filled = websearch::fill_empty_web_search_results(&mut message);
-                            tracing::info!(
-                                filled,
-                                origin = routing_id,
-                                "scraped links into the GPT-origin web search response"
-                            );
-                            return message_response(state, &message, subcall.stream, capture)
-                                .await;
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "GPT web search forward failed; passing the sub-call through to Anthropic");
-                        }
-                    }
+        let mode = state.config.web_search.mode;
+        if mode == WebSearchMode::Alpha {
+            match alpha_search(
+                state,
+                &base_url,
+                credential.as_ref(),
+                &route.upstream_model,
+                subcall,
+            )
+            .await
+            {
+                Ok((links, output)) => {
+                    tracing::info!(
+                        links = links.len(),
+                        origin = routing_id,
+                        backend = "alpha-search",
+                        "answered routed-origin web search from alpha/search"
+                    );
+                    let message = websearch::synthesize_message(
+                        &route.routing_id,
+                        subcall,
+                        &links,
+                        &output,
+                        estimate_input_tokens(&body),
+                    );
+                    return message_response(state, &message, subcall.stream, capture).await;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "failed to rewrite sub-call model; passing through to Anthropic");
+                    tracing::warn!(%error, "alpha web search failed; falling back to the origin route's scrape path");
                 }
-            },
-            WebSearchMode::Off => {}
+            }
+        }
+        if matches!(mode, WebSearchMode::Alpha | WebSearchMode::Scrape) {
+            match scrape_on_origin_route(
+                state,
+                parts,
+                &body,
+                route,
+                subcall,
+                &base_url,
+                credential.as_ref(),
+                capture,
+            )
+            .await
+            {
+                Ok(response) => return response,
+                Err(returned) => capture = returned,
+            }
         }
     }
     forward(
@@ -485,7 +559,11 @@ async fn gpt_response(
     let route = decision
         .route
         .expect("GPT decisions always contain an allowlist route");
-    let rewritten = match substitute_model(&body, &route.upstream_model) {
+    // Grok carries reasoning effort in the model ID: the `output_config`
+    // field Claude Code sends never reaches xAI (see
+    // `routing::effort_qualified_model`).
+    let upstream_model = crate::routing::effort_qualified_model(route, &body);
+    let rewritten = match substitute_model(&body, &upstream_model) {
         Ok(body) => body,
         Err(error) => {
             tracing::warn!(%error, "failed to rewrite routed model");
@@ -520,48 +598,8 @@ async fn gpt_response(
         && parts.uri.path() == "/v1/messages"
         && let Some(subcall) = websearch::detect(&rewritten)
     {
-        let origin = websearch::session_id(&rewritten).and_then(|session_id| {
-            state.pending_searches.consume(&websearch::PendingKey::new(
-                session_id,
-                &subcall.query,
-                subcall.allowed_domains.as_deref(),
-                subcall.blocked_domains.as_deref(),
-            ))
-        });
-        let mut capture = capture;
-        // The Anthropic-native path needs no GPT upstream — attempt it even
-        // when the GPT target is unavailable.
-        if let Some(websearch::Origin::Claude { model }) = origin {
-            match claude_origin_on_gpt_branch(state, parts, &body, &model, &subcall, capture).await
-            {
-                Ok(response) => return response,
-                Err(returned) => capture = returned,
-            }
-        }
-        if let Some((base_url, credential)) = gpt_forward_target(&state.cliproxy_upstream) {
-            return websearch_response(
-                state,
-                parts,
-                rewritten,
-                &route.routing_id,
-                &route.upstream_model,
-                &subcall,
-                &base_url,
-                credential.as_ref(),
-                policies,
-                capture,
-            )
-            .await;
-        }
-        // No GPT target (stub / unready managed): existing handling.
-        return forward_gpt(
-            state,
-            parts,
-            rewritten,
-            &route.upstream_model,
-            policies,
-            capture,
-            None,
+        return gpt_branch_subcall(
+            state, parts, &body, rewritten, route, &subcall, policies, capture,
         )
         .await;
     }
@@ -598,6 +636,77 @@ fn cache_identity_headers(
     headers::with_cache_identity(&parts.headers, &key)
 }
 
+/// A `WebSearch` sub-call that arrived on the GPT branch: answered by the
+/// origin's own backend, else by the existing alpha/scrape/forward ladder.
+#[allow(clippy::too_many_arguments)] // mirrors websearch_response's shape
+async fn gpt_branch_subcall(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: &Bytes,
+    rewritten: Bytes,
+    route: &crate::config::ModelRoute,
+    subcall: &websearch::Subcall,
+    policies: GptPolicies,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let origin = websearch::session_id(&rewritten).and_then(|session_id| {
+        state.pending_searches.consume(&websearch::PendingKey::new(
+            session_id,
+            &subcall.query,
+            subcall.allowed_domains.as_deref(),
+            subcall.blocked_domains.as_deref(),
+        ))
+    });
+    let mut capture = capture;
+    // Policy lives in `websearch::native_search_route` (unit-tested there);
+    // this only supplies the config lookup. `None` leaves every arm below
+    // exactly as it was, still using `route`.
+    let native_search_route =
+        websearch::native_search_route(origin.as_ref(), route, |routing_id| {
+            state
+                .config
+                .effective_models()
+                .find(|candidate| candidate.routing_id == routing_id)
+        });
+    // The Anthropic-native path needs no GPT upstream — attempt it even when
+    // the GPT target is unavailable.
+    if let Some(websearch::Origin::Claude { model }) = origin {
+        match claude_origin_on_gpt_branch(state, parts, body, &model, subcall, capture).await {
+            Ok(response) => return response,
+            Err(returned) => capture = returned,
+        }
+    }
+    if let Some(grok) = native_search_route {
+        return grok_native_websearch_response(state, &rewritten, grok, subcall, capture).await;
+    }
+    if let Some((base_url, credential)) = gpt_forward_target(&state.cliproxy_upstream) {
+        return websearch_response(
+            state,
+            parts,
+            rewritten,
+            &route.routing_id,
+            &route.upstream_model,
+            subcall,
+            &base_url,
+            credential.as_ref(),
+            policies,
+            capture,
+        )
+        .await;
+    }
+    // No GPT target (stub / unready managed): existing handling.
+    forward_gpt(
+        state,
+        parts,
+        rewritten,
+        &route.upstream_model,
+        policies,
+        capture,
+        None,
+    )
+    .await
+}
+
 /// How this request's usage is reported back.
 ///
 /// The estimate only ever reaches the client through the streamed
@@ -616,8 +725,8 @@ fn usage_policy(rewritten: &Bytes, route: &crate::config::ModelRoute) -> UsagePo
 }
 
 /// Everything the GPT branch rewrites in this request's response. Overflow
-/// translation is armed only for Codex-native upstream models with a known
-/// real window. A streaming request carries its already-computed estimate;
+/// translation is armed only for routes with a verified backend dialect and
+/// a known real window, and only ever matches that dialect's own phrase. A streaming request carries its already-computed estimate;
 /// a non-streaming one carries the body (a refcount, not a copy) for lazy
 /// estimation — never both, so a long-lived response stream does not pin
 /// its request's payload.
@@ -625,14 +734,14 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
     let usage = usage_policy(rewritten, route);
     let overflow = route
         .context_window
-        .filter(|_| crate::config::is_codex_native_model(&route.upstream_model))
-        .map(|window| {
+        .zip(crate::config::overflow_dialect(route))
+        .map(|(window, dialect)| {
             let estimate = if crate::routing::is_streaming(rewritten) {
                 crate::overflow::Estimate::Computed(usage.estimate)
             } else {
                 crate::overflow::Estimate::Deferred(rewritten.clone())
             };
-            OverflowRewrite::new(window, estimate)
+            OverflowRewrite::new(window, estimate, dialect)
         });
     GptPolicies { usage, overflow }
 }
@@ -867,7 +976,11 @@ async fn websearch_response(
     if state.config.web_search.mode == WebSearchMode::Alpha {
         match alpha_search(state, base_url, credential, upstream_model, subcall).await {
             Ok((links, output)) => {
-                tracing::info!(links = links.len(), "answered web search from alpha/search");
+                tracing::info!(
+                    links = links.len(),
+                    backend = "alpha-search",
+                    "answered web search from alpha/search"
+                );
                 let message = websearch::synthesize_message(
                     routing_id,
                     subcall,
@@ -914,6 +1027,301 @@ async fn websearch_response(
     }
 }
 
+/// Why an xAI-native search could not be answered. Carries its own mapping to
+/// the client-visible failed-search result, so the taxonomy lives in one place.
+enum SearchFailure {
+    Status(u16),
+    Transport(anyhow::Error),
+    TimedOut,
+    NoSources(&'static str),
+    GatewayUnavailable,
+    /// The gateway is shutting down and will not start new searches.
+    ShuttingDown,
+    /// The sub-call's domain filter cannot be honored.
+    InvalidFilter(websearch::InvalidDomainRule),
+}
+
+impl SearchFailure {
+    /// `(error_code, detail)` for [`websearch::synthesize_error_message`].
+    fn rendered(&self) -> (&'static str, String) {
+        match self {
+            Self::Status(429) => (
+                websearch::search_error::TOO_MANY_REQUESTS,
+                "xAI search is rate-limited".to_string(),
+            ),
+            Self::Status(status) => (
+                websearch::search_error::UNAVAILABLE,
+                format!("xAI search returned HTTP {status}"),
+            ),
+            Self::Transport(error) => (
+                websearch::search_error::UNAVAILABLE,
+                format!("xAI search could not be reached ({error})"),
+            ),
+            Self::TimedOut => (
+                websearch::search_error::UNAVAILABLE,
+                "xAI search did not return sources in time".to_string(),
+            ),
+            Self::NoSources(reason) => (
+                websearch::search_error::UNAVAILABLE,
+                format!("xAI search returned no sources ({reason})"),
+            ),
+            Self::GatewayUnavailable => (
+                websearch::search_error::UNAVAILABLE,
+                "the model gateway is not ready".to_string(),
+            ),
+            Self::ShuttingDown => (
+                websearch::search_error::UNAVAILABLE,
+                "the model gateway is shutting down".to_string(),
+            ),
+            Self::InvalidFilter(rule) => (
+                websearch::search_error::INVALID_INPUT,
+                // Refusing beats quietly widening an allow-list or dropping a
+                // block-list the caller asked for.
+                rule.to_string(),
+            ),
+        }
+    }
+}
+
+/// Owns every in-flight xAI search stream.
+///
+/// Each search runs in a task that reads its response to completion no matter
+/// what the request handler does, because dropping a live stream disconnects
+/// the client mid-response and makes the child quarantine the xAI auth entry
+/// for 30–60s (measured). The handler's deadline therefore stops it WAITING;
+/// it never cancels the HTTP read. Shutdown stops admitting new searches and
+/// waits for the running ones, so a restart cannot orphan a stream either.
+///
+/// How many searches may run at once is not the router's business: a parallel
+/// sweep should meet the limits the user's own xAI subscription imposes, not
+/// an invented one. Admission is a shutdown gate, nothing more.
+pub struct XaiSearchTasks {
+    limits: crate::config::XaiSearchLimits,
+    closed: std::sync::atomic::AtomicBool,
+    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+impl XaiSearchTasks {
+    fn new(limits: crate::config::XaiSearchLimits) -> Self {
+        Self {
+            closed: std::sync::atomic::AtomicBool::new(false),
+            tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+            limits,
+        }
+    }
+
+    /// Takes ownership of one search stream's task. `false` once shutdown has
+    /// been signalled, in which case the caller must not open the stream at
+    /// all: an admitted-then-aborted stream is the disconnect that
+    /// quarantines the xAI auth.
+    async fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        // Checked under the lock that `wait` also takes, so a search cannot be
+        // admitted after the drain has begun.
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(task);
+        true
+    }
+
+    /// Stops admitting searches. Called the moment shutdown is signalled, not
+    /// after connections drain, so a search arriving mid-drain fails visibly
+    /// instead of opening a stream nothing is left to finish.
+    fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Waits for already-admitted search streams, bounded by `budget`. Runs
+    /// after handlers drain and BEFORE the managed child is torn down, so
+    /// in-flight streams end by themselves rather than by disconnection.
+    async fn wait(&self, budget: std::time::Duration) {
+        let drain = async {
+            let mut tasks = self.tasks.lock().await;
+            while tasks.join_next().await.is_some() {}
+        };
+        if tokio::time::timeout(budget, drain).await.is_err() {
+            tracing::warn!(
+                timeout_seconds = budget.as_secs_f64(),
+                "xAI search drain expired; remaining streams are dropped"
+            );
+        }
+    }
+}
+
+/// Answers a Grok-origin sub-call from xAI's hosted `web_search`, or returns
+/// the failure to render. Strict by construction: this function never reaches
+/// another vendor's backend.
+async fn grok_native_websearch_response(
+    state: &AppState,
+    body: &Bytes,
+    route: &crate::config::ModelRoute,
+    subcall: &websearch::Subcall,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let started = std::time::Instant::now();
+    let outcome = match gpt_forward_target(&state.cliproxy_upstream) {
+        Some((base_url, credential)) => {
+            xai_native_search(
+                state,
+                &base_url,
+                credential.as_ref(),
+                &route.upstream_model,
+                subcall,
+            )
+            .await
+        }
+        None => Err(SearchFailure::GatewayUnavailable),
+    };
+    let input_tokens = estimate_input_tokens(body);
+    let message = match outcome {
+        Ok(links) => {
+            tracing::info!(
+                links = links.len(),
+                origin = %route.routing_id,
+                backend = "xai-web-search",
+                elapsed_ms = started.elapsed().as_millis(),
+                "answered routed-origin web search from xAI native search"
+            );
+            // No commentary text: the synthesized prose is never read, so it
+            // can never leak into the result.
+            websearch::synthesize_message(&route.routing_id, subcall, &links, "", input_tokens)
+        }
+        Err(failure) => {
+            let (error_code, detail) = failure.rendered();
+            tracing::warn!(
+                origin = %route.routing_id,
+                backend = "xai-web-search",
+                %detail,
+                "xAI native search failed; returning a failed-search result"
+            );
+            websearch::synthesize_error_message(
+                &route.routing_id,
+                subcall,
+                error_code,
+                &detail,
+                input_tokens,
+            )
+        }
+    };
+    message_response(state, &message, subcall.stream, capture).await
+}
+
+/// One search against xAI's hosted `web_search` tool through the same
+/// `CLIProxyAPI` child, streamed.
+///
+/// The stream is read by a task that owns it and always reads to the end, so
+/// the connection is never closed early — a client disconnect makes the child
+/// quarantine the xAI auth entry for 30–60s
+/// (`auth_unavailable: no auth available (providers=xai)`), which would take
+/// the user's whole Grok family offline after every search. This function only
+/// waits for the sources (~3s), and giving up on that wait leaves the worker
+/// running. Draining is measured not to block concurrent Grok traffic.
+async fn xai_native_search(
+    state: &AppState,
+    base_url: &str,
+    credential: Option<&headers::GptUpstreamCredential>,
+    upstream_model: &str,
+    subcall: &websearch::Subcall,
+) -> Result<Vec<websearch::Link>, SearchFailure> {
+    let policy =
+        websearch::DomainPolicy::from_subcall(subcall).map_err(SearchFailure::InvalidFilter)?;
+    let body = serde_json::to_vec(&websearch::xai_search_request_body(
+        subcall,
+        &policy,
+        upstream_model,
+    ))
+    .map_err(|error| SearchFailure::Transport(error.into()))?;
+    let limits = state.xai_searches.limits;
+    let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
+    let mut request = state
+        .client
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(body);
+    if let Some(credential) = credential {
+        request = credential.apply(request);
+    }
+    let (harvested_tx, harvested_rx) = tokio::sync::oneshot::channel();
+    // The registry takes the task BEFORE the stream is opened, so no stream
+    // exists that it does not own — and none is opened once shutdown has been
+    // signalled.
+    let admitted = state
+        .xai_searches
+        .spawn(async move {
+            xai_search_worker(request, policy, limits, harvested_tx).await;
+        })
+        .await;
+    if !admitted {
+        return Err(SearchFailure::ShuttingDown);
+    }
+
+    match tokio::time::timeout(limits.harvest_timeout, harvested_rx).await {
+        Ok(Ok(result)) => result,
+        // The worker ended without reporting: it panicked or was aborted.
+        Ok(Err(_)) => Err(SearchFailure::NoSources("search task ended")),
+        // Deadline: stop waiting, but leave the worker to finish the stream.
+        Err(_) => Err(SearchFailure::TimedOut),
+    }
+}
+
+/// Owns one search stream start to finish: reports the harvest as soon as it
+/// appears, then keeps reading until the upstream ends the response.
+async fn xai_search_worker(
+    request: reqwest::RequestBuilder,
+    policy: websearch::DomainPolicy,
+    limits: crate::config::XaiSearchLimits,
+    outcome_tx: tokio::sync::oneshot::Sender<Result<Vec<websearch::Link>, SearchFailure>>,
+) {
+    let mut outcome_tx = Some(outcome_tx);
+    let mut report = |outcome| {
+        if let Some(sender) = outcome_tx.take() {
+            // The receiver is gone when the handler's deadline already
+            // expired; the stream still gets drained below.
+            let _ = sender.send(outcome);
+        }
+    };
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => return report(Err(SearchFailure::Transport(error.into()))),
+    };
+    if response.status() != reqwest::StatusCode::OK {
+        return report(Err(SearchFailure::Status(response.status().as_u16())));
+    }
+    let mut harvester = websearch::XaiSourceHarvester::new(policy);
+    let mut stream = response.bytes_stream();
+    let read = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    tracing::debug!(%error, "xAI search stream ended early");
+                    report(Err(SearchFailure::Transport(error.into())));
+                    return;
+                }
+            };
+            match harvester.push(&chunk) {
+                Some(websearch::Harvested::Sources(links)) => report(Ok(links)),
+                Some(websearch::Harvested::Ended(reason)) => {
+                    report(Err(SearchFailure::NoSources(reason)));
+                }
+                None => {}
+            }
+            // Reading continues past the harvest on purpose: the response is
+            // finished by the upstream, never by us.
+        }
+        report(Err(SearchFailure::NoSources("stream ended")));
+    };
+    if tokio::time::timeout(limits.drain_timeout, read)
+        .await
+        .is_err()
+    {
+        tracing::debug!("xAI search stream exceeded the drain budget");
+    }
+}
+
 /// One search round-trip against the Codex search backend. Returns the
 /// deduplicated links and the rendered search output. Empty results are not
 /// an error (some query classes legitimately have no link results), but an
@@ -926,7 +1334,11 @@ async fn alpha_search(
     subcall: &websearch::Subcall,
 ) -> anyhow::Result<(Vec<websearch::Link>, String)> {
     let url = format!("{}/v1/alpha/search", base_url.trim_end_matches('/'));
-    let body = serde_json::to_vec(&websearch::alpha_request_body(subcall, upstream_model))?;
+    // Mapped here rather than at the call sites: this function is the only
+    // way to reach the Codex search backend, so a future caller cannot leak
+    // a foreign slug to it by forgetting the conversion.
+    let search_model = websearch::alpha_search_model(upstream_model);
+    let body = serde_json::to_vec(&websearch::alpha_request_body(subcall, search_model))?;
     let mut request = state
         .client
         .post(url)
@@ -1589,6 +2001,51 @@ mod tests {
         Body::from_stream(futures_util::stream::pending::<Result<Bytes, Infallible>>())
     }
 
+    #[tokio::test]
+    async fn search_admission_closes_at_shutdown_and_running_streams_are_awaited() {
+        let tasks = XaiSearchTasks::new(crate::config::XaiSearchLimits::default());
+        let running = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // A search admitted before the signal runs, and shutdown waits for it.
+        let (started, done) = (running.clone(), finished.clone());
+        assert!(
+            tasks
+                .spawn(async move {
+                    started.notify_one();
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await
+        );
+        running.notified().await;
+
+        tasks.close();
+        // A search arriving after the signal is refused, and its work never
+        // runs: an admitted-then-aborted stream is the quarantine hazard, so
+        // the stream must not be opened at all.
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran = rejected.clone();
+        assert!(
+            !tasks
+                .spawn(async move {
+                    ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await
+        );
+
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        tasks.wait(std::time::Duration::from_secs(5)).await;
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "shutdown returned before the admitted stream finished"
+        );
+        assert!(
+            !rejected.load(std::sync::atomic::Ordering::SeqCst),
+            "a refused search still ran"
+        );
+    }
+
     #[test]
     fn upstream_url_preserves_encoded_path_and_query_text() {
         let uri: Uri = "/v1/messages?beta=true&raw=%2F&empty=".parse().unwrap();
@@ -1635,6 +2092,9 @@ mod tests {
         let server = tokio::spawn(serve_app(
             listener,
             app,
+            Arc::new(XaiSearchTasks::new(
+                crate::config::XaiSearchLimits::default(),
+            )),
             async move {
                 let _ = shutdown_rx.await;
             },

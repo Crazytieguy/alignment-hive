@@ -58,7 +58,12 @@ impl Dirs {
         self.config_dir.join("config.toml")
     }
 
-    /// Codex auth material managed by the router's `CLIProxyAPI` child.
+    /// OAuth material managed by the router's `CLIProxyAPI` child — Codex
+    /// (`codex-*.json`) and, when configured, xAI (`xai-*.json`).
+    ///
+    /// The directory name is a historical misnomer now that it holds more
+    /// than Codex logins. Renaming it would strand every existing install's
+    /// credentials for cosmetics, so it stays.
     #[must_use]
     pub fn auth_dir(&self) -> PathBuf {
         self.state_dir.join("codex-auth")
@@ -169,6 +174,15 @@ fn tempfile_in(dir: &Path) -> anyhow::Result<(PathBuf, fs::File)> {
         }
     }
     anyhow::bail!("could not create a temporary file in {}", dir.display())
+}
+
+/// Reads the gateway secret if it already exists, without creating one.
+///
+/// Diagnosis-only counterpart to [`load_or_create_secret`]: `doctor` must
+/// never bring state into being as a side effect of inspecting it.
+#[must_use]
+pub fn load_secret(dirs: &Dirs) -> Option<String> {
+    read_nonempty(&dirs.secret_file()).ok().flatten()
 }
 
 /// Returns the create-once gateway secret, generating it on first use.
@@ -356,26 +370,119 @@ pub fn import_legacy_auth(dirs: &Dirs) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+/// Filename prefix `CLIProxyAPI` writes for a Codex OAuth login
+/// (`codex-<uuid>-<email>-<plan>.json`).
+pub const CODEX_AUTH_PREFIX: &str = "codex-";
+
+/// Filename prefix `CLIProxyAPI` writes for an xAI OAuth login
+/// (`xai-<email>.json`). Note it is `xai-`, not `grok-`.
+pub const GROK_AUTH_PREFIX: &str = "xai-";
+
+/// Every `*.json` file in a `CLIProxyAPI` auth dir, sorted so the result
+/// never depends on `read_dir` order.
+///
+/// See [`auth_files`] for why this is fallible.
+///
+/// # Errors
+/// Returns an error when the directory or any of its entries cannot be read.
+fn json_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    auth_files(dir, "")
+}
+
+/// Every `<prefix>*.json` login in a `CLIProxyAPI` auth dir, sorted so the
+/// result never depends on `read_dir` order. An empty prefix matches every
+/// `.json`.
+///
+/// Fallible on purpose. A directory we could not read, or an entry we could
+/// not stat, must never be reported as "no matching files" — a caller that
+/// hardens permissions would then certify files it never inspected. A
+/// *missing* directory is genuinely empty and is the one non-error case.
+///
+/// # Errors
+/// Returns an error when the directory or any of its entries cannot be read.
+pub fn auth_files(dir: &Path, prefix: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(anyhow::Error::new(error))
+                .with_context(|| format!("failed to read {}", dir.display()));
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to read an entry in {}", dir.display()))?;
+        let path = entry.path();
+        let json = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        let matches = json
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix));
+        if matches {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Finds a `<prefix>*.json` login in a `CLIProxyAPI` auth dir.
+///
+/// Best-effort: an unreadable directory reads as "no login", which is what
+/// the auth checks already report and repair elsewhere. Permission repair
+/// belongs to [`harden_auth_files`], which covers *every* match rather than
+/// whichever one happens to sort first — and which surfaces the errors this
+/// swallows.
+#[must_use]
+pub fn find_auth(dir: &Path, prefix: &str) -> Option<PathBuf> {
+    auth_files(dir, prefix).ok()?.into_iter().next()
+}
+
 /// Finds a `codex-*.json` login in a `CLIProxyAPI` auth dir.
 #[must_use]
 pub fn find_codex_auth(dir: &Path) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            let json = path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
-            json && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("codex-"))
-        })
+    find_auth(dir, CODEX_AUTH_PREFIX)
+}
+
+/// Tightens every `*.json` credential in a `CLIProxyAPI` auth dir to
+/// `0600`, returning the files that needed it.
+///
+/// Deliberately prefix-blind. The directory holds nothing but OAuth
+/// credentials, and `CLIProxyAPI` 7.2.110 already writes five kinds
+/// (`codex-`, `xai-`, `claude-`, `kimi-`, `antigravity-`) — of which it
+/// writes the xAI one world-readable. Enumerating a hardcoded list would
+/// leave the next provider silently unprotected, so this covers whatever is
+/// there.
+///
+/// # Errors
+/// Returns an error when the directory or a file's permissions cannot be
+/// read or changed.
+#[cfg_attr(not(unix), allow(unused_variables))]
+pub fn harden_auth_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut hardened = Vec::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in json_files(dir)? {
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("failed to stat {}", path.display()))?;
+            if metadata.permissions().mode() & 0o777 == 0o600 {
+                continue;
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to restrict permissions on {}", path.display()))?;
+            hardened.push(path);
+        }
+    }
+    Ok(hardened)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn test_dirs(root: &Path) -> Dirs {
@@ -474,5 +581,133 @@ mod tests {
         assert!(dirs.auth_dir().join("codex-test-user.json").exists());
         // Second call: already present, no re-import.
         assert_eq!(import_legacy_auth(&dirs).unwrap(), None);
+    }
+
+    #[test]
+    fn auth_finders_select_by_prefix_and_are_order_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in [
+            "xai-b@example.com.json",
+            "codex-2-b@example.com-pro.json",
+            "codex-1-a@example.com-pro.json",
+            "xai-a@example.com.json",
+            "notes.txt",
+            "codex-ignored.json.bak",
+        ] {
+            fs::write(root.join(name), b"{}").unwrap();
+        }
+        // Sorted, so the choice never depends on readdir order.
+        assert_eq!(
+            find_codex_auth(root).unwrap().file_name().unwrap(),
+            "codex-1-a@example.com-pro.json"
+        );
+        assert_eq!(
+            find_auth(root, GROK_AUTH_PREFIX)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "xai-a@example.com.json"
+        );
+        assert_eq!(auth_files(root, CODEX_AUTH_PREFIX).unwrap().len(), 2);
+        assert_eq!(auth_files(root, GROK_AUTH_PREFIX).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn missing_auth_dir_yields_nothing_rather_than_erroring() {
+        // A directory that does not exist is genuinely empty — the only
+        // non-error case, and the one every fresh install hits.
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("nope");
+        assert!(find_codex_auth(&absent).is_none());
+        assert!(find_auth(&absent, GROK_AUTH_PREFIX).is_none());
+        assert!(harden_auth_files(&absent).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardening_covers_every_match_and_is_idempotent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let loose_a = root.join("xai-a@example.com.json");
+        let loose_b = root.join("xai-b@example.com.json");
+        let other_family = root.join("codex-1-a@example.com-pro.json");
+        for path in [&loose_a, &loose_b, &other_family] {
+            fs::write(path, b"{}").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        // Every matching file is hardened, not just the one a finder returns.
+        let mut hardened = harden_auth_files(root).unwrap();
+        hardened.sort();
+        let mut expected = vec![loose_a.clone(), loose_b.clone(), other_family.clone()];
+        expected.sort();
+        assert_eq!(hardened, expected);
+        for path in [&loose_a, &loose_b] {
+            let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+        // Prefix-blind: a second family's credential is hardened too, so a
+        // provider we have not heard of cannot stay world-readable.
+        assert_eq!(
+            fs::metadata(&other_family).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // Idempotent: a second run reports nothing left to do.
+        assert!(harden_auth_files(root).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardening_surfaces_failure_rather_than_swallowing_it() {
+        // A dangling symlink matches by name but cannot be stat'd, so the
+        // error must propagate instead of being silently skipped: a
+        // credential we failed to harden must never look hardened.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::os::unix::fs::symlink(root.join("gone.json"), root.join("xai-broken.json")).unwrap();
+        let error = harden_auth_files(root).unwrap_err();
+        assert!(format!("{error:#}").contains("failed to stat"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_auth_dir_surfaces_an_error_rather_than_reading_as_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("auth");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("xai-a@example.com.json"), b"{}").unwrap();
+        // Unlistable: a caller must not conclude "no files to harden".
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let enumerated = auth_files(&root, GROK_AUTH_PREFIX);
+        let hardened = harden_auth_files(&root);
+        // Restore before asserting so tempdir cleanup always succeeds.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Root bypasses the permission bits; nothing to assert there.
+        if running_as_root() {
+            return;
+        }
+        let error = enumerated.unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read"), "{error:#}");
+        let error = hardened.unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read"), "{error:#}");
+    }
+
+    /// Shared by the doctor tests: permission bits do not apply to root, so
+    /// permission-dependent assertions must no-op there.
+    #[cfg(unix)]
+    pub(crate) fn running_as_root() -> bool {
+        // `id -u` avoids taking a libc dependency just for this guard.
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .is_some_and(|uid| uid.trim() == "0")
     }
 }

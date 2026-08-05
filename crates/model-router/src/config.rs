@@ -49,6 +49,99 @@ pub(crate) fn is_codex_native_model(upstream_model: &str) -> bool {
     CODEX_NATIVE_MODELS.contains(&upstream_model)
 }
 
+/// Which backend context-overflow dialect this route speaks, if the router
+/// has verified one (see [`crate::overflow`]).
+///
+/// Checked against the built-in model lists rather than the family alone: a
+/// hand-written `[[models]]` entry inherits `family = "gpt"` by default but
+/// may point anywhere, and arming the translation for an unverified backend
+/// would risk the false positive the whole module exists to avoid.
+///
+/// Returning the dialect rather than a bool matters just as much: a route
+/// must only ever match *its own* backend's phrase. Sharing one matcher
+/// across dialects would let a Codex route classify the xAI wording as
+/// overflow and compact-and-retry a request that was never too long.
+#[must_use]
+pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::OverflowDialect> {
+    use crate::overflow::OverflowDialect;
+    match route.family {
+        ModelFamily::Gpt => {
+            is_codex_native_model(&route.upstream_model).then_some(OverflowDialect::Codex)
+        }
+        ModelFamily::Grok => GROK_MODELS
+            .iter()
+            .any(|(model, _, _)| *model == route.upstream_model)
+            .then_some(OverflowDialect::Xai),
+        // Any host can sit behind an openai-compat route; their error
+        // strings are unknown.
+        ModelFamily::OpenAiCompat => None,
+    }
+}
+
+/// The xAI-native upstream model IDs behind the built-in Grok routes, with
+/// the context window `CLIProxyAPI`'s embedded model registry declares for
+/// them. Only the flagship ships: the same OAuth also exposes `grok-4.3`,
+/// the `grok-4.20-*` snapshots and the `grok-3-mini*` pair, none of which
+/// are characterised well enough to recommend.
+const GROK_MODELS: [(&str, &str, u64); 1] = [("grok-4.5", "Grok 4.5", 500_000)];
+
+/// Time bounds on the xAI search side call.
+///
+/// Deliberately no concurrency cap: how many searches may run at once is the
+/// user's own xAI subscription's business, and a parallel sweep should meet
+/// that limit rather than an invented local one.
+///
+/// Public only so tests can shrink these; production always uses [`Default`].
+#[derive(Clone, Copy, Debug)]
+pub struct XaiSearchLimits {
+    /// How long the request handler WAITS for sources. Never cancels the
+    /// upstream read — see `proxy::XaiSearchTasks`.
+    pub harvest_timeout: std::time::Duration,
+    /// Upper bound on reading a stream to its end, so a wedged upstream
+    /// cannot pin a worker for the process's lifetime.
+    pub drain_timeout: std::time::Duration,
+}
+
+impl Default for XaiSearchLimits {
+    fn default() -> Self {
+        Self {
+            // Sources are measured at 3–5s; this only bounds a wedged
+            // upstream, and is still far under the 20–70s legacy LLM path.
+            harvest_timeout: std::time::Duration::from_secs(45),
+            drain_timeout: std::time::Duration::from_mins(3),
+        }
+    }
+}
+
+/// Which vendor family serves a route. Carried per-route rather than as a
+/// third [`crate::routing::Branch`] variant: `Branch` answers where a
+/// request is *sent* (Anthropic or the `CLIProxyAPI` child), which stays
+/// binary no matter how many families ride the child. Family answers what
+/// the model *is*, which only the identity block, the overflow dialect, and
+/// the search backend care about — all per-route concerns.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelFamily {
+    /// Codex-native slugs.
+    #[default]
+    Gpt,
+    /// xAI models reached through the child's xAI OAuth.
+    Grok,
+    /// Routes derived from `[[openai-providers]]`.
+    OpenAiCompat,
+}
+
+impl ModelFamily {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gpt => "gpt",
+            Self::Grok => "grok",
+            Self::OpenAiCompat => "openai-compat",
+        }
+    }
+}
+
 #[serde_inline_default]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -89,6 +182,11 @@ pub struct Config {
     #[serde(default, rename = "openai-providers")]
     pub openai_providers: Vec<OpenAiProvider>,
 
+    /// Optional Grok (xAI) family. Disabled by default: an install that
+    /// never opts in keeps exactly today's routes and doctor checks.
+    #[serde(default)]
+    pub grok: GrokConfig,
+
     /// Optional request/response capture settings.
     #[serde(default)]
     pub capture: CaptureConfig,
@@ -104,10 +202,37 @@ pub struct Config {
     /// the service was started from elsewhere).
     pub declared_context_window: Option<u64>,
 
-    /// Routes derived from `openai_providers` model entries; rebuilt by
-    /// [`Config::prepare`], never read from TOML.
+    /// Routes the router generates rather than reads: the built-in Grok
+    /// family when `[grok] enabled`, plus one per `[[openai-providers]]`
+    /// model entry. Rebuilt by [`Config::prepare`], never read from TOML.
+    ///
+    /// Deliberately not merged into `models`: that field carries a serde
+    /// default, which a single user-written `[[models]]` block replaces
+    /// wholesale — taking every generated route with it.
     #[serde(skip)]
-    pub derived_models: Vec<ModelRoute>,
+    pub generated_models: Vec<ModelRoute>,
+
+    /// Bounds on the xAI search side call. Deliberately not file-settable:
+    /// these are internals, exposed only so tests can shorten them.
+    #[serde(skip)]
+    pub xai_search: XaiSearchLimits,
+}
+
+/// The optional Grok family. `enabled` gates the built-in routes, the
+/// doctor auth/model checks, and `login grok`.
+#[serde_inline_default]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GrokConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Rescale the built-in Grok routes' reported usage so auto-compaction
+    /// fires at their real windows rather than at the single declared one.
+    /// See [`ModelRoute::context_window_scaling`]; off by default, because
+    /// clipping keeps every displayed token count true.
+    #[serde(default)]
+    pub context_window_scaling: bool,
 }
 
 #[serde_inline_default]
@@ -198,6 +323,12 @@ pub struct ModelRoute {
 
     pub upstream_model: String,
     pub display_name: String,
+
+    /// Which vendor family serves this route. Read from TOML (defaulting to
+    /// `gpt`) so a hand-written entry pointing at a Grok upstream gets the
+    /// right identity block; every generated route sets it explicitly.
+    #[serde(default)]
+    pub family: ModelFamily,
 
     /// The model's real context window in tokens. See [`ProviderModel`].
     pub context_window: Option<u64>,
@@ -326,6 +457,25 @@ fn template_models_section(models: &[ModelRoute]) -> String {
         .join("\n")
 }
 
+/// Renders the commented `[grok]` template section, with the built-in route
+/// list generated from [`GROK_MODELS`] so the template can never drift from
+/// what the code actually serves.
+fn template_grok_section() -> String {
+    let routes = GROK_MODELS
+        .into_iter()
+        .map(|(model, _, window)| format!("#   {model} / claude-{model} ({window} tokens)"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "# Optional Grok (xAI) family: rides the same managed CLIProxyAPI child\n# under an xAI \
+         subscription OAuth login (`model-router login grok`).\n# Off by default. Built-in routes \
+         when enabled:\n{routes}\n#[grok]\n# Default: false\n#enabled = true\n# Rescale reported \
+         usage so auto-compaction fires at Grok's real window instead of at\n# \
+         CLAUDE_CODE_MAX_CONTEXT_TOKENS. Off by default: clipping keeps every\n# displayed token \
+         count true.\n# Default: false\n#context-window-scaling = true\n"
+    )
+}
+
 /// The fully static provider / context-window section of the config
 /// template. Kept out of the interpolated body so `template` stays readable.
 const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (managed mode only): the managed CLIProxyAPI
@@ -379,11 +529,34 @@ fn default_models() -> Vec<ModelRoute> {
         upstream: CLIPROXY_UPSTREAM.to_string(),
         upstream_model: upstream_model.to_string(),
         display_name: display_name.to_string(),
+        family: ModelFamily::Gpt,
         context_window: Some(GPT_CONTEXT_WINDOW),
         context_window_scaling: false,
         usage_scale: None,
     })
     .collect()
+}
+
+/// The built-in Grok routes. Each model gets the bare routing ID and the
+/// `claude-`-prefixed alias, matching [`default_models`]: only the bare ID
+/// picks up `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, while the prefixed one is what
+/// gateway model discovery accepts.
+fn grok_models(scaling: bool) -> Vec<ModelRoute> {
+    GROK_MODELS
+        .into_iter()
+        .flat_map(|(model, display_name, context_window)| {
+            [format!("claude-{model}"), model.to_string()].map(move |routing_id| ModelRoute {
+                routing_id,
+                upstream: CLIPROXY_UPSTREAM.to_string(),
+                upstream_model: model.to_string(),
+                display_name: display_name.to_string(),
+                family: ModelFamily::Grok,
+                context_window: Some(context_window),
+                context_window_scaling: scaling,
+                usage_scale: None,
+            })
+        })
+        .collect()
 }
 
 impl Config {
@@ -454,7 +627,7 @@ impl Config {
     /// Returns an error when any safety or consistency invariant is violated.
     pub fn prepare(&mut self) -> anyhow::Result<()> {
         self.normalize_legacy_upstream_name()?;
-        self.rebuild_derived_models();
+        self.rebuild_generated_models();
         self.validate()?;
         self.compute_usage_scales();
         Ok(())
@@ -464,7 +637,11 @@ impl Config {
     /// declaration scaling depends on is known to be present.
     fn compute_usage_scales(&mut self) {
         let declared = self.declared_context_window;
-        for route in self.models.iter_mut().chain(self.derived_models.iter_mut()) {
+        for route in self
+            .models
+            .iter_mut()
+            .chain(self.generated_models.iter_mut())
+        {
             route.usage_scale = route.scale_for(declared);
         }
     }
@@ -480,10 +657,10 @@ impl Config {
             .expect("prepared config always contains the cliproxy upstream")
     }
 
-    /// Every route the router serves: configured `[[models]]` plus routes
-    /// derived from `[[openai-providers]]`.
+    /// Every route the router serves: configured `[[models]]` plus the
+    /// generated ones (built-in Grok, `[[openai-providers]]`).
     pub fn effective_models(&self) -> impl Iterator<Item = &ModelRoute> {
-        self.models.iter().chain(self.derived_models.iter())
+        self.models.iter().chain(self.generated_models.iter())
     }
 
     fn normalize_legacy_upstream_name(&mut self) -> anyhow::Result<()> {
@@ -515,22 +692,27 @@ impl Config {
         Ok(())
     }
 
-    fn rebuild_derived_models(&mut self) {
-        self.derived_models = self
-            .openai_providers
-            .iter()
-            .flat_map(|provider| {
-                provider.models.iter().map(|model| ModelRoute {
-                    routing_id: model.routing_id.clone(),
-                    upstream: CLIPROXY_UPSTREAM.to_string(),
-                    upstream_model: derived_alias(&model.routing_id),
-                    display_name: model.display_name.clone(),
-                    context_window: model.context_window,
-                    context_window_scaling: model.context_window_scaling,
-                    usage_scale: None,
-                })
+    /// Rebuilds every generated route. The Grok family contributes nothing
+    /// when disabled, so a config that never opts in is unchanged.
+    fn rebuild_generated_models(&mut self) {
+        let derived = self.openai_providers.iter().flat_map(|provider| {
+            provider.models.iter().map(|model| ModelRoute {
+                routing_id: model.routing_id.clone(),
+                upstream: CLIPROXY_UPSTREAM.to_string(),
+                upstream_model: derived_alias(&model.routing_id),
+                display_name: model.display_name.clone(),
+                family: ModelFamily::OpenAiCompat,
+                context_window: model.context_window,
+                context_window_scaling: model.context_window_scaling,
+                usage_scale: None,
             })
-            .collect();
+        });
+        let grok = if self.grok.enabled {
+            grok_models(self.grok.context_window_scaling)
+        } else {
+            Vec::new()
+        };
+        self.generated_models = grok.into_iter().chain(derived).collect();
     }
 
     /// Validates loopback binding, upstream URLs, and routing entries.
@@ -789,6 +971,7 @@ impl Config {
 # Default: "alpha"
 #mode = "alpha"
 
+{grok}
 #[capture]
 # Capture is off by default. Captures include prompt and response bodies; keep
 # the file private. Credential and cookie header values are always redacted.
@@ -809,6 +992,7 @@ impl Config {
             anthropic_base = defaults.anthropic_upstream_base,
             models = template_models_section(&defaults.models),
             providers = TEMPLATE_PROVIDERS_SECTION,
+            grok = template_grok_section(),
             capture_file = defaults.capture.file.display(),
             capture_max_response_body_bytes = defaults.capture.max_response_body_bytes,
         )
@@ -1300,8 +1484,8 @@ mod tests {
     #[test]
     fn provider_models_become_derived_routes_with_namespaced_aliases() {
         let config = parse_and_prepare(&provider_toml(KIMI_MODEL));
-        assert_eq!(config.derived_models.len(), 1);
-        let route = &config.derived_models[0];
+        assert_eq!(config.generated_models.len(), 1);
+        let route = &config.generated_models[0];
         assert_eq!(route.routing_id, "kimi-k2.7");
         assert_eq!(route.upstream, "cliproxy");
         assert_eq!(route.upstream_model, "openai-compat--kimi-k2.7");
@@ -1406,9 +1590,9 @@ mod tests {
     fn prepare_is_idempotent() {
         let mut config: Config = toml::from_str(&provider_toml(KIMI_MODEL)).unwrap();
         config.prepare().unwrap();
-        let first = config.derived_models.clone();
+        let first = config.generated_models.clone();
         config.prepare().unwrap();
-        assert_eq!(config.derived_models, first);
+        assert_eq!(config.generated_models, first);
     }
 
     #[test]
@@ -1558,5 +1742,159 @@ mod context_window_tests {
         assert!(template.contains("#context-window-scaling = true"));
         assert!(template.contains("# declared-context-window = 258400"));
         parse_and_prepare(&template);
+    }
+
+    // ---- Grok family (optional) ----
+
+    /// The declaration setup writes; `client_context_window` uses it for
+    /// bare routing IDs and ignores it for `claude-`-prefixed ones.
+    const DECLARED: &str = "declared-context-window = 258400\n";
+
+    #[test]
+    fn grok_routes_are_absent_unless_enabled() {
+        for source in ["", "[grok]\nenabled = false\n"] {
+            let config = parse_and_prepare(source);
+            assert!(
+                !config
+                    .generated_models
+                    .iter()
+                    .any(|route| route.family == ModelFamily::Grok),
+                "{source:?}"
+            );
+            assert!(
+                !config
+                    .effective_models()
+                    .any(|r| r.family == ModelFamily::Grok),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabling_grok_adds_bare_and_prefixed_routes() {
+        let config = parse_and_prepare("[grok]\nenabled = true\n");
+        let grok: Vec<&ModelRoute> = config
+            .generated_models
+            .iter()
+            .filter(|route| route.family == ModelFamily::Grok)
+            .collect();
+        let ids: Vec<&str> = grok.iter().map(|route| route.routing_id.as_str()).collect();
+        assert_eq!(ids, ["claude-grok-4.5", "grok-4.5"]);
+        for route in &grok {
+            assert_eq!(route.family, ModelFamily::Grok);
+            assert_eq!(route.upstream, CLIPROXY_UPSTREAM);
+            assert!(route.upstream_model.starts_with("grok-"));
+        }
+        // Reachable through the one iterator every consumer uses.
+        assert!(
+            config
+                .effective_models()
+                .any(|route| route.routing_id == "grok-4.5")
+        );
+    }
+
+    #[test]
+    fn hand_written_models_do_not_suppress_grok_routes() {
+        // `models` has a serde default, so any [[models]] block replaces it
+        // wholesale — the Grok routes must not live there.
+        let config = parse_and_prepare(
+            "[[models]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n[grok]\nenabled = true\n",
+        );
+        assert_eq!(config.models.len(), 1);
+        assert_eq!(config.generated_models.len(), 2);
+        assert!(
+            config
+                .effective_models()
+                .any(|route| route.routing_id == "grok-4.5")
+        );
+    }
+
+    #[test]
+    fn grok_scaling_applies_to_bare_and_prefixed_routes_at_different_ratios() {
+        let config = parse_and_prepare(&format!(
+            "{DECLARED}[grok]\nenabled = true\ncontext-window-scaling = true\n"
+        ));
+        let scale = |routing_id: &str| {
+            config
+                .effective_models()
+                .find(|route| route.routing_id == routing_id)
+                .unwrap_or_else(|| panic!("{routing_id} missing"))
+                .usage_scale
+                .unwrap_or_else(|| panic!("{routing_id} unscaled"))
+        };
+        // Both must be scaled: a `compute_usage_scales` that skipped
+        // grok_models would leave these None while doctor still says
+        // "scaled".
+        let bare = scale("grok-4.5");
+        let prefixed = scale("claude-grok-4.5");
+        // ... and they must differ: CLAUDE_CODE_MAX_CONTEXT_TOKENS applies
+        // to the bare ID (258400) but never to a `claude-` one (200000).
+        assert_ne!(bare, prefixed);
+        assert!((bare.ratio() - 258_400.0 / 500_000.0).abs() < 1e-9);
+        assert!((prefixed.ratio() - 200_000.0 / 500_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn grok_routes_are_unscaled_by_default() {
+        let config = parse_and_prepare(&format!("{DECLARED}[grok]\nenabled = true\n"));
+        assert!(
+            config
+                .generated_models
+                .iter()
+                .all(|route| route.usage_scale.is_none())
+        );
+    }
+
+    #[test]
+    fn grok_routes_take_part_in_duplicate_detection() {
+        let error = prepare_error(
+            "[[models]]\nrouting-id = \"grok-4.5\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n[grok]\nenabled = true\n",
+        );
+        assert!(error.contains("duplicate model routing-id"), "{error}");
+    }
+
+    #[test]
+    fn grok_section_rejects_unknown_keys() {
+        assert!(toml::from_str::<Config>("[grok]\nenabled = true\nnope = 1\n").is_err());
+    }
+
+    // ---- family field ----
+
+    #[test]
+    fn family_defaults_to_gpt_and_is_readable_from_toml() {
+        let config = parse_and_prepare(
+            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\n\n\
+             [[models]]\nrouting-id = \"b\"\nupstream-model = \"m2\"\ndisplay-name = \"B\"\nfamily = \"grok\"\n",
+        );
+        assert_eq!(config.models[0].family, ModelFamily::Gpt);
+        assert_eq!(config.models[1].family, ModelFamily::Grok);
+    }
+
+    #[test]
+    fn generated_routes_carry_their_family() {
+        let config = parse_and_prepare(
+            "[grok]\nenabled = true\n\n[[openai-providers]]\nname = \"p\"\nbase-url = \"https://example.test/v1\"\n\n\
+             [[openai-providers.models]]\nname = \"vendor/model\"\nrouting-id = \"kimi\"\ndisplay-name = \"Kimi\"\n",
+        );
+        let family = |routing_id: &str| {
+            config
+                .effective_models()
+                .find(|route| route.routing_id == routing_id)
+                .unwrap()
+                .family
+        };
+        assert_eq!(family("gpt-5.6-sol"), ModelFamily::Gpt);
+        assert_eq!(family("grok-4.5"), ModelFamily::Grok);
+        assert_eq!(family("kimi"), ModelFamily::OpenAiCompat);
+    }
+
+    #[test]
+    fn family_rejects_unknown_values() {
+        assert!(
+            toml::from_str::<Config>(
+                "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\nfamily = \"gemini\"\n"
+            )
+            .is_err()
+        );
     }
 }

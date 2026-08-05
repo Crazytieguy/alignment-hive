@@ -159,7 +159,14 @@ impl SseUsageTransformer {
 }
 
 pub(crate) fn event_boundary(buffer: &[u8]) -> Option<usize> {
-    (0..buffer.len()).find_map(|index| {
+    event_boundary_from(buffer, 0)
+}
+
+/// The end of the first complete event at or after `from`. The caller resumes
+/// from where it last stopped so a long stream is not rescanned per chunk;
+/// `from` must be rewound far enough to catch a separator split across chunks.
+fn event_boundary_from(buffer: &[u8], from: usize) -> Option<usize> {
+    (from..buffer.len()).find_map(|index| {
         if buffer[index..].starts_with(b"\r\n\r\n") {
             Some(index + 4)
         } else if buffer[index..].starts_with(b"\n\n") {
@@ -170,12 +177,85 @@ pub(crate) fn event_boundary(buffer: &[u8]) -> Option<usize> {
     })
 }
 
+/// Overall cap on bytes buffered per scanned response; overflowing latches
+/// the scanner off (forwarding, where there is any, is unaffected).
+pub(crate) const MAX_SCAN_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+
+/// Reassembles SSE events from arbitrary chunk boundaries for the passive
+/// readers (the `WebSearch` tool-use sniffer and the xAI source harvester).
+/// Both need the same buffer, the same size cap, the same latch, and the same
+/// drain loop; only what they do with each event differs.
+#[derive(Default)]
+pub(crate) struct SseEventBuffer {
+    buffer: Vec<u8>,
+    /// How far the separator scan has already looked, so each chunk costs one
+    /// pass over its own bytes rather than over the whole buffer.
+    scanned: usize,
+    disabled: bool,
+}
+
+impl SseEventBuffer {
+    /// Appends a chunk. Returns `false` once the buffer has outgrown its cap,
+    /// after which the scanner is latched off and yields nothing.
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> bool {
+        if self.disabled {
+            return false;
+        }
+        if self.buffer.len().saturating_add(chunk.len()) > MAX_SCAN_BUFFER_BYTES {
+            self.disable();
+            return false;
+        }
+        self.buffer.extend_from_slice(chunk);
+        true
+    }
+
+    /// Runs `handle` over each complete event in arrival order, stopping at
+    /// the first `Some`. Events are parsed in place; only consumed bytes are
+    /// removed. Events that are not valid UTF-8 are skipped.
+    pub(crate) fn drain<T>(&mut self, mut handle: impl FnMut(&str) -> Option<T>) -> Option<T> {
+        while !self.disabled {
+            // Rewind by the longest separator minus one so a separator split
+            // across two chunks is still found.
+            let resume = self.scanned.saturating_sub(3);
+            let Some(event_end) = event_boundary_from(&self.buffer, resume) else {
+                self.scanned = self.buffer.len();
+                return None;
+            };
+            let found = std::str::from_utf8(&self.buffer[..event_end])
+                .ok()
+                .and_then(&mut handle);
+            self.buffer.drain(..event_end);
+            self.scanned = 0;
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// The bytes buffered so far, for readers whose framing is not SSE (a
+    /// non-streaming response body arrives through the same cap and latch).
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    pub(crate) fn disable(&mut self) {
+        self.disabled = true;
+        self.buffer = Vec::new();
+        self.scanned = 0;
+    }
+
+    pub(crate) const fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
 fn transform_event(event: Vec<u8>, policies: &GptPolicies) -> Vec<u8> {
     let UsagePolicy { estimate, scale } = policies.usage;
     let Ok(text) = std::str::from_utf8(&event) else {
         return event;
     };
-    let Some((event_name, data_range)) = event_fields(text) else {
+    let Some((event_name, data_range)) = rewritable_event(text) else {
         return event;
     };
     if event_name != "message_start" && event_name != "message_delta" && event_name != "error" {
@@ -250,9 +330,26 @@ pub(crate) fn inject_estimated_input_tokens(usage: &mut Value, estimate: u64) ->
     true
 }
 
-pub(crate) fn event_fields(event: &str) -> Option<(&str, std::ops::Range<usize>)> {
-    let mut event_name = None;
-    let mut data_range = None;
+/// One parsed SSE event.
+pub(crate) struct SseEvent<'a> {
+    /// The `event:` name, absent when the event carried only `data:` lines
+    /// (which SSE permits).
+    pub name: Option<&'a str>,
+    /// The payload, with multiple `data:` lines joined by newlines as the
+    /// spec requires. Borrowed in the single-line case, which is every event
+    /// in practice.
+    pub data: std::borrow::Cow<'a, str>,
+    /// Where the payload sits in the event — `Some` only for a single `data:`
+    /// line, the one case a rewritten payload can be spliced back in.
+    pub data_range: Option<std::ops::Range<usize>>,
+}
+
+/// Parses an SSE event's fields. `None` when the event carries no `data:`
+/// line at all (comments, `id:`/`retry:`-only events).
+pub(crate) fn parse_event(event: &str) -> Option<SseEvent<'_>> {
+    let mut name = None;
+    let mut first_range: Option<std::ops::Range<usize>> = None;
+    let mut joined: Option<String> = None;
     let mut offset = 0;
 
     for line_with_ending in event.split_inclusive('\n') {
@@ -261,21 +358,47 @@ pub(crate) fn event_fields(event: &str) -> Option<(&str, std::ops::Range<usize>)
             .unwrap_or(line_with_ending);
         let line = line.strip_suffix('\r').unwrap_or(line);
         if let Some(value) = line.strip_prefix("event:") {
-            event_name = Some(value.trim());
+            name = Some(value.trim());
         } else if let Some(value) = line.strip_prefix("data:") {
-            if data_range.is_some() {
-                return None;
-            }
             let leading_whitespace = value.len().saturating_sub(value.trim_start().len());
             let trailing_whitespace = value.len().saturating_sub(value.trim_end().len());
-            let start = offset + "data:".len() + leading_whitespace;
-            let end = offset + line.len() - trailing_whitespace;
-            data_range = Some(start..end);
+            let range = (offset + "data:".len() + leading_whitespace)
+                ..(offset + line.len() - trailing_whitespace);
+            match (&first_range, &mut joined) {
+                (None, _) => first_range = Some(range),
+                (Some(first), None) => {
+                    joined = Some(format!("{}\n{}", &event[first.clone()], &event[range]));
+                }
+                (Some(_), Some(joined)) => {
+                    joined.push('\n');
+                    joined.push_str(&event[range]);
+                }
+            }
         }
         offset += line_with_ending.len();
     }
 
-    Some((event_name?, data_range?))
+    let first_range = first_range?;
+    Some(match joined {
+        None => SseEvent {
+            name,
+            data: std::borrow::Cow::Borrowed(&event[first_range.clone()]),
+            data_range: Some(first_range),
+        },
+        Some(joined) => SseEvent {
+            name,
+            data: std::borrow::Cow::Owned(joined),
+            data_range: None,
+        },
+    })
+}
+
+/// The strict view [`transform_event`] needs: a named event whose single
+/// `data:` payload can be rewritten in place. Anything else is forwarded
+/// untouched.
+fn rewritable_event(event: &str) -> Option<(&str, std::ops::Range<usize>)> {
+    let parsed = parse_event(event)?;
+    Some((parsed.name?, parsed.data_range?))
 }
 
 fn log_actual_usage(data: &Value, estimated: u64) {
@@ -342,6 +465,7 @@ mod tests {
             overflow: Some(crate::overflow::OverflowRewrite::new(
                 258_400,
                 crate::overflow::Estimate::Computed(estimate),
+                crate::overflow::OverflowDialect::Codex,
             )),
         }
     }

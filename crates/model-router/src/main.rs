@@ -31,8 +31,12 @@ enum Command {
     ConfigTemplate,
     /// Download and verify the pinned `CLIProxyAPI` release (no-op when cached).
     EnsureUpstream,
-    /// Run `CLIProxyAPI`'s interactive Codex OAuth login for the managed upstream.
-    Login,
+    /// Run `CLIProxyAPI`'s interactive OAuth login for the managed upstream.
+    Login {
+        /// Which provider to log in to.
+        #[arg(value_enum, default_value_t = LoginProvider::Codex)]
+        provider: LoginProvider,
+    },
     /// Check configured openai-providers against their /models endpoints
     /// (never prints API keys).
     VerifyProviders {
@@ -59,6 +63,62 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+}
+
+/// Which OAuth provider `login` targets. A fieldless enum because
+/// `ValueEnum` requires one; the per-provider data lives in
+/// [`LoginDescriptor`].
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum LoginProvider {
+    #[default]
+    Codex,
+    Grok,
+}
+
+/// Everything that differs between the OAuth flows. Adding a provider is one
+/// more descriptor — `CLIProxyAPI` 7.2.110 also ships `-claude-login`,
+/// `-kimi-login`, and `-antigravity-login` — never a second copy of the
+/// login routine.
+struct LoginDescriptor {
+    /// Human name used in the prompts.
+    label: &'static str,
+    /// The child binary's login flag.
+    flag: &'static str,
+    /// Auth-file prefix this flow writes.
+    auth_prefix: &'static str,
+    /// Whether the router would actually use this provider's credential.
+    /// Keeps the login routine provider-blind — no `match` on the variant.
+    is_enabled: fn(&Config) -> bool,
+    /// Printed before spawning the child, only when the flow does something
+    /// the child's own output doesn't explain (Codex opens a browser).
+    /// `None` when the child's output speaks for itself.
+    start_notice: Option<&'static str>,
+}
+
+impl LoginProvider {
+    const fn descriptor(self) -> &'static LoginDescriptor {
+        match self {
+            Self::Codex => &LoginDescriptor {
+                label: "Codex",
+                flag: "-codex-login",
+                auth_prefix: model_router::state::CODEX_AUTH_PREFIX,
+                // Codex is the default family; nothing gates it.
+                is_enabled: |_| true,
+                start_notice: Some(
+                    "Opening the Codex OAuth flow (browser + loopback callback on port 1455)...",
+                ),
+            },
+            Self::Grok => &LoginDescriptor {
+                label: "Grok",
+                flag: "-xai-login",
+                auth_prefix: model_router::state::GROK_AUTH_PREFIX,
+                is_enabled: |config| config.grok.enabled,
+                // The xAI device flow prints its own verification URL and
+                // code; nothing to add.
+                start_notice: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -115,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Prefetch => Ok(()),
-        Command::Login => login(&dirs, &config_path).await,
+        Command::Login { provider } => login(&dirs, &config_path, provider).await,
         Command::VerifyProviders { name, json } => {
             let reports = model_router::verify::run(&config_path, name.as_deref()).await?;
             let (rendered, all_ok) = model_router::verify::render(&reports);
@@ -248,37 +308,63 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
-async fn login(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()> {
+async fn login(
+    dirs: &Dirs,
+    config_path: &std::path::Path,
+    provider: LoginProvider,
+) -> anyhow::Result<()> {
+    let descriptor = provider.descriptor();
     let config = Config::load(config_path)?;
     let upstream = config.cliproxy_upstream().clone();
     anyhow::ensure!(
         upstream.mode == UpstreamMode::Managed,
-        "`model-router login` manages Codex auth for managed mode; [upstreams.cliproxy] is {:?}",
+        "`model-router login` manages OAuth for managed mode; [upstreams.cliproxy] is {:?}",
         upstream.mode
+    );
+    // Refuse a login the router would then ignore: without the family
+    // enabled, no route uses the credential and it would sit unused.
+    anyhow::ensure!(
+        (descriptor.is_enabled)(&config),
+        "{} routing is off; enable it in {} before logging in",
+        descriptor.label,
+        config_path.display()
     );
     let binary = acquire::ensure_upstream(dirs).await?;
     let paths = supervisor::prepare_managed_state(dirs, &upstream, &config.openai_providers)?;
-    if let Some(existing) = model_router::state::find_codex_auth(&paths.auth_dir) {
+    if let Some(existing) = model_router::state::find_auth(&paths.auth_dir, descriptor.auth_prefix)
+    {
         println!(
-            "A Codex login already exists at {}; continuing will add another.",
+            "A {} login already exists at {}; continuing will add another.",
+            descriptor.label,
             existing.display()
         );
     }
-    println!("Opening the Codex OAuth flow (browser + loopback callback on port 1455)...");
+    if let Some(notice) = descriptor.start_notice {
+        println!("{notice}");
+    }
     let status = std::process::Command::new(&binary)
         .arg("-config")
         .arg(&paths.upstream_config)
-        .arg("-codex-login")
+        .arg(descriptor.flag)
         .status()
         .with_context(|| format!("failed to run {}", binary.display()))?;
-    anyhow::ensure!(status.success(), "codex login exited with {status}");
-    match model_router::state::find_codex_auth(&paths.auth_dir) {
+    anyhow::ensure!(
+        status.success(),
+        "{} login exited with {status}",
+        descriptor.label
+    );
+    // The child writes the xAI credential world-readable, so harden before
+    // reporting success. One enumeration serves both the check and the
+    // report.
+    model_router::state::harden_auth_files(&paths.auth_dir)?;
+    match model_router::state::auth_files(&paths.auth_dir, descriptor.auth_prefix)?.first() {
         Some(auth) => {
             println!("Login stored at {}", auth.display());
             Ok(())
         }
         None => anyhow::bail!(
-            "login finished but no codex-*.json appeared in {}",
+            "login finished but no {}*.json appeared in {}",
+            descriptor.auth_prefix,
             paths.auth_dir.display()
         ),
     }

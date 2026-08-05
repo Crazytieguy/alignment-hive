@@ -1,0 +1,10 @@
+data: {"type":"response.created","response":{"id":"synthetic"}}
+
+: a comment line, ignored per SSE
+id: 7
+retry: 1000
+data: {"type":"response.in_progress"}
+
+data: {"sequence_number":3,"type":"response.output_item.done",
+data: "item":{"id":"ws_synthetic","type":"web_search_call","status":"completed","action":{"type":"search","query":"synthetic","sources":[{"type":"url","url":"https://example.test/a"},{"type":"url","url":"https://example.test/b"}]}},"output_index":1}
+

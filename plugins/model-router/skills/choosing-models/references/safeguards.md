@@ -5,7 +5,8 @@ deciding factor (e.g. legitimate bio/cyber research that frontier-lab
 classifiers refuse). Anthropic tiers per model under
 [RSP v3.4, eff. 2026-07-08](https://www.anthropic.com/rsp); OpenAI under the
 [Preparedness Framework v2](https://deploymentsafety.openai.com/gpt-5-6);
-Kimi and GLM publish no vendor safety framework.
+xAI publishes a framework without quantitative thresholds; Kimi and GLM
+publish no vendor safety framework.
 
 - **Fable 5 / Mythos 5** — ASL-3 plus a Mythos-class classifier layer that
   reroutes cyber, bio/chem, and distillation queries (<5% of sessions,
@@ -33,6 +34,14 @@ Kimi and GLM publish no vendor safety framework.
 - **GPT-5.6 (sol/terra/luna, via Codex)** — "High" (not Critical) in both
   bio/chem and cyber: real-time monitors plus account-level enforcement.
   [System card, Jul 2026](https://deploymentsafety.openai.com/gpt-5-6).
+- **Grok 4.5 (xAI)** — the lightest safeguard stack of the framework-backed
+  vendors: a bio/chem input filter on all surfaces (API included) and
+  refusal training, with **no cyber classifier** and no deployed real-time
+  monitoring; the
+  [xAI Frontier AI Framework, eff. 2026-06-30](https://media.x.ai/v1/website/xai-frontier-artificial-intelligence-framework-30-june-2026-99c40684.pdf)
+  commits filters to CBRN topics only and contains no quantitative
+  thresholds. grok-4.5 itself shipped with **no model card**, so what is
+  actually deployed on it is uncertain.
 - **Kimi K2.7 / K3** — no published vendor safety framework or model-card
   safety section (checked 2026-07-21:
   [github.com/moonshotai/kimi-k2](https://github.com/moonshotai/kimi-k2)).

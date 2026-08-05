@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth, OS service, and Claude Code settings wiring.
+description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth, optional Grok (xAI) family, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -88,9 +88,10 @@ macOS and Linux only.
    a Claude Code release drop the flag.
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
    served through an OpenAI-compatible host they have an API key for — if
-   yes, read `references/open-weights.md` and follow it; (b) agents for
-   other GPT model x effort combinations — if yes, follow
-   `references/custom-agents.md`.
+   yes, read `references/open-weights.md` and follow it; (b) Grok models
+   under their own xAI subscription login (no API key) — if yes, read
+   `references/grok.md` and follow it; (c) agents for other model x effort
+   combinations — if yes, follow `references/custom-agents.md`.
 
 ## Repair
 

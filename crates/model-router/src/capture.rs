@@ -20,6 +20,10 @@ pub struct CaptureSink {
 #[derive(Clone, Debug)]
 pub struct RequestCapture {
     pub branch: String,
+    /// Model family label from `RoutingDecision::family_label` — `claude`,
+    /// `gpt`, `grok`, or `openai-compat`. `branch` alone cannot say which,
+    /// because every routed family shares one branch.
+    pub family: String,
     pub model: Option<String>,
     pub method: String,
     pub path: String,
@@ -48,6 +52,7 @@ pub struct BoundedResponseBody {
 struct CaptureRecord {
     timestamp: String,
     branch: String,
+    family: String,
     model: Option<String>,
     method: String,
     path: String,
@@ -98,6 +103,7 @@ impl CaptureSink {
         let record = CaptureRecord {
             timestamp: Utc::now().to_rfc3339(),
             branch: request.branch,
+            family: request.family,
             model: request.model,
             method: request.method,
             path: request.path,
@@ -299,6 +305,7 @@ mod tests {
         let outgoing_headers = request_headers(&HeaderMap::new(), true, false, Some(&credential));
         let request = RequestCapture {
             branch: "gpt".to_string(),
+            family: "gpt".to_string(),
             model: Some("claude-gpt-test".to_string()),
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),

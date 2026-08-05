@@ -7,7 +7,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::{Router, routing::any};
 use futures_util::StreamExt;
-use model_router::config::{CaptureConfig, Config, ModelRoute, UpstreamConfig, UpstreamMode};
+use model_router::config::{
+    CaptureConfig, Config, ModelRoute, UpstreamConfig, UpstreamMode, XaiSearchLimits,
+};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 use tower::ServiceExt;
@@ -622,6 +624,7 @@ async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
             upstream: "cliproxy".to_string(),
             upstream_model: "kimi-k3".to_string(),
             display_name: "Kimi K3".to_string(),
+            family: model_router::config::ModelFamily::OpenAiCompat,
             context_window: Some(1_000_000),
             context_window_scaling: true,
             usage_scale: None,
@@ -973,7 +976,10 @@ async fn websearch_subcall_is_answered_from_alpha_search() {
     assert_eq!(request.uri, "/v1/alpha/search");
     assert_eq!(request.headers["authorization"], "Bearer gateway-secret");
     let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-    assert_eq!(document["model"], "gpt-test");
+    // The alpha backend is ChatGPT's Codex search endpoint, reached under the
+    // Codex credential, so it is addressed with a Codex slug — not with the
+    // requesting route's upstream model (here the non-Codex `gpt-test`).
+    assert_eq!(document["model"], "gpt-5.6-sol");
     assert_eq!(
         document["commands"]["search_query"][0]["q"],
         "rust axum shutdown"
@@ -1778,4 +1784,692 @@ async fn gpt_branch_rewrites_cache_identity_headers_to_the_shared_prefix_key() {
     }
     // A different system head is a different identity.
     assert_ne!(forwarded[2].headers["x-claude-code-session-id"], key);
+}
+
+// ---- Grok-origin WebSearch: xAI-native search ----
+
+/// A config with both a Grok route and a GPT route, so the gate is exercised
+/// against a real choice rather than a single-family config.
+fn grok_websearch_config(fake_address: std::net::SocketAddr) -> Config {
+    Config {
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        models: vec![
+            ModelRoute {
+                routing_id: "grok-4.5".to_string(),
+                upstream: "codex".to_string(),
+                upstream_model: "grok-4.5".to_string(),
+                display_name: "Grok 4.5".to_string(),
+                family: model_router::config::ModelFamily::Grok,
+                ..Default::default()
+            },
+            ModelRoute {
+                routing_id: "claude-gpt-test".to_string(),
+                upstream: "codex".to_string(),
+                upstream_model: "gpt-test".to_string(),
+                display_name: "GPT Test".to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Config::default()
+    }
+}
+
+/// `grok_websearch_config` plus the generated `claude-`-prefixed Grok alias.
+fn grok_alias_websearch_config(fake_address: std::net::SocketAddr) -> Config {
+    let mut config = grok_websearch_config(fake_address);
+    config.models.push(ModelRoute {
+        routing_id: "claude-grok-4.5".to_string(),
+        upstream: "codex".to_string(),
+        upstream_model: "grok-4.5".to_string(),
+        display_name: "Grok 4.5".to_string(),
+        family: model_router::config::ModelFamily::Grok,
+        ..Default::default()
+    });
+    config
+}
+
+/// The xAI Responses stream: a completed hosted `web_search_call` carrying
+/// sources, then (optionally) an open-ended tail the router must not wait for.
+fn xai_search_sse(urls: &[&str], hold_open: bool) -> Response {
+    let sources = urls
+        .iter()
+        .map(|url| serde_json::json!({"type": "url", "url": url}))
+        .collect::<Vec<_>>();
+    let chunks = [
+        serde_json::json!({"type": "response.created", "response": {"id": "r1"}}),
+        serde_json::json!({"type": "response.output_item.done", "item": {
+            "id": "ws_1", "type": "web_search_call", "status": "completed",
+            "action": {"type": "search", "query": "bun release notes",
+                       "sources": sources}}}),
+    ]
+    .iter()
+    .map(|data| Bytes::from(format!("event: x\ndata: {data}\n\n")))
+    .collect();
+    sse_response(chunks, hold_open)
+}
+
+fn terminal_only_sse() -> Response {
+    sse_response(
+        [
+            serde_json::json!({"type": "response.created", "response": {"id": "r1"}}),
+            serde_json::json!({"type": "response.completed"}),
+        ]
+        .iter()
+        .map(|data| Bytes::from(format!("event: x\ndata: {data}\n\n")))
+        .collect(),
+        false,
+    )
+}
+
+/// Drives a main-loop turn on `turn_model` — whose response streams a
+/// `WebSearch` tool_use, so the tap records that origin — and then the
+/// follow-up sub-call carried by `subcall_model`. Returns the sub-call's body.
+async fn turn_then_subcall(app: axum::Router, turn_model: &str, subcall_model: &str) -> String {
+    let turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body(turn_model)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), StatusCode::OK);
+    let mut stream = turn.into_body().into_data_stream();
+    read_until(&mut stream, "content_block_stop").await;
+
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(origin_subcall_body(subcall_model)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+fn observed_paths(observed: &[ObservedRequest]) -> Vec<&str> {
+    observed
+        .iter()
+        .map(|request| request.uri.as_str())
+        .collect()
+}
+
+/// I1: a Grok agent's search is answered from xAI's hosted `web_search` —
+/// never from alpha/search, never from Anthropic — and the router answers as
+/// soon as the sources arrive, without waiting for the stream to end.
+#[tokio::test]
+async fn grok_origin_websearch_is_answered_from_xai_native_search() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => {
+                let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+                assert_eq!(document["model"], "grok-4.5");
+                assert_eq!(document["input"], "bun release notes");
+                assert_eq!(document["tools"][0]["type"], "web_search");
+                assert_eq!(document["tool_choice"], "required");
+                assert_eq!(document["stream"], true);
+                assert_eq!(parts.headers["authorization"], "Bearer gateway-secret");
+                // Held open: passing proves the router does not wait for the
+                // synthesis tail.
+                xai_search_sse(&["https://bun.sh/blog", "https://bun.sh/docs"], true)
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..grok_websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
+
+    assert!(body.contains(r#""type":"web_search_tool_result""#));
+    assert!(body.contains("https://bun.sh/blog"));
+    assert!(body.contains("https://bun.sh/docs"));
+    // No titles exist on this path: the URL is its own label.
+    assert!(body.contains(r#""title":"https://bun.sh/blog""#));
+    assert!(!body.contains("web_search_tool_result_error"));
+
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/responses"],
+        "the search must go to /v1/responses and nowhere else"
+    );
+}
+
+/// I2: an xAI search that errors is reported as a failed search. It must not
+/// fall back to alpha/search, to the origin route, or to Anthropic.
+#[tokio::test]
+async fn grok_origin_websearch_failure_is_visible_and_never_falls_back() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => {
+                let mut response = Response::new(Body::from("upstream exploded"));
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..grok_websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
+
+    assert!(body.contains("web_search_tool_result_error"));
+    assert!(body.contains(r#""error_code":"unavailable""#));
+    assert!(body.contains("xAI search returned HTTP 500"));
+    // A failed search must not spend the session's WebSearch budget.
+    assert!(!body.contains("web_search_requests"));
+
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/responses"],
+        "no alpha/search or scrape fallback is permitted"
+    );
+}
+
+/// I3: a stream that completes without a hosted search is a failed search,
+/// not an empty one — and never a fallback.
+#[tokio::test]
+async fn grok_origin_websearch_without_sources_fails_strictly() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => terminal_only_sse(),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let Some((cpa_address, _cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..grok_websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
+
+    assert!(body.contains("web_search_tool_result_error"));
+    assert!(body.contains("returned no sources"));
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+}
+
+/// I4: a GPT origin keeps using alpha/search even when Grok routes exist, with
+/// the Codex slug pin intact.
+#[tokio::test]
+async fn gpt_origin_still_uses_alpha_search_when_grok_routes_exist() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/alpha/search" => {
+                let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+                assert_eq!(document["model"], "gpt-5.6-sol");
+                alpha_results_response()
+            }
+            path => panic!("unexpected CPA path {path} (xAI search is Grok-only)"),
+        }
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let app = model_router::proxy::app(grok_websearch_config(cpa_address))
+        .await
+        .unwrap();
+    let body = turn_then_subcall(app, "claude-gpt-test", "claude-sonnet-4-5").await;
+
+    assert!(body.contains("https://bun.sh/blog"));
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/alpha/search"]
+    );
+}
+
+/// I5: a Claude subagent searching inside a Grok session is still answered by
+/// Anthropic — the Grok carrier must not capture it.
+#[tokio::test]
+async fn claude_origin_under_a_grok_carrier_still_goes_to_anthropic() {
+    fn anthropic(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        assert_eq!(parts.uri.path(), "/v1/messages");
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        assert_eq!(document["model"], "claude-haiku-4-5");
+        Response::new(Body::from(
+            serde_json::json!({
+                "id": "msg_native", "type": "message", "role": "assistant",
+                "model": "claude-haiku-4-5", "stop_reason": "end_turn",
+                "content": [
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_n",
+                     "content": [{"type": "web_search_result", "title": "Bun releases",
+                                  "url": "https://bun.sh/blog"}]},
+                ],
+                "usage": {"input_tokens": 100, "output_tokens": 200},
+            })
+            .to_string(),
+        ))
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!(
+            "a Claude-origin search must not reach the routed upstream, got {}",
+            parts.uri.path()
+        );
+    }
+    let Some((cpa_address, _)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..grok_websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "claude-haiku-4-5", "grok-4.5").await;
+    assert!(body.contains("https://bun.sh/blog"));
+    assert!(!body.contains("web_search_tool_result_error"));
+}
+
+/// I6: after a TRANSIENT Anthropic failure the Claude-origin sub-call falls
+/// through to the routed path — and must still never reach xAI, even though
+/// the carrying route is Grok. This is the leak a carrier-based gate ships.
+#[tokio::test]
+async fn claude_origin_transient_anthropic_failure_under_a_grok_carrier_never_reaches_xai() {
+    fn anthropic(_parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+        if document.get("tool_choice").is_none() {
+            return sse_response(websearch_tool_use_sse(), false);
+        }
+        // 503 is fallback-eligible: the router continues down the GPT path.
+        let mut response = Response::new(Body::from("anthropic overloaded"));
+        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        response
+    }
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        assert_ne!(
+            parts.uri.path(),
+            "/v1/responses",
+            "a Claude-origin search must never reach xAI's search"
+        );
+        assert_eq!(parts.uri.path(), "/v1/alpha/search");
+        alpha_results_response()
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
+        return;
+    };
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..grok_websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "claude-haiku-4-5", "grok-4.5").await;
+
+    assert!(body.contains("https://bun.sh/blog"));
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/alpha/search"],
+        "the fallback stays on the Codex search backend"
+    );
+}
+
+/// I8: a GPT origin carried by a DIFFERENT GPT route keeps using the
+/// carrier's own arguments. Both routes are Codex-native and distinct, so the
+/// alpha slug actually distinguishes them: substituting the origin for the
+/// carrier would be visible.
+#[tokio::test]
+async fn gpt_origin_on_a_different_gpt_carrier_keeps_the_carriers_arguments() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/alpha/search" => {
+                let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+                assert_eq!(
+                    document["model"], "gpt-5.6-terra",
+                    "the alpha call must carry the CARRIER's model, not the origin's"
+                );
+                alpha_results_response()
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let mut config = grok_websearch_config(cpa_address);
+    // Two distinct Codex-native routes: `alpha_search_model` passes each
+    // through unchanged, so origin and carrier stay tellable apart.
+    config.models.push(ModelRoute {
+        routing_id: "gpt-5.6-sol".to_string(),
+        upstream: "codex".to_string(),
+        upstream_model: "gpt-5.6-sol".to_string(),
+        display_name: "GPT-5.6 Sol".to_string(),
+        ..Default::default()
+    });
+    config.models.push(ModelRoute {
+        routing_id: "gpt-5.6-terra".to_string(),
+        upstream: "codex".to_string(),
+        upstream_model: "gpt-5.6-terra".to_string(),
+        display_name: "GPT-5.6 Terra".to_string(),
+        ..Default::default()
+    });
+    let app = model_router::proxy::app(config).await.unwrap();
+
+    // Sol subagent turn records the origin; the sub-call is carried by Terra.
+    let body = turn_then_subcall(app, "gpt-5.6-sol", "gpt-5.6-terra").await;
+    assert!(body.contains("https://bun.sh/blog"));
+    // The synthesized answer is attributed to the carrying route, unchanged.
+    assert!(body.contains(r#""model":"gpt-5.6-terra""#), "{body}");
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/alpha/search"],
+        "a GPT origin never reaches xAI, whatever carries it"
+    );
+}
+
+// ---- xAI search stream ownership ----
+
+/// An SSE body whose tail is produced only if the consumer keeps reading:
+/// the tail future sets `consumed` when polled, so a client that walked away
+/// (or a spawned task that does nothing) cannot set it.
+fn sse_with_observable_tail(
+    chunks: Vec<Bytes>,
+    head_delay: Duration,
+    tail_delay: Duration,
+    consumed: &'static std::sync::atomic::AtomicBool,
+) -> Response {
+    let head = futures_util::stream::once(async move {
+        tokio::time::sleep(head_delay).await;
+        Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b":warmup\n\n"))
+    })
+    .chain(futures_util::stream::iter(chunks.into_iter().map(Ok)));
+    let tail = futures_util::stream::once(async move {
+        tokio::time::sleep(tail_delay).await;
+        consumed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Bytes::from_static(
+            b"event: x\ndata: {\"type\":\"response.completed\"}\n\n",
+        ))
+    });
+    let mut response = Response::new(Body::from_stream(head.chain(tail)));
+    response.headers_mut().insert(
+        "content-type",
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    response
+}
+
+fn source_event(url: &str) -> Bytes {
+    let data = serde_json::json!({"type": "response.output_item.done", "item": {
+        "id": "ws_1", "type": "web_search_call", "status": "completed",
+        "action": {"type": "search", "query": "bun release notes",
+                   "sources": [{"type": "url", "url": url}]}}});
+    Bytes::from(format!("event: x\ndata: {data}\n\n"))
+}
+
+async fn wait_for(flag: &std::sync::atomic::AtomicBool, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+static I1_TAIL_CONSUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// I1 (strengthened): the answer arrives at the harvest, and the stream is
+/// still read to its end afterwards. An empty spawned task would fail this.
+#[tokio::test]
+async fn grok_origin_search_is_answered_at_the_harvest_and_the_tail_is_consumed() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => sse_with_observable_tail(
+                vec![source_event("https://bun.sh/blog")],
+                Duration::ZERO,
+                Duration::from_millis(300),
+                &I1_TAIL_CONSUMED,
+            ),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let Some((cpa_address, _)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let app = model_router::proxy::app(grok_websearch_config(cpa_address))
+        .await
+        .unwrap();
+    let started = Instant::now();
+    // The router owns the search registry, so it must outlive the request the
+    // way it does in a running gateway.
+    let keepalive = app.clone();
+    let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
+    let answered_in = started.elapsed();
+
+    assert!(body.contains("https://bun.sh/blog"));
+    // Answered without waiting for the tail...
+    assert!(
+        answered_in < Duration::from_millis(300),
+        "answer waited for the stream tail ({answered_in:?})"
+    );
+    assert!(
+        !I1_TAIL_CONSUMED.load(std::sync::atomic::Ordering::SeqCst),
+        "the tail cannot have been consumed before it was sent"
+    );
+    // ...and the stream is still read to completion afterwards.
+    assert!(
+        wait_for(&I1_TAIL_CONSUMED, Duration::from_secs(5)).await,
+        "the stream tail was never consumed: the connection was abandoned"
+    );
+    drop(keepalive);
+}
+
+static TIMEOUT_TAIL_CONSUMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The harvest deadline stops the handler WAITING; it must not cancel the
+/// upstream read. Otherwise the timeout path recreates the very disconnect
+/// that quarantines the child's xAI auth.
+#[tokio::test]
+async fn a_timed_out_search_still_reads_its_stream_to_the_end() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            // Sources arrive well after the handler's deadline.
+            "/v1/responses" => sse_with_observable_tail(
+                vec![source_event("https://bun.sh/blog")],
+                Duration::from_millis(400),
+                Duration::from_millis(200),
+                &TIMEOUT_TAIL_CONSUMED,
+            ),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let Some((cpa_address, _)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let app = model_router::proxy::app(Config {
+        xai_search: XaiSearchLimits {
+            harvest_timeout: Duration::from_millis(100),
+            ..Default::default()
+        },
+        ..grok_websearch_config(cpa_address)
+    })
+    .await
+    .unwrap();
+    let keepalive = app.clone();
+    let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
+
+    // The client sees a failed search rather than a hung request...
+    assert!(body.contains("web_search_tool_result_error"));
+    assert!(body.contains("did not return sources in time"));
+    // ...while the abandoned-looking stream is still read to its end.
+    assert!(
+        wait_for(&TIMEOUT_TAIL_CONSUMED, Duration::from_secs(5)).await,
+        "the timeout cancelled the upstream read: this is the quarantine bug"
+    );
+    drop(keepalive);
+}
+
+static SHUTDOWN_TAIL_CONSUMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Shutdown waits for in-flight search streams instead of dropping them: a
+/// dropped stream is a disconnect, and a disconnect is what quarantines the
+/// child's xAI auth — at the worst possible moment, a restart.
+#[tokio::test]
+async fn shutdown_waits_for_in_flight_search_streams() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => sse_with_observable_tail(
+                vec![source_event("https://bun.sh/blog")],
+                Duration::ZERO,
+                Duration::from_millis(400),
+                &SHUTDOWN_TAIL_CONSUMED,
+            ),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(_) => return,
+    };
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(model_router::proxy::serve_listener_with_drain(
+        listener,
+        grok_websearch_config(cpa_address),
+        None,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+        Duration::from_secs(10),
+    ));
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{address}");
+    let turn = client
+        .post(format!("{base}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(websearch_declaring_body("grok-4.5"))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = turn.bytes_stream();
+    let mut seen = String::new();
+    while let Some(chunk) = stream.next().await {
+        seen.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        if seen.contains("content_block_stop") {
+            break;
+        }
+    }
+    drop(stream);
+    let subcall = client
+        .post(format!("{base}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(origin_subcall_body("claude-sonnet-4-5"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        subcall
+            .text()
+            .await
+            .unwrap()
+            .contains("https://bun.sh/blog")
+    );
+    // The client has its answer while the stream tail is still outstanding.
+    assert!(!SHUTDOWN_TAIL_CONSUMED.load(std::sync::atomic::Ordering::SeqCst));
+
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    assert!(
+        SHUTDOWN_TAIL_CONSUMED.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown returned while a search stream was still open"
+    );
+    // Shutting down opened nothing new; it only finished what was running.
+    let observed = cpa_observed.lock().await;
+    assert_eq!(
+        observed_paths(&observed)
+            .iter()
+            .filter(|path| **path == "/v1/responses")
+            .count(),
+        1
+    );
+}
+
+/// I9: the generated `claude-`-prefixed Grok alias is gated by family, not by
+/// the routing-id string.
+#[tokio::test]
+async fn claude_prefixed_grok_alias_is_gated_by_family() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => xai_search_sse(&["https://bun.sh/blog"], false),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
+        return;
+    };
+    let app = model_router::proxy::app(grok_alias_websearch_config(cpa_address))
+        .await
+        .unwrap();
+    let body = turn_then_subcall(app, "claude-grok-4.5", "claude-sonnet-4-5").await;
+
+    assert!(body.contains("https://bun.sh/blog"));
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/responses"]
+    );
 }
