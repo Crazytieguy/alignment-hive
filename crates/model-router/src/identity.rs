@@ -18,6 +18,34 @@ pub fn identity_text(display_name: &str) -> String {
     )
 }
 
+/// Appended to the identity block on subagent conversations only. GPT
+/// models follow the harness's delegation-encouraging tool and skill copy
+/// literally, so without a counterweight a subagent re-delegates (observed:
+/// read choosing-models, then fan out); no harness layer tells it not to.
+const SUBAGENT_TEXT: &str = "You are running as a subagent: complete the \
+     task yourself with your own tools, and do not launch further agents \
+     unless your task explicitly calls for it.";
+
+/// Whether the request is a subagent conversation, per the
+/// `cc_is_subagent=true` flag Claude Code stamps into the
+/// billing-attribution system block. The flag is constant across a
+/// conversation's requests, so the derived identity text — and with it the
+/// shared-prefix cache identity — is too.
+fn is_subagent(system: Option<&Value>) -> bool {
+    let Some(Value::Array(blocks)) = system else {
+        return false;
+    };
+    blocks.iter().any(|block| {
+        block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| {
+                text.trim_start().starts_with("x-anthropic-billing-header:")
+                    && text.contains("cc_is_subagent=true")
+            })
+    })
+}
+
 /// Prepends the identity system block to an Anthropic Messages request body.
 ///
 /// The block leads the system prompt because its copy frames everything
@@ -34,6 +62,9 @@ pub fn identity_text(display_name: &str) -> String {
 /// - any other `system` shape → error (the caller must reject the request
 ///   rather than forward a body it could not rewrite)
 ///
+/// On subagent conversations (detected via [`is_subagent`]) the block also
+/// carries the do-your-own-work sentence in [`SUBAGENT_TEXT`].
+///
 /// The identity block never carries `cache_control`.
 ///
 /// # Errors
@@ -46,7 +77,12 @@ pub fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("request body is not a JSON object"))?;
 
-    let identity_block = json!({"type": "text", "text": identity_text(display_name)});
+    let mut text = identity_text(display_name);
+    if is_subagent(object.get("system")) {
+        text.push(' ');
+        text.push_str(SUBAGENT_TEXT);
+    }
+    let identity_block = json!({"type": "text", "text": text});
     let system = match object.remove("system") {
         None => json!([identity_block]),
         Some(Value::String(original)) => {
@@ -139,6 +175,32 @@ mod tests {
     fn non_object_body_is_rejected() {
         assert!(inject_identity(b"[]", "GPT Test").is_err());
         assert!(inject_identity(b"not json", "GPT Test").is_err());
+    }
+
+    #[test]
+    fn subagent_attribution_flag_appends_the_subagent_sentence() {
+        let body = br#"{"model":"gpt-test","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.222; cch=6e11f; cc_is_subagent=true;"},{"type":"text","text":"Complete the task you are given."}],"messages":[]}"#;
+        let result = parsed(&inject_identity(body, "GPT Test").unwrap());
+        let text = result["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains("running as a subagent"));
+        assert!(text.contains("do not launch further agents"));
+    }
+
+    #[test]
+    fn main_conversations_do_not_get_the_subagent_sentence() {
+        for body in [
+            // Attribution block without the flag.
+            br#"{"model":"gpt-test","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.222; cch=6e11f;"},{"type":"text","text":"main prompt"}],"messages":[]}"#.as_slice(),
+            // The flag outside the attribution block does not count.
+            br#"{"model":"gpt-test","system":[{"type":"text","text":"mentions cc_is_subagent=true in prose"}],"messages":[]}"#.as_slice(),
+            // String and absent system shapes carry no attribution block.
+            br#"{"model":"gpt-test","system":"main prompt","messages":[]}"#.as_slice(),
+            br#"{"model":"gpt-test","messages":[]}"#.as_slice(),
+        ] {
+            let result = parsed(&inject_identity(body, "GPT Test").unwrap());
+            let text = result["system"][0]["text"].as_str().unwrap();
+            assert!(!text.contains("running as a subagent"), "{text}");
+        }
     }
 
     #[test]
