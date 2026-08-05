@@ -363,7 +363,8 @@ fn upstream_checks(
 ///
 /// Split from the transport so every outcome is unit-testable.
 fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
-    // Aliases share one upstream ID; report each ID once, grouped by family.
+    // Several routes can share one upstream ID; report each ID once, grouped
+    // by family.
     let mut wanted: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for route in config
         .effective_models()
@@ -635,19 +636,17 @@ mod tests {
     }
 
     #[test]
-    fn aliases_sharing_an_upstream_id_are_reported_once() {
-        // grok-4.5 and claude-grok-4.5 are two routes, one upstream ID.
+    fn routes_sharing_an_upstream_id_are_reported_once() {
+        // Two hand-written routes, one upstream ID.
+        let config = config(
+            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"gpt-test\"\ndisplay-name = \"A\"\n\n\
+             [[models]]\nrouting-id = \"b\"\nupstream-model = \"gpt-test\"\ndisplay-name = \"B\"\n",
+        );
         let body = models_body(&[]);
-        let check = routed_models_check(&grok_enabled(), Ok(&body));
+        let check = routed_models_check(&config, Ok(&body));
         assert!(!check.ok);
         assert_eq!(
-            check.detail.matches("grok-4.5").count(),
-            1,
-            "{}",
-            check.detail
-        );
-        assert_eq!(
-            check.detail.matches("gpt-5.6-sol").count(),
+            check.detail.matches("gpt-test").count(),
             1,
             "{}",
             check.detail

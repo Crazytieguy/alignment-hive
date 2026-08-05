@@ -2120,10 +2120,9 @@ mod tests {
         };
         let known = [
             route("grok-4.5", ModelFamily::Grok),
-            route("claude-grok-4.5", ModelFamily::Grok),
             route("gpt-5.6-sol", ModelFamily::Gpt),
         ];
-        let (grok, gpt) = (&known[0], &known[2]);
+        let (grok, gpt) = (&known[0], &known[1]);
         let resolve = |origin: Option<Origin>, carrier| resolve(&known, origin.as_ref(), carrier);
         let gpt_origin = |routing_id: &str| {
             Some(Origin::Gpt {
@@ -2133,12 +2132,6 @@ mod tests {
         let is = |routing_id: &str| Some(routing_id.to_string());
         // A Grok origin decides, whatever it is riding on.
         assert_eq!(resolve(gpt_origin("grok-4.5"), gpt), is("grok-4.5"));
-        // The generated `claude-`-prefixed alias is gated by family, not by
-        // the routing-id string.
-        assert_eq!(
-            resolve(gpt_origin("claude-grok-4.5"), gpt),
-            is("claude-grok-4.5")
-        );
         // A GPT origin never does — not even on a Grok carrier, and the
         // carrier's own arguments are left to the existing arms.
         assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), grok), None);

@@ -1,6 +1,6 @@
 [package]
 name = "model-router"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 description = "Loopback Anthropic-format gateway routing selected models to a local GPT proxy"
 license = "MIT"

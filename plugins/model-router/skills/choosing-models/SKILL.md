@@ -144,9 +144,6 @@ shipped agents instead — `gpt-5.6-sol(medium)`, `gpt-5.6-sol(high)`,
 combination, Workflow's
 `agent(prompt, {model: 'gpt-5.6-sol', effort: 'low'})` — likewise
 `{model: 'grok-4.5', effort: 'high'}` when the Grok family is configured.
-Prefer the bare `gpt-5.6-*` / `grok-*` routing IDs over the `claude-`
-aliases: only the bare IDs pick up the declared context window
-(`CLAUDE_CODE_MAX_CONTEXT_TOKENS`).
 
 For Claude models, include the `[1m]` suffix — `fable[1m]`, `sonnet[1m]`,
 `opus[1m]` — in agent definitions and Workflow `model` params, or omit

@@ -12,7 +12,7 @@ Anthropic-format gateway on your machine:
   `api.anthropic.com`, with your existing claude.ai OAuth login and
   subscription billing untouched.
 - Requests for an explicit allowlist of GPT routing IDs (e.g.
-  `claude-gpt-5.6-sol`) are stripped of all Anthropic credentials and
+  `gpt-5.6-sol`) are stripped of all Anthropic credentials and
   forwarded to a supervised local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
   instance, which translates them to the Codex protocol under your separate
   Codex subscription OAuth. No API keys required on either side.

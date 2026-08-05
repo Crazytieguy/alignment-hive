@@ -351,7 +351,7 @@ impl ModelRoute {
         let actual = self
             .context_window
             .filter(|_| self.context_window_scaling)?;
-        let client = client_context_window(&self.routing_id, declared);
+        let client = client_context_window(declared);
         (client != actual).then(|| UsageScale::new(client, actual))?
     }
 }
@@ -463,7 +463,7 @@ fn template_models_section(models: &[ModelRoute]) -> String {
 fn template_grok_section() -> String {
     let routes = GROK_MODELS
         .into_iter()
-        .map(|(model, _, window)| format!("#   {model} / claude-{model} ({window} tokens)"))
+        .map(|(model, _, window)| format!("#   {model} ({window} tokens)"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -508,26 +508,22 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 # What Claude Code believes routed models' context windows are. Read from
 # ~/.claude/settings.json (or the project's) at startup, so it normally needs
 # no entry here — set it only when a settings file the service cannot see
-# holds the real value. Note the variable is ignored for model IDs starting
-# with `claude-`, which always get Claude Code's built-in 200000 default.
+# holds the real value.
 # declared-context-window = 258400
 "#;
 
 fn default_models() -> Vec<ModelRoute> {
     let [sol, terra, luna] = CODEX_NATIVE_MODELS;
     [
-        ("claude-gpt-5.6-sol", sol, "GPT-5.6 Sol"),
-        ("claude-gpt-5.6-terra", terra, "GPT-5.6 Terra"),
-        ("claude-gpt-5.6-luna", luna, "GPT-5.6 Luna"),
-        ("gpt-5.6-sol", sol, "GPT-5.6 Sol"),
-        ("gpt-5.6-terra", terra, "GPT-5.6 Terra"),
-        ("gpt-5.6-luna", luna, "GPT-5.6 Luna"),
+        (sol, "GPT-5.6 Sol"),
+        (terra, "GPT-5.6 Terra"),
+        (luna, "GPT-5.6 Luna"),
     ]
     .into_iter()
-    .map(|(routing_id, upstream_model, display_name)| ModelRoute {
-        routing_id: routing_id.to_string(),
+    .map(|(model, display_name)| ModelRoute {
+        routing_id: model.to_string(),
         upstream: CLIPROXY_UPSTREAM.to_string(),
-        upstream_model: upstream_model.to_string(),
+        upstream_model: model.to_string(),
         display_name: display_name.to_string(),
         family: ModelFamily::Gpt,
         context_window: Some(GPT_CONTEXT_WINDOW),
@@ -537,24 +533,20 @@ fn default_models() -> Vec<ModelRoute> {
     .collect()
 }
 
-/// The built-in Grok routes. Each model gets the bare routing ID and the
-/// `claude-`-prefixed alias, matching [`default_models`]: only the bare ID
-/// picks up `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, while the prefixed one is what
-/// gateway model discovery accepts.
+/// The built-in Grok routes: one bare routing ID per model, matching
+/// [`default_models`].
 fn grok_models(scaling: bool) -> Vec<ModelRoute> {
     GROK_MODELS
         .into_iter()
-        .flat_map(|(model, display_name, context_window)| {
-            [format!("claude-{model}"), model.to_string()].map(move |routing_id| ModelRoute {
-                routing_id,
-                upstream: CLIPROXY_UPSTREAM.to_string(),
-                upstream_model: model.to_string(),
-                display_name: display_name.to_string(),
-                family: ModelFamily::Grok,
-                context_window: Some(context_window),
-                context_window_scaling: scaling,
-                usage_scale: None,
-            })
+        .map(|(model, display_name, context_window)| ModelRoute {
+            routing_id: model.to_string(),
+            upstream: CLIPROXY_UPSTREAM.to_string(),
+            upstream_model: model.to_string(),
+            display_name: display_name.to_string(),
+            family: ModelFamily::Grok,
+            context_window: Some(context_window),
+            context_window_scaling: scaling,
+            usage_scale: None,
         })
         .collect()
 }
@@ -803,7 +795,7 @@ impl Config {
             );
         }
         if route.context_window_scaling {
-            let client = client_context_window(&route.routing_id, self.declared_context_window);
+            let client = client_context_window(self.declared_context_window);
             // Scaling only ever reports *fewer* tokens than were really used.
             // The reverse would mean claiming a route can hold more than
             // Claude Code thinks, and the compact gate mixes in its own
@@ -955,7 +947,7 @@ impl Config {
 # ingress-token = "replace-with-a-random-token"
 
 # GPT routing is exact-match only. Requests for every other model go to
-# Anthropic. By default the six GPT-5.6 routes below are enabled; writing
+# Anthropic. By default the three GPT-5.6 routes below are enabled; writing
 # any [[models]] entry replaces the whole default list.
 {models}
 # Claude Code implements its WebSearch tool as a side call that runs the
@@ -1202,22 +1194,12 @@ mod tests {
                 .iter()
                 .map(|route| route.routing_id.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "claude-gpt-5.6-sol",
-                "claude-gpt-5.6-terra",
-                "claude-gpt-5.6-luna",
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.6-luna"
-            ]
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
         );
         for example in [
             "#mode = \"managed\"",
             "#mode = \"external\"",
             "#mode = \"stub\"",
-            "#routing-id = \"claude-gpt-5.6-sol\"",
-            "#routing-id = \"claude-gpt-5.6-terra\"",
-            "#routing-id = \"claude-gpt-5.6-luna\"",
             "#routing-id = \"gpt-5.6-sol\"",
             "#routing-id = \"gpt-5.6-terra\"",
             "#routing-id = \"gpt-5.6-luna\"",
@@ -1612,7 +1594,6 @@ mod tests {
 mod context_window_tests {
     use super::tests::{parse_and_prepare, prepare_error, provider_toml};
     use super::*;
-    use crate::client_window::UNKNOWN_MODEL_CONTEXT_WINDOW;
 
     /// One provider model with the context fields under test, and the
     /// top-level declaration scaling requires.
@@ -1679,25 +1660,6 @@ mod context_window_tests {
     }
 
     #[test]
-    fn claude_prefixed_routes_scale_against_the_built_in_default() {
-        // CLAUDE_CODE_MAX_CONTEXT_TOKENS is ignored for `claude-` IDs, so the
-        // numerator must be the built-in default whatever is declared.
-        let config = parse_and_prepare(&config_toml(
-            "claude-kimi-k3",
-            1_000_000,
-            "context-window = 1000000",
-            true,
-        ));
-        assert_eq!(
-            route(&config, "claude-kimi-k3")
-                .usage_scale
-                .unwrap()
-                .apply(1_000_000),
-            UNKNOWN_MODEL_CONTEXT_WINDOW
-        );
-    }
-
-    #[test]
     fn default_gpt_routes_record_their_real_window_without_scaling() {
         let config = parse_and_prepare("");
         let route = route(&config, "gpt-5.6-sol");
@@ -1747,7 +1709,7 @@ mod context_window_tests {
     // ---- Grok family (optional) ----
 
     /// The declaration setup writes; `client_context_window` uses it for
-    /// bare routing IDs and ignores it for `claude-`-prefixed ones.
+    /// every routed model.
     const DECLARED: &str = "declared-context-window = 258400\n";
 
     #[test]
@@ -1771,7 +1733,7 @@ mod context_window_tests {
     }
 
     #[test]
-    fn enabling_grok_adds_bare_and_prefixed_routes() {
+    fn enabling_grok_adds_the_built_in_route() {
         let config = parse_and_prepare("[grok]\nenabled = true\n");
         let grok: Vec<&ModelRoute> = config
             .generated_models
@@ -1779,7 +1741,7 @@ mod context_window_tests {
             .filter(|route| route.family == ModelFamily::Grok)
             .collect();
         let ids: Vec<&str> = grok.iter().map(|route| route.routing_id.as_str()).collect();
-        assert_eq!(ids, ["claude-grok-4.5", "grok-4.5"]);
+        assert_eq!(ids, ["grok-4.5"]);
         for route in &grok {
             assert_eq!(route.family, ModelFamily::Grok);
             assert_eq!(route.upstream, CLIPROXY_UPSTREAM);
@@ -1801,7 +1763,7 @@ mod context_window_tests {
             "[[models]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n[grok]\nenabled = true\n",
         );
         assert_eq!(config.models.len(), 1);
-        assert_eq!(config.generated_models.len(), 2);
+        assert_eq!(config.generated_models.len(), 1);
         assert!(
             config
                 .effective_models()
@@ -1810,28 +1772,19 @@ mod context_window_tests {
     }
 
     #[test]
-    fn grok_scaling_applies_to_bare_and_prefixed_routes_at_different_ratios() {
+    fn grok_scaling_applies_the_declared_over_real_ratio() {
         let config = parse_and_prepare(&format!(
             "{DECLARED}[grok]\nenabled = true\ncontext-window-scaling = true\n"
         ));
-        let scale = |routing_id: &str| {
-            config
-                .effective_models()
-                .find(|route| route.routing_id == routing_id)
-                .unwrap_or_else(|| panic!("{routing_id} missing"))
-                .usage_scale
-                .unwrap_or_else(|| panic!("{routing_id} unscaled"))
-        };
-        // Both must be scaled: a `compute_usage_scales` that skipped
-        // grok_models would leave these None while doctor still says
-        // "scaled".
-        let bare = scale("grok-4.5");
-        let prefixed = scale("claude-grok-4.5");
-        // ... and they must differ: CLAUDE_CODE_MAX_CONTEXT_TOKENS applies
-        // to the bare ID (258400) but never to a `claude-` one (200000).
-        assert_ne!(bare, prefixed);
-        assert!((bare.ratio() - 258_400.0 / 500_000.0).abs() < 1e-9);
-        assert!((prefixed.ratio() - 200_000.0 / 500_000.0).abs() < 1e-9);
+        // Must be scaled: a `compute_usage_scales` that skipped grok_models
+        // would leave this None while doctor still says "scaled".
+        let scale = config
+            .effective_models()
+            .find(|route| route.routing_id == "grok-4.5")
+            .expect("grok-4.5 missing")
+            .usage_scale
+            .expect("grok-4.5 unscaled");
+        assert!((scale.ratio() - 258_400.0 / 500_000.0).abs() < 1e-9);
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub async fn fill_context_windows(config: &mut Config, dirs: &Dirs) {
             if !model.context_window_scaling || model.context_window.is_some() {
                 continue;
             }
-            let believed = client_context_window(&model.routing_id, declared);
+            let believed = client_context_window(declared);
             match cache.get(&cache_key(&provider.name, &model.name)).copied() {
                 // Only a window larger than the client's is scalable, and a
                 // discovered number must never fail the config the way a

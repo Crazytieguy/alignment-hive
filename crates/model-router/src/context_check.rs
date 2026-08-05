@@ -79,8 +79,8 @@ pub fn check(config: &Config, client: ClientWindow) -> Option<Check> {
     let mut ok = true;
     let mut matched = 0_usize;
     let mut notes = Vec::new();
+    let believed = client_context_window(declared);
     for route in config.effective_models() {
-        let believed = client_context_window(&route.routing_id, declared);
         let status = match (route.context_window, route.usage_scale) {
             (Some(actual), Some(scale)) => RouteStatus::Scaled {
                 ratio: scale.ratio(),
@@ -242,13 +242,6 @@ context-window-scaling = {scaling}
         assert!(!check.ok);
         assert!(
             check.detail.contains("gpt-5.6-sol OVERRUN RISK"),
-            "{check:?}"
-        );
-        // The claude-prefixed aliases ignore the env var, so they stay clipped.
-        assert!(
-            check
-                .detail
-                .contains("claude-gpt-5.6-sol clipped to 200000"),
             "{check:?}"
         );
     }

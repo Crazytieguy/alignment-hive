@@ -74,12 +74,12 @@ ID**. The router has no say, and no API response can tell it otherwise:
 - Setup writes `CLAUDE_CODE_MAX_CONTEXT_TOKENS=258400`, the Codex backend's
   effective input limit behind the GPT routes (272K × 95%).
 
-Every bare routing ID shares that one number — GPT's, every open-weights
+Every routed ID shares that one number — GPT's, every open-weights
 model's, and the Grok routes' if configured. Kimi K3 and GLM-5.2 have 1M-token windows, so a 258400 declaration
 clips them to a quarter of their capacity.
 
 **Raising the global value is not an option**, so don't offer it: the shipped
-GPT agents and the `choosing-models` skill name the bare `gpt-5.6-*` IDs,
+GPT agents and the `choosing-models` skill name the `gpt-5.6-*` IDs,
 which would inherit the larger number and start sending the Codex backend
 requests past its limit. The declared value stays where the GPT routes need
 it.

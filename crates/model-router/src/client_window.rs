@@ -3,21 +3,17 @@
 //!
 //! Claude Code decides a model's context window from the model ID before it
 //! ever talks to the router, and nothing in a response can change that. This
-//! module owns everything we know about those rules — the env var, the
-//! prefix exemption, the unknown-model default — plus [`UsageScale`], which
-//! converts real token counts into the window Claude Code believes a route
-//! has. Keeping the model in one place matters because it is reverse
-//! engineered: `plugins/model-router/docs/experiments.md` records how each
-//! rule was verified, and a Claude Code upgrade invalidates all of it at once.
+//! module owns everything we know about those rules — the env var and how it
+//! is resolved — plus [`UsageScale`], which converts real token counts into
+//! the window Claude Code believes a route has. Keeping the model in one
+//! place matters because it is reverse engineered:
+//! `plugins/model-router/docs/experiments.md` records how each rule was
+//! verified, and a Claude Code upgrade invalidates all of it at once.
 
 use std::path::Path;
 
 /// The setting that overrides Claude Code's per-model context window.
 pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
-
-/// Claude Code's built-in context window for model IDs it does not recognize.
-/// Binary-verified against 2.1.220.
-pub const UNKNOWN_MODEL_CONTEXT_WINDOW: u64 = 200_000;
 
 /// The [`ENV_VAR`] value the setup skill writes: the Codex backend's real
 /// effective input cap, so the declaration and the built-in GPT routes'
@@ -27,24 +23,12 @@ pub const UNKNOWN_MODEL_CONTEXT_WINDOW: u64 = 200_000;
 /// explicit declaration.
 pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = 258_400;
 
-/// The model-ID prefix [`ENV_VAR`] never applies to.
-const CLAUDE_PREFIX: &str = "claude-";
-
-/// The context window Claude Code believes `routing_id` has.
-///
-/// [`ENV_VAR`] is ignored for IDs starting with `claude-`; those fall back to
-/// the built-in unknown-model default. This is the client-side coordinate
+/// The context window Claude Code believes a routed model has: [`ENV_VAR`]
+/// applies to every routed model ID. This is the client-side coordinate
 /// system every scaling ratio is expressed in.
 #[must_use]
-pub fn client_context_window(routing_id: &str, declared: Option<u64>) -> u64 {
-    if routing_id
-        .get(..CLAUDE_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(CLAUDE_PREFIX))
-    {
-        UNKNOWN_MODEL_CONTEXT_WINDOW
-    } else {
-        declared.unwrap_or(DEFAULT_DECLARED_CONTEXT_WINDOW)
-    }
+pub fn client_context_window(declared: Option<u64>) -> u64 {
+    declared.unwrap_or(DEFAULT_DECLARED_CONTEXT_WINDOW)
 }
 
 /// Rescales the usage the router reports so Claude Code's auto-compact gate
@@ -167,22 +151,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_env_var_is_ignored_for_claude_prefixed_ids() {
-        assert_eq!(client_context_window("kimi-k3", Some(1_000_000)), 1_000_000);
-        assert_eq!(
-            client_context_window("claude-gpt-5.6-sol", Some(1_000_000)),
-            UNKNOWN_MODEL_CONTEXT_WINDOW
-        );
-        assert_eq!(
-            client_context_window("CLAUDE-Gpt", Some(1_000_000)),
-            UNKNOWN_MODEL_CONTEXT_WINDOW
-        );
-        // Not a prefix match: the rule is on `claude-`, not `claude`.
-        assert_eq!(client_context_window("claude", Some(999)), 999);
-        assert_eq!(
-            client_context_window("kimi-k3", None),
-            DEFAULT_DECLARED_CONTEXT_WINDOW
-        );
+    fn the_declaration_wins_and_the_default_backstops_it() {
+        assert_eq!(client_context_window(Some(1_000_000)), 1_000_000);
+        assert_eq!(client_context_window(None), DEFAULT_DECLARED_CONTEXT_WINDOW);
     }
 
     #[test]

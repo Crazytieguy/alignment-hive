@@ -5,8 +5,7 @@ user's own xAI subscription login (SuperGrok, or an X account with Premium —
 the login itself is the test; it costs nothing to try). No API key. Off by
 default; nothing below changes a GPT-only install.
 
-Built-in routes when enabled: `grok-4.5` / `claude-grok-4.5` (500K-token
-window).
+Built-in route when enabled: `grok-4.5` (500K-token window).
 
 1. Enable the family in `~/.config/model-router/config.toml`:
    ```toml
@@ -22,10 +21,10 @@ window).
 3. `$ROUTER doctor` — `grok-auth` confirms the login, `routed-models`
    confirms the live child actually serves the Grok ID.
 4. **Context window**: Claude Code decides a model's window client-side
-   from the model ID; for bare routing IDs the one global
+   from the model ID; for routed IDs the one global
    `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declaration applies, and it is sized
    to 258400 for the GPT routes (the Codex backend's input limit — raising
-   it would push those routes past it). So bare `grok-4.5` is clipped to
+   it would push those routes past it). So `grok-4.5` is clipped to
    258400 of its real 500K window unless its reported usage is rescaled:
    ```toml
    [grok]

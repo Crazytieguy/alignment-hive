@@ -1814,20 +1814,6 @@ fn grok_websearch_config(fake_address: std::net::SocketAddr) -> Config {
     }
 }
 
-/// `grok_websearch_config` plus the generated `claude-`-prefixed Grok alias.
-fn grok_alias_websearch_config(fake_address: std::net::SocketAddr) -> Config {
-    let mut config = grok_websearch_config(fake_address);
-    config.models.push(ModelRoute {
-        routing_id: "claude-grok-4.5".to_string(),
-        upstream: "codex".to_string(),
-        upstream_model: "grok-4.5".to_string(),
-        display_name: "Grok 4.5".to_string(),
-        family: model_router::config::ModelFamily::Grok,
-        ..Default::default()
-    });
-    config
-}
-
 /// The xAI Responses stream: a completed hosted `web_search_call` carrying
 /// sources, then (optionally) an open-ended tail the router must not wait for.
 fn xai_search_sse(urls: &[&str], hold_open: bool) -> Response {
@@ -2445,31 +2431,5 @@ async fn shutdown_waits_for_in_flight_search_streams() {
             .filter(|path| **path == "/v1/responses")
             .count(),
         1
-    );
-}
-
-/// I9: the generated `claude-`-prefixed Grok alias is gated by family, not by
-/// the routing-id string.
-#[tokio::test]
-async fn claude_prefixed_grok_alias_is_gated_by_family() {
-    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
-        match parts.uri.path() {
-            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
-            "/v1/responses" => xai_search_sse(&["https://bun.sh/blog"], false),
-            path => panic!("unexpected CPA path {path}"),
-        }
-    }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let app = model_router::proxy::app(grok_alias_websearch_config(cpa_address))
-        .await
-        .unwrap();
-    let body = turn_then_subcall(app, "claude-grok-4.5", "claude-sonnet-4-5").await;
-
-    assert!(body.contains("https://bun.sh/blog"));
-    assert_eq!(
-        observed_paths(&cpa_observed.lock().await),
-        ["/v1/messages", "/v1/responses"]
     );
 }

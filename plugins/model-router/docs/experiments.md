@@ -213,7 +213,13 @@ raw SSE inspected.
   can't have both the context override and a discovery picker entry —
   dual-route aliases (both prefixes → same upstream) would give each flow the
   right ID. Untested what happens if a conversation exceeds the real
-  upstream limit.
+  upstream limit. *Stale as of 0.1.12: the `claude-` alias routes were
+  removed — the recommended setup disables gateway discovery
+  (`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`) and uses the custom-model env
+  pair for the picker, so only the bare routing IDs ship. The Claude Code
+  facts recorded here (200K unknown-model default, `claude-` prefix
+  exclusion) still hold; `claude-gpt-5.6-*` IDs elsewhere in this file are
+  historical.*
 - Claude context windows behind the gateway (measured 2026-07-28, Claude Code
   2.1.220). Claude Code grants a natively-1M Claude model its 1M window only
   when `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`; behind the

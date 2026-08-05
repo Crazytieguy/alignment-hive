@@ -58,17 +58,14 @@ macOS and Linux only.
    `ENABLE_TOOL_SEARCH` matters: tool search silently disables itself behind
    a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
    context window — it only applies to model IDs that don't start with
-   `claude-` (the bare `gpt-5.6-*` routes), so Claude models keep their
+   `claude-` (the `gpt-5.6-*` routes), so Claude models keep their
    built-in windows; 258400 is the Codex backend's effective input limit.
    On an existing install with configured open-weights routes, run
    `$ROUTER doctor` after raising the value — it fails with the fix
    spelled out if a route's window no longer fits under the new
    declaration. The custom-model pair adds one
-   "GPT-5.6 Sol" entry to the /model picker using the bare routing ID, so
-   main-model GPT use gets the declared context window too; terra and luna
-   stay subagent-only. (The router also serves `/v1/models` for gateway
-   model discovery, but discovery only accepts `claude-`-prefixed IDs,
-   which the context declaration skips — prefer the custom-model entry.)
+   "GPT-5.6 Sol" entry to the /model picker, so main-model GPT use gets
+   the declared context window too; terra and luna stay subagent-only.
 6. Tell the user to restart Claude Code sessions (env is read at startup),
    and that the GPT agents and `choosing-models` skill are now available.
    Offer to run smoke tests. A fresh `claude -p` reads the step 5 settings
@@ -79,7 +76,7 @@ macOS and Linux only.
    routing test is instead required, and the window check is meaningless —
    against the direct Anthropic API it prints 1000000 regardless of the
    flag.)
-   Routing: `claude -p 'reply with ok' --model claude-gpt-5.6-sol`.
+   Routing: `claude -p 'reply with ok' --model gpt-5.6-sol`.
    1M windows, to confirm they survive the current Claude Code version:
    `claude -p 'say ok' --model claude-fable-5 --output-format json | jq
    '.modelUsage[].contextWindow'` — it must print 1000000. On 200000,
