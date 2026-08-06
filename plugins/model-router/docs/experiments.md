@@ -321,7 +321,8 @@ from" — because per-model context sizing depends on the answer.
   open-weights host (no provider key available). **Retest trigger:** any Claude
   Code upgrade — this is undocumented, reverse-engineered behavior, and a
   version that starts sizing context differently would turn scaling into
-  silent overruns.
+  silent overruns. *(Fired: re-verified against 2.1.223 — see the
+  context-window changes section below.)*
 
 Externally sourced catalog facts (not measured here, 2026-07-27): GLM-5.2
 advertises a 1M-token window under the separate `glm-5.2[1m]` model ID
@@ -329,6 +330,68 @@ advertises a 1M-token window under the separate `glm-5.2[1m]` model ID
 served windows can be lower than the vendor's advertised number — the Codex
 backend serving 272K of GPT-5.6's advertised 1.05M is the same pattern — and
 OpenRouter's `context_length` is the maximum across its sub-providers.
+
+## Context-window changes in Claude Code 2.1.223 (binary-verified, 2026-08-06)
+
+Method: string extraction from the installed 2.1.223 binary, same approach as
+the 2.1.220 dig above, which this satisfies the retest trigger of. Changelog
+context: 2.1.223 changes `CLAUDE_CODE_DISABLE_1M_CONTEXT` behavior, enforces
+assumed context limits on unrecognized model IDs, and adds a startup warning
+around both.
+
+Core assumptions re-verified byte-for-byte equivalent — scaling remains valid:
+
+- Prefix rule unchanged: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applies exactly when
+  the resolved model ID does not start with `claude-`; otherwise the 200K
+  unknown-model default. Routed IDs still get the declared 258400.
+- Gate arithmetic unchanged: anchor = most recent usage-bearing assistant
+  message; sum of exactly `input_tokens + cache_creation_input_tokens +
+  cache_read_input_tokens + output_tokens` (`yHe`); client-estimated unscaled
+  tail after the anchor; 20K output reserve; 13K compact margin.
+
+New in 2.1.223, and how it interacts with the router:
+
+- Window resolution (`v9`) now tags a source. Unrecognized model IDs — every
+  routed ID — resolve as source `"unknown-model"` (window still the
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value); previously they fell through to
+  `"auto"`. The auto-compact gate (`hky`) short-circuits to *disabled* when
+  the source is `"auto"`, so this change is what makes the tokens gate firmly
+  cover routed models. Net effect for the router: auto-compact on routed
+  models is now guaranteed by an explicit code path rather than incidental.
+- **Footgun:** `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`
+  ("restores the previous wait-for-the-API behavior") reverts routed models
+  to source `"auto"` — the tokens gate never fires, sessions grow until the
+  router's context-overflow translation backstop trips at the Codex cap.
+  Works, but degraded UX. Do not set it alongside the router.
+- The new unrecognized-model startup notice ("X is not a model this version
+  of Claude Code recognizes…") is suppressed exactly when the model is
+  non-`claude-` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` > 0 — the setup skill's
+  declaration keeps router sessions notice-free. Without the declaration the
+  notice appears and the assumed window is 200K.
+- `CLAUDE_CODE_DISABLE_1M_CONTEXT` now clamps native-1M Claude models to 200K
+  via auto-compact, and emits a startup warning for any model whose window
+  exceeds 200K with source ≠ `"auto"` — which includes every routed model
+  (258400 > 200K). A user setting that var sees "the 200K limit isn't
+  enforced for gpt-5.6-sol…" suggesting `CLAUDE_CODE_AUTO_COMPACT_WINDOW=
+  200000`. Cosmetic (the routed window is intentionally above 200K), but the
+  copy reads as a misconfiguration.
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / `autoCompactWindow` semantics unchanged
+  (lower-only, clamped to [100K, 1M], global). On a scaled route the
+  real-token trigger shrinks proportionally: `configured × actual/declared`.
+  Compacts early — the safe direction.
+- Account state `longContext1mCreditsBlocked` (set when the API refuses 1M
+  for credit reasons) clamps *any* model with a resolved window above 200K to
+  200K — routed models included. The router's 258400 declaration is then
+  optimistic; scaled usage over-reports against the clamped window and
+  compaction fires early. Safe direction, no action.
+- `modelOverrides` (the notice's suggested remedy) is a model *aliasing* map,
+  not per-model windows — no use to the router. Alias resolution runs before
+  the `claude-` prefix check, so mapping a routed ID to a `claude-*` name
+  would strip the env-var window. Also retroactively validates 0.1.15's
+  removal of the `claude-` alias routes: those IDs ignore the declaration
+  entirely.
+
+**Retest trigger:** unchanged — the next Claude Code upgrade.
 
 ## GPT tool-usage audits (2026-07-20, 5 transcripts, Sonnet auditors)
 
