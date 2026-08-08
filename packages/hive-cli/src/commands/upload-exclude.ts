@@ -19,7 +19,7 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
 
   // Backfill-aware state, same as the list/review paths — a reopened session must gate as
   // pending (excludable), not as uploaded.
-  const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+  const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
   const { parentSessions, sessionById } = state;
 
   if (parentSessions.length === 0) {

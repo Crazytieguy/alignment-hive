@@ -38,7 +38,7 @@ export async function uploadList(args: Array<string>): Promise<number> {
   }
 
   const { parentSessions, uploadedMap, excludedSet, startedMap, migrationTimestamp } =
-    await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+    await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
 
   if (parentSessions.length === 0) {
     printInfo(hive.upload.noSessions);

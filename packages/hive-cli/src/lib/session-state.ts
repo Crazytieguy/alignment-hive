@@ -3,7 +3,8 @@ import { appendFile, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { canExclude } from '@alignment-hive/session-data';
-import { getClaudeProjectDir, statePaths  } from './config';
+import { getClaudeProjectDir, getMainWorktreePath, statePaths  } from './config';
+import { extractCwdFromFile } from './transcript-discovery';
 import { parseJsonl } from './session-format';
 import { findRawSessions, scanSubagentDir } from './session-io';
 import type { SessionStatus } from '@alignment-hive/session-data';
@@ -83,20 +84,48 @@ async function hasAssistantContent(path: string): Promise<boolean> {
 }
 
 /**
+ * Sanitized project-dir names can collide (e.g. /work/foo.bar and /work/foo-bar both map
+ * to -work-foo-bar), so a transcript dir may hold another project's sessions. Drop a
+ * session only when its recorded cwd affirmatively resolves to a different project's
+ * main worktree — sessions with no readable cwd, or whose cwd is deleted or not a git
+ * repo, are kept, so worktree and deleted-worktree discovery behave as before.
+ */
+function makeProjectSessionFilter(projectCwd: string): (filePath: string) => boolean {
+  const projectMain = getMainWorktreePath(projectCwd) ?? projectCwd;
+  const mainCache = new Map<string, string | null>();
+  return (filePath) => {
+    const sessionCwd = extractCwdFromFile(filePath);
+    if (!sessionCwd || sessionCwd === projectMain || sessionCwd === projectCwd) return true;
+    let main = mainCache.get(sessionCwd);
+    if (main === undefined) {
+      main = getMainWorktreePath(sessionCwd);
+      mainCache.set(sessionCwd, main);
+    }
+    return main === null || main === projectMain;
+  };
+}
+
+/**
  * Discover sessions from transcript directories.
  * Filters out sessions with no assistant messages (abandoned/empty sessions).
+ * When projectCwd is given, sessions recorded under a different project (colliding
+ * dir names) are dropped — see makeProjectSessionFilter.
  * Returns both parent and agent sessions — callers filter as needed.
  */
 export async function discoverSessions(
   transcriptsDirs: Array<string>,
+  projectCwd?: string,
 ): Promise<Array<DiscoveredSession>> {
   const dirResults = await Promise.all(
     transcriptsDirs.map((dir) => findRawSessions(dir).catch(() => [])),
   );
 
+  const belongsToProject = projectCwd ? makeProjectSessionFilter(projectCwd) : null;
+
   const promises: Array<Promise<DiscoveredSession | null>> = [];
   for (const rawSessions of dirResults) {
     for (const s of rawSessions) {
+      if (belongsToProject && !belongsToProject(s.path)) continue;
       const sessionId = basename(s.path, '.jsonl');
       const build = (mtime: Date): DiscoveredSession => ({
         sessionId,
@@ -340,9 +369,10 @@ export interface SessionState {
 export async function loadSessionState(
   stateDir: string,
   transcriptsDirs: Array<string>,
+  projectCwd?: string,
 ): Promise<SessionState> {
   const [allSessions, uploadedMap, excludedSet, startedMap, migrationTimestamp] = await Promise.all([
-    discoverSessions(transcriptsDirs),
+    discoverSessions(transcriptsDirs, projectCwd),
     loadUploadedSessions(stateDir),
     loadExcludedSessions(stateDir),
     loadStartedUploads(stateDir),

@@ -58,12 +58,17 @@ fi
 # Also runs before the early-exit: a fork/resume in a directory that never had
 # a plain startup (e.g. `claude --resume <id> --fork-session` from a fresh
 # checkout) still needs its transcript dir registered.
+# Derived from transcript_path rather than recomputing Claude Code's
+# project-dir naming (which sanitizes and truncates; see toClaudeProjectDirName).
 
-TRANSCRIPT_DIR="$HOME/.claude/projects/$(echo "$CLAUDE_PROJECT_DIR" | tr '/' '-')"
-if [ -d "$TRANSCRIPT_DIR" ]; then
-  TRANSCRIPTS_FILE="$STATE_DIR/transcripts-dirs"
-  if ! grep -qxF "$TRANSCRIPT_DIR" "$TRANSCRIPTS_FILE" 2>/dev/null; then
-    echo "$TRANSCRIPT_DIR" >> "$TRANSCRIPTS_FILE"
+TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // ""')
+if [ -n "$TRANSCRIPT_PATH" ]; then
+  TRANSCRIPT_DIR=$(dirname "$TRANSCRIPT_PATH")
+  if [ -d "$TRANSCRIPT_DIR" ]; then
+    TRANSCRIPTS_FILE="$STATE_DIR/transcripts-dirs"
+    if ! grep -qxF "$TRANSCRIPT_DIR" "$TRANSCRIPTS_FILE" 2>/dev/null; then
+      echo "$TRANSCRIPT_DIR" >> "$TRANSCRIPTS_FILE"
+    fi
   fi
 fi
 

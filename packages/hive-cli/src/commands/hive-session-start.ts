@@ -174,7 +174,7 @@ export async function hiveSessionStart(): Promise<number> {
 
   // Run session discovery and one-time agent migration if needed
   const { parentSessions: allSessions, uploadedMap, excludedSet, migrationTimestamp: effectiveMigrationTs } =
-    await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+    await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
 
   const snoozeUntil = await isSnoozed(stateDir) ? Date.now() + 1 : null; // truthy if snoozed
   const statusCtx = { uploadedMap, excludedSet, consentMtime: consentTimestamp, snoozeUntil, migrationTimestamp: effectiveMigrationTs };

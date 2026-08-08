@@ -27,7 +27,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
       list: t.procedure.query(async () => {
         const transcriptsDirs = await loadTranscriptsDirs(stateDir);
         const { parentSessions, uploadedMap, excludedSet, startedMap, migrationTimestamp } =
-          await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+          await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
         const consentResult = await resolveProjectConsent(cwd);
         if ('error' in consentResult) {
           throw new Error(`Consent not available: ${consentResult.error}`);
@@ -75,7 +75,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         .input(z.object({ sessionId: z.string() }))
         .query(async ({ input }) => {
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-          const { sessionById, agentsByParent } = await loadSessionState(stateDir, transcriptsDirs);
+          const { sessionById, agentsByParent } = await loadSessionState(stateDir, transcriptsDirs, cwd);
 
           const session = sessionById.get(input.sessionId);
           if (!session) {
@@ -143,7 +143,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
           // Backfill-aware state, same as list — a reopened session must gate as pending
           // (excludable), not as uploaded.
-          const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+          const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
 
           const session = state.sessionById.get(input.sessionId);
           if (!session) {
@@ -175,7 +175,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           const ids = getProjectIdentifiers(cwd);
 
           const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-          const { sessionById, agentsByParent } = await loadSessionState(stateDir, transcriptsDirs);
+          const { sessionById, agentsByParent } = await loadSessionState(stateDir, transcriptsDirs, cwd);
 
           const session = sessionById.get(input.sessionId);
           if (!session) {
@@ -219,7 +219,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         const snoozeUntil = await getSnoozeUntil(stateDir);
         const transcriptsDirs = await loadTranscriptsDirs(stateDir);
         const { parentSessions, uploadedMap, excludedSet, migrationTimestamp } =
-          await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs);
+          await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
 
         const consentResult = await resolveProjectConsent(cwd);
         if ('error' in consentResult) {

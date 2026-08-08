@@ -128,7 +128,7 @@ async function doUploadWork(
 
   const transcriptsDirs = await loadTranscriptsDirs(stateDir);
   const [{ parentSessions, agentsByParent, uploadedMap, excludedSet, migrationTimestamp }, checkoutId, consentWindows] = await Promise.all([
-    loadSessionStateWithAgentMigration(stateDir, transcriptsDirs),
+    loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd),
     getOrCreateCheckoutId(stateDir),
     loadConsentWindows(ids),
   ]);

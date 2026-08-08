@@ -17,7 +17,7 @@ export async function hiveHeartbeat(): Promise<number> {
 
   const [checkoutId, allSessions] = await Promise.all([
     getOrCreateCheckoutId(stateDir),
-    discoverSessions(transcriptsDirs),
+    discoverSessions(transcriptsDirs, cwd),
   ]);
   const ids = getProjectIdentifiers(cwd);
 

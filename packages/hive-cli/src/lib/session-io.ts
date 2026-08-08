@@ -214,7 +214,7 @@ export async function discoverRawSessions(cwd: string): Promise<Array<Discovered
     dirs = [getClaudeProjectDir(cwd)];
   }
 
-  return discoverSessions(dirs);
+  return discoverSessions(dirs, cwd);
 }
 
 // --- SessionSource ---

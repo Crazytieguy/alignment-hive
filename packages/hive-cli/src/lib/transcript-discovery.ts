@@ -8,32 +8,40 @@ import { ensureStateDir, getClaudeProjectDir, getMainWorktreePath, loadTranscrip
 const CWD_READ_BYTES = 8192;
 
 /**
+ * Extract the cwd recorded in a session file. Only reads the first 8KB since
+ * cwd appears in early entries. Returns null if none found or unreadable.
+ */
+export function extractCwdFromFile(filePath: string): string | null {
+  try {
+    const fd = openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(CWD_READ_BYTES);
+      const bytesRead = readSync(fd, buf, 0, CWD_READ_BYTES, 0);
+      const content = buf.toString('utf-8', 0, bytesRead);
+      for (const line of content.split('\n')) {
+        const cwd = parseCwdFromLine(line);
+        if (cwd) return cwd;
+      }
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // skip unreadable files
+  }
+  return null;
+}
+
+/**
  * Extract the cwd from the first session file in a project directory
- * that has a "cwd" field. Only reads the first 8KB of each file since
- * cwd appears in early entries. Returns null if none found.
+ * that has a "cwd" field. Returns null if none found.
  */
 export function extractCwd(projectDir: string): string | null {
   try {
     const entries = readdirSync(projectDir);
     for (const entry of entries) {
       if (!entry.endsWith('.jsonl')) continue;
-      try {
-        const filePath = join(projectDir, entry);
-        const fd = openSync(filePath, 'r');
-        try {
-          const buf = Buffer.alloc(CWD_READ_BYTES);
-          const bytesRead = readSync(fd, buf, 0, CWD_READ_BYTES, 0);
-          const content = buf.toString('utf-8', 0, bytesRead);
-          for (const line of content.split('\n')) {
-            const cwd = parseCwdFromLine(line);
-            if (cwd) return cwd;
-          }
-        } finally {
-          closeSync(fd);
-        }
-      } catch {
-        // skip unreadable files
-      }
+      const cwd = extractCwdFromFile(join(projectDir, entry));
+      if (cwd) return cwd;
     }
   } catch {
     // skip unreadable directories

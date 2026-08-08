@@ -76,8 +76,8 @@ async function readSessionCwds(sessionPath: string) {
 }
 
 /** Load session state and run one-time agent migration if needed. */
-export async function loadSessionStateWithAgentMigration(stateDir: string, transcriptsDirs: Array<string>) {
-  const state = await loadSessionState(stateDir, transcriptsDirs);
+export async function loadSessionStateWithAgentMigration(stateDir: string, transcriptsDirs: Array<string>, projectCwd?: string) {
+  const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd);
   const migrationTimestamp = await runAgentMigration(
     state, stateDir, transcriptsDirs,
     readSessionCwds,

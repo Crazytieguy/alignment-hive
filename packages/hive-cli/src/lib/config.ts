@@ -55,9 +55,28 @@ export function parseCwdFromLine(line: string): string | null {
   return null;
 }
 
-/** Convert an absolute path to the Claude project directory name (e.g., /Users/foo/bar → -Users-foo-bar). */
+// Claude Code's own project-dir hash (Java-style string hash over the original path).
+function claudeProjectDirHash(path: string): number {
+  let hash = 0;
+  for (let i = 0; i < path.length; i++) {
+    hash = ((hash << 5) - hash + path.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
+const CLAUDE_PROJECT_DIR_MAX_LENGTH = 200;
+
+/**
+ * Convert an absolute path to the Claude project directory name, mirroring Claude Code's
+ * scheme (as of 2.1.224): every non-alphanumeric character becomes '-' (e.g.,
+ * /Users/foo/x.y → -Users-foo-x-y), and names over 200 chars are truncated to 200 plus
+ * '-<base36 hash of the original path>' to keep long paths from colliding.
+ */
 export function toClaudeProjectDirName(absolutePath: string): string {
-  return absolutePath.replaceAll('/', '-');
+  const sanitized = absolutePath.replace(/[^a-zA-Z0-9]/g, '-');
+  if (sanitized.length <= CLAUDE_PROJECT_DIR_MAX_LENGTH) return sanitized;
+  const suffix = Math.abs(claudeProjectDirHash(absolutePath)).toString(36);
+  return `${sanitized.slice(0, CLAUDE_PROJECT_DIR_MAX_LENGTH)}-${suffix}`;
 }
 
 /** Get the full Claude project directory path for a given cwd. */
