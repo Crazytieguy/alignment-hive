@@ -7,7 +7,7 @@
  *   - a "Web application" OAuth client whose authorized redirect URI is
  *     http://localhost:53682/oauth2callback
  *   - the OAuth consent screen published (not "Testing"), so the refresh token doesn't expire
- *   - scopes: calendar.events + calendar.freebusy
+ *   - scopes: calendar.events + calendar.freebusy + spreadsheets (feedback responses)
  * Provide the client id/secret via GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET env vars,
  * or paste them at the prompts.
  *
@@ -26,6 +26,8 @@ const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/calendar.freebusy",
+  // Feedback survey responses are appended to a Google Sheet with the same credentials.
+  "https://www.googleapis.com/auth/spreadsheets",
 ];
 const ENV_PATH = join(import.meta.dir, "..", "packages", "web", ".env.local");
 

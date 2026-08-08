@@ -9,6 +9,7 @@ A TanStack Start + React web application for alignment researchers to share sess
 - **Dashboard**: Admin dashboard for sessions and users
 - **Integration**: Backend for the hive CLI (session uploads, consent, heartbeats)
 - **Booking**: Public per-office pages (`/book/<office>`) to book in-person meetings with Yoav, backed by Google Calendar (see `src/lib/booking/` and `src/routes/booking/`; env vars in `scripts/google-calendar-auth.ts`).
+- **Feedback**: Anonymous consulting-session feedback (`/feedback/mats`) behind single-use HMAC-signed links (generate with `scripts/generate-feedback-tokens.ts`). Answers append to a Google Sheet (`FEEDBACK_SHEET_ID`; testimonials in a separate tab, unlinked from answers); single-use state lives in the Convex `feedbackTokens` table, guarded by `FEEDBACK_TOKEN_SECRET` (set in Vercel and in the Convex deployment env). See `src/lib/feedback/`.
 
 ## Local Development
 

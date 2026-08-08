@@ -129,6 +129,16 @@ export default defineSchema({
   })
     .index("by_installation_id", ["installationId"]),
 
+  // Single-use consulting-feedback tokens, keyed by sha256 of the token id so the raw token is
+  // never stored. `pending` marks an in-flight submission claim (reclaimable after a TTL);
+  // `redeemed` is final. Responses themselves live in a Google Sheet, never here — keeping the
+  // token store and the response store separate is what makes feedback anonymous.
+  feedbackTokens: defineTable({
+    tokenHash: v.string(),
+    status: v.union(v.literal("pending"), v.literal("redeemed")),
+    claimedAt: v.number(),
+  }).index("by_token_hash", ["tokenHash"]),
+
   linkedRepos: defineTable({
     installationId: v.number(),
     gitRemote: v.string(), // "github.com/owner/repo"

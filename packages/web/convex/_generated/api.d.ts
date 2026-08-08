@@ -12,6 +12,7 @@ import type * as agreement from "../agreement.js";
 import type * as auth from "../auth.js";
 import type * as authorized from "../authorized.js";
 import type * as consent from "../consent.js";
+import type * as feedback from "../feedback.js";
 import type * as github from "../github.js";
 import type * as githubWebhook from "../githubWebhook.js";
 import type * as http from "../http.js";
@@ -36,6 +37,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   authorized: typeof authorized;
   consent: typeof consent;
+  feedback: typeof feedback;
   github: typeof github;
   githubWebhook: typeof githubWebhook;
   http: typeof http;

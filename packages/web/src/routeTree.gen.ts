@@ -15,6 +15,9 @@ import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as BookIndexRouteImport } from './routes/book/index'
 import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
+import { Route as FeedbackSubmitRouteImport } from './routes/feedback/submit'
+import { Route as FeedbackStatusRouteImport } from './routes/feedback/status'
+import { Route as FeedbackMatsRouteImport } from './routes/feedback/mats'
 import { Route as BookingCreateRouteImport } from './routes/booking/create'
 import { Route as BookingCancelRouteImport } from './routes/booking/cancel'
 import { Route as BookingAvailabilityRouteImport } from './routes/booking/availability'
@@ -61,6 +64,21 @@ const AuthorizedIndexRoute = AuthorizedIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => AuthorizedRoute,
+} as any)
+const FeedbackSubmitRoute = FeedbackSubmitRouteImport.update({
+  id: '/feedback/submit',
+  path: '/feedback/submit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FeedbackStatusRoute = FeedbackStatusRouteImport.update({
+  id: '/feedback/status',
+  path: '/feedback/status',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FeedbackMatsRoute = FeedbackMatsRouteImport.update({
+  id: '/feedback/mats',
+  path: '/feedback/mats',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const BookingCreateRoute = BookingCreateRouteImport.update({
   id: '/booking/create',
@@ -165,6 +183,9 @@ export interface FileRoutesByFullPath {
   '/booking/availability': typeof BookingAvailabilityRoute
   '/booking/cancel': typeof BookingCancelRoute
   '/booking/create': typeof BookingCreateRoute
+  '/feedback/mats': typeof FeedbackMatsRoute
+  '/feedback/status': typeof FeedbackStatusRoute
+  '/feedback/submit': typeof FeedbackSubmitRoute
   '/authorized/': typeof AuthorizedIndexRoute
   '/book': typeof BookIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
@@ -188,6 +209,9 @@ export interface FileRoutesByTo {
   '/booking/availability': typeof BookingAvailabilityRoute
   '/booking/cancel': typeof BookingCancelRoute
   '/booking/create': typeof BookingCreateRoute
+  '/feedback/mats': typeof FeedbackMatsRoute
+  '/feedback/status': typeof FeedbackStatusRoute
+  '/feedback/submit': typeof FeedbackSubmitRoute
   '/authorized': typeof AuthorizedIndexRoute
   '/book': typeof BookIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
@@ -214,6 +238,9 @@ export interface FileRoutesById {
   '/booking/availability': typeof BookingAvailabilityRoute
   '/booking/cancel': typeof BookingCancelRoute
   '/booking/create': typeof BookingCreateRoute
+  '/feedback/mats': typeof FeedbackMatsRoute
+  '/feedback/status': typeof FeedbackStatusRoute
+  '/feedback/submit': typeof FeedbackSubmitRoute
   '/authorized/': typeof AuthorizedIndexRoute
   '/book/': typeof BookIndexRoute
   '/_authenticated/consent_/projects': typeof AuthenticatedConsentProjectsRoute
@@ -240,6 +267,9 @@ export interface FileRouteTypes {
     | '/booking/availability'
     | '/booking/cancel'
     | '/booking/create'
+    | '/feedback/mats'
+    | '/feedback/status'
+    | '/feedback/submit'
     | '/authorized/'
     | '/book'
     | '/consent/projects'
@@ -263,6 +293,9 @@ export interface FileRouteTypes {
     | '/booking/availability'
     | '/booking/cancel'
     | '/booking/create'
+    | '/feedback/mats'
+    | '/feedback/status'
+    | '/feedback/submit'
     | '/authorized'
     | '/book'
     | '/consent/projects'
@@ -288,6 +321,9 @@ export interface FileRouteTypes {
     | '/booking/availability'
     | '/booking/cancel'
     | '/booking/create'
+    | '/feedback/mats'
+    | '/feedback/status'
+    | '/feedback/submit'
     | '/authorized/'
     | '/book/'
     | '/_authenticated/consent_/projects'
@@ -309,6 +345,9 @@ export interface RootRouteChildren {
   BookingAvailabilityRoute: typeof BookingAvailabilityRoute
   BookingCancelRoute: typeof BookingCancelRoute
   BookingCreateRoute: typeof BookingCreateRoute
+  FeedbackMatsRoute: typeof FeedbackMatsRoute
+  FeedbackStatusRoute: typeof FeedbackStatusRoute
+  FeedbackSubmitRoute: typeof FeedbackSubmitRoute
   BookIndexRoute: typeof BookIndexRoute
   ApiGithubInstalledRoute: typeof ApiGithubInstalledRoute
 }
@@ -356,6 +395,27 @@ declare module '@tanstack/react-router' {
       fullPath: '/authorized/'
       preLoaderRoute: typeof AuthorizedIndexRouteImport
       parentRoute: typeof AuthorizedRoute
+    }
+    '/feedback/submit': {
+      id: '/feedback/submit'
+      path: '/feedback/submit'
+      fullPath: '/feedback/submit'
+      preLoaderRoute: typeof FeedbackSubmitRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/feedback/status': {
+      id: '/feedback/status'
+      path: '/feedback/status'
+      fullPath: '/feedback/status'
+      preLoaderRoute: typeof FeedbackStatusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/feedback/mats': {
+      id: '/feedback/mats'
+      path: '/feedback/mats'
+      fullPath: '/feedback/mats'
+      preLoaderRoute: typeof FeedbackMatsRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/booking/create': {
       id: '/booking/create'
@@ -532,6 +592,9 @@ const rootRouteChildren: RootRouteChildren = {
   BookingAvailabilityRoute: BookingAvailabilityRoute,
   BookingCancelRoute: BookingCancelRoute,
   BookingCreateRoute: BookingCreateRoute,
+  FeedbackMatsRoute: FeedbackMatsRoute,
+  FeedbackStatusRoute: FeedbackStatusRoute,
+  FeedbackSubmitRoute: FeedbackSubmitRoute,
   BookIndexRoute: BookIndexRoute,
   ApiGithubInstalledRoute: ApiGithubInstalledRoute,
 }
