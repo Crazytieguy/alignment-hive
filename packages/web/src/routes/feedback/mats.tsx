@@ -104,10 +104,10 @@ function FeedbackPage() {
         Session feedback
       </h1>
       <p className="mt-2 text-muted-foreground">
-        This takes ~3 minutes and helps me improve future sessions and
-        understand their impact. Responses are anonymous — your link just
-        confirms you're a MATS fellow and isn't stored with your answers. I may
-        share responses with the MATS team.
+        Thanks for taking the time to fill this out, it helps me improve future
+        sessions and understand their impact. Responses are anonymous — your
+        link just confirms you're a MATS fellow and isn't stored with your
+        answers. I may share responses with the MATS team.
       </p>
       <FeedbackForm token={token!} onDone={() => setDone(true)} />
     </BookingShell>
@@ -193,8 +193,8 @@ function FeedbackForm({
 
       <label className="block">
         <span className="text-sm font-medium text-foreground">
-          Since the session, what have you actually tried, used, or changed —
-          and what happened?
+          Since the session, what significant changes have stuck, and how are
+          you finding them?
         </span>
         <p className="mt-0.5 text-xs text-muted-foreground">
           One concrete example is enough, and "nothing yet" is a genuinely
@@ -229,10 +229,9 @@ function FeedbackForm({
           Testimonial (optional)
         </span>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          What would you tell another MATS fellow considering a session? I may
-          quote this publicly (website, other materials) — attributed to "a MATS
-          fellow" unless you add your name. Stored separately from your
-          anonymous answers above.
+          What would you tell someone considering a session with me? I may
+          quote this publicly (website, other materials) — attributed to "a
+          MATS fellow" unless you add your name.
         </p>
         <textarea
           className={`${inputClass} mt-2`}
