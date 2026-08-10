@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { Loader2 } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import { Button } from "@alignment-hive/ui";
 import { BookingShell } from "@/components/booking/booking-shell";
@@ -128,6 +129,16 @@ function FeedbackForm({
   const [name, setName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Loading state appears only after a short delay so a fast round-trip doesn't flash it.
+  const [showSending, setShowSending] = useState(false);
+  useEffect(() => {
+    if (!submitting) {
+      setShowSending(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowSending(true), 400);
+    return () => clearTimeout(timer);
+  }, [submitting]);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -257,7 +268,8 @@ function FeedbackForm({
 
       {error && <p className="text-sm text-destructive">{error}</p>}
       <Button type="submit" disabled={submitting || rating === null}>
-        {submitting ? "Sending…" : "Send feedback"}
+        {showSending && <Loader2 className="animate-spin" />}
+        {showSending ? "Sending…" : "Send feedback"}
       </Button>
     </form>
   );

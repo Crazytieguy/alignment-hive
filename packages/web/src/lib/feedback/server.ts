@@ -6,9 +6,10 @@
 // identifier; the token hash goes to Convex and nowhere near the Sheet.
 //
 // Single-use protocol: atomically claim the token in Convex (pending), append, then confirm
-// (redeemed). A definitive Sheets rejection releases the claim; ambiguous failures leave it
-// pending, and pending claims expire after a TTL (see convex/feedback.ts) — a deliberate
-// at-least-once tradeoff so a transient failure never permanently burns a fellow's link.
+// (redeemed). Failures that provably wrote nothing (token refresh failed, or a definitive Sheets
+// rejection) release the claim immediately; ambiguous failures leave it pending, and pending
+// claims expire after a TTL (see convex/feedback.ts) — a deliberate at-least-once tradeoff so a
+// transient failure never permanently burns a fellow's link.
 import { ConvexHttpClient } from "convex/browser";
 import { z } from "zod";
 import { api } from "../../../convex/_generated/api";
@@ -76,9 +77,22 @@ export async function submitFeedback(
     };
   }
 
+  let accessToken: string;
+  try {
+    accessToken = await getAccessToken();
+  } catch (err) {
+    // The refresh call failed before anything could be written — free the claim so the link is
+    // immediately usable again instead of locked for the TTL.
+    await convex.mutation(api.feedback.release, {
+      tokenHash,
+      serviceSecret: secret,
+    });
+    console.error("Feedback submit failed:", err);
+    return { ok: false, reason: "error" };
+  }
+
   let wroteResponse = false;
   try {
-    const accessToken = await getAccessToken();
     const sheetId = feedbackSheetId();
     const date = new Date().toISOString().slice(0, 10);
     await appendSheetRow(accessToken, sheetId, "responses!A:D", [

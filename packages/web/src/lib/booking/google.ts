@@ -29,6 +29,8 @@ export async function getAccessToken(): Promise<string> {
       refresh_token: requireEnv("GOOGLE_OAUTH_REFRESH_TOKEN"),
       grant_type: "refresh_token",
     }),
+    // A hung token refresh otherwise stalls the caller until the platform kills the function.
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     throw new Error(`Google token refresh failed (${res.status}): ${await res.text()}`);
