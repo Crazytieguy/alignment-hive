@@ -26,3 +26,8 @@ target/
 /remote-kernels.log
 .playwright-mcp/
 .playwright-cli/
+.vercel
+.env*.local
+
+# Local working notes
+notes/
