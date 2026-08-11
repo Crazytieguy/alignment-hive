@@ -70,15 +70,25 @@ BINARY="$CACHE_DIR/remote-kernels"
 # Populate the cache if it is empty: from the bundled archive when the plugin
 # ships one, otherwise from GitHub releases.
 if [ ! -x "$BINARY" ]; then
+  # Download and extract into a private staging dir, then atomically rename
+  # the binary into place: Claude Code runs this once per session and several
+  # sessions can start at once, so extracting into the live cache dir would
+  # let one run publish another's half-written file. $BINARY is only ever a
+  # complete file or absent, and a mid-extract kill leaves nothing behind.
   ARCHIVE_NAME="remote-kernels-${TARGET}.tar.xz"
   # Present only in the platform-specific plugin zips; a mismatched one already
   # exited above, so reaching here with no bundle means the plain plugin.
   ARCHIVE="$PLUGIN_ROOT/bin/$ARCHIVE_NAME"
 
   mkdir -p "$CACHE_DIR"
+  # Reap staging dirs orphaned by killed runs; only clearly-stale ones so a
+  # concurrent extraction is never disturbed.
+  find "$CACHE_DIR" -maxdepth 1 -name 'staging.*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+  STAGING=$(mktemp -d "${CACHE_DIR}/staging.XXXXXX")
+  trap 'rm -rf "$STAGING"' EXIT
 
   if [ ! -f "$ARCHIVE" ]; then
-    ARCHIVE="$CACHE_DIR/$ARCHIVE_NAME"
+    ARCHIVE="$STAGING/$ARCHIVE_NAME"
     DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/remote-kernels-v${VERSION}/${ARCHIVE_NAME}"
 
     echo "Downloading remote-kernels v${VERSION} for ${TARGET}..." >&2
@@ -90,23 +100,19 @@ if [ ! -x "$BINARY" ]; then
     fi
   fi
 
-  tar -xf "$ARCHIVE" -C "$CACHE_DIR"
-  rm -f "$CACHE_DIR/$ARCHIVE_NAME"
+  tar -xf "$ARCHIVE" -C "$STAGING"
 
   # cargo-dist archives nest the binary in a subdirectory
-  if [ ! -f "$BINARY" ]; then
-    FOUND=$(find "$CACHE_DIR" -name "remote-kernels" -type f 2>/dev/null | head -1)
-    if [ -n "$FOUND" ]; then
-      mv "$FOUND" "$BINARY"
-      # Clean up extracted subdirectories
-      find "$CACHE_DIR" -mindepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
-    else
-      echo "Binary not found in archive" >&2
-      exit 1
-    fi
+  FOUND=$(find "$STAGING" -name "remote-kernels" -type f 2>/dev/null | head -1)
+  if [ -z "$FOUND" ]; then
+    echo "Binary not found in archive" >&2
+    exit 1
   fi
 
-  chmod +x "$BINARY"
+  chmod +x "$FOUND"
+  mv -f "$FOUND" "$BINARY"
+  rm -rf "$STAGING"
+  trap - EXIT
   echo "Installed remote-kernels v${VERSION}" >&2
 fi
 
