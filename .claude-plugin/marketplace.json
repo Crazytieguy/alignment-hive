@@ -23,6 +23,38 @@
       "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads"
     },
     {
+      "name": "remote-kernels-aarch64-apple-darwin",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/remote-kernels-aarch64-apple-darwin.zip"
+      },
+      "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads (macOS, Apple Silicon)"
+    },
+    {
+      "name": "remote-kernels-aarch64-unknown-linux-gnu",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/remote-kernels-aarch64-unknown-linux-gnu.zip"
+      },
+      "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads (Linux, arm64)"
+    },
+    {
+      "name": "remote-kernels-x86_64-apple-darwin",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/remote-kernels-x86_64-apple-darwin.zip"
+      },
+      "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads (macOS, Intel)"
+    },
+    {
+      "name": "remote-kernels-x86_64-unknown-linux-gnu",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/remote-kernels-x86_64-unknown-linux-gnu.zip"
+      },
+      "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads (Linux, x86_64)"
+    },
+    {
       "name": "hive",
       "source": "./plugins/hive",
       "description": "Tooling recommendations and session sharing for alignment researchers"
@@ -41,6 +73,38 @@
       "name": "model-router",
       "source": "./plugins/model-router",
       "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway"
+    },
+    {
+      "name": "model-router-aarch64-apple-darwin",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-aarch64-apple-darwin.zip"
+      },
+      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (macOS, Apple Silicon)"
+    },
+    {
+      "name": "model-router-aarch64-unknown-linux-gnu",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-aarch64-unknown-linux-gnu.zip"
+      },
+      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (Linux, arm64)"
+    },
+    {
+      "name": "model-router-x86_64-apple-darwin",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-x86_64-apple-darwin.zip"
+      },
+      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (macOS, Intel)"
+    },
+    {
+      "name": "model-router-x86_64-unknown-linux-gnu",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-x86_64-unknown-linux-gnu.zip"
+      },
+      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (Linux, x86_64)"
     }
   ]
 }
