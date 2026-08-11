@@ -66,10 +66,16 @@ fi
 # Cache directory
 CACHE_DIR="$HOME/.cache/remote-kernels/v${VERSION}"
 BINARY="$CACHE_DIR/remote-kernels"
+# Written only after the binary is fully in place. An executable at $BINARY is
+# not by itself proof of a complete install: bootstrap before plugin 0.2.6
+# extracted into the live cache dir, so a lost race could leave a truncated
+# file that `-x` accepts forever, with no way back short of deleting the cache
+# by hand. Caches from those versions have no stamp and are reinstalled once.
+STAMP="$CACHE_DIR/.installed"
 
 # Populate the cache if it is empty: from the bundled archive when the plugin
 # ships one, otherwise from GitHub releases.
-if [ ! -x "$BINARY" ]; then
+if [ ! -x "$BINARY" ] || [ ! -f "$STAMP" ]; then
   # Download and extract into a private staging dir, then atomically rename
   # the binary into place: Claude Code runs this once per session and several
   # sessions can start at once, so extracting into the live cache dir would
@@ -111,6 +117,7 @@ if [ ! -x "$BINARY" ]; then
 
   chmod +x "$FOUND"
   mv -f "$FOUND" "$BINARY"
+  : > "$STAMP"
   rm -rf "$STAGING"
   trap - EXIT
   echo "Installed remote-kernels v${VERSION}" >&2
