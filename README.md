@@ -2,7 +2,7 @@
 
 A shared tooling and knowledge layer for the AI alignment community. The repo behind [alignment-hive.com](https://alignment-hive.com).
 
-As soft takeoff picks up, the alignment community needs shared infrastructure to keep pace. Alignment Hive aims to provide the benefits of scale that frontier AI labs have, through shared tooling and accumulated knowledge. AI tooling is moving fast, and it's hard to keep up with what's available and what works.
+AI tooling is moving fast, and it's hard to keep up with what's available and what works. As soft takeoff picks up, the alignment community needs shared infrastructure to keep pace. Alignment Hive aims to provide the benefits of scale that frontier AI labs have, through shared tooling and accumulated knowledge.
 
 **What's here:**
 
