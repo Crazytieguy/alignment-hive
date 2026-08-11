@@ -2,7 +2,7 @@
 
 A shared tooling and knowledge layer for the AI alignment community. The repo behind [alignment-hive.com](https://alignment-hive.com).
 
-As soft takeoff picks up, the alignment community needs shared infrastructure to keep pace. Alignment Hive aims to provide the benefits of scale that large labs have, through shared tooling and accumulated knowledge. AI tooling is moving fast, and it's hard to keep up with what's available and what works.
+As soft takeoff picks up, the alignment community needs shared infrastructure to keep pace. Alignment Hive aims to provide the benefits of scale that frontier AI labs have, through shared tooling and accumulated knowledge. AI tooling is moving fast, and it's hard to keep up with what's available and what works.
 
 **What's here:**
 
@@ -60,10 +60,10 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 | Plugin | Description | `enabledPlugins` key |
 |--------|-------------|----------------------|
 | [hive](plugins/hive) | Tooling recommendations, session memory + sharing | Included in install script |
-| [mats](plugins/mats) | MATS fellow handbook, lit review, best practices | `mats@alignment-hive` |
 | [llms-fetch-mcp](plugins/llms-fetch-mcp) | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `llms-fetch-mcp@alignment-hive` |
 | [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `remote-kernels@alignment-hive` |
 | [model-router](plugins/model-router) | GPT models as native Claude Code subagents via a local gateway (experimental) | `model-router@alignment-hive` |
+| [mats](plugins/mats) | MATS fellow handbook, lit review, best practices | `mats@alignment-hive` |
 
 [Codex for Claude Code](https://github.com/Crazytieguy/codex-plugin-cc) — Codex reviews and task delegation without leaving Claude Code — is maintained in a separate repo.
 
