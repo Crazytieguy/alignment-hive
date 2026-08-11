@@ -22,6 +22,13 @@ msg() {
   printf '{"systemMessage": "%smodel-router:%s %s"}\n' "$BOLD" "$RESET" "$1"
 }
 
+# Wrong platform-specific variant installed: nothing below can work, so say it
+# before anything else. bootstrap.sh owns the test.
+if ! bash "$BOOTSTRAP" platform-check >/dev/null 2>&1; then
+  msg "wrong platform, run ${MAGENTA}/model-router:setup${RESET} to fix"
+  exit 0
+fi
+
 BASE="${ANTHROPIC_BASE_URL:-}"
 
 if [ -z "$BASE" ]; then

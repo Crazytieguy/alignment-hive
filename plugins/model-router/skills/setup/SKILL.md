@@ -6,9 +6,33 @@ description: Set up, verify, repair, or uninstall the model-router Claude/GPT ro
 # model-router setup
 
 `ROUTER="${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"` — every command below
-goes through it (it downloads the pinned router binary on first use). This
+goes through it (it resolves the pinned router binary on first use). This
 flow is idempotent; `$ROUTER doctor` at any point shows what's left to do.
 macOS and Linux only.
+
+## Wrong platform (check this first)
+
+`$ROUTER platform-check` — silent and exit 0 means all is well, go on to the
+install flow. It only fails when a platform-specific plugin entry for a
+*different* machine is enabled: those bundle one target's binary, so the wrong
+one cannot run. It prints the entry that should be there, e.g.
+`model-router-aarch64-apple-darwin`.
+
+Fix it by editing whichever settings file enables the wrong key
+(`.claude/settings.local.json`, `~/.claude/settings.local.json`, or a
+project's `.claude/settings.json`): replace it with
+`<printed-name>@alignment-hive`, keeping the value `true`. Exactly one
+model-router key may be enabled across all settings files — the plain
+`model-router@alignment-hive` and any platform entry define the same
+commands, skills and agents, so two of them load two copies.
+
+A platform key belongs only in a machine-local settings file. If the wrong one
+came from a checked-in `.claude/settings.json`, moving it to
+`.claude/settings.local.json` is the fix, and collaborators need to add the
+entry for their own machines.
+
+Then tell the user to restart Claude Code and re-run this skill. Nothing else
+here works until the binary resolves.
 
 ## Install flow
 

@@ -218,6 +218,19 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  # The binary now exists, so the platform-specific plugin zips that bundle it
+  # can be built and published in this same run. That is what lets a
+  # binary-version bump be a single push instead of two.
+  plugin-archives:
+    needs:
+      - host
+    if: ${{ always() && needs.host.result == 'success' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/plugin-archives.yml
+    with:
+      plugin: model-router
+
   announce:
     needs:
       - plan

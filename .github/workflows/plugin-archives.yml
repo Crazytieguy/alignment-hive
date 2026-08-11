@@ -1,0 +1,68 @@
+# Publishes the platform-specific plugin archives (plugin content + that
+# platform's released binary, in one zip) onto the rolling `plugin-archives`
+# release, replacing the assets in place. The urls are fixed, so nothing in
+# marketplace.json changes at release time.
+#
+# Runs on a push that changes plugin content, and again from each binary
+# release workflow once that workflow has cut the binary — which is what makes
+# a binary-version bump a single push. See
+# .claude/skills/release-plugins/SKILL.md.
+
+name: Plugin archives
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/model-router/**'
+      - 'plugins/remote-kernels/**'
+      - 'dist-workspace.toml'
+      - 'scripts/plugin-archives.py'
+      - '.github/workflows/plugin-archives.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      plugin:
+        description: >-
+          Publish only this plugin. Set by the binary release workflows, which
+          call this once the binary exists — naming a plugin is what makes a
+          missing binary release an error rather than a skip.
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  archives:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    # Job level, not workflow level: a workflow_call invocation runs inside the
+    # caller's run, where this workflow's own workflow-level concurrency would
+    # not apply — and the release-chained callers are exactly the writers that
+    # must not race the push-triggered ones onto the same release.
+    concurrency:
+      group: plugin-archives
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # Always main, never the caller's ref. A release workflow calls us from a
+      # tag, and building that tree would republish it over any content that
+      # landed while the binary was building.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Cache the released binaries
+        uses: actions/cache@v4
+        with:
+          path: dist/plugin-archives/.cache
+          key: plugin-binaries-${{ hashFiles('plugins/*/binary-version') }}
+
+      - name: Build and publish archives
+        env:
+          # Empty unless a release workflow called us. Unquoted below so an
+          # empty value expands to no argument, i.e. every plugin.
+          PLUGIN: ${{ inputs.plugin }}
+        run: python3 scripts/plugin-archives.py publish $PLUGIN

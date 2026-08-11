@@ -15,6 +15,9 @@ presentation/
 # Dev binary
 .dev/
 
+# Built plugin archives (scripts/plugin-archives.py)
+/dist/
+
 # Review app build output
 packages/review-app/dist/
 

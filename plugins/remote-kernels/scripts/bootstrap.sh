@@ -2,8 +2,14 @@
 set -euo pipefail
 
 # Bootstrap script for remote-kernels MCP server.
-# Downloads the prebuilt binary from GitHub releases (cached locally),
-# then exec's it so signals propagate correctly for graceful shutdown.
+# Resolves the prebuilt binary (cached locally), then exec's it so signals
+# propagate correctly for graceful shutdown.
+#
+# The platform-specific marketplace entries ship the binary inside the plugin
+# zip, at bin/remote-kernels-<target>.tar.xz. When it is there the binary comes
+# from the plugin itself, so plugin and binary are never out of step. The plain
+# (path-source) plugin has no bin/ and downloads from GitHub releases as before.
+# A bin/ that holds some other platform's binary is an error, not a fallback.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -36,6 +42,22 @@ esac
 
 TARGET="${ARCH_TRIPLE}-${OS_TRIPLE}"
 
+# A platform-specific plugin zip carries exactly one target's binary. A bin/
+# without ours means the wrong variant is installed: stop, rather than quietly
+# downloading, which would hand back the plugin/binary skew the bundle exists
+# to remove. `platform-check` runs just this test — no download, no exec — and
+# prints the entry that should have been installed, for the setup skill.
+if [ -d "$PLUGIN_ROOT/bin" ] && [ ! -f "$PLUGIN_ROOT/bin/remote-kernels-${TARGET}.tar.xz" ]; then
+  if [ "${1:-}" = "platform-check" ]; then
+    echo "remote-kernels-${TARGET}"
+  fi
+  echo "remote-kernels: wrong platform, run /remote-kernels:setup to fix" >&2
+  exit 1
+fi
+if [ "${1:-}" = "platform-check" ]; then
+  exit 0
+fi
+
 # Dev mode: use locally-built binary if REMOTE_KERNELS_DEV is set
 if [ -n "${REMOTE_KERNELS_DEV:-}" ] && [ -x "$REMOTE_KERNELS_DEV" ]; then
   exec "$REMOTE_KERNELS_DEV" "$@"
@@ -45,21 +67,30 @@ fi
 CACHE_DIR="$HOME/.cache/remote-kernels/v${VERSION}"
 BINARY="$CACHE_DIR/remote-kernels"
 
-# Download if not cached
+# Populate the cache if it is empty: from the bundled archive when the plugin
+# ships one, otherwise from GitHub releases.
 if [ ! -x "$BINARY" ]; then
   ARCHIVE_NAME="remote-kernels-${TARGET}.tar.xz"
-  DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/remote-kernels-v${VERSION}/${ARCHIVE_NAME}"
+  # Present only in the platform-specific plugin zips; a mismatched one already
+  # exited above, so reaching here with no bundle means the plain plugin.
+  ARCHIVE="$PLUGIN_ROOT/bin/$ARCHIVE_NAME"
 
-  echo "Downloading remote-kernels v${VERSION} for ${TARGET}..." >&2
   mkdir -p "$CACHE_DIR"
 
-  if ! curl -fSL "$DOWNLOAD_URL" -o "$CACHE_DIR/$ARCHIVE_NAME" 2>/dev/null; then
-    echo "Failed to download from: $DOWNLOAD_URL" >&2
-    echo "Check that v${VERSION} has been released with binaries for ${TARGET}" >&2
-    exit 1
+  if [ ! -f "$ARCHIVE" ]; then
+    ARCHIVE="$CACHE_DIR/$ARCHIVE_NAME"
+    DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/remote-kernels-v${VERSION}/${ARCHIVE_NAME}"
+
+    echo "Downloading remote-kernels v${VERSION} for ${TARGET}..." >&2
+
+    if ! curl -fSL "$DOWNLOAD_URL" -o "$ARCHIVE" 2>/dev/null; then
+      echo "Failed to download from: $DOWNLOAD_URL" >&2
+      echo "Check that v${VERSION} has been released with binaries for ${TARGET}" >&2
+      exit 1
+    fi
   fi
 
-  tar -xf "$CACHE_DIR/$ARCHIVE_NAME" -C "$CACHE_DIR"
+  tar -xf "$ARCHIVE" -C "$CACHE_DIR"
   rm -f "$CACHE_DIR/$ARCHIVE_NAME"
 
   # cargo-dist archives nest the binary in a subdirectory

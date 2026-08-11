@@ -40,3 +40,33 @@ fi
 echo "**Plugin version**: $PLUGIN_VERSION"
 echo "**Last run version**: $LAST_VERSION"
 echo "**Run type**: $RUN_TYPE"
+
+# Platform-specific marketplace entries for the plugins that ship a binary.
+# Resolved here rather than in the command prose so the target triple has one
+# definition and the catalog lookup is exact.
+case "$(uname -s 2>/dev/null)" in
+  Linux) OS_TRIPLE="unknown-linux-gnu" ;;
+  Darwin) OS_TRIPLE="apple-darwin" ;;
+  *) OS_TRIPLE="" ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+  x86_64) ARCH_TRIPLE="x86_64" ;;
+  aarch64 | arm64) ARCH_TRIPLE="aarch64" ;;
+  *) ARCH_TRIPLE="" ;;
+esac
+
+CATALOG="$HOME/.claude/plugins/marketplaces/alignment-hive/.claude-plugin/marketplace.json"
+AVAILABLE=""
+if [ -n "$OS_TRIPLE" ] && [ -n "$ARCH_TRIPLE" ]; then
+  SUFFIX="-${ARCH_TRIPLE}-${OS_TRIPLE}"
+  for plugin in model-router remote-kernels; do
+    if grep -q "\"${plugin}${SUFFIX}\"" "$CATALOG" 2>/dev/null; then
+      AVAILABLE="$AVAILABLE $plugin"
+    fi
+  done
+else
+  SUFFIX="none (unsupported platform)"
+fi
+
+echo "**Platform entry suffix**: $SUFFIX"
+echo "**Platform entries available for**:${AVAILABLE:- none}"

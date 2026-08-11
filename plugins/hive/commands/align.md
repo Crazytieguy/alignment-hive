@@ -59,6 +59,16 @@ If the user chooses to keep it, record that in `.claude/hive/align-rejected.md` 
 
 If not installed, skip silently — do not mention it.
 
+### Bundled-binary Migration (remote-kernels, model-router)
+
+The plain `remote-kernels@alignment-hive` and `model-router@alignment-hive` keys download their binary separately from the plugin, so a plugin update briefly runs against the previous binary. The platform-specific entries described in the Plugins checklist below close that gap.
+
+For each of those two plugins listed under **Platform entries available for** in Status above, find every settings file that enables the plain key and offer the switch. Treat the four files as one effective configuration: on yes, remove the plain key from *all* of them and add the platform-specific key to one machine-local file — `.claude/settings.local.json` for a project install, `~/.claude/settings.local.json` for a global one. The two keys must never both be enabled.
+
+If the plain key is in `.claude/settings.json`, say so in the ask: that file is usually checked in, so the plugin moves out of the settings collaborators share and they will each need the entry for their own machine.
+
+Record declines in `.claude/hive/align-rejected.md`. If neither plain key is enabled, skip silently — do not mention it.
+
 ### First-Time Setup (recommendations)
 
 Walk through the checklist below. For each item, check if it's already implemented. If not, offer it to the user. Implement if accepted, note the reason in the rejected file if declined.
@@ -87,6 +97,15 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
 - **Cross-model review**: `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code
 - **Cross-model subagents (experimental)**: `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental alternative to the codex plugin
+
+#### Platform-specific entries for remote-kernels and model-router
+
+These two plugins ship a compiled binary, and the marketplace has a per-platform entry for each that bundles the binary inside the plugin, so a plugin update and its binary always arrive together. For every plugin listed under **Platform entries available for** in Status above, install `<plugin><suffix>@alignment-hive` using the suffix reported there (e.g. `remote-kernels-aarch64-apple-darwin@alignment-hive`) instead of the plain key. Plugins not listed there have no entry for this platform — use the plain key.
+
+Two rules for these entries specifically:
+
+- **Machine-local settings only.** The key names a platform, so it must never land in a settings file that is checked in — a teammate on another OS would get an archive that refuses to run. Write it to `.claude/settings.local.json`, or `~/.claude/settings.local.json` for a global install. This overrides the shared/local preference inferred above.
+- **Never both.** A platform-specific entry and its plain counterpart define the same commands, skills and hooks, so enabling both loads two copies. Exactly one key per plugin across all four settings files, not one per file.
 
 #### README URLs for "Tell me more"
 
@@ -123,7 +142,7 @@ For alignment-hive plugins (requires alignment-hive marketplace):
 ```json
 {
   "enabledPlugins": {
-    "model-router@alignment-hive": true
+    "mats@alignment-hive": true
   },
   "extraKnownMarketplaces": {
     "alignment-hive": {

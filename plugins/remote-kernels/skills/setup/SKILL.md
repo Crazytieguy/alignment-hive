@@ -13,6 +13,25 @@ environment variables. Prefer inferring configuration from the project's
 code, docs, and existing infrastructure; ask the user only when inference
 isn't possible or is genuinely ambiguous.
 
+## 0. Wrong platform (check this first)
+
+`${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh platform-check` — silent and exit 0
+means all is well, go on. It only fails when a platform-specific plugin entry
+for a *different* machine is enabled: those bundle one target's binary, so the
+wrong one cannot run and the MCP server will not start. It prints the entry
+that should be there, e.g. `remote-kernels-aarch64-apple-darwin`.
+
+Fix it by editing whichever settings file enables the wrong key: replace it
+with `<printed-name>@alignment-hive`, keeping the value `true`. Exactly one
+remote-kernels key may be enabled across all settings files — the plain
+`remote-kernels@alignment-hive` and any platform entry declare the same MCP
+server, so two of them load twice. A platform key belongs only in a
+machine-local settings file; if the wrong one came from a checked-in
+`.claude/settings.json`, moving it to `.claude/settings.local.json` is the fix,
+and collaborators need to add the entry for their own machines.
+
+Then tell the user to restart Claude Code and re-run this skill.
+
 ## 1. Pick the runtime(s)
 
 - **RunPod** — managed pods, reliable stop/resume; the simplest choice

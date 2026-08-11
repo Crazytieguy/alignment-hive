@@ -6,6 +6,13 @@
 STATE_DIR="$CLAUDE_PROJECT_DIR/.claude/remote-kernels"
 BINARY_VERSION=$(cat "${CLAUDE_PLUGIN_ROOT}/binary-version" 2>/dev/null || echo "")
 
+# Wrong platform-specific variant installed: the MCP server cannot start, so
+# say that instead of a setup nudge. bootstrap.sh owns the test.
+if ! bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh" platform-check >/dev/null 2>&1; then
+  echo '{"systemMessage": "\u001b[1mremote-kernels:\u001b[0m wrong platform, run \u001b[1;35m/remote-kernels:setup\u001b[0m to fix"}'
+  exit 0
+fi
+
 # If remote-kernels.toml exists, setup is done — but nudge once after updates.
 if [ -f "$CLAUDE_PROJECT_DIR/remote-kernels.toml" ]; then
   if [ -n "$BINARY_VERSION" ]; then
