@@ -360,10 +360,12 @@ pub(crate) fn parse_event(event: &str) -> Option<SseEvent<'_>> {
         if let Some(value) = line.strip_prefix("event:") {
             name = Some(value.trim());
         } else if let Some(value) = line.strip_prefix("data:") {
-            let leading_whitespace = value.len().saturating_sub(value.trim_start().len());
-            let trailing_whitespace = value.len().saturating_sub(value.trim_end().len());
-            let range = (offset + "data:".len() + leading_whitespace)
-                ..(offset + line.len() - trailing_whitespace);
+            // Measured off the trimmed value so an all-whitespace payload
+            // (`data: ` keep-alives) yields an empty range, not an inverted one.
+            let trimmed = value.trim();
+            let leading_whitespace = value.len() - value.trim_start().len();
+            let start = offset + "data:".len() + leading_whitespace;
+            let range = start..(start + trimmed.len());
             match (&first_range, &mut joined) {
                 (None, _) => first_range = Some(range),
                 (Some(first), None) => {
@@ -619,6 +621,25 @@ data: {"type":"message_delta","usage":{"input_tokens":400,"output_tokens":80,"ca
     fn without_a_scale_events_are_byte_identical() {
         let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":42,\"output_tokens\":3}}\n\n";
         assert_eq!(transformed(&[delta], 99), delta);
+    }
+
+    #[test]
+    fn whitespace_only_data_lines_parse_as_empty_payloads() {
+        let event = "event: ping\ndata: \n\n";
+        let parsed = parse_event(event).unwrap();
+        assert_eq!(parsed.name, Some("ping"));
+        assert_eq!(parsed.data, "");
+        assert_eq!(&event[parsed.data_range.unwrap()], "");
+
+        // The multi-`data:` join walks the same ranges.
+        let joined = parse_event("event: ping\ndata:\t\ndata: {}\n\n").unwrap();
+        assert_eq!(joined.data, "\n{}");
+    }
+
+    #[test]
+    fn keep_alive_events_pass_through_unmodified() {
+        let input = b"event: ping\ndata: \n\n";
+        assert_eq!(transformed(&[input], 99), input);
     }
 
     #[test]
