@@ -88,7 +88,14 @@ impl RunPodClient {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            anyhow::bail!("RunPod API error ({status}): {body}");
+            // Typed so callers can classify by HTTP status — a 404 means the
+            // pod is gone, which no substring match on the message can tell
+            // apart from another status whose body merely mentions 404.
+            return Err(RunPodError::Api {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         tracing::debug!(%body, "Get pod response");

@@ -354,6 +354,20 @@ pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities
     }
 }
 
+/// Whether a failed pod query proves the pod no longer exists.
+///
+/// Only an HTTP 404 from the API counts. Matching the substring `404` in the
+/// rendered message would also swallow, say, a 500 whose body happens to
+/// mention 404 — and `Gone` is definitive: reconciliation clears the durable
+/// record, so a live, still-billing pod would vanish from status and cost
+/// tracking.
+fn is_pod_not_found(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<crate::runpod::client::RunPodError>(),
+        Some(crate::runpod::client::RunPodError::Api { status: 404, .. })
+    )
+}
+
 impl Runtime for RunPodRuntime {
     type Conn = RunPodConnection;
 
@@ -503,7 +517,7 @@ impl Runtime for RunPodRuntime {
             }),
             // The REST API 404s for terminated pods; surface as Gone rather
             // than an error so reconnect logic can fall through cleanly.
-            Err(e) if e.to_string().contains("404") => Ok(InstanceStatus::Gone),
+            Err(e) if is_pod_not_found(&e) => Ok(InstanceStatus::Gone),
             Err(e) => Err(e),
         }
     }
@@ -909,6 +923,32 @@ fn to_camel_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a real 404 status may read as "pod deleted" — `describe()` turns
+    /// that into `Gone`, and reconciliation deletes the local record on it.
+    #[test]
+    fn only_http_404_counts_as_pod_not_found() {
+        use crate::runpod::client::RunPodError;
+
+        let not_found = RunPodError::Api {
+            status: 404,
+            body: "{\"error\":\"pod not found\"}".to_string(),
+        };
+        assert!(is_pod_not_found(&not_found.into()));
+
+        // A server error that merely mentions 404 in its body must stay an
+        // error — the pod may well still be running and billing.
+        let server_error = RunPodError::Api {
+            status: 500,
+            body: "{\"error\":\"upstream status 404 while refreshing metadata\"}".to_string(),
+        };
+        assert!(!is_pod_not_found(&server_error.into()));
+
+        // Non-API failures (transport, parse) never prove deletion either.
+        assert!(!is_pod_not_found(&anyhow::anyhow!(
+            "connection reset (404 bytes read)"
+        )));
+    }
 
     #[test]
     fn camel_case_conversion() {
