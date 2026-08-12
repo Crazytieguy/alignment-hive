@@ -138,7 +138,7 @@ impl Notebook {
     pub fn append_cell(&mut self, code: &str, output: &ExecutionOutput) -> anyhow::Result<()> {
         self.execution_count += 1;
 
-        let outputs = build_outputs(output, self.execution_count);
+        let outputs = build_outputs(output, Some(self.execution_count));
 
         let cell = json!({
             "cell_type": "code",
@@ -152,7 +152,10 @@ impl Notebook {
         self.save()
     }
 
-    /// Create a cell placeholder with empty output. Returns the cell number (1-indexed).
+    /// Create a cell placeholder with empty output. Returns the cell number
+    /// (1-indexed position in the notebook, which is what `update_cell_output`
+    /// and `backfill_output` speak — not the execution count, which diverges as
+    /// soon as the notebook holds non-code cells or gaps).
     /// Used for streaming: the cell is created up front, then updated as output arrives.
     pub fn append_cell_placeholder(
         &mut self,
@@ -176,7 +179,7 @@ impl Notebook {
 
         self.cells.push(cell);
         self.save()?;
-        Ok(self.execution_count)
+        u32::try_from(self.cells.len()).context("notebook has too many cells")
     }
 
     /// Update the output of an existing cell (identified by `cell_number`, 1-indexed).
@@ -186,9 +189,9 @@ impl Notebook {
         cell_number: u32,
         output: &ExecutionOutput,
     ) -> anyhow::Result<()> {
-        let index = (cell_number - 1) as usize;
-        if let Some(cell) = self.cells.get_mut(index) {
-            let outputs = build_outputs(output, cell_number);
+        let index = (cell_number as usize).checked_sub(1);
+        if let Some(cell) = index.and_then(|index| self.cells.get_mut(index)) {
+            let outputs = build_outputs(output, cell_execution_count(cell));
             cell["outputs"] = json!(outputs);
             cell["metadata"]["remote_kernels"]["placeholder"] = json!(false);
             if let Some(metadata) = cell["metadata"]["remote_kernels"].as_object_mut() {
@@ -230,7 +233,7 @@ impl Notebook {
             return Ok(None);
         }
         let cell_number = u32::try_from(index + 1).context("notebook has too many cells")?;
-        cell["outputs"] = json!(build_outputs(output, cell_number));
+        cell["outputs"] = json!(build_outputs(output, cell_execution_count(cell)));
         cell["metadata"]["remote_kernels"]["recovery_status"] = if complete {
             json!("recovered")
         } else {
@@ -349,8 +352,15 @@ fn sanitize_filename(name: &str) -> String {
     trimmed.chars().take(64).collect()
 }
 
+/// The execution count recorded on a cell, for stamping its `execute_result`.
+fn cell_execution_count(cell: &Value) -> Option<u32> {
+    cell["execution_count"]
+        .as_u64()
+        .and_then(|c| u32::try_from(c).ok())
+}
+
 /// Build notebook output cells from execution output.
-fn build_outputs(output: &ExecutionOutput, execution_count: u32) -> Vec<serde_json::Value> {
+fn build_outputs(output: &ExecutionOutput, execution_count: Option<u32>) -> Vec<serde_json::Value> {
     let mut outputs = Vec::new();
 
     if !output.stdout.is_empty() {
@@ -501,6 +511,47 @@ mod tests {
         let mut loaded = Notebook::load(original.path()).unwrap();
         assert_eq!(loaded.kernel_id(), Some("kernel-1"));
         assert_eq!(loaded.append_cell_placeholder("a + 1", "msg-2").unwrap(), 2);
+    }
+
+    #[test]
+    fn placeholder_cell_number_is_a_position_not_an_execution_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = Notebook::new(dir.path(), "kernel-1", Some("mixed")).unwrap();
+        original
+            .append_cell("a = 1", &output_with("", None))
+            .unwrap();
+
+        // A markdown cell added by hand while the server was stopped: it shifts
+        // positions without advancing the execution count.
+        let path = original.path().to_path_buf();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        json["cells"].as_array_mut().unwrap().push(json!({
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": ["notes"]
+        }));
+        std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let mut loaded = Notebook::load(&path).unwrap();
+        let cell_number = loaded.append_cell_placeholder("a + 1", "msg-2").unwrap();
+        assert_eq!(cell_number, 3);
+        loaded
+            .update_cell_output(cell_number, &output_with("", Some("2")))
+            .unwrap();
+
+        let json = read_notebook(&loaded);
+        assert_eq!(json["cells"][1]["cell_type"], "markdown");
+        assert!(json["cells"][1].get("outputs").is_none());
+        let outputs = &json["cells"][2]["outputs"];
+        assert_eq!(outputs[0]["output_type"], "execute_result");
+        assert_eq!(outputs[0]["data"]["text/plain"][0], "2");
+        // The result is stamped with the cell's execution count, not its position.
+        assert_eq!(outputs[0]["execution_count"], 2);
+        assert_eq!(
+            json["cells"][2]["metadata"]["remote_kernels"]["placeholder"],
+            false
+        );
     }
 
     #[test]
