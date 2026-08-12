@@ -4693,18 +4693,41 @@ impl RemoteKernelsServer {
     /// without this, the stale plan would resume on the next attach and
     /// could stop or terminate the machine again unexpectedly.
     async fn cancel_finish_intent(&self, machine_id: &str) {
-        let state = self.state.lock().await;
-        let mut lifecycle = crate::state::load_lifecycle_record(&state.project_dir, machine_id);
-        if lifecycle.finish_intent.is_some() {
-            lifecycle.finish_intent = None;
-            if let Err(error) =
-                crate::state::save_lifecycle_record(&state.project_dir, machine_id, &lifecycle)
-            {
-                tracing::warn!(
-                    instance = machine_id,
-                    "Could not cancel the queued finish() plan: {error}"
-                );
+        let conn = {
+            let state = self.state.lock().await;
+            let mut lifecycle = crate::state::load_lifecycle_record(&state.project_dir, machine_id);
+            if lifecycle.finish_intent.is_some() {
+                lifecycle.finish_intent = None;
+                if let Err(error) =
+                    crate::state::save_lifecycle_record(&state.project_dir, machine_id, &lifecycle)
+                {
+                    tracing::warn!(
+                        instance = machine_id,
+                        "Could not cancel the queued finish() plan: {error}"
+                    );
+                }
             }
+            state
+                .instances
+                .get(machine_id)
+                .and_then(|inst| inst.connection.clone())
+        };
+        // The machine-side marker outlives the local record: the drain sees
+        // the local plan gone and exits without touching it, so a stopped
+        // machine that is attached again would apply the cancelled plan at
+        // its next disconnect cleanup. Clear it while the connection is still
+        // live, before the stop/terminate runs. A clear that cannot reach the
+        // machine only logs — it must not block the stop the user asked for,
+        // and the marker cannot bite regardless: only a watchdog consumes it,
+        // and no attach installs one before reconciling the marker first (see
+        // `heartbeat::reconcile_finish_marker`).
+        if let Some(conn) = conn
+            && let Err(error) = crate::machine_scripts::clear_intent(&*conn).await
+        {
+            tracing::warn!(
+                instance = machine_id,
+                "Could not clear the finish marker on the machine: {error:#}"
+            );
         }
     }
 

@@ -296,6 +296,22 @@ async fn establish_and_run(
             instance = machine_id,
             "Runtime supports lease fencing but not a detached watchdog"
         );
+    } else if let Err(e) = reconcile_finish_marker(conn, &project_dir, machine_id).await {
+        // The marker is only ever consumed by the watchdog's finalizer, so
+        // refusing to install one is what makes a cancelled plan durable:
+        // either the stale marker is gone, or nothing on the machine can act
+        // on it.
+        tracing::warn!(
+            instance = machine_id,
+            "Stale finish marker not cleared: {e:#}"
+        );
+        let caveat = format!(
+            "a cancelled finish() plan could not be cleared from the machine ({e:#}), so the \
+             machine-side auto-cleanup was not installed{NO_AUTO_SHUTDOWN_TAIL}"
+        );
+        mark_unsupervisable(state, machine_id, external_id, &caveat).await;
+        let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
+        return Ok(());
     } else if let Err(e) = conn.install_watchdog(watchdog_policy.clone()).await {
         // A failed install means NO machine-side cleanup or budget
         // enforcement exists — reporting Active here would bypass the
@@ -601,6 +617,29 @@ async fn run_startup_commands(conn: &AnyConnection, machine_id: &str, commands: 
     }
 }
 
+/// Drop a machine-side finish marker that no local plan backs any more.
+///
+/// `stop()`/`terminate()` clear the marker when they cancel a plan, but that
+/// clear reaches a machine that may already be unreachable, and a crashed
+/// server never runs it at all. The marker survives the machine's own stop,
+/// so without this the next disconnect cleanup would follow the cancelled
+/// plan — a cancelled `then="terminate"` deleting a machine the user stopped
+/// to preserve. A local plan that is still queued owns its marker and keeps
+/// it: `attach()` resumes that plan.
+async fn reconcile_finish_marker(
+    conn: &AnyConnection,
+    project_dir: &std::path::Path,
+    machine_id: &str,
+) -> anyhow::Result<()> {
+    if crate::state::load_lifecycle_record(project_dir, machine_id)
+        .finish_intent
+        .is_some()
+    {
+        return Ok(());
+    }
+    crate::machine_scripts::clear_intent(conn).await
+}
+
 /// Handle for stopping an instance's heartbeat on shutdown.
 pub struct HeartbeatState {
     pub task_handle: tokio::task::JoinHandle<()>,
@@ -630,5 +669,50 @@ mod tests {
             budget: 1.0,
         };
         assert_eq!(feed.remaining_secs().await, None);
+    }
+
+    /// A marker left behind by a cancelled plan (its eager clear never
+    /// reached the machine) must be gone before this session installs a
+    /// watchdog that could act on it.
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn stale_finish_marker_is_cleared_before_the_watchdog_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_dir = tempfile::tempdir().unwrap();
+        let conn = AnyConnection::Fake(
+            crate::runtime::fake::FakeConnection::for_test(machine_dir.path(), false).unwrap(),
+        );
+        let machine_id = crate::ulid::new();
+        let marker = std::path::PathBuf::from(crate::machine_scripts::state_dir(conn.workdir()))
+            .join("intent.json");
+
+        // Cancelled plan: the local record is clean, the marker is not.
+        crate::machine_scripts::write_intent(&conn, false, crate::state::FinishThen::Terminate)
+            .await
+            .unwrap();
+        assert!(marker.exists());
+        reconcile_finish_marker(&conn, dir.path(), &machine_id)
+            .await
+            .unwrap();
+        assert!(
+            !marker.exists(),
+            "a marker with no local plan must not survive into a supervised session"
+        );
+
+        // A still-queued plan owns its marker: attach() resumes that plan.
+        crate::machine_scripts::write_intent(&conn, false, crate::state::FinishThen::Terminate)
+            .await
+            .unwrap();
+        let mut lifecycle = crate::state::load_lifecycle_record(dir.path(), &machine_id);
+        lifecycle.finish_intent = Some(crate::state::FinishIntent {
+            uuid: "queued".to_string(),
+            downloads: Vec::new(),
+            then: crate::state::FinishThen::Terminate,
+        });
+        crate::state::save_lifecycle_record(dir.path(), &machine_id, &lifecycle).unwrap();
+        reconcile_finish_marker(&conn, dir.path(), &machine_id)
+            .await
+            .unwrap();
+        assert!(marker.exists(), "a queued plan must keep its marker");
     }
 }

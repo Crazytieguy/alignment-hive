@@ -1262,6 +1262,30 @@ async fn explicit_stop_cancels_queued_finish_plan() {
         .unwrap();
     assert!(!is_error(&result), "{}", text_of(&result));
 
+    // Where the machine-side marker lives — captured while the machine is
+    // still attached, so it can be inspected after the stop.
+    let marker = {
+        let state = server.shared_state();
+        let state = state.lock().await;
+        let workdir = state.instances[&machine_id]
+            .connection
+            .as_ref()
+            .expect("attached machine has a connection")
+            .workdir()
+            .to_string();
+        std::path::PathBuf::from(remote_kernels::machine_scripts::state_dir(&workdir))
+            .join("intent.json")
+    };
+    let mut written = false;
+    for _ in 0..40 {
+        if marker.exists() {
+            written = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(written, "finish() never wrote the machine-side marker");
+
     // The user changes their mind: explicit stop supersedes the plan.
     let result = server
         .stop(Parameters(remote_kernels::server::StopParams {
@@ -1277,6 +1301,13 @@ async fn explicit_stop_cancels_queued_finish_plan() {
             .finish_intent
             .is_none(),
         "explicit stop must cancel the queued plan"
+    );
+    // The marker must go too: left behind, the next attach's disconnect
+    // cleanup would follow the cancelled terminate and delete the machine
+    // the user stopped to preserve.
+    assert!(
+        !marker.exists(),
+        "explicit stop must clear the machine-side finish marker"
     );
     let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
         .expect("stopped machine keeps its record");
