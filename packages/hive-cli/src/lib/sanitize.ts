@@ -2,6 +2,7 @@ import { ALL_KEYWORDS, SECRET_RULES } from './secret-rules';
 
 const MAX_SANITIZE_DEPTH = 100;
 const MIN_SECRET_LENGTH = 8;
+const TRUNCATED_PLACEHOLDER = '[TRUNCATED:max-depth]';
 
 const SAFE_KEYS = new Set([
   'uuid',
@@ -230,7 +231,9 @@ export interface SanitizeDeepOptions {
 }
 
 export function sanitizeDeep<T>(value: T, opts: SanitizeDeepOptions = {}, depth = 0): T {
-  if (depth > MAX_SANITIZE_DEPTH) return value;
+  // Past the cap the subtree is dropped, not passed through: returning it unscanned would let
+  // anything nested below the cap (secrets included) reach storage unredacted.
+  if (depth > MAX_SANITIZE_DEPTH) return TRUNCATED_PLACEHOLDER as T;
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return sanitizeString(value) as T;
   if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, opts, depth + 1)) as T;

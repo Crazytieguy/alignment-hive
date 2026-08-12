@@ -130,6 +130,31 @@ describe('sanitizeDeep', () => {
 
     expect(current.value).toContain('[REDACTED:');
   });
+
+  test('drops subtrees past the depth limit instead of passing them through', async () => {
+    // 150 levels deep — past the 100 limit, so the secret is never scanned and the whole
+    // subtree must be dropped rather than returned unsanitized.
+    let nested: Record<string, unknown> = { value: TEST_GITHUB_TOKEN };
+    for (let i = 0; i < 150; i++) {
+      nested = { child: nested };
+    }
+
+    const sanitized = await sanitizeDeep(nested, { strict: true });
+
+    expect(JSON.stringify(sanitized)).not.toContain('ghp_');
+    expect(JSON.stringify(sanitized)).toContain('[TRUNCATED:max-depth]');
+  });
+
+  test('drops over-deep arrays too', async () => {
+    let nested: unknown = TEST_GITHUB_TOKEN;
+    for (let i = 0; i < 150; i++) {
+      nested = [nested];
+    }
+
+    const sanitized = await sanitizeDeep(nested, { strict: true });
+
+    expect(JSON.stringify(sanitized)).not.toContain('ghp_');
+  });
 });
 
 describe('sanitizeString edge cases', () => {
