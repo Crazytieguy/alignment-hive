@@ -1311,7 +1311,19 @@ impl RemoteKernelsServer {
             if !server.finish_drains.lock().await.insert(machine_id.clone()) {
                 return;
             }
+            // Token of the plan a failed attempt worked on, so the respawn
+            // below can tell "a newer plan arrived" from "the plan we just
+            // failed on is still queued". A failure deliberately keeps the
+            // intent for a later attach(), so respawning for it would retry
+            // the identical plan immediately and forever.
+            let mut failed_plan: Option<Option<String>> = None;
             loop {
+                let queued_uuid = {
+                    let project_dir = server.state.lock().await.project_dir.clone();
+                    crate::state::load_lifecycle_record(&project_dir, &machine_id)
+                        .finish_intent
+                        .map(|intent| intent.uuid)
+                };
                 match server.finish_drain(&machine_id).await {
                     Ok(Some(message)) => {
                         tracing::info!(instance = %machine_id, "Finish plan: {message}");
@@ -1322,19 +1334,28 @@ impl RemoteKernelsServer {
                         server.start_failures.lock().await.push(format!(
                             "Queued finish() for machine {machine_id} did not complete: {message}"
                         ));
+                        failed_plan = Some(queued_uuid);
                         break;
                     }
                 }
             }
             server.finish_drains.lock().await.remove(&machine_id);
             // A plan queued between our last look and the set removal would
-            // otherwise strand until the next attach — respawn for it.
+            // otherwise strand until the next attach — respawn for it, unless
+            // it is the very plan that just failed.
             let project_dir = server.state.lock().await.project_dir.clone();
-            if crate::state::load_lifecycle_record(&project_dir, &machine_id)
-                .finish_intent
-                .is_some()
+            if let Some(queued) =
+                crate::state::load_lifecycle_record(&project_dir, &machine_id).finish_intent
             {
-                server.spawn_finish_drain(&machine_id);
+                // Unknown failed token counts as "same plan": never retry
+                // blind. The intent stays durable either way, so a later
+                // attach() or finish() resumes it.
+                let repeats_failure = failed_plan
+                    .as_ref()
+                    .is_some_and(|failed| failed.as_deref().is_none_or(|uuid| uuid == queued.uuid));
+                if !repeats_failure {
+                    server.spawn_finish_drain(&machine_id);
+                }
             }
         });
     }
@@ -6629,6 +6650,48 @@ mod tests {
             .unwrap();
         let text = result.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("retry shortly"), "{text}");
+    }
+
+    /// A drain that keeps failing (here: the machine is not attached, so the
+    /// plan stays queued for a later attach) must not respawn itself — the
+    /// intent it left behind is the same plan that just failed.
+    #[tokio::test]
+    async fn failing_finish_drain_does_not_respawn_for_the_same_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = RemoteKernelsServer::new(
+            toml::from_str("").unwrap(),
+            AppState::new(dir.path().to_path_buf()),
+            None,
+        );
+        let queue_plan = || {
+            let mut lifecycle = crate::state::load_lifecycle_record(dir.path(), "main");
+            lifecycle.finish_intent = Some(crate::state::FinishIntent {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                downloads: vec!["results/out.csv".to_string()],
+                then: crate::state::FinishThen::Terminate,
+            });
+            crate::state::save_lifecycle_record(dir.path(), "main", &lifecycle).unwrap();
+        };
+
+        queue_plan();
+        server.spawn_finish_drain("main");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let failures = server.start_failures.lock().await.len();
+        assert_eq!(failures, 1, "the failed drain respawned itself");
+        assert!(server.finish_drains.lock().await.is_empty());
+        // The plan is kept for a later attach()/finish().
+        assert!(
+            crate::state::load_lifecycle_record(dir.path(), "main")
+                .finish_intent
+                .is_some()
+        );
+
+        // A newer plan is still drained: the block is per failed plan, not
+        // a permanent stop.
+        queue_plan();
+        server.spawn_finish_drain("main");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(server.start_failures.lock().await.len(), 2);
     }
 }
 
