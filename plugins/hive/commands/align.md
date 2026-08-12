@@ -63,11 +63,19 @@ If not installed, skip silently — do not mention it.
 
 The plain `remote-kernels@alignment-hive` and `model-router@alignment-hive` keys download their binary separately from the plugin, so a plugin update briefly runs against the previous binary. The platform-specific entries described in the Plugins checklist below close that gap.
 
-For each of those two plugins listed under **Platform entries available for** in Status above, find every settings file that enables the plain key and offer the switch. Treat the four files as one effective configuration: on yes, remove the plain key from *all* of them and add the platform-specific key to one machine-local file — `.claude/settings.local.json` for a project install, `~/.claude/settings.local.json` for a global one. The two keys must never both be enabled.
+For each of those two plugins listed under **Platform entries available for** in Status above, find every settings file that enables the plain key and offer the switch. If the plain key is in `.claude/settings.json`, say so prominently in the ask: that file is usually checked in, so removing it takes the plugin away from collaborators, who will each need to install the platform entry for their own machine — the user can decline and keep the shared key.
 
-If the plain key is in `.claude/settings.json`, say so in the ask: that file is usually checked in, so the plugin moves out of the settings collaborators share and they will each need the entry for their own machine.
+On yes, run the install-then-clean procedure below with `<plugin><suffix>@alignment-hive`.
 
 Record declines in `.claude/hive/align-rejected.md`. If neither plain key is enabled, skip silently — do not mention it.
+
+**Repair:** a platform-specific key enabled in `~/.claude/settings.local.json` (an older version of this migration wrote it there — the plugin loader never reads that file), or enabled anywhere but failing with a "not cached" error, is broken. Offer to fix it with the same install-then-clean procedure; no plain key needs to exist. Idempotent — a healthy platform install needs nothing.
+
+**Install-then-clean procedure** (also used by the Plugins checklist below — editing `enabledPlugins` by hand does not install anything):
+
+1. Pick the scope: `--scope user` if any occurrence of the key being replaced is in `~/.claude/settings.json` or `~/.claude/settings.local.json`, else `--scope local`. Never `--scope project` for a platform entry — a checked-in platform key breaks teammates on other platforms.
+2. Run `claude plugin install <entry> --scope <scope>`. Verify: exit 0 and the entry appears in `claude plugin list`. On failure, remove nothing — report and stop.
+3. Only then remove every other occurrence of that plugin's keys — plain and platform-specific, across all settings files, `~/.claude/settings.local.json` included — so exactly one enabled entry remains: the one the install just wrote.
 
 ### First-Time Setup (recommendations)
 
@@ -84,9 +92,9 @@ Walk through the checklist below. For each item, check if it's already implement
 
 ### Plugins (based on project type)
 
-Check both global (`~/.claude/settings.json`, `~/.claude/settings.local.json`) and project-level (`.claude/settings.json`, `.claude/settings.local.json`) settings to discover already-installed plugins. A plugin installed at either level counts as installed — do not recommend it again.
+Check both global (`~/.claude/settings.json`, `~/.claude/settings.local.json`) and project-level (`.claude/settings.json`, `.claude/settings.local.json`) settings to discover already-installed plugins. A plugin enabled in `~/.claude/settings.json` or either project-level file counts as installed — do not recommend it again. A plugin enabled *only* in `~/.claude/settings.local.json` does not count: the plugin loader never reads that file, so the plugin isn't actually working — reinstall it via `claude plugin install --scope user` and remove the stale key (verify first, per the install-then-clean procedure).
 
-**Always install plugins to project-level settings files** (`.claude/settings.json` or `.claude/settings.local.json` in the working directory) unless the user explicitly asks for a global install. Infer from existing project-level settings whether the user prefers local-only (`.claude/settings.local.json`) or shared (`.claude/settings.json`) — if unclear, ask once and use that for all installations.
+**Install with the claude CLI, never by editing `enabledPlugins` by hand** — a settings entry alone installs nothing (archive-sourced plugins in particular never load without a real install). Default to project-level: `--scope project` (shared via `.claude/settings.json`) or `--scope local` (machine-only, `.claude/settings.local.json`), unless the user explicitly asks for a global install (`--scope user`). Infer from existing project-level settings whether the user prefers local-only or shared — if unclear, ask once and use that for all installations.
 
 Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin gets three options: **Yes** (install), **No** (skip), **Tell me more**. After the user responds, process "Tell me more" answers one plugin at a time in sequence: (1) fetch the full, untruncated content of that plugin's README from the table below (use curl — WebFetch summarizes), (2) present the full README content to the user verbatim (the READMEs are already concise — do not summarize or truncate), (3) ask a fresh AskUserQuestion with only **Yes** / **No**. Do not advance to the next "Tell me more" plugin until the current one has a Yes/No answer.
 
@@ -104,8 +112,8 @@ These two plugins ship a compiled binary, and the marketplace has a per-platform
 
 Two rules for these entries specifically:
 
-- **Machine-local settings only.** The key names a platform, so it must never land in a settings file that is checked in — a teammate on another OS would get an archive that refuses to run. Write it to `.claude/settings.local.json`, or `~/.claude/settings.local.json` for a global install. This overrides the shared/local preference inferred above.
-- **Never both.** A platform-specific entry and its plain counterpart define the same commands, skills and hooks, so enabling both loads two copies. Exactly one key per plugin across all four settings files, not one per file.
+- **Never `--scope project`.** The key names a platform, so it must never land in a settings file that is checked in — a teammate on another OS would get an archive that refuses to run. Install with `--scope local`, or `--scope user` for a global install; this overrides the shared/local preference inferred above. (`~/.claude/settings.local.json` is not a plugin-enable location — the loader ignores it.)
+- **Never both.** A platform-specific entry and its plain counterpart define the same commands, skills and hooks, so enabling both loads two copies. Exactly one key per plugin across all settings files — use the install-then-clean procedure from the Bundled-binary Migration section above.
 
 #### README URLs for "Tell me more"
 
@@ -117,43 +125,27 @@ Two rules for these entries specifically:
 | codex | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
 | model-router | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/model-router/README.md` |
 
-For non-alignment-hive plugins, write this block into the chosen settings file (shape is the same; values come from the table below):
+For non-alignment-hive plugins, add the marketplace and install with the CLI (values from the table below; re-adding an already-known marketplace is harmless):
 
-```json
-{
-  "enabledPlugins": { "<plugin>": true },
-  "extraKnownMarketplaces": {
-    "<marketplace>": {
-      "source": { "source": "github", "repo": "<github-repo>" },
-      "autoUpdate": true
-    }
-  }
-}
+```
+claude plugin marketplace add <github-repo> --scope <scope>
+claude plugin install <plugin> --scope <scope>
 ```
 
-| Plugin | `<plugin>` (enabledPlugins key) | `<marketplace>` | `<github-repo>` |
+| Plugin | `<plugin>` (install coordinate) | `<marketplace>` | `<github-repo>` |
 |---|---|---|---|
 | precis | `precis@precis` | `precis` | `Crazytieguy/precis` |
 | codex | `codex@codex-plugin-cc` | `codex-plugin-cc` | `Crazytieguy/codex-plugin-cc` |
 
-`autoUpdate: true` is included by default for recommended non-alignment-hive marketplaces — they iterate quickly and benefit from auto-refresh, and the user has already opted in by accepting the recommendation. Claude Code (v2.1.140+) propagates this field to `~/.claude/plugins/known_marketplaces.json` on next session start.
+Then add `"autoUpdate": true` to the `extraKnownMarketplaces.<marketplace>` entry that `marketplace add` wrote to the scoped settings file — there is no CLI flag for auto-update. It is on by default for recommended non-alignment-hive marketplaces: they iterate quickly and benefit from auto-refresh, and the user has already opted in by accepting the recommendation. Claude Code (v2.1.140+) propagates the field to `~/.claude/plugins/known_marketplaces.json` on next session start.
 
-For alignment-hive plugins (requires alignment-hive marketplace):
-```json
-{
-  "enabledPlugins": {
-    "mats@alignment-hive": true
-  },
-  "extraKnownMarketplaces": {
-    "alignment-hive": {
-      "source": {
-        "source": "github",
-        "repo": "Crazytieguy/alignment-hive"
-      }
-    }
-  }
-}
+For alignment-hive plugins:
+
 ```
+claude plugin install <plugin>@alignment-hive --scope <scope>
+```
+
+If the install fails because the alignment-hive marketplace is missing, run `claude plugin marketplace add Crazytieguy/alignment-hive --scope <scope>` first, and add `"autoUpdate": true` to the declaration it writes.
 
 #### Marketplace auto-update — retroactive sweep
 
@@ -166,11 +158,12 @@ Some users may have these marketplaces installed without `autoUpdate: true` (ins
 3. For each candidate marketplace where: name ∈ `{precis, codex-plugin-cc}` AND at least one plugin from it is enabled in some settings file AND `autoUpdate` is not already `true` in **any** settings file's `extraKnownMarketplaces.<marketplace>.autoUpdate` AND `autoUpdate` is not already `true` in the registry entry AND not already recorded as declined in `.claude/hive/align-rejected.md` → include in the ask.
 4. Ask via `AskUserQuestion` using the same pattern as the plugin recommendations above: one `Question` per candidate marketplace, two options each (Yes / No), all questions batched in a single tool call.
 5. For Yes answers, determine the target settings file by walking this preference order until a match is found, then edit that file:
-   - The file that already declares the marketplace in its `extraKnownMarketplaces` (add `"autoUpdate": true` to the existing entry, preserve other fields). If multiple files declare it, prefer the most local: `.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.local.json` > `~/.claude/settings.json`.
+   - The file that already declares the marketplace in its `extraKnownMarketplaces` (add `"autoUpdate": true` to the existing entry, preserve other fields). If multiple files declare it, prefer the most local: `.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.json`. Declarations in `~/.claude/settings.local.json` don't count here — step 6 handles them.
    - Otherwise, the file that enables the plugin (add a full `extraKnownMarketplaces.<marketplace>` entry with the source from the install mapping table above + `"autoUpdate": true`). Same preference order if multiple files enable it.
 
    This keeps personal vs shared state aligned with the user's existing choices and never promotes a third-party marketplace declaration into a more-shared file than the user already chose for the plugin itself. The change takes effect on the next session start (Claude Code propagates `autoUpdate` to the registry then).
-6. For No answers: append to `.claude/hive/align-rejected.md` (e.g. "Declined auto-update for `precis` marketplace") so we don't re-prompt.
+6. If any marketplace declaration sits in `~/.claude/settings.local.json` (an older version of this flow could write it there; the CLI never uses that file), clean it up: when the marketplace is also declared in a supported settings file, merge an `"autoUpdate": true` from the stale entry into the supported one and delete the stale entry; when it is declared only there, run `claude plugin marketplace add <github-repo> --scope user`, verify it exited 0 and the marketplace appears in `claude plugin marketplace list`, add `"autoUpdate": true` to the declaration it wrote, then delete the stale entry. On verification failure, delete nothing.
+7. For No answers: append to `.claude/hive/align-rejected.md` (e.g. "Declined auto-update for `precis` marketplace") so we don't re-prompt.
 
 Skip the sweep entirely if no candidates remain after filtering.
 
