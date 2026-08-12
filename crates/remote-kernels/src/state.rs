@@ -1241,9 +1241,20 @@ fn migrate_legacy_state(project_dir: &Path) {
     let Ok(content) = std::fs::read_to_string(&legacy_path) else {
         return;
     };
-    let Ok(legacy) = serde_json::from_str::<LegacyState>(&content) else {
-        let _ = std::fs::remove_file(&legacy_path);
-        return;
+    // A corrupt legacy file may still be the only record of an already-billing
+    // machine (provider id, cleanup policy, token, key path). Keep it and let a
+    // later start — or the user — recover from it; never delete it.
+    let legacy = match serde_json::from_str::<LegacyState>(&content) {
+        Ok(legacy) => legacy,
+        Err(error) => {
+            tracing::warn!(
+                path = %legacy_path.display(),
+                %error,
+                "Legacy state file is corrupt; leaving it in place. If a machine \
+                 is still running, recover its id from this file and attach to it."
+            );
+            return;
+        }
     };
 
     let Some(pod_id) = legacy.pod_id else {
@@ -1709,6 +1720,24 @@ mod tests {
         assert!(!state_dir.join("state.json").exists());
         assert!((state.total_spend() - 1.25).abs() < 0.001);
         assert!(!state_dir.join("spend.json").exists());
+    }
+
+    #[test]
+    fn corrupt_legacy_state_is_preserved_instead_of_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = state_dir(dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("state.json");
+        // Truncated after a crash: the pod id is still readable by a human.
+        std::fs::write(&legacy_path, r#"{"pod_id":"abc"#).unwrap();
+
+        let _state = AppState::new(dir.path().to_path_buf());
+
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).unwrap(),
+            r#"{"pod_id":"abc"#
+        );
+        assert!(load_instance_record(dir.path(), "main").is_none());
     }
 
     #[test]
