@@ -122,12 +122,13 @@ matter.
 Like open-weights models, use Grok on the user's request or stated
 preference, not autonomously. The usual reasons they ask: lighter
 deployment safeguards (see `references/safeguards.md`) and a third billing
-pool, preserving both Claude and Codex usage — capability-wise grok-4.5
-has no measured edge over sol or Opus 5. Give it clear stop conditions and
-boundaries, same as the GPT models. Effort: xAI defaults grok-4.5 to high,
-and subscription billing makes latency its only cost. Its web search
-returns fewer, title-less results than the Claude and GPT backends —
-prefer another family for search-heavy tasks.
+pool, preserving both Claude and Codex usage. Use grok-4.6 (a legacy
+grok-4.5 route exists for agents that predate it) — it has no measured
+edge over sol or Opus 5 here. Give it clear stop conditions and
+boundaries, same as the GPT models. Effort: xAI defaults it to high, and
+subscription billing makes latency its only cost; it also accepts xhigh.
+Its web search returns fewer, title-less results than the Claude and GPT
+backends — prefer another family for search-heavy tasks.
 
 ## Open-weights models
 
@@ -143,7 +144,7 @@ shipped agents instead — `gpt-5.6-sol(medium)`, `gpt-5.6-sol(high)`,
 `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` — or, for any other model/effort
 combination, Workflow's
 `agent(prompt, {model: 'gpt-5.6-sol', effort: 'low'})` — likewise
-`{model: 'grok-4.5', effort: 'high'}` when the Grok family is configured.
+`{model: 'grok-4.6', effort: 'high'}` when the Grok family is configured.
 
 For Claude models, include the `[1m]` suffix — `fable[1m]`, `sonnet[1m]`,
 `opus[1m]` — in agent definitions and Workflow `model` params, or omit

@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn present_when_every_routed_model_is_served() {
-        let body = body_with(&["grok-4.5", "grok-imagine-image"]);
+        let body = body_with(&["grok-4.6", "grok-4.5", "grok-imagine-image"]);
         let check = routed_models_check(&grok_enabled(), Ok(&body));
         assert!(check.ok, "{}", check.detail);
     }
@@ -603,7 +603,11 @@ mod tests {
         let body = models_body(&GPT_MODELS);
         let check = routed_models_check(&grok_enabled(), Ok(&body));
         assert!(!check.ok);
-        assert!(check.detail.contains("grok: grok-4.5"), "{}", check.detail);
+        assert!(
+            check.detail.contains("grok: grok-4.5, grok-4.6"),
+            "{}",
+            check.detail
+        );
         // The served Codex slugs are not named.
         assert!(!check.detail.contains("gpt-5.6"), "{}", check.detail);
     }

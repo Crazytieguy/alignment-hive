@@ -80,10 +80,14 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
 
 /// The xAI-native upstream model IDs behind the built-in Grok routes, with
 /// the context window `CLIProxyAPI`'s embedded model registry declares for
-/// them. Only the flagship ships: the same OAuth also exposes `grok-4.3`,
-/// the `grok-4.20-*` snapshots and the `grok-3-mini*` pair, none of which
-/// are characterised well enough to recommend.
-const GROK_MODELS: [(&str, &str, u64); 1] = [("grok-4.5", "Grok 4.5", 500_000)];
+/// them. Only the flagship and its still-served predecessor ship — 4.5
+/// stays so existing per-user agents keep resolving: the same OAuth also
+/// exposes `grok-4.3`, the `grok-4.20-*` snapshots and the `grok-3-mini*`
+/// pair, none of which are characterised well enough to recommend.
+const GROK_MODELS: [(&str, &str, u64); 2] = [
+    ("grok-4.6", "Grok 4.6", 500_000),
+    ("grok-4.5", "Grok 4.5", 500_000),
+];
 
 /// Time bounds on the xAI search side call.
 ///
@@ -1741,7 +1745,7 @@ mod context_window_tests {
             .filter(|route| route.family == ModelFamily::Grok)
             .collect();
         let ids: Vec<&str> = grok.iter().map(|route| route.routing_id.as_str()).collect();
-        assert_eq!(ids, ["grok-4.5"]);
+        assert_eq!(ids, ["grok-4.6", "grok-4.5"]);
         for route in &grok {
             assert_eq!(route.family, ModelFamily::Grok);
             assert_eq!(route.upstream, CLIPROXY_UPSTREAM);
@@ -1763,7 +1767,7 @@ mod context_window_tests {
             "[[models]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n[grok]\nenabled = true\n",
         );
         assert_eq!(config.models.len(), 1);
-        assert_eq!(config.generated_models.len(), 1);
+        assert_eq!(config.generated_models.len(), GROK_MODELS.len());
         assert!(
             config
                 .effective_models()

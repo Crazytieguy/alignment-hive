@@ -85,10 +85,11 @@ pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
 /// channel that reaches xAI, so Grok routes carry the effort there instead.
 ///
 /// The value passes through unvalidated on purpose: the child owns the
-/// clamping rules and applies them per model (`xhigh`/`max` → `high`;
-/// `none` → `low` where a model forbids zero; an unknown value → the
-/// model's default). Re-deriving them here would be a second, drifting copy
-/// of a table we do not own.
+/// clamping rules and applies them per model from its registry's declared
+/// levels (grok-4.5 clamps `xhigh`/`max` → `high`, grok-4.6 declares
+/// `xhigh` and maps `max` → `xhigh`; `none` → `low` where a model forbids
+/// zero; an unknown value → the model's default). Re-deriving them here
+/// would be a second, drifting copy of a table we do not own.
 #[must_use]
 pub fn effort_qualified_model<'a>(route: &'a ModelRoute, body: &[u8]) -> Cow<'a, str> {
     if route.family != ModelFamily::Grok {

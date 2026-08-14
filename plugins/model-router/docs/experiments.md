@@ -1272,3 +1272,77 @@ run went to the user-level settings' gateway. `CLAUDE_CONFIG_DIR` does move
 credential lookup (an isolated dir reports "Not logged in"), so it is read for
 auth but not for the base URL. Harness-level sandboxing needs a new approach;
 the rendering question above was settled from the bundle instead.
+
+## Grok 4.6 + CLIProxyAPI 7.2.132 pin bump (2026-08-14, model-router 0.1.14)
+
+xAI released grok-4.6 on 2026-08-12 (500K window, effort low/medium/high/
+xhigh, image input, a real model card). CLIProxyAPI's embedded registry
+gained the ID in v7.2.131; our 7.2.110 pin predates it, so shipping the
+route required a pin bump to v7.2.132 (latest at the time). All four
+vendored archive sha256s were computed from downloaded artifacts AND
+cross-checked against the release's official `checksums.txt` — exact match
+on every platform, closing the only-host-platform-is-exercised gap.
+
+Pin-bump risk audit. Full local tree diff between the tags: **423 files,
+215 production Go** (an earlier GitHub-Compare-based count of 300 was that
+API's file-list cap, not the real total). Scope of what was actually
+audited, and how:
+
+- **Full-file diffs read**: codex identity (`codex_executor_request.go`
+  Originator pass-through + `codex-tui` default semantically identical —
+  the de8ed8a pin rationale holds), the four xAI executor files
+  (auth-error normalization only: 403 bad-credentials remapped to 401 for
+  refresh-retry; overflow error bodies pass through untouched), the
+  thinking mapper (`internal/thinking/apply.go` — per-model level
+  clamping from registry-declared levels: 4.6 declares `xhigh`, so
+  `xhigh` stays and `max` → `xhigh` there, while 4.5 still clamps both to
+  `high`; `routing.rs`'s comment now says so).
+- **Skimmed at diffstat/area level**: `sdk/cliproxy/auth` (multi-credential
+  selection, cooldown, session affinity, Home-OAuth 401 recovery — for a
+  one-credential-per-provider install every request selects the sole
+  credential, a path each live run below exercises), `sdk/api/handlers`,
+  and the translators. Changes gated behind new config options we don't
+  set (codex alpha-search API keys, `support-prompt-cache-key`, Kimi
+  thinking-replay cache) are inert here.
+- **Not audited**: the child's Claude/Gemini/Antigravity native paths
+  (model-router's Claude branch goes straight to Anthropic and never
+  rides the child) and the remaining ~190 production files. Coverage for
+  what we ship rests on the live exercise below of every serving path we
+  use (claude-protocol ingress translation, codex executor, xAI executor,
+  streaming and non-streaming, tool use, error translation, search), plus
+  the standing containment: `routed-models` doctor check, service-refresh
+  prefetch, and byte-deterministic rollback by reverting the commit.
+  **The OpenAI-compat inference path is unverified under 7.2.132**: no
+  provider is configured on this install (no key to test with), and
+  `verify-providers` only checks the provider's own `/models` catalog —
+  it never sends inference through the child, so it would NOT catch an
+  executor/translator regression there. First signal for installs with
+  `[[openai-providers]]` routes would be a failing user turn; rollback is
+  the remedy.
+
+Live verification, sandboxed instance (worktree debug build v0.1.14,
+scratch XDG dirs under the job tmp, gateway :8790, child :8318, auth-file
+copies deleted after; the live 0.1.13/7.2.110 service was never touched and
+answered normally afterward):
+
+| check | result |
+|---|---|
+| doctor | all green; `routed-models`: every routed model served (child catalog has grok-4.6 and grok-4.5); `context-windows`: both Grok routes clipped 500000→258400 |
+| grok-4.6 smoke | answers as `grok-4.6-build` (the `-build` served-name convention carries over from 4.5) |
+| grok-4.5 smoke | still answers (`grok-4.5-build`) |
+| gpt-5.6-sol smoke + tool use | `ok`; clean `tool_use` block for a client tool; thinking block streams at high effort; `end_turn` |
+| grok-4.6 effort | `output_config.effort: xhigh` end-to-end success (suffix channel; per-model mapping verified in child source, not on the wire) |
+| grok-4.6 overflow | 540087-token prompt → canonical `prompt is too long: 540087 tokens > 500000 maximum` — the xAI overflow phrase and dialect-exact translation hold for 4.6 |
+| Grok-origin WebSearch | main turn on grok-4.6 emitted `WebSearch` tool_use; correlated sub-call answered from the xAI backend in 4.1s with real links (bun.sh results). The 2026-08-13 review-agent claim that Grok-native search feeds gzip to the harvester did **not** reproduce on 7.2.132 |
+
+Methodology trap re-confirmed the cheap way: a sub-call whose
+`metadata.user_id` is not the JSON-object string carrying `session_id`
+never correlates — it silently passes through to Anthropic and returns an
+auth error under a sandbox with no API key. First attempt failed exactly
+so; fixing the metadata shape made correlation immediate. (Driving Claude
+Code itself at the sandbox is still not possible per the 2.1.222 finding
+above; direct-curl replication of the two-request shape is the method.)
+
+Route decision: grok-4.6 ships alongside grok-4.5 (flagship-first in
+`GROK_MODELS`) rather than replacing it — existing per-user `grok-4.5(*)`
+agents keep resolving; docs now recommend 4.6.

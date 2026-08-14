@@ -5,7 +5,9 @@ user's own xAI subscription login (SuperGrok, or an X account with Premium —
 the login itself is the test; it costs nothing to try). No API key. Off by
 default; nothing below changes a GPT-only install.
 
-Built-in route when enabled: `grok-4.5` (500K-token window).
+Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
+`grok-4.5` route is also registered so configs and agents that predate
+4.6 keep working.
 
 1. Enable the family in `~/.config/model-router/config.toml`:
    ```toml
@@ -24,14 +26,14 @@ Built-in route when enabled: `grok-4.5` (500K-token window).
    from the model ID; for routed IDs the one global
    `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declaration applies, and it is sized
    to 258400 for the GPT routes (the Codex backend's input limit — raising
-   it would push those routes past it). So `grok-4.5` is clipped to
-   258400 of its real 500K window unless its reported usage is rescaled:
+   it would push those routes past it). So the Grok routes are clipped to
+   258400 of their real 500K windows unless their reported usage is rescaled:
    ```toml
    [grok]
    enabled = true
    context-window-scaling = true
    ```
-   With scaling, the router divides the route's reported usage by
+   With scaling, the router divides each route's reported usage by
    `500000 / 258400`, so auto-compaction fires near the real window; the
    cost is that Claude Code's displayed token counts for Grok routes read
    low by that ratio (percentages stay right). Recommend scaling — the
@@ -42,25 +44,26 @@ Built-in route when enabled: `grok-4.5` (500K-token window).
    spends it on `gpt-5.6-sol`. If the user prefers Grok there, replace both
    env values in the step-5 settings block:
    ```json
-   "ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.5",
-   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.5"
+   "ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.6",
+   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.6"
    ```
    One slot means one of GPT/Grok; the other family stays subagent-only.
    Whichever is chosen, subagents for both keep working.
 6. Create agents so Claude can delegate — use the template in
-   `references/custom-agents.md`. Recommended set: `grok-4.5(high)` (xAI's
-   own default effort) and optionally `grok-4.5(medium)` for faster runs
-   (`model: grok-4.5`, `effort: high`/`medium`). Effort comes from agent
+   `references/custom-agents.md`. Recommended set: `grok-4.6(high)` (xAI's
+   own default effort) and optionally `grok-4.6(medium)` for faster runs
+   (`model: grok-4.6`, `effort: high`/`medium`). Effort comes from agent
    frontmatter exactly like the GPT agents — the router translates it for
    xAI.
 7. Smoke-test with a direct request through the gateway:
    ```
    curl -s <base_url from doctor --json>/v1/messages \
      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
-     -d '{"model":"grok-4.5","max_tokens":300,"messages":[{"role":"user","content":"reply with exactly: ok"}]}'
+     -d '{"model":"grok-4.6","max_tokens":300,"messages":[{"role":"user","content":"reply with exactly: ok"}]}'
    ```
-   A response naming a `grok-*` model proves the chain (grok-4.5 is served
-   as `grok-4.5-build` — that's the expected name).
+   A response naming a `grok-*` model proves the chain (the served name
+   carries a `-build` suffix — grok-4.6 answers as `grok-4.6-build` —
+   that's expected).
 
 If the user asks to remove Grok (or at full uninstall): delete the `[grok]`
 block, and the custom-model env pair if it names a Grok ID. The stored

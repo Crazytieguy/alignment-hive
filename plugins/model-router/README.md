@@ -28,7 +28,7 @@ present themselves as Claude.
   orchestration.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
-- Optional Grok family — grok-4.5 under your own xAI subscription OAuth
+- Optional Grok family — grok-4.6 under your own xAI subscription OAuth
   login (no API key), riding the same CLIProxyAPI instance. Off by
   default; opt in during `/model-router:setup`.
 - A `choosing-models` skill that helps Claude pick the right model and

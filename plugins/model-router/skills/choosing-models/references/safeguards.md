@@ -34,14 +34,20 @@ publish no vendor safety framework.
 - **GPT-5.6 (sol/terra/luna, via Codex)** — "High" (not Critical) in both
   bio/chem and cyber: real-time monitors plus account-level enforcement.
   [System card, Jul 2026](https://deploymentsafety.openai.com/gpt-5-6).
-- **Grok 4.5 (xAI)** — the lightest safeguard stack of the framework-backed
-  vendors: a bio/chem input filter on all surfaces (API included) and
-  refusal training, with **no cyber classifier** and no deployed real-time
-  monitoring; the
+- **Grok 4.6 (xAI)** — the lightest safeguard stack of the
+  framework-backed vendors: refusal training plus runtime input and
+  topical filters that vary by deployment surface (CSAM, self-harm,
+  bio/chem weapons pathways, and cyber-specific input controls). The
   [xAI Frontier AI Framework, eff. 2026-06-30](https://media.x.ai/v1/website/xai-frontier-artificial-intelligence-framework-30-june-2026-99c40684.pdf)
-  commits filters to CBRN topics only and contains no quantitative
-  thresholds. grok-4.5 itself shipped with **no model card**, so what is
-  actually deployed on it is uncertain.
+  names moderation filters and production-deployment monitoring for
+  offensive-cyber risk but contains no quantitative thresholds, and no
+  document pins down which controls run on the subscription-OAuth path
+  this plugin uses. Its
+  [model card, 2026-08-12](https://media.x.ai/v1/website/card-4p6-4cd2dc57.pdf)
+  reports tighter CBRN/weapons refusals than grok-4.5 but more assistance
+  on borderline dual-use cyber — roughly twice as often as 4.5, about
+  half as often as GPT-5.6 sol. The legacy grok-4.5 route shipped with no
+  model card, so what is deployed on it is uncertain.
 - **Kimi K2.7 / K3** — no published vendor safety framework or model-card
   safety section (checked 2026-07-21:
   [github.com/moonshotai/kimi-k2](https://github.com/moonshotai/kimi-k2)).
