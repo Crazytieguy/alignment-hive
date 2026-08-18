@@ -21,10 +21,16 @@ pub fn identity_text(display_name: &str) -> String {
 /// Appended to the identity block on subagent conversations only. GPT
 /// models follow the harness's delegation-encouraging tool and skill copy
 /// literally, so without a counterweight a subagent re-delegates (observed:
-/// read choosing-models, then fan out); no harness layer tells it not to.
+/// read choosing-models, then fan out) or loads skills whose trigger wording
+/// merely brushes the task (observed: the bundled claude-api skill's ~175K
+/// payload, fatal at a 258400-token window); no harness layer tells it not
+/// to.
 const SUBAGENT_TEXT: &str = "You are running as a subagent: complete the \
      task yourself with your own tools, and do not launch further agents \
-     unless your task explicitly calls for it.";
+     unless your task explicitly calls for it. Never invoke a skill on \
+     your own initiative, even one whose trigger matches your task: use a \
+     skill only when your task explicitly instructs you to use that \
+     skill.";
 
 /// Whether the request is a subagent conversation, per the
 /// `cc_is_subagent=true` flag Claude Code stamps into the
@@ -184,6 +190,7 @@ mod tests {
         let text = result["system"][0]["text"].as_str().unwrap();
         assert!(text.contains("running as a subagent"));
         assert!(text.contains("do not launch further agents"));
+        assert!(text.contains("Never invoke a skill on your own initiative"));
     }
 
     #[test]

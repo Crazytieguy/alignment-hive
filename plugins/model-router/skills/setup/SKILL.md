@@ -102,16 +102,6 @@ here works until the binary resolves.
    declaration. The custom-model pair adds one
    "GPT-5.6 Sol" entry to the /model picker, so main-model GPT use gets
    the declared context window too; terra and luna stay subagent-only.
-   In the same settings file, also turn the bundled `claude-api` skill off
-   (merge into any existing `skillOverrides` block):
-   ```json
-   "skillOverrides": {
-     "claude-api": "off"
-   }
-   ```
-   Its trigger fires on any mention of Claude, and the GPT models follow
-   it literally — loading a single payload too large for their context
-   window, which kills the subagent on the spot ("Prompt is too long").
 6. Tell the user to restart Claude Code sessions (env is read at startup),
    and that the GPT agents and `choosing-models` skill are now available.
    Offer to run smoke tests. A fresh `claude -p` reads the step 5 settings

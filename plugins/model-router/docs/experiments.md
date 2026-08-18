@@ -1346,3 +1346,46 @@ above; direct-curl replication of the two-request shape is the method.)
 Route decision: grok-4.6 ships alongside grok-4.5 (flagship-first in
 `GROK_MODELS`) rather than replacing it — existing per-user `grok-4.5(*)`
 agents keep resolving; docs now recommend 4.6.
+
+## Subagent skill-suppression sentence (2026-08-18, Claude Code 2.1.235, router 0.1.15)
+
+Context: GPT subagents follow skill trigger wording literally; the bundled
+`claude-api` skill triggers on any mention of Claude/Anthropic and its payload
+killed 17 subagents in one week ("Prompt is too long"), which 0.1.19 patched
+around by having setup turn the skill off globally. The general fix tested
+here: extend the subagent identity sentence to also forbid proactive skill
+invocation, so main agents decide skill use and relay it.
+
+Method: A/B against a second router instance on :8790 built from the patched
+tree (`[upstreams.cliproxy] mode = "external"` pointed at the production
+managed CLIProxyAPI on :8317, own `XDG_STATE_HOME` for the serve lock). The
+`claude-api` skillOverride was removed for the test. Drivers: headless sonnet
+sessions in a scratch dir, each instructed to spawn exactly one
+`model-router:gpt-5.6-sol(high)` subagent. Tasks: T1 = summarize a Claude Code
+SessionStart hook script (Claude-adjacent, the observed death mode); T2 =
+write a TypeScript snippet calling the Claude API via `@anthropic-ai/sdk`
+(squarely inside the skill's trigger). Outcome read from the driver's
+transcript jsonl: any sidechain `Skill` tool_use with `claude-api`.
+
+| arm | T1 invoked | T2 invoked |
+|---|---|---|
+| baseline (0.1.13 sentence, no skill clause) | 3/3 | 3/3 |
+| v1: "use a skill only when your task names it" | 0/3 | 3/3 |
+| v2: "Never invoke a skill on your own initiative … only when your task explicitly instructs you to use that skill" | 0/1 | 0/3 |
+
+- v1's "names it" failed on T2 because the task text "the Claude API" reads
+  as naming the `claude-api` skill; v2's explicit-instruction wording closed
+  that.
+- No trial hit "Prompt is too long" at a fresh subagent's context; the
+  historical deaths came from fuller contexts. Invocation rate is the metric.
+- v2 T2 subagents produced correct SDK streaming code without the skill, so
+  suppression did not degrade the deliverable.
+- Contradicting the 2.1.222 finding above: on 2.1.235 a `--settings` file
+  with its own `env` block **does** override the user-level
+  `ANTHROPIC_BASE_URL` for headless runs (verified by echoing the env and by
+  the request landing in the :8790 instance's capture file). Harness-level
+  sandboxing by settings file works again.
+- Capture records inbound request bodies (pre-injection), so the injected
+  identity text never appears in `capture.jsonl`; `cc_is_subagent=true` in
+  the captured attribution block is the marker that the subagent path was
+  exercised.
