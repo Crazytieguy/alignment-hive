@@ -88,7 +88,9 @@ here works until the binary resolves.
    the real API — which is what the Claude branch is); it also restores the
    rest of Claude Code's first-party behaviour, including error reporting,
    refusal fallback and first-party billing headers, and it disables
-   `/v1/models` gateway discovery. GPT routing is unaffected: the router
+   `/v1/models` gateway discovery. It does not extend to Remote Control —
+   this env block disables Remote Control entirely; see the Remote
+   Control section below. GPT routing is unaffected: the router
    strips `anthropic-beta` and credentials on that branch, and the GPT window
    still comes from `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
    `ENABLE_TOOL_SEARCH` matters: tool search silently disables itself behind
@@ -135,6 +137,57 @@ here works until the binary resolves.
    under their own xAI subscription login (no API key) — if yes, read
    `references/grok.md` and follow it; (c) agents for other model x effort
    combinations — if yes, follow `references/custom-agents.md`.
+
+## Remote Control
+
+The step 5 env block disables Claude Code's Remote Control in every
+session it applies to. Remote Control refuses to start behind the
+gateway with:
+
+> Remote Control is only available when using Claude via
+> api.anthropic.com. ANTHROPIC_BASE_URL is set and does not point at
+> api.anthropic.com. (_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL does not
+> apply to Remote Control.)
+
+The step 5 first-party flag is explicitly exempted from this gate, so
+it does not help. Neither does prefixing `ANTHROPIC_BASE_URL=` on the
+shell — as the step 6 note says, the settings env block silently
+overrides shell-provided values.
+
+What works is a per-session CLI `--settings` file, because CLI settings
+outrank the user-settings env block. Blank the router keys:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "",
+    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": ""
+  }
+}
+```
+
+Save it as e.g. `~/.claude/rc-direct-settings.json` and launch sessions
+that need Remote Control with
+`claude --settings="$HOME/.claude/rc-direct-settings.json"`. A shell
+wrapper can prepend the flag automatically for interactive launches and
+the `remote-control`/`agents` subcommands, with an env-var opt-out
+(e.g. `CLAUDE_RC_OVERRIDE=0`) and skips when the caller already passed
+`--settings`, requested a `gpt-5.6-*` model, or used `-p`. For
+daemon-dispatched sessions, pass the same file (or inline JSON) to
+`claude agents --settings` — per its `--help` it applies "to the agent
+view and dispatched sessions", and it is the only interception point
+there, since dispatch bypasses any shell wrapper.
+
+Trade-off: a session running with the override talks directly to
+api.anthropic.com, so it cannot route to the `gpt-5.6-*` subagents.
+From such a session, run GPT work as a fresh
+`claude -p --model gpt-5.6-sol` instead (which the wrapper pattern
+above leaves un-overridden). A worked reference implementation —
+settings file plus wrapper — lives in
+[yulonglin/dotfiles](https://github.com/yulonglin/dotfiles)
+(commits e4853ea, 1f5cd7c, d06aaa6).
 
 ## Repair
 
