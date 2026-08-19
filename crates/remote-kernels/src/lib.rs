@@ -40,21 +40,37 @@ pub(crate) async fn send_429_retry(
         if resp.status().as_u16() != 429 || delay.as_secs() > 16 {
             return Ok(resp);
         }
-        tracing::debug!(?delay, "provider API rate limit (429); backing off");
-        tokio::time::sleep(delay).await;
+        // RunPod v2 says how long to wait (integer seconds); vast never sends
+        // the header, so it keeps the ladder by construction.
+        let wait = retry_after_delay(resp.headers(), delay);
+        tracing::debug!(?wait, "provider API rate limit (429); backing off");
+        tokio::time::sleep(wait).await;
         delay *= 2;
     }
 }
 
 /// How long to wait after a 429, honoring the provider's `Retry-After`
-/// (RunPod v2 sends integer seconds). Absent, zero, or unparseable → the
+/// (`RunPod` v2 sends integer seconds). Absent, zero, or unparseable → the
 /// caller's own backoff; clamped to a ceiling so a pathological header can
 /// never park a tool call for an hour.
 pub(crate) fn retry_after_delay(
-    _headers: &reqwest::header::HeaderMap,
-    _fallback: std::time::Duration,
+    headers: &reqwest::header::HeaderMap,
+    fallback: std::time::Duration,
 ) -> std::time::Duration {
-    unimplemented!("GREEN: §4.3")
+    /// A provider asking for more than a minute is asking for more than a
+    /// tool call can wait; the caller's own bound takes over from there.
+    const CEILING: std::time::Duration = std::time::Duration::from_mins(1);
+
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        // 0 (or an HTTP-date, which does not parse as an integer) must never
+        // turn the retry loop into a busy loop.
+        .filter(|secs| *secs > 0)
+        .map_or(fallback, |secs| {
+            std::time::Duration::from_secs(secs).min(CEILING)
+        })
 }
 
 pub mod config;
@@ -102,7 +118,7 @@ mod tests {
         // A pathological value must not park a tool call for a day.
         assert_eq!(
             super::retry_after_delay(&headers("100000"), fallback),
-            Duration::from_secs(60)
+            Duration::from_mins(1)
         );
         // HTTP-date form and outright garbage both fall back.
         assert_eq!(

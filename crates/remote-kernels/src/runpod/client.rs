@@ -1,16 +1,54 @@
 use reqwest::Client;
 use serde::Deserialize;
 
-use super::types::{CreatePodRequest, ListPodsResponse, Pod};
+use super::types::{CreatePodRequest, ListPodsResponse, Pod, PodActionRequest};
 
-const REST_URL: &str = "https://rest.runpod.io/v1";
+const BASE_URL: &str = "https://api.runpod.io/v2";
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum RunPodError {
-    #[error("RunPod API error ({status}): {body}")]
+    /// A response with an HTTP status. Typed so callers classify by status —
+    /// no substring match on a rendered message can tell a real 404 apart
+    /// from a 500 whose body merely mentions one.
     Api { status: u16, body: String },
-    #[error("{0}")]
-    Other(#[from] anyhow::Error),
+    /// Transport, TLS, or parse failure: the request's outcome is unknown.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for RunPodError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Api { status, body } => {
+                // v2 answers every error with an RFC 9457 problem document;
+                // its `detail` is the sentence worth showing, and a 422's
+                // `errors` list is what makes it actionable. Anything else
+                // (an HTML error page from a proxy) falls back to the body.
+                match Problem::parse(body) {
+                    Some(problem) => {
+                        let detail = problem
+                            .detail
+                            .or(problem.title)
+                            .unwrap_or_else(|| body.clone());
+                        write!(f, "RunPod API error ({status}): {detail}")?;
+                        if !problem.errors.is_empty() {
+                            write!(f, " [{}]", problem.errors.join("; "))?;
+                        }
+                        Ok(())
+                    }
+                    None => write!(f, "RunPod API error ({status}): {body}"),
+                }
+            }
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for RunPodError {}
+
+impl From<anyhow::Error> for RunPodError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Other(e)
+    }
 }
 
 /// RFC 9457 problem document (`application/problem+json`) — what v2 returns
@@ -31,8 +69,10 @@ pub struct Problem {
 impl Problem {
     /// Parse a response body as a problem document; `None` when the body is
     /// not one (HTML from a proxy, an empty body, plain text).
-    pub fn parse(_body: &str) -> Option<Self> {
-        unimplemented!("GREEN: §4.2")
+    pub fn parse(body: &str) -> Option<Self> {
+        let problem: Self = serde_json::from_str(body).ok()?;
+        // A JSON body with neither field is some other shape entirely.
+        (problem.title.is_some() || problem.detail.is_some()).then_some(problem)
     }
 }
 
@@ -52,42 +92,36 @@ pub enum CreateDisposition {
 }
 
 impl RunPodError {
-    pub fn is_server_error(&self) -> bool {
-        matches!(self, Self::Api { status, .. } if *status >= 500)
-    }
-
-    /// Check if this is a known GPU availability error (as opposed to an unknown server error).
-    /// `RunPod` returns HTTP 500 for transient availability issues with recognizable error messages.
-    pub fn is_availability_error(&self) -> bool {
-        match self {
-            Self::Api { status, body } if *status >= 500 => {
-                let lower = body.to_lowercase();
-                lower.contains("no instance")
-                    || lower.contains("no available")
-                    || lower.contains("insufficient")
-                    || lower.contains("out of capacity")
-                    || lower.contains("no gpu")
-                    || lower.contains("not available")
-                    || lower.contains("no machines")
-            }
-            _ => false,
-        }
-    }
-
     /// The RFC 9457 document this error carries, when it has one.
     pub fn problem(&self) -> Option<Problem> {
-        unimplemented!("GREEN: §4.2")
+        match self {
+            Self::Api { body, .. } => Problem::parse(body),
+            Self::Other(_) => None,
+        }
     }
 
     /// Whether this failure proves the resource does not exist. Status only:
     /// a body that merely mentions 404 proves nothing.
     pub fn is_not_found(&self) -> bool {
-        unimplemented!("GREEN: §4.2")
+        matches!(self, Self::Api { status: 404, .. })
     }
 
-    /// Classify a failed `POST /v2/pods` per `RunPod`'s documented table.
+    /// Classify a failed `POST /v2/pods` per `RunPod`'s documented table:
+    /// 422 (contract violation), 402 (balance), 401/404 → nothing will
+    /// succeed; 400 (cross-field rule OR no capacity) and 403 (pool not
+    /// accessible) → next candidate; 429/5xx → transient; anything else →
+    /// the outcome is unknown and must be resolved by lookup (D21).
     pub fn create_disposition(&self) -> CreateDisposition {
-        unimplemented!("GREEN: §4.2")
+        match self {
+            Self::Api { status, .. } => match status {
+                400 | 403 => CreateDisposition::NextCandidate,
+                429 => CreateDisposition::RetrySame,
+                s if *s >= 500 => CreateDisposition::RetrySame,
+                _ => CreateDisposition::Fatal,
+            },
+            // Transport or parse failure: the pod may exist and be billing.
+            Self::Other(_) => CreateDisposition::Indeterminate,
+        }
     }
 }
 
@@ -95,8 +129,25 @@ impl RunPodError {
 /// unique name match. Two matches are never guessed between — the machine
 /// name is unique per machine id, so ambiguity means something else is going
 /// on and adopting the wrong pod would leak the other one.
-pub fn pick_adoptable<'a>(_pods: &'a [Pod], _name: &str) -> anyhow::Result<Option<&'a Pod>> {
-    unimplemented!("GREEN: §4.2")
+pub fn pick_adoptable<'a>(pods: &'a [Pod], name: &str) -> anyhow::Result<Option<&'a Pod>> {
+    let matches: Vec<&Pod> = pods
+        .iter()
+        .filter(|p| p.name.as_deref() == Some(name))
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [pod] => Ok(Some(pod)),
+        many => anyhow::bail!(
+            "{} pods at RunPod are named {name:?} ({}) — refusing to guess which one \
+             belongs to this machine. Terminate the ones you don't want in the RunPod \
+             console, then retry.",
+            many.len(),
+            many.iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 pub struct RunPodClient {
@@ -117,7 +168,7 @@ impl RunPodClient {
 
         let resp = crate::send_429_retry(
             self.client
-                .post(format!("{REST_URL}/pods"))
+                .post(format!("{BASE_URL}/pods"))
                 .bearer_auth(&self.api_key)
                 .json(input),
         )
@@ -134,13 +185,15 @@ impl RunPodClient {
         }
 
         tracing::debug!(%body, "Create pod response");
+        // A 2xx we cannot parse means a pod probably EXISTS and is billing:
+        // Other → Indeterminate → resolved by name lookup, never re-created.
         serde_json::from_str(&body).map_err(|e| RunPodError::Other(e.into()))
     }
 
     pub async fn get_pod(&self, pod_id: &str) -> anyhow::Result<Pod> {
         let resp = crate::send_429_retry(
             self.client
-                .get(format!("{REST_URL}/pods/{pod_id}"))
+                .get(format!("{BASE_URL}/pods/{pod_id}"))
                 .bearer_auth(&self.api_key),
         )
         .await?;
@@ -148,9 +201,6 @@ impl RunPodClient {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            // Typed so callers can classify by HTTP status — a 404 means the
-            // pod is gone, which no substring match on the message can tell
-            // apart from another status whose body merely mentions 404.
             return Err(RunPodError::Api {
                 status: status.as_u16(),
                 body,
@@ -162,42 +212,13 @@ impl RunPodClient {
         Ok(serde_json::from_str(&body)?)
     }
 
-    /// All pods on the account. Used only by the create-recovery path.
+    /// All pods on the account. `GET /v2/pods` wraps them in an object (v1
+    /// returned a bare array) and has no pagination. Used only by the
+    /// create-recovery path.
     pub async fn list_pods(&self) -> anyhow::Result<Vec<Pod>> {
-        let _unused: Option<ListPodsResponse> = None;
-        unimplemented!("GREEN: §4.2")
-    }
-
-    /// Trigger a pod state transition (`start`, `stop`, `terminate`).
-    /// Returns the updated pod when the API reports one.
-    pub async fn pod_action(&self, _pod_id: &str, _action: &str) -> anyhow::Result<Option<Pod>> {
-        unimplemented!("GREEN: §4.2")
-    }
-
-    pub async fn stop_pod(&self, pod_id: &str) -> anyhow::Result<()> {
         let resp = crate::send_429_retry(
             self.client
-                .post(format!("{REST_URL}/pods/{pod_id}/stop"))
-                .bearer_auth(&self.api_key),
-        )
-        .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("RunPod API error ({status}): {body}");
-        }
-
-        Ok(())
-    }
-
-    /// Resume a stopped pod. Uses `POST /pods/{podId}/start`.
-    ///
-    /// Note: `/start` resumes a stopped pod. `/restart` reboots a running pod.
-    pub async fn resume_pod(&self, pod_id: &str) -> anyhow::Result<Pod> {
-        let resp = crate::send_429_retry(
-            self.client
-                .post(format!("{REST_URL}/pods/{pod_id}/start"))
+                .get(format!("{BASE_URL}/pods"))
                 .bearer_auth(&self.api_key),
         )
         .await?;
@@ -205,17 +226,87 @@ impl RunPodClient {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            anyhow::bail!("RunPod API error ({status}): {body}");
+            return Err(RunPodError::Api {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
-        tracing::debug!(%body, "Resume pod response");
-        Ok(serde_json::from_str(&body)?)
+        let parsed: ListPodsResponse = serde_json::from_str(&body)?;
+        Ok(parsed.pods)
+    }
+
+    /// Trigger a pod state transition (`start`, `stop`, `terminate`).
+    /// Returns the updated pod when the API reports one (200) and `None`
+    /// when it reports no body (204) or the pod already satisfies the
+    /// intent (409 — v2 rejects actions invalid for the current status,
+    /// where v1's dedicated endpoints were lenient).
+    pub async fn pod_action(&self, pod_id: &str, action: &str) -> anyhow::Result<Option<Pod>> {
+        let resp = crate::send_429_retry(
+            self.client
+                .post(format!("{BASE_URL}/pods/{pod_id}/action"))
+                .bearer_auth(&self.api_key)
+                .json(&PodActionRequest { action }),
+        )
+        .await?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if status.as_u16() == 409 {
+            // "Not valid for the current status" is success when the status
+            // IS what we were asking for (cleanup paths stop pods that may
+            // already have stopped themselves).
+            let current = self.get_pod(pod_id).await.ok();
+            let current_status = current
+                .as_ref()
+                .and_then(|p| p.status.as_deref())
+                .unwrap_or("");
+            if crate::runtime::runpod::conflict_satisfies(action, current_status) {
+                tracing::info!(
+                    pod_id,
+                    action,
+                    status = current_status,
+                    "pod already satisfies the requested action"
+                );
+                return Ok(None);
+            }
+            let error = RunPodError::Api {
+                status: 409,
+                body: body.clone(),
+            };
+            anyhow::bail!(
+                "RunPod refused to {action} pod {pod_id} in status {current_status:?}: {error}"
+            );
+        }
+
+        if !status.is_success() {
+            return Err(RunPodError::Api {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
+        }
+
+        tracing::debug!(%body, action, "Pod action response");
+        Ok(serde_json::from_str(&body).ok())
+    }
+
+    pub async fn stop_pod(&self, pod_id: &str) -> anyhow::Result<()> {
+        self.pod_action(pod_id, "stop").await.map(|_| ())
+    }
+
+    /// Resume a stopped pod (`action: "start"`; `restart` reboots a running
+    /// pod, which is not what any caller here wants).
+    pub async fn resume_pod(&self, pod_id: &str) -> anyhow::Result<()> {
+        self.pod_action(pod_id, "start").await.map(|_| ())
     }
 
     pub async fn terminate_pod(&self, pod_id: &str) -> anyhow::Result<()> {
         let resp = crate::send_429_retry(
             self.client
-                .delete(format!("{REST_URL}/pods/{pod_id}"))
+                .delete(format!("{BASE_URL}/pods/{pod_id}"))
                 .bearer_auth(&self.api_key),
         )
         .await?;
@@ -227,7 +318,11 @@ impl RunPodClient {
         // local record gets cleared (vast and kubernetes do the same).
         if !status.is_success() && status.as_u16() != 404 {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("RunPod API error ({status}): {body}");
+            return Err(RunPodError::Api {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         Ok(())

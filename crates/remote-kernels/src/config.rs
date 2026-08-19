@@ -391,7 +391,7 @@ impl RunpodConfig {
     /// validation, tunnel selection, orphan-guard arming, and SSH failure
     /// handling, which must never disagree.
     pub fn ssh_expected(&self) -> bool {
-        unimplemented!("GREEN: §4.4")
+        self.cloud_type.eq_ignore_ascii_case("SECURE") || self.support_public_ip == Some(true)
     }
 }
 
@@ -641,13 +641,7 @@ impl Config {
     }
 
     pub fn runpod_ssh_expected(&self) -> bool {
-        self.runpod.cloud_type.eq_ignore_ascii_case("SECURE")
-            || self
-                .runpod
-                .extra
-                .get("support-public-ip")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(false)
+        self.runpod.ssh_expected()
     }
 
     /// Generate a commented TOML config template with all fields and their
@@ -785,7 +779,9 @@ impl Config {
         let d = Self::defaults();
         format!(
             r#"# RunPod runtime configuration. Known fields are typed; any extra fields
-# are passed through to the RunPod pod creation API (camelCase conversion applied).
+# are passed through to the RunPod v2 pod-create body (kebab-case is converted
+# to camelCase); they must be v2 fields — unknown keys are rejected before the
+# API call.
 [runpod]
 # Cleanup mode for RunPod machines when the session ends:
 #   "stop"      — preserve machine (reliable on RunPod; storage costs apply)
@@ -838,7 +834,8 @@ impl Config {
 # Default: {default_container_disk_gb}
 # container-disk-gb = {default_container_disk_gb}
 
-# Persistent volume size in GB (set to 0 to disable).
+# Persistent volume size in GB: 0 to disable, otherwise at least 10 (the
+# RunPod v2 floor for a persistent mount).
 # Default: {default_volume_gb}
 # volume-gb = {default_volume_gb}
 
@@ -848,16 +845,21 @@ impl Config {
 
 # Network volume ID (optional, for persistent data across pod terminations).
 # Must be in the same datacenter as the pod — pin one via a passthrough
-# field, e.g. data-center-id = "EU-RO-1".
+# field, e.g. data-center-ids = ["EU-RO-1"].
 # network-volume-id = "vol_abc123"
 
 # Cloud type: "SECURE" or "COMMUNITY".
 # COMMUNITY is cheaper but may have less reliable availability. COMMUNITY
-# pods get SSH (and the on-machine watchdog) only with a public IP — passed
-# through to the pod API:
+# pods get SSH (and the on-machine watchdog) only with a public IP. The v2
+# API has no request knob for that, so this flag declares the expectation:
+# it turns on the SSH tunnel path and arms the pre-SSH orphan guard.
 # support-public-ip = true
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
+
+# Acceptable CUDA versions on the host, passed through into the v2 GPU block
+# (mutually exclusive with min-cuda-version).
+# allowed-cuda-versions = ["12.8"]
 
 # The image's own start command (its Dockerfile CMD), which pod creation
 # wraps with the pre-SSH orphan guard (see orphan-halt-mins). Applies

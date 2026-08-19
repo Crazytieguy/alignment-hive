@@ -140,6 +140,12 @@ pub fn validate_config_with_budget_source(
                 .to_string(),
         );
     }
+    // Our own typed RunPod knobs whose legal values v2 constrains. Failing
+    // at startup (like provision-timeout-mins) beats discovering it in a
+    // 422 that costs a create round trip; passthrough extras deliberately
+    // stay a provision-time check so a stale one can't block a vast-only
+    // server.
+    runpod::validate_storage_and_cloud(&config.runpod)?;
     for &name in AnyRuntime::known_names() {
         if config.finalize_command_timeout_secs_for(name) == 0 {
             return Err(format!(

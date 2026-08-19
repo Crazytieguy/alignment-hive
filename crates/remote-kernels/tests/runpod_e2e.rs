@@ -243,7 +243,11 @@ volume-gb = 0
     let pod_id = guard.pod_id.clone().expect("pod id");
     let pod = client.get_pod(&pod_id).await.expect("get_pod after start");
     assert_eq!(pod.status.as_deref(), Some("RUNNING"), "{:?}", pod.status);
-    assert!(pod.hourly_cost().is_some(), "no rate reported: {:?}", pod.cost);
+    assert!(
+        pod.hourly_cost().is_some(),
+        "no rate reported: {:?}",
+        pod.cost
+    );
     assert!(pod.direct_ssh().is_some(), "no ssh.direct: {:?}", pod.ssh);
     let args = pod.args.clone().unwrap_or_default();
     assert!(args.starts_with("sh -c "), "args not v2-encoded: {args:?}");
@@ -484,7 +488,10 @@ print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
         .lines()
         .find_map(|l| l.strip_prefix("PID1: "))
         .expect("PID1 line");
-    assert!(pid1.contains("/start.sh"), "PID 1 is not the image CMD: {pid1}");
+    assert!(
+        pid1.contains("/start.sh"),
+        "PID 1 is not the image CMD: {pid1}"
+    );
     assert!(
         !pid1.starts_with("sh -c"),
         "the wrapper shell is still PID 1 (exec lost): {pid1}"
@@ -495,7 +502,10 @@ print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
     let pod = client.get_pod(&pod_id).await.expect("get_pod");
     let args = pod.args.clone().unwrap_or_default();
     assert!(args.contains("sleep "), "args lost the guard: {args:?}");
-    assert!(args.contains("/tmp/heartbeat"), "args lost the guard: {args:?}");
+    assert!(
+        args.contains("/tmp/heartbeat"),
+        "args lost the guard: {args:?}"
+    );
 
     // Run the deployed chains from inside the pod with the kernel's own
     // (SSH-descended, possibly env-poor) environment — the chains' prelude

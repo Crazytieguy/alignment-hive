@@ -130,11 +130,7 @@ fn example(
     let examples = response["content"][content_type]["examples"]
         .as_object()
         .unwrap_or_else(|| panic!("no examples for {method} {path} {status}"));
-    examples
-        .values()
-        .next()
-        .expect("at least one example")["value"]
-        .clone()
+    examples.values().next().expect("at least one example")["value"].clone()
 }
 
 fn pod_example(spec: &serde_json::Value) -> serde_json::Value {
@@ -169,7 +165,11 @@ fn assert_keys_in_schema(
     what: &str,
 ) {
     let allowed = resolve_props(spec, schema_name);
-    for key in value.as_object().unwrap_or_else(|| panic!("{what} is not an object")).keys() {
+    for key in value
+        .as_object()
+        .unwrap_or_else(|| panic!("{what} is not an object"))
+        .keys()
+    {
         assert!(
             allowed.contains(key),
             "{what} field {key:?} is not a property of {schema_name} \
@@ -258,7 +258,10 @@ fn create_pod_required_fields_are_present() {
     let json = serde_json::to_value(&body).unwrap();
 
     let required = required_props(&spec, "CreatePodRequest");
-    assert!(required.contains("name"), "spec drift: name must be required");
+    assert!(
+        required.contains("name"),
+        "spec drift: name must be required"
+    );
     for field in &required {
         assert!(
             !json[field.as_str()].is_null(),
@@ -308,7 +311,10 @@ fn endpoints_and_action_enum_exist_in_spec() {
 #[test]
 fn pod_status_constants_match_spec() {
     let spec = spec();
-    let ours: BTreeSet<String> = types::POD_STATUSES.iter().map(|s| (*s).to_string()).collect();
+    let ours: BTreeSet<String> = types::POD_STATUSES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     assert_eq!(ours, enum_values(&spec, "PodStatus"));
 }
 
@@ -407,17 +413,14 @@ fn problem_json_error_is_parsed_and_rendered() {
     assert!(rendered.contains("resource not found"), "{rendered}");
 
     // The 422 example carries the schema's documented `errors` list.
-    let mut unprocessable = example(
-        &spec,
-        "/v2/pods",
-        "post",
-        "422",
-        "application/problem+json",
-    );
+    let mut unprocessable = example(&spec, "/v2/pods", "post", "422", "application/problem+json");
     let errors = spec["components"]["schemas"]["ErrorResponse"]["properties"]["errors"]["examples"]
         [0]
-        .clone();
-    assert!(errors.is_array(), "spec drift: ErrorResponse.errors example");
+    .clone();
+    assert!(
+        errors.is_array(),
+        "spec drift: ErrorResponse.errors example"
+    );
     unprocessable["errors"] = errors;
     let problem = Problem::parse(&unprocessable.to_string()).expect("422 example must parse");
     assert_eq!(problem.status, Some(422));
@@ -427,7 +430,10 @@ fn problem_json_error_is_parsed_and_rendered() {
         body: unprocessable.to_string(),
     }
     .to_string();
-    assert!(rendered.contains("Request validation failed."), "{rendered}");
+    assert!(
+        rendered.contains("Request validation failed."),
+        "{rendered}"
+    );
     assert!(
         rendered.contains("additional properties 'bogus' not allowed"),
         "the per-field violations are what makes a 422 actionable: {rendered}"

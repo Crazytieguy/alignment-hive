@@ -1,4 +1,4 @@
-//! `RunPod` backend: REST/GraphQL client behind the [`Runtime`] trait.
+//! `RunPod` backend: REST v2 client behind the [`Runtime`] trait.
 //!
 //! Connectivity: Jupyter is reached through a local SSH tunnel to the pod's
 //! loopback whenever the config guarantees SSH (`jupyter-access = "auto"`,
@@ -7,13 +7,16 @@
 //! fallback when a resumed pod's sshd is slow to return. Only strict
 //! `jupyter-access = "tunnel"` pods are created without the public 8888
 //! mapping (never internet-reachable, no fallback). Infra
-//! commands and file sync go over SSH to the pod's public IP. The on-pod
-//! watchdog and the pre-SSH orphan guard self-clean via `runpodctl` / the
-//! REST API, authorized by the pod-scoped `RUNPOD_API_KEY` that `RunPod`
-//! injects into every pod.
+//! commands and file sync go over SSH to the pod's public IP, discovered
+//! from the pod's own `ssh.direct` block. The on-pod watchdog and the
+//! pre-SSH orphan guard self-clean via `runpodctl` / the v2 REST API,
+//! authorized by the pod-scoped `RUNPOD_API_KEY` that `RunPod` injects into
+//! every pod.
 //!
-//! The orphan guard rides `dockerStartCmd`, which replaces the image's CMD
-//! (and only CMD — an image ENTRYPOINT still runs). It arms only when ALL of:
+//! The orphan guard rides `args` — one string that `RunPod` tokenizes like a
+//! POSIX shell, so the wrapper is sent as a shell-quoted `sh -c <script>` —
+//! which replaces the image's CMD (and only CMD — an image ENTRYPOINT still
+//! runs). It arms only when ALL of:
 //! cleanup is not "disabled" (that mode promises no automatic cleanup, ever);
 //! SSH is expected on the pod (only the SSH heartbeat disarms the guard, and
 //! a Jupyter-only community pod must not self-clean under a live session);
@@ -21,7 +24,7 @@
 //! (CMD `/start.sh`, no ENTRYPOINT, per runpod/containers) or an explicit
 //! `image-start-cmd` in `[runpod]`.
 //!
-//! Because `dockerStartCmd` persists in the pod config, the guard re-runs on
+//! Because `args` persists in the pod config, the guard re-runs on
 //! EVERY container start while a stop clears `/tmp` — deliberately: the
 //! guard is boot-scoped, so any resume (this tool's, including a crash
 //! mid-resume, or a console resume with no server around) re-arms it, and a
@@ -39,10 +42,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::{Cleanup, Config};
-use crate::runpod::client::RunPodClient;
-use crate::runpod::types::CreatePodRequest;
-#[allow(unused_imports)] // used by the v2 body builder (§4.5)
-use crate::runpod::types::{CreateGpuConfig, Mounts, NetworkMount, PersistentMount, Pod};
+use crate::runpod::client::{CreateDisposition, RunPodClient, RunPodError};
+use crate::runpod::types::{
+    CreateGpuConfig, CreatePodRequest, Mounts, NetworkMount, PersistentMount, Pod,
+};
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
@@ -61,7 +64,8 @@ enum AccessDecision {
     Proxy,
 }
 
-/// `(dockerStartCmd wrapper, guard-off note)` — at most one is `Some`.
+/// `(start-command argv wrapper, guard-off note)` — at most one is `Some`.
+/// The argv is encoded into v2's `args` string by [`args_from_argv`].
 type GuardWrapper = (Option<Vec<String>>, Option<String>);
 
 pub struct RunPodRuntime {
@@ -87,6 +91,14 @@ impl RunPodRuntime {
         }
     }
 
+    /// A handle carrying the provisioning note (e.g. "the orphan guard is
+    /// OFF for this pod"), which only [`Runtime::provision`] sets.
+    fn handle_with_note(pod: &Pod, note: Option<&String>) -> InstanceHandle {
+        let mut handle = Self::handle_from_pod(pod);
+        handle.note = note.cloned();
+        handle
+    }
+
     fn handle_from_pod(pod: &Pod) -> InstanceHandle {
         InstanceHandle {
             external_id: pod.id.clone(),
@@ -109,10 +121,186 @@ impl RunPodRuntime {
     #[doc(hidden)]
     pub fn pod_create_request(
         &self,
-        _req: &ProvisionRequest,
-        _gpu_type: &str,
+        req: &ProvisionRequest,
+        gpu_type: &str,
     ) -> anyhow::Result<(CreatePodRequest, Option<String>)> {
-        unimplemented!("GREEN: §4.5")
+        validate_storage_and_cloud(&self.runpod).map_err(|e| anyhow::anyhow!(e))?;
+
+        let image = req.image.clone().unwrap_or_else(|| self.image_name.clone());
+        let mut env = req.env.clone();
+        env.insert("PUBLIC_KEY".to_string(), req.ssh_public_key.clone());
+        env.insert("JUPYTER_PASSWORD".to_string(), req.jupyter_token.clone());
+
+        let ports = self.pod_ports()?;
+
+        // Pre-SSH orphan guard: wrap the image's start command so a pod this
+        // server never reaches cleans itself up (see module docs). A wrong
+        // image-start-cmd stays money-bounded: the pod never brings up
+        // SSH/Jupyter, so the provision timeout terminates it.
+        // volume-mount-path is embedded in the guard script and the
+        // heartbeat's marker command (single-quote-wrapped contexts).
+        crate::ssh_exec::validate_shell_safe("volume-mount-path", &self.runpod.volume_mount_path)?;
+        let (guard_argv, note) = self.guard_wrapper(&image, req.cleanup);
+        let args = guard_argv.as_deref().map(args_from_argv);
+
+        // v2 allows at most one mount kind, and a network volume is the one
+        // that outlives the pod — it wins over the host-local volume.
+        let mounts = if let Some(volume_id) = &self.runpod.network_volume_id {
+            Some(Mounts {
+                persistent: None,
+                network: Some(vec![NetworkMount {
+                    volume_id: volume_id.clone(),
+                    path: self.runpod.volume_mount_path.clone(),
+                }]),
+            })
+        } else if self.runpod.volume_gb > 0 {
+            Some(Mounts {
+                persistent: Some(PersistentMount {
+                    size: self.runpod.volume_gb,
+                    path: self.runpod.volume_mount_path.clone(),
+                }),
+                network: None,
+            })
+        } else {
+            None
+        };
+
+        let PassthroughFields {
+            extra,
+            allowed_cuda_versions,
+            min_cuda_version,
+            registry,
+        } = self.passthrough_fields()?;
+
+        Ok((
+            CreatePodRequest {
+                name: format!("{}-{}", self.name, req.machine_id),
+                image,
+                args,
+                disk: Some(self.runpod.container_disk_gb),
+                ports: Some(ports),
+                env: Some(env),
+                cloud: Some(self.runpod.cloud_type.to_uppercase()),
+                // Cheap insurance: the flag injects a PUBLIC_KEY only when
+                // the body sets none, so it cannot overwrite ours — but its
+                // absence is documented as "no SSH access" (D22).
+                start_ssh: Some(true),
+                gpu: CreateGpuConfig {
+                    id: gpu_type.to_string(),
+                    count: Some(self.runpod.gpu_count),
+                    allowed_cuda_versions,
+                    min_cuda_version,
+                },
+                mounts,
+                registry,
+                extra,
+            },
+            note,
+        ))
+    }
+
+    /// The `[runpod]` passthrough extras, converted to v2: the three v1
+    /// fields that merely moved are routed to their new homes (D24), and
+    /// everything else is checked against the v2 field set before any API
+    /// call — a 422 costs a round trip and never mentions
+    /// `remote-kernels.toml`.
+    fn passthrough_fields(&self) -> anyhow::Result<PassthroughFields> {
+        let mut fields = PassthroughFields::default();
+
+        for (key, value) in &self.runpod.extra {
+            match key.as_str() {
+                "allowed-cuda-versions" => {
+                    let versions = value
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|v| v.as_str().map(String::from))
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "[runpod] allowed-cuda-versions must be an array of \
+                                 version strings, e.g. [\"12.8\", \"12.6\"]"
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "[runpod] allowed-cuda-versions must contain only strings"
+                            )
+                        })?;
+                    fields.allowed_cuda_versions = Some(versions);
+                }
+                "min-cuda-version" => {
+                    fields.min_cuda_version = Some(
+                        value
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "[runpod] min-cuda-version must be a string, e.g. \"12.1\""
+                                )
+                            })?
+                            .to_string(),
+                    );
+                }
+                "container-registry-auth-id" => {
+                    fields.registry = Some(
+                        value
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "[runpod] container-registry-auth-id must be a string"
+                                )
+                            })?
+                            .to_string(),
+                    );
+                }
+                _ => {
+                    let camel = to_camel_case(key);
+                    if crate::runpod::types::MANAGED_CREATE_FIELDS.contains(&camel.as_str()) {
+                        anyhow::bail!(
+                            "[runpod] {key} sets {camel:?}, a pod-create field this runtime \
+                             manages itself. {}",
+                            managed_field_hint(&camel)
+                        );
+                    }
+                    if !crate::runpod::types::CREATE_POD_FIELDS.contains(&camel.as_str()) {
+                        let hint = v1_rename_hint(&camel)
+                            .map(|h| format!(" {h}"))
+                            .unwrap_or_default();
+                        anyhow::bail!(
+                            "[runpod] {key} ({camel:?}) is not a field of the v2 pod-create \
+                             body, so RunPod would reject the whole request.{hint} \
+                             Passthrough fields accepted by v2: {PASSTHROUGH_FIELD_LIST}."
+                        );
+                    }
+                    fields.extra.insert(camel, toml_to_json(value));
+                }
+            }
+        }
+
+        // v2 answers this combination with a 400 that the provision loop
+        // would misread as "no capacity", so it fails here instead.
+        if fields
+            .allowed_cuda_versions
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+            && fields.min_cuda_version.is_some()
+        {
+            anyhow::bail!(
+                "[runpod] allowed-cuda-versions and min-cuda-version cannot be combined \
+                 (RunPod rejects a non-empty version set together with a floor). Keep the \
+                 exact set, or the floor — not both."
+            );
+        }
+
+        Ok(fields)
+    }
+
+    /// The pod this create may already have made, found by its unique name.
+    async fn adopt_existing(&self, name: &str) -> anyhow::Result<Option<Pod>> {
+        let pods = self.client.list_pods().await?;
+        Ok(crate::runpod::client::pick_adoptable(&pods, name)?.cloned())
     }
 
     /// Docker treats `docker.io/x` and `x` as the same image — normalize
@@ -147,13 +335,7 @@ impl RunPodRuntime {
     /// pod must NOT carry the guard: nothing would ever write the heartbeat,
     /// and the guard would clean up a live session at `orphan-halt-mins`.
     fn ssh_expected(&self) -> bool {
-        !self.runpod.cloud_type.eq_ignore_ascii_case("COMMUNITY")
-            || self
-                .runpod
-                .extra
-                .get("support-public-ip")
-                .and_then(toml::Value::as_bool)
-                == Some(true)
+        self.runpod.ssh_expected()
     }
 
     /// The pod's port mappings, derived from the Jupyter access mode. Only
@@ -260,7 +442,7 @@ impl RunPodRuntime {
         Ok(AccessDecision::Proxy)
     }
 
-    /// The `dockerStartCmd` wrapper (guard in the background, then the
+    /// The start-command wrapper (guard in the background, then the
     /// image's own start command), or the note telling the user the guard is
     /// off and why. `(None, None)` means the guard is off by explicit choice
     /// (cleanup = "disabled", or image-start-cmd = "") — no nagging.
@@ -331,8 +513,25 @@ impl RunPodRuntime {
     /// Poll `GET /v2/pods/{id}` until the pod reports a direct SSH endpoint.
     /// `ssh.direct` appears only once the published `22/tcp` mapping has a
     /// public port, which can lag RUNNING by a few seconds.
-    async fn wait_for_ssh_info(&self, _pod_id: &str) -> anyhow::Result<(String, u16)> {
-        unimplemented!("GREEN: §4.5")
+    async fn wait_for_ssh_info(&self, pod_id: &str) -> anyhow::Result<(String, u16)> {
+        for attempt in 1..=40 {
+            match self.client.get_pod(pod_id).await {
+                Ok(pod) => {
+                    if let Some((ip, port)) = pod.direct_ssh() {
+                        tracing::info!(attempt, %ip, port, "SSH info available");
+                        return Ok((ip, port));
+                    }
+                    tracing::debug!(attempt, "SSH info not yet available");
+                }
+                Err(e) => tracing::debug!(attempt, error = %e, "Failed to query SSH info"),
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        anyhow::bail!(
+            "Pod does not have a public IP or SSH port after 2 minutes. \
+             This is required for the heartbeat, sync, and download. \
+             Try starting again — a different machine may be assigned."
+        )
     }
 }
 
@@ -350,30 +549,146 @@ pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities
     }
 }
 
+/// The v2 create fields a `[runpod]` passthrough may legitimately set (the
+/// rest are managed here), plus the v1 names that still work by mapping.
+const PASSTHROUGH_FIELD_LIST: &str = "cpu, dataCenterIds, globalNetworking, startJupyter, \
+     templateId, and the [runpod] keys allowed-cuda-versions, min-cuda-version, \
+     container-registry-auth-id";
+
+/// Where the `[runpod]` extras end up in the v2 body.
+#[derive(Default)]
+struct PassthroughFields {
+    extra: HashMap<String, serde_json::Value>,
+    allowed_cuda_versions: Option<Vec<String>>,
+    min_cuda_version: Option<String>,
+    registry: Option<String>,
+}
+
+/// The `[runpod]` knob that owns a create field this runtime sets itself.
+fn managed_field_hint(camel: &str) -> &'static str {
+    match camel {
+        "image" => "Use image-name (or start(image=...)) instead.",
+        "args" => {
+            "The pre-SSH orphan guard rides args; put the image's own start command in \
+             [runpod] image-start-cmd (the guard wraps it), or set image-start-cmd = \"\" \
+             to disable the guard."
+        }
+        "gpu" => {
+            "Use [runpod] gpu-type-ids / gpu-count for the GPU itself and \
+             allowed-cuda-versions / min-cuda-version for the CUDA constraints — a \
+             [runpod.gpu] table would replace the GPU type the provision loop is trying."
+        }
+        "mounts" => "Use [runpod] volume-gb, volume-mount-path, or network-volume-id.",
+        "ports" => "Use [runpod] jupyter-access, which decides the port mapping.",
+        "cloud" => "Use [runpod] cloud-type.",
+        "disk" => "Use [runpod] container-disk-gb.",
+        "env" => "Use the top-level env table (or env-file).",
+        "name" => "Use the top-level name key.",
+        "startSsh" => {
+            "SSH is requested for every pod; use [runpod] support-public-ip to declare \
+             whether a community pod is expected to get one."
+        }
+        "registry" => "Use [runpod] container-registry-auth-id.",
+        _ => "Set it through its typed [runpod] key instead.",
+    }
+}
+
+/// What a v1-only pod-create field became in v2, for configs written against
+/// the old API.
+fn v1_rename_hint(camel: &str) -> Option<&'static str> {
+    Some(match camel {
+        "dockerStartCmd" => {
+            "v2 has no dockerStartCmd — the start command rides `args`, which carries the \
+             pre-SSH orphan guard. Put the image's start command in [runpod] \
+             image-start-cmd instead (the guard wraps it), or set image-start-cmd = \"\" \
+             to pass it through unwrapped."
+        }
+        "supportPublicIp" => {
+            "v2 has no supportPublicIp; [runpod] support-public-ip is now a typed local \
+             flag that declares the expectation instead of being sent to the API."
+        }
+        "imageName" => "It is `image` in v2 — set [runpod] image-name.",
+        "containerDiskInGb" => "It is `disk` in v2 — set [runpod] container-disk-gb.",
+        "volumeInGb" => "It is `mounts.persistent.size` in v2 — set [runpod] volume-gb.",
+        "volumeMountPath" => "It is the mount's `path` in v2 — set [runpod] volume-mount-path.",
+        "networkVolumeId" => {
+            "It is `mounts.network[].volumeId` in v2 — set [runpod] network-volume-id."
+        }
+        "gpuTypeIds" | "gpuCount" => {
+            "They are `gpu.id` / `gpu.count` in v2 — set [runpod] \
+             gpu-type-ids and gpu-count."
+        }
+        "cloudType" => "It is `cloud` in v2 — set [runpod] cloud-type.",
+        "containerRegistryAuthId" => {
+            "It is `registry` in v2 — [runpod] container-registry-auth-id is mapped for you."
+        }
+        _ => return None,
+    })
+}
+
 /// Encode an argv the way v2's `args` string wants it: one POSIX-quoted
 /// token per argument, so `RunPod`'s shell-like tokenizer recovers exactly
 /// the argv v1 took as an array. Reuses the crate's single shell-quoting
 /// implementation.
-pub(crate) fn args_from_argv(_argv: &[String]) -> String {
-    unimplemented!("GREEN: §4.5")
+pub(crate) fn args_from_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| crate::machine_scripts::shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Map a v2 `PodStatus` string onto the runtime-agnostic status.
-pub(crate) fn instance_status_from(_status: &str) -> InstanceStatus {
-    unimplemented!("GREEN: §4.5")
+///
+/// `PROVISIONING`/`STARTING` are the normal early states in v2 (v1's
+/// `desiredStatus` was RUNNING from the start), and `Unknown` would block
+/// `attach()` on a pod that is merely still coming up. `ERROR` stays
+/// `Unknown` deliberately: attach must not silently resume a pod `RunPod`
+/// calls unrecoverable — the user sees the status and decides.
+pub(crate) fn instance_status_from(status: &str) -> InstanceStatus {
+    match status {
+        "RUNNING" => InstanceStatus::Running,
+        "EXITED" => InstanceStatus::Stopped,
+        "TERMINATED" => InstanceStatus::Gone,
+        "PROVISIONING" | "STARTING" => InstanceStatus::Provisioning,
+        other => InstanceStatus::Unknown(other.to_string()),
+    }
 }
 
 /// Whether a 409 from `POST /action` is already the outcome we wanted (the
-/// pod is in a status that satisfies the requested transition).
-pub(crate) fn conflict_satisfies(_action: &str, _status: &str) -> bool {
-    unimplemented!("GREEN: §4.5")
+/// pod is in a status that satisfies the requested transition). A `start` on
+/// a RUNNING-but-broken pod is fine; a `stop` that was refused while the pod
+/// is still RUNNING must surface.
+pub(crate) fn conflict_satisfies(action: &str, status: &str) -> bool {
+    match action {
+        "stop" => matches!(status, "EXITED" | "TERMINATED"),
+        "start" => matches!(status, "RUNNING" | "STARTING" | "PROVISIONING"),
+        "terminate" => status == "TERMINATED",
+        _ => false,
+    }
 }
 
 /// Validate the two `[runpod]` knobs whose values v2 constrains, so a bad
 /// one fails at server startup instead of costing a create round trip.
 pub(crate) fn validate_storage_and_cloud(
-    _runpod: &crate::config::RunpodConfig,
+    runpod: &crate::config::RunpodConfig,
 ) -> Result<(), String> {
+    if !crate::runpod::types::CLOUDS
+        .iter()
+        .any(|cloud| runpod.cloud_type.eq_ignore_ascii_case(cloud))
+    {
+        return Err(format!(
+            "[runpod] cloud-type must be \"SECURE\" or \"COMMUNITY\" (got {:?})",
+            runpod.cloud_type
+        ));
+    }
+    if runpod.volume_gb > 0 && runpod.volume_gb < 10 {
+        return Err(format!(
+            "[runpod] volume-gb must be 0 (no persistent volume) or at least 10 — RunPod \
+             enforces a 10 GB floor on host-local persistent storage, so {} would be \
+             rejected at pod creation. Raise it to 10 or more, or set volume-gb = 0.",
+            runpod.volume_gb
+        ));
+    }
     Ok(())
 }
 
@@ -402,81 +717,104 @@ impl Runtime for RunPodRuntime {
         capabilities(&self.runpod)
     }
 
-    /// Try each configured GPU type in order:
-    /// - availability errors (parsed from 500 body) → next GPU type immediately
-    /// - other 5xx → retry up to 3 times with 1s delay, then next GPU type
-    /// - non-5xx → fail immediately
+    /// Try each configured GPU type in order, following `RunPod`'s published
+    /// create-error table (see [`CreateDisposition`]):
+    /// - 400 / 403 → this candidate cannot be satisfied; next GPU type
+    /// - 422 / 402 / 401 / 404 → nothing will succeed; fail immediately
+    /// - 429 / 5xx → retry the same candidate, after checking whether the pod
+    ///   was in fact created (a 502 can mean "created, gateway timed out")
+    /// - transport/parse failure → the outcome is unknown: adopt the pod if
+    ///   the provider has one under our name, and never create a second one
+    ///   (v2 has no idempotency key).
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
         let gpu_type_ids = req
             .gpu_type
             .as_ref()
             .map_or_else(|| self.gpu_type_ids.clone(), |g| vec![g.clone()]);
-        let image_name = req.image.clone().unwrap_or_else(|| self.image_name.clone());
 
-        let _ports = self.pod_ports()?;
-
-        // Pre-SSH orphan guard: wrap the image's start command so a pod this
-        // server never reaches cleans itself up (see module docs). A wrong
-        // image-start-cmd stays money-bounded: the pod never brings up
-        // SSH/Jupyter, so the provision timeout terminates it.
-        // volume-mount-path is embedded in the guard script and the
-        // heartbeat's marker command (single-quote-wrapped contexts).
-        crate::ssh_exec::validate_shell_safe("volume-mount-path", &self.runpod.volume_mount_path)?;
-        let (docker_start_cmd, note) = self.guard_wrapper(&image_name, req.cleanup);
-        if docker_start_cmd.is_some()
-            && self
-                .runpod
-                .extra
-                .keys()
-                .any(|k| to_camel_case(k) == "dockerStartCmd")
-        {
-            anyhow::bail!(
-                "[runpod] docker-start-cmd would collide with the pre-SSH orphan guard's \
-                 dockerStartCmd wrapper (both set the same pod-create field). Put the \
-                 image's start command in [runpod] image-start-cmd instead — the guard \
-                 wraps it — or set image-start-cmd = \"\" to disable the guard and pass \
-                 docker-start-cmd through unchanged."
-            );
-        }
-
+        // Per-candidate failures, plus whether every one of them was a 400 —
+        // which RunPod documents as ambiguous between "no capacity" and "your
+        // request is wrong".
         let mut failures: Vec<(String, String)> = Vec::new();
+        let mut all_bad_request = true;
+        let mut last_detail: Option<String> = None;
 
         for gpu_type in &gpu_type_ids {
-            let (input, _note) = self.pod_create_request(req, gpu_type)?;
+            let (input, note) = self.pod_create_request(req, gpu_type)?;
+            let name = input.name.clone();
+            let guard_armed = input.args.is_some();
 
             tracing::info!(gpu_type = %gpu_type, "Trying GPU type...");
 
             for attempt in 1..=3 {
-                match self.client.create_pod(&input).await {
+                let error = match self.client.create_pod(&input).await {
                     Ok(pod) => {
                         tracing::info!(
                             pod_id = %pod.id,
                             gpu = %pod.gpu_display_name(),
-                            orphan_guard = docker_start_cmd.is_some(),
+                            orphan_guard = guard_armed,
                             "Pod created"
                         );
-                        let mut handle = Self::handle_from_pod(&pod);
-                        handle.note.clone_from(&note);
-                        return Ok(handle);
+                        return Ok(Self::handle_with_note(&pod, note.as_ref()));
                     }
-                    Err(e) if e.is_availability_error() => {
-                        tracing::info!(gpu_type = %gpu_type, error = %e, "No availability, skipping to next GPU type");
-                        failures.push((gpu_type.clone(), format!("no availability: {e}")));
+                    Err(e) => e,
+                };
+
+                match error.create_disposition() {
+                    CreateDisposition::NextCandidate => {
+                        if !matches!(error, RunPodError::Api { status: 400, .. }) {
+                            all_bad_request = false;
+                        }
+                        last_detail = Some(error.to_string());
+                        tracing::info!(gpu_type = %gpu_type, error = %error, "Candidate rejected, next GPU type");
+                        failures.push((gpu_type.clone(), format!("rejected: {error}")));
                         break;
                     }
-                    Err(e) if e.is_server_error() && attempt < 3 => {
-                        tracing::info!(gpu_type = %gpu_type, attempt, error = %e, "Server error, retrying...");
+                    CreateDisposition::Fatal => {
+                        anyhow::bail!("Failed to create pod: {error}");
+                    }
+                    CreateDisposition::RetrySame => {
+                        all_bad_request = false;
+                        // The failed call may still have created the pod (a
+                        // gateway timeout after a successful create), and a
+                        // blind retry would leave that one billing untracked.
+                        if let Ok(Some(pod)) = self.adopt_existing(&name).await {
+                            tracing::warn!(pod_id = %pod.id, "create reported an error but the pod exists — adopting it");
+                            return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                        }
+                        if attempt == 3 {
+                            tracing::info!(gpu_type = %gpu_type, error = %error, "Transient failures exhausted, next GPU type");
+                            failures.push((
+                                gpu_type.clone(),
+                                format!("transient failure after {attempt} attempts: {error}"),
+                            ));
+                            break;
+                        }
+                        tracing::info!(gpu_type = %gpu_type, attempt, error = %error, "Transient failure, retrying...");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                    Err(e) if e.is_server_error() => {
-                        tracing::info!(gpu_type = %gpu_type, error = %e, "Server error on final attempt, moving to next GPU type");
-                        failures.push((
-                            gpu_type.clone(),
-                            format!("server error after {attempt} attempts: {e}"),
-                        ));
-                        break;
+                    CreateDisposition::Indeterminate => {
+                        // A failure of the probe itself is fatal here:
+                        // creating a second pod on a guess is the one outcome
+                        // that must never happen.
+                        let existing = self.adopt_existing(&name).await.map_err(|probe| {
+                            anyhow::anyhow!(
+                                "the pod create failed with an unknown outcome ({error}) and \
+                                 the follow-up lookup failed too ({probe}), so it is unclear \
+                                 whether a pod named {name} is now running and billing. \
+                                 Check the RunPod console before retrying start()."
+                            )
+                        })?;
+                        if let Some(pod) = existing {
+                            tracing::warn!(pod_id = %pod.id, "create outcome unknown; adopted the pod it created");
+                            return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                        }
+                        anyhow::bail!(
+                            "the create outcome is unknown ({error}) and no pod named {name} \
+                             exists at the provider; not retrying to avoid creating a \
+                             duplicate — retry start() if you believe this was a transport blip."
+                        );
                     }
-                    Err(e) => anyhow::bail!("Failed to create pod: {e}"),
                 }
             }
         }
@@ -484,6 +822,15 @@ impl Runtime for RunPodRuntime {
         let mut msg = String::from("Failed to create pod — all GPU types exhausted:\n");
         for (gpu, reason) in &failures {
             let _ = writeln!(msg, "  - {gpu}: {reason}");
+        }
+        if all_bad_request && !failures.is_empty() {
+            let _ = write!(
+                msg,
+                "\nRunPod answers both a rule violation and absent capacity with 400, and \
+                 every GPU type failed the same way — which usually means the request \
+                 itself rather than the market. Last detail: {}\n",
+                last_detail.as_deref().unwrap_or("(none)")
+            );
         }
         msg.push_str(
             "\nConsider editing gpu-type-ids in remote-kernels.toml to try different GPU types.",
@@ -541,7 +888,7 @@ impl Runtime for RunPodRuntime {
     }
 
     async fn resume(&self, external_id: &str) -> anyhow::Result<()> {
-        self.client.resume_pod(external_id).await.map(|_| ())
+        self.client.resume_pod(external_id).await
     }
 
     async fn terminate(&self, external_id: &str) -> anyhow::Result<()> {
@@ -704,7 +1051,8 @@ const STOP_SELF: &str = concat!(
     "runpodctl stop pod \"$RUNPOD_POD_ID\"",
     " || runpodctl pod stop \"$RUNPOD_POD_ID\"",
     " || curl -sfm 20 -X POST -H \"Authorization: Bearer $RUNPOD_API_KEY\"",
-    " \"https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID/stop\""
+    " -H \"Content-Type: application/json\" -d \"{\\\"action\\\":\\\"stop\\\"}\"",
+    " \"https://api.runpod.io/v2/pods/$RUNPOD_POD_ID/action\""
 );
 
 /// Env prelude for the self-cleanup chains. They run in two different
@@ -740,7 +1088,7 @@ pub fn self_cleanup_command(cleanup: Cleanup) -> Option<String> {
                 "{p}runpodctl remove pod \"$RUNPOD_POD_ID\"",
                 " || runpodctl pod delete \"$RUNPOD_POD_ID\"",
                 " || curl -sfm 20 -X DELETE -H \"Authorization: Bearer $RUNPOD_API_KEY\"",
-                " \"https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID\"",
+                " \"https://api.runpod.io/v2/pods/$RUNPOD_POD_ID\"",
                 " || {s}"
             ),
             p = ENV_PRELUDE,
@@ -1035,18 +1383,18 @@ mod tests {
     #[test]
     fn guard_args_round_trip_through_shell_parsing() {
         let rt = runtime_with("");
-        let (argv, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
-        let argv = argv.expect("guard must arm for the default image");
-        let args = args_from_argv(&argv);
-        assert!(args.starts_with("sh -c "), "{args}");
+        let (wrapper, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let wrapper = wrapper.expect("guard must arm for the default image");
+        let encoded = args_from_argv(&wrapper);
+        assert!(encoded.starts_with("sh -c "), "{encoded}");
         assert_eq!(
-            shlex::split(&args).expect("a POSIX parser must accept our args"),
-            argv,
+            shlex::split(&encoded).expect("a POSIX parser must accept our args"),
+            wrapper,
             "the argv must survive the array→string→argv round trip byte for byte"
         );
         assert_ne!(
-            args,
-            format!("sh -c '{}'", argv[2]),
+            encoded,
+            format!("sh -c '{}'", wrapper[2]),
             "the script's own single quotes must be escaped, not passed raw"
         );
     }
@@ -1121,7 +1469,10 @@ mod tests {
         let err = body_err("[runpod]\nvolume-gb = 5");
         assert!(err.contains("10"), "{err}");
         assert!(err.contains("volume-gb"), "{err}");
-        assert!(err.contains('0'), "the disable-it fix must be offered: {err}");
+        assert!(
+            err.contains('0'),
+            "the disable-it fix must be offered: {err}"
+        );
         // Same helper, same message, at startup validation.
         let config: Config = toml::from_str("[runpod]\nvolume-gb = 5").unwrap();
         let startup = validate_storage_and_cloud(&config.runpod).unwrap_err();
@@ -1188,9 +1539,8 @@ mod tests {
 
         // v2 answers the illegal combination with a 400 that the provision
         // loop would misread as "no capacity" — fail locally instead.
-        let err = body_err(
-            "[runpod]\nallowed-cuda-versions = [\"12.8\"]\nmin-cuda-version = \"12.1\"",
-        );
+        let err =
+            body_err("[runpod]\nallowed-cuda-versions = [\"12.8\"]\nmin-cuda-version = \"12.1\"");
         assert!(err.contains("allowed-cuda-versions"), "{err}");
         assert!(err.contains("min-cuda-version"), "{err}");
 
@@ -1259,11 +1609,7 @@ mod tests {
                 "{action} on {status} is already the outcome we wanted"
             );
         }
-        for (action, status) in [
-            ("stop", "RUNNING"),
-            ("start", "EXITED"),
-            ("start", "ERROR"),
-        ] {
+        for (action, status) in [("stop", "RUNNING"), ("start", "EXITED"), ("start", "ERROR")] {
             assert!(
                 !conflict_satisfies(action, status),
                 "{action} on {status} must surface"

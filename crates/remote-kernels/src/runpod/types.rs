@@ -18,21 +18,48 @@ use serde::{Deserialize, Serialize};
 /// other key is a 422 — passthrough extras are checked against this set
 /// before the request is sent. Pinned to the vendored spec by
 /// `tests/runpod_spec.rs`.
-pub const CREATE_POD_FIELDS: &[&str] = &[];
+pub const CREATE_POD_FIELDS: &[&str] = &[
+    "args",
+    "cloud",
+    "cpu",
+    "dataCenterIds",
+    "disk",
+    "env",
+    "globalNetworking",
+    "gpu",
+    "image",
+    "mounts",
+    "name",
+    "ports",
+    "registry",
+    "startJupyter",
+    "startSsh",
+    "templateId",
+];
 
 /// The subset of [`CREATE_POD_FIELDS`] this runtime sets itself. A
 /// passthrough extra naming one of these would silently fight the value we
 /// computed (or duplicate a key in the flattened body), so they are rejected
 /// with a pointer at the typed `[runpod]` knob instead.
-pub const MANAGED_CREATE_FIELDS: &[&str] = &[];
+pub const MANAGED_CREATE_FIELDS: &[&str] = &[
+    "args", "cloud", "disk", "env", "gpu", "image", "mounts", "name", "ports", "registry",
+    "startSsh",
+];
 
 /// The `PodStatus` enum (pinned to the spec by `tests/runpod_spec.rs`).
 /// Statuses stay `String` on the wire — a provider that adds one must not
 /// break the parse (see `InstanceStatus::Unknown`).
-pub const POD_STATUSES: &[&str] = &[];
+pub const POD_STATUSES: &[&str] = &[
+    "PROVISIONING",
+    "STARTING",
+    "RUNNING",
+    "EXITED",
+    "ERROR",
+    "TERMINATED",
+];
 
 /// The `Cloud` enum — the values `cloud-type` accepts.
-pub const CLOUDS: &[&str] = &[];
+pub const CLOUDS: &[&str] = &["SECURE", "COMMUNITY"];
 
 // --- Request types ---
 
@@ -259,31 +286,37 @@ where
 
 impl Pod {
     pub fn is_running(&self) -> bool {
-        unimplemented!("GREEN: §4.1")
+        self.status.as_deref() == Some("RUNNING")
     }
 
     /// GPU type name for display (`gpu.id`, v1's `machine.gpuTypeId`).
     pub fn gpu_display_name(&self) -> &str {
-        unimplemented!("GREEN: §4.1")
+        self.gpu
+            .as_ref()
+            .and_then(|g| g.id.as_deref())
+            .unwrap_or("unknown")
     }
 
     /// Public `(host, port)` for direct SSH, once the pod has one. This is
     /// the fact the deleted GraphQL query used to fetch.
     pub fn direct_ssh(&self) -> Option<(String, u16)> {
-        unimplemented!("GREEN: §4.1")
+        let direct = self.ssh.as_ref()?.direct.as_ref()?;
+        Some((direct.host.clone(), direct.port))
     }
 
     /// Hourly rate, or `None` when the provider reports no rate. v2 reports
     /// `0.0` for EXITED/TERMINATED pods, which must not overwrite the real
     /// rate recorded in the ledger (D8).
     pub fn hourly_cost(&self) -> Option<f64> {
-        unimplemented!("GREEN: §4.1")
+        self.cost.filter(|c| *c > 0.0)
     }
 
     /// Whether the pod carries `RunPod`'s public 8888 proxy mapping.
     /// Missing data conservatively reads as "mapping exists" — every
     /// pre-tunnel pod had it.
     pub fn has_proxy_port(&self) -> bool {
-        unimplemented!("GREEN: §4.1")
+        self.ports
+            .as_deref()
+            .is_none_or(|p| p.iter().any(|m| m.starts_with("8888/")))
     }
 }
