@@ -388,6 +388,39 @@ fn attach_refusal_message(mode: ConnectMode, message: &str) -> String {
     }
 }
 
+/// What an attach owes the cost ledger before it touches the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeAccounting {
+    /// The ledger already carries an open compute interval for this machine.
+    AlreadyOpen,
+    /// The machine is stopped: issue the provider `start` AND open the
+    /// interval (opened first — an unconfirmed start must not bill silently).
+    ResumeAndOpen,
+    /// The machine is billing already: open the interval, make no provider
+    /// call.
+    OpenOnly,
+}
+
+/// Decide it from the provider's answer and the durable record's phase.
+///
+/// The subtle case is a record that says stopped while the provider reports
+/// the machine as *coming up*: something outside this server started it (the
+/// console, or a resume this process died in the middle of), and `RunPod` v2
+/// reports `PROVISIONING`/`STARTING` for the first minutes of that — where
+/// v1's `desiredStatus` read `RUNNING` from the first poll. The meter runs
+/// during it either way, so it must reopen the interval exactly like the
+/// running case: otherwise attach installs a budget deadline computed from
+/// the stopped machine's storage rate on a machine burning its compute rate.
+fn resume_accounting(provider_status: &InstanceStatus, phase: Phase) -> ResumeAccounting {
+    if *provider_status == InstanceStatus::Stopped {
+        return ResumeAccounting::ResumeAndOpen;
+    }
+    if phase == Phase::Stopped && provider_status.is_billing() {
+        return ResumeAccounting::OpenOnly;
+    }
+    ResumeAccounting::AlreadyOpen
+}
+
 fn provider_rejection_is_authoritative(error: &anyhow::Error) -> bool {
     if let Some(error) = error.downcast_ref::<crate::vast::client::ApiStatusError>() {
         return (400..500).contains(&error.status);
@@ -817,25 +850,42 @@ impl RemoteKernelsServer {
                 "Machine {machine_id} cannot be attached: {error:#}; record kept."
             ));
         }
-        let resumed = provider_status == InstanceStatus::Stopped;
-        if resumed && auto {
+        let accounting = resume_accounting(&provider_status, record.phase);
+        let needs_provider_resume = accounting == ResumeAccounting::ResumeAndOpen;
+        let resumed = accounting != ResumeAccounting::AlreadyOpen;
+        if needs_provider_resume && auto {
             // Startup re-attach never resumes: resuming restarts billing and
-            // is always an explicit decision.
+            // is always an explicit decision. (A machine that is already
+            // billing is not skipped — leaving it unsupervised is the
+            // expensive outcome.)
             return err_text(format!(
                 "Machine {machine_id} is stopped; automatic reattach skipped it. attach(\"{machine_id}\") resumes it (billing restarts)."
             ));
         }
         if resumed {
             self.state.lock().await.reset_known_hosts(&machine_id);
-            self.accounted_resume(
-                &machine_id,
-                "resume provider call admitted",
-                runtime.resume(&record.external_id),
-            )
+            let note = if needs_provider_resume {
+                "resume provider call admitted"
+            } else {
+                "already billing at the provider; interval reopened"
+            };
+            self.accounted_resume(&machine_id, note, async {
+                if needs_provider_resume {
+                    runtime.resume(&record.external_id).await
+                } else {
+                    Ok(())
+                }
+            })
             .await
             .map_err(|error| {
                 McpError::internal_error(
-                    format!("Failed to resume machine {machine_id}: {error}"),
+                    if needs_provider_resume {
+                        format!("Failed to resume machine {machine_id}: {error}")
+                    } else {
+                        format!(
+                            "Machine {machine_id} is already running and billing at the provider, but reopening its cost ledger failed ({error}); attach was refused so spend cannot go untracked — stop() it, or repair the ledger."
+                        )
+                    },
                     None,
                 )
             })?;
@@ -4904,15 +4954,18 @@ impl RemoteKernelsServer {
             ));
         }
 
-        if provider_state == InstanceStatus::Running
+        if provider_state.is_billing()
             && record.phase == Phase::Stopped
             && lifecycle_snapshot.finalize_phase
                 != Some(crate::state::FinalizePhase::RetrievingOutcome)
         {
-            // Resumed outside this tool (console, CLI): GPU billing restarted
-            // while the ledger still shows the stopped storage tail. Reopen
-            // the interval at the full rate (attributed to the machine's
-            // existing owner) so spend is never silently untracked.
+            // Resumed outside this tool (console, CLI), or still coming up
+            // from such a resume — RunPod v2 reports PROVISIONING/STARTING
+            // for the first minutes of a restart and the meter runs the whole
+            // time: GPU billing restarted while the ledger still shows the
+            // stopped storage tail. Reopen the interval at the full rate
+            // (attributed to the machine's existing owner) so spend is never
+            // silently untracked.
             let reopened = self.state.lock().await.append_ledger_event(
                 machine_id,
                 crate::ledger::EventKind::RateChanged,
@@ -5976,7 +6029,7 @@ impl ServerHandler for RemoteKernelsServer {
 mod tests {
     use rmcp::handler::server::wrapper::Parameters;
 
-    use super::{RemoteKernelsServer, validate_vast_offers};
+    use super::{RemoteKernelsServer, ResumeAccounting, resume_accounting, validate_vast_offers};
     use crate::config::{Cleanup, Config};
     use crate::jupyter::messages::ExecutionOutput;
     #[cfg(feature = "fake-runtime")]
@@ -6182,6 +6235,113 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+    }
+
+    /// A stopped durable record against a provider that reports the machine
+    /// as coming up (`RunPod` v2's `STARTING`, where v1 would already have said
+    /// `RUNNING`) is a machine that is BILLING: the attach must reopen the
+    /// ledger at the compute rate — without issuing a second provider start —
+    /// so the budget deadline it installs is computed from that rate and not
+    /// from the stopped machine's storage tail.
+    #[tokio::test]
+    async fn a_stopped_record_on_a_starting_machine_reopens_the_ledger() {
+        // The provider statuses that mean "billing" reach this decision the
+        // same way, and only a provider-stopped machine gets a start call.
+        for status in ["STARTING", "PROVISIONING", "RUNNING"] {
+            assert_eq!(
+                resume_accounting(
+                    &crate::runtime::runpod::instance_status_from(status),
+                    Phase::Stopped
+                ),
+                ResumeAccounting::OpenOnly,
+                "{status}"
+            );
+            assert_eq!(
+                resume_accounting(
+                    &crate::runtime::runpod::instance_status_from(status),
+                    Phase::Running
+                ),
+                ResumeAccounting::AlreadyOpen,
+                "{status}"
+            );
+        }
+        assert_eq!(
+            resume_accounting(
+                &crate::runtime::runpod::instance_status_from("EXITED"),
+                Phase::Stopped
+            ),
+            ResumeAccounting::ResumeAndOpen
+        );
+
+        // ...and the reopen it asks for really does restore the compute rate
+        // and the deadline derived from it.
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let mut instance = InstanceState::provisioning(
+            "main".to_string(),
+            None,
+            "runpod".to_string(),
+            "provider-id".to_string(),
+            "GPU".to_string(),
+            2.0,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/key".into(),
+            false,
+        );
+        instance.phase = Phase::Stopped;
+        let record = instance.record();
+        state
+            .admit_provision("main", &record, &crate::state::LifecycleRecord::default())
+            .unwrap();
+        state
+            .append_ledger_event(
+                "main",
+                crate::ledger::EventKind::Stopped,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let server = RemoteKernelsServer::new(toml::from_str("").unwrap(), state, Some(1.0));
+        assert!(
+            server
+                .state
+                .lock()
+                .await
+                .spend_summary()
+                .unwrap()
+                .hourly_rate
+                .abs()
+                < f64::EPSILON,
+            "the stopped machine must start from a closed interval"
+        );
+
+        // What the attach path runs for ResumeAccounting::OpenOnly: the
+        // ledger event, and no provider call.
+        server
+            .accounted_resume("main", "already billing at the provider", async { Ok(()) })
+            .await
+            .unwrap();
+
+        let rate = server
+            .state
+            .lock()
+            .await
+            .spend_summary()
+            .unwrap()
+            .hourly_rate;
+        assert!((rate - 2.0).abs() < f64::EPSILON, "reopened at {rate}/hr");
+        // The watchdog's budget deadline comes from exactly this rate: $1.00
+        // of budget at $2.00/hr is half an hour, not the unbounded window a
+        // storage-rate ledger would have produced.
+        let feed = crate::heartbeat::BudgetFeed {
+            state: std::sync::Arc::clone(&server.state),
+            budget: 1.0,
+        };
+        let deadline = feed.remaining_secs().await.expect("a deadline");
+        assert!((1750..=1800).contains(&deadline), "{deadline}s");
     }
 
     #[test]

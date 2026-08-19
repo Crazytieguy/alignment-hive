@@ -275,6 +275,21 @@ pub enum InstanceStatus {
     Unknown(String),
 }
 
+impl InstanceStatus {
+    /// Whether the machine is burning its COMPUTE rate, not just storage.
+    ///
+    /// `Provisioning` counts: every provider here starts the meter when the
+    /// machine is assigned, not when it finishes booting — `RunPod` bills a
+    /// pod from `PROVISIONING`/`STARTING`, a vast instance bills while its
+    /// image is still pulling, and a `Kubernetes` pod holds its node from
+    /// `Pending`. So a durable record that still says stopped, against a
+    /// provider that reports either of these, means billing has resumed and
+    /// the ledger interval must be reopened at the full rate.
+    pub fn is_billing(&self) -> bool {
+        matches!(self, Self::Running | Self::Provisioning)
+    }
+}
+
 /// Who can reach a machine's Jupyter endpoint. Declared by the runtime that
 /// built the endpoint (it knows the access path it chose) — never inferred
 /// from the URL: this classification is shown to the user as a security
