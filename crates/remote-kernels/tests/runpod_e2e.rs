@@ -475,17 +475,38 @@ def ppid(pid):
     return '0'
 
 # The wrapper shell backgrounds the guard and then `exec`s the image's own
-# start command, so it must not survive as a process of its own: the only
-# thing still carrying the script text is the forked guard subshell, and
-# walking up from it must reach PID 1 without passing through another copy.
+# start command, so it must not survive as a process of its own. PID 1 is not
+# evidence either way here: this image has an ENTRYPOINT, so PID 1 is
+# docker-init holding our whole args string (script text and all) as inert
+# argv. What counts is (a) no LIVE process other than PID 1 carries the
+# wrapper's tail, and (b) walking up from the guard reaches PID 1 without
+# passing through such a process.
+import os
+guard = next((p for p in pids if p != '1'), None)
+print('GUARD_PID:', guard or 'NONE')
 print('PID1_ARGV0:', argv(1)[0].decode())
+survivors = []
+for p in os.listdir('/proc'):
+    if not p.isdigit() or p == '1':
+        continue
+    try:
+        line = b' '.join(argv(p)).decode()
+    except (OSError, UnicodeDecodeError):
+        continue
+    if 'exec /start.sh' in line:
+        survivors.append(p)
+print('WRAPPER_SURVIVORS:', len(survivors))
 chain = []
-p = ppid(pids[0]) if pids else '0'
+p = ppid(guard) if guard else '0'
 while p not in ('0', ''):
-    chain.append('%s:%s' % (p, b' '.join(argv(p)).decode().strip()))
-    if p == '1':
+    try:
+        chain.append('%s:%s' % (p, b' '.join(argv(p)).decode().strip()))
+        if p == '1':
+            break
+        p = ppid(p)
+    except OSError as e:
+        chain.append('%s:<unreadable: %s>' % (p, e))
         break
-    p = ppid(p)
 for c in chain: print('GUARD_ANCESTOR:', c)
 
 env = pid1_env()
@@ -509,10 +530,18 @@ print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
     // so PID 1 is docker-init carrying our whole args string (script text
     // included) as its argv — it "contains /start.sh" and does not "start
     // with sh -c" whether or not exec ran. What exec actually guarantees is
-    // that the wrapper shell REPLACED itself: the only process left holding
-    // the script is the guard subshell it forked, and that subshell's
-    // ancestry must not pass through a second, surviving copy of the wrapper
-    // (which is what would still be waiting for /start.sh had exec been lost).
+    // that the wrapper shell REPLACED itself: no live process other than PID 1
+    // may still carry the wrapper's tail, and the guard subshell's ancestry
+    // must reach PID 1 without passing through one (a wrapper that lost its
+    // exec would sit right there, waiting for /start.sh).
+    assert!(
+        out.contains("WRAPPER_SURVIVORS: 0"),
+        "a wrapper shell is still alive (exec lost): {out}"
+    );
+    assert!(
+        !out.contains("GUARD_PID: NONE"),
+        "no guard process outside PID 1 — pgrep matched only PID 1's argv: {out}"
+    );
     let pid1_argv0 = out
         .lines()
         .find_map(|l| l.strip_prefix("PID1_ARGV0: "))
@@ -542,7 +571,7 @@ print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
             // holding our args string as plain argv, which proves nothing
             // either way (the PID1_ARGV0 check above covers the no-ENTRYPOINT
             // image, where the wrapper shell WOULD be PID 1).
-            .any(|ancestor| !ancestor.starts_with("1:") && ancestor.contains("/tmp/heartbeat")),
+            .any(|ancestor| !ancestor.starts_with("1:") && ancestor.contains("exec /start.sh")),
         "a wrapper shell survived as the guard's ancestor (exec lost): {ancestors:?}"
     );
 
