@@ -330,21 +330,39 @@ impl RunPodRuntime {
     /// adopting is creating a SECOND billing pod under the same
     /// (non-unique-to-`RunPod`) name:
     /// - `Ok(Some(pod))` — adopt it.
-    /// - `Ok(None)` — a probe succeeded and the account has no such pod. Only
-    ///   this outcome may lead to another create.
-    /// - `Err(_)` — the probe never succeeded within the window, or several
-    ///   pods carry the name. The outcome is unknowable from here, so the
-    ///   caller must abort provisioning (record-preserving error), never
-    ///   create again.
+    /// - `Ok(None)` — every probe in the window parsed cleanly and none listed
+    ///   the name. Note what this does NOT mean: the v2 contract puts no
+    ///   upper bound on list-after-write visibility, so it is "not seen yet",
+    ///   not "not created" — only a create that could not have been committed
+    ///   (429) may act on it by retrying.
+    /// - `Err(_)` — the probe never succeeded within the window, several pods
+    ///   carry the name, or the matched pod could not be re-read. The outcome
+    ///   is unknowable from here, so the caller aborts provisioning
+    ///   (record-preserving error) and never creates again.
+    ///
+    /// The listing itself is parsed strictly (`ProbePodsResponse`): a pod
+    /// whose `name` is missing, null, or not a string fails the parse and
+    /// lands in the `Err` arm, rather than silently not matching.
     async fn adopt_existing(&self, name: &str) -> anyhow::Result<Option<Pod>> {
         let mut unresolved: Option<anyhow::Error> = None;
         for attempt in 1..=ADOPT_PROBE_ATTEMPTS {
             if attempt > 1 {
                 tokio::time::sleep(self.adopt_probe_interval).await;
             }
-            match self.client.list_pods().await {
+            match self.client.probe_pods().await {
                 Ok(pods) => match crate::runpod::client::pick_adoptable(&pods, name) {
-                    Ok(Some(pod)) => return Ok(Some(pod.clone())),
+                    // The probe reads only (id, name); the handle needs the
+                    // full pod, which the normal lenient GET provides.
+                    Ok(Some(found)) => match self.client.get_pod(&found.id).await {
+                        Ok(pod) => return Ok(Some(pod)),
+                        Err(unreadable) => {
+                            unresolved = Some(anyhow::anyhow!(
+                                "pod {} is named {name} at RunPod but could not be read \
+                                 ({unreadable})",
+                                found.id
+                            ));
+                        }
+                    },
                     // A successful probe that sees nothing is only provisional
                     // until the window is out — the pod may still be landing.
                     Ok(None) => unresolved = None,
@@ -661,11 +679,11 @@ const PASSTHROUGH_FIELD_LIST: &str = "dataCenterIds, globalNetworking, startJupy
      templateId, and the [runpod] keys allowed-cuda-versions, min-cuda-version, \
      container-registry-auth-id";
 
-/// The one error the provision loop may answer with when it cannot tell
-/// whether a failed create left a pod behind: it stops, keeps the name it
-/// used, and points at the console. Creating another pod under the same name
-/// is exactly the outcome this prevents — v2 has no idempotency key, and the
-/// duplicate would bill untracked.
+/// The provision loop stops here when the follow-up lookup itself failed —
+/// the probe errored, its body was unreadable, two pods share the name, or
+/// the matched pod could not be re-read. Creating another pod under the same
+/// name is exactly the outcome this prevents: v2 has no idempotency key, and
+/// the duplicate would bill untracked.
 fn unresolved_create_outcome(
     error: &RunPodError,
     name: &str,
@@ -676,6 +694,23 @@ fn unresolved_create_outcome(
          whether a pod named {name} now exists and is billing ({probe}). No second pod \
          was created. Check the RunPod console for a pod named {name}: terminate it if \
          you don't want it, then retry start()."
+    )
+}
+
+/// ...and here when the lookup worked and simply did not show the pod. That
+/// is weaker evidence than it looks: `RunPod` publishes no bound on how long
+/// a just-created pod takes to appear in `GET /v2/pods`, so "not listed
+/// {seconds}s later" cannot be read as "not created" for a create that may
+/// already have been committed. The user gets the same one place to look.
+fn unconfirmed_create_outcome(error: &RunPodError, name: &str) -> anyhow::Error {
+    let seconds = ADOPT_PROBE_INTERVAL.as_secs() * u64::from(ADOPT_PROBE_ATTEMPTS - 1);
+    anyhow::anyhow!(
+        "the pod create failed after the request reached RunPod ({error}), so it may \
+         still have created a pod. No pod named {name} was listed in the following \
+         {seconds}s, but RunPod does not promise a new pod is listed that quickly — so \
+         this run stops instead of creating a second one that could bill untracked. \
+         Check the RunPod console for a pod named {name}: terminate it if you don't want \
+         it, then retry start()."
     )
 }
 
@@ -845,11 +880,12 @@ impl Runtime for RunPodRuntime {
     /// create-error table (see [`CreateDisposition`]):
     /// - 400 / 403 → this candidate cannot be satisfied; next GPU type
     /// - 422 / 402 / 401 / 404 → nothing will succeed; fail immediately
-    /// - 429 / 5xx → retry the same candidate, after checking whether the pod
-    ///   was in fact created (a 502 can mean "created, gateway timed out")
-    /// - transport/parse failure → the outcome is unknown: adopt the pod if
-    ///   the provider has one under our name, and never create a second one
-    ///   (v2 has no idempotency key).
+    /// - 429 → the provider declined to process the request, so the same
+    ///   candidate may be re-sent (after a probe, as insurance)
+    /// - 5xx / transport / unparseable 2xx → the create may have been
+    ///   committed: adopt the pod if one carries our name, otherwise STOP.
+    ///   Never a second create, on any evidence — v2 has no idempotency key
+    ///   and no visibility bound that could make an empty listing proof.
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
         let gpu_type_ids = req
             .gpu_type
@@ -899,12 +935,15 @@ impl Runtime for RunPodRuntime {
                     }
                     CreateDisposition::RetrySame => {
                         all_bad_request = false;
-                        // The failed call may still have created the pod (a
-                        // gateway timeout after a successful create), and a
-                        // blind retry would leave that one billing untracked.
-                        // An unresolvable probe aborts for the same reason the
-                        // Indeterminate arm does: another create is the one
-                        // outcome that must never happen on a guess.
+                        // Reached only for a 429 — a request the server
+                        // declined to process (RFC 6585), so it cannot have
+                        // created anything and re-sending it is what the
+                        // provider's own Retry-After asks for. The probe still
+                        // runs first, as cheap insurance against the
+                        // classification being wrong: if a pod under our name
+                        // did appear, it is adopted rather than duplicated,
+                        // and an unresolvable probe aborts exactly like the
+                        // Indeterminate arm.
                         match self.adopt_existing(&name).await {
                             Ok(Some(pod)) => {
                                 tracing::warn!(pod_id = %pod.id, "create reported an error but the pod exists — adopting it");
@@ -916,20 +955,24 @@ impl Runtime for RunPodRuntime {
                             }
                         }
                         if attempt == 3 {
-                            tracing::info!(gpu_type = %gpu_type, error = %error, "Transient failures exhausted, next GPU type");
+                            tracing::info!(gpu_type = %gpu_type, error = %error, "Rate limit persisted, next GPU type");
                             failures.push((
                                 gpu_type.clone(),
-                                format!("transient failure after {attempt} attempts: {error}"),
+                                format!("rate-limited after {attempt} attempts: {error}"),
                             ));
                             break;
                         }
-                        tracing::info!(gpu_type = %gpu_type, attempt, error = %error, "Transient failure, retrying...");
+                        tracing::info!(gpu_type = %gpu_type, attempt, error = %error, "Rate limited, retrying...");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     CreateDisposition::Indeterminate => {
-                        // A failure of the probe itself is fatal here:
-                        // creating a second pod on a guess is the one outcome
-                        // that must never happen.
+                        // The create may have been committed before the
+                        // failure. Only the provider can settle that, and only
+                        // by showing us the pod: an empty listing is "not
+                        // visible yet", which the v2 contract never promises
+                        // to turn into "not created". So this arm has exactly
+                        // two endings — adopt, or stop and tell the user where
+                        // to look. It never creates again, on any evidence.
                         let existing = self
                             .adopt_existing(&name)
                             .await
@@ -938,11 +981,7 @@ impl Runtime for RunPodRuntime {
                             tracing::warn!(pod_id = %pod.id, "create outcome unknown; adopted the pod it created");
                             return Ok(Self::handle_with_note(&pod, note.as_ref()));
                         }
-                        anyhow::bail!(
-                            "the create outcome is unknown ({error}) and no pod named {name} \
-                             exists at the provider; not retrying to avoid creating a \
-                             duplicate — retry start() if you believe this was a transport blip."
-                        );
+                        return Err(unconfirmed_create_outcome(&error, &name));
                     }
                 }
             }
@@ -2149,6 +2188,20 @@ mod tests {
             // degrading it to zero pods is what would authorize a second
             // create.
             ("probe body is malformed", 200, "{\"data\": []}"),
+            // ...and neither is a pod whose NAME we cannot read. The listing
+            // is otherwise perfectly well-formed here, and the entry may well
+            // be the pod this create just landed: a lenient parse would call
+            // it nameless, fail to match, and authorize a duplicate.
+            (
+                "listed pod has no name",
+                200,
+                "{\"pods\": [{\"id\": \"landed\"}]}",
+            ),
+            (
+                "listed pod's name is null",
+                200,
+                "{\"pods\": [{\"id\": \"landed\", \"name\": null}]}",
+            ),
         ] {
             let mut script = vec![(
                 "POST /v2/pods ",
@@ -2222,10 +2275,16 @@ mod tests {
     /// would produce a duplicate.
     #[tokio::test]
     async fn a_pod_that_appears_late_in_the_probe_window_is_adopted() {
+        // The probe listing carries only (id, name) — the full pod comes from
+        // the normal lenient GET, which is what the handle is built from.
         let landed = serde_json::json!({"pods": [
-            {"id": "late-1", "name": "remote-kernels-m1", "status": "PROVISIONING",
-             "gpu": {"id": "NVIDIA GeForce RTX 4090"}, "cost": 0.44}
+            {"id": "late-1", "name": "remote-kernels-m1"}
         ]})
+        .to_string();
+        let pod = serde_json::json!({
+            "id": "late-1", "name": "remote-kernels-m1", "status": "PROVISIONING",
+            "gpu": {"id": "NVIDIA GeForce RTX 4090"}, "cost": 0.44
+        })
         .to_string();
         let fake = FakeRunPod::spawn(vec![
             (
@@ -2235,18 +2294,60 @@ mod tests {
             ),
             ("GET /v2/pods ", 200, "{\"pods\": []}".to_string()),
             ("GET /v2/pods ", 200, landed),
+            ("GET /v2/pods/late-1 ", 200, pod),
         ]);
         let rt = runtime_against(&fake, "");
 
         let handle = rt.provision(&provision_req()).await.unwrap();
         assert_eq!(handle.external_id, "late-1");
+        assert_eq!(handle.gpu_name, "NVIDIA GeForce RTX 4090");
         assert_eq!(handle.cost_per_hr, Some(0.44));
         assert_eq!(fake.count("POST /v2/pods "), 1);
     }
 
-    /// A transport failure has an unknown outcome too — and when the probe
-    /// then proves the account has no such pod, provisioning still must not
-    /// create again in the same call (D21).
+    /// The heart of the rule: a create that REACHED `RunPod` and then failed
+    /// may have been committed, and a bounded run of clean empty listings is
+    /// not evidence that it wasn't — v2 promises no visibility deadline. So
+    /// the loop stops and hands the user the one place to look, instead of
+    /// falling through to another create.
+    #[tokio::test]
+    async fn empty_listings_are_not_proof_that_a_5xx_create_did_nothing() {
+        let mut script = vec![(
+            "POST /v2/pods ",
+            502,
+            "{\"detail\":\"bad gateway\"}".to_string(),
+        )];
+        script.extend(probe_replies(200, "{\"pods\": []}"));
+        let fake = FakeRunPod::spawn(script);
+        let rt = runtime_against(&fake, "");
+
+        let error = rt
+            .provision(&provision_req())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("may still have created a pod"),
+            "the message must not claim the create did nothing: {error}"
+        );
+        assert!(
+            error.contains("Check the RunPod console for a pod named remote-kernels-m1"),
+            "{error}"
+        );
+        assert_eq!(
+            fake.count("POST /v2/pods "),
+            1,
+            "an empty listing must not authorize a second create"
+        );
+        assert_eq!(
+            fake.count("GET /v2/pods "),
+            usize::try_from(ADOPT_PROBE_ATTEMPTS).unwrap(),
+            "the whole window is used before giving up"
+        );
+    }
+
+    /// Same for a transport/parse failure, which never even learned whether
+    /// the request was processed (D21).
     #[tokio::test]
     async fn a_clean_absent_probe_after_an_unknown_outcome_stops_the_loop() {
         let mut script = vec![
@@ -2262,8 +2363,38 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("no pod named remote-kernels-m1"), "{error}");
+        assert!(
+            error.contains("Check the RunPod console for a pod named remote-kernels-m1"),
+            "{error}"
+        );
         assert_eq!(fake.count("POST /v2/pods "), 1, "{error}");
+    }
+
+    /// 429 is the one failure that provably created nothing (the provider
+    /// declined to process the request), so the same candidate is re-sent —
+    /// after a probe, which adopts instead of duplicating if the
+    /// classification was ever wrong.
+    #[tokio::test]
+    async fn a_rate_limited_create_is_retried_after_a_clean_probe() {
+        let mut script = vec![(
+            "POST /v2/pods ",
+            429,
+            "{\"detail\":\"rate limit exceeded\"}".to_string(),
+        )];
+        script.extend(probe_replies(200, "{\"pods\": []}"));
+        script.push((
+            "POST /v2/pods ",
+            200,
+            serde_json::json!({"id": "second-try", "name": "remote-kernels-m1",
+                               "status": "PROVISIONING", "cost": 0.44})
+            .to_string(),
+        ));
+        let fake = FakeRunPod::spawn(script);
+        let rt = runtime_against(&fake, "");
+
+        let handle = rt.provision(&provision_req()).await.unwrap();
+        assert_eq!(handle.external_id, "second-try");
+        assert_eq!(fake.count("POST /v2/pods "), 2);
     }
 
     /// v2 dropped `supportPublicIp`, so on community cloud the flag can no

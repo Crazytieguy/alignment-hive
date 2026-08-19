@@ -284,16 +284,33 @@ pub struct PodRuntimePort {
     pub ip: Option<String>,
 }
 
-/// `GET /v2/pods` — an object wrapper, not the bare array v1 returned.
+/// `GET /v2/pods` as the create-recovery probe reads it — an object wrapper,
+/// not the bare array v1 returned.
 ///
-/// `pods` is the ONE response field that is parsed strictly (no `default`, no
-/// [`lenient`]): this list is the probe that decides whether a failed create
-/// already left a pod billing, so "the body was not what we expected" must
-/// surface as an error. Degrading it to an empty list would read as "no pod
-/// exists" and let the provision loop create a second one.
+/// This is the ONE strictly-parsed response shape in the file, and it is
+/// deliberately its own type rather than a list of [`Pod`]: the probe decides
+/// whether a failed create already left a pod billing, and it decides it by
+/// NAME. A [`Pod`] parses `{"id": "x"}` happily and reports `name: None`,
+/// which reads as "not our pod" — the exact misreading that would authorize a
+/// second create. Here a missing, null, or non-string `name` (or `id`, or
+/// `pods`) is a parse error, which the caller treats as a failed probe and
+/// therefore as "abort, do not create again".
+///
+/// The lenient [`Pod`] stays lenient for every other call (a status query
+/// must survive a field we cannot represent — see the `runtime.uptime: -1`
+/// defect); the probe adopts by id, then re-reads the pod through the normal
+/// lenient `GET /v2/pods/{id}`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ListPodsResponse {
-    pub pods: Vec<Pod>,
+pub struct ProbePodsResponse {
+    pub pods: Vec<ProbePod>,
+}
+
+/// One entry of [`ProbePodsResponse`]: only the two fields the probe's
+/// decision rests on, both required.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProbePod {
+    pub id: String,
+    pub name: String,
 }
 
 /// Deserialize a response field, degrading to its default instead of failing

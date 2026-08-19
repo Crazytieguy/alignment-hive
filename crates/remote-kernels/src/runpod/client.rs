@@ -1,7 +1,7 @@
 use reqwest::Client;
 use serde::Deserialize;
 
-use super::types::{CreatePodRequest, ListPodsResponse, Pod, PodActionRequest};
+use super::types::{CreatePodRequest, Pod, PodActionRequest, ProbePod, ProbePodsResponse};
 
 const BASE_URL: &str = "https://api.runpod.io/v2";
 
@@ -82,10 +82,13 @@ impl Problem {
 pub enum CreateDisposition {
     /// This candidate cannot be satisfied; try the next GPU type.
     NextCandidate,
-    /// Transient upstream failure; retry the same candidate.
+    /// The provider declined to process the request (429), so nothing was
+    /// created and the same candidate may be re-sent.
     RetrySame,
-    /// The create may or may not have landed — resolve by looking the pod
-    /// up, never by creating again (v2 has no idempotency key).
+    /// The create may or may not have landed — resolve by looking the pod up,
+    /// never by creating again (v2 has no idempotency key), and stop when the
+    /// lookup does not find it: an empty listing is "not visible yet", which
+    /// no bounded wait can turn into "not created".
     Indeterminate,
     /// No candidate can succeed; stop.
     Fatal,
@@ -109,14 +112,26 @@ impl RunPodError {
     /// Classify a failed `POST /v2/pods` per `RunPod`'s documented table:
     /// 422 (contract violation), 402 (balance), 401/404 → nothing will
     /// succeed; 400 (cross-field rule OR no capacity) and 403 (pool not
-    /// accessible) → next candidate; 429/5xx → transient; anything else →
-    /// the outcome is unknown and must be resolved by lookup (D21).
+    /// accessible) → next candidate; 429 → the request was rejected before
+    /// it was processed, so the same candidate may be retried; 5xx →
+    /// **indeterminate**, exactly like a transport or parse failure.
+    ///
+    /// A 5xx is not "transient" in the sense that matters here. The v2
+    /// contract says nothing about whether the handler had already committed
+    /// the pod when the gateway gave up, so a retried 5xx create is a
+    /// coin-flip on a second billing pod, and `GET /v2/pods` publishes no
+    /// upper bound on how soon a committed pod becomes visible — no bounded
+    /// probe can turn "not listed yet" into "not created" (D21).
+    ///
+    /// 429 is the one documented exception: RFC 6585 defines it as the server
+    /// declining to process the request, and `RunPod` pairs it with
+    /// `Retry-After`, i.e. an invitation to send the same request again.
     pub fn create_disposition(&self) -> CreateDisposition {
         match self {
             Self::Api { status, .. } => match status {
                 400 | 403 => CreateDisposition::NextCandidate,
                 429 => CreateDisposition::RetrySame,
-                s if *s >= 500 => CreateDisposition::RetrySame,
+                s if *s >= 500 => CreateDisposition::Indeterminate,
                 _ => CreateDisposition::Fatal,
             },
             // Transport or parse failure: the pod may exist and be billing.
@@ -125,15 +140,18 @@ impl RunPodError {
     }
 }
 
-/// The pod (if any) an indeterminate create may have left behind: an exact,
-/// unique name match. Two matches are never guessed between — the machine
-/// name is unique per machine id, so ambiguity means something else is going
-/// on and adopting the wrong pod would leak the other one.
-pub fn pick_adoptable<'a>(pods: &'a [Pod], name: &str) -> anyhow::Result<Option<&'a Pod>> {
-    let matches: Vec<&Pod> = pods
-        .iter()
-        .filter(|p| p.name.as_deref() == Some(name))
-        .collect();
+/// The pod (if any) a failed create may have left behind: an exact, unique
+/// name match over the STRICT probe listing (see
+/// [`ProbePodsResponse`](super::types::ProbePodsResponse) — a pod whose name
+/// we could not read never reaches this function, because the parse fails
+/// first). Two matches are never guessed between — the machine name is unique
+/// per machine id, so ambiguity means something else is going on and adopting
+/// the wrong pod would leak the other one.
+pub fn pick_adoptable<'a>(
+    pods: &'a [ProbePod],
+    name: &str,
+) -> anyhow::Result<Option<&'a ProbePod>> {
+    let matches: Vec<&ProbePod> = pods.iter().filter(|p| p.name == name).collect();
     match matches.as_slice() {
         [] => Ok(None),
         [pod] => Ok(Some(pod)),
@@ -221,12 +239,15 @@ impl RunPodClient {
         Ok(serde_json::from_str(&body)?)
     }
 
-    /// All pods on the account. `GET /v2/pods` wraps them in an object (v1
-    /// returned a bare array) and has no pagination. Used only by the
-    /// create-recovery path, which is why the parse is strict: a body we
-    /// cannot read is an error, never an empty account (see
-    /// [`ListPodsResponse`]).
-    pub async fn list_pods(&self) -> anyhow::Result<Vec<Pod>> {
+    /// All pods on the account, as the create-recovery probe reads them:
+    /// `(id, name)` and nothing else, parsed strictly. `GET /v2/pods` wraps
+    /// them in an object (v1 returned a bare array) and has no pagination.
+    ///
+    /// Strict on purpose, and only here: a body we cannot read — or an entry
+    /// whose name we cannot read — is an error, never an empty account and
+    /// never a non-match (see
+    /// [`ProbePodsResponse`](super::types::ProbePodsResponse)).
+    pub async fn probe_pods(&self) -> anyhow::Result<Vec<ProbePod>> {
         let resp = crate::send_429_retry(
             self.client
                 .get(format!("{}/pods", self.base_url))
@@ -244,7 +265,7 @@ impl RunPodClient {
             .into());
         }
 
-        let parsed: ListPodsResponse = serde_json::from_str(&body)?;
+        let parsed: ProbePodsResponse = serde_json::from_str(&body)?;
         Ok(parsed.pods)
     }
 
@@ -369,11 +390,14 @@ mod tests {
                 "{status} must stop the loop"
             );
         }
+        // A 5xx may have committed the pod before the gateway gave up, and
+        // nothing in the contract bounds how long such a pod takes to show up
+        // in GET /v2/pods — so it is resolved by lookup, never re-sent.
         for status in [500, 502, 503] {
             assert_eq!(
                 api(status, "upstream exploded").create_disposition(),
-                CreateDisposition::RetrySame,
-                "{status} must retry the same candidate"
+                CreateDisposition::Indeterminate,
+                "{status} must be resolved by lookup, not retried"
             );
         }
         // 429 survives `send_429_retry`'s own ladder only when the provider
@@ -393,10 +417,10 @@ mod tests {
         assert_ne!(other.create_disposition(), CreateDisposition::RetrySame);
 
         // The v1 body-substring heuristic is gone: capacity failures are
-        // 400s in v2, and a 5xx is transient regardless of its wording.
+        // 400s in v2, and a 5xx is indeterminate regardless of its wording.
         assert_eq!(
             api(500, "{\"detail\":\"no instance available\"}").create_disposition(),
-            CreateDisposition::RetrySame
+            CreateDisposition::Indeterminate
         );
         assert_eq!(
             api(400, "gibberish that matches nothing").create_disposition(),
@@ -411,7 +435,7 @@ mod tests {
         assert!(!RunPodError::Other(anyhow::anyhow!("404 bytes read")).is_not_found());
     }
 
-    fn pod_named(id: &str, name: &str) -> Pod {
+    fn pod_named(id: &str, name: &str) -> ProbePod {
         serde_json::from_value(serde_json::json!({"id": id, "name": name})).unwrap()
     }
 
@@ -433,5 +457,36 @@ mod tests {
         let dupes = vec![pod_named("d1", "rk-mine-2"), pod_named("d2", "rk-mine-2")];
         let err = pick_adoptable(&dupes, "rk-mine-2").unwrap_err().to_string();
         assert!(err.contains("d1") && err.contains("d2"), "{err}");
+    }
+
+    /// The probe's own parse is the first line of defence: an entry whose
+    /// name we cannot read must never reach `pick_adoptable`, where it would
+    /// simply not match and read as "no such pod".
+    #[test]
+    fn probe_listing_requires_a_readable_name_on_every_pod() {
+        let parse = |value: serde_json::Value| serde_json::from_value::<ProbePodsResponse>(value);
+
+        let ok = parse(serde_json::json!({"pods": [{"id": "a", "name": "rk-mine"}]}))
+            .expect("the shape the API documents must parse");
+        assert_eq!(ok.pods[0].name, "rk-mine");
+        // Unknown extra keys are still fine — only the two we decide on are
+        // required.
+        assert!(
+            parse(serde_json::json!({"pods": [{"id": "a", "name": "n", "future": 1}]})).is_ok()
+        );
+
+        for broken in [
+            serde_json::json!({"pods": [{"id": "landed"}]}),
+            serde_json::json!({"pods": [{"id": "landed", "name": null}]}),
+            serde_json::json!({"pods": [{"id": "landed", "name": 7}]}),
+            serde_json::json!({"pods": [{"name": "rk-mine"}]}),
+            serde_json::json!({"pods": null}),
+            serde_json::json!({"data": []}),
+        ] {
+            assert!(
+                parse(broken.clone()).is_err(),
+                "must not degrade to an empty/nameless listing: {broken}"
+            );
+        }
     }
 }

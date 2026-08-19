@@ -505,11 +505,30 @@ fn problem_json_error_is_parsed_and_rendered() {
     assert!(Problem::parse("<html>bad gateway</html>").is_none());
 }
 
+/// The create-recovery probe parses `GET /v2/pods` strictly — so the shape
+/// the spec documents has to satisfy it, and anything less must not degrade
+/// into a listing that silently fails to match our pod.
 #[test]
 fn list_response_wrapper_deserializes() {
     let spec = spec();
     let listed = serde_json::json!({ "pods": [pod_example(&spec)] });
-    let parsed: types::ListPodsResponse = serde_json::from_value(listed).unwrap();
+    let parsed: types::ProbePodsResponse = serde_json::from_value(listed).unwrap();
     assert_eq!(parsed.pods.len(), 1);
-    assert_eq!(parsed.pods[0].name.as_deref(), Some("pytorch-training"));
+    assert_eq!(parsed.pods[0].name, "pytorch-training");
+
+    // `name` is required by the spec's own Pod schema, which is what lets the
+    // probe treat its absence as a broken response rather than a non-match.
+    assert!(
+        required_props(&spec, "Pod").contains("name"),
+        "the probe's strictness rests on the spec requiring pod names"
+    );
+    let mut nameless = pod_example(&spec);
+    nameless["name"] = serde_json::Value::Null;
+    assert!(
+        serde_json::from_value::<types::ProbePodsResponse>(
+            serde_json::json!({ "pods": [nameless] })
+        )
+        .is_err(),
+        "a nameless entry must fail the probe parse, not read as 'not our pod'"
+    );
 }
