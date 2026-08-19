@@ -318,11 +318,10 @@ from" — because per-model context sizing depends on the answer.
   raise it above the model's max; both are global, so neither gives per-model
   sizing.
 - Not verified: end-to-end behavior on a live scaled route against a real
-  open-weights host (no provider key available). **Retest trigger:** any Claude
-  Code upgrade — this is undocumented, reverse-engineered behavior, and a
-  version that starts sizing context differently would turn scaling into
-  silent overruns. *(Fired: re-verified against 2.1.223 — see the
-  context-window changes section below.)*
+  open-weights host (no provider key available). This is undocumented,
+  reverse-engineered behavior — a Claude Code version that starts sizing
+  context differently would turn scaling into silent overruns. *(Re-verified
+  against 2.1.223 — see the context-window changes section below.)*
 
 Externally sourced catalog facts (not measured here, 2026-07-27): GLM-5.2
 advertises a 1M-token window under the separate `glm-5.2[1m]` model ID
@@ -390,8 +389,6 @@ New in 2.1.223, and how it interacts with the router:
   would strip the env-var window. Also retroactively validates 0.1.15's
   removal of the `claude-` alias routes: those IDs ignore the declaration
   entirely.
-
-**Retest trigger:** unchanged — the next Claude Code upgrade.
 
 ## GPT tool-usage audits (2026-07-20, 5 transcripts, Sonnet auditors)
 
@@ -709,11 +706,12 @@ Live e2e (2026-07-29, patched router in external mode against the running
 CLIProxyAPI child): oversized requests on `gpt-5.6-sol` and
 `claude-gpt-5.6-sol`, streaming and non-streaming, all four returned
 `prompt is too long: 1680090 tokens > 258400 maximum` (real lazy estimate on
-the non-streaming path). **Retest triggers:** any Claude Code upgrade (the
-classifier strings and recovery behavior are reverse-engineered), any
+the non-streaming path). **Retest triggers:** any
 CLIProxyAPI upgrade (its error translation may change shape — if it starts
 preserving `context_length_exceeded`, detection can tighten to the code),
 and Codex backend window changes (272K/95% → update `GPT_CONTEXT_WINDOW`).
+(The classifier strings and recovery behavior are reverse-engineered from
+Claude Code, so an upgrade could still change them silently.)
 
 ### Full recovery e2e: Claude Code compacting on the GPT branch (2026-07-29 evening)
 
