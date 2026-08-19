@@ -246,6 +246,31 @@ fn create_pod_field_whitelist_matches_spec() {
         managed.is_subset(&ours) && managed.len() < ours.len(),
         "MANAGED_CREATE_FIELDS must be a strict subset of CREATE_POD_FIELDS"
     );
+
+    // Fields the spec allows but this runtime's own body forbids: `cpu`
+    // cannot coexist with the `gpu` block we always send ("Exactly one of
+    // `gpu` or `cpu` must be set"), so it is rejected locally rather than
+    // failing every GPU candidate at the API.
+    let conflicting: BTreeSet<String> = types::CONFLICTING_CREATE_FIELDS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert!(
+        conflicting.is_subset(&ours),
+        "CONFLICTING_CREATE_FIELDS must name real v2 create fields"
+    );
+    assert!(
+        conflicting.is_disjoint(&managed),
+        "a field is either managed by this runtime or conflicting with it, never both"
+    );
+    let create_description =
+        spec["components"]["schemas"]["CreatePodRequest"]["allOf"][1]["description"]
+            .as_str()
+            .expect("CreatePodRequest description");
+    assert!(
+        create_description.contains("Exactly one of `gpu` or `cpu`"),
+        "the reason cpu is rejected must still be in the spec: {create_description}"
+    );
 }
 
 #[test]

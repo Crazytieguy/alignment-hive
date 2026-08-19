@@ -46,6 +46,18 @@ pub const MANAGED_CREATE_FIELDS: &[&str] = &[
     "startSsh",
 ];
 
+/// Fields the v2 schema accepts but that cannot coexist with the pod this
+/// runtime builds: the create body must set "exactly one of `gpu` or `cpu`"
+/// (`CreatePodRequest` description) and this runtime always sends `gpu` — the
+/// provision loop's whole job is trying GPU types. A `[runpod.cpu]` extra
+/// would therefore fail EVERY candidate with a per-candidate 4xx that the
+/// loop reads as absent capacity, so it is rejected locally instead.
+///
+/// `templateId` is deliberately NOT here: the spec resolves a template at
+/// create time and explicit body fields override the template's (env is
+/// merged, body winning), so it composes with the fields we manage.
+pub const CONFLICTING_CREATE_FIELDS: &[&str] = &["cpu"];
+
 /// The `PodStatus` enum (pinned to the spec by `tests/runpod_spec.rs`).
 /// Statuses stay `String` on the wire — a provider that adds one must not
 /// break the parse (see `InstanceStatus::Unknown`).
@@ -273,9 +285,14 @@ pub struct PodRuntimePort {
 }
 
 /// `GET /v2/pods` — an object wrapper, not the bare array v1 returned.
+///
+/// `pods` is the ONE response field that is parsed strictly (no `default`, no
+/// [`lenient`]): this list is the probe that decides whether a failed create
+/// already left a pod billing, so "the body was not what we expected" must
+/// surface as an error. Degrading it to an empty list would read as "no pod
+/// exists" and let the provision loop create a second one.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListPodsResponse {
-    #[serde(default, deserialize_with = "lenient")]
     pub pods: Vec<Pod>,
 }
 

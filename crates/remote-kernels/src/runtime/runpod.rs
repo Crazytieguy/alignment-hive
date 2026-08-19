@@ -77,7 +77,21 @@ pub struct RunPodRuntime {
     runpod: crate::config::RunpodConfig,
     /// Pre-SSH orphan guard window (config `orphan-halt-mins`).
     orphan_halt_mins: u64,
+    /// Gap between the post-failure name probes ([`Self::adopt_existing`]).
+    /// A field, not a constant, so the unit tests can exercise the whole
+    /// bounded window without wall-clock cost.
+    adopt_probe_interval: Duration,
 }
+
+/// How many times a create failure's name probe is repeated before the
+/// outcome is declared unresolvable. `GET /v2/pods` is list-after-write: a
+/// pod the failed create actually made can take a few seconds to appear, and
+/// giving up on the first empty list is what would let the loop create a
+/// second billing pod.
+const ADOPT_PROBE_ATTEMPTS: u32 = 5;
+
+/// Gap between those probes (≈ 8 s of eventual-consistency window in total).
+const ADOPT_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 impl RunPodRuntime {
     pub fn new(api_key: String, config: &Config) -> Self {
@@ -88,6 +102,7 @@ impl RunPodRuntime {
             image_name: config.runpod_image_name(),
             runpod: config.runpod.clone(),
             orphan_halt_mins: config.orphan_halt_mins,
+            adopt_probe_interval: ADOPT_PROBE_INTERVAL,
         }
     }
 
@@ -264,6 +279,16 @@ impl RunPodRuntime {
                             managed_field_hint(&camel)
                         );
                     }
+                    if crate::runpod::types::CONFLICTING_CREATE_FIELDS.contains(&camel.as_str()) {
+                        anyhow::bail!(
+                            "[runpod] {key} sets {camel:?}, which v2 forbids alongside the \
+                             `gpu` block this runtime always sends (a create body must set \
+                             exactly one of gpu/cpu). Every GPU candidate would be rejected, \
+                             and the loop would report it as absent capacity. This runtime \
+                             provisions GPU pods only — remove {key} and set [runpod] \
+                             gpu-type-ids."
+                        );
+                    }
                     if !crate::runpod::types::CREATE_POD_FIELDS.contains(&camel.as_str()) {
                         let hint = v1_rename_hint(&camel)
                             .map(|h| format!(" {h}"))
@@ -297,10 +322,46 @@ impl RunPodRuntime {
         Ok(fields)
     }
 
-    /// The pod this create may already have made, found by its unique name.
+    /// The pod this create may already have made, found by its unique name,
+    /// looked for over a bounded eventual-consistency window
+    /// ([`ADOPT_PROBE_ATTEMPTS`]).
+    ///
+    /// The three outcomes are all load-bearing, because the alternative to
+    /// adopting is creating a SECOND billing pod under the same
+    /// (non-unique-to-`RunPod`) name:
+    /// - `Ok(Some(pod))` — adopt it.
+    /// - `Ok(None)` — a probe succeeded and the account has no such pod. Only
+    ///   this outcome may lead to another create.
+    /// - `Err(_)` — the probe never succeeded within the window, or several
+    ///   pods carry the name. The outcome is unknowable from here, so the
+    ///   caller must abort provisioning (record-preserving error), never
+    ///   create again.
     async fn adopt_existing(&self, name: &str) -> anyhow::Result<Option<Pod>> {
-        let pods = self.client.list_pods().await?;
-        Ok(crate::runpod::client::pick_adoptable(&pods, name)?.cloned())
+        let mut unresolved: Option<anyhow::Error> = None;
+        for attempt in 1..=ADOPT_PROBE_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(self.adopt_probe_interval).await;
+            }
+            match self.client.list_pods().await {
+                Ok(pods) => match crate::runpod::client::pick_adoptable(&pods, name) {
+                    Ok(Some(pod)) => return Ok(Some(pod.clone())),
+                    // A successful probe that sees nothing is only provisional
+                    // until the window is out — the pod may still be landing.
+                    Ok(None) => unresolved = None,
+                    // Ambiguity never resolves itself, and guessing between
+                    // two same-named pods would leak the other one.
+                    Err(ambiguous) => return Err(ambiguous),
+                },
+                Err(probe) => {
+                    tracing::warn!(attempt, error = %probe, "pod-name probe failed");
+                    unresolved = Some(probe);
+                }
+            }
+        }
+        match unresolved {
+            Some(probe) => Err(probe),
+            None => Ok(None),
+        }
     }
 
     /// Docker treats `docker.io/x` and `x` as the same image — normalize
@@ -336,6 +397,51 @@ impl RunPodRuntime {
     /// and the guard would clean up a live session at `orphan-halt-mins`.
     fn ssh_expected(&self) -> bool {
         self.runpod.ssh_expected()
+    }
+
+    /// Whether the SSH expectation rests on `support-public-ip` alone, i.e.
+    /// on a wish v2 can no longer send to the API. Under v1,
+    /// `supportPublicIp: true` constrained PLACEMENT — `RunPod` only started
+    /// the pod where it could give it a public IP. v2 removed the field with
+    /// no replacement, so on COMMUNITY cloud the flag now declares an
+    /// expectation the scheduler never hears, and a host without a public
+    /// `22/tcp` mapping is a real (if uncommon — observed live 2026-08-18 to
+    /// still be the exception) outcome. Only the failure MESSAGE branches on
+    /// this: the expectation still arms the orphan guard and still fails the
+    /// start, because degrading a guard-armed pod to Jupyter-only would let
+    /// the guard halt a live session.
+    fn ssh_is_community_best_effort(&self) -> bool {
+        self.ssh_expected() && self.runpod.cloud_type.eq_ignore_ascii_case("COMMUNITY")
+    }
+
+    /// The failure the start must not survive when a pod the config expects
+    /// SSH on never produced an SSH endpoint.
+    fn ssh_expectation_unmet(&self, detail: &str) -> anyhow::Error {
+        let cause = if self.ssh_is_community_best_effort() {
+            "this community host gave the pod no direct SSH endpoint. Since RunPod's v2 \
+             API dropped the supportPublicIp create field, [runpod] support-public-ip can \
+             no longer ask for placement on a public-IP host — it only declares that you \
+             expect one"
+                .to_string()
+        } else {
+            "the pod never became reachable over SSH although cloud-type = \"SECURE\" \
+             guarantees it"
+                .to_string()
+        };
+        let recovery = if self.ssh_is_community_best_effort() {
+            "Retry start() — community hosts differ, and most do offer one. For a \
+             guaranteed endpoint use cloud-type = \"SECURE\"; to run Jupyter-only over \
+             RunPod's proxy instead, drop support-public-ip (that also gives up sync, \
+             download, the on-machine watchdog, and the orphan guard)."
+        } else {
+            "Retry start(); if it repeats, check the pod in the RunPod console."
+        };
+        anyhow::anyhow!(
+            "{cause}: {detail} Failing the start — the pre-SSH orphan guard armed at \
+             creation is disarmed only by the SSH heartbeat, so a Jupyter-only session on \
+             this pod would self-clean after {} minutes. {recovery}",
+            self.orphan_halt_mins
+        )
     }
 
     /// The pod's port mappings, derived from the Jupyter access mode. Only
@@ -551,9 +657,27 @@ pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities
 
 /// The v2 create fields a `[runpod]` passthrough may legitimately set (the
 /// rest are managed here), plus the v1 names that still work by mapping.
-const PASSTHROUGH_FIELD_LIST: &str = "cpu, dataCenterIds, globalNetworking, startJupyter, \
+const PASSTHROUGH_FIELD_LIST: &str = "dataCenterIds, globalNetworking, startJupyter, \
      templateId, and the [runpod] keys allowed-cuda-versions, min-cuda-version, \
      container-registry-auth-id";
+
+/// The one error the provision loop may answer with when it cannot tell
+/// whether a failed create left a pod behind: it stops, keeps the name it
+/// used, and points at the console. Creating another pod under the same name
+/// is exactly the outcome this prevents — v2 has no idempotency key, and the
+/// duplicate would bill untracked.
+fn unresolved_create_outcome(
+    error: &RunPodError,
+    name: &str,
+    probe: &anyhow::Error,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the pod create failed ({error}) and the follow-up lookup could not establish \
+         whether a pod named {name} now exists and is billing ({probe}). No second pod \
+         was created. Check the RunPod console for a pod named {name}: terminate it if \
+         you don't want it, then retry start()."
+    )
+}
 
 /// Where the `[runpod]` extras end up in the v2 body.
 #[derive(Default)]
@@ -778,9 +902,18 @@ impl Runtime for RunPodRuntime {
                         // The failed call may still have created the pod (a
                         // gateway timeout after a successful create), and a
                         // blind retry would leave that one billing untracked.
-                        if let Ok(Some(pod)) = self.adopt_existing(&name).await {
-                            tracing::warn!(pod_id = %pod.id, "create reported an error but the pod exists — adopting it");
-                            return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                        // An unresolvable probe aborts for the same reason the
+                        // Indeterminate arm does: another create is the one
+                        // outcome that must never happen on a guess.
+                        match self.adopt_existing(&name).await {
+                            Ok(Some(pod)) => {
+                                tracing::warn!(pod_id = %pod.id, "create reported an error but the pod exists — adopting it");
+                                return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                            }
+                            Ok(None) => {}
+                            Err(probe) => {
+                                return Err(unresolved_create_outcome(&error, &name, &probe));
+                            }
                         }
                         if attempt == 3 {
                             tracing::info!(gpu_type = %gpu_type, error = %error, "Transient failures exhausted, next GPU type");
@@ -797,14 +930,10 @@ impl Runtime for RunPodRuntime {
                         // A failure of the probe itself is fatal here:
                         // creating a second pod on a guess is the one outcome
                         // that must never happen.
-                        let existing = self.adopt_existing(&name).await.map_err(|probe| {
-                            anyhow::anyhow!(
-                                "the pod create failed with an unknown outcome ({error}) and \
-                                 the follow-up lookup failed too ({probe}), so it is unclear \
-                                 whether a pod named {name} is now running and billing. \
-                                 Check the RunPod console before retrying start()."
-                            )
-                        })?;
+                        let existing = self
+                            .adopt_existing(&name)
+                            .await
+                            .map_err(|probe| unresolved_create_outcome(&error, &name, &probe))?;
                         if let Some(pod) = existing {
                             tracing::warn!(pod_id = %pod.id, "create outcome unknown; adopted the pod it created");
                             return Ok(Self::handle_with_note(&pod, note.as_ref()));
@@ -921,14 +1050,7 @@ impl Runtime for RunPodRuntime {
                 port,
             }),
             Err(e) if self.ssh_expected() => {
-                anyhow::bail!(
-                    "the pod never became reachable over SSH although the config \
-                     guarantees it (cloud-type SECURE or support-public-ip): {e} \
-                     Failing the start — the pre-SSH orphan guard armed at creation \
-                     is disarmed only by the SSH heartbeat, so a Jupyter-only \
-                     session on this pod would self-clean after {} minutes.",
-                    self.orphan_halt_mins
-                );
+                return Err(self.ssh_expectation_unmet(&e.to_string()));
             }
             Err(e) => {
                 tracing::warn!(external_id, "No SSH connectivity: {e}");
@@ -1321,9 +1443,16 @@ mod tests {
         crate::ssh_exec::validate_shell_safe("stop chain", &stop).unwrap();
         crate::ssh_exec::validate_shell_safe("terminate chain", &terminate).unwrap();
         // Env-poor shells (watchdog runs in an SSH session env): the prelude
-        // must backfill from PID 1 and never prime runpodctl with an empty key.
-        assert!(stop.contains("/proc/1/environ"));
-        assert!(stop.contains("[ -n \"$RUNPOD_API_KEY\" ] && runpodctl config"));
+        // must backfill from PID 1 and never prime runpodctl with an empty
+        // key. Both chains need it — the terminate chain runs in exactly the
+        // same environments, and its curl fallback carries the API key too.
+        for chain in [&stop, &terminate] {
+            assert!(chain.contains("/proc/1/environ"), "{chain}");
+            assert!(
+                chain.contains("[ -n \"$RUNPOD_API_KEY\" ] && runpodctl config"),
+                "{chain}"
+            );
+        }
     }
 
     fn runtime_with(config_toml: &str) -> RunPodRuntime {
@@ -1470,8 +1599,8 @@ mod tests {
         assert!(err.contains("10"), "{err}");
         assert!(err.contains("volume-gb"), "{err}");
         assert!(
-            err.contains('0'),
-            "the disable-it fix must be offered: {err}"
+            err.contains("volume-gb = 0"),
+            "the disable-it fix must be offered by name: {err}"
         );
         // Same helper, same message, at startup validation.
         let config: Config = toml::from_str("[runpod]\nvolume-gb = 5").unwrap();
@@ -1519,6 +1648,33 @@ mod tests {
         // A real v2 field passes through, kebab→camelCase.
         let json = body("[runpod]\ndata-center-ids = [\"EU-RO-1\"]");
         assert_eq!(json["dataCenterIds"], serde_json::json!(["EU-RO-1"]));
+    }
+
+    /// `cpu` is a legal v2 create field but not a legal one HERE: v2 wants
+    /// exactly one of gpu/cpu and this runtime always sends gpu, so a
+    /// `[runpod.cpu]` extra would fail every candidate with a 4xx the
+    /// provision loop reports as exhausted capacity.
+    #[test]
+    fn cpu_extra_is_rejected_instead_of_failing_every_candidate() {
+        for config in [
+            "[runpod.cpu]\nflavor = \"cpu3c\"\ncount = 4",
+            "[runpod]\ncpu = \"cpu3c\"",
+        ] {
+            let err = body_err(config);
+            assert!(err.contains("exactly one of gpu/cpu"), "{err}");
+            assert!(err.contains("gpu-type-ids"), "{err}");
+        }
+        // ...and it is no longer advertised as an accepted passthrough.
+        assert!(
+            !PASSTHROUGH_FIELD_LIST.contains("cpu"),
+            "{PASSTHROUGH_FIELD_LIST}"
+        );
+
+        // templateId, by contrast, composes: v2 resolves the template at
+        // create time and explicit body fields override it, so it stays a
+        // passthrough.
+        let json = body("[runpod]\ntemplate-id = \"30zmvf89kd\"");
+        assert_eq!(json["templateId"], "30zmvf89kd", "{json}");
     }
 
     /// v1 top-level fields that merely MOVED in v2 keep working (D24) —
@@ -1603,13 +1759,23 @@ mod tests {
             ("start", "RUNNING"),
             ("start", "STARTING"),
             ("start", "PROVISIONING"),
+            // pod_action is reachable with any action string; terminate goes
+            // through DELETE today, so this arm is defensive — and untested
+            // is how a defensive arm rots.
+            ("terminate", "TERMINATED"),
         ] {
             assert!(
                 conflict_satisfies(action, status),
                 "{action} on {status} is already the outcome we wanted"
             );
         }
-        for (action, status) in [("stop", "RUNNING"), ("start", "EXITED"), ("start", "ERROR")] {
+        for (action, status) in [
+            ("stop", "RUNNING"),
+            ("start", "EXITED"),
+            ("start", "ERROR"),
+            ("terminate", "RUNNING"),
+            ("terminate", "EXITED"),
+        ] {
             assert!(
                 !conflict_satisfies(action, status),
                 "{action} on {status} must surface"
@@ -1855,6 +2021,283 @@ mod tests {
             rt.access_path(true, None).unwrap(),
             AccessDecision::Proxy
         ));
+    }
+
+    /// Minimal HTTP/1.1 responder for driving the provision loop against
+    /// canned v2 responses. Replies are scripted as a queue: each is consumed
+    /// by the first request whose `"METHOD /path"` line matches its prefix,
+    /// so a test spells out an exact sequence. An unscripted request is still
+    /// RECORDED and answered with a 599 — never a plausible success — so "the
+    /// loop created a second pod" fails an assertion instead of passing
+    /// quietly. Each connection is closed after one response
+    /// (`Connection: close`) so reqwest never reuses a socket.
+    struct FakeRunPod {
+        base_url: String,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl FakeRunPod {
+        fn spawn(script: Vec<(&'static str, u16, String)>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            // Same shape as the real base URL, so the scripted prefixes are
+            // the paths the production client builds.
+            let base_url = format!("http://{}/v2", listener.local_addr().unwrap());
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = Arc::clone(&requests);
+            let mut script = std::collections::VecDeque::from(script);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    use std::io::{Read as _, Write as _};
+                    let Ok(mut stream) = stream else { break };
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    let header_end = loop {
+                        let Ok(n) = stream.read(&mut tmp) else {
+                            break 0;
+                        };
+                        if n == 0 {
+                            break 0;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    if header_end == 0 {
+                        continue;
+                    }
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    // Drain the body so the write isn't racing the request.
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        let Ok(n) = stream.read(&mut tmp) else { break };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let request_line = head.lines().next().unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(request_line.clone());
+                    let scripted = script
+                        .iter()
+                        .position(|(prefix, _, _)| request_line.starts_with(prefix))
+                        .and_then(|index| script.remove(index));
+                    let (status, body) = scripted.map_or_else(
+                        || (599, "{\"detail\":\"unscripted request\"}".to_string()),
+                        |(_, status, body)| (status, body),
+                    );
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { base_url, requests }
+        }
+
+        fn count(&self, prefix: &str) -> usize {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with(prefix))
+                .count()
+        }
+    }
+
+    /// A runtime whose client talks to `fake`, with the eventual-consistency
+    /// probe window collapsed so the whole ladder runs in milliseconds.
+    fn runtime_against(fake: &FakeRunPod, config_toml: &str) -> RunPodRuntime {
+        let config: Config = toml::from_str(config_toml).unwrap();
+        RunPodRuntime {
+            client: Arc::new(RunPodClient::new_with_base_url(
+                "test-key".to_string(),
+                fake.base_url.clone(),
+            )),
+            name: config.name.clone(),
+            gpu_type_ids: config.runpod_gpu_type_ids(),
+            image_name: config.runpod_image_name(),
+            runpod: config.runpod.clone(),
+            orphan_halt_mins: config.orphan_halt_mins,
+            adopt_probe_interval: Duration::from_millis(1),
+        }
+    }
+
+    fn probe_replies(status: u16, body: &str) -> Vec<(&'static str, u16, String)> {
+        (0..ADOPT_PROBE_ATTEMPTS)
+            .map(|_| ("GET /v2/pods ", status, body.to_string()))
+            .collect()
+    }
+
+    /// A 5xx create may have landed. When the follow-up name probe cannot say
+    /// whether it did, provisioning must STOP: another create would be a
+    /// second pod billing under the same name (v2 has no idempotency key).
+    #[tokio::test]
+    async fn unresolvable_probe_after_a_failed_create_aborts_instead_of_creating_again() {
+        for (label, probe_status, probe_body) in [
+            ("probe errors", 500, "{\"detail\":\"upstream exploded\"}"),
+            // A body we cannot read is NOT an empty account: leniently
+            // degrading it to zero pods is what would authorize a second
+            // create.
+            ("probe body is malformed", 200, "{\"data\": []}"),
+        ] {
+            let mut script = vec![(
+                "POST /v2/pods ",
+                502,
+                "{\"detail\":\"bad gateway\"}".to_string(),
+            )];
+            script.extend(probe_replies(probe_status, probe_body));
+            let fake = FakeRunPod::spawn(script);
+            let rt = runtime_against(&fake, "");
+
+            let error = rt
+                .provision(&provision_req())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("No second pod was created"),
+                "{label}: {error}"
+            );
+            assert!(error.contains("RunPod console"), "{label}: {error}");
+            assert!(error.contains("remote-kernels-m1"), "{label}: {error}");
+            assert_eq!(
+                fake.count("POST /v2/pods "),
+                1,
+                "{label}: exactly one create may ever be issued"
+            );
+        }
+    }
+
+    /// The same rule for the other unresolvable outcome: two pods already
+    /// carry our name, so which one this create made is unknowable. Adopting
+    /// either could leak the other; creating a third is worse still.
+    #[tokio::test]
+    async fn duplicate_name_matches_abort_provisioning() {
+        let dupes = serde_json::json!({"pods": [
+            {"id": "dup-1", "name": "remote-kernels-m1", "status": "RUNNING"},
+            {"id": "dup-2", "name": "remote-kernels-m1", "status": "RUNNING"},
+        ]})
+        .to_string();
+        let fake = FakeRunPod::spawn(vec![
+            (
+                "POST /v2/pods ",
+                502,
+                "{\"detail\":\"bad gateway\"}".to_string(),
+            ),
+            ("GET /v2/pods ", 200, dupes),
+        ]);
+        let rt = runtime_against(&fake, "");
+
+        let error = rt
+            .provision(&provision_req())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("dup-1") && error.contains("dup-2"),
+            "{error}"
+        );
+        assert!(error.contains("No second pod was created"), "{error}");
+        assert_eq!(
+            fake.count("POST /v2/pods "),
+            1,
+            "ambiguity must abort, not create again"
+        );
+        // Ambiguity never resolves itself, so the window is not re-probed.
+        assert_eq!(fake.count("GET /v2/pods "), 1, "{:?}", fake.requests);
+    }
+
+    /// `GET /v2/pods` is list-after-write: the pod a failed create landed can
+    /// take seconds to appear. Giving up on the first empty list is what
+    /// would produce a duplicate.
+    #[tokio::test]
+    async fn a_pod_that_appears_late_in_the_probe_window_is_adopted() {
+        let landed = serde_json::json!({"pods": [
+            {"id": "late-1", "name": "remote-kernels-m1", "status": "PROVISIONING",
+             "gpu": {"id": "NVIDIA GeForce RTX 4090"}, "cost": 0.44}
+        ]})
+        .to_string();
+        let fake = FakeRunPod::spawn(vec![
+            (
+                "POST /v2/pods ",
+                502,
+                "{\"detail\":\"bad gateway\"}".to_string(),
+            ),
+            ("GET /v2/pods ", 200, "{\"pods\": []}".to_string()),
+            ("GET /v2/pods ", 200, landed),
+        ]);
+        let rt = runtime_against(&fake, "");
+
+        let handle = rt.provision(&provision_req()).await.unwrap();
+        assert_eq!(handle.external_id, "late-1");
+        assert_eq!(handle.cost_per_hr, Some(0.44));
+        assert_eq!(fake.count("POST /v2/pods "), 1);
+    }
+
+    /// A transport failure has an unknown outcome too — and when the probe
+    /// then proves the account has no such pod, provisioning still must not
+    /// create again in the same call (D21).
+    #[tokio::test]
+    async fn a_clean_absent_probe_after_an_unknown_outcome_stops_the_loop() {
+        let mut script = vec![
+            // A 2xx we cannot parse: the pod probably exists and is billing.
+            ("POST /v2/pods ", 200, "not json at all".to_string()),
+        ];
+        script.extend(probe_replies(200, "{\"pods\": []}"));
+        let fake = FakeRunPod::spawn(script);
+        let rt = runtime_against(&fake, "");
+
+        let error = rt
+            .provision(&provision_req())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no pod named remote-kernels-m1"), "{error}");
+        assert_eq!(fake.count("POST /v2/pods "), 1, "{error}");
+    }
+
+    /// v2 dropped `supportPublicIp`, so on community cloud the flag can no
+    /// longer constrain placement — the start still fails (an armed guard
+    /// must never ride a Jupyter-only session), but the message says why and
+    /// what to do, and it must not claim a guarantee the API can't give.
+    #[test]
+    fn ssh_expectation_failure_distinguishes_secure_from_community() {
+        let secure = runtime_with("");
+        assert!(!secure.ssh_is_community_best_effort());
+        let message = secure.ssh_expectation_unmet("no ssh endpoint").to_string();
+        assert!(message.contains("SECURE"), "{message}");
+        assert!(!message.contains("supportPublicIp"), "{message}");
+
+        let community =
+            runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
+        assert!(community.ssh_is_community_best_effort());
+        let message = community
+            .ssh_expectation_unmet("no ssh endpoint")
+            .to_string();
+        assert!(message.contains("supportPublicIp"), "{message}");
+        assert!(message.contains("Retry start()"), "{message}");
+        assert!(message.contains("cloud-type = \"SECURE\""), "{message}");
+        // The guard rationale stays: this is why the start fails instead of
+        // degrading to Jupyter-only.
+        assert!(message.contains("orphan guard"), "{message}");
+        // ...and the guard really is armed for this config, which is what
+        // makes failing the start the preserving choice.
+        assert!(
+            community
+                .guard_wrapper(&default_image(), Cleanup::Terminate)
+                .0
+                .is_some()
+        );
     }
 
     #[test]

@@ -153,13 +153,22 @@ pub fn pick_adoptable<'a>(pods: &'a [Pod], name: &str) -> anyhow::Result<Option<
 pub struct RunPodClient {
     client: Client,
     api_key: String,
+    /// `https://api.runpod.io/v2` in production; pointed at a local test
+    /// server by [`Self::new_with_base_url`] so the provision loop's failure
+    /// paths can be exercised against canned HTTP responses.
+    base_url: String,
 }
 
 impl RunPodClient {
     pub fn new(api_key: String) -> Self {
+        Self::new_with_base_url(api_key, BASE_URL.to_string())
+    }
+
+    pub(crate) fn new_with_base_url(api_key: String, base_url: String) -> Self {
         Self {
             client: crate::api_http_client(),
             api_key,
+            base_url,
         }
     }
 
@@ -168,7 +177,7 @@ impl RunPodClient {
 
         let resp = crate::send_429_retry(
             self.client
-                .post(format!("{BASE_URL}/pods"))
+                .post(format!("{}/pods", self.base_url))
                 .bearer_auth(&self.api_key)
                 .json(input),
         )
@@ -193,7 +202,7 @@ impl RunPodClient {
     pub async fn get_pod(&self, pod_id: &str) -> anyhow::Result<Pod> {
         let resp = crate::send_429_retry(
             self.client
-                .get(format!("{BASE_URL}/pods/{pod_id}"))
+                .get(format!("{}/pods/{pod_id}", self.base_url))
                 .bearer_auth(&self.api_key),
         )
         .await?;
@@ -214,11 +223,13 @@ impl RunPodClient {
 
     /// All pods on the account. `GET /v2/pods` wraps them in an object (v1
     /// returned a bare array) and has no pagination. Used only by the
-    /// create-recovery path.
+    /// create-recovery path, which is why the parse is strict: a body we
+    /// cannot read is an error, never an empty account (see
+    /// [`ListPodsResponse`]).
     pub async fn list_pods(&self) -> anyhow::Result<Vec<Pod>> {
         let resp = crate::send_429_retry(
             self.client
-                .get(format!("{BASE_URL}/pods"))
+                .get(format!("{}/pods", self.base_url))
                 .bearer_auth(&self.api_key),
         )
         .await?;
@@ -245,7 +256,7 @@ impl RunPodClient {
     pub async fn pod_action(&self, pod_id: &str, action: &str) -> anyhow::Result<Option<Pod>> {
         let resp = crate::send_429_retry(
             self.client
-                .post(format!("{BASE_URL}/pods/{pod_id}/action"))
+                .post(format!("{}/pods/{pod_id}/action", self.base_url))
                 .bearer_auth(&self.api_key)
                 .json(&PodActionRequest { action }),
         )
@@ -306,7 +317,7 @@ impl RunPodClient {
     pub async fn terminate_pod(&self, pod_id: &str) -> anyhow::Result<()> {
         let resp = crate::send_429_retry(
             self.client
-                .delete(format!("{BASE_URL}/pods/{pod_id}"))
+                .delete(format!("{}/pods/{pod_id}", self.base_url))
                 .bearer_auth(&self.api_key),
         )
         .await?;
@@ -365,6 +376,16 @@ mod tests {
                 "{status} must retry the same candidate"
             );
         }
+        // 429 survives `send_429_retry`'s own ladder only when the provider
+        // is still rate-limiting us. The request was rejected BEFORE it was
+        // processed, so no pod was created: retrying the same candidate is
+        // both safe and the only thing that can succeed (a different GPU type
+        // would hit the same account-level limit).
+        assert_eq!(
+            api(429, "{\"detail\":\"rate limit exceeded\"}").create_disposition(),
+            CreateDisposition::RetrySame,
+            "429 must retry the same candidate"
+        );
         // Transport/parse failures: the create MAY have landed. Retrying
         // would create a second billing pod.
         let other = RunPodError::Other(anyhow::anyhow!("connection reset"));
