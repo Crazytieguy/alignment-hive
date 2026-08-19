@@ -350,6 +350,37 @@ fn pod_running_example_deserializes() {
     );
 }
 
+/// Regression, found live 2026-08-18: a pod on its way out reports
+/// `runtime.uptime: -1`, which used to fail the whole parse — so `describe()`
+/// errored on a machine that was still billing. No single response field may
+/// be able to do that.
+#[test]
+fn out_of_range_response_values_degrade_instead_of_failing_the_parse() {
+    let spec = spec();
+    let mut value = pod_example(&spec);
+    value["runtime"]["uptime"] = serde_json::json!(-1);
+    value["disk"] = serde_json::json!(-1);
+    value["runtime"]["ports"][0]["public"] = serde_json::json!(-1);
+    let pod: Pod = serde_json::from_value(value).expect("must still parse");
+    // The fields we actually depend on are untouched by the bad neighbors.
+    assert_eq!(pod.status.as_deref(), Some("RUNNING"));
+    assert_eq!(pod.hourly_cost(), Some(0.44));
+    assert_eq!(
+        pod.direct_ssh(),
+        Some(("195.26.233.3".to_string(), 34446_u16))
+    );
+    assert_eq!(pod.disk, None, "an unrepresentable value degrades to None");
+    assert_eq!(pod.runtime.as_ref().unwrap().uptime, Some(-1));
+
+    // A whole sub-object of the wrong shape degrades too.
+    let mut value = pod_example(&spec);
+    value["ssh"] = serde_json::json!("not an object");
+    value["gpu"] = serde_json::json!([1, 2, 3]);
+    let pod: Pod = serde_json::from_value(value).expect("must still parse");
+    assert!(pod.direct_ssh().is_none());
+    assert_eq!(pod.gpu_display_name(), "unknown");
+}
+
 #[test]
 fn pod_provisioning_example_deserializes() {
     let spec = spec();

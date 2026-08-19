@@ -142,9 +142,10 @@ pub struct PodActionRequest<'a> {
 
 // --- Response types ---
 //
-// Every field is optional: a provider that omits or nulls one must degrade,
-// not fail the parse (a status query is how the server learns a machine is
-// still billing).
+// Every field is optional AND leniently parsed (see [`lenient`]): a provider
+// that omits a field, nulls it, or reports a value we cannot represent must
+// degrade, not fail the parse — a status query is how the server learns a
+// machine is still billing, and an unparseable response would hide that.
 
 /// Pod as returned by `POST /v2/pods`, `GET /v2/pods/{id}`, `GET /v2/pods`
 /// and `POST /v2/pods/{id}/action`.
@@ -152,72 +153,72 @@ pub struct PodActionRequest<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct Pod {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub name: Option<String>,
     /// One of [`POD_STATUSES`] — kept as a string on purpose (D7).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub status: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub image: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub args: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub disk: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub ports: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    #[serde(default, deserialize_with = "lenient")]
     pub env: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub cloud: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub data_center_id: Option<String>,
     /// Current cost in USD/hour; `0.0` while EXITED or TERMINATED.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub cost: Option<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub gpu: Option<GpuInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub mounts: Option<MountsInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub ssh: Option<PodSsh>,
     /// Null unless the pod is RUNNING.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub runtime: Option<PodRuntime>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuInfo {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountsInfo {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub persistent: Option<PersistentMountInfo>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    #[serde(default, deserialize_with = "lenient")]
     pub network: Vec<NetworkMountInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentMountInfo {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub size: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkMountInfo {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub volume_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub path: Option<String>,
 }
 
@@ -227,20 +228,22 @@ pub struct NetworkMountInfo {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSsh {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub proxy: Option<PodSshEndpoint>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub direct: Option<PodSshEndpoint>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSshEndpoint {
-    pub host: String,
-    pub port: u16,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
+    pub host: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub port: Option<u16>,
+    #[serde(default, deserialize_with = "lenient")]
     pub username: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub command: Option<String>,
 }
 
@@ -248,40 +251,48 @@ pub struct PodSshEndpoint {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodRuntime {
-    #[serde(default)]
-    pub uptime: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    /// Seconds since the container started. Observed live: a pod on its way
+    /// out reports `-1`, hence the signed type (and the lenient parse).
+    #[serde(default, deserialize_with = "lenient")]
+    pub uptime: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
     pub ports: Vec<PodRuntimePort>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodRuntimePort {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub private: Option<u16>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub public: Option<u16>,
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "lenient")]
     pub port_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub ip: Option<String>,
 }
 
 /// `GET /v2/pods` — an object wrapper, not the bare array v1 returned.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListPodsResponse {
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    #[serde(default, deserialize_with = "lenient")]
     pub pods: Vec<Pod>,
 }
 
-/// Deserialize `null` as the default value for a type.
-/// `#[serde(default)]` only handles missing fields, not explicit `null` values.
-fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+/// Deserialize a response field, degrading to its default instead of failing
+/// the whole parse. This covers three cases at once: a missing field, an
+/// explicit `null` (which `#[serde(default)]` alone does not handle), and a
+/// value the field's type cannot represent — `RunPod` reports
+/// `runtime.uptime: -1` on a pod that is shutting down (observed live
+/// 2026-08-18), and one such field must never make `describe()` fail on a
+/// machine that is still billing.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
-    T: Default + serde::Deserialize<'de>,
+    T: Default + serde::de::DeserializeOwned,
 {
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(value).unwrap_or_default())
 }
 
 impl Pod {
@@ -301,7 +312,7 @@ impl Pod {
     /// the fact the deleted GraphQL query used to fetch.
     pub fn direct_ssh(&self) -> Option<(String, u16)> {
         let direct = self.ssh.as_ref()?.direct.as_ref()?;
-        Some((direct.host.clone(), direct.port))
+        Some((direct.host.clone()?, direct.port?))
     }
 
     /// Hourly rate, or `None` when the provider reports no rate. v2 reports
