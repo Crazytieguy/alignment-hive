@@ -464,7 +464,30 @@ for p in pids:
 print('GUARDS=%d' % len(pids))
 for l in lines: print('CMDLINE:', l)
 print('RUNPODCTL:', subprocess.run(['sh','-c','command -v runpodctl'], capture_output=True, text=True).stdout.strip() or 'MISSING')
-print('PID1:', open('/proc/1/cmdline','rb').read().replace(b'\0',b' ').decode())
+
+def argv(pid):
+    return open('/proc/%s/cmdline' % pid, 'rb').read().split(b'\0')
+
+def ppid(pid):
+    for line in open('/proc/%s/status' % pid):
+        if line.startswith('PPid:'):
+            return line.split()[1]
+    return '0'
+
+# The wrapper shell backgrounds the guard and then `exec`s the image's own
+# start command, so it must not survive as a process of its own: the only
+# thing still carrying the script text is the forked guard subshell, and
+# walking up from it must reach PID 1 without passing through another copy.
+print('PID1_ARGV0:', argv(1)[0].decode())
+chain = []
+p = ppid(pids[0]) if pids else '0'
+while p not in ('0', ''):
+    chain.append('%s:%s' % (p, b' '.join(argv(p)).decode().strip()))
+    if p == '1':
+        break
+    p = ppid(p)
+for c in chain: print('GUARD_ANCESTOR:', c)
+
 env = pid1_env()
 print('PID1_HAS_POD_ID:', 'RUNPOD_POD_ID' in env)
 print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
@@ -481,20 +504,46 @@ print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
     assert!(out.contains("runpodctl"), "{out}");
     assert!(out.contains("PID1_HAS_POD_ID: True"), "{out}");
     assert!(out.contains("PID1_HAS_API_KEY: True"), "{out}");
-    // The `exec` tail survived the argv→string encoding: PID 1 is the
-    // image's own start command, not our wrapper shell, so signal delivery
-    // is as if the guard were never there.
-    let pid1 = out
+    // The `exec` tail survived the argv→string encoding. Substring checks on
+    // /proc/1/cmdline cannot show this: the default image has an ENTRYPOINT,
+    // so PID 1 is docker-init carrying our whole args string (script text
+    // included) as its argv — it "contains /start.sh" and does not "start
+    // with sh -c" whether or not exec ran. What exec actually guarantees is
+    // that the wrapper shell REPLACED itself: the only process left holding
+    // the script is the guard subshell it forked, and that subshell's
+    // ancestry must not pass through a second, surviving copy of the wrapper
+    // (which is what would still be waiting for /start.sh had exec been lost).
+    let pid1_argv0 = out
         .lines()
-        .find_map(|l| l.strip_prefix("PID1: "))
-        .expect("PID1 line");
+        .find_map(|l| l.strip_prefix("PID1_ARGV0: "))
+        .expect("PID1_ARGV0 line");
     assert!(
-        pid1.contains("/start.sh"),
-        "PID 1 is not the image CMD: {pid1}"
+        !std::path::Path::new(pid1_argv0)
+            .file_name()
+            .is_some_and(|name| name == "sh"),
+        "PID 1 is our wrapper shell (exec lost): {pid1_argv0}"
+    );
+    let ancestors: Vec<&str> = out
+        .lines()
+        .filter_map(|l| l.strip_prefix("GUARD_ANCESTOR: "))
+        .collect();
+    assert!(
+        !ancestors.is_empty(),
+        "the guard's ancestry could not be read: {out}"
     );
     assert!(
-        !pid1.starts_with("sh -c"),
-        "the wrapper shell is still PID 1 (exec lost): {pid1}"
+        ancestors.last().is_some_and(|top| top.starts_with("1:")),
+        "the guard's ancestry must reach PID 1: {ancestors:?}"
+    );
+    assert!(
+        !ancestors
+            .iter()
+            // PID 1 is exempt: with this image's ENTRYPOINT it is docker-init
+            // holding our args string as plain argv, which proves nothing
+            // either way (the PID1_ARGV0 check above covers the no-ENTRYPOINT
+            // image, where the wrapper shell WOULD be PID 1).
+            .any(|ancestor| !ancestor.starts_with("1:") && ancestor.contains("/tmp/heartbeat")),
+        "a wrapper shell survived as the guard's ancestor (exec lost): {ancestors:?}"
     );
 
     // ...and the API round-tripped the args string we sent: this separates
@@ -625,9 +674,29 @@ print(r.stderr[-1500:])
             instance: None,
             skip_pre_terminate_command: None,
         }))
-        .await
-        .unwrap();
-    assert!(!is_error(&result), "{}", text_of(&result));
+        .await;
+    let (refused, message) = match &result {
+        Ok(result) => (is_error(result), text_of(result)),
+        Err(error) => (true, error.message.to_string()),
+    };
+    if refused {
+        // One refusal is legitimate and is exactly what a pod that deleted
+        // ITSELF produces: this session still held a watchdog lease, so the
+        // pre-mutation lease refresh could not reach the (already deleted)
+        // machine, and the server declines to mutate a machine it can no
+        // longer prove it controls. Money-safe — the pod is already gone —
+        // but only in that precise combination, so both halves are asserted.
+        assert_eq!(
+            outcome, "terminated",
+            "terminate was refused while the pod still exists: {message}"
+        );
+        assert!(
+            message.contains("could not confirm this session still controls machine"),
+            "terminate failed for a reason other than the documented \
+             authority-unknown fence: {message}"
+        );
+        eprintln!("terminate fenced as AuthorityUnknown (pod had already self-deleted): {message}");
+    }
     guard.done = true;
 
     // Belt and braces: the provider must know nothing named rk-guard anymore.

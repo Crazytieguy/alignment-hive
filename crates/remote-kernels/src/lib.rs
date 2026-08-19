@@ -26,11 +26,16 @@ pub(crate) fn api_http_client() -> reqwest::Client {
 /// means the request was rejected before processing, so retrying is safe for
 /// every verb — including instance creation. Rate limiting must surface as a
 /// delay, never as an error that a caller could mistake for a dead machine.
+///
+/// The whole ladder is bounded by [`TOTAL_BACKOFF_BUDGET`]: waiting only pays
+/// while the caller is still there, and a 429 handed back is a normal,
+/// classifiable outcome for every caller here.
 pub(crate) async fn send_429_retry(
     req: reqwest::RequestBuilder,
 ) -> anyhow::Result<reqwest::Response> {
     use anyhow::Context as _;
     let mut delay = std::time::Duration::from_secs(2);
+    let mut spent = std::time::Duration::ZERO;
     loop {
         let resp = req
             .try_clone()
@@ -42,11 +47,32 @@ pub(crate) async fn send_429_retry(
         }
         // RunPod v2 says how long to wait (integer seconds); vast never sends
         // the header, so it keeps the ladder by construction.
-        let wait = retry_after_delay(resp.headers(), delay);
+        let Some(wait) = next_backoff(resp.headers(), delay, spent) else {
+            tracing::debug!("provider API rate limit (429); backoff budget spent");
+            return Ok(resp);
+        };
         tracing::debug!(?wait, "provider API rate limit (429); backing off");
         tokio::time::sleep(wait).await;
+        spent += wait;
         delay *= 2;
     }
+}
+
+/// Total time one request may spend waiting out 429s. The bare 2/4/8/16
+/// ladder sums to 30 s; honoring a provider's `Retry-After` (`RunPod` v2
+/// sends it) could otherwise stretch the same four steps to four minutes
+/// inside a single tool call.
+const TOTAL_BACKOFF_BUDGET: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// The next 429 wait, clamped to what is left of [`TOTAL_BACKOFF_BUDGET`];
+/// `None` once the budget is spent, which ends the ladder.
+fn next_backoff(
+    headers: &reqwest::header::HeaderMap,
+    fallback: std::time::Duration,
+    spent: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let wait = retry_after_delay(headers, fallback).min(TOTAL_BACKOFF_BUDGET.saturating_sub(spent));
+    (!wait.is_zero()).then_some(wait)
 }
 
 /// How long to wait after a 429, honoring the provider's `Retry-After`
@@ -129,5 +155,32 @@ mod tests {
             super::retry_after_delay(&headers("soon"), fallback),
             fallback
         );
+    }
+
+    /// Honoring `Retry-After` must not turn a bounded ladder into a
+    /// four-minute stall: all four steps share one cumulative budget.
+    #[test]
+    fn backoff_ladder_is_bounded_in_total() {
+        // The bare ladder (no header) is unchanged — it already fits.
+        let mut spent = Duration::ZERO;
+        for step in [2, 4, 8, 16] {
+            let wait = super::next_backoff(&HeaderMap::new(), Duration::from_secs(step), spent)
+                .expect("the plain ladder always fits the budget");
+            assert_eq!(wait, Duration::from_secs(step));
+            spent += wait;
+        }
+        assert_eq!(spent, Duration::from_secs(30));
+
+        // A provider asking for the per-wait ceiling every time gets it once
+        // and then the ladder ends, instead of stacking four of them.
+        let mut spent = Duration::ZERO;
+        let mut waits = Vec::new();
+        while let Some(wait) = super::next_backoff(&headers("60"), Duration::from_secs(2), spent) {
+            spent += wait;
+            waits.push(wait);
+            assert!(waits.len() <= 4, "the ladder must terminate: {waits:?}");
+        }
+        assert_eq!(waits, vec![Duration::from_mins(1)]);
+        assert!(spent <= super::TOTAL_BACKOFF_BUDGET);
     }
 }
