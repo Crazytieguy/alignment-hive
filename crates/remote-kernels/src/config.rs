@@ -349,6 +349,12 @@ pub struct RunpodConfig {
     #[serde_inline_default("SECURE".to_string())]
     pub cloud_type: String,
 
+    /// Declares that this pod is expected to get a public IP (and with it
+    /// SSH). v2 has no request field for it — the flag is NOT sent to the
+    /// API; it drives our own expectations: SSH/tunnel selection, the
+    /// orphan guard, and budget enforceability ([`Self::ssh_expected`]).
+    pub support_public_ip: Option<bool>,
+
     /// The image's own start command (its Dockerfile CMD). When known, pod
     /// creation wraps it with the pre-SSH orphan guard (dockerStartCmd runs
     /// the guard in the background, then `exec`s this). Unset: the built-in
@@ -375,6 +381,18 @@ pub struct RunpodConfig {
     /// Extra fields passed through to the `RunPod` API.
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
+}
+
+impl RunpodConfig {
+    /// Whether SSH — and with it the heartbeat that disarms the orphan guard
+    /// — is expected on pods created from this config: guaranteed on SECURE
+    /// cloud, and on COMMUNITY only when `support-public-ip` is requested.
+    /// The single implementation of this predicate: it gates budget
+    /// validation, tunnel selection, orphan-guard arming, and SSH failure
+    /// handling, which must never disagree.
+    pub fn ssh_expected(&self) -> bool {
+        unimplemented!("GREEN: §4.4")
+    }
 }
 
 /// `#[serde(default)]` on `Config.runpod` uses this impl when the `[runpod]` section is
@@ -1295,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_runpod_fields_pass_through_via_extra() {
+    fn support_public_ip_is_typed_not_passthrough() {
         let config: Config = toml::from_str(
             r"
             [runpod]
@@ -1305,18 +1323,46 @@ mod tests {
             ",
         )
         .unwrap();
+        // The passthrough mechanism itself is unchanged.
         assert_eq!(
             config.runpod.extra.get("min-vcpu-count"),
             Some(&toml::Value::Integer(8))
         );
-        assert_eq!(
-            config.runpod.extra.get("support-public-ip"),
-            Some(&toml::Value::Boolean(true))
-        );
+        // support-public-ip is typed now: v2 has no supportPublicIp field, so
+        // passing it through would 422 the whole create.
+        assert_eq!(config.runpod.support_public_ip, Some(true));
+        assert!(!config.runpod.extra.contains_key("support-public-ip"));
         // Typed fields must not leak into the passthrough map — that would
         // double-send them in the pod-create API payload.
         assert_eq!(config.runpod.gpu_count, 1);
         assert!(!config.runpod.extra.contains_key("gpu-count"));
+    }
+
+    /// One predicate, one implementation: the config-level helper and the
+    /// `[runpod]` method must never disagree (they used to, for non-enum
+    /// cloud values).
+    #[test]
+    fn ssh_expected_has_one_implementation() {
+        for (toml_src, expected) in [
+            ("", true),
+            ("[runpod]\ncloud-type = \"COMMUNITY\"", false),
+            (
+                "[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true",
+                true,
+            ),
+        ] {
+            let config: Config = toml::from_str(toml_src).unwrap();
+            assert_eq!(
+                config.runpod.ssh_expected(),
+                expected,
+                "ssh_expected for {toml_src:?}"
+            );
+            assert_eq!(
+                config.runpod_ssh_expected(),
+                expected,
+                "Config::runpod_ssh_expected must delegate for {toml_src:?}"
+            );
+        }
     }
 
     #[test]

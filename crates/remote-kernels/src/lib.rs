@@ -46,6 +46,17 @@ pub(crate) async fn send_429_retry(
     }
 }
 
+/// How long to wait after a 429, honoring the provider's `Retry-After`
+/// (RunPod v2 sends integer seconds). Absent, zero, or unparseable → the
+/// caller's own backoff; clamped to a ceiling so a pathological header can
+/// never park a tool call for an hour.
+pub(crate) fn retry_after_delay(
+    _headers: &reqwest::header::HeaderMap,
+    _fallback: std::time::Duration,
+) -> std::time::Duration {
+    unimplemented!("GREEN: §4.3")
+}
+
 pub mod config;
 pub mod descriptions;
 pub mod heartbeat;
@@ -62,3 +73,45 @@ pub mod state;
 pub mod sync;
 pub mod ulid;
 pub mod vast;
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    fn headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn retry_after_delay_parses_and_clamps() {
+        let fallback = Duration::from_secs(4);
+        assert_eq!(
+            super::retry_after_delay(&headers("12"), fallback),
+            Duration::from_secs(12)
+        );
+        assert_eq!(
+            super::retry_after_delay(&HeaderMap::new(), fallback),
+            fallback
+        );
+        // 0 would spin the loop with no delay at all.
+        assert_eq!(super::retry_after_delay(&headers("0"), fallback), fallback);
+        // A pathological value must not park a tool call for a day.
+        assert_eq!(
+            super::retry_after_delay(&headers("100000"), fallback),
+            Duration::from_secs(60)
+        );
+        // HTTP-date form and outright garbage both fall back.
+        assert_eq!(
+            super::retry_after_delay(&headers("Wed, 21 Oct 2026 07:28:00 GMT"), fallback),
+            fallback
+        );
+        assert_eq!(
+            super::retry_after_delay(&headers("soon"), fallback),
+            fallback
+        );
+    }
+}

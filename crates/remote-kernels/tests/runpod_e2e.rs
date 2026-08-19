@@ -135,6 +135,13 @@ async fn create_kernel_retry(server: &RemoteKernelsServer, name: &str) -> String
     panic!("create_kernel {name:?} failed after 4 attempts")
 }
 
+/// Whether a failed query proves the pod is gone. Typed: a body that merely
+/// mentions 404 is not a deletion (the v2 client keeps the HTTP status).
+fn is_gone(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<remote_kernels::runpod::client::RunPodError>()
+        .is_some_and(remote_kernels::runpod::client::RunPodError::is_not_found)
+}
+
 /// Poll until the pod reaches EXITED (`Some("stopped")`), 404s when
 /// `accept_404` (`Some("terminated")`), or 3 minutes pass (`None`).
 async fn wait_for_pod_exit(
@@ -146,12 +153,12 @@ async fn wait_for_pod_exit(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         match client.get_pod(pod_id).await {
             Ok(pod) => {
-                eprintln!("pod status: {:?}", pod.desired_status);
-                if pod.desired_status.as_deref() == Some("EXITED") {
+                eprintln!("pod status: {:?}", pod.status);
+                if pod.status.as_deref() == Some("EXITED") {
                     return Some("stopped");
                 }
             }
-            Err(e) if accept_404 && e.to_string().contains("404") => return Some("terminated"),
+            Err(e) if accept_404 && is_gone(&e) => return Some("terminated"),
             Err(e) => eprintln!("get_pod: {e}"),
         }
     }
@@ -226,6 +233,21 @@ volume-gb = 0
     guard.pod_id =
         remote_kernels::state::load_instance_record(dir.path(), &machine_id).map(|r| r.external_id);
 
+    // What the v2 GET must report for a pod we just started: the status
+    // enum, a billing rate (D8's premise), the direct SSH endpoint that
+    // replaced the GraphQL query — on a COMMUNITY pod created with
+    // startSsh: true and our own PUBLIC_KEY (D22/D3) — and our orphan guard
+    // round-tripped through the `args` string.
+    let client =
+        remote_kernels::runpod::client::RunPodClient::new(std::env::var("RUNPOD_API_KEY").unwrap());
+    let pod_id = guard.pod_id.clone().expect("pod id");
+    let pod = client.get_pod(&pod_id).await.expect("get_pod after start");
+    assert_eq!(pod.status.as_deref(), Some("RUNNING"), "{:?}", pod.status);
+    assert!(pod.hourly_cost().is_some(), "no rate reported: {:?}", pod.cost);
+    assert!(pod.direct_ssh().is_some(), "no ssh.direct: {:?}", pod.ssh);
+    let args = pod.args.clone().unwrap_or_default();
+    assert!(args.starts_with("sh -c "), "args not v2-encoded: {args:?}");
+
     // Kernel + execution + sync round trip.
     let kernel_id = create_kernel_retry(&server, "regress").await;
 
@@ -289,6 +311,15 @@ volume-gb = 0
     assert!(!is_error(&result), "resume failed: {text}");
     assert!(text.contains("Attached"), "{text}");
     eprintln!("resumed: {text}");
+
+    // The resumed pod must expose ssh.direct again — the resume leg is where
+    // v1's GraphQL lookup used to be re-run.
+    let pod = client.get_pod(&pod_id).await.expect("get_pod after resume");
+    assert!(
+        pod.direct_ssh().is_some(),
+        "no ssh.direct after resume: {:?}",
+        pod.ssh
+    );
 
     // Terminate for real.
     let result = server
@@ -429,6 +460,7 @@ for p in pids:
 print('GUARDS=%d' % len(pids))
 for l in lines: print('CMDLINE:', l)
 print('RUNPODCTL:', subprocess.run(['sh','-c','command -v runpodctl'], capture_output=True, text=True).stdout.strip() or 'MISSING')
+print('PID1:', open('/proc/1/cmdline','rb').read().replace(b'\0',b' ').decode())
 env = pid1_env()
 print('PID1_HAS_POD_ID:', 'RUNPOD_POD_ID' in env)
 print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
@@ -445,6 +477,25 @@ print('PID1_HAS_API_KEY:', 'RUNPOD_API_KEY' in env)
     assert!(out.contains("runpodctl"), "{out}");
     assert!(out.contains("PID1_HAS_POD_ID: True"), "{out}");
     assert!(out.contains("PID1_HAS_API_KEY: True"), "{out}");
+    // The `exec` tail survived the argv→string encoding: PID 1 is the
+    // image's own start command, not our wrapper shell, so signal delivery
+    // is as if the guard were never there.
+    let pid1 = out
+        .lines()
+        .find_map(|l| l.strip_prefix("PID1: "))
+        .expect("PID1 line");
+    assert!(pid1.contains("/start.sh"), "PID 1 is not the image CMD: {pid1}");
+    assert!(
+        !pid1.starts_with("sh -c"),
+        "the wrapper shell is still PID 1 (exec lost): {pid1}"
+    );
+
+    // ...and the API round-tripped the args string we sent: this separates
+    // "we encoded it wrong" from "RunPod re-serialized it".
+    let pod = client.get_pod(&pod_id).await.expect("get_pod");
+    let args = pod.args.clone().unwrap_or_default();
+    assert!(args.contains("sleep "), "args lost the guard: {args:?}");
+    assert!(args.contains("/tmp/heartbeat"), "args lost the guard: {args:?}");
 
     // Run the deployed chains from inside the pod with the kernel's own
     // (SSH-descended, possibly env-poor) environment — the chains' prelude
@@ -521,8 +572,8 @@ print(r.stderr[-1500:])
             .await
             .expect("provider delete of stopped pod");
         match client.get_pod(&pod_id).await {
-            Err(e) if e.to_string().contains("404") => eprintln!("pod gone at provider"),
-            Ok(pod) => panic!("pod still exists at provider: {:?}", pod.desired_status),
+            Err(e) if is_gone(&e) => eprintln!("pod gone at provider"),
+            Ok(pod) => panic!("pod still exists at provider: {:?}", pod.status),
             Err(e) => panic!("could not confirm pod deletion: {e}"),
         }
         guard.done = true;
@@ -571,8 +622,8 @@ print(r.stderr[-1500:])
 
     // Belt and braces: the provider must know nothing named rk-guard anymore.
     match client.get_pod(&pod_id).await {
-        Err(e) if e.to_string().contains("404") => eprintln!("pod gone at provider"),
-        Ok(pod) => panic!("pod still exists at provider: {:?}", pod.desired_status),
+        Err(e) if is_gone(&e) => eprintln!("pod gone at provider"),
+        Ok(pod) => panic!("pod still exists at provider: {:?}", pod.status),
         Err(e) => panic!("could not confirm pod deletion: {e}"),
     }
 }

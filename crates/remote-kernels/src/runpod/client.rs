@@ -1,9 +1,9 @@
 use reqwest::Client;
+use serde::Deserialize;
 
-use super::types::{GraphQlPodData, GraphQlResponse, Pod, PodCreateInput, PodRuntimePort};
+use super::types::{CreatePodRequest, ListPodsResponse, Pod};
 
 const REST_URL: &str = "https://rest.runpod.io/v1";
-const GRAPHQL_URL: &str = "https://api.runpod.io/graphql";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunPodError {
@@ -11,6 +11,44 @@ pub enum RunPodError {
     Api { status: u16, body: String },
     #[error("{0}")]
     Other(#[from] anyhow::Error),
+}
+
+/// RFC 9457 problem document (`application/problem+json`) — what v2 returns
+/// for every error.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Problem {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Individual request-validation failures (422).
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+impl Problem {
+    /// Parse a response body as a problem document; `None` when the body is
+    /// not one (HTML from a proxy, an empty body, plain text).
+    pub fn parse(_body: &str) -> Option<Self> {
+        unimplemented!("GREEN: §4.2")
+    }
+}
+
+/// What the provision loop should do about a failed create, per `RunPod`'s
+/// published create-error table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateDisposition {
+    /// This candidate cannot be satisfied; try the next GPU type.
+    NextCandidate,
+    /// Transient upstream failure; retry the same candidate.
+    RetrySame,
+    /// The create may or may not have landed — resolve by looking the pod
+    /// up, never by creating again (v2 has no idempotency key).
+    Indeterminate,
+    /// No candidate can succeed; stop.
+    Fatal,
 }
 
 impl RunPodError {
@@ -35,6 +73,30 @@ impl RunPodError {
             _ => false,
         }
     }
+
+    /// The RFC 9457 document this error carries, when it has one.
+    pub fn problem(&self) -> Option<Problem> {
+        unimplemented!("GREEN: §4.2")
+    }
+
+    /// Whether this failure proves the resource does not exist. Status only:
+    /// a body that merely mentions 404 proves nothing.
+    pub fn is_not_found(&self) -> bool {
+        unimplemented!("GREEN: §4.2")
+    }
+
+    /// Classify a failed `POST /v2/pods` per `RunPod`'s documented table.
+    pub fn create_disposition(&self) -> CreateDisposition {
+        unimplemented!("GREEN: §4.2")
+    }
+}
+
+/// The pod (if any) an indeterminate create may have left behind: an exact,
+/// unique name match. Two matches are never guessed between — the machine
+/// name is unique per machine id, so ambiguity means something else is going
+/// on and adopting the wrong pod would leak the other one.
+pub fn pick_adoptable<'a>(_pods: &'a [Pod], _name: &str) -> anyhow::Result<Option<&'a Pod>> {
+    unimplemented!("GREEN: §4.2")
 }
 
 pub struct RunPodClient {
@@ -50,9 +112,7 @@ impl RunPodClient {
         }
     }
 
-    // --- REST API (rest.runpod.io/v1) ---
-
-    pub async fn create_pod(&self, input: &PodCreateInput) -> Result<Pod, RunPodError> {
+    pub async fn create_pod(&self, input: &CreatePodRequest) -> Result<Pod, RunPodError> {
         tracing::debug!(request = %serde_json::to_string_pretty(input).unwrap_or_default(), "Creating pod");
 
         let resp = crate::send_429_retry(
@@ -100,6 +160,18 @@ impl RunPodClient {
 
         tracing::debug!(%body, "Get pod response");
         Ok(serde_json::from_str(&body)?)
+    }
+
+    /// All pods on the account. Used only by the create-recovery path.
+    pub async fn list_pods(&self) -> anyhow::Result<Vec<Pod>> {
+        let _unused: Option<ListPodsResponse> = None;
+        unimplemented!("GREEN: §4.2")
+    }
+
+    /// Trigger a pod state transition (`start`, `stop`, `terminate`).
+    /// Returns the updated pod when the API reports one.
+    pub async fn pod_action(&self, _pod_id: &str, _action: &str) -> anyhow::Result<Option<Pod>> {
+        unimplemented!("GREEN: §4.2")
     }
 
     pub async fn stop_pod(&self, pod_id: &str) -> anyhow::Result<()> {
@@ -160,59 +232,90 @@ impl RunPodClient {
 
         Ok(())
     }
+}
 
-    // --- GraphQL API (api.runpod.io/graphql) ---
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Get runtime port mappings for a pod via the GraphQL API.
-    ///
-    /// The REST API does not return runtime networking info. The GraphQL API
-    /// provides `runtime.ports` with the actual IP and port assignments.
-    pub async fn get_runtime_ports(&self, pod_id: &str) -> anyhow::Result<Vec<PodRuntimePort>> {
-        let query = serde_json::json!({
-            "query": format!(
-                r#"query {{ pod(input: {{podId: "{pod_id}"}}) {{ runtime {{ ports {{ ip isIpPublic privatePort publicPort type }} }} }} }}"#
-            )
-        });
-
-        let resp = crate::send_429_retry(
-            self.client
-                .post(GRAPHQL_URL)
-                .bearer_auth(&self.api_key)
-                .json(&query),
-        )
-        .await?;
-
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("RunPod GraphQL error ({status}): {body}");
+    fn api(status: u16, body: &str) -> RunPodError {
+        RunPodError::Api {
+            status,
+            body: body.to_string(),
         }
-
-        tracing::debug!(%body, "GraphQL runtime ports response");
-
-        let parsed: GraphQlResponse<GraphQlPodData> = serde_json::from_str(&body)?;
-        if let Some(errors) = &parsed.errors {
-            let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-            anyhow::bail!("RunPod GraphQL errors: {}", msgs.join("; "));
-        }
-
-        Ok(parsed
-            .data
-            .and_then(|d| d.pod)
-            .and_then(|p| p.runtime)
-            .map_or_else(Vec::new, |r| r.ports))
     }
 
-    /// Get SSH connection info (public IP + external port) via the GraphQL API.
-    ///
-    /// Returns `(ip, port)` for the SSH service, or `None` if not yet available.
-    pub async fn get_ssh_info(&self, pod_id: &str) -> anyhow::Result<Option<(String, u16)>> {
-        let ports = self.get_runtime_ports(pod_id).await?;
+    /// `RunPod`'s published create-error table, and the one rule that is
+    /// ours: an unknown outcome must never be retried blindly (D21).
+    #[test]
+    fn create_disposition_classifies_v2_statuses() {
+        for status in [400, 403] {
+            assert_eq!(
+                api(status, "{\"detail\":\"no capacity\"}").create_disposition(),
+                CreateDisposition::NextCandidate,
+                "{status} must move to the next GPU candidate"
+            );
+        }
+        for status in [401, 402, 404, 422] {
+            assert_eq!(
+                api(status, "{\"detail\":\"nope\"}").create_disposition(),
+                CreateDisposition::Fatal,
+                "{status} must stop the loop"
+            );
+        }
+        for status in [500, 502, 503] {
+            assert_eq!(
+                api(status, "upstream exploded").create_disposition(),
+                CreateDisposition::RetrySame,
+                "{status} must retry the same candidate"
+            );
+        }
+        // Transport/parse failures: the create MAY have landed. Retrying
+        // would create a second billing pod.
+        let other = RunPodError::Other(anyhow::anyhow!("connection reset"));
+        assert_eq!(other.create_disposition(), CreateDisposition::Indeterminate);
+        assert_ne!(other.create_disposition(), CreateDisposition::RetrySame);
 
-        let ssh = ports
-            .iter()
-            .find(|p| p.private_port == 22 && p.is_ip_public);
+        // The v1 body-substring heuristic is gone: capacity failures are
+        // 400s in v2, and a 5xx is transient regardless of its wording.
+        assert_eq!(
+            api(500, "{\"detail\":\"no instance available\"}").create_disposition(),
+            CreateDisposition::RetrySame
+        );
+        assert_eq!(
+            api(400, "gibberish that matches nothing").create_disposition(),
+            CreateDisposition::NextCandidate
+        );
+    }
 
-        Ok(ssh.map(|p| (p.ip.clone(), p.public_port)))
+    #[test]
+    fn not_found_is_status_only() {
+        assert!(api(404, "{\"detail\":\"resource not found\"}").is_not_found());
+        assert!(!api(500, "upstream status 404 while refreshing").is_not_found());
+        assert!(!RunPodError::Other(anyhow::anyhow!("404 bytes read")).is_not_found());
+    }
+
+    fn pod_named(id: &str, name: &str) -> Pod {
+        serde_json::from_value(serde_json::json!({"id": id, "name": name})).unwrap()
+    }
+
+    #[test]
+    fn adoptable_pod_is_matched_by_unique_name() {
+        let pods = vec![
+            pod_named("a", "rk-other-1"),
+            pod_named("b", "rk-mine-2"),
+            pod_named("c", "rk-mine-22"),
+        ];
+        assert!(pick_adoptable(&pods, "rk-nothing").unwrap().is_none());
+        assert_eq!(
+            pick_adoptable(&pods, "rk-mine-2").unwrap().unwrap().id,
+            "b",
+            "exact name match only"
+        );
+
+        // Two pods with our name: adopting either could leak the other.
+        let dupes = vec![pod_named("d1", "rk-mine-2"), pod_named("d2", "rk-mine-2")];
+        let err = pick_adoptable(&dupes, "rk-mine-2").unwrap_err().to_string();
+        assert!(err.contains("d1") && err.contains("d2"), "{err}");
     }
 }

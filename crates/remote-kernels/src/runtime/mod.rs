@@ -742,6 +742,24 @@ mod tests {
         assert!(validate_config(&cfg, false).is_ok());
     }
 
+    /// `cloud-type` and `volume-gb` are our own typed knobs whose legal
+    /// values v2 constrains — a bad one must fail at startup, not cost a
+    /// create round trip (the same helper the body builder uses).
+    #[test]
+    fn validate_config_rejects_bad_runpod_storage_and_cloud() {
+        let err = validate_config(&config("[runpod]\nvolume-gb = 5"), false).unwrap_err();
+        assert!(err.contains("volume-gb"), "{err}");
+        assert!(err.contains("10"), "{err}");
+
+        let err = validate_config(&config("[runpod]\ncloud-type = \"bogus\""), false).unwrap_err();
+        assert!(err.contains("SECURE") && err.contains("COMMUNITY"), "{err}");
+
+        // Legal values (including the "disabled" 0) stay legal.
+        assert!(validate_config(&config("[runpod]\nvolume-gb = 0"), false).is_ok());
+        assert!(validate_config(&config("[runpod]\nvolume-gb = 10"), false).is_ok());
+        assert!(validate_config(&config("[runpod]\ncloud-type = \"community\""), false).is_ok());
+    }
+
     /// Zero/too-low money windows would self-clean healthy machines — the
     /// footgun values are rejected at load, everything else is the user's
     /// tuning to make.
