@@ -14,6 +14,8 @@ observed in captured request bodies/headers.
   (`sonnet | opus | haiku | fable`). Passing a GPT routing ID fails with
   `InputValidationError` before dispatch.
 - `ANTHROPIC_CUSTOM_MODEL_OPTION` does not extend the enum.
+- Neither does the 2.1.243 `modelPicker` setting (re-verified on 2.1.246 —
+  see the `modelPicker` section at the end).
 - Gateway model discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`)
   never fired in `-p` sessions (zero `GET /v1/models` hits, no
   `~/.claude/cache/gateway-models.json`); untested interactively, but the enum
@@ -541,6 +543,8 @@ behavior — recheck the cap and its scope on Claude Code upgrades.
   samples (single positive so far).
 - Gateway model discovery in interactive sessions (cosmetic: /model picker
   entries; not needed for the agent-file or Workflow flows).
+  (Picker rendering is now measurable through a pty-driven session — see the
+  `modelPicker` section; `modelPicker` rows make discovery moot for us.)
 - Compliance: user reviewed the subscription-OAuth consideration and accepted
   the risk (2026-07-20); revisit before any public release of the plugin.
 - The Workflow `opts.model` string-typing is an implementation detail, not a
@@ -920,6 +924,8 @@ gateway instead, which reads as "the sandbox works" while measuring nothing.
 `ANTHROPIC_CUSTOM_MODEL_OPTION` in that block is also what makes `--model
 <routing-id>` accepted (an unregistered ID is rejected with "issue with the
 selected model", regardless of `/v1/models` discovery).
+(Superseded on 2.1.246: acceptance no longer depends on the var — see
+"`modelPicker` vs the custom-model env pair" below.)
 
 ### GATE 5 — foreign thinking signatures are NOT reachable (no mitigation needed)
 
@@ -1387,3 +1393,151 @@ transcript jsonl: any sidechain `Skill` tool_use with `claude-api`.
   identity text never appears in `capture.jsonl`; `cc_is_subagent=true` in
   the captured attribution block is the marker that the subagent path was
   exercised.
+
+## `modelPicker` vs the custom-model env pair (2026-08-25, Claude Code 2.1.246, router 0.1.15)
+
+Context: 2.1.243 added a `modelPicker` setting ("curate the `/model` picker
+with an ordered, labeled list of models … appended to or replacing the
+built-in lineup"). Question: should setup step 5 drop the single-slot
+`ANTHROPIC_CUSTOM_MODEL_OPTION(_NAME)` pair for it.
+
+Method: headless `claude -p 'say ok' --output-format json` runs from a scratch
+dir (`--strict-mcp-config`, default auto mode, live gateway on :8787), each
+under its own `--settings <file>` whose `env` block repeats the step-5 wiring
+and either sets the pair or sets both vars to `""` — the consumers test
+truthiness, so an empty string unregisters the slot even though the
+user-level block still names it (verified: `printenv` in the run printed an
+empty value, rc=0). Arms: pair only / neither / `modelPicker` only (sol with a
+label, terra, luna, and `grok-4.6`, which this install does not serve) / both
+/ `replaceBuiltInOptions: true`. Picker rendering was measured in real
+interactive sessions driven through a pty (`pty.fork`, `TIOCSWINSZ` 140x45,
+alt+p to open the picker, ANSI stripped from the captured bytes) — the
+"interactive-only" gap in the 2.1.216 gateway-discovery notes is closeable
+this way. Consumption sites were read out of the 2.1.246 binary as before.
+
+### (a) `--model <routing-id>` acceptance does not depend on either mechanism
+
+| arm | `--model` | result |
+|---|---|---|
+| pair=sol | gpt-5.6-sol | ok |
+| pair=sol | gpt-5.6-terra (unregistered) | **ok** |
+| neither | gpt-5.6-terra | **ok** |
+| neither | gpt-5.6-nope (unserved) | exit 1: "There's an issue with the selected model (gpt-5.6-nope). It may not exist or you may not have access to it." |
+| picker | gpt-5.6-terra, gpt-5.6-luna | ok, ok |
+| picker | grok-4.6 (row present, route disabled) | exit 1, same message as the unserved id |
+| both | gpt-5.6-sol, gpt-5.6-terra | ok, ok |
+| replace | sonnet, claude-fable-5 | ok, ok |
+
+In `-p`, what decides is whether the gateway answers the first request; the
+"issue with the selected model" text is the 404 `model_not_found` formatter,
+not a registration check. **This supersedes the 2.1.220 phase-5 note that the
+custom-model var "is also what makes `--model <routing-id>` accepted".**
+Every non-catalog id (the registered one included) now logs
+`[claude-code:unrecognized_model] {"model":…,"query_source":"sdk"}` to stderr;
+cosmetic. Interactive typed `/model <id>` (no pair, no picker): a served id is
+accepted — and **Enter saves it as the default for new sessions, i.e. writes
+`model` into the user settings file**; an unserved id fails validation with
+"Model 'grok-4.6' not found". Binary: `/model` validation short-circuits for
+alias names, the env-pair id, any `modelPicker` row (exact trimmed match,
+after the allowlist/deprecation/entitlement filter), and previously
+validated ids; anything else gets a 1-token probe request
+(`querySource: model_validation`) through the gateway. A picker row therefore
+skips the probe: an unserved row is selectable and fails at the first turn.
+
+### (b) `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is unaffected
+
+`modelUsage[].contextWindow`: 258400 for every `gpt-5.6-*` run in every arm;
+1000000 for `claude-sonnet-5` and `claude-fable-5` under the picker and
+replace arms. Window resolution is still the `claude-` prefix rule.
+
+### (c) The Agent tool's `model` enum stays closed
+
+Binary (2.1.246): the Agent tool schema is still
+`model: enum(["sonnet","opus","haiku","fable"]).optional()` — a hard-coded
+literal, no reference to the picker. Measured under the picker arm: a Sonnet
+main asked to call Agent with `model: "gpt-5.6-terra"` got
+`InputValidationError … Invalid option: expected one of
+"sonnet"|"opus"|"haiku"|"fable"`. The dynamic-delegation item stays blocked;
+Workflow `agent()` remains the per-invocation path.
+
+### (d) Setting shape, sources, interaction with the pair
+
+```json
+"modelPicker": {
+  "options": [
+    { "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "description": "…" },
+    { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra" }
+  ],
+  "replaceBuiltInOptions": false
+}
+```
+
+- Rows need `model`; `label` and `description` optional. Default label is the
+  built-in name for a known model, else the id; default description
+  `Custom model (<id>)`. Invalid rows are dropped one at a time with a
+  settings warning; a malformed field drops the whole key.
+- **Sources: managed > `--settings`/SDK > user settings; project and local
+  files are ignored.** Measured: rows placed in a scratch project's
+  `.claude/settings.json` and `.claude/settings.local.json` did not render;
+  `--settings` rows did. Binary: the lookup iterates exactly
+  `["policySettings","flagSettings","userSettings"]` and takes the first
+  defined value whole (the settings merger special-cases the key: higher
+  source replaces, never merges). User-level placement itself was not
+  exercised (the live file is off-limits for tests); it is the documented
+  and binary-visible middle source.
+- Both set (measured): the env-pair row renders first ("GPT-5.6 Sol · Custom
+  model (gpt-5.6-sol)"), picker rows are appended after it in order. Binary:
+  the append dedupes on model id (case-insensitive, `[1m]`-insensitive), so a
+  picker row naming the pair's id is skipped in the list — but the display
+  name used in the header/status line resolves the picker label *first*, so
+  for a duplicated id the picker label wins there. Not measured.
+- `replaceBuiltInOptions: true` (measured): only "Default (recommended)", the
+  curated rows, and a raw row for the session's current model ("sonnet ·
+  Custom model"); built-ins, gateway-discovered rows and the env-pair row are
+  hidden (the last two per binary/docs). Not what we want — Claude models
+  must stay in the lineup.
+- Labels are used beyond the picker: after selecting the Terra row for the
+  session, the header read "GPT-5.6 Terra with xhigh effort · Claude Max" and
+  the status line "GPT-5.6 Terra (xhigh)"; the toast still says "Model set to
+  gpt-5.6-terra for this session only". Without a row the same places show
+  the raw id.
+- Server-side filtering ("Dropped: a row Claude Code can't serve") only
+  covers first-party catalog cases (Fable/Mythos entitlement, rows the
+  server marks disabled); a gateway id is never dropped or grayed, which is
+  why the unserved `grok-4.6` row rendered.
+- Managed-tier detail: when several admin tiers merge, `modelPicker` and
+  `modelPicker.replaceBuiltInOptions` are stripped from every tier but the
+  top one. Irrelevant here.
+
+### (e) Rendering, measured
+
+Picker arm, rows 6–9 after the five built-ins: "GPT-5.6 Sol (picker) · Codex,
+general", "GPT-5.6 Terra · Custom model (gpt-5.6-terra)", "GPT-5.6 Luna ·
+Codex, luna", "Grok 4.6 · Custom model (grok-4.6)" — order and labels exactly
+as written. `s` (use for this session only) works on these rows; the ←/→
+effort footer was shown but not exercised.
+
+Still untested: user-level placement (see above); `availableModels`
+interplay; a picker row duplicating the pair's id; managed settings;
+behaviour on Claude Code < 2.1.242 (unknown-key handling); whether a picker
+label affects anything on the wire (nothing in the binary suggests it — the
+model string is sent verbatim).
+
+### Recommendation: switch, for user-level wiring
+
+Replace the env pair in step 5 with a `modelPicker` block in the **user**
+settings file listing every route the install serves — gpt-5.6-sol/terra/
+luna with labels, plus `grok-4.6` when Grok is enabled and any open-weights
+routes — `replaceBuiltInOptions` left off. Gains: terra and luna become
+main-model selectable with the declared 258400 window (they were
+subagent-only), Grok no longer competes for a slot (grok.md step 5 becomes
+"add a row"), labels show in the header/status line, and nothing is lost —
+the pair was never needed for `-p --model` acceptance on current versions.
+Costs: requires 2.1.242+ (setup should check `claude --version`); rows are
+not validated against the router, so the list must track the routes (a
+future `doctor` check could compare picker rows to `routed-models`); and
+**project-scoped wiring keeps the env pair** — `modelPicker` is ignored in
+`.claude/settings*.json`, and putting the rows in `~/.claude/settings.json`
+would show them in every project, including ones whose sessions do not go
+through the gateway (selecting one there fails with the 404 message against
+api.anthropic.com). Uninstall gains one line: remove the `modelPicker` key.
