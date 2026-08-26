@@ -20,7 +20,7 @@ dollar, and GPT delegation bills the separate Codex subscription — it
 preserves Claude usage entirely. Within the Claude family, Opus 5 costs
 half of Fable per token ($5/$25 vs $10/$50) and does not draw from the
 Fable-specific usage cap (currently up to ~50% of the weekly limit);
-Sonnet 5 is cheaper still ($3/$15, introductory $2/$10 through 2026-08).
+Sonnet 5 is cheaper still ($2/$10).
 
 ## Character differences
 
@@ -83,7 +83,7 @@ processing untrusted content.
   creative hypothesis generation, and difficult tasks that Opus 5 or sol
   attempted and failed. Mind the Fable usage cap.
 - **Sonnet 5** — very high input-token-volume tasks where judgement still
-  matters; the intro pricing makes it the cheapest capable Claude.
+  matters; the cheapest capable Claude.
 - **Haiku** — almost never the right call; it's outdated and Sonnet is
   cheap enough.
 
