@@ -796,6 +796,10 @@ pub(crate) fn args_from_argv(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// What a pod whose status we could not read is called, in every string a
+/// user might see. v1 rendered a missing `desiredStatus` this way.
+pub(crate) const UNKNOWN_STATUS: &str = "unknown";
+
 /// Map a v2 `PodStatus` string onto the runtime-agnostic status.
 ///
 /// `PROVISIONING`/`STARTING` are the normal early states in v2 (v1's
@@ -1014,7 +1018,13 @@ impl Runtime for RunPodRuntime {
 
     async fn describe(&self, external_id: &str) -> anyhow::Result<InstanceStatus> {
         match self.client.get_pod(external_id).await {
-            Ok(pod) => Ok(instance_status_from(pod.status.as_deref().unwrap_or(""))),
+            // A pod with no readable status becomes `Unknown("unknown")`, not
+            // `Unknown("")`: the server prints this string back to the user
+            // ("unexpected provider status ..."), and an empty one reads as a
+            // bug in the tool rather than as a fact about the pod.
+            Ok(pod) => Ok(instance_status_from(
+                pod.status.as_deref().unwrap_or(UNKNOWN_STATUS),
+            )),
             // The REST API 404s for terminated pods; surface as Gone rather
             // than an error so reconnect logic can fall through cleanly.
             Err(e) if is_pod_not_found(&e) => Ok(InstanceStatus::Gone),
@@ -2395,6 +2405,36 @@ mod tests {
         let handle = rt.provision(&provision_req()).await.unwrap();
         assert_eq!(handle.external_id, "second-try");
         assert_eq!(fake.count("POST /v2/pods "), 2);
+    }
+
+    /// A pod the API returns without a readable status must not reach the
+    /// user as `unexpected provider status ""` — `server.rs` prints this
+    /// string straight back, and v1 rendered the same case as "unknown".
+    #[tokio::test]
+    async fn a_status_less_pod_is_described_as_unknown_not_empty() {
+        let fake = FakeRunPod::spawn(vec![
+            // Every field but the id absent — what the lenient parse is for.
+            ("GET /v2/pods/p1 ", 200, "{\"id\": \"p1\"}".to_string()),
+            (
+                "GET /v2/pods/p2 ",
+                200,
+                "{\"id\": \"p2\", \"status\": null}".to_string(),
+            ),
+            // A status of a type we cannot represent degrades the same way.
+            (
+                "GET /v2/pods/p3 ",
+                200,
+                "{\"id\": \"p3\", \"status\": 7}".to_string(),
+            ),
+        ]);
+        let rt = runtime_against(&fake, "");
+
+        for pod_id in ["p1", "p2", "p3"] {
+            match rt.describe(pod_id).await.unwrap() {
+                InstanceStatus::Unknown(status) => assert_eq!(status, "unknown", "{pod_id}"),
+                other => panic!("{pod_id}: expected Unknown, got {other:?}"),
+            }
+        }
     }
 
     /// v2 dropped `supportPublicIp`, so on community cloud the flag can no

@@ -165,6 +165,37 @@ async fn wait_for_pod_exit(
     None
 }
 
+/// Which cloud tier this run exercises. Both tests were written against
+/// COMMUNITY (the cheap path), so that stays the default and nothing changes
+/// unless you ask: `REMOTE_KERNELS_E2E_CLOUD=SECURE` runs the same gate on
+/// the tier `cloud-type` actually defaults to for users.
+fn e2e_cloud() -> &'static str {
+    match std::env::var("REMOTE_KERNELS_E2E_CLOUD") {
+        Ok(value) if value.eq_ignore_ascii_case("SECURE") => "SECURE",
+        Ok(value) if value.is_empty() || value.eq_ignore_ascii_case("COMMUNITY") => "COMMUNITY",
+        Ok(other) => panic!(
+            "REMOTE_KERNELS_E2E_CLOUD must be SECURE or COMMUNITY (got {other:?}) — a typo \
+             must not silently spend money on the wrong tier"
+        ),
+        Err(_) => "COMMUNITY",
+    }
+}
+
+/// Point a test's config at [`e2e_cloud`]. The literals keep spelling out
+/// COMMUNITY so they still read as real configs; this rewrites that one line
+/// and fails loudly if it ever moves — a silent no-op here would report
+/// SECURE coverage that never happened.
+fn with_cloud(config: &str) -> String {
+    const COMMUNITY_LINE: &str = "cloud-type = \"COMMUNITY\"";
+    assert!(
+        config.contains(COMMUNITY_LINE),
+        "no cloud-type line to parameterize in this config"
+    );
+    let cloud = e2e_cloud();
+    eprintln!("e2e cloud-type: {cloud}");
+    config.replace(COMMUNITY_LINE, &format!("cloud-type = {cloud:?}"))
+}
+
 /// Python helper injected ahead of on-pod snippets: PID 1's environment is
 /// what the guard/watchdog processes see (kernels launched over SSH may lack
 /// the container env vars).
@@ -187,19 +218,22 @@ async fn runpod_lifecycle_with_stop_resume() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("remote-kernels.toml"),
-        r#"
+        with_cloud(
+            r#"
 name = "rk-regress"
 gpu-type-ids = ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090", "NVIDIA RTX A5000"]
 
 [runpod]
 cloud-type = "COMMUNITY"
-# Guarantees a public IP → jupyter-access "auto" resolves to the SSH tunnel
-# (the pod keeps its token-protected proxy mapping as the resume fallback):
-# this run is the live proof of the tunnel-first Jupyter path.
+# Declares that SSH is expected → jupyter-access "auto" resolves to the SSH
+# tunnel (the pod keeps its token-protected proxy mapping as the resume
+# fallback): this run is the live proof of the tunnel-first Jupyter path. On
+# SECURE the flag is redundant (SSH is guaranteed there) and harmless.
 support-public-ip = true
 container-disk-gb = 20
 volume-gb = 0
 "#,
+        ),
     )
     .unwrap();
     let config = Config::load(dir.path()).unwrap();
@@ -365,7 +399,8 @@ async fn runpod_orphan_guard_self_cleanup() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("remote-kernels.toml"),
-        r#"
+        with_cloud(
+            r#"
 name = "rk-guard"
 cleanup = "stop"
 # Cheap consumer types first, then a spread of datacenter/workstation types
@@ -382,11 +417,12 @@ gpu-type-ids = [
 ]
 
 [runpod]
-# COMMUNITY deliberately: it's the cheap path, and losing the GPU across the
+# COMMUNITY by default: it's the cheap path, and losing the GPU across the
 # stop is handled in the test itself. Verified live that RunPod re-rents the
 # GPU while a pod is stopped on BOTH clouds — the same "not enough free GPUs"
 # 500 on resume hit COMMUNITY twice and SECURE once — so paying secure rates
-# buys no reservation here.
+# buys no reservation here. REMOTE_KERNELS_E2E_CLOUD=SECURE rewrites this
+# line (see `with_cloud`) to cover the tier users actually get by default.
 cloud-type = "COMMUNITY"
 container-disk-gb = 20
 volume-gb = 0
@@ -398,6 +434,7 @@ support-public-ip = true
 # guard behavior under test (the guard arms on ssh_expected, not on access).
 jupyter-access = "proxy"
 "#,
+        ),
     )
     .unwrap();
     let config = Config::load(dir.path()).unwrap();

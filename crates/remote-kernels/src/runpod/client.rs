@@ -291,10 +291,12 @@ impl RunPodClient {
             // IS what we were asking for (cleanup paths stop pods that may
             // already have stopped themselves).
             let current = self.get_pod(pod_id).await.ok();
+            // Same rule as `describe()`: a status we could not read is called
+            // "unknown" everywhere a user might read it back, never "".
             let current_status = current
                 .as_ref()
                 .and_then(|p| p.status.as_deref())
-                .unwrap_or("");
+                .unwrap_or(crate::runtime::runpod::UNKNOWN_STATUS);
             if crate::runtime::runpod::conflict_satisfies(action, current_status) {
                 tracing::info!(
                     pod_id,
