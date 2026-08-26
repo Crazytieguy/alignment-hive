@@ -338,13 +338,40 @@ volume-gb = 0
     assert!(!is_error(&result), "stop failed: {text}");
     eprintln!("stopped: {text}");
 
-    let result = server
-        .attach(Parameters(remote_kernels::server::AttachParams {
-            machine_id: machine_id.clone(),
-            force: None,
-        }))
-        .await
-        .expect("attach protocol error");
+    // RunPod releases a stopped pod's GPU and may re-rent it — on SECURE as
+    // well as COMMUNITY (observed live 2026-08-26: two SECURE runs died here
+    // while the guard test's resume, which already retried, came back both
+    // times). Retry on that one provider message only; anything else is a
+    // real failure and panics immediately.
+    let mut resumed = None;
+    for attempt in 1..=4 {
+        match server
+            .attach(Parameters(remote_kernels::server::AttachParams {
+                machine_id: machine_id.clone(),
+                force: None,
+            }))
+            .await
+        {
+            Ok(result) => {
+                resumed = Some(result);
+                break;
+            }
+            Err(e) if e.message.contains("not enough free GPUs") => {
+                eprintln!("resume attempt {attempt}: host capacity exhausted ({e})");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+            Err(e) => panic!("attach protocol error: {e:?}"),
+        }
+    }
+    // Out of attempts: the machine is real and still stopped, so let the
+    // TerminateGuard delete it and say plainly that this run proved nothing
+    // about the resume path rather than reporting a defect.
+    let result = resumed.unwrap_or_else(|| {
+        panic!(
+            "INCONCLUSIVE: RunPod had no free GPU on the host for this pod after 4 resume \
+             attempts — the resume/terminate legs did not run. Rerun at a quieter hour."
+        )
+    });
     let text = text_of(&result);
     assert!(!is_error(&result), "resume failed: {text}");
     assert!(text.contains("Attached"), "{text}");
