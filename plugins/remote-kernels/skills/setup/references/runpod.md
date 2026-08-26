@@ -42,8 +42,9 @@ Edge cases:
   minutes of provisioning leaves the pod billing until stopped by hand
   (RunPod console, or `attach()`/`status()` from a later session, which
   can supervise or end it — `start()` always creates a fresh machine).
-- A raw `docker-start-cmd` passthrough conflicts with the guard; migrate it
-  to `image-start-cmd`.
+- `docker-start-cmd` is not a RunPod v2 field and `start()` rejects it. Put
+  the image's start command in `image-start-cmd` (the guard wraps it), or
+  set `image-start-cmd = ""` to run the image unwrapped.
 
 ## Advanced: Jupyter exposure (`jupyter-access`)
 
@@ -54,5 +55,10 @@ the endpoint remains internet-reachable with the token. Users who need
 Jupyter physically unreachable from the internet must set
 `jupyter-access = "tunnel"`: no public mapping is created at all, at the
 cost that a resume whose SSH never returns cannot fall back.
-Community-cloud pods without `support-public-ip` always use the public
-proxy (token-protected).
+Community-cloud pods use the public proxy (token-protected) unless
+`support-public-ip = true`. RunPod's v2 API has no field to request a public
+IP, so the flag is a declaration to this tool, not a request to RunPod: it
+selects the SSH tunnel path and arms the pre-SSH orphan guard, and a pod
+whose direct SSH endpoint never appears fails the start instead of running
+unsupervised. Without the flag a community pod has no guard and no
+enforceable budget.
