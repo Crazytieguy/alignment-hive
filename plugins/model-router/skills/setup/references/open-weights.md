@@ -60,6 +60,8 @@ vendor.
    failure, report provider, base-url, model ID, and HTTP status. The
    day-to-day interface is the agents from step 6 (frontmatter `model:`
    accepts any routed ID); they work in sessions started after the restart.
+   Add a row per routing-id to the main setup's step-5 `modelPicker` list
+   (user-level wiring only; `display-name` makes a good label).
 
 ## Context windows
 

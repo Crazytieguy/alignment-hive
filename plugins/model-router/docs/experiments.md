@@ -218,10 +218,10 @@ raw SSE inspected.
   upstream limit. *Stale as of 0.1.12: the `claude-` alias routes were
   removed — the recommended setup disables gateway discovery
   (`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`) and uses the custom-model env
-  pair for the picker, so only the bare routing IDs ship. The Claude Code
-  facts recorded here (200K unknown-model default, `claude-` prefix
-  exclusion) still hold; `claude-gpt-5.6-*` IDs elsewhere in this file are
-  historical.*
+  pair for the picker (0.1.22: `modelPicker` rows), so only the bare routing
+  IDs ship. The Claude Code facts recorded here (200K unknown-model default,
+  `claude-` prefix exclusion) still hold; `claude-gpt-5.6-*` IDs elsewhere
+  in this file are historical.*
 - Claude context windows behind the gateway (measured 2026-07-28, Claude Code
   2.1.220). Claude Code grants a natively-1M Claude model its 1M window only
   when `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`; behind the
@@ -1164,7 +1164,8 @@ machine or behind a deny rule, and MCP tools disabled for the cells.
 - Every routed request returned 200 (plus the known `count_tokens` 404s).
 - `claude --settings <file>` with its own `env` block remains mandatory (see
   phase 5); `ANTHROPIC_CUSTOM_MODEL_OPTION` must name the routing ID under
-  test, so each model needs its own settings file.
+  test, so each model needs its own settings file. (Superseded on 2.1.246:
+  the var no longer gates `--model`; see the `modelPicker` section.)
 
 ## Grok-native WebSearch (2026-08-04, CLIProxyAPI 7.2.110, model-router 0.1.11)
 
@@ -1523,14 +1524,14 @@ behaviour on Claude Code < 2.1.242 (unknown-key handling); whether a picker
 label affects anything on the wire (nothing in the binary suggests it — the
 model string is sent verbatim).
 
-### Recommendation: switch, for user-level wiring
+### Recommendation: switch, for user-level wiring (adopted in setup 0.1.22)
 
 Replace the env pair in step 5 with a `modelPicker` block in the **user**
 settings file listing every route the install serves — gpt-5.6-sol/terra/
 luna with labels, plus `grok-4.6` when Grok is enabled and any open-weights
 routes — `replaceBuiltInOptions` left off. Gains: terra and luna become
-main-model selectable with the declared 258400 window (they were
-subagent-only), Grok no longer competes for a slot (grok.md step 5 becomes
+main-model selectable with the declared 258400 window (they were off
+the picker), Grok no longer competes for a slot (grok.md step 5 becomes
 "add a row"), labels show in the header/status line, and nothing is lost —
 the pair was never needed for `-p --model` acceptance on current versions.
 Costs: requires 2.1.242+ (setup should check `claude --version`); rows are

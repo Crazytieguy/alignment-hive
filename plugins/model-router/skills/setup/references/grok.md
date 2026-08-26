@@ -39,16 +39,16 @@ Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
    low by that ratio (percentages stay right). Recommend scaling — the
    larger window is much of the point — but flip it only with the user's
    explicit OK after stating that displayed-count caveat.
-5. **Main-model slot (only if the user wants Grok in the /model picker)**:
-   Claude Code has a single custom-model slot, and the main setup already
-   spends it on `gpt-5.6-sol`. If the user prefers Grok there, replace both
-   env values in the step-5 settings block:
+5. **`/model` picker row**: add to the step-5 `modelPicker` options in
+   `~/.claude/settings.json`:
    ```json
-   "ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.6",
-   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.6"
+   { "model": "grok-4.6", "label": "Grok 4.6" }
    ```
-   One slot means one of GPT/Grok; the other family stays subagent-only.
-   Whichever is chosen, subagents for both keep working.
+   With project-scoped wiring there is only the single-slot env pair; if
+   the user prefers Grok in it, replace both values
+   (`"ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.6"`,
+   `"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.6"`) and GPT stays off
+   the picker there. Subagents for both families keep working either way.
 6. Create agents so Claude can delegate — use the template in
    `references/custom-agents.md`. Recommended set: `grok-4.6(high)` (xAI's
    own default effort) and optionally `grok-4.6(medium)` for faster runs
@@ -66,6 +66,7 @@ Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
    that's expected).
 
 If the user asks to remove Grok (or at full uninstall): delete the `[grok]`
-block, and the custom-model env pair if it names a Grok ID. The stored
+block, the Grok picker row (or the env pair, if it names a Grok ID), and a
+`model` key naming a Grok ID if a row was saved as the default. The stored
 login sits in `~/.local/state/model-router/codex-auth/xai-*.json` and is
 covered by the uninstall section's state-dir warning.

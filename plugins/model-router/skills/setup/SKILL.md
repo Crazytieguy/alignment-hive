@@ -75,9 +75,7 @@ here works until the binary resolves.
    "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
    "ENABLE_TOOL_SEARCH": "true",
-   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "258400",
-   "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-sol",
-   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol"
+   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "258400"
    ```
    `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude models' native 1M
    context windows. Claude Code grants those only when the base URL is
@@ -99,11 +97,41 @@ here works until the binary resolves.
    On an existing install with configured open-weights routes, run
    `$ROUTER doctor` after raising the value — it fails with the fix
    spelled out if a route's window no longer fits under the new
-   declaration. The custom-model pair adds one
-   "GPT-5.6 Sol" entry to the /model picker, so main-model GPT use gets
-   the declared context window too; terra and luna stay subagent-only.
-6. Tell the user to restart Claude Code sessions (env is read at startup),
-   and that the GPT agents and `choosing-models` skill are now available.
+   declaration.
+   Then list the routes in the `/model` picker: one row per routing ID that
+   `$ROUTER doctor` lists under `routed-models` (the three GPT routes on a
+   default install, plus any Grok or open-weights routes already
+   configured). Claude Code reads `modelPicker` only from
+   `~/.claude/settings.json` (project and local files are ignored) and only
+   from 2.1.242 on; add it there as a sibling of `env`, and drop the
+   `ANTHROPIC_CUSTOM_MODEL_OPTION` pair an earlier install wrote (the rows
+   replace it):
+   ```json
+   "modelPicker": {
+     "options": [
+       { "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol" },
+       { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra" },
+       { "model": "gpt-5.6-luna", "label": "GPT-5.6 Luna" }
+     ]
+   }
+   ```
+   The rows follow the built-in Claude models, and a routed ID picked there
+   gets the declared context window like any other. Rows are never checked
+   against the router — an unserved row is selectable and fails on its
+   first turn — so drop a row when its route goes. Two cases keep the
+   single-slot pair instead, in the wired file's `env` block (one entry
+   only; the other routes stay off the picker, reachable through agents or
+   `--model`): project-scoped wiring, where user-level rows would show in
+   every project, including ones that don't go through the gateway; and
+   Claude Code below 2.1.242 (`claude --version`), where the key is
+   unmeasured.
+   ```json
+   "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-sol",
+   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol"
+   ```
+6. Tell the user to restart Claude Code sessions (settings are read at
+   startup), and that the GPT agents and `choosing-models` skill are now
+   available.
    Offer to run smoke tests. A fresh `claude -p` reads the step 5 settings
    at its own startup, so they work without restarting the current session.
    Don't env-prefix the step 5 variables onto them: once the settings env
@@ -113,6 +141,8 @@ here works until the binary resolves.
    against the direct Anthropic API it prints 1000000 regardless of the
    flag.)
    Routing: `claude -p 'reply with ok' --model gpt-5.6-sol`.
+   Picker rows: `/model` in a fresh interactive session lists them after
+   the Claude models.
    1M windows, to confirm they survive the current Claude Code version:
    `claude -p 'say ok' --model claude-fable-5 --output-format json | jq
    '.modelUsage[].contextWindow'` — it must print 1000000. On 200000,
@@ -133,13 +163,17 @@ service, upstream). Fix only that layer using the matching step above;
 `$ROUTER service restart` after config changes. Doctor does not see Claude
 Code's env block: if Claude models report a 200K window, re-check step 5's
 `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` with the step 6 window check —
-a Claude Code release could drop the flag.
+a Claude Code release could drop the flag. A picker row that fails on its
+first turn with "There's an issue with the selected model" names a route the
+gateway doesn't serve: compare the rows with doctor's `routed-models`.
 
 ## Disable / uninstall
 
-1. Remove `ANTHROPIC_BASE_URL` (and optionally the other keys step 5 added)
-   from the settings file it was written to — this alone restores direct
-   Anthropic access.
+1. Remove `ANTHROPIC_BASE_URL` (and optionally the other keys step 5 added,
+   `modelPicker` included) from the settings file it was written to — this
+   alone restores direct Anthropic access. Also remove a `model` key naming
+   a routed ID (written when a picker row was saved as the default), or new
+   sessions start on a model Anthropic doesn't serve.
 2. `$ROUTER service uninstall`.
 3. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,
    and `~/.cache/model-router` (the state dir includes the Codex auth login —
