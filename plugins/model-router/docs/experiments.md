@@ -1545,3 +1545,85 @@ future `doctor` check could compare picker rows to `routed-models`); and
 would show them in every project, including ones whose sessions do not go
 through the gateway (selecting one there fails with the 404 message against
 api.anthropic.com). Uninstall gains one line: remove the `modelPicker` key.
+
+## Subagent model-404 fallback (2026-08-29, Claude Code 2.1.251, router 0.1.15)
+
+Context: the 2.1.247 changelog says "Fixed sub-agents dying on a first-call
+model 404: they now use the session's fallback model chain, and the error
+returned to the parent includes the error type, status, request id, and
+model." Question: can a GPT/Grok subagent whose route the gateway does not
+serve now silently run on a Claude model.
+
+Method: headless `claude -p --output-format json --strict-mcp-config` runs
+from a scratch dir (default auto mode, live gateway on :8787, the user-level
+step-5 wiring), each asking the main session to spawn one custom agent
+(`.claude/agents/*.md` with a `model:` line) and relay the Agent tool's
+result verbatim. Which model actually answered was read from
+`modelUsage` in the JSON result (authoritative; the agent's self-report is
+not — see below). One interactive arm was driven through a pty. Consumption
+sites were read out of the 2.1.251 binary.
+
+| fallback chain | agent model | result | `modelUsage` besides the parent |
+|---|---|---|---|
+| none | gpt-5.6-nope (unserved) | `<error>Agent terminated early due to an API error: There's an issue with the selected model (gpt-5.6-nope). … (error type model_not_found, HTTP 404, request id req_…, model sent to the API: gpt-5.6-nope)</error>` | — |
+| none | claude-nope-9 | same shape, 404 | — |
+| none | claude-3-5-sonnet-20240620 (retired) | same shape, 404 | — |
+| none | gpt-5.6-sol (control) | `MODEL-REPORT: gpt-5.6-sol` | gpt-5.6-sol |
+| `--fallback-model sonnet` | gpt-5.6-nope | **`MODEL-REPORT: gpt-5.6-nope`, no error, no warning** | **claude-sonnet-5** |
+| `--settings` file with `"fallbackModel": ["sonnet"]` | gpt-5.6-nope | same: silent, answered by Sonnet | **claude-sonnet-5** |
+| `fallbackModel` setting, interactive (pty) | gpt-5.6-nope | agents view shows `Run nope-gpt report • claude-sonnet-5`; final text `MODEL-REPORT: gpt-5.6-nope`, no warning | (Sonnet, per the agents view) |
+| `--fallback-model sonnet`, Workflow `agent(…, {model: "gpt-5.6-nope"})` | gpt-5.6-nope | `{"r":"MODEL-REPORT: GPT-5.6"}`, "0 errors" | **claude-sonnet-5** |
+
+Findings:
+
+- **Without a fallback chain nothing changed**: an unserved id still kills
+  the subagent, and the parent now gets the richer error (type, status,
+  request id, model). Same for the Claude branch (unknown and retired ids
+  404 at api.anthropic.com through the gateway).
+- **With a fallback chain the 404 pivots the subagent to the chain's first
+  model, silently.** Neither the Agent tool result nor the Workflow return
+  value carries any marker; the interactive agents view is the only place
+  the served model is visible. The agent's self-report is worthless as a
+  check — Sonnet answered "gpt-5.6-nope" (it echoes the agent definition)
+  and "GPT-5.6" (Workflow arm).
+- Binary (2.1.251): the pivot is one branch in the request retry loop —
+  `if ((model_not_found || permission_denied || (!CLAUDE_CODE_RETRY_WATCHDOG
+  && server_error)) && r.fallbackModel && r.fallbackModel !== r.model)
+  throw new FallbackTriggeredError(...)`, logged as
+  `tengu_api_model_not_found_fallback_triggered`. So the same chain also
+  catches a **router 5xx** on a GPT subagent (Codex backend down, CLIProxyAPI
+  503 after retries) — the flag's original "overloaded" purpose, now
+  spanning providers. The subagent runner logs
+  `tengu_api_subagent_model_not_found` with `has_fallback_chain:
+  !CLAUDE_CODE_NO_MODEL_FALLBACK && options.fallbackModel` before throwing
+  the no-chain error.
+- Chain sources (`sJn` in the binary): CLI `--fallback-model a,b` (split on
+  commas) else the `fallbackModel` settings array; max 3 entries;
+  `"default"` expands to the default model; unknown ids are dropped
+  (`kr(i)` catalog check — a GPT routing id in the chain is silently
+  dropped, so the chain can only ever point at Claude). The same resolver
+  feeds `prepared-interactive` and `prepared-headless`, and the pty arm
+  confirms the setting is live in interactive sessions even though the
+  `--fallback-model` help text still says "(only works with --print)".
+  Settings merge: `fallbackModel` is "highest source that sets it owns it
+  whole" (no array union), so a managed/policy `fallbackModel` overrides a
+  user one, not the other way round.
+- `CLAUDE_CODE_NO_MODEL_FALLBACK=1` disables every model substitution
+  (`T6()`), with a tripwire that throws if a pivot is attempted. Too blunt
+  for setup: it also blocks the Fable-consent swap and compaction's
+  substitution ("Compaction unavailable: CLAUDE_CODE_NO_MODEL_FALLBACK is
+  set").
+
+Exposure for model-router users: none by default — setup never writes
+`fallbackModel`, and none of this fires without a chain. It becomes a
+cross-provider spend surprise the moment a user (or a managed-settings
+admin) sets `fallbackModel`, or a script passes `--fallback-model`: every
+GPT/Grok subagent then degrades to Claude on any 404/5xx from the gateway,
+without a word in the result.
+
+Recommended (not done): `doctor` reads every settings file for
+`fallbackModel` and warns that routed subagents will silently fall back to
+it; `choosing-models` notes that `modelUsage` / the agents view, not the
+agent's self-report, shows which model served a subagent. Retest triggers:
+a changelog entry touching `fallbackModel`, `--fallback-model`,
+`CLAUDE_CODE_NO_MODEL_FALLBACK`, or subagent model errors.
