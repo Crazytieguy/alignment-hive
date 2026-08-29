@@ -842,6 +842,38 @@ mod tests {
         assert!(validate_config(&config("[runpod]\ncloud-type = \"community\""), false).is_ok());
     }
 
+    /// A `[runpod]` value left over from earlier use must not stop a vast-
+    /// or Kubernetes-only server from booting: it only ever matters to a pod
+    /// create, which validates it again and fails closed. It stays fatal
+    /// where `RunPod` is the runtime this server reaches for by default.
+    #[test]
+    fn a_stale_runpod_key_does_not_block_a_vast_only_server() {
+        let stale = "[runpod]\nvolume-gb = 5\ncloud-type = \"bogus\"";
+        assert!(
+            validate_config(
+                &config(&format!("default-runtime = \"vast\"\n{stale}")),
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_config(
+                &config(&format!("default-runtime = \"kubernetes\"\n{stale}")),
+                false
+            )
+            .is_ok()
+        );
+        // Default (runpod) and explicit runpod both still fail closed.
+        assert!(validate_config(&config(stale), false).is_err());
+        assert!(
+            validate_config(
+                &config(&format!("default-runtime = \"runpod\"\n{stale}")),
+                false
+            )
+            .is_err()
+        );
+    }
+
     /// Zero/too-low money windows would self-clean healthy machines — the
     /// footgun values are rejected at load, everything else is the user's
     /// tuning to make.
