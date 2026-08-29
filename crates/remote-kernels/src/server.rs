@@ -140,7 +140,7 @@ impl FailedStartCleanup {
             }
             Self::Unconfirmed => {
                 "cleanup could NOT be confirmed — the machine may still exist and bill; \
-                 check status() or the provider console before starting another"
+                 call status() before starting another, it re-checks the provider"
             }
         }
     }
@@ -973,7 +973,7 @@ impl RemoteKernelsServer {
             }
             InstanceStatus::Unknown(status) => {
                 return err_text(format!(
-                    "Machine {machine_id} has unexpected provider status {status:?}; record kept."
+                    "Machine {machine_id} has unexpected provider status {status:?}; it was left untouched and its record was kept. Tell the user what the provider reports — terminate(instance=\"{machine_id}\") ends the machine and its data if they don't want it."
                 ));
             }
             InstanceStatus::Stopped | InstanceStatus::Running | InstanceStatus::Provisioning => {}
@@ -1026,7 +1026,9 @@ impl RemoteKernelsServer {
             .map_err(|error| {
                 McpError::internal_error(
                     if needs_provider_resume {
-                        format!("Failed to resume machine {machine_id}: {error}")
+                        format!(
+                            "Failed to resume machine {machine_id}: {error}. Retry attach(\"{machine_id}\")."
+                        )
                     } else {
                         ledger_reopen_refusal(&machine_id, &error, &project_dir)
                     },
@@ -1162,7 +1164,7 @@ impl RemoteKernelsServer {
     ) -> String {
         let Ok(runtime) = self.runtime_for(runtime_name).await else {
             return format!(
-                "The machine could not be stopped again (runtime {runtime_name} unavailable) and is still billing — stop it at the provider dashboard."
+                "The machine could not be stopped again and is still billing: the {runtime_name} runtime is not usable from this session (its credentials or config are wrong). Fix that and call stop(instance=\"{machine_id}\"), or tell the user it is billing."
             );
         };
         match runtime.stop(external_id).await {
@@ -3953,7 +3955,7 @@ impl RemoteKernelsServer {
     /// verb ("retry terminate" / "call stop") vary per site.
     fn action_needed(machine_id: &str, provider_id: &str, cause: &str, remedy: &str) -> String {
         format!(
-            "ACTION NEEDED — machine {machine_id} (provider id {provider_id}) may still be running and billing: {cause}. Check it at the provider dashboard or {remedy}(instance=\"{machine_id}\")."
+            "ACTION NEEDED — machine {machine_id} (provider id {provider_id}) may still be running and billing: {cause}. {remedy}(instance=\"{machine_id}\") to end it; if that keeps failing, tell the user."
         )
     }
 
@@ -5392,7 +5394,7 @@ impl RemoteKernelsServer {
             );
             if let Err(error) = reopened {
                 return Some(format!(
-                    "Machine {machine_id}: the provider shows it running again, but recording that in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
+                    "Machine {machine_id}: the provider shows it running again, but recording that in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files (they are the only record of spend), and tell the user"
                 ));
             }
             let mut running = record.clone();
@@ -5420,7 +5422,7 @@ impl RemoteKernelsServer {
                 && let Err(error) = self.record_stopped(machine_id, None).await
             {
                 return Some(format!(
-                    "Machine {machine_id}: the provider shows it stopped, but recording that in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
+                    "Machine {machine_id}: the provider shows it stopped, but recording that in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files (they are the only record of spend), and tell the user"
                 ));
             }
         }
@@ -5456,7 +5458,7 @@ impl RemoteKernelsServer {
                 Ok(()) => {
                     if let Err(error) = self.record_stopped(machine_id, None).await {
                         return Some(format!(
-                            "Machine {machine_id}: it was stopped again after an interrupted self-cleanup check, but recording the stop in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
+                            "Machine {machine_id}: it was stopped again after an interrupted self-cleanup check, but recording the stop in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files (they are the only record of spend), and tell the user"
                         ));
                     }
                     let mut stopped = record.clone();
@@ -5547,7 +5549,7 @@ impl RemoteKernelsServer {
         {
             if let Err(error) = self.record_stopped(machine_id, None).await {
                 return Some(format!(
-                    "Machine {machine_id}: the provider confirms it stopped, but recording the stop in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files"
+                    "Machine {machine_id}: the provider confirms it stopped, but recording the stop in the local cost ledger failed ({error}); new spend stays blocked until the ledger is repaired — do not delete the ledger files (they are the only record of spend), and tell the user"
                 ));
             }
             let mut stopped = record.clone();
@@ -6264,9 +6266,11 @@ impl RemoteKernelsServer {
             match self.explicit_cleanup_instance(&target, action, false).await {
                 Ok(actual) => actions.push(format!("{}: {}", target.machine_id, actual.past_tense())),
                 Err(e) => actions.push(format!(
-                    "{}: attempted to {} but failed: {e} — it is still tracked; retry or check the provider dashboard",
+                    "{}: attempted to {} but failed: {e} — it is still tracked and may still be billing; retry {}(instance=\"{}\"), or tell the user",
                     target.machine_id,
-                    action.verb()
+                    action.verb(),
+                    action.verb(),
+                    target.machine_id
                 )),
             }
         }

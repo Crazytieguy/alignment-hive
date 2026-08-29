@@ -803,10 +803,10 @@ impl Config {
     fn template_runpod() -> String {
         let d = Self::defaults();
         format!(
-            r#"# RunPod runtime configuration. Known fields are typed; any extra fields
-# are passed through to the RunPod v2 pod-create body (kebab-case is converted
-# to camelCase); they must be v2 fields — unknown keys are rejected before the
-# API call.
+            r#"# RunPod runtime configuration. Known fields are typed; any extra fields are
+# passed through to RunPod's pod-create API (kebab-case is converted to
+# camelCase). They must be fields that API accepts — anything else is
+# rejected here, before the call, naming this file.
 [runpod]
 # Cleanup mode for RunPod machines when the session ends:
 #   "stop"      — preserve machine (reliable on RunPod; storage costs apply)
@@ -859,8 +859,8 @@ impl Config {
 # Default: {default_container_disk_gb}
 # container-disk-gb = {default_container_disk_gb}
 
-# Persistent volume size in GB: 0 to disable, otherwise at least 10 (the
-# RunPod v2 floor for a persistent mount).
+# Persistent volume size in GB: 0 to disable, otherwise at least 10 (RunPod's
+# floor for a persistent mount).
 # Default: {default_volume_gb}
 # volume-gb = {default_volume_gb}
 
@@ -881,8 +881,8 @@ impl Config {
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 
-# Acceptable CUDA versions on the host, passed through into the v2 GPU block
-# (mutually exclusive with min-cuda-version).
+# Acceptable CUDA versions on the host (mutually exclusive with
+# min-cuda-version).
 # allowed-cuda-versions = ["12.8"]
 
 # The image's own start command (its Dockerfile CMD), which pod creation

@@ -429,6 +429,25 @@ impl RunPodRuntime {
         }
     }
 
+    /// The one thing to do about a create `RunPod` refused outright. No
+    /// pod was made in any of these cases, so the question is only what to
+    /// fix before the next `start()` — and who has to fix it.
+    fn fatal_hint(&self, error: &RunPodError) -> String {
+        match error {
+            RunPodError::Api { status: 401, .. } => {
+                " RunPod rejected the API key — tell the user to check RUNPOD_API_KEY.".to_string()
+            }
+            RunPodError::Api { status: 402, .. } => {
+                " The RunPod account cannot pay for this pod — tell the user.".to_string()
+            }
+            _ => format!(
+                " No pod was created. The reason above is RunPod's; fix what it names (the \
+                 [runpod] settings live in {}) and retry start().",
+                self.config_path
+            ),
+        }
+    }
+
     /// The one outcome a create can have that neither adopting nor retrying
     /// settles: the probe never succeeded, several pods carry the name, the
     /// matched pod could not be re-read, or the listing simply did not show
@@ -944,7 +963,7 @@ impl Runtime for RunPodRuntime {
                         break;
                     }
                     CreateDisposition::Fatal => {
-                        anyhow::bail!("Failed to create pod: {error}");
+                        anyhow::bail!("Failed to create pod: {error}{}", self.fatal_hint(&error));
                     }
                     CreateDisposition::RetrySame => {
                         all_bad_request = false;
