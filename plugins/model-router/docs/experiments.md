@@ -1621,9 +1621,10 @@ admin) sets `fallbackModel`, or a script passes `--fallback-model`: every
 GPT/Grok subagent then degrades to Claude on any 404/5xx from the gateway,
 without a word in the result.
 
-Recommended (not done): `doctor` reads every settings file for
-`fallbackModel` and warns that routed subagents will silently fall back to
-it; `choosing-models` notes that `modelUsage` / the agents view, not the
-agent's self-report, shows which model served a subagent. Retest triggers:
+Adopted (router 0.1.16): `doctor` reads the winning settings file for
+`fallbackModel` and fails the `fallback-model` check when a chain is in
+effect. Not adopted: a `choosing-models` note that `modelUsage` / the agents
+view, not the agent's self-report, shows which model served a subagent —
+skill space on a rare edge case. Retest triggers:
 a changelog entry touching `fallbackModel`, `--fallback-model`,
 `CLAUDE_CODE_NO_MODEL_FALLBACK`, or subagent model errors.

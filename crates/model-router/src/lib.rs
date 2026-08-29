@@ -2,6 +2,7 @@
 
 pub mod acquire;
 pub mod capture;
+mod claude_settings;
 pub mod client_window;
 pub mod config;
 mod context_check;

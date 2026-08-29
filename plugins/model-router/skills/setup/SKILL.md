@@ -165,7 +165,11 @@ Code's env block: if Claude models report a 200K window, re-check step 5's
 `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` with the step 6 window check —
 a Claude Code release could drop the flag. A picker row that fails on its
 first turn with "There's an issue with the selected model" names a route the
-gateway doesn't serve: compare the rows with doctor's `routed-models`.
+gateway doesn't serve: compare the rows with doctor's `routed-models`. A
+`fallback-model` failure means a Claude Code `fallbackModel` setting is in
+effect, which silently re-runs a failed GPT/Grok subagent on a Claude model;
+the fix is removing that setting (then restarting Claude Code), and it is
+the user's call.
 
 ## Disable / uninstall
 

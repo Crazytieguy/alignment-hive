@@ -125,30 +125,20 @@ fn resolve_with(env: Option<&str>, home: Option<&Path>, project: &Path) -> Clien
     if let Some(value) = env.and_then(|raw| raw.parse().ok()) {
         return ClientWindow::Environment(value);
     }
-    let candidates = [
-        project.join(".claude/settings.local.json"),
-        project.join(".claude/settings.json"),
-    ];
-    candidates
-        .into_iter()
-        .chain(home.map(|home| home.join(".claude/settings.json")))
-        .find_map(|path| read_settings_window(&path))
+    crate::claude_settings::winning_setting(home, project, &["env", ENV_VAR])
+        .and_then(|(_, raw)| {
+            // Claude Code's settings `env` block is string-valued, but accept
+            // a bare number too rather than silently reporting "unresolved".
+            raw.as_u64()
+                .or_else(|| raw.as_str().and_then(|value| value.parse().ok()))
+        })
         .map_or(ClientWindow::Unresolved, ClientWindow::Settings)
-}
-
-fn read_settings_window(path: &Path) -> Option<u64> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let settings: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    let raw = settings.get("env")?.get(ENV_VAR)?;
-    // Claude Code's settings `env` block is string-valued, but accept a bare
-    // number too rather than silently reporting "unresolved".
-    raw.as_u64()
-        .or_else(|| raw.as_str().and_then(|value| value.parse().ok()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_settings::write_settings;
 
     #[test]
     fn the_declaration_wins_and_the_default_backstops_it() {
@@ -173,12 +163,6 @@ mod tests {
         assert!(UsageScale::new(1, 0).is_none());
         // No overflow at absurd token counts.
         assert_eq!(UsageScale::new(2, 1).unwrap().apply(u64::MAX), u64::MAX);
-    }
-
-    fn write_settings(dir: &Path, name: &str, body: &str) {
-        let claude = dir.join(".claude");
-        std::fs::create_dir_all(&claude).unwrap();
-        std::fs::write(claude.join(name), body).unwrap();
     }
 
     #[test]

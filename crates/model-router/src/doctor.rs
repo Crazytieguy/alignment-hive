@@ -32,6 +32,8 @@ pub struct Report {
 #[allow(clippy::too_many_lines)]
 pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     let mut checks = Vec::new();
+    let home = crate::state::home_dir();
+    let project = std::env::current_dir().unwrap_or_default();
 
     // Auth-file permissions are a property of the state directory alone, so
     // this runs before — and independently of — the config load, the
@@ -177,8 +179,10 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                 // The running service resolved its context declaration at
                 // startup; a settings edit since then silently moves every
                 // scaled route's compaction point until it restarts.
-                if let (Some(running), Some(current)) = (running_window, client_window_value())
-                    && running != current
+                if let (Some(running), Some(current)) = (
+                    running_window,
+                    crate::client_window::resolve(home.as_deref(), &project).value(),
+                ) && running != current
                 {
                     checks.push(Check {
                         name: "context-declaration",
@@ -225,12 +229,9 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     }
 
     if let Some(config) = &config {
-        let home = crate::state::home_dir();
-        let client = crate::client_window::resolve(
-            home.as_deref(),
-            &std::env::current_dir().unwrap_or_default(),
-        );
+        let client = crate::client_window::resolve(home.as_deref(), &project);
         checks.extend(crate::context_check::check(config, client));
+        checks.extend(fallback_model_check(home.as_deref(), &project));
     }
 
     let healthy = checks.iter().all(|check| check.ok);
@@ -242,15 +243,42 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     }
 }
 
-/// The context window Claude Code is configured with right now, as this
-/// process can see it.
-fn client_window_value() -> Option<u64> {
-    let home = crate::state::home_dir();
-    crate::client_window::resolve(
-        home.as_deref(),
-        &std::env::current_dir().unwrap_or_default(),
-    )
-    .value()
+/// Fails when a settings `fallbackModel` chain is in effect: Claude Code
+/// re-runs a subagent whose request 404s or 5xxs on that chain, silently,
+/// and the chain can only name Claude models, so every routed GPT/Grok agent
+/// degrades to Claude whenever the gateway fails it. Entries are reported
+/// raw: Claude Code resolves the chain at session start (dropping ids it
+/// does not recognise, expanding `"default"`, keeping three), and mirroring
+/// that here would only be confidently wrong; an all-unrecognised chain
+/// still fails since the setting is the hazard. `--fallback-model` on the
+/// command line is invisible here.
+fn fallback_model_check(
+    home: Option<&std::path::Path>,
+    project: &std::path::Path,
+) -> Option<Check> {
+    let (path, raw) = crate::claude_settings::winning_setting(home, project, &["fallbackModel"])?;
+    // Claude Code drops blank entries and ignores non-arrays, but the key
+    // still shadows lower files.
+    let chain = raw
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    (!chain.is_empty()).then(|| Check {
+        name: "fallback-model",
+        ok: false,
+        detail: format!(
+            "`fallbackModel` is set in {} ({}): a routed GPT/Grok subagent whose request the \
+             gateway fails (404/5xx) silently continues on the first Claude model of that \
+             chain instead of erroring; remove the setting and restart Claude Code (the chain \
+             is fixed at session start) to keep routed agents on their model",
+            path.display(),
+            chain.join(", "),
+        ),
+    })
 }
 
 /// Repairs and reports auth-file permissions. Not gated on any family or
@@ -554,6 +582,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_settings::write_settings;
 
     fn test_dirs(root: &std::path::Path) -> Dirs {
         Dirs {
@@ -705,6 +734,54 @@ mod tests {
         );
         let (base_url, _) = models_catalog_request(&dirs, &external).unwrap();
         assert_eq!(base_url, "http://127.0.0.1:9");
+    }
+
+    #[test]
+    fn fallback_model_fails_on_the_winning_chain_only() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        assert!(fallback_model_check(Some(home.path()), project.path()).is_none());
+
+        write_settings(
+            home.path(),
+            "settings.json",
+            r#"{"fallbackModel":["sonnet","default"]}"#,
+        );
+        let check = fallback_model_check(Some(home.path()), project.path()).unwrap();
+        assert_eq!(check.name, "fallback-model");
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("(sonnet, default)"),
+            "{}",
+            check.detail
+        );
+
+        // A project file that sets the key owns it whole, even set to nothing
+        // usable; only its own usable entries are reported.
+        write_settings(project.path(), "settings.json", r#"{"fallbackModel":[]}"#);
+        assert!(fallback_model_check(Some(home.path()), project.path()).is_none());
+        write_settings(
+            project.path(),
+            "settings.json",
+            r#"{"fallbackModel":"sonnet"}"#,
+        );
+        assert!(fallback_model_check(Some(home.path()), project.path()).is_none());
+        write_settings(
+            project.path(),
+            "settings.json",
+            r#"{"fallbackModel":[" opus ", ""]}"#,
+        );
+        let check = fallback_model_check(Some(home.path()), project.path()).unwrap();
+        assert!(check.detail.contains("(opus)"), "{}", check.detail);
+    }
+
+    #[test]
+    fn fallback_model_ignores_unreadable_and_silent_settings() {
+        let project = tempfile::tempdir().unwrap();
+        write_settings(project.path(), "settings.json", "{ not json");
+        assert!(fallback_model_check(None, project.path()).is_none());
+        write_settings(project.path(), "settings.json", r#"{"model":"opus"}"#);
+        assert!(fallback_model_check(None, project.path()).is_none());
     }
 
     #[test]
