@@ -739,6 +739,12 @@ impl AppState {
         }
     }
 
+    /// Whether accounting is already known to be broken for this project, so
+    /// callers don't retry a write that cannot succeed.
+    pub fn accounting_failed_closed(&self) -> bool {
+        self.accounting_init_error.is_some()
+    }
+
     pub fn append_ledger_event(
         &self,
         machine_id: &str,

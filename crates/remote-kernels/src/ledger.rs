@@ -133,7 +133,9 @@ pub fn now_ms() -> u64 {
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
-fn ledger_dir(project_dir: &Path) -> PathBuf {
+/// Where the spend ledger lives. Public so a message that has to tell the
+/// user which files cannot be written can name them.
+pub fn ledger_dir(project_dir: &Path) -> PathBuf {
     state_dir(project_dir).join("ledger")
 }
 
@@ -743,13 +745,32 @@ fn read_events_partial(path: &Path) -> (Vec<LedgerEvent>, Option<String>) {
         Ok(content) => content,
         Err(error) => return (Vec::new(), Some(format!("{}: {error}", path.display()))),
     };
+    // The jsonl append is the one ledger write that isn't tmp+rename, so a
+    // full disk can leave a half-written final line. That fragment is
+    // recoverable, not corruption: the append's WAL is removed only after
+    // the write is durable, so the entry is still on disk and
+    // [`EpochGuard::recover_wals`] re-applies it on the next open. Dropping
+    // the fragment therefore loses nothing, where treating it as corruption
+    // would block all future spend over a write that is about to be redone.
+    // Only a MISSING trailing newline earns this: a complete last line that
+    // will not parse is corruption like any other.
+    let torn_tail = !content.is_empty() && !content.ends_with('\n');
+    let lines: Vec<&str> = content.lines().collect();
+    let last_index = lines.len().saturating_sub(1);
     let mut events = Vec::new();
-    for (index, line) in content.lines().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
         let event: LedgerEvent = match serde_json::from_str(line) {
             Ok(event) => event,
+            Err(error) if torn_tail && index == last_index => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "dropping a torn final ledger line; its WAL re-applies the entry: {error}"
+                );
+                break;
+            }
             Err(error) => {
                 return (
                     events,
@@ -1377,6 +1398,37 @@ mod tests {
         let recovered = EpochGuard::acquire(dir.path()).unwrap();
         assert_ne!(recovered.manifest().unwrap().epoch_id, old_epoch);
         assert!(!ledger_dir(dir.path()).join("machine.jsonl").exists());
+    }
+
+    /// A half-written final line is a torn append, not corruption: the
+    /// entry's WAL is still on disk and is re-applied on the next open, so
+    /// dropping the fragment recovers where failing closed would block all
+    /// future spend. A COMPLETE last line that will not parse still fails.
+    #[test]
+    fn a_torn_final_line_is_dropped_but_a_complete_bad_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = EpochGuard::acquire(dir.path()).unwrap();
+        guard
+            .append(
+                "main",
+                "provisioned",
+                event(EventKind::Provisioned, 1.0, 0.0, 0, None, None),
+            )
+            .unwrap();
+        let path = ledger_dir(dir.path()).join("main.jsonl");
+
+        let intact = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{intact}{{\"uuid\":\"half-writ")).unwrap();
+        let (events, corruption) = read_events_partial(&path);
+        assert_eq!(events.len(), 1, "{corruption:?}");
+        assert!(corruption.is_none(), "{corruption:?}");
+        assert!(guard.fold(now_ms()).is_ok());
+
+        // Same bytes, terminated: nothing says this was interrupted, so it
+        // is corruption like any other.
+        std::fs::write(&path, format!("{intact}{{\"uuid\":\"half-writ\n")).unwrap();
+        let (_, corruption) = read_events_partial(&path);
+        assert!(corruption.is_some());
     }
 
     #[test]

@@ -485,6 +485,47 @@ fn decide_unconfirmed(
     }
 }
 
+/// How many times a ledger append is tried before its failure is reported.
+const LEDGER_APPEND_ATTEMPTS: u32 = 3;
+
+/// What an attach says when the machine is already billing but its spend
+/// could not be recorded. Both branches end in something the reader can do:
+/// `stop()` works from the durable record, so the money can always be ended
+/// even though the attach was refused.
+fn ledger_reopen_refusal(
+    machine_id: &str,
+    error: &anyhow::Error,
+    project_dir: &std::path::Path,
+) -> String {
+    if is_permanent_ledger_failure(error) {
+        // Nothing here can repair this, and the machine bills meanwhile:
+        // end the money, keep the files, hand it to the user.
+        format!(
+            "Spend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Attaching was refused so untracked spend cannot accumulate. Machine {machine_id} is still billing: stop() it (it keeps its data). Do NOT delete the ledger files; tell the user."
+        )
+    } else {
+        format!(
+            "Machine {machine_id} is running and billing at the provider, but its spend could not be recorded ({error}); attach was refused. Retry attach(); if it fails again, stop() the machine (it keeps its data) and tell the user the spend ledger at {} cannot be written.",
+            crate::ledger::ledger_dir(project_dir).display()
+        )
+    }
+}
+
+/// Whether a ledger failure is the permanent kind — a torn line, a bad
+/// manifest, an orphan WAL — rather than the filesystem briefly refusing a
+/// write. The two need different things said about them: one is the user's
+/// to inspect, the other is worth retrying.
+fn is_permanent_ledger_failure(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<crate::ledger::LedgerError>(),
+        Some(
+            crate::ledger::LedgerError::Corrupt(_)
+                | crate::ledger::LedgerError::CorruptFold { .. }
+                | crate::ledger::LedgerError::Json(_)
+        )
+    )
+}
+
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -987,9 +1028,7 @@ impl RemoteKernelsServer {
                     if needs_provider_resume {
                         format!("Failed to resume machine {machine_id}: {error}")
                     } else {
-                        format!(
-                            "Machine {machine_id} is already running and billing at the provider, but reopening its cost ledger failed ({error}); attach was refused so spend cannot go untracked — stop() it, or repair the ledger."
-                        )
+                        ledger_reopen_refusal(&machine_id, &error, &project_dir)
                     },
                     None,
                 )
@@ -1185,48 +1224,63 @@ impl RemoteKernelsServer {
         let skip_finalize = params.0.skip_pre_stop_command.unwrap_or(false);
         let requested = params.0.instance;
 
-        let resolved = {
+        let (resolved, has_live) = {
             let state = self.state.lock().await;
-            state.resolve_instance(requested.as_deref())
+            (
+                state.resolve_instance(requested.as_deref()),
+                !state.instances.is_empty(),
+            )
         };
-        let machine_id = match resolved {
-            Ok(machine_id) => machine_id,
-            Err(message) => {
-                if let Some(machine_id) = self.resolve_record_only(requested.as_deref()).await {
-                    let project_dir = self.state.lock().await.project_dir.clone();
-                    let stopped = crate::state::load_instance_record(&project_dir, &machine_id)
-                        .is_some_and(|record| record.phase == Phase::Stopped);
-                    return err_text(if stopped {
-                        format!(
-                            "Machine {machine_id} is already stopped. Use attach(\"{machine_id}\") to \
-                             resume it or terminate(instance=\"{machine_id}\") to delete it."
-                        )
-                    } else {
-                        format!(
-                            "Machine {machine_id} is not attached in this server, so stop() can't \
-                             reach it — it may still be running and billing. Use attach(\"{machine_id}\") \
-                             first, or terminate(instance=\"{machine_id}\") to delete it."
-                        )
-                    });
+        let target = match resolved {
+            Ok(machine_id) => {
+                {
+                    let state = self.state.lock().await;
+                    if let Some(message) = state
+                        .instances
+                        .get(&machine_id)
+                        .and_then(Self::fenced_message)
+                    {
+                        return err_text(message);
+                    }
                 }
-                return err_text(message);
+                let Some(target) = self.live_target(&machine_id).await else {
+                    return err_text(format!("Machine {machine_id:?} is no longer active."));
+                };
+                target
+            }
+            // Record-only, exactly like terminate(): the machine is not
+            // attached here, but its record says where it is and it may well
+            // be billing. Refusing with "attach() first" was a closed loop —
+            // that is the call a failed attach has just refused.
+            Err(message) => {
+                // With no explicit instance and several live machines the
+                // ambiguity must propagate: a bare stop() must never pick
+                // (and stop) an unrelated detached machine.
+                if requested.is_none() && has_live {
+                    return err_text(message);
+                }
+                let Some(machine_id) = self.resolve_record_only(requested.as_deref()).await else {
+                    return err_text(message);
+                };
+                let project_dir = self.state.lock().await.project_dir.clone();
+                let Some(record) = crate::state::load_instance_record(&project_dir, &machine_id)
+                else {
+                    return err_text(message);
+                };
+                if record.phase == Phase::Stopped {
+                    return err_text(format!(
+                        "Machine {machine_id} is already stopped. Use attach(\"{machine_id}\") to \
+                         resume it or terminate(instance=\"{machine_id}\") to delete it."
+                    ));
+                }
+                CleanupTarget {
+                    machine_id,
+                    external_id: record.external_id,
+                    runtime: record.runtime,
+                }
             }
         };
-
-        {
-            let state = self.state.lock().await;
-            if let Some(message) = state
-                .instances
-                .get(&machine_id)
-                .and_then(Self::fenced_message)
-            {
-                return err_text(message);
-            }
-        }
-
-        let Some(target) = self.live_target(&machine_id).await else {
-            return err_text(format!("Machine {machine_id:?} is no longer active."));
-        };
+        let machine_id = target.machine_id.clone();
 
         tracing::info!(instance = %machine_id, external_id = %target.external_id, "Stopping machine...");
         self.cancel_finish_intent(&machine_id).await;
@@ -2029,7 +2083,7 @@ impl RemoteKernelsServer {
             Err(error) => {
                 let _ = write!(
                     info,
-                    "\n\nSpend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Starting or attaching machines is blocked so untracked spend cannot accumulate. Existing machines are unaffected — they are still billing, and stop() and terminate() still work. Do NOT delete the ledger files (they are the only record of spend); tell the user so they can inspect or repair the ledger."
+                    "\n\nSpend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Starting or attaching machines is blocked so untracked spend cannot accumulate. Existing machines are unaffected — they are still billing, and stop()/terminate() still reach the provider, so the money can be ended (recording the result stays blocked until the ledger is repaired). Do NOT delete the ledger files (they are the only record of spend); tell the user so they can inspect or repair the ledger."
                 );
             }
         }
@@ -4794,7 +4848,7 @@ impl RemoteKernelsServer {
             .map_err(|error| {
                 McpError::internal_error(
                     format!(
-                        "Spend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Starting or attaching machines is blocked so untracked spend cannot accumulate. Existing machines are unaffected — they are still billing, and stop() and terminate() still work. Do NOT delete the ledger files (they are the only record of spend); tell the user so they can inspect or repair the ledger."
+                        "Spend tracking is broken: the local cost ledger (in this project's .claude/remote-kernels state directory) is corrupt or ambiguous ({error}). Starting or attaching machines is blocked so untracked spend cannot accumulate. Existing machines are unaffected — they are still billing, and stop()/terminate() still reach the provider, so the money can be ended (recording the result stays blocked until the ledger is repaired). Do NOT delete the ledger files (they are the only record of spend); tell the user so they can inspect or repair the ledger."
                     ),
                     None,
                 )
@@ -6055,6 +6109,17 @@ impl RemoteKernelsServer {
                 instance.phase = Phase::Stopped;
                 state.save_record(&target.machine_id, &instance.record())?;
             }
+        } else if action == CleanupAction::Stop {
+            // A record-only stop has no in-memory instance to persist from,
+            // but the record must still say stopped — otherwise status()
+            // keeps reporting a running machine that isn't.
+            if let Some(mut record) =
+                crate::state::load_instance_record(&state.project_dir, &target.machine_id)
+                && record.external_id == target.external_id
+            {
+                record.phase = Phase::Stopped;
+                state.save_record(&target.machine_id, &record)?;
+            }
         }
         if action == CleanupAction::Terminate
             && crate::state::load_instance_record(&state.project_dir, &target.machine_id)
@@ -6090,6 +6155,41 @@ impl RemoteKernelsServer {
         Ok(())
     }
 
+    /// Open the billing interval, retrying a filesystem hiccup. A full disk,
+    /// a momentary permission failure or an interrupted write usually clears
+    /// within a moment, and the alternative here is refusing to supervise a
+    /// machine that is already billing. Corruption never clears, so it comes
+    /// straight back — the caller says something different about it.
+    async fn open_billing_interval(&self, machine_id: &str, note: &str) -> anyhow::Result<()> {
+        let mut delay = std::time::Duration::from_millis(100);
+        let mut attempt = 1;
+        loop {
+            let appended = self.state.lock().await.append_ledger_event(
+                machine_id,
+                crate::ledger::EventKind::Resumed,
+                None,
+                None,
+                None,
+                Some(note.to_string()),
+            );
+            let Err(error) = appended else { return Ok(()) };
+            if attempt == LEDGER_APPEND_ATTEMPTS
+                || is_permanent_ledger_failure(&error)
+                || self.state.lock().await.accounting_failed_closed()
+            {
+                return Err(error);
+            }
+            tracing::warn!(
+                instance = machine_id,
+                attempt,
+                "cost ledger append failed; retrying: {error}"
+            );
+            tokio::time::sleep(delay).await;
+            delay *= 3;
+            attempt += 1;
+        }
+    }
+
     async fn accounted_resume<F>(
         &self,
         machine_id: &str,
@@ -6099,14 +6199,7 @@ impl RemoteKernelsServer {
     where
         F: std::future::Future<Output = anyhow::Result<()>>,
     {
-        self.state.lock().await.append_ledger_event(
-            machine_id,
-            crate::ledger::EventKind::Resumed,
-            None,
-            None,
-            None,
-            Some(note.to_string()),
-        )?;
+        self.open_billing_interval(machine_id, note).await?;
         if let Err(error) = resume.await {
             // An authoritative failure closes the conservatively-opened
             // interval. Process death leaves it open, which is the required
@@ -6704,6 +6797,74 @@ mod tests {
         };
         let deadline = feed.remaining_secs().await.expect("a deadline");
         assert!((1750..=1800).contains(&deadline), "{deadline}s");
+    }
+
+    /// A machine that is already billing but whose spend cannot be recorded
+    /// gets one of two answers, and both are executable: a filesystem
+    /// failure is retried first and then handed back as "retry `attach()`,
+    /// else `stop()` it", while corruption — which retrying cannot fix —
+    /// says `stop()` it and hand the ledger to the user.
+    #[tokio::test]
+    async fn an_unrecordable_reopen_is_classified_and_never_dead_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        let mut instance = InstanceState::provisioning(
+            "main".to_string(),
+            None,
+            "runpod".to_string(),
+            "provider-id".to_string(),
+            "GPU".to_string(),
+            2.0,
+            Cleanup::Terminate,
+            "token".to_string(),
+            "/tmp/key".into(),
+            false,
+        );
+        instance.phase = Phase::Stopped;
+        state
+            .admit_provision(
+                "main",
+                &instance.record(),
+                &crate::state::LifecycleRecord::default(),
+            )
+            .unwrap();
+        let server = RemoteKernelsServer::new(toml::from_str("").unwrap(), state, None);
+
+        // A complete line that is not an event is corruption: permanent, so
+        // the retry ladder must not spend three tries on it.
+        let ledger = crate::ledger::ledger_dir(dir.path()).join("main.jsonl");
+        let mut broken = std::fs::read_to_string(&ledger).unwrap();
+        broken.push_str("{not an event}\n");
+        std::fs::write(&ledger, &broken).unwrap();
+
+        let error = server
+            .open_billing_interval("main", "already billing at the provider")
+            .await
+            .unwrap_err();
+        assert!(super::is_permanent_ledger_failure(&error), "{error}");
+        let refusal = super::ledger_reopen_refusal("main", &error, dir.path());
+        assert!(refusal.contains("Spend tracking is broken"), "{refusal}");
+        assert!(
+            refusal.contains("stop() it (it keeps its data)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("Do NOT delete the ledger files"),
+            "{refusal}"
+        );
+
+        // A filesystem failure reads differently and names the files.
+        let io = anyhow::Error::new(crate::ledger::LedgerError::Io(std::io::Error::other(
+            "no space left on device",
+        )));
+        assert!(!super::is_permanent_ledger_failure(&io));
+        let refusal = super::ledger_reopen_refusal("main", &io, dir.path());
+        assert!(refusal.contains("Retry attach()"), "{refusal}");
+        assert!(refusal.contains("stop() the machine"), "{refusal}");
+        assert!(
+            refusal.contains(&crate::ledger::ledger_dir(dir.path()).display().to_string()),
+            "{refusal}"
+        );
     }
 
     #[test]

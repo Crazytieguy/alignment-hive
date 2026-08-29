@@ -1677,6 +1677,60 @@ async fn failing_terminate_preop_downgrades_to_confirmed_stop() {
         .unwrap();
 }
 
+/// stop() must work from the durable record, the way terminate() always
+/// has. Refusing with "attach() first" was a closed loop: the messages that
+/// tell an agent to stop a billing machine are reachable exactly when
+/// attaching just failed.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn stop_ends_the_billing_of_a_machine_this_server_never_attached() {
+    let dir = tempfile::tempdir().unwrap();
+    let (machine_id, external_id) = {
+        let server = server_in(dir.path(), None);
+        let (machine_id, _) = start_machine(&server, Some("record-only")).await;
+        let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+        (machine_id, record.external_id)
+    };
+
+    // A fresh server over the same project: the machine is billing, its
+    // record says where it is, and nothing is attached here.
+    let server = server_in(dir.path(), None);
+    let result = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .expect("stop protocol error");
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    assert!(text.contains("stopped"), "{text}");
+
+    let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
+    assert_eq!(
+        runtime.describe(&external_id).await.unwrap(),
+        remote_kernels::runtime::InstanceStatus::Stopped
+    );
+    // ...and the record agrees, so status() doesn't keep reporting a
+    // machine that is running when it isn't.
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    assert_eq!(record.phase, remote_kernels::state::Phase::Stopped);
+
+    // A second stop is the "already stopped" answer, not a provider call.
+    let again = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .unwrap();
+    assert!(
+        text_of(&again).contains("already stopped"),
+        "{}",
+        text_of(&again)
+    );
+}
+
 /// A create the provider never confirmed leaves a machine with no local
 /// record — the one case where a machine can bill entirely untracked. The
 /// marker start() keeps is what closes that: status() finds the machine by
