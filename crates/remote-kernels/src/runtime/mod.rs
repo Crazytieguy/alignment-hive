@@ -281,6 +281,8 @@ pub struct UnconfirmedCreate {
     /// What the caller is told; the runtime composes it because only it
     /// knows what bounds the exposure.
     pub summary: String,
+    /// The provider failure alone, for the durable marker's own row.
+    pub cause: String,
     /// The provider-side name the create asked for — how the machine is
     /// found again if it does exist.
     pub expected_name: String,

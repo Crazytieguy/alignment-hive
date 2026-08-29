@@ -157,6 +157,37 @@ pub struct LifecycleRecord {
     pub finalize_unsupervised: bool,
 }
 
+/// A create whose outcome the provider never confirmed
+/// (`instances/<machine_id>/unconfirmed.json`).
+///
+/// Written INSTEAD of an [`InstanceRecord`], because there may be no machine
+/// at all: it carries no ledger event, no phase and no spend, and nothing
+/// that walks instance records sees it. `status()` settles it by asking the
+/// provider whether a machine named `expected_name` exists — one match is
+/// promoted to a real record, several reach the user, none keeps waiting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnconfirmedRecord {
+    pub runtime: String,
+    /// Provider-side name the create asked for — the only handle on a
+    /// machine whose id was never learned.
+    pub expected_name: String,
+    pub created_at_epoch: u64,
+    /// The provider failure the create ended with.
+    pub error: String,
+    /// Minutes after which the machine, if it exists, ends itself with no
+    /// action here. `None`: nothing bounds it.
+    #[serde(default)]
+    pub self_halt_mins: Option<u64>,
+    /// What a promotion needs to turn a found machine into a usable record:
+    /// the credentials the create already handed it. Without them the
+    /// machine could only be terminated, never used.
+    pub cleanup: Cleanup,
+    pub jupyter_token: String,
+    pub ssh_key_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutcomeMarker {
     #[serde(alias = "op_id")]
@@ -865,6 +896,24 @@ impl AppState {
         Ok(())
     }
 
+    /// Drop an unconfirmed create entirely: the marker, the instance
+    /// directory it lives in, and the key material minted for a machine that
+    /// was never confirmed. No ledger involvement — a marker never admitted
+    /// any spend, so there is no interval to close.
+    pub fn clear_unconfirmed(&self, machine_id: &str) -> anyhow::Result<()> {
+        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+        let managed_dir = self.keys_root.join("instances").join(machine_id);
+        let _ = std::fs::remove_dir_all(&managed_dir);
+        let dir = instance_dir(&self.project_dir, machine_id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+            if let Some(parent) = dir.parent() {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
+
     /// The per-instance SSH key path, under [`Self::keys_root`] (NOT the
     /// project state dir — see the field doc). The record persists whatever
     /// absolute path was actually used, so older records keep working.
@@ -1028,6 +1077,64 @@ pub fn save_lifecycle_record(
     std::fs::rename(temporary, dir.join("lifecycle.json"))?;
     std::fs::File::open(&dir)?.sync_all()?;
     Ok(())
+}
+
+fn unconfirmed_path(project_dir: &Path, machine_id: &str) -> PathBuf {
+    instance_dir(project_dir, machine_id).join("unconfirmed.json")
+}
+
+/// Persist the marker for a create the provider never confirmed. Same
+/// tmp+rename durability as every other record here: the marker is the only
+/// local trace of a machine that may be billing.
+pub fn save_unconfirmed_record(
+    project_dir: &Path,
+    machine_id: &str,
+    record: &UnconfirmedRecord,
+) -> anyhow::Result<()> {
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    let dir = instance_dir(project_dir, machine_id);
+    std::fs::create_dir_all(&dir)?;
+    ensure_gitignore(project_dir);
+    let temporary = dir.join(format!(".unconfirmed.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(record)?)?;
+    std::fs::File::open(&temporary)?.sync_all()?;
+    std::fs::rename(temporary, unconfirmed_path(project_dir, machine_id))?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    Ok(())
+}
+
+pub fn load_unconfirmed_record(project_dir: &Path, machine_id: &str) -> Option<UnconfirmedRecord> {
+    validate_machine_id(machine_id).ok()?;
+    let content = std::fs::read_to_string(unconfirmed_path(project_dir, machine_id)).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Every unconfirmed create still waiting to be settled.
+pub fn list_unconfirmed_records(project_dir: &Path) -> Vec<(String, UnconfirmedRecord)> {
+    let instances_dir = state_dir(project_dir).join("instances");
+    let Ok(entries) = std::fs::read_dir(&instances_dir) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for entry in entries.flatten() {
+        let machine_id = entry.file_name().to_string_lossy().to_string();
+        if let Some(record) = load_unconfirmed_record(project_dir, &machine_id) {
+            records.push((machine_id, record));
+        }
+    }
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    records
+}
+
+/// Drop just the marker, keeping whatever else the instance directory holds
+/// — used when the machine turned out to exist and became a real record.
+pub fn clear_unconfirmed_marker(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    match std::fs::remove_file(unconfirmed_path(project_dir, machine_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn clear_lifecycle_record(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {

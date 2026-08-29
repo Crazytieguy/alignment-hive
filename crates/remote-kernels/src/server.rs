@@ -442,6 +442,49 @@ fn clamp_timeout_secs(secs: u64) -> u64 {
     secs.min(31_536_000)
 }
 
+/// What to do about one unconfirmed create, given what the provider lists
+/// under the name it asked for. Pure so every branch is testable without a
+/// provider.
+#[derive(Debug, PartialEq, Eq)]
+enum UnconfirmedDecision {
+    /// Exactly one machine wears the name: it is this one.
+    Adopt(String),
+    /// Several do, and which is this machine's is not knowable from here.
+    Ambiguous,
+    /// None does, and none can still be billing: the window in which a
+    /// created machine would have ended itself has passed.
+    Expired,
+    /// None does — which is only "not listed", never "not created".
+    Keep,
+}
+
+/// Margin on top of a machine's self-halt window before its marker may be
+/// dropped: the machine checks the deadline at a coarse granularity, and a
+/// provider listing lags its own writes.
+const UNCONFIRMED_CLEAR_MARGIN_SECS: u64 = 600;
+
+fn decide_unconfirmed(
+    marker: &crate::state::UnconfirmedRecord,
+    found: &[String],
+    now: u64,
+) -> UnconfirmedDecision {
+    match found {
+        [external_id] => UnconfirmedDecision::Adopt(external_id.clone()),
+        [] => match marker.self_halt_mins {
+            // A machine the guard stopped would still be LISTED, so an
+            // unlisted one past this window is gone, not hiding.
+            Some(mins)
+                if now.saturating_sub(marker.created_at_epoch)
+                    > mins.saturating_mul(60) + UNCONFIRMED_CLEAR_MARGIN_SECS =>
+            {
+                UnconfirmedDecision::Expired
+            }
+            _ => UnconfirmedDecision::Keep,
+        },
+        _ => UnconfirmedDecision::Ambiguous,
+    }
+}
+
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -592,27 +635,35 @@ impl RemoteKernelsServer {
         // A fresh machine under a reused machine id must not inherit the previous
         // machine's TOFU host-key pin (see SshEndpoint) — it WILL differ.
         self.state.lock().await.reset_known_hosts(&machine_id);
-        let handle = runtime
-            .provision(&req)
-            .await
-            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
-
-        let external_volume_id = (runtime_name == "runpod")
-            .then(|| self.config.runpod.network_volume_id.clone())
-            .flatten();
-        let lifecycle = crate::state::LifecycleRecord {
-            storage_rate_per_hr: Some(if external_volume_id.is_some() {
-                0.0
-            } else {
-                handle.storage_rate_per_hr
-            }),
-            storage_rate_note: external_volume_id.as_ref().map_or_else(
-                || handle.storage_rate_note.clone(),
-                |id| Some(format!("external volume {id}: not budget-tracked")),
-            ),
-            external_volume_id,
-            ..crate::state::LifecycleRecord::default()
+        let handle = match runtime.provision(&req).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                // A create the provider never confirmed may have made a
+                // machine under the name it asked for; everything needed to
+                // settle it later — and to USE it if it turns out to exist —
+                // is in hand right here and nowhere else.
+                let marker = error
+                    .downcast_ref::<crate::runtime::UnconfirmedCreate>()
+                    .map(|unconfirmed| crate::state::UnconfirmedRecord {
+                        runtime: runtime_name.clone(),
+                        expected_name: unconfirmed.expected_name.clone(),
+                        created_at_epoch: now_epoch(),
+                        error: unconfirmed.cause.clone(),
+                        self_halt_mins: unconfirmed.self_halt_mins,
+                        cleanup,
+                        jupyter_token: jupyter_token.clone(),
+                        ssh_key_path: ssh_keypair.private_key_path.display().to_string(),
+                        label: label.clone(),
+                    });
+                return Err(McpError::internal_error(
+                    self.keep_unconfirmed_create(&machine_id, marker, &error)
+                        .await,
+                    None,
+                ));
+            }
         };
+
+        let lifecycle = self.provision_lifecycle(&runtime_name, &handle);
 
         // Record the instance and first ledger event durably the moment it exists at the provider —
         // a crash from here on must not orphan a paid machine.
@@ -720,6 +771,60 @@ impl RemoteKernelsServer {
                  background — poll status() until it shows running before creating kernels.{note}{reconcile_note}",
                 handle.external_id, handle.gpu_name
             ))]))
+        }
+    }
+
+    /// The lifecycle record a freshly provisioned (or freshly adopted)
+    /// machine starts life with: storage pricing, and whether its volume is
+    /// an external one this budget does not track.
+    fn provision_lifecycle(
+        &self,
+        runtime_name: &str,
+        handle: &crate::runtime::InstanceHandle,
+    ) -> crate::state::LifecycleRecord {
+        let external_volume_id = (runtime_name == "runpod")
+            .then(|| self.config.runpod.network_volume_id.clone())
+            .flatten();
+        crate::state::LifecycleRecord {
+            storage_rate_per_hr: Some(if external_volume_id.is_some() {
+                0.0
+            } else {
+                handle.storage_rate_per_hr
+            }),
+            storage_rate_note: external_volume_id.as_ref().map_or_else(
+                || handle.storage_rate_note.clone(),
+                |id| Some(format!("external volume {id}: not budget-tracked")),
+            ),
+            external_volume_id,
+            ..crate::state::LifecycleRecord::default()
+        }
+    }
+
+    /// Turn a failed provision into the message the caller gets, keeping the
+    /// durable marker first when the provider never confirmed the create's
+    /// outcome. The marker is the only local trace of a machine that may
+    /// exist and may be billing: `status()` settles it later by name, and
+    /// `terminate(instance=...)` can end whatever it finds. Every other
+    /// failure is reported as-is — nothing was created.
+    async fn keep_unconfirmed_create(
+        &self,
+        machine_id: &str,
+        marker: Option<crate::state::UnconfirmedRecord>,
+        error: &anyhow::Error,
+    ) -> String {
+        let Some(record) = marker else {
+            return format!("{error}");
+        };
+        let project_dir = self.state.lock().await.project_dir.clone();
+        match crate::state::save_unconfirmed_record(&project_dir, machine_id, &record) {
+            Ok(()) => format!("{error} It is tracked as machine {machine_id}."),
+            // Nothing local can settle it now, so the one remaining move is
+            // to hand the fact to the user.
+            Err(write_error) => format!(
+                "{error} Recording it locally failed ({write_error}), so status() cannot \
+                 keep checking — tell the user a machine named {} may exist at {}.",
+                record.expected_name, record.runtime
+            ),
         }
     }
 
@@ -1146,6 +1251,17 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let skip_finalize = params.0.skip_pre_terminate_command.unwrap_or(false);
         let requested = params.0.instance;
+
+        // An unconfirmed create is not a machine yet: it may or may not have
+        // one behind it, so terminate resolves it by name and ends whatever
+        // wears that name. Only ever by explicit id — this must not be what
+        // a bare terminate() picks.
+        if let Some(machine_id) = requested.as_deref() {
+            let project_dir = self.state.lock().await.project_dir.clone();
+            if let Some(marker) = crate::state::load_unconfirmed_record(&project_dir, machine_id) {
+                return self.terminate_unconfirmed(machine_id, &marker).await;
+            }
+        }
 
         // Live instance, or a record-only (stopped/crashed) machine.
         let live_name = {
@@ -1676,6 +1792,10 @@ impl RemoteKernelsServer {
         let only = params.0.instance;
         let mut sections: Vec<String> = Vec::new();
         let project_dir = self.state.lock().await.project_dir.clone();
+        // Settle creates whose outcome was never confirmed FIRST: one that
+        // turns out to have made a machine becomes a normal row below, in
+        // this same call.
+        sections.extend(self.settle_unconfirmed(only.as_deref()).await);
         let initial_records = crate::state::list_instance_records(&project_dir)
             .into_iter()
             .filter(|(id, _)| only.as_deref().is_none_or(|requested| requested == id))
@@ -1881,7 +2001,7 @@ impl RemoteKernelsServer {
             sections.push(section);
         }
 
-        if !has_records {
+        if !has_records && crate::state::list_unconfirmed_records(&project_dir).is_empty() {
             sections.push("No durable machine records found.".to_string());
         }
 
@@ -4881,6 +5001,248 @@ impl RemoteKernelsServer {
         messages
     }
 
+    /// Settle every create whose outcome the provider never confirmed: ask
+    /// the provider whether the machine it might have made exists, and act
+    /// on the answer. One row per marker, in `status()`'s output.
+    async fn settle_unconfirmed(&self, only: Option<&str>) -> Vec<String> {
+        let project_dir = self.state.lock().await.project_dir.clone();
+        let mut rows = Vec::new();
+        for (machine_id, marker) in crate::state::list_unconfirmed_records(&project_dir)
+            .into_iter()
+            .filter(|(id, _)| only.is_none_or(|requested| requested == id))
+        {
+            rows.push(self.settle_one_unconfirmed(&machine_id, &marker).await);
+        }
+        rows
+    }
+
+    async fn settle_one_unconfirmed(
+        &self,
+        machine_id: &str,
+        marker: &crate::state::UnconfirmedRecord,
+    ) -> String {
+        let name = &marker.expected_name;
+        let runtime = match self.runtime_for(&marker.runtime).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return format!(
+                    "Machine {machine_id} [unconfirmed]: a machine named {name} may exist at \
+                     {}, but that runtime is not usable from this session ({error}). Fix the \
+                     credentials or config (this won't heal on its own), then call status().",
+                    marker.runtime
+                );
+            }
+        };
+        let found = match runtime.find_by_name(name).await {
+            Ok(found) => found,
+            Err(error) => {
+                return format!(
+                    "Machine {machine_id} [unconfirmed]: a machine named {name} may exist at \
+                     {}, but it could not be looked up ({error}); this retries on the next \
+                     status().",
+                    marker.runtime
+                );
+            }
+        };
+        match decide_unconfirmed(marker, &found, now_epoch()) {
+            UnconfirmedDecision::Adopt(external_id) => {
+                self.adopt_unconfirmed(machine_id, marker, &external_id)
+                    .await
+            }
+            // Which one this create made is not knowable from here, and
+            // guessing would leave the others billing untracked.
+            UnconfirmedDecision::Ambiguous => format!(
+                "Machine {machine_id} [unconfirmed]: {} machines at {} are named {name} ({}); \
+                 remote-kernels cannot tell which is this machine's. \
+                 terminate(instance=\"{machine_id}\") ends all of them, or tell the user to \
+                 pick one in the RunPod console.",
+                found.len(),
+                marker.runtime,
+                found.join(", ")
+            ),
+            // Nothing is listed and the window in which a created machine
+            // would have ended itself has passed. A stopped one would still
+            // be listed, so an unlisted one cannot still be billing.
+            UnconfirmedDecision::Expired => {
+                match self.state.lock().await.clear_unconfirmed(machine_id) {
+                    Ok(()) => format!(
+                        "Machine {machine_id}: no machine named {name} exists at {}, and any \
+                         that had been created would have shut itself down by now; its \
+                         unconfirmed record was cleared.",
+                        marker.runtime
+                    ),
+                    Err(error) => format!(
+                        "Machine {machine_id} [unconfirmed]: no machine named {name} exists at \
+                         {}, but clearing its record failed ({error}); it will keep appearing \
+                         here.",
+                        marker.runtime
+                    ),
+                }
+            }
+            UnconfirmedDecision::Keep => {
+                let bound = marker.self_halt_mins.map_or_else(
+                    || " If it exists it keeps billing until terminated.".to_string(),
+                    |mins| {
+                        format!(
+                            " If it exists it shuts itself down within {mins} minutes of \
+                             creation."
+                        )
+                    },
+                );
+                format!(
+                    "Machine {machine_id} [unconfirmed]: creating it failed with an unclear \
+                     outcome ({}), so a machine named {name} may exist at {}. status() keeps \
+                     checking and adopts it if it appears; terminate(instance=\"{machine_id}\") \
+                     ends it if it does exist.{bound}",
+                    marker.error, marker.runtime
+                )
+            }
+        }
+    }
+
+    /// The machine a never-confirmed create turned out to have made: give it
+    /// the durable record and billing interval it never got, using the
+    /// credentials that create already handed it, so it is a normal machine
+    /// from here on.
+    async fn adopt_unconfirmed(
+        &self,
+        machine_id: &str,
+        marker: &crate::state::UnconfirmedRecord,
+        external_id: &str,
+    ) -> String {
+        let name = &marker.expected_name;
+        let runtime = match self.runtime_for(&marker.runtime).await {
+            Ok(runtime) => runtime,
+            Err(error) => return format!("Machine {machine_id} [unconfirmed]: {error}"),
+        };
+        let handle = match runtime.get_handle(external_id).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                return format!(
+                    "Machine {machine_id} [unconfirmed]: a machine named {name} exists at {} \
+                     ({external_id}) and is billing, but reading it failed ({error}); this \
+                     retries on the next status().",
+                    marker.runtime
+                );
+            }
+        };
+        let record = InstanceRecord {
+            machine_id: Some(machine_id.to_string()),
+            label: marker.label.clone(),
+            runtime: marker.runtime.clone(),
+            external_id: external_id.to_string(),
+            phase: Phase::Provisioning,
+            cleanup: marker.cleanup,
+            jupyter_token: Some(marker.jupyter_token.clone()),
+            ssh_key_path: Some(marker.ssh_key_path.clone()),
+            gpu_name: Some(handle.gpu_name.clone()),
+            cost_per_hr: handle.cost_per_hr.unwrap_or(0.0),
+            proxy_port_mapped: handle.proxy_port_mapped,
+            kernels: Vec::new(),
+        };
+        let lifecycle = self.provision_lifecycle(&marker.runtime, &handle);
+        let (project_dir, admitted) = {
+            let state = self.state.lock().await;
+            (
+                state.project_dir.clone(),
+                state.admit_provision(machine_id, &record, &lifecycle),
+            )
+        };
+        if let Err(error) = admitted {
+            return format!(
+                "Machine {machine_id} [unconfirmed]: a machine named {name} exists at {} \
+                 ({external_id}) and is billing, but recording it locally failed ({error}). \
+                 Retry status(); if it keeps failing, terminate(instance=\"{machine_id}\") \
+                 ends it.",
+                marker.runtime
+            );
+        }
+        // The record supersedes the marker; a leftover would re-adopt.
+        if let Err(error) = crate::state::clear_unconfirmed_marker(&project_dir, machine_id) {
+            tracing::warn!(
+                instance = machine_id,
+                "stale unconfirmed marker kept: {error}"
+            );
+        }
+        format!(
+            "Machine {machine_id}: the machine its create never confirmed does exist \
+             ({external_id}) and was adopted; its spend is tracked from now. \
+             attach(\"{machine_id}\") to use it, or terminate(instance=\"{machine_id}\") to \
+             end it."
+        )
+    }
+
+    /// `terminate()` on an unconfirmed create: end everything the provider
+    /// lists under the name that create asked for, then drop the marker.
+    /// Terminating all of them is what makes the duplicate-name advice real
+    /// — none of them is wanted, and one of them is this machine's.
+    async fn terminate_unconfirmed(
+        &self,
+        machine_id: &str,
+        marker: &crate::state::UnconfirmedRecord,
+    ) -> Result<CallToolResult, McpError> {
+        let name = &marker.expected_name;
+        let runtime = self.runtime_for(&marker.runtime).await?;
+        let found = match runtime.find_by_name(name).await {
+            Ok(found) => found,
+            Err(error) => {
+                return err_text(format!(
+                    "Machine {machine_id}: could not ask {} whether a machine named {name} \
+                     exists ({error}); nothing was terminated and its record was kept. Retry \
+                     terminate(instance=\"{machine_id}\").",
+                    marker.runtime
+                ));
+            }
+        };
+        let mut failed = Vec::new();
+        for external_id in &found {
+            if let Err(error) = runtime.terminate(external_id).await {
+                failed.push(format!("{external_id} ({error})"));
+            }
+        }
+        if !failed.is_empty() {
+            return err_text(format!(
+                "Machine {machine_id}: terminating {} named {name} failed — {}. Its record was \
+                 kept; retry terminate(instance=\"{machine_id}\").",
+                if failed.len() == 1 {
+                    "the machine".to_string()
+                } else {
+                    format!("{} of the machines", failed.len())
+                },
+                failed.join("; ")
+            ));
+        }
+        if let Err(error) = self.state.lock().await.clear_unconfirmed(machine_id) {
+            return err_text(format!(
+                "Machine {machine_id}: {} at {}, but clearing its unconfirmed record failed \
+                 ({error}); it will keep appearing in status().",
+                if found.is_empty() {
+                    format!("no machine named {name} exists")
+                } else {
+                    format!("{} machine(s) named {name} were terminated", found.len())
+                },
+                marker.runtime
+            ));
+        }
+        Ok(CallToolResult::success(vec![Content::text(
+            if found.is_empty() {
+                format!(
+                    "No machine named {name} exists at {}; the unconfirmed record for \
+                 {machine_id} was cleared. Nothing is billing.",
+                    marker.runtime
+                )
+            } else {
+                format!(
+                    "Terminated {} machine(s) named {name} at {} ({}); the unconfirmed record for \
+                 {machine_id} was cleared.",
+                    found.len(),
+                    marker.runtime,
+                    found.join(", ")
+                )
+            },
+        )]))
+    }
+
     async fn reconcile_machine(&self, machine_id: &str) -> Option<String> {
         let project_dir = self.state.lock().await.project_dir.clone();
         let record = crate::state::load_instance_record(&project_dir, machine_id)?;
@@ -6947,6 +7309,170 @@ mod fencing_tests {
 
     fn result_text(result: &CallToolResult) -> String {
         result.content[0].as_text().unwrap().text.clone()
+    }
+
+    fn unconfirmed_marker(
+        runtime: &str,
+        name: &str,
+        self_halt_mins: Option<u64>,
+    ) -> crate::state::UnconfirmedRecord {
+        crate::state::UnconfirmedRecord {
+            runtime: runtime.to_string(),
+            expected_name: name.to_string(),
+            created_at_epoch: now_epoch(),
+            error: "RunPod API error (502): bad gateway".to_string(),
+            self_halt_mins,
+            cleanup: Cleanup::Terminate,
+            jupyter_token: "token".to_string(),
+            ssh_key_path: "/tmp/missing-key".to_string(),
+            label: None,
+        }
+    }
+
+    /// What the provider lists under the name a never-confirmed create asked
+    /// for decides everything. The one dangerous answer is the empty one: it
+    /// means "not listed", never "not created" — so the marker is only
+    /// dropped once a machine that HAD been created would have ended itself,
+    /// and a merely stopped one would still have been listed.
+    #[test]
+    fn unconfirmed_decisions_follow_the_listing() {
+        let found = |ids: &[&str]| ids.iter().map(|id| (*id).to_string()).collect::<Vec<_>>();
+        let marker = unconfirmed_marker("runpod", "rk-m1", Some(45));
+
+        assert_eq!(
+            decide_unconfirmed(&marker, &found(&["p1"]), marker.created_at_epoch),
+            UnconfirmedDecision::Adopt("p1".to_string())
+        );
+        assert_eq!(
+            decide_unconfirmed(&marker, &found(&["p1", "p2"]), marker.created_at_epoch),
+            UnconfirmedDecision::Ambiguous
+        );
+        // Inside the self-halt window: an unlisted machine may simply not be
+        // visible yet.
+        assert_eq!(
+            decide_unconfirmed(&marker, &[], marker.created_at_epoch + 45 * 60),
+            UnconfirmedDecision::Keep
+        );
+        assert_eq!(
+            decide_unconfirmed(
+                &marker,
+                &[],
+                marker.created_at_epoch + 45 * 60 + UNCONFIRMED_CLEAR_MARGIN_SECS + 1
+            ),
+            UnconfirmedDecision::Expired
+        );
+        // Nothing bounds a machine whose guard never armed: the marker
+        // stays until the provider or the user settles it, however long.
+        let unbounded = unconfirmed_marker("runpod", "rk-m1", None);
+        assert_eq!(
+            decide_unconfirmed(&unbounded, &[], unbounded.created_at_epoch + 86_400),
+            UnconfirmedDecision::Keep
+        );
+    }
+
+    /// A create whose outcome was never confirmed gets its own `status()` row
+    /// — with the machine id that can end it — and keeps it until the
+    /// provider settles the question.
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn status_keeps_an_unconfirmed_create_visible_and_actionable() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_in(dir.path());
+        let machine_id = crate::ulid::new();
+        crate::state::save_unconfirmed_record(
+            dir.path(),
+            &machine_id,
+            &unconfirmed_marker("fake", "nothing-was-listed", None),
+        )
+        .unwrap();
+
+        let text = result_text(
+            &server
+                .status(Parameters(StatusParams { instance: None }))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            text.contains(&format!("Machine {machine_id} [unconfirmed]")),
+            "{text}"
+        );
+        assert!(text.contains("nothing-was-listed"), "{text}");
+        assert!(
+            text.contains(&format!("terminate(instance=\"{machine_id}\")")),
+            "{text}"
+        );
+        assert!(text.contains("keeps billing until terminated"), "{text}");
+        // A marker is not "no records" — that would read as nothing to do.
+        assert!(!text.contains("No durable machine records found"), "{text}");
+        assert!(
+            crate::state::load_unconfirmed_record(dir.path(), &machine_id).is_some(),
+            "an unlisted machine is not proof that none was created"
+        );
+    }
+
+    /// ...but once the window in which a created machine would have ended
+    /// itself has passed, an unlisted one cannot still be billing (a stopped
+    /// one would still be listed), so the marker goes.
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn an_expired_unconfirmed_create_clears_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_in(dir.path());
+        let machine_id = crate::ulid::new();
+        let mut marker = unconfirmed_marker("fake", "long-gone", Some(1));
+        marker.created_at_epoch = now_epoch() - 3600;
+        crate::state::save_unconfirmed_record(dir.path(), &machine_id, &marker).unwrap();
+
+        let text = result_text(
+            &server
+                .status(Parameters(StatusParams { instance: None }))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            text.contains("would have shut itself down by now"),
+            "{text}"
+        );
+        assert!(
+            crate::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
+            "{text}"
+        );
+    }
+
+    /// `terminate()` must be executable on an unconfirmed create, or the
+    /// advice to call it is a dead end. With nothing listed under the name,
+    /// there is nothing to terminate and the marker goes.
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn terminating_an_unconfirmed_create_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_in(dir.path());
+        let machine_id = crate::ulid::new();
+        crate::state::save_unconfirmed_record(
+            dir.path(),
+            &machine_id,
+            &unconfirmed_marker("fake", "never-existed", None),
+        )
+        .unwrap();
+
+        let result = server
+            .terminate(Parameters(TerminateParams {
+                instance: Some(machine_id.clone()),
+                skip_pre_terminate_command: None,
+            }))
+            .await
+            .unwrap();
+        let text = result_text(&result);
+        assert!(!result.is_error.unwrap_or(false), "{text}");
+        assert!(
+            text.contains("No machine named never-existed exists"),
+            "{text}"
+        );
+        assert!(text.contains("Nothing is billing"), "{text}");
+        assert!(
+            crate::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
+            "{text}"
+        );
     }
 
     /// Codex P1 (fresh pass): a deliberate adoption must install the

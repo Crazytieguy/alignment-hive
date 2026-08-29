@@ -28,6 +28,9 @@ use super::{
 };
 
 struct FakeInstance {
+    /// The provider-side name of this "machine" — the machine id the create
+    /// asked for. Only [`Runtime::find_by_name`] reads it.
+    name: String,
     child: Option<tokio::process::Child>,
     port: u16,
     token: String,
@@ -232,6 +235,7 @@ impl Runtime for FakeRuntime {
         self.instances.lock().await.insert(
             external_id.clone(),
             FakeInstance {
+                name: req.machine_id.clone(),
                 child: Some(child),
                 port,
                 token: req.jupyter_token.clone(),
@@ -240,6 +244,24 @@ impl Runtime for FakeRuntime {
                 lease_no_flock: std::env::var_os("REMOTE_KERNELS_FAKE_NO_FLOCK").is_some(),
             },
         );
+
+        // The machine EXISTS from here on. Returning an unconfirmed-create
+        // error instead of the handle is what a provider that answers a
+        // committed create with a 5xx looks like from here — the one path
+        // that leaves a machine with no local record.
+        if std::env::var_os("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE").is_some() {
+            return Err(anyhow::Error::new(super::UnconfirmedCreate {
+                summary: format!(
+                    "Creating the machine failed with an unclear outcome (simulated). No \
+                     second machine was created. A machine named {} may exist; status() \
+                     keeps checking and adopts it if it appears. Retry start().",
+                    req.machine_id
+                ),
+                cause: "simulated unconfirmed create".to_string(),
+                expected_name: req.machine_id.clone(),
+                self_halt_mins: None,
+            }));
+        }
 
         Ok(InstanceHandle {
             external_id,
@@ -250,6 +272,17 @@ impl Runtime for FakeRuntime {
             note: None,
             proxy_port_mapped: false,
         })
+    }
+
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .instances
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, instance)| instance.name == name)
+            .map(|(external_id, _)| external_id.clone())
+            .collect())
     }
 
     async fn get_handle(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {

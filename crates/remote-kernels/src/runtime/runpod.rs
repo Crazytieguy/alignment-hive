@@ -455,6 +455,7 @@ impl RunPodRuntime {
             "if it exists it keeps billing until terminated".to_string()
         };
         anyhow::Error::new(super::UnconfirmedCreate {
+            cause: error.to_string(),
             summary: format!(
                 "Creating the pod failed with an unclear outcome ({error}). No second pod \
                  was created. A pod named {name} may exist at RunPod; status() keeps \

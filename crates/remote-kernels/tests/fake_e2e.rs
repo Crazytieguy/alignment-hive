@@ -1677,6 +1677,119 @@ async fn failing_terminate_preop_downgrades_to_confirmed_stop() {
         .unwrap();
 }
 
+/// A create the provider never confirmed leaves a machine with no local
+/// record — the one case where a machine can bill entirely untracked. The
+/// marker start() keeps is what closes that: status() finds the machine by
+/// the name the create asked for, gives it the record and billing interval
+/// it never got, and from there it is an ordinary machine.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn an_unconfirmed_create_is_adopted_by_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE", "1") };
+    let error = server
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: Some("unconfirmed".to_string()),
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(false),
+        }))
+        .await
+        .unwrap_err();
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE") };
+    let message = error.to_string();
+    assert!(message.contains("unclear outcome"), "{message}");
+    assert!(message.contains("tracked as machine"), "{message}");
+
+    // No instance record — the machine was never admitted — but the marker
+    // is there, under the id the message named.
+    assert!(
+        remote_kernels::state::list_instance_records(dir.path()).is_empty(),
+        "an unconfirmed create must not admit spend"
+    );
+    let markers = remote_kernels::state::list_unconfirmed_records(dir.path());
+    assert_eq!(markers.len(), 1, "{markers:?}");
+    let machine_id = markers[0].0.clone();
+    assert!(message.contains(&machine_id), "{message}");
+
+    // status() asks the provider for the name the create asked for, finds
+    // the machine it did make, and promotes it.
+    let status = server
+        .status(Parameters(remote_kernels::server::StatusParams {
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&status);
+    assert!(text.contains("does exist"), "{text}");
+    assert!(text.contains("was adopted"), "{text}");
+    assert!(
+        remote_kernels::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
+        "{text}"
+    );
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("the adopted machine must have a durable record");
+    assert_eq!(record.label.as_deref(), Some("unconfirmed"));
+
+    // ...and it is an ordinary machine from here: terminate() ends it.
+    let terminated = terminate(&server, Some(&machine_id)).await;
+    assert!(terminated.contains("terminated"), "{terminated}");
+    assert!(
+        remote_kernels::state::load_instance_record(dir.path(), &machine_id).is_none(),
+        "{terminated}"
+    );
+}
+
+/// The same marker, when the provider really did make nothing: terminate()
+/// on it must be executable (the status row tells the agent to call it) and
+/// must leave nothing behind.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn terminating_an_unconfirmed_create_that_made_nothing_clears_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE", "1") };
+    let error = server
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: None,
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(false),
+        }))
+        .await
+        .unwrap_err();
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE") };
+    assert!(error.to_string().contains("unclear outcome"));
+
+    let (machine_id, marker) = remote_kernels::state::list_unconfirmed_records(dir.path())
+        .pop()
+        .expect("marker");
+    // Take the machine away behind the tool's back: now nothing wears the
+    // name, exactly like a create that was never committed.
+    let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
+    for external_id in runtime.find_by_name(&marker.expected_name).await.unwrap() {
+        runtime.terminate(&external_id).await.unwrap();
+    }
+
+    let text = terminate(&server, Some(&machine_id)).await;
+    assert!(text.contains("Nothing is billing"), "{text}");
+    assert!(
+        remote_kernels::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
+        "{text}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs uv + network for jupyter-server; run with --ignored"]
 async fn ambiguous_stop_refuses_attach_until_provider_state_converges() {
