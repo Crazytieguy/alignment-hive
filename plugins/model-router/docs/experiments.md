@@ -27,7 +27,10 @@ observed in captured request bodies/headers.
   silent on the per-invocation parameter's accepted values (the documented
   "full model ID" allowance is the *frontmatter/SDK* field, which works).
   The only documented override is `CLAUDE_CODE_SUBAGENT_MODEL` — session-wide,
-  so unsuitable for mixed Claude+GPT sessions.
+  so unsuitable for mixed Claude+GPT sessions. Update (2.1.251 changelog, not
+  re-measured): it now sets the *default* subagent model, and an agent
+  definition's `model:` or an explicit per-spawn model takes precedence over
+  it, so the mixed-session objection no longer applies.
 
 ### Workflow tool — per-invocation model AND effort work (measured live)
 Workflow scripts' `agent()` types `opts.model` as a plain string and skips
