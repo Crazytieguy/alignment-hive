@@ -77,6 +77,8 @@ pub struct RunPodRuntime {
     runpod: crate::config::RunpodConfig,
     /// Pre-SSH orphan guard window (config `orphan-halt-mins`).
     orphan_halt_mins: u64,
+    /// The config file every `[runpod]` complaint tells the reader to edit.
+    config_path: String,
     /// Gap between the post-failure name probes ([`Self::adopt_existing`]).
     /// A field, not a constant, so the unit tests can exercise the whole
     /// bounded window without wall-clock cost.
@@ -102,6 +104,7 @@ impl RunPodRuntime {
             image_name: config.runpod_image_name(),
             runpod: config.runpod.clone(),
             orphan_halt_mins: config.orphan_halt_mins,
+            config_path: config.config_path(),
             adopt_probe_interval: ADOPT_PROBE_INTERVAL,
         }
     }
@@ -139,7 +142,8 @@ impl RunPodRuntime {
         req: &ProvisionRequest,
         gpu_type: &str,
     ) -> anyhow::Result<(CreatePodRequest, Option<String>)> {
-        validate_storage_and_cloud(&self.runpod).map_err(|e| anyhow::anyhow!(e))?;
+        validate_storage_and_cloud(&self.runpod, &self.config_path)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         let image = req.image.clone().unwrap_or_else(|| self.image_name.clone());
         let mut env = req.env.clone();
@@ -214,13 +218,16 @@ impl RunPodRuntime {
         ))
     }
 
-    /// The `[runpod]` passthrough extras, converted to v2: the three v1
-    /// fields that merely moved are routed to their new homes (D24), and
-    /// everything else is checked against the v2 field set before any API
-    /// call — a 422 costs a round trip and never mentions
-    /// `remote-kernels.toml`.
+    /// The `[runpod]` passthrough extras, converted for the pod-create body:
+    /// the older names that merely moved are routed to their new homes
+    /// (D24), and everything else is checked against the accepted field set
+    /// before any API call — a 422 costs a round trip and never says which
+    /// file to edit.
+    #[allow(clippy::too_many_lines)] // one linear pass over the [runpod] keys
     fn passthrough_fields(&self) -> anyhow::Result<PassthroughFields> {
         let mut fields = PassthroughFields::default();
+        let mut data_center_id: Option<String> = None;
+        let config = &self.config_path;
 
         for (key, value) in &self.runpod.extra {
             match key.as_str() {
@@ -236,12 +243,13 @@ impl RunPodRuntime {
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "[runpod] allowed-cuda-versions must be an array of \
-                                 version strings, e.g. [\"12.8\", \"12.6\"]"
+                                 version strings, e.g. [\"12.8\", \"12.6\"] — edit {config}"
                             )
                         })?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "[runpod] allowed-cuda-versions must contain only strings"
+                                "[runpod] allowed-cuda-versions must contain only strings \
+                                 — edit {config}"
                             )
                         })?;
                     fields.allowed_cuda_versions = Some(versions);
@@ -252,7 +260,8 @@ impl RunPodRuntime {
                             .as_str()
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "[runpod] min-cuda-version must be a string, e.g. \"12.1\""
+                                    "[runpod] min-cuda-version must be a string, e.g. \
+                                     \"12.1\" — edit {config}"
                                 )
                             })?
                             .to_string(),
@@ -264,7 +273,24 @@ impl RunPodRuntime {
                             .as_str()
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "[runpod] container-registry-auth-id must be a string"
+                                    "[runpod] container-registry-auth-id must be a string \
+                                     — edit {config}"
+                                )
+                            })?
+                            .to_string(),
+                    );
+                }
+                // This plugin's own template recommended the singular for
+                // years; RunPod takes a list. Mapping it is free and keeps
+                // those configs starting.
+                "data-center-id" => {
+                    data_center_id = Some(
+                        value
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "[runpod] data-center-id must be a string, e.g. \
+                                     \"EU-RO-1\" — edit {config}"
                                 )
                             })?
                             .to_string(),
@@ -274,19 +300,15 @@ impl RunPodRuntime {
                     let camel = to_camel_case(key);
                     if crate::runpod::types::MANAGED_CREATE_FIELDS.contains(&camel.as_str()) {
                         anyhow::bail!(
-                            "[runpod] {key} sets {camel:?}, a pod-create field this runtime \
-                             manages itself. {}",
+                            "[runpod] {key} is set by remote-kernels. {} Edit {config}.",
                             managed_field_hint(&camel)
                         );
                     }
                     if crate::runpod::types::CONFLICTING_CREATE_FIELDS.contains(&camel.as_str()) {
                         anyhow::bail!(
-                            "[runpod] {key} sets {camel:?}, which v2 forbids alongside the \
-                             `gpu` block this runtime always sends (a create body must set \
-                             exactly one of gpu/cpu). Every GPU candidate would be rejected, \
-                             and the loop would report it as absent capacity. This runtime \
-                             provisions GPU pods only — remove {key} and set [runpod] \
-                             gpu-type-ids."
+                            "[runpod] {key} asks RunPod for a CPU pod, and remote-kernels \
+                             provisions GPU pods only. Remove {key} and set [runpod] \
+                             gpu-type-ids — edit {config}."
                         );
                     }
                     if !crate::runpod::types::CREATE_POD_FIELDS.contains(&camel.as_str()) {
@@ -294,9 +316,9 @@ impl RunPodRuntime {
                             .map(|h| format!(" {h}"))
                             .unwrap_or_default();
                         anyhow::bail!(
-                            "[runpod] {key} ({camel:?}) is not a field of the v2 pod-create \
-                             body, so RunPod would reject the whole request.{hint} \
-                             Passthrough fields accepted by v2: {PASSTHROUGH_FIELD_LIST}."
+                            "[runpod] {key} is not a field RunPod's pod-create API accepts, \
+                             so it would reject the whole request.{hint} Fields it does \
+                             accept here: {PASSTHROUGH_FIELD_LIST}. Edit {config}."
                         );
                     }
                     fields.extra.insert(camel, toml_to_json(value));
@@ -304,7 +326,19 @@ impl RunPodRuntime {
             }
         }
 
-        // v2 answers this combination with a 400 that the provision loop
+        if let Some(id) = data_center_id {
+            if fields.extra.contains_key("dataCenterIds") {
+                anyhow::bail!(
+                    "[runpod] data-center-id and data-center-ids both pin a datacenter. \
+                     Keep data-center-ids — edit {config}."
+                );
+            }
+            fields
+                .extra
+                .insert("dataCenterIds".to_string(), serde_json::json!([id]));
+        }
+
+        // RunPod answers this combination with a 400 that the provision loop
         // would misread as "no capacity", so it fails here instead.
         if fields
             .allowed_cuda_versions
@@ -314,8 +348,8 @@ impl RunPodRuntime {
         {
             anyhow::bail!(
                 "[runpod] allowed-cuda-versions and min-cuda-version cannot be combined \
-                 (RunPod rejects a non-empty version set together with a floor). Keep the \
-                 exact set, or the floor — not both."
+                 (RunPod rejects an exact version set together with a floor). Keep one — \
+                 edit {config}."
             );
         }
 
@@ -350,26 +384,39 @@ impl RunPodRuntime {
                 tokio::time::sleep(self.adopt_probe_interval).await;
             }
             match self.client.probe_pods().await {
-                Ok(pods) => match crate::runpod::client::pick_adoptable(&pods, name) {
-                    // The probe reads only (id, name); the handle needs the
-                    // full pod, which the normal lenient GET provides.
-                    Ok(Some(found)) => match self.client.get_pod(&found.id).await {
-                        Ok(pod) => return Ok(Some(pod)),
-                        Err(unreadable) => {
-                            unresolved = Some(anyhow::anyhow!(
-                                "pod {} is named {name} at RunPod but could not be read \
-                                 ({unreadable})",
-                                found.id
+                Ok(pods) => {
+                    let matches = crate::runpod::client::pods_named(&pods, name);
+                    match matches.as_slice() {
+                        // The probe reads only (id, name); the handle needs
+                        // the full pod, which the normal lenient GET provides.
+                        [found] => match self.client.get_pod(&found.id).await {
+                            Ok(pod) => return Ok(Some(pod)),
+                            Err(unreadable) => {
+                                unresolved = Some(anyhow::anyhow!(
+                                    "pod {} is named {name} at RunPod but could not be \
+                                     read ({unreadable})",
+                                    found.id
+                                ));
+                            }
+                        },
+                        // A successful probe that sees nothing is only
+                        // provisional until the window is out — the pod may
+                        // still be landing.
+                        [] => unresolved = None,
+                        // Ambiguity never resolves itself, and guessing
+                        // between two same-named pods would leak the other.
+                        many => {
+                            return Err(anyhow::anyhow!(
+                                "{} pods at RunPod are named {name} ({})",
+                                many.len(),
+                                many.iter()
+                                    .map(|pod| pod.id.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         }
-                    },
-                    // A successful probe that sees nothing is only provisional
-                    // until the window is out — the pod may still be landing.
-                    Ok(None) => unresolved = None,
-                    // Ambiguity never resolves itself, and guessing between
-                    // two same-named pods would leak the other one.
-                    Err(ambiguous) => return Err(ambiguous),
-                },
+                    }
+                }
                 Err(probe) => {
                     tracing::warn!(attempt, error = %probe, "pod-name probe failed");
                     unresolved = Some(probe);
@@ -380,6 +427,42 @@ impl RunPodRuntime {
             Some(probe) => Err(probe),
             None => Ok(None),
         }
+    }
+
+    /// The one outcome a create can have that neither adopting nor retrying
+    /// settles: the probe never succeeded, several pods carry the name, the
+    /// matched pod could not be re-read, or the listing simply did not show
+    /// it. That last one is weaker evidence than it looks — `RunPod`
+    /// publishes no bound on how long a new pod takes to appear in
+    /// `GET /v2/pods`, so "not listed" is never "not created", and v2 has no
+    /// idempotency key that would make a second create safe.
+    ///
+    /// The server keeps a durable marker under the machine id from here, so
+    /// `status()` can settle it later (see
+    /// [`crate::runtime::UnconfirmedCreate`]).
+    fn unconfirmed_create(
+        &self,
+        error: &RunPodError,
+        name: &str,
+        guard_armed: bool,
+    ) -> anyhow::Error {
+        let outlook = if guard_armed {
+            format!(
+                "if it was created it shuts itself down within {} minutes",
+                self.orphan_halt_mins
+            )
+        } else {
+            "if it exists it keeps billing until terminated".to_string()
+        };
+        anyhow::Error::new(super::UnconfirmedCreate {
+            summary: format!(
+                "Creating the pod failed with an unclear outcome ({error}). No second pod \
+                 was created. A pod named {name} may exist at RunPod; status() keeps \
+                 checking and adopts it if it appears, and {outlook}. Retry start()."
+            ),
+            expected_name: name.to_string(),
+            self_halt_mins: guard_armed.then_some(self.orphan_halt_mins),
+        })
     }
 
     /// Docker treats `docker.io/x` and `x` as the same image — normalize
@@ -410,55 +493,23 @@ impl RunPodRuntime {
 
     /// Whether SSH — and with it the heartbeat that disarms the orphan guard
     /// — is expected on this pod: guaranteed on SECURE cloud, and on
-    /// COMMUNITY only when `support-public-ip` is requested. A Jupyter-only
-    /// pod must NOT carry the guard: nothing would ever write the heartbeat,
-    /// and the guard would clean up a live session at `orphan-halt-mins`.
+    /// COMMUNITY only for configs still carrying the deprecated
+    /// `support-public-ip`. A Jupyter-only pod must NOT carry the guard:
+    /// nothing would ever write the heartbeat, and the guard would clean up
+    /// a live session at `orphan-halt-mins`.
     fn ssh_expected(&self) -> bool {
         self.runpod.ssh_expected()
     }
 
-    /// Whether the SSH expectation rests on `support-public-ip` alone, i.e.
-    /// on a wish v2 can no longer send to the API. Under v1,
-    /// `supportPublicIp: true` constrained PLACEMENT — `RunPod` only started
-    /// the pod where it could give it a public IP. v2 removed the field with
-    /// no replacement, so on COMMUNITY cloud the flag now declares an
-    /// expectation the scheduler never hears, and a host without a public
-    /// `22/tcp` mapping is a real (if uncommon — observed live 2026-08-18 to
-    /// still be the exception) outcome. Only the failure MESSAGE branches on
-    /// this: the expectation still arms the orphan guard and still fails the
-    /// start, because degrading a guard-armed pod to Jupyter-only would let
-    /// the guard halt a live session.
-    fn ssh_is_community_best_effort(&self) -> bool {
-        self.ssh_expected() && self.runpod.cloud_type.eq_ignore_ascii_case("COMMUNITY")
-    }
-
     /// The failure the start must not survive when a pod the config expects
-    /// SSH on never produced an SSH endpoint.
-    fn ssh_expectation_unmet(&self, detail: &str) -> anyhow::Error {
-        let cause = if self.ssh_is_community_best_effort() {
-            "this community host gave the pod no direct SSH endpoint. Since RunPod's v2 \
-             API dropped the supportPublicIp create field, [runpod] support-public-ip can \
-             no longer ask for placement on a public-IP host — it only declares that you \
-             expect one"
-                .to_string()
-        } else {
-            "the pod never became reachable over SSH although cloud-type = \"SECURE\" \
-             guarantees it"
-                .to_string()
-        };
-        let recovery = if self.ssh_is_community_best_effort() {
-            "Retry start() — community hosts differ, and most do offer one. For a \
-             guaranteed endpoint use cloud-type = \"SECURE\"; to run Jupyter-only over \
-             RunPod's proxy instead, drop support-public-ip (that also gives up sync, \
-             download, the on-machine watchdog, and the orphan guard)."
-        } else {
-            "Retry start(); if it repeats, check the pod in the RunPod console."
-        };
+    /// SSH on never produced an SSH endpoint. One message for both clouds:
+    /// the symptom is the same, and nothing here establishes a cause.
+    fn ssh_expectation_unmet(&self) -> anyhow::Error {
         anyhow::anyhow!(
-            "{cause}: {detail} Failing the start — the pre-SSH orphan guard armed at \
-             creation is disarmed only by the SSH heartbeat, so a Jupyter-only session on \
-             this pod would self-clean after {} minutes. {recovery}",
-            self.orphan_halt_mins
+            "No direct SSH endpoint appeared for this pod within {SSH_WAIT_MINUTES} \
+             minutes. Retry start(). If it keeps happening on community cloud, set \
+             [runpod] cloud-type = \"SECURE\" in {}.",
+            self.config_path
         )
     }
 
@@ -475,10 +526,11 @@ impl RunPodRuntime {
             && !self.ssh_expected()
         {
             anyhow::bail!(
-                "[runpod] jupyter-access = \"tunnel\" requires a config that guarantees \
-                 SSH (cloud-type = \"SECURE\", or support-public-ip = true on community \
-                 cloud) — without SSH the tunnel can never come up, and tunneled pods \
-                 have no public Jupyter fallback."
+                "[runpod] jupyter-access = \"tunnel\" needs SSH, which only cloud-type = \
+                 \"SECURE\" guarantees — without SSH the tunnel can never come up, and \
+                 tunneled pods have no public Jupyter fallback. Set [runpod] cloud-type = \
+                 \"SECURE\" (or jupyter-access = \"auto\") — edit {}.",
+                self.config_path
             );
         }
         Ok(
@@ -526,10 +578,10 @@ impl RunPodRuntime {
                      currently has no SSH endpoint, so its Jupyter is unreachable. The \
                      machine was left untouched. Pods usually regain SSH within a couple \
                      of minutes of starting — wait, then retry attach(); if this repeats, \
-                     ask the user to check the pod in the RunPod console, or terminate() \
-                     it and start fresh (set [runpod] jupyter-access = \"proxy\" first if \
-                     you want the public proxy).",
-                    super::USER_ACTION_REQUIRED
+                     terminate() it and start() again (set [runpod] jupyter-access = \
+                     \"proxy\" in {} first if you want the public proxy).",
+                    super::USER_ACTION_REQUIRED,
+                    self.config_path
                 );
             };
             return Ok(AccessDecision::Tunnel {
@@ -554,10 +606,10 @@ impl RunPodRuntime {
                          cannot tunnel to its Jupyter, and strict tunnel mode forbids the \
                          public proxy. The machine was left untouched. Pods usually regain \
                          SSH within a couple of minutes of starting — wait, then retry \
-                         attach(); if this repeats, ask the user to check the pod in the \
-                         RunPod console, terminate() it, or set [runpod] jupyter-access = \
-                         \"proxy\".",
-                        super::USER_ACTION_REQUIRED
+                         attach(); if this repeats, terminate() it, or set [runpod] \
+                         jupyter-access = \"proxy\" in {}.",
+                        super::USER_ACTION_REQUIRED,
+                        self.config_path
                     );
                 }
                 None => {}
@@ -584,13 +636,12 @@ impl RunPodRuntime {
             return (
                 None,
                 Some(format!(
-                    "the pre-SSH orphan guard is OFF for this pod: community-cloud pods \
-                     without support-public-ip may lack SSH, and only the SSH heartbeat \
-                     disarms the guard — it would wrongly self-clean a Jupyter-only \
-                     session after {} minutes. Set [runpod] support-public-ip = true or \
-                     cloud-type = \"SECURE\" to enable it, or image-start-cmd = \"\" to \
-                     silence this note.",
-                    self.orphan_halt_mins
+                    "this machine cannot clean itself up before this session reaches it: \
+                     that needs SSH, which this pod has no guarantee of. If this process \
+                     dies during the first minutes of provisioning, the pod keeps billing \
+                     until stopped. Set [runpod] cloud-type = \"SECURE\" in {} to get it, \
+                     or [runpod] image-start-cmd = \"\" to silence this note.",
+                    self.config_path
                 )),
             );
         }
@@ -598,12 +649,13 @@ impl RunPodRuntime {
             return (
                 None,
                 Some(format!(
-                    "the pre-SSH orphan guard is OFF for this pod: the start command of \
-                     image {image_name:?} isn't known, so it can't be wrapped. If this \
+                    "this machine cannot clean itself up before this session reaches it: \
+                     the start command of image {image_name:?} isn't known. If this \
                      process dies during the first minutes of provisioning, the pod keeps \
-                     billing until stopped by hand. To enable the guard, set image-name to \
-                     this image and [runpod] image-start-cmd to its Dockerfile CMD \
-                     (image-start-cmd = \"\" silences this note)."
+                     billing until stopped. To enable it, set [runpod] image-name to this \
+                     image and [runpod] image-start-cmd to its start command in {} \
+                     (image-start-cmd = \"\" silences this note).",
+                    self.config_path
                 )),
             );
         };
@@ -638,7 +690,7 @@ impl RunPodRuntime {
     /// `ssh.direct` appears only once the published `22/tcp` mapping has a
     /// public port, which can lag RUNNING by a few seconds.
     async fn wait_for_ssh_info(&self, pod_id: &str) -> anyhow::Result<(String, u16)> {
-        for attempt in 1..=40 {
+        for attempt in 1..=SSH_WAIT_ATTEMPTS {
             match self.client.get_pod(pod_id).await {
                 Ok(pod) => {
                     if let Some((ip, port)) = pod.direct_ssh() {
@@ -649,15 +701,17 @@ impl RunPodRuntime {
                 }
                 Err(e) => tracing::debug!(attempt, error = %e, "Failed to query SSH info"),
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(SSH_WAIT_INTERVAL).await;
         }
-        anyhow::bail!(
-            "Pod does not have a public IP or SSH port after 2 minutes. \
-             This is required for the heartbeat, sync, and download. \
-             Try starting again — a different machine may be assigned."
-        )
+        anyhow::bail!("no direct SSH endpoint after {SSH_WAIT_MINUTES} minutes")
     }
 }
+
+/// How long `open()` waits for the pod to publish its direct SSH endpoint,
+/// and the same window in whole minutes for the message that reports it.
+const SSH_WAIT_ATTEMPTS: u64 = 40;
+const SSH_WAIT_INTERVAL: Duration = Duration::from_secs(3);
+const SSH_WAIT_MINUTES: u64 = SSH_WAIT_ATTEMPTS * SSH_WAIT_INTERVAL.as_secs() / 60;
 
 /// Runtime capabilities, exposed credential-free so config validation can
 /// consult them at load time (see [`super::validate_config`]).
@@ -673,46 +727,11 @@ pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities
     }
 }
 
-/// The v2 create fields a `[runpod]` passthrough may legitimately set (the
-/// rest are managed here), plus the v1 names that still work by mapping.
+/// The create fields a `[runpod]` passthrough may legitimately set (the rest
+/// are managed here), plus the older names that still work by mapping.
 const PASSTHROUGH_FIELD_LIST: &str = "dataCenterIds, globalNetworking, startJupyter, \
      templateId, and the [runpod] keys allowed-cuda-versions, min-cuda-version, \
      container-registry-auth-id";
-
-/// The provision loop stops here when the follow-up lookup itself failed —
-/// the probe errored, its body was unreadable, two pods share the name, or
-/// the matched pod could not be re-read. Creating another pod under the same
-/// name is exactly the outcome this prevents: v2 has no idempotency key, and
-/// the duplicate would bill untracked.
-fn unresolved_create_outcome(
-    error: &RunPodError,
-    name: &str,
-    probe: &anyhow::Error,
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "the pod create failed ({error}) and the follow-up lookup could not establish \
-         whether a pod named {name} now exists and is billing ({probe}). No second pod \
-         was created. Check the RunPod console for a pod named {name}: terminate it if \
-         you don't want it, then retry start()."
-    )
-}
-
-/// ...and here when the lookup worked and simply did not show the pod. That
-/// is weaker evidence than it looks: `RunPod` publishes no bound on how long
-/// a just-created pod takes to appear in `GET /v2/pods`, so "not listed
-/// {seconds}s later" cannot be read as "not created" for a create that may
-/// already have been committed. The user gets the same one place to look.
-fn unconfirmed_create_outcome(error: &RunPodError, name: &str) -> anyhow::Error {
-    let seconds = ADOPT_PROBE_INTERVAL.as_secs() * u64::from(ADOPT_PROBE_ATTEMPTS - 1);
-    anyhow::anyhow!(
-        "the pod create failed after the request reached RunPod ({error}), so it may \
-         still have created a pod. No pod named {name} was listed in the following \
-         {seconds}s, but RunPod does not promise a new pod is listed that quickly — so \
-         this run stops instead of creating a second one that could bill untracked. \
-         Check the RunPod console for a pod named {name}: terminate it if you don't want \
-         it, then retry start()."
-    )
-}
 
 /// Where the `[runpod]` extras end up in the v2 body.
 #[derive(Default)]
@@ -723,63 +742,50 @@ struct PassthroughFields {
     registry: Option<String>,
 }
 
-/// The `[runpod]` knob that owns a create field this runtime sets itself.
+/// The `[runpod]` knob to use instead of a create field this runtime sets
+/// itself.
 fn managed_field_hint(camel: &str) -> &'static str {
     match camel {
-        "image" => "Use image-name (or start(image=...)) instead.",
+        "image" => "Use [runpod] image-name, or start(image=...).",
         "args" => {
-            "The pre-SSH orphan guard rides args; put the image's own start command in \
-             [runpod] image-start-cmd (the guard wraps it), or set image-start-cmd = \"\" \
-             to disable the guard."
+            "Put the image's own start command in [runpod] image-start-cmd, or set \
+             image-start-cmd = \"\" to run the image unwrapped."
         }
         "gpu" => {
-            "Use [runpod] gpu-type-ids / gpu-count for the GPU itself and \
-             allowed-cuda-versions / min-cuda-version for the CUDA constraints — a \
-             [runpod.gpu] table would replace the GPU type the provision loop is trying."
+            "Use [runpod] gpu-type-ids and gpu-count, plus allowed-cuda-versions or \
+             min-cuda-version for the CUDA constraints."
         }
         "mounts" => "Use [runpod] volume-gb, volume-mount-path, or network-volume-id.",
-        "ports" => "Use [runpod] jupyter-access, which decides the port mapping.",
+        "ports" => "Use [runpod] jupyter-access.",
         "cloud" => "Use [runpod] cloud-type.",
         "disk" => "Use [runpod] container-disk-gb.",
         "env" => "Use the top-level env table (or env-file).",
         "name" => "Use the top-level name key.",
-        "startSsh" => {
-            "SSH is requested for every pod; use [runpod] support-public-ip to declare \
-             whether a community pod is expected to get one."
-        }
+        "startSsh" => "SSH is requested for every pod.",
         "registry" => "Use [runpod] container-registry-auth-id.",
-        _ => "Set it through its typed [runpod] key instead.",
+        _ => "Use its typed [runpod] key instead.",
     }
 }
 
-/// What a v1-only pod-create field became in v2, for configs written against
-/// the old API.
+/// The `[runpod]` key that replaces a create field `RunPod`'s API used to
+/// have, for configs written against the older API.
 fn v1_rename_hint(camel: &str) -> Option<&'static str> {
     Some(match camel {
         "dockerStartCmd" => {
-            "v2 has no dockerStartCmd — the start command rides `args`, which carries the \
-             pre-SSH orphan guard. Put the image's start command in [runpod] \
-             image-start-cmd instead (the guard wraps it), or set image-start-cmd = \"\" \
-             to pass it through unwrapped."
+            "Put the image's start command in [runpod] image-start-cmd instead, or set \
+             image-start-cmd = \"\" to run the image unwrapped."
         }
-        "supportPublicIp" => {
-            "v2 has no supportPublicIp; [runpod] support-public-ip is now a typed local \
-             flag that declares the expectation instead of being sent to the API."
-        }
-        "imageName" => "It is `image` in v2 — set [runpod] image-name.",
-        "containerDiskInGb" => "It is `disk` in v2 — set [runpod] container-disk-gb.",
-        "volumeInGb" => "It is `mounts.persistent.size` in v2 — set [runpod] volume-gb.",
-        "volumeMountPath" => "It is the mount's `path` in v2 — set [runpod] volume-mount-path.",
-        "networkVolumeId" => {
-            "It is `mounts.network[].volumeId` in v2 — set [runpod] network-volume-id."
-        }
-        "gpuTypeIds" | "gpuCount" => {
-            "They are `gpu.id` / `gpu.count` in v2 — set [runpod] \
-             gpu-type-ids and gpu-count."
-        }
-        "cloudType" => "It is `cloud` in v2 — set [runpod] cloud-type.",
+        "supportPublicIp" => "RunPod's API no longer has this field — remove it.",
+        "minVcpuCount" => "RunPod's API no longer supports it — remove it.",
+        "imageName" => "Set [runpod] image-name instead.",
+        "containerDiskInGb" => "Set [runpod] container-disk-gb instead.",
+        "volumeInGb" => "Set [runpod] volume-gb instead.",
+        "volumeMountPath" => "Set [runpod] volume-mount-path instead.",
+        "networkVolumeId" => "Set [runpod] network-volume-id instead.",
+        "gpuTypeIds" | "gpuCount" => "Set [runpod] gpu-type-ids and gpu-count instead.",
+        "cloudType" => "Set [runpod] cloud-type instead.",
         "containerRegistryAuthId" => {
-            "It is `registry` in v2 — [runpod] container-registry-auth-id is mapped for you."
+            "Set [runpod] container-registry-auth-id instead — it is mapped for you."
         }
         _ => return None,
     })
@@ -830,25 +836,26 @@ pub(crate) fn conflict_satisfies(action: &str, status: &str) -> bool {
     }
 }
 
-/// Validate the two `[runpod]` knobs whose values v2 constrains, so a bad
-/// one fails at server startup instead of costing a create round trip.
+/// Validate the two `[runpod]` knobs whose values `RunPod` constrains, so a
+/// bad one fails early instead of costing a create round trip. `config_path`
+/// is the file to edit.
 pub(crate) fn validate_storage_and_cloud(
     runpod: &crate::config::RunpodConfig,
+    config_path: &str,
 ) -> Result<(), String> {
     if !crate::runpod::types::CLOUDS
         .iter()
         .any(|cloud| runpod.cloud_type.eq_ignore_ascii_case(cloud))
     {
         return Err(format!(
-            "[runpod] cloud-type must be \"SECURE\" or \"COMMUNITY\" (got {:?})",
+            "[runpod] cloud-type must be \"SECURE\" or \"COMMUNITY\" (got {:?}) — edit \
+             {config_path}",
             runpod.cloud_type
         ));
     }
     if runpod.volume_gb > 0 && runpod.volume_gb < 10 {
         return Err(format!(
-            "[runpod] volume-gb must be 0 (no persistent volume) or at least 10 — RunPod \
-             enforces a 10 GB floor on host-local persistent storage, so {} would be \
-             rejected at pod creation. Raise it to 10 or more, or set volume-gb = 0.",
+            "[runpod] volume-gb must be 0 or at least 10 (got {}) — edit {config_path}",
             runpod.volume_gb
         ));
     }
@@ -890,6 +897,7 @@ impl Runtime for RunPodRuntime {
     ///   committed: adopt the pod if one carries our name, otherwise STOP.
     ///   Never a second create, on any evidence — v2 has no idempotency key
     ///   and no visibility bound that could make an empty listing proof.
+    #[allow(clippy::too_many_lines)] // the create-disposition ladder stays linear
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
         let gpu_type_ids = req
             .gpu_type
@@ -955,7 +963,8 @@ impl Runtime for RunPodRuntime {
                             }
                             Ok(None) => {}
                             Err(probe) => {
-                                return Err(unresolved_create_outcome(&error, &name, &probe));
+                                tracing::warn!(error = %probe, "create outcome unsettled");
+                                return Err(self.unconfirmed_create(&error, &name, guard_armed));
                             }
                         }
                         if attempt == 3 {
@@ -977,15 +986,18 @@ impl Runtime for RunPodRuntime {
                         // to turn into "not created". So this arm has exactly
                         // two endings — adopt, or stop and tell the user where
                         // to look. It never creates again, on any evidence.
-                        let existing = self
-                            .adopt_existing(&name)
-                            .await
-                            .map_err(|probe| unresolved_create_outcome(&error, &name, &probe))?;
+                        let existing = match self.adopt_existing(&name).await {
+                            Ok(existing) => existing,
+                            Err(probe) => {
+                                tracing::warn!(error = %probe, "create outcome unsettled");
+                                None
+                            }
+                        };
                         if let Some(pod) = existing {
                             tracing::warn!(pod_id = %pod.id, "create outcome unknown; adopted the pod it created");
                             return Ok(Self::handle_with_note(&pod, note.as_ref()));
                         }
-                        return Err(unconfirmed_create_outcome(&error, &name));
+                        return Err(self.unconfirmed_create(&error, &name, guard_armed));
                     }
                 }
             }
@@ -998,15 +1010,20 @@ impl Runtime for RunPodRuntime {
         if all_bad_request && !failures.is_empty() {
             let _ = write!(
                 msg,
-                "\nRunPod answers both a rule violation and absent capacity with 400, and \
-                 every GPU type failed the same way — which usually means the request \
-                 itself rather than the market. Last detail: {}\n",
-                last_detail.as_deref().unwrap_or("(none)")
+                "\nEvery GPU type was refused by RunPod (400). Last reason from RunPod: \
+                 {}. If the reason is about capacity, retry later or add other GPU types \
+                 to [runpod] gpu-type-ids in {}; otherwise the request itself was \
+                 rejected — tell the user the reason above.\n",
+                last_detail.as_deref().unwrap_or("(none given)"),
+                self.config_path
+            );
+        } else {
+            let _ = write!(
+                msg,
+                "\nRetry later, or add other GPU types to [runpod] gpu-type-ids in {}.",
+                self.config_path
             );
         }
-        msg.push_str(
-            "\nConsider editing gpu-type-ids in remote-kernels.toml to try different GPU types.",
-        );
         anyhow::bail!(msg)
     }
 
@@ -1014,6 +1031,14 @@ impl Runtime for RunPodRuntime {
         Ok(Self::handle_from_pod(
             &self.client.get_pod(external_id).await?,
         ))
+    }
+
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        let pods = self.client.probe_pods().await?;
+        Ok(crate::runpod::client::pods_named(&pods, name)
+            .into_iter()
+            .map(|pod| pod.id.clone())
+            .collect())
     }
 
     async fn describe(&self, external_id: &str) -> anyhow::Result<InstanceStatus> {
@@ -1099,7 +1124,11 @@ impl Runtime for RunPodRuntime {
                 port,
             }),
             Err(e) if self.ssh_expected() => {
-                return Err(self.ssh_expectation_unmet(&e.to_string()));
+                tracing::warn!(
+                    external_id,
+                    "no SSH endpoint on a pod that expects one: {e}"
+                );
+                return Err(self.ssh_expectation_unmet());
             }
             Err(e) => {
                 tracing::warn!(external_id, "No SSH connectivity: {e}");
@@ -1146,6 +1175,7 @@ impl Runtime for RunPodRuntime {
                         tunnel: Some(tunnel),
                         degraded: false,
                         remote_workdir: self.runpod.volume_mount_path.clone(),
+                        config_path: self.config_path.clone(),
                     });
                 }
                 // A pin mismatch is a trust failure: never mask it with a
@@ -1185,6 +1215,7 @@ impl Runtime for RunPodRuntime {
             tunnel: None,
             degraded,
             remote_workdir: self.runpod.volume_mount_path.clone(),
+            config_path: self.config_path.clone(),
         })
     }
 }
@@ -1206,6 +1237,8 @@ pub struct RunPodConnection {
     degraded: bool,
     /// Where uploads land (the volume mount path).
     remote_workdir: String,
+    /// The config file a `[runpod]` suggestion tells the reader to edit.
+    config_path: String,
 }
 
 /// Self-stop chain run on the pod itself: `runpodctl` first (legacy and v2
@@ -1282,9 +1315,11 @@ impl RunPodConnection {
     fn ssh_endpoint(&self) -> anyhow::Result<&crate::ssh_exec::SshEndpoint> {
         self.ssh.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "This machine has no public IP/SSH port (common on community cloud). \
-                 Kernels still work, but sync/download and the on-machine watchdog do not. \
-                 Terminate and start again for a machine with a public IP."
+                "This machine has no SSH endpoint. Kernels still work, but sync/download \
+                 and the on-machine watchdog do not. For a machine that has one, set \
+                 [runpod] cloud-type = \"SECURE\" in {}, then terminate() this machine \
+                 and start() again.",
+                self.config_path
             )
         })
     }
@@ -1645,16 +1680,17 @@ mod tests {
     #[test]
     fn volume_gb_below_v2_floor_is_rejected() {
         let err = body_err("[runpod]\nvolume-gb = 5");
-        assert!(err.contains("10"), "{err}");
-        assert!(err.contains("volume-gb"), "{err}");
-        assert!(
-            err.contains("volume-gb = 0"),
-            "the disable-it fix must be offered by name: {err}"
-        );
+        assert!(err.contains("[runpod] volume-gb"), "{err}");
+        assert!(err.contains("0 or at least 10"), "{err}");
+        assert!(err.contains("(got 5)"), "{err}");
+        // Every config complaint names the file to edit.
+        assert!(err.contains("remote-kernels.toml"), "{err}");
         // Same helper, same message, at startup validation.
         let config: Config = toml::from_str("[runpod]\nvolume-gb = 5").unwrap();
-        let startup = validate_storage_and_cloud(&config.runpod).unwrap_err();
+        let startup =
+            validate_storage_and_cloud(&config.runpod, "/p/remote-kernels.toml").unwrap_err();
         assert!(startup.contains("volume-gb"), "{startup}");
+        assert!(startup.contains("edit /p/remote-kernels.toml"), "{startup}");
     }
 
     #[test]
@@ -1668,24 +1704,28 @@ mod tests {
         assert!(err.contains("SECURE") && err.contains("COMMUNITY"), "{err}");
     }
 
-    /// Passthrough extras are checked against the v2 field set BEFORE the
-    /// call, and v1 names get a rename hint instead of a 422 round trip.
+    /// Passthrough extras are checked against the accepted field set BEFORE
+    /// the call, and v1 names get a rename hint instead of a 422 round trip.
+    /// Every one of these messages names the file to edit.
     #[test]
     fn extras_are_checked_against_the_v2_field_set() {
         let err = body_err("[runpod]\ndocker-start-cmd = [\"/start.sh\"]");
-        assert!(err.contains("orphan guard"), "{err}");
         assert!(err.contains("image-start-cmd"), "{err}");
+        assert!(err.contains("remote-kernels.toml"), "{err}");
 
-        // A v1-only knob with no v2 equivalent.
+        // A v1-only knob with no v2 equivalent: rejected with the one thing
+        // to do about it.
         let err = body_err("[runpod]\nmin-vcpu-count = 8");
         assert!(
-            err.contains("not a field of the v2 pod-create body"),
+            err.contains("is not a field RunPod's pod-create API accepts"),
             "{err}"
         );
+        assert!(err.contains("no longer supports it — remove it"), "{err}");
         assert!(err.contains("dataCenterIds"), "the accepted set: {err}");
 
         // Colliding with a field we manage ourselves.
         let err = body_err("[runpod]\nimage = \"my/image:latest\"");
+        assert!(err.contains("is set by remote-kernels"), "{err}");
         assert!(err.contains("image-name"), "{err}");
 
         // A nested [runpod.gpu] table could replace the gpu.id the candidate
@@ -1694,9 +1734,19 @@ mod tests {
         assert!(err.contains("gpu-type-ids"), "{err}");
         assert!(err.contains("allowed-cuda-versions"), "{err}");
 
-        // A real v2 field passes through, kebab→camelCase.
+        // A real v2 field passes through, kebab→camelCase...
         let json = body("[runpod]\ndata-center-ids = [\"EU-RO-1\"]");
         assert_eq!(json["dataCenterIds"], serde_json::json!(["EU-RO-1"]));
+        // ...and the singular this plugin's own old template recommended is
+        // mapped onto it rather than rejected.
+        let json = body("[runpod]\ndata-center-id = \"EU-RO-1\"");
+        assert_eq!(json["dataCenterIds"], serde_json::json!(["EU-RO-1"]));
+        assert!(json["dataCenterId"].is_null(), "{json}");
+        let err = body_err("[runpod]\ndata-center-id = 7");
+        assert!(err.contains("must be a string"), "{err}");
+        let err =
+            body_err("[runpod]\ndata-center-id = \"EU-RO-1\"\ndata-center-ids = [\"EU-SE-1\"]");
+        assert!(err.contains("Keep data-center-ids"), "{err}");
     }
 
     /// `cpu` is a legal v2 create field but not a legal one HERE: v2 wants
@@ -1710,7 +1760,7 @@ mod tests {
             "[runpod]\ncpu = \"cpu3c\"",
         ] {
             let err = body_err(config);
-            assert!(err.contains("exactly one of gpu/cpu"), "{err}");
+            assert!(err.contains("provisions GPU pods only"), "{err}");
             assert!(err.contains("gpu-type-ids"), "{err}");
         }
         // ...and it is no longer advertised as an accepted passthrough.
@@ -1890,14 +1940,19 @@ mod tests {
             (None, None)
         );
 
-        // Community cloud without support-public-ip: SSH (and so the
-        // heartbeat that disarms the guard) isn't guaranteed — the guard
-        // must NOT arm, or it would clean up a live Jupyter-only session.
+        // Community cloud: SSH (and so the heartbeat that disarms the guard)
+        // isn't guaranteed — the guard must NOT arm, or it would clean up a
+        // live Jupyter-only session. The note offers the one fix, and never
+        // the deprecated flag.
         let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"");
         let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
         assert_eq!(cmd, None);
-        assert!(note.unwrap().contains("support-public-ip"));
-        // ...and with support-public-ip requested, the guard arms again.
+        let note = note.unwrap();
+        assert!(note.contains("cloud-type = \"SECURE\""), "{note}");
+        assert!(note.contains("remote-kernels.toml"), "{note}");
+        assert!(!note.contains("support-public-ip"), "{note}");
+        // ...and a config that still carries the deprecated flag keeps the
+        // behavior it selected: the guard arms again.
         let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
         let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
         assert!(cmd.is_some());
@@ -2177,6 +2232,7 @@ mod tests {
             image_name: config.runpod_image_name(),
             runpod: config.runpod.clone(),
             orphan_halt_mins: config.orphan_halt_mins,
+            config_path: config.config_path(),
             adopt_probe_interval: Duration::from_millis(1),
         }
     }
@@ -2231,8 +2287,13 @@ mod tests {
                 error.contains("No second pod was created"),
                 "{label}: {error}"
             );
-            assert!(error.contains("RunPod console"), "{label}: {error}");
             assert!(error.contains("remote-kernels-m1"), "{label}: {error}");
+            // The agent is never sent to the console: status() settles it.
+            assert!(!error.contains("console"), "{label}: {error}");
+            assert!(
+                error.contains("status() keeps checking"),
+                "{label}: {error}"
+            );
             assert_eq!(
                 fake.count("POST /v2/pods "),
                 1,
@@ -2261,15 +2322,15 @@ mod tests {
         ]);
         let rt = runtime_against(&fake, "");
 
-        let error = rt
-            .provision(&provision_req())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("dup-1") && error.contains("dup-2"),
-            "{error}"
-        );
+        let error = rt.provision(&provision_req()).await.unwrap_err();
+        // The duplicate ids are not the agent's problem at this moment —
+        // status() re-probes and reports them with the machine id that can
+        // end them. Here the create just stops.
+        let unconfirmed = error
+            .downcast_ref::<crate::runtime::UnconfirmedCreate>()
+            .expect("an unsettled create must carry its marker payload");
+        assert_eq!(unconfirmed.expected_name, "remote-kernels-m1");
+        let error = error.to_string();
         assert!(error.contains("No second pod was created"), "{error}");
         assert_eq!(
             fake.count("POST /v2/pods "),
@@ -2337,13 +2398,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("may still have created a pod"),
+            error.contains("A pod named remote-kernels-m1 may exist at RunPod"),
             "the message must not claim the create did nothing: {error}"
         );
-        assert!(
-            error.contains("Check the RunPod console for a pod named remote-kernels-m1"),
-            "{error}"
-        );
+        assert!(error.contains("status() keeps checking"), "{error}");
         assert_eq!(
             fake.count("POST /v2/pods "),
             1,
@@ -2374,10 +2432,65 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("Check the RunPod console for a pod named remote-kernels-m1"),
+            error.contains("A pod named remote-kernels-m1 may exist at RunPod"),
             "{error}"
         );
         assert_eq!(fake.count("POST /v2/pods "), 1, "{error}");
+    }
+
+    /// What the agent is told about an unsettled create depends on one fact
+    /// the runtime knows and the agent cannot check: whether the machine, if
+    /// it exists, ends itself. Both brancheas carry the marker payload that
+    /// lets `status()` settle it later.
+    #[tokio::test]
+    async fn an_unsettled_create_says_whether_the_machine_bounds_itself() {
+        // Guard armed (the default config): no action needed either way.
+        let mut script = vec![(
+            "POST /v2/pods ",
+            502,
+            "{\"detail\":\"bad gateway\"}".to_string(),
+        )];
+        script.extend(probe_replies(200, "{\"pods\": []}"));
+        let fake = FakeRunPod::spawn(script);
+        let error = runtime_against(&fake, "orphan-halt-mins = 30")
+            .provision(&provision_req())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::runtime::UnconfirmedCreate>()
+                .and_then(|unconfirmed| unconfirmed.self_halt_mins),
+            Some(30)
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("shuts itself down within 30 minutes"),
+            "{message}"
+        );
+
+        // Guard off (image-start-cmd = ""): the pod would bill on.
+        let mut script = vec![(
+            "POST /v2/pods ",
+            502,
+            "{\"detail\":\"bad gateway\"}".to_string(),
+        )];
+        script.extend(probe_replies(200, "{\"pods\": []}"));
+        let fake = FakeRunPod::spawn(script);
+        let error = runtime_against(&fake, "[runpod]\nimage-start-cmd = \"\"")
+            .provision(&provision_req())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::runtime::UnconfirmedCreate>()
+                .and_then(|unconfirmed| unconfirmed.self_halt_mins),
+            None
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("keeps billing until terminated"),
+            "{message}"
+        );
     }
 
     /// 429 is the one failure that provably created nothing (the provider
@@ -2437,32 +2550,33 @@ mod tests {
         }
     }
 
-    /// v2 dropped `supportPublicIp`, so on community cloud the flag can no
-    /// longer constrain placement — the start still fails (an armed guard
-    /// must never ride a Jupyter-only session), but the message says why and
-    /// what to do, and it must not claim a guarantee the API can't give.
+    /// One message for both clouds: it reports the symptom, gives one thing
+    /// to do, and claims no cause. `support-public-ip` is gone from the UI,
+    /// so no message may name it — but a config that still carries it keeps
+    /// exactly the behavior it had (SSH expected, guard armed).
     #[test]
-    fn ssh_expectation_failure_distinguishes_secure_from_community() {
+    fn ssh_expectation_failure_is_one_message_for_both_clouds() {
         let secure = runtime_with("");
-        assert!(!secure.ssh_is_community_best_effort());
-        let message = secure.ssh_expectation_unmet("no ssh endpoint").to_string();
-        assert!(message.contains("SECURE"), "{message}");
-        assert!(!message.contains("supportPublicIp"), "{message}");
-
         let community =
             runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
-        assert!(community.ssh_is_community_best_effort());
-        let message = community
-            .ssh_expectation_unmet("no ssh endpoint")
-            .to_string();
-        assert!(message.contains("supportPublicIp"), "{message}");
+        assert_eq!(
+            secure.ssh_expectation_unmet().to_string(),
+            community.ssh_expectation_unmet().to_string()
+        );
+
+        let message = secure.ssh_expectation_unmet().to_string();
+        assert!(message.contains("No direct SSH endpoint"), "{message}");
+        assert!(message.contains("2 minutes"), "the window: {message}");
         assert!(message.contains("Retry start()"), "{message}");
         assert!(message.contains("cloud-type = \"SECURE\""), "{message}");
-        // The guard rationale stays: this is why the start fails instead of
-        // degrading to Jupyter-only.
-        assert!(message.contains("orphan guard"), "{message}");
-        // ...and the guard really is armed for this config, which is what
-        // makes failing the start the preserving choice.
+        assert!(message.contains("remote-kernels.toml"), "{message}");
+        for gone in ["support-public-ip", "supportPublicIp", "orphan guard"] {
+            assert!(!message.contains(gone), "{gone} survives: {message}");
+        }
+
+        // The deprecated flag still selects the old behavior for configs
+        // that carry it: SSH expected, so the guard arms.
+        assert!(community.ssh_expected());
         assert!(
             community
                 .guard_wrapper(&default_image(), Cleanup::Terminate)

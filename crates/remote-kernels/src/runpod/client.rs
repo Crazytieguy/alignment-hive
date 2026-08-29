@@ -140,32 +140,19 @@ impl RunPodError {
     }
 }
 
-/// The pod (if any) a failed create may have left behind: an exact, unique
-/// name match over the STRICT probe listing (see
+/// The pods a failed create may have left behind: exact name matches over
+/// the STRICT probe listing (see
 /// [`ProbePodsResponse`](super::types::ProbePodsResponse) — a pod whose name
 /// we could not read never reaches this function, because the parse fails
-/// first). Two matches are never guessed between — the machine name is unique
-/// per machine id, so ambiguity means something else is going on and adopting
-/// the wrong pod would leak the other one.
-pub fn pick_adoptable<'a>(
-    pods: &'a [ProbePod],
-    name: &str,
-) -> anyhow::Result<Option<&'a ProbePod>> {
-    let matches: Vec<&ProbePod> = pods.iter().filter(|p| p.name == name).collect();
-    match matches.as_slice() {
-        [] => Ok(None),
-        [pod] => Ok(Some(pod)),
-        many => anyhow::bail!(
-            "{} pods at RunPod are named {name:?} ({}) — refusing to guess which one \
-             belongs to this machine. Terminate the ones you don't want in the RunPod \
-             console, then retry.",
-            many.len(),
-            many.iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+/// first).
+///
+/// Several matches are never guessed between: the machine name is unique per
+/// machine id, so ambiguity means something else is going on, and adopting
+/// the wrong pod would leak the other one. The caller decides what to do
+/// with that — it is the one that knows the machine id the user would have
+/// to name.
+pub fn pods_named<'a>(pods: &'a [ProbePod], name: &str) -> Vec<&'a ProbePod> {
+    pods.iter().filter(|p| p.name == name).collect()
 }
 
 pub struct RunPodClient {
@@ -442,27 +429,29 @@ mod tests {
     }
 
     #[test]
-    fn adoptable_pod_is_matched_by_unique_name() {
+    fn adoptable_pod_is_matched_by_exact_name() {
         let pods = vec![
             pod_named("a", "rk-other-1"),
             pod_named("b", "rk-mine-2"),
             pod_named("c", "rk-mine-22"),
         ];
-        assert!(pick_adoptable(&pods, "rk-nothing").unwrap().is_none());
-        assert_eq!(
-            pick_adoptable(&pods, "rk-mine-2").unwrap().unwrap().id,
-            "b",
-            "exact name match only"
-        );
+        assert!(pods_named(&pods, "rk-nothing").is_empty());
+        let matched = pods_named(&pods, "rk-mine-2");
+        assert_eq!(matched.len(), 1, "exact name match only");
+        assert_eq!(matched[0].id, "b");
 
-        // Two pods with our name: adopting either could leak the other.
+        // Two pods with our name: every one of them is reported, because
+        // adopting either could leak the other.
         let dupes = vec![pod_named("d1", "rk-mine-2"), pod_named("d2", "rk-mine-2")];
-        let err = pick_adoptable(&dupes, "rk-mine-2").unwrap_err().to_string();
-        assert!(err.contains("d1") && err.contains("d2"), "{err}");
+        let ids: Vec<&str> = pods_named(&dupes, "rk-mine-2")
+            .iter()
+            .map(|pod| pod.id.as_str())
+            .collect();
+        assert_eq!(ids, ["d1", "d2"]);
     }
 
     /// The probe's own parse is the first line of defence: an entry whose
-    /// name we cannot read must never reach `pick_adoptable`, where it would
+    /// name we cannot read must never reach `pods_named`, where it would
     /// simply not match and read as "no such pod".
     #[test]
     fn probe_listing_requires_a_readable_name_on_every_pod() {

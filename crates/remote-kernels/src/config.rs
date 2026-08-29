@@ -82,6 +82,13 @@ pub struct Config {
 
     /// vast.ai runtime configuration. Absent = defaults.
     pub vast: Option<VastConfig>,
+
+    /// Absolute path of the `remote-kernels.toml` this config was loaded
+    /// from (or would be loaded from), filled in by [`Self::load`]. Every
+    /// message that asks for a config edit names it — an error whose file
+    /// the reader has to guess is not actionable.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,10 +356,13 @@ pub struct RunpodConfig {
     #[serde_inline_default("SECURE".to_string())]
     pub cloud_type: String,
 
-    /// Declares that this pod is expected to get a public IP (and with it
-    /// SSH). v2 has no request field for it — the flag is NOT sent to the
-    /// API; it drives our own expectations: SSH/tunnel selection, the
-    /// orphan guard, and budget enforceability ([`Self::ssh_expected`]).
+    /// DEPRECATED and undocumented: kept only so configs written against
+    /// `RunPod`'s v1 API keep parsing and keep the behavior they selected
+    /// (SSH expected on a COMMUNITY pod — see [`Self::ssh_expected`]). It is
+    /// never sent to the API, never mentioned in the template, in any
+    /// message, or in the setup docs; `cloud-type = "SECURE"` is the only
+    /// documented way to ask for SSH.
+    #[doc(hidden)]
     pub support_public_ip: Option<bool>,
 
     /// The image's own start command (its Dockerfile CMD). When known, pod
@@ -368,7 +378,7 @@ pub struct RunpodConfig {
     pub provision_timeout_mins: u64,
 
     /// How this machine's Jupyter is reached: "auto" (SSH tunnel when the
-    /// config guarantees SSH — cloud-type SECURE or support-public-ip —
+    /// config guarantees SSH — cloud-type = "SECURE" —
     /// with `RunPod`'s token-protected public proxy kept as a fallback for
     /// when SSH is slow to come back, e.g. on resume), "tunnel" (strict:
     /// always tunnel, pods are created WITHOUT the public 8888 mapping so
@@ -386,7 +396,8 @@ pub struct RunpodConfig {
 impl RunpodConfig {
     /// Whether SSH — and with it the heartbeat that disarms the orphan guard
     /// — is expected on pods created from this config: guaranteed on SECURE
-    /// cloud, and on COMMUNITY only when `support-public-ip` is requested.
+    /// cloud, and on COMMUNITY only for configs that still carry the
+    /// deprecated `support-public-ip` (so they behave exactly as before).
     /// The single implementation of this predicate: it gates budget
     /// validation, tunnel selection, orphan-guard arming, and SSH failure
     /// handling, which must never disagree.
@@ -459,10 +470,15 @@ impl Config {
         let config_path = project_dir.join("remote-kernels.toml");
         if !config_path.exists() {
             tracing::info!("No remote-kernels.toml found, using defaults");
-            return Ok(toml::from_str("")?);
+            let mut config: Self = toml::from_str("")?;
+            // Named even when absent: a message that says "set X in <path>"
+            // is actionable whether or not the file exists yet.
+            config.source_path = Some(config_path);
+            return Ok(config);
         }
         let content = std::fs::read_to_string(&config_path)?;
-        let config: Self = toml::from_str(&content)?;
+        let mut config: Self = toml::from_str(&content)?;
+        config.source_path = Some(config_path.clone());
         if config.cleanup.is_some() {
             tracing::warn!(
                 "The top-level `cleanup` key is deprecated and now acts only as a fallback — \
@@ -478,6 +494,15 @@ impl Config {
         }
         tracing::info!(?config_path, "Loaded config");
         Ok(config)
+    }
+
+    /// The config file to name in any message that asks for an edit. Falls
+    /// back to the bare filename for configs built in memory (tests).
+    pub fn config_path(&self) -> String {
+        self.source_path.as_ref().map_or_else(
+            || "remote-kernels.toml".to_string(),
+            |path| path.display().to_string(),
+        )
     }
 
     /// Effective runpod GPU shortlist:
@@ -813,9 +838,9 @@ impl Config {
 # A machine that can't run the on-machine watchdog (the process the plugin
 # installs over SSH to enforce cleanup and budget even after this server
 # disconnects) is normally refused when a budget is set — e.g. a COMMUNITY
-# pod without support-public-ip (below). Set true to allow such machines
-# anyway. Applies only to this file's budget-cap; a REMOTE_KERNELS_BUDGET
-# budget is never waivable from project config.
+# pod, which has no SSH. Set true to allow such machines anyway. Applies
+# only to this file's budget-cap; a REMOTE_KERNELS_BUDGET budget is never
+# waivable from project config.
 # allow-unenforced-budget = false
 
 # GPU types to try, in order of preference.
@@ -849,11 +874,10 @@ impl Config {
 # network-volume-id = "vol_abc123"
 
 # Cloud type: "SECURE" or "COMMUNITY".
-# COMMUNITY is cheaper but may have less reliable availability. COMMUNITY
-# pods get SSH (and the on-machine watchdog) only with a public IP. The v2
-# API has no request knob for that, so this flag declares the expectation:
-# it turns on the SSH tunnel path and arms the pre-SSH orphan guard.
-# support-public-ip = true
+# COMMUNITY is cheaper but may have less reliable availability, and its pods
+# run Jupyter over RunPod's token-protected public proxy: sync/download, the
+# on-machine watchdog and budget enforcement all need SSH, which only SECURE
+# pods are guaranteed to have.
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 
@@ -866,8 +890,8 @@ impl Config {
 # automatically to the default image; set it when using a custom image — a
 # wrong value keeps SSH/Jupyter from starting — or to "" to disable the
 # guard. The guard is also skipped with disabled cleanup, on COMMUNITY
-# without support-public-ip (no SSH to disarm it), and when start(image=...)
-# overrides the configured image.
+# cloud (no SSH to disarm it), and when start(image=...) overrides the
+# configured image.
 # Default: "{default_image_start_cmd}" for the default image, unset otherwise (no guard).
 # image-start-cmd = "{default_image_start_cmd}"
 
@@ -878,14 +902,14 @@ impl Config {
 
 # How Jupyter on the machine is reached:
 #   "auto"   — SSH tunnel (localhost) when the config guarantees SSH
-#              (cloud-type SECURE, or COMMUNITY with support-public-ip =
-#              true); the token-protected public proxy otherwise, and as a
-#              fallback when SSH is slow to come back (e.g. on resume).
+#              (cloud-type = "SECURE"); the token-protected public proxy
+#              otherwise, and as a fallback when SSH is slow to come back
+#              (e.g. on resume).
 #   "tunnel" — strict: always tunnel; the pod is created WITHOUT the public
 #              8888 mapping, so Jupyter is never internet-reachable — but a
 #              resume whose SSH never returns keeps retrying until the
 #              provision timeout terminates it, instead of falling back.
-#              Requires an SSH-guaranteeing config.
+#              Requires cloud-type = "SECURE".
 #   "proxy"  — always {{pod}}-8888.proxy.runpod.net (token-protected, public).
 # The port mapping is fixed at pod creation and reconnects follow the POD,
 # not the current config: a pod created tunnel-only always tunnels (it has no

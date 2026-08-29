@@ -145,7 +145,19 @@ pub fn validate_config_with_budget_source(
     // 422 that costs a create round trip; passthrough extras deliberately
     // stay a provision-time check so a stale one can't block a vast-only
     // server.
-    runpod::validate_storage_and_cloud(&config.runpod)?;
+    //
+    // A [runpod] value left over from earlier use must not stop a vast- or
+    // Kubernetes-only server from booting, though: the value only ever
+    // matters to a pod create, which validates it again and fails closed.
+    // So it is fatal only where RunPod is the runtime this server reaches
+    // for by default, and a startup warning everywhere else.
+    if let Err(message) = runpod::validate_storage_and_cloud(&config.runpod, &config.config_path())
+    {
+        if config.default_runtime == "runpod" {
+            return Err(message);
+        }
+        tracing::warn!("{message}");
+    }
     for &name in AnyRuntime::known_names() {
         if config.finalize_command_timeout_secs_for(name) == 0 {
             return Err(format!(
@@ -180,10 +192,14 @@ pub fn validate_config_with_budget_source(
         && !config.runpod_ssh_expected()
         && !(source == BudgetSource::Toml && config.runpod.allow_unenforced_budget)
     {
-        return Err(
-            "budget cannot be enforced for [runpod] jupyter-access = \"proxy\" when the config does not expect SSH; set cloud-type = \"SECURE\" or support-public-ip = true. allow-unenforced-budget is accepted only for a TOML budget-cap, never REMOTE_KERNELS_BUDGET"
-                .to_string(),
-        );
+        return Err(format!(
+            "budget cannot be enforced for [runpod] jupyter-access = \"proxy\" without SSH \
+             (nothing on the machine can end the run when the budget is spent). In {}, set \
+             [runpod] cloud-type = \"SECURE\", or [runpod] allow-unenforced-budget = true — \
+             which is accepted only for a budget-cap set in that same file, never for \
+             REMOTE_KERNELS_BUDGET",
+            config.config_path()
+        ));
     }
     Ok(())
 }
@@ -251,6 +267,26 @@ pub const USER_ACTION_REQUIRED: &str = "user action required:";
 /// Whether an error (anywhere in its chain) is marked [`USER_ACTION_REQUIRED`].
 pub fn error_requires_user_action(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains(USER_ACTION_REQUIRED)
+}
+
+/// A create the provider never confirmed either way: it may or may not have
+/// made a machine, and no second create may be issued to find out (no
+/// provider here offers an idempotency key). Runtimes return this instead of
+/// a plain error so the server can keep a durable marker under the machine
+/// id it already minted — the only thing that lets a later `status()` settle
+/// the question by asking the provider for `expected_name`.
+#[derive(Debug, thiserror::Error)]
+#[error("{summary}")]
+pub struct UnconfirmedCreate {
+    /// What the caller is told; the runtime composes it because only it
+    /// knows what bounds the exposure.
+    pub summary: String,
+    /// The provider-side name the create asked for — how the machine is
+    /// found again if it does exist.
+    pub expected_name: String,
+    /// `Some(minutes)` when the machine, if it exists, ends itself that long
+    /// after creation with no action here; `None` when nothing bounds it.
+    pub self_halt_mins: Option<u64>,
 }
 
 /// Marker error: the machine is still legitimately coming up (e.g. a
@@ -478,6 +514,21 @@ pub trait Runtime: Send + Sync {
         external_id: &str,
     ) -> impl Future<Output = anyhow::Result<InstanceStatus>> + Send;
 
+    /// Machines the provider currently lists under `name` — the
+    /// provider-side name a create asked for. This is how an
+    /// [`UnconfirmedCreate`] is settled later: found means adopt, several
+    /// means the ambiguity has to reach the user, and none is only "not
+    /// listed", never proof that none was made.
+    ///
+    /// Only providers whose machine names are unique per machine can answer;
+    /// the rest report the lookup unsupported, and a marker of theirs waits
+    /// for the user. (Today only `RunPod` ever produces one.)
+    fn find_by_name(&self, name: &str) -> impl Future<Output = anyhow::Result<Vec<String>>> + Send {
+        let runtime = self.name();
+        let _ = name;
+        async move { anyhow::bail!("the {runtime} runtime cannot look up machines by name") }
+    }
+
     /// Poll until the machine is running. Returns the refreshed handle.
     fn wait_running(
         &self,
@@ -633,6 +684,10 @@ impl Runtime for AnyRuntime {
 
     async fn describe(&self, external_id: &str) -> anyhow::Result<InstanceStatus> {
         dispatch!(self, r => r.describe(external_id).await)
+    }
+
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        dispatch!(self, r => r.find_by_name(name).await)
     }
 
     async fn wait_running(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
@@ -881,6 +936,8 @@ mod tests {
         assert!(validate_config_with_budget_source(&cfg, Some(BudgetSource::Toml)).is_ok());
         let error =
             validate_config_with_budget_source(&cfg, Some(BudgetSource::Environment)).unwrap_err();
-        assert!(error.contains("never REMOTE_KERNELS_BUDGET"), "{error}");
+        assert!(error.contains("never for REMOTE_KERNELS_BUDGET"), "{error}");
+        assert!(error.contains("remote-kernels.toml"), "{error}");
+        assert!(!error.contains("support-public-ip"), "{error}");
     }
 }
