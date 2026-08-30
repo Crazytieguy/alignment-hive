@@ -192,6 +192,28 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), LedgerError> 
 /// How many times an append is tried before its failure is reported.
 const APPEND_ATTEMPTS: u32 = 3;
 
+/// Test-only fault injection for the one window that cannot be reached from
+/// the outside: the append is already durable AND its WAL is already gone,
+/// so nothing on disk marks the entry as pending. A retry that minted a
+/// fresh uuid finds no slot to reuse and appends a SECOND event; a retry
+/// carrying the original uuid recognises its own entry and stops. That
+/// difference is the whole reason the interval's uuid is minted once.
+#[cfg(all(test, feature = "fake-runtime"))]
+pub(crate) mod fault {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static POST_APPEND_FAILURE: AtomicBool = AtomicBool::new(false);
+
+    /// Fail the next `commit_wal` once, after its append is durable.
+    pub(crate) fn arm_post_append_failure() {
+        POST_APPEND_FAILURE.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn take_post_append_failure() -> bool {
+        POST_APPEND_FAILURE.swap(false, Ordering::SeqCst)
+    }
+}
+
 impl EpochGuard {
     pub fn acquire(project_dir: &Path) -> Result<Self, LedgerError> {
         let dir = ledger_dir(project_dir);
@@ -365,7 +387,7 @@ impl EpochGuard {
             {
                 continue;
             }
-            let (events, corruption) = read_events_partial(&path, self.torn_tail_ok(&path));
+            let (events, corruption) = read_events_partial(&path, &self.pending_for(&path));
             // A corrupt file is never cleanup evidence. Keep it so the fold
             // can account its valid prefix and fail admission closed.
             if corruption.is_none() && events.iter().all(|event| event.epoch_id != current_epoch) {
@@ -483,7 +505,10 @@ impl EpochGuard {
         validate_event(&event)?;
         let ledger_path = self.ledger_dir.join(format!("{machine_id}.jsonl"));
         let existing_events = if path_exists(&ledger_path)? {
-            read_events(&ledger_path, has_pending_wal(&self.ledger_dir, machine_id))?
+            read_events(
+                &ledger_path,
+                &pending_wal_events(&self.ledger_dir, machine_id),
+            )?
         } else {
             Vec::new()
         };
@@ -550,19 +575,24 @@ impl EpochGuard {
             )));
         }
         let ledger_path = self.ledger_dir.join(format!("{machine_id}.jsonl"));
+        // Read the pending set BEFORE anything removes a WAL: it includes
+        // the one being committed here, which is what makes its own torn
+        // fragment droppable.
+        let pending = pending_wal_events(&self.ledger_dir, machine_id);
 
-        // The WAL being committed here is itself the evidence that a torn
-        // final line is redundant, so it can be tolerated on read and must
-        // be removed from disk before this append lands after it.
+        // Whatever happens below, the file must end on a record boundary
+        // first — including on the duplicate path, where an event that lost
+        // its newline would otherwise keep no boundary at all and be
+        // truncated by a later append.
+        restore_record_boundary(&ledger_path, &pending)?;
         if path_exists(&ledger_path)?
-            && read_events(&ledger_path, true)?
+            && read_events(&ledger_path, &pending)?
                 .iter()
                 .any(|existing| existing.uuid == wal.event.uuid)
         {
             std::fs::remove_file(&wal_path)?;
             return Ok(false);
         }
-        truncate_torn_tail(&ledger_path)?;
         let mut bytes = serde_json::to_vec(&wal.event)?;
         bytes.push(b'\n');
         let mut file = std::fs::OpenOptions::new()
@@ -574,6 +604,12 @@ impl EpochGuard {
         sync_parent(&ledger_path)?;
         std::fs::remove_file(&wal_path)?;
         sync_parent(&wal_path)?;
+        #[cfg(all(test, feature = "fake-runtime"))]
+        if fault::take_post_append_failure() {
+            return Err(LedgerError::Io(std::io::Error::other(
+                "injected failure after the append was durable",
+            )));
+        }
         Ok(true)
     }
 
@@ -595,7 +631,7 @@ impl EpochGuard {
             }
             let machine_id = name.trim_end_matches(".jsonl");
             let (events, corruption) =
-                read_events_partial(&path, has_pending_wal(&self.ledger_dir, machine_id));
+                read_events_partial(&path, &pending_wal_events(&self.ledger_dir, machine_id));
             if let Some(corruption) = corruption {
                 corruptions.push(corruption);
             }
@@ -730,7 +766,7 @@ impl EpochGuard {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        let events = read_events(&path, has_pending_wal(&self.ledger_dir, machine_id))?;
+        let events = read_events(&path, &pending_wal_events(&self.ledger_dir, machine_id))?;
         let epoch = self.manifest()?.epoch_id;
         if !events.iter().any(|event| event.epoch_id == epoch) {
             return Ok(None);
@@ -739,16 +775,29 @@ impl EpochGuard {
         Ok(Some(owner))
     }
 
-    /// Whether a torn final line in this ledger file may be dropped: only
-    /// with a WAL still holding the entry it was being written from.
-    fn torn_tail_ok(&self, path: &Path) -> bool {
-        machine_of(path).is_some_and(|machine_id| has_pending_wal(&self.ledger_dir, machine_id))
+    /// The torn-tail evidence for a ledger file, looked up from the file's
+    /// own machine id.
+    fn pending_for(&self, path: &Path) -> Vec<String> {
+        machine_of(path).map_or_else(Vec::new, |machine_id| {
+            pending_wal_events(&self.ledger_dir, machine_id)
+        })
     }
 
-    /// [`read_events`] for a ledger file, with the torn-tail evidence looked
-    /// up from the file's own machine id.
+    /// [`read_events`] for a ledger file, with that evidence supplied.
     fn read_machine_events(&self, path: &Path) -> Result<Vec<LedgerEvent>, LedgerError> {
-        read_events(path, self.torn_tail_ok(path))
+        read_events(path, &self.pending_for(path))
+    }
+
+    /// One machine's events as they actually landed. Assertions about how
+    /// many times something was recorded have to read these, not a fold: a
+    /// fold collapses a machine to one rate no matter how many events it
+    /// carries, so a duplicate is invisible there.
+    pub fn events_for(&self, machine_id: &str) -> Result<Vec<LedgerEvent>, LedgerError> {
+        let path = self.ledger_dir.join(format!("{machine_id}.jsonl"));
+        if !path_exists(&path)? {
+            return Ok(Vec::new());
+        }
+        self.read_machine_events(&path)
     }
 
     pub fn has_current_epoch_events(&self, machine_id: &str) -> Result<bool, LedgerError> {
@@ -759,7 +808,7 @@ impl EpochGuard {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         }
-        let events = read_events(&path, has_pending_wal(&self.ledger_dir, machine_id))?;
+        let events = read_events(&path, &pending_wal_events(&self.ledger_dir, machine_id))?;
         let epoch = self.manifest()?.epoch_id;
         Ok(events.iter().any(|event| event.epoch_id == epoch))
     }
@@ -798,21 +847,39 @@ fn validate_event(event: &LedgerEvent) -> Result<(), LedgerError> {
     Ok(())
 }
 
-/// Whether an append for `machine_id` is still recorded in a WAL. This is
-/// the ONLY evidence that lets a torn final line be dropped: the WAL is
-/// removed after the append is durable, so while it exists the entry is
-/// still on disk and [`EpochGuard::recover_wals`] re-applies it. With no
-/// WAL, those bytes are the only trace the event ever existed.
-fn has_pending_wal(ledger_dir: &Path, machine_id: &str) -> bool {
+/// The serialized event line of every WAL still pending for `machine_id`,
+/// byte-identical to what an append would write.
+///
+/// This is the evidence that lets a torn final line be dropped, and it has to
+/// be matched against the fragment itself, not merely against the machine:
+/// the WAL is removed only after its append is durable, so a pending WAL
+/// whose JSON *starts with* the bytes on disk is proof that those bytes are
+/// the head of an entry that will be re-applied. Any OTHER pending WAL for
+/// the same machine proves nothing about them — they could be the only trace
+/// of a different event entirely.
+fn pending_wal_events(ledger_dir: &Path, machine_id: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(ledger_dir.join("wal")) else {
-        return false;
+        return Vec::new();
     };
-    entries.flatten().any(|entry| {
-        std::fs::read(entry.path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<WalRecord>(&bytes).ok())
-            .is_some_and(|wal| wal.machine_id == machine_id)
-    })
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let wal: WalRecord = serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+            if wal.machine_id != machine_id {
+                return None;
+            }
+            serde_json::to_string(&wal.event).ok()
+        })
+        .collect()
+}
+
+/// The unterminated bytes at the end of a ledger file, if any. `None` when
+/// the file already ends on a record boundary.
+fn trailing_fragment(content: &str) -> Option<&str> {
+    if content.is_empty() || content.ends_with('\n') {
+        return None;
+    }
+    content.rsplit('\n').next().filter(|tail| !tail.is_empty())
 }
 
 /// The machine a ledger file belongs to.
@@ -820,26 +887,46 @@ fn machine_of(path: &Path) -> Option<&str> {
     path.file_name()?.to_str()?.strip_suffix(".jsonl")
 }
 
-/// Drop a torn final line from disk before anything is appended after it.
-/// Without this a retried append is glued onto the fragment and the file is
-/// corrupt for good — the exact outcome the in-memory tolerance exists to
-/// avoid. Only ever called where a WAL proves the fragment is redundant.
-fn truncate_torn_tail(path: &Path) -> Result<(), LedgerError> {
-    let content = match std::fs::read(path) {
+/// Make the file end on a record boundary before anything is appended after
+/// it. Two different things can be sitting at the end, and they need
+/// opposite treatment:
+///
+/// - A **complete** final event that lost only its trailing newline (the
+///   append writes event-plus-newline in one call, so a short write can stop
+///   exactly there). That is real recorded spend: it must keep its place,
+///   and its newline has to come back — otherwise the next append is glued
+///   onto it and BOTH events are lost.
+/// - A **fragment**, droppable only when a pending WAL's own JSON starts
+///   with it, which proves it is the head of an entry that gets re-applied.
+///   Anything else is corruption: nothing is touched, and the read that
+///   follows fails closed.
+fn restore_record_boundary(path: &Path, pending: &[String]) -> Result<(), LedgerError> {
+    let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    if content.is_empty() || content.last() == Some(&b'\n') {
+    let Some(fragment) = trailing_fragment(&content) else {
+        return Ok(());
+    };
+    if serde_json::from_str::<LedgerEvent>(fragment).is_ok() {
+        tracing::warn!(
+            path = %path.display(),
+            "restoring the record boundary after a complete final event that lost its newline"
+        );
+        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        sync_parent(path)?;
         return Ok(());
     }
-    let keep = content
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1);
+    if !pending.iter().any(|event| event.starts_with(fragment)) {
+        return Ok(());
+    }
+    let keep = content.len() - fragment.len();
     tracing::warn!(
         path = %path.display(),
-        dropped = content.len() - keep,
+        dropped = fragment.len(),
         "truncating a torn final ledger line; its WAL re-applies the entry"
     );
     let file = std::fs::OpenOptions::new().write(true).open(path)?;
@@ -849,33 +936,32 @@ fn truncate_torn_tail(path: &Path) -> Result<(), LedgerError> {
     Ok(())
 }
 
-/// `torn_tail_recoverable` must come from [`has_pending_wal`]: without that
-/// evidence a malformed final line is corruption like any other.
-fn read_events(path: &Path, torn_tail_recoverable: bool) -> Result<Vec<LedgerEvent>, LedgerError> {
-    let (events, corruption) = read_events_partial(path, torn_tail_recoverable);
+/// `pending` must come from [`pending_wal_events`]: without a WAL whose own
+/// JSON starts with it, a malformed final line is corruption like any other.
+fn read_events(path: &Path, pending: &[String]) -> Result<Vec<LedgerEvent>, LedgerError> {
+    let (events, corruption) = read_events_partial(path, pending);
     if let Some(corruption) = corruption {
         return Err(LedgerError::Corrupt(corruption));
     }
     Ok(events)
 }
 
-fn read_events_partial(
-    path: &Path,
-    torn_tail_recoverable: bool,
-) -> (Vec<LedgerEvent>, Option<String>) {
+fn read_events_partial(path: &Path, pending: &[String]) -> (Vec<LedgerEvent>, Option<String>) {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) => return (Vec::new(), Some(format!("{}: {error}", path.display()))),
     };
     // The jsonl append is the one ledger write that isn't tmp+rename, so a
     // full disk can leave a half-written final line. That fragment is
-    // recoverable ONLY while a WAL still holds the entry it was being
-    // written from: then dropping it loses nothing, where treating it as
-    // corruption would block all future spend over a write that is about to
-    // be redone. With no WAL the fragment is the only trace of the event, so
-    // it is corruption — fail closed. A complete last line that will not
-    // parse is corruption either way.
-    let torn_tail = torn_tail_recoverable && !content.is_empty() && !content.ends_with('\n');
+    // recoverable ONLY while a WAL holds the very entry it was being written
+    // from — which means the WAL's own JSON has to START WITH these bytes.
+    // Then dropping it loses nothing, where treating it as corruption would
+    // block all future spend over a write that is about to be redone. With
+    // no such WAL the fragment is the only trace of some event, so it is
+    // corruption — fail closed. A complete last line that will not parse is
+    // corruption either way.
+    let torn_tail = trailing_fragment(&content)
+        .is_some_and(|fragment| pending.iter().any(|event| event.starts_with(fragment)));
     let lines: Vec<&str> = content.lines().collect();
     let last_index = lines.len().saturating_sub(1);
     let mut events = Vec::new();
@@ -1291,7 +1377,7 @@ mod tests {
         resume.ts_ms = 100;
         guard.append("machine", "resume", resume).unwrap();
 
-        let events = read_events(&ledger_dir(dir.path()).join("machine.jsonl"), false).unwrap();
+        let events = read_events(&ledger_dir(dir.path()).join("machine.jsonl"), &[]).unwrap();
         assert_eq!(
             events.iter().map(|event| event.ts_ms).collect::<Vec<_>>(),
             vec![100, 101, 102]
@@ -1329,7 +1415,7 @@ mod tests {
         drop(guard); // simulated process death before ledger append
 
         let _restarted = EpochGuard::acquire(dir.path()).unwrap();
-        let events = read_events(&ledger_dir(dir.path()).join("machine.jsonl"), false).unwrap();
+        let events = read_events(&ledger_dir(dir.path()).join("machine.jsonl"), &[]).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].uuid, "persisted-before-crash");
     }
@@ -1528,7 +1614,7 @@ mod tests {
     /// dropping the fragment recovers where failing closed would block all
     /// future spend. A COMPLETE last line that will not parse still fails.
     #[test]
-    fn a_torn_final_line_needs_a_wal_behind_it() {
+    fn a_torn_final_line_needs_the_wal_it_came_from() {
         let dir = tempfile::tempdir().unwrap();
         let guard = EpochGuard::acquire(dir.path()).unwrap();
         guard
@@ -1541,34 +1627,50 @@ mod tests {
         let path = ledger_dir(dir.path()).join("main.jsonl");
         let intact = std::fs::read_to_string(&path).unwrap();
 
-        // The real shape of the accident: the WAL is written first, the
-        // append is interrupted, the WAL is still there. The fragment is
-        // then redundant — dropped on read, and truncated on disk before the
-        // retry lands, so the retry cannot glue itself onto it.
-        guard
+        // A pending WAL exists for this machine — but for a DIFFERENT event.
+        // It is not evidence about the bytes below.
+        let wal = guard
             .prepare(
                 "main",
                 "stopped",
                 event(EventKind::Stopped, 0.0, 0.0, 0, None, None),
             )
             .unwrap();
+        let line = serde_json::to_string(&wal.event).unwrap();
+
         std::fs::write(&path, format!("{intact}{{\"uuid\":\"half-writ")).unwrap();
-        assert!(guard.torn_tail_ok(&path));
-        let (events, corruption) = read_events_partial(&path, guard.torn_tail_ok(&path));
+        let (_, corruption) = read_events_partial(&path, &guard.pending_for(&path));
+        assert!(
+            corruption.is_some(),
+            "a fragment no pending WAL was writing is corruption"
+        );
+        assert!(guard.fold(now_ms()).is_err());
+
+        // The real shape of the accident: the WAL is written first, the
+        // append is interrupted part-way through THAT event, and the WAL is
+        // still there. The fragment is the head of its JSON, so it is
+        // redundant — dropped on read, and truncated on disk before the
+        // retry lands, so the retry cannot glue itself onto it.
+        let fragment = &line[..line.len() / 2];
+        std::fs::write(&path, format!("{intact}{fragment}")).unwrap();
+        let (events, corruption) = read_events_partial(&path, &guard.pending_for(&path));
         assert_eq!(events.len(), 1, "{corruption:?}");
         assert!(corruption.is_none(), "{corruption:?}");
         assert!(guard.fold(now_ms()).is_ok());
 
         assert!(guard.commit_wal("main", "stopped").unwrap());
         let recovered = std::fs::read_to_string(&path).unwrap();
-        assert!(!recovered.contains("half-writ"), "{recovered}");
-        assert_eq!(read_events(&path, false).unwrap().len(), 2, "{recovered}");
+        assert!(recovered.ends_with('\n'), "{recovered}");
+        assert_eq!(recovered.lines().count(), 2, "{recovered}");
+        let events = read_events(&path, &[]).unwrap();
+        assert_eq!(events.len(), 2, "{recovered}");
+        assert_eq!(events[1].uuid, wal.event.uuid);
 
-        // The same fragment with no WAL behind it: those bytes are the only
-        // trace the event ever existed, so spend fails closed.
-        std::fs::write(&path, format!("{recovered}{{\"uuid\":\"half-writ")).unwrap();
-        assert!(!guard.torn_tail_ok(&path));
-        let (_, corruption) = read_events_partial(&path, guard.torn_tail_ok(&path));
+        // The same fragment with no WAL left behind it: those bytes are the
+        // only trace the event ever existed, so spend fails closed.
+        std::fs::write(&path, format!("{recovered}{fragment}")).unwrap();
+        assert!(guard.pending_for(&path).is_empty());
+        let (_, corruption) = read_events_partial(&path, &guard.pending_for(&path));
         assert!(
             corruption.is_some(),
             "a torn tail with no WAL is corruption"
@@ -1577,8 +1679,54 @@ mod tests {
 
         // A COMPLETE last line that will not parse is corruption either way.
         std::fs::write(&path, format!("{recovered}{{\"uuid\":\"half-writ\n")).unwrap();
-        let (_, corruption) = read_events_partial(&path, true);
+        let (_, corruption) = read_events_partial(&path, &[line]);
         assert!(corruption.is_some());
+    }
+
+    /// A complete final event that lost only its trailing newline is real
+    /// recorded spend, not a fragment. The append writes event-and-newline
+    /// in one call, so a short write can stop exactly on the boundary — and
+    /// the boundary has to come back, on EVERY path out of `commit_wal`,
+    /// including the one that finds the event already there. Otherwise the
+    /// next append is glued onto it and both events are lost.
+    #[test]
+    fn a_complete_final_event_missing_its_newline_gets_its_boundary_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = EpochGuard::acquire(dir.path()).unwrap();
+        let path = ledger_dir(dir.path()).join("main.jsonl");
+
+        let wal = guard
+            .prepare(
+                "main",
+                "provisioned",
+                event(EventKind::Provisioned, 1.0, 0.0, 0, None, None),
+            )
+            .unwrap();
+        let line = serde_json::to_string(&wal.event).unwrap();
+        // The interrupted append: everything but the newline.
+        std::fs::write(&path, &line).unwrap();
+
+        // commit_wal finds its own event already on disk and returns "no
+        // append needed" — after restoring the boundary.
+        assert!(!guard.commit_wal("main", "provisioned").unwrap());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.ends_with('\n'),
+            "the record boundary must be restored: {content:?}"
+        );
+        assert_eq!(content.lines().count(), 1, "{content:?}");
+
+        // ...so the next append is a second event, not a corrupted first one.
+        guard
+            .append(
+                "main",
+                "stopped",
+                event(EventKind::Stopped, 0.0, 0.0, 0, None, None),
+            )
+            .unwrap();
+        let events = read_events(&path, &[]).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].uuid, wal.event.uuid);
     }
 
     /// A retry after a post-append failure must not open a second billing
@@ -1610,12 +1758,12 @@ mod tests {
                 .unwrap(),
             "the retry must recognise its own event"
         );
-        assert_eq!(read_events(&path, false).unwrap().len(), 1);
+        assert_eq!(read_events(&path, &[]).unwrap().len(), 1);
 
         // What a fresh uuid per attempt would have done instead.
         let again = event(EventKind::Resumed, 1.0, 0.0, 0, None, None);
         assert!(guard.append("main", "Resumed", again).unwrap());
-        assert_eq!(read_events(&path, false).unwrap().len(), 2);
+        assert_eq!(read_events(&path, &[]).unwrap().len(), 2);
     }
 
     #[test]

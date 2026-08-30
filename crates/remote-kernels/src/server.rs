@@ -5268,25 +5268,6 @@ impl RemoteKernelsServer {
         external_id: &str,
     ) -> String {
         let name = &marker.expected_name;
-        // Already admitted — by a settle that died after admitting, or by
-        // one that ran while this marker was still on disk. A second
-        // admission would write a second Provisioned event and double the
-        // machine's recorded spend, so only the leftover marker goes.
-        let existing = self.state.lock().await.project_dir.clone();
-        if crate::state::load_instance_record(&existing, machine_id).is_some() {
-            return match crate::state::clear_unconfirmed_marker(&existing, machine_id) {
-                Ok(()) => format!(
-                    "Machine {machine_id}: the machine its create never confirmed does exist \
-                     ({external_id}) and is already recorded; its unconfirmed record was \
-                     cleared. attach(\"{machine_id}\") to use it."
-                ),
-                Err(error) => format!(
-                    "Machine {machine_id}: the machine its create never confirmed does exist \
-                     ({external_id}) and is already recorded, but clearing its unconfirmed \
-                     record failed ({error}). Call status() again."
-                ),
-            };
-        }
         let runtime = match self.runtime_for(&marker.runtime).await {
             Ok(runtime) => runtime,
             Err(error) => return format!("Machine {machine_id} [unconfirmed]: {error}"),
@@ -5304,34 +5285,59 @@ impl RemoteKernelsServer {
         };
         let record = unconfirmed_instance_record(machine_id, marker, external_id, &handle);
         let lifecycle = self.provision_lifecycle(&marker.runtime, &handle);
+        // Admission decides, under the epoch lock, whether this settlement
+        // is the one that gets to record the machine. Nothing checked before
+        // the provider round-trips above could still be true here.
         let (project_dir, admitted) = {
             let state = self.state.lock().await;
             (
                 state.project_dir.clone(),
-                state.admit_provision(machine_id, &record, &lifecycle),
+                state.admit_provision_if_absent(machine_id, &record, &lifecycle),
             )
         };
-        if let Err(error) = admitted {
-            return format!(
-                "Machine {machine_id} [unconfirmed]: a machine named {name} exists at {} \
-                 ({external_id}), but recording it locally failed ({error}). Retry status(); \
-                 if it keeps failing, terminate(instance=\"{machine_id}\") ends it.",
-                marker.runtime
-            );
-        }
+        let admitted = match admitted {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return format!(
+                    "Machine {machine_id} [unconfirmed]: a machine named {name} exists at {} \
+                     ({external_id}), but recording it locally failed ({error}). Retry \
+                     status(); if it keeps failing, terminate(instance=\"{machine_id}\") ends \
+                     it.",
+                    marker.runtime
+                );
+            }
+        };
         // The record supersedes the marker; a leftover would re-adopt.
-        if let Err(error) = crate::state::clear_unconfirmed_marker(&project_dir, machine_id) {
+        let cleared = crate::state::clear_unconfirmed_marker(&project_dir, machine_id);
+        if let Err(error) = &cleared {
             tracing::warn!(
                 instance = machine_id,
                 "stale unconfirmed marker kept: {error}"
             );
         }
-        format!(
-            "Machine {machine_id}: the machine its create never confirmed does exist \
-             ({external_id}) and was adopted; its spend is tracked from now. \
-             attach(\"{machine_id}\") to use it, or terminate(instance=\"{machine_id}\") to \
-             end it."
-        )
+        if admitted {
+            return format!(
+                "Machine {machine_id}: the machine its create never confirmed does exist \
+                 ({external_id}) and was adopted; its spend is tracked from now. \
+                 attach(\"{machine_id}\") to use it, or terminate(instance=\"{machine_id}\") \
+                 to end it."
+            );
+        }
+        // Something admitted it first — a settlement that died after
+        // admitting, or one that raced this one. Only the leftover marker
+        // goes; a second admission would double the machine's spend.
+        match cleared {
+            Ok(()) => format!(
+                "Machine {machine_id}: the machine its create never confirmed does exist \
+                 ({external_id}) and is already recorded; its unconfirmed record was cleared. \
+                 attach(\"{machine_id}\") to use it."
+            ),
+            Err(error) => format!(
+                "Machine {machine_id}: the machine its create never confirmed does exist \
+                 ({external_id}) and is already recorded, but clearing its unconfirmed record \
+                 failed ({error}). Call status() again."
+            ),
+        }
     }
 
     /// An unconfirmed create is not a machine yet: it may or may not have
@@ -5470,7 +5476,9 @@ impl RemoteKernelsServer {
         let lifecycle = self.provision_lifecycle(&marker.runtime, &handle);
         let project_dir = {
             let state = self.state.lock().await;
-            state.admit_provision(machine_id, &record, &lifecycle)?;
+            // `false` means something recorded it first; the machine was
+            // still stopped, so only the bookkeeping below is left.
+            state.admit_provision_if_absent(machine_id, &record, &lifecycle)?;
             state.project_dir.clone()
         };
         if phase == Phase::Stopped {
@@ -7919,17 +7927,82 @@ mod fencing_tests {
     /// already admitted must not append a second `Provisioned` event.
     #[cfg(feature = "fake-runtime")]
     #[tokio::test]
-    async fn adopting_a_marker_whose_record_exists_does_not_admit_twice() {
+    async fn a_second_admission_of_one_machine_is_refused_under_the_lock() {
         let dir = tempfile::tempdir().unwrap();
         let server = server_in(dir.path());
         let machine_id = crate::ulid::new();
-        let marker = unconfirmed_marker("fake", "already-here", None);
         let record = InstanceRecord {
             machine_id: Some(machine_id.clone()),
             label: None,
             runtime: "fake".to_string(),
             external_id: "ext-1".to_string(),
             phase: Phase::Running,
+            cleanup: Cleanup::Terminate,
+            jupyter_token: Some("token".to_string()),
+            ssh_key_path: Some("/tmp/missing-key".to_string()),
+            gpu_name: Some("Fake GPU".to_string()),
+            cost_per_hr: 1.0,
+            proxy_port_mapped: false,
+            kernels: Vec::new(),
+        };
+        let provisioned = |label: &str| {
+            let events = crate::ledger::EpochGuard::acquire(dir.path())
+                .unwrap()
+                .events_for(&machine_id)
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            events
+                .iter()
+                .filter(|event| event.event == crate::ledger::EventKind::Provisioned)
+                .count()
+        };
+
+        // Two settlements land on the same marker. Whether they raced or one
+        // simply died after admitting, only the first may record the machine.
+        let lifecycle = crate::state::LifecycleRecord::default();
+        {
+            let state = server.state.lock().await;
+            assert!(
+                state
+                    .admit_provision_if_absent(&machine_id, &record, &lifecycle)
+                    .unwrap(),
+                "the first settlement admits"
+            );
+            assert!(
+                !state
+                    .admit_provision_if_absent(&machine_id, &record, &lifecycle)
+                    .unwrap(),
+                "the second must refuse, under the same lock as the write"
+            );
+        }
+        assert_eq!(provisioned("after two admissions"), 1);
+
+        // A fold cannot see any of this: it collapses a machine to one rate
+        // however many Provisioned events it carries, so a duplicate is
+        // invisible there. Counting events is the whole point.
+        //
+        // The settlement path that ends here is covered end to end by
+        // `settling_the_same_marker_twice_records_the_machine_once` in the
+        // e2e suite, which needs a machine the provider actually lists.
+    }
+
+    /// The retry inside the ledger must not open a SECOND billing interval
+    /// when the first attempt failed after its append was already durable and
+    /// its WAL already gone — the one window where nothing on disk marks the
+    /// entry as pending. It survives that only because the interval's uuid is
+    /// minted once, before the retry: a fresh uuid per attempt finds no slot
+    /// to reuse and appends again.
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn a_retried_interval_open_does_not_double_the_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_in(dir.path());
+        let machine_id = crate::ulid::new();
+        let record = InstanceRecord {
+            machine_id: Some(machine_id.clone()),
+            label: None,
+            runtime: "fake".to_string(),
+            external_id: "ext-1".to_string(),
+            phase: Phase::Stopped,
             cleanup: Cleanup::Terminate,
             jupyter_token: Some("token".to_string()),
             ssh_key_path: Some("/tmp/missing-key".to_string()),
@@ -7948,28 +8021,22 @@ mod fencing_tests {
                 )
                 .unwrap();
         }
-        let before = crate::ledger::EpochGuard::acquire(dir.path())
-            .unwrap()
-            .fold(crate::ledger::now_ms())
-            .unwrap()
-            .machine_rates
-            .len();
 
-        let text = server
-            .adopt_unconfirmed(&machine_id, &marker, "ext-1")
-            .await;
-        assert!(text.contains("already recorded"), "{text}");
-        assert!(
-            crate::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
-            "the leftover marker must go: {text}"
-        );
-        let after = crate::ledger::EpochGuard::acquire(dir.path())
+        crate::ledger::fault::arm_post_append_failure();
+        server
+            .open_billing_interval(&machine_id, "already billing at the provider")
+            .await
+            .expect("the retry must carry the interval through");
+
+        let events = crate::ledger::EpochGuard::acquire(dir.path())
             .unwrap()
-            .fold(crate::ledger::now_ms())
-            .unwrap()
-            .machine_rates
-            .len();
-        assert_eq!(before, after, "a second admission would double the spend");
+            .events_for(&machine_id)
+            .unwrap();
+        let resumed = events
+            .iter()
+            .filter(|event| event.event == crate::ledger::EventKind::Resumed)
+            .count();
+        assert_eq!(resumed, 1, "{events:#?}");
     }
 
     /// Codex P1 (fresh pass): a deliberate adoption must install the

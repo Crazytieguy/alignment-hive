@@ -1859,6 +1859,92 @@ async fn terminating_an_unlisted_unconfirmed_create_keeps_its_marker() {
     );
 }
 
+/// Two settlements landing on the same marker must record the machine ONCE.
+/// The second one gets there after its own provider round-trips, so the only
+/// check that can be trusted is the one admission itself makes under the
+/// epoch lock. Counted in ledger events, not in a fold: a fold collapses a
+/// machine to one rate however many Provisioned events it carries.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn settling_the_same_marker_twice_records_the_machine_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE", "1") };
+    let error = server
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: None,
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(false),
+        }))
+        .await
+        .unwrap_err();
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE") };
+    assert!(error.to_string().contains("unclear outcome"));
+
+    let (machine_id, marker) = remote_kernels::state::list_unconfirmed_records(dir.path())
+        .pop()
+        .expect("marker");
+    let marker = marker.expect("a freshly written marker parses");
+
+    let provisioned = || {
+        remote_kernels::ledger::EpochGuard::acquire(dir.path())
+            .unwrap()
+            .events_for(&machine_id)
+            .unwrap()
+            .iter()
+            .filter(|event| event.event == remote_kernels::ledger::EventKind::Provisioned)
+            .count()
+    };
+
+    // First settlement: the machine is found and adopted.
+    let text = text_of(
+        &server
+            .status(Parameters(remote_kernels::server::StatusParams {
+                instance: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(text.contains("was adopted"), "{text}");
+    assert_eq!(provisioned(), 1, "{text}");
+
+    // A second settlement of the same marker — the shape left behind by a
+    // settle that died after admitting, or by one that raced this one. The
+    // stamp is cleared so the probe is not throttled.
+    let leftover = remote_kernels::state::UnconfirmedRecord {
+        last_checked_epoch: 0,
+        ..marker
+    };
+    remote_kernels::state::save_unconfirmed_record(dir.path(), &machine_id, &leftover).unwrap();
+
+    let text = text_of(
+        &server
+            .status(Parameters(remote_kernels::server::StatusParams {
+                instance: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(text.contains("already recorded"), "{text}");
+    assert!(
+        remote_kernels::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
+        "the leftover marker must go: {text}"
+    );
+    assert_eq!(
+        provisioned(),
+        1,
+        "a second admission would double the machine's recorded spend: {text}"
+    );
+
+    terminate(&server, Some(&machine_id)).await;
+}
+
 /// `stop()` gets the same marker-aware handling as `terminate()`: the one
 /// machine wearing the name is stopped and promoted to a durable stopped
 /// record, so it can be resumed rather than stranded.

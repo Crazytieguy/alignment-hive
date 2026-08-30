@@ -825,11 +825,44 @@ impl AppState {
         record: &InstanceRecord,
         lifecycle: &LifecycleRecord,
     ) -> anyhow::Result<()> {
+        self.admit(machine_id, record, lifecycle, false).map(|_| ())
+    }
+
+    /// [`Self::admit_provision`] for a machine the caller DISCOVERED rather
+    /// than created — a create the provider never confirmed, found later by
+    /// name. Returns `Ok(false)` when a durable record is already there:
+    /// something admitted it first, and a second admission would write a
+    /// second `Provisioned` event and double the machine's recorded spend.
+    ///
+    /// The check lives here, under the epoch lock and immediately before the
+    /// write, because a caller cannot hold one across the provider
+    /// round-trips it takes to get this far — by the time it arrives, its
+    /// own pre-check is stale.
+    pub fn admit_provision_if_absent(
+        &self,
+        machine_id: &str,
+        record: &InstanceRecord,
+        lifecycle: &LifecycleRecord,
+    ) -> anyhow::Result<bool> {
+        self.admit(machine_id, record, lifecycle, true)
+    }
+
+    fn admit(
+        &self,
+        machine_id: &str,
+        record: &InstanceRecord,
+        lifecycle: &LifecycleRecord,
+        only_if_absent: bool,
+    ) -> anyhow::Result<bool> {
         if let Some(error) = &self.accounting_init_error {
             anyhow::bail!("accounting failed closed: {error}");
         }
         validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
         let guard = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
+        // Under the lock, before anything is written.
+        if only_if_absent && load_instance_record(&self.project_dir, machine_id).is_some() {
+            return Ok(false);
+        }
         let storage = if lifecycle.external_volume_id.is_some() {
             0.0
         } else {
@@ -860,7 +893,7 @@ impl AppState {
         self.save_record(machine_id, record)?;
         save_lifecycle_record(&self.project_dir, machine_id, lifecycle)?;
         guard.commit_wal(machine_id, "provisioned")?;
-        Ok(())
+        Ok(true)
     }
 
     /// Write an instance's durable record. Called immediately after provider

@@ -2541,6 +2541,27 @@ mod tests {
         );
     }
 
+    /// `gpu-type-ids = []` is reachable from a hand-edited config, and the
+    /// candidate loop has nothing to try. It must say what to change rather
+    /// than report every GPU type exhausted with an empty list of them, and
+    /// it must not reach the provider at all.
+    #[tokio::test]
+    async fn no_gpu_candidates_says_what_to_add() {
+        let fake = FakeRunPod::spawn(Vec::new());
+        let error = runtime_against(&fake, "[runpod]\ngpu-type-ids = []")
+            .provision(&provision_req())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("No GPU types to try — add one to [runpod] gpu-type-ids in"),
+            "{error}"
+        );
+        assert!(error.contains("remote-kernels.toml"), "{error}");
+        assert!(!error.contains("exhausted"), "{error}");
+        assert_eq!(fake.count("POST /v2/pods "), 0, "no candidate, no create");
+    }
+
     /// When even the durable marker cannot be written, the message must not
     /// be the tracked summary plus a correction: that summary promises
     /// `status()` will adopt the machine, and the failed write is exactly what
