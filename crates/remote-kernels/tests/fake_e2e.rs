@@ -1839,7 +1839,17 @@ async fn terminating_an_unlisted_unconfirmed_create_keeps_its_marker() {
         runtime.terminate(&external_id).await.unwrap();
     }
 
-    let text = terminate(&server, Some(&machine_id)).await;
+    // A refusal, not a success: nothing was ended, so the call did not do
+    // what it was asked to.
+    let result = server
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_terminate_command: None,
+        }))
+        .await
+        .expect("terminate protocol error");
+    let text = text_of(&result);
+    assert!(is_error(&result), "{text}");
     assert!(text.contains("nothing was terminated"), "{text}");
     assert!(text.contains("was kept"), "{text}");
     assert!(

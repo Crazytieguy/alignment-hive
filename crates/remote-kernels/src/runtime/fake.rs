@@ -251,11 +251,14 @@ impl Runtime for FakeRuntime {
         // that leaves a machine with no local record.
         if std::env::var_os("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE").is_some() {
             return Err(anyhow::Error::new(super::UnconfirmedCreate {
+                // Same shape as the real one: it must never send the reader
+                // back to start(), which would mint a second billing machine.
                 summary: format!(
                     "Creating the machine failed with an unclear outcome (simulated). No \
-                     second machine was created. A machine named {} may exist; status() \
-                     keeps checking and adopts it if it appears. Retry start().",
-                    req.machine_id
+                     second machine was created. A machine named {} may exist and is \
+                     tracked as machine {}: status() adopts it if it appears. Call \
+                     status() before starting another machine.",
+                    req.machine_id, req.machine_id
                 ),
                 cause: "simulated unconfirmed create".to_string(),
                 expected_name: req.machine_id.clone(),
