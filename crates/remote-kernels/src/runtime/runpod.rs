@@ -459,6 +459,8 @@ impl RunPodRuntime {
             ),
             expected_name: name.to_string(),
             self_halt_mins: guard_armed.then_some(self.orphan_halt_mins),
+            noun: "pod",
+            provider: "RunPod",
         })
     }
 
@@ -2535,6 +2537,80 @@ mod tests {
         let message = error.to_string();
         assert!(
             message.contains("keeps billing until terminate(instance=\"m1\")"),
+            "{message}"
+        );
+    }
+
+    /// When even the durable marker cannot be written, the message must not
+    /// be the tracked summary plus a correction: that summary promises
+    /// `status()` will adopt the machine, and the failed write is exactly what
+    /// makes the promise false. It is replaced by an escalation to the user
+    /// — the only party who can still act — and an escalation may name where
+    /// the user would look, which no agent-facing next action does.
+    #[tokio::test]
+    async fn an_untrackable_create_escalates_instead_of_promising_status() {
+        let mut script = vec![(
+            "POST /v2/pods ",
+            502,
+            "{\"detail\":\"bad gateway\"}".to_string(),
+        )];
+        script.extend(probe_replies(200, "{\"pods\": []}"));
+        let fake = FakeRunPod::spawn(script);
+        let error = runtime_against(&fake, "")
+            .provision(&provision_req())
+            .await
+            .unwrap_err();
+        let unconfirmed = error
+            .downcast_ref::<crate::runtime::UnconfirmedCreate>()
+            .expect("an unsettled create must carry its marker payload");
+        let message = unconfirmed.untracked(&"disk full");
+
+        assert!(
+            message.starts_with(
+                "Creating the pod failed with an unclear outcome (RunPod API error (502): bad \
+                 gateway). No second pod was created. A pod named remote-kernels-m1 may exist \
+                 at RunPod, but local tracking failed (disk full), so this session cannot \
+                 manage it: tell the user that a pod named remote-kernels-m1 may exist at \
+                 RunPod and may need to be terminated there."
+            ),
+            "{message}"
+        );
+        // The guard is armed by default, so the exposure is bounded and the
+        // message says so.
+        assert!(
+            message.contains("If it was created it shuts itself down within 45 minutes."),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("Do not start another machine until that is settled."),
+            "{message}"
+        );
+        // Nothing may survive from the tracked summary: no promise that
+        // status() adopts it, and never a second start().
+        for gone in [
+            "is tracked as machine",
+            "status() adopts it",
+            "Retry start()",
+        ] {
+            assert!(!message.contains(gone), "{gone} survives: {message}");
+        }
+
+        // Guard off: no self-halt sentence, and the rest is unchanged.
+        let unbounded = crate::runtime::UnconfirmedCreate {
+            self_halt_mins: None,
+            summary: unconfirmed.summary.clone(),
+            cause: unconfirmed.cause.clone(),
+            expected_name: unconfirmed.expected_name.clone(),
+            noun: unconfirmed.noun,
+            provider: unconfirmed.provider,
+        };
+        let message = unbounded.untracked(&"disk full");
+        assert!(!message.contains("shuts itself down"), "{message}");
+        assert!(
+            message.ends_with(
+                "may need to be terminated there. Do not start another machine until that is \
+                 settled."
+            ),
             "{message}"
         );
     }

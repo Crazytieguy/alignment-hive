@@ -263,6 +263,8 @@ impl Runtime for FakeRuntime {
                 cause: "simulated unconfirmed create".to_string(),
                 expected_name: req.machine_id.clone(),
                 self_halt_mins: None,
+                noun: "machine",
+                provider: "the fake provider",
             }));
         }
 

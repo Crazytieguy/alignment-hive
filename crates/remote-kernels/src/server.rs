@@ -790,24 +790,27 @@ impl RemoteKernelsServer {
                 // machine under the name it asked for; everything needed to
                 // settle it later — and to USE it if it turns out to exist —
                 // is in hand right here and nowhere else.
-                let marker = error
+                let unconfirmed = error
                     .downcast_ref::<crate::runtime::UnconfirmedCreate>()
-                    .map(|unconfirmed| crate::state::UnconfirmedRecord {
-                        runtime: runtime_name.clone(),
-                        expected_name: unconfirmed.expected_name.clone(),
-                        created_at_epoch: now_epoch(),
-                        error: unconfirmed.cause.clone(),
-                        self_halt_mins: unconfirmed.self_halt_mins,
-                        cleanup,
-                        jupyter_token: jupyter_token.clone(),
-                        ssh_key_path: ssh_keypair.private_key_path.display().to_string(),
-                        label: label.clone(),
-                        // Never probed yet: the first status() must not be
-                        // throttled out of asking.
-                        last_checked_epoch: 0,
+                    .map(|unconfirmed| {
+                        let record = crate::state::UnconfirmedRecord {
+                            runtime: runtime_name.clone(),
+                            expected_name: unconfirmed.expected_name.clone(),
+                            created_at_epoch: now_epoch(),
+                            error: unconfirmed.cause.clone(),
+                            self_halt_mins: unconfirmed.self_halt_mins,
+                            cleanup,
+                            jupyter_token: jupyter_token.clone(),
+                            ssh_key_path: ssh_keypair.private_key_path.display().to_string(),
+                            label: label.clone(),
+                            // Never probed yet: the first status() must not
+                            // be throttled out of asking.
+                            last_checked_epoch: 0,
+                        };
+                        (unconfirmed, record)
                     });
                 return Err(McpError::internal_error(
-                    self.keep_unconfirmed_create(&machine_id, marker, &error)
+                    self.keep_unconfirmed_create(&machine_id, unconfirmed, &error)
                         .await,
                     None,
                 ));
@@ -960,10 +963,13 @@ impl RemoteKernelsServer {
     async fn keep_unconfirmed_create(
         &self,
         machine_id: &str,
-        marker: Option<crate::state::UnconfirmedRecord>,
+        unconfirmed: Option<(
+            &crate::runtime::UnconfirmedCreate,
+            crate::state::UnconfirmedRecord,
+        )>,
         error: &anyhow::Error,
     ) -> String {
-        let Some(record) = marker else {
+        let Some((unconfirmed, record)) = unconfirmed else {
             return format!("{error}");
         };
         let project_dir = self.state.lock().await.project_dir.clone();
@@ -971,13 +977,10 @@ impl RemoteKernelsServer {
             // The runtime's own summary already names the machine id it is
             // tracked under, so there is nothing to add.
             Ok(()) => format!("{error}"),
-            // Nothing local can settle it now, so the one remaining move is
-            // to hand the fact to the user.
-            Err(write_error) => format!(
-                "{error} Local tracking failed ({write_error}); tell the user that a machine \
-                 named {} may exist at RunPod and cannot be managed from this session.",
-                record.expected_name
-            ),
+            // The summary promises that status() will adopt the machine.
+            // With no marker on disk that promise is false, so the summary is
+            // REPLACED, not appended to.
+            Err(write_error) => unconfirmed.untracked(&write_error),
         }
     }
 

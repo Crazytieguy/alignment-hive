@@ -291,8 +291,8 @@ pub fn error_requires_user_action(err: &anyhow::Error) -> bool {
 #[derive(Debug, thiserror::Error)]
 #[error("{summary}")]
 pub struct UnconfirmedCreate {
-    /// What the caller is told; the runtime composes it because only it
-    /// knows what bounds the exposure.
+    /// What the caller is told when the durable marker WAS written; the
+    /// runtime composes it because only it knows what bounds the exposure.
     pub summary: String,
     /// The provider failure alone, for the durable marker's own row.
     pub cause: String,
@@ -302,6 +302,38 @@ pub struct UnconfirmedCreate {
     /// `Some(minutes)` when the machine, if it exists, ends itself that long
     /// after creation with no action here; `None` when nothing bounds it.
     pub self_halt_mins: Option<u64>,
+    /// What this provider calls one machine ("pod"), and what to call the
+    /// provider itself (`"RunPod"`), so the escalation below reads in the same
+    /// terms as the rest of that provider's messages.
+    pub noun: &'static str,
+    pub provider: &'static str,
+}
+
+impl UnconfirmedCreate {
+    /// What the caller is told when even the durable marker could not be
+    /// written. This REPLACES [`Self::summary`] rather than correcting it:
+    /// the summary's promise is that the machine is tracked and `status()`
+    /// will adopt it, and a failed write is exactly what makes that untrue.
+    ///
+    /// Nothing local can settle the question now, so the whole message
+    /// escalates — and an escalation addressed to the user may say where the
+    /// user would look, which no agent-facing next action ever does.
+    pub fn untracked(&self, write_error: &dyn std::fmt::Display) -> String {
+        let outlook = self.self_halt_mins.map_or_else(String::new, |mins| {
+            format!(" If it was created it shuts itself down within {mins} minutes.")
+        });
+        format!(
+            "Creating the {noun} failed with an unclear outcome ({cause}). No second {noun} \
+             was created. A {noun} named {name} may exist at {provider}, but local tracking \
+             failed ({write_error}), so this session cannot manage it: tell the user that a \
+             {noun} named {name} may exist at {provider} and may need to be terminated \
+             there.{outlook} Do not start another machine until that is settled.",
+            noun = self.noun,
+            cause = self.cause,
+            name = self.expected_name,
+            provider = self.provider,
+        )
+    }
 }
 
 /// Marker error: the machine is still legitimately coming up (e.g. a
