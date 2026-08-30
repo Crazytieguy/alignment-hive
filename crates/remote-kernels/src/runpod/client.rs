@@ -95,14 +95,6 @@ pub enum CreateDisposition {
 }
 
 impl RunPodError {
-    /// The RFC 9457 document this error carries, when it has one.
-    pub fn problem(&self) -> Option<Problem> {
-        match self {
-            Self::Api { body, .. } => Problem::parse(body),
-            Self::Other(_) => None,
-        }
-    }
-
     /// Whether this failure proves the resource does not exist. Status only:
     /// a body that merely mentions 404 proves nothing.
     pub fn is_not_found(&self) -> bool {
@@ -177,6 +169,23 @@ impl RunPodClient {
         }
     }
 
+    /// One place where a response becomes either its body or a typed
+    /// [`RunPodError::Api`]. Every caller here classifies by status, so the
+    /// status has to survive this boundary intact — a rendered message
+    /// cannot be matched on later.
+    async fn check(resp: reqwest::Response) -> Result<String, RunPodError> {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            Ok(body)
+        } else {
+            Err(RunPodError::Api {
+                status: status.as_u16(),
+                body,
+            })
+        }
+    }
+
     pub async fn create_pod(&self, input: &CreatePodRequest) -> Result<Pod, RunPodError> {
         tracing::debug!(request = %serde_json::to_string_pretty(input).unwrap_or_default(), "Creating pod");
 
@@ -189,15 +198,7 @@ impl RunPodClient {
         .await
         .map_err(RunPodError::Other)?;
 
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(RunPodError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
+        let body = Self::check(resp).await?;
         tracing::debug!(%body, "Create pod response");
         // A 2xx we cannot parse means a pod probably EXISTS and is billing:
         // Other → Indeterminate → resolved by name lookup, never re-created.
@@ -212,16 +213,7 @@ impl RunPodClient {
         )
         .await?;
 
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(RunPodError::Api {
-                status: status.as_u16(),
-                body,
-            }
-            .into());
-        }
-
+        let body = Self::check(resp).await?;
         tracing::debug!(%body, "Get pod response");
         Ok(serde_json::from_str(&body)?)
     }
@@ -242,16 +234,7 @@ impl RunPodClient {
         )
         .await?;
 
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(RunPodError::Api {
-                status: status.as_u16(),
-                body,
-            }
-            .into());
-        }
-
+        let body = Self::check(resp).await?;
         let parsed: ProbePodsResponse = serde_json::from_str(&body)?;
         Ok(parsed.pods)
     }
@@ -270,10 +253,8 @@ impl RunPodClient {
         )
         .await?;
 
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-
-        if status.as_u16() == 409 {
+        if resp.status().as_u16() == 409 {
+            let body = resp.text().await.unwrap_or_default();
             // "Not valid for the current status" is success when the status
             // IS what we were asking for (cleanup paths stop pods that may
             // already have stopped themselves).
@@ -283,8 +264,8 @@ impl RunPodClient {
             let current_status = current
                 .as_ref()
                 .and_then(|p| p.status.as_deref())
-                .unwrap_or(crate::runtime::runpod::UNKNOWN_STATUS);
-            if crate::runtime::runpod::conflict_satisfies(action, current_status) {
+                .unwrap_or(super::types::UNKNOWN_STATUS);
+            if super::types::conflict_satisfies(action, current_status) {
                 tracing::info!(
                     pod_id,
                     action,
@@ -302,14 +283,7 @@ impl RunPodClient {
             );
         }
 
-        if !status.is_success() {
-            return Err(RunPodError::Api {
-                status: status.as_u16(),
-                body,
-            }
-            .into());
-        }
-
+        let body = Self::check(resp).await?;
         tracing::debug!(%body, action, "Pod action response");
         Ok(serde_json::from_str(&body).ok())
     }
@@ -332,20 +306,14 @@ impl RunPodClient {
         )
         .await?;
 
-        let status = resp.status();
         // 404 = already gone, which is this call's desired end state — a pod
         // may have been deleted externally or self-cleaned by the on-pod
         // watchdog/orphan guard, and terminate() must still succeed so the
         // local record gets cleared (vast and kubernetes do the same).
-        if !status.is_success() && status.as_u16() != 404 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RunPodError::Api {
-                status: status.as_u16(),
-                body,
-            }
-            .into());
+        if resp.status().as_u16() == 404 {
+            return Ok(());
         }
-
+        Self::check(resp).await?;
         Ok(())
     }
 }

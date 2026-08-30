@@ -99,6 +99,26 @@ pub(crate) fn retry_after_delay(
         })
 }
 
+/// Deserialize a response field, degrading to its default instead of failing
+/// the whole parse. This covers three cases at once: a missing field, an
+/// explicit `null` (which `#[serde(default)]` alone does not handle), and a
+/// value the field's type cannot represent — `RunPod` reports
+/// `runtime.uptime: -1` on a pod that is shutting down (observed live
+/// 2026-08-18), and one such field must never make `describe()` fail on a
+/// machine that is still billing.
+///
+/// Nothing about that is provider-specific: it lives here so any response
+/// type in this crate can point a field at it.
+pub(crate) fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::de::DeserializeOwned,
+{
+    use serde::Deserialize as _;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(value).unwrap_or_default())
+}
+
 pub mod config;
 pub mod descriptions;
 pub mod heartbeat;

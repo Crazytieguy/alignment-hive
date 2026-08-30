@@ -1108,9 +1108,19 @@ impl RemoteKernelsServer {
                 "Machine {machine_id} cannot be attached: {error:#}; record kept."
             ));
         }
-        let accounting = resume_accounting(&provider_status, record.phase);
-        let needs_provider_resume = accounting == ResumeAccounting::ResumeAndOpen;
-        let resumed = accounting != ResumeAccounting::AlreadyOpen;
+        // One reading of what this attach owes the ledger: whether an
+        // interval has to be opened (and with what note), and whether the
+        // provider has to be asked to start the machine at all.
+        let (needs_provider_resume, interval_note) =
+            match resume_accounting(&provider_status, record.phase) {
+                ResumeAccounting::AlreadyOpen => (false, None),
+                ResumeAccounting::ResumeAndOpen => (true, Some("resume provider call admitted")),
+                ResumeAccounting::OpenOnly => (
+                    false,
+                    Some("already billing at the provider; interval reopened"),
+                ),
+            };
+        let resumed = interval_note.is_some();
         if needs_provider_resume && auto {
             // Startup re-attach never resumes: resuming restarts billing and
             // is always an explicit decision. (A machine that is already
@@ -1120,13 +1130,8 @@ impl RemoteKernelsServer {
                 "Machine {machine_id} is stopped; automatic reattach skipped it. attach(\"{machine_id}\") resumes it (billing restarts)."
             ));
         }
-        if resumed {
+        if let Some(note) = interval_note {
             self.state.lock().await.reset_known_hosts(&machine_id);
-            let note = if needs_provider_resume {
-                "resume provider call admitted"
-            } else {
-                "already billing at the provider; interval reopened"
-            };
             self.accounted_resume(&machine_id, note, async {
                 if needs_provider_resume {
                     runtime.resume(&record.external_id).await
@@ -5553,18 +5558,21 @@ impl RemoteKernelsServer {
             ));
         }
 
-        if provider_state.is_billing()
-            && record.phase == Phase::Stopped
+        // Exactly the rule attach() applies, from the same function: a
+        // machine the provider is billing while the record says stopped owes
+        // the ledger a reopened interval. What differs is the OWNER —
+        // reconciliation observes a machine, it does not claim one, so the
+        // event carries no ownership change (see below).
+        if resume_accounting(&provider_state, record.phase) == ResumeAccounting::OpenOnly
             && lifecycle_snapshot.finalize_phase
                 != Some(crate::state::FinalizePhase::RetrievingOutcome)
         {
-            // Resumed outside this tool (console, CLI), or still coming up
-            // from such a resume — RunPod v2 reports PROVISIONING/STARTING
-            // for the first minutes of a restart and the meter runs the whole
-            // time: GPU billing restarted while the ledger still shows the
-            // stopped storage tail. Reopen the interval at the full rate
-            // (attributed to the machine's existing owner) so spend is never
-            // silently untracked.
+            // Resumed outside this tool, or still coming up from such a
+            // resume — RunPod v2 reports PROVISIONING/STARTING for the first
+            // minutes of a restart and the meter runs the whole time: GPU
+            // billing restarted while the ledger still shows the stopped
+            // storage tail. Reopen at the full rate, attributed to the
+            // machine's existing owner, so spend is never silently untracked.
             let reopened = self.state.lock().await.append_ledger_event(
                 machine_id,
                 crate::ledger::EventKind::RateChanged,
@@ -6292,25 +6300,26 @@ impl RemoteKernelsServer {
             None,
             None,
         )?;
-        if is_current_generation
-            && let Some(mut instance) = state.instances.remove(&target.machine_id)
-        {
-            instance.stop_heartbeat();
-            if action == CleanupAction::Stop {
-                instance.phase = Phase::Stopped;
-                state.save_record(&target.machine_id, &instance.record())?;
-            }
-        } else if action == CleanupAction::Stop {
-            // A record-only stop has no in-memory instance to persist from,
-            // but the record must still say stopped — otherwise status()
-            // keeps reporting a running machine that isn't.
-            if let Some(mut record) =
+        // The in-memory instance goes either way; what it leaves behind is
+        // the record to persist, when there is one.
+        let live = is_current_generation
+            .then(|| state.instances.remove(&target.machine_id))
+            .flatten()
+            .map(|mut instance| {
+                instance.stop_heartbeat();
+                instance.record()
+            });
+        // One rule for persisting a stop, live or record-only: the phase
+        // lands on disk whenever the record still names the machine that was
+        // stopped. (The terminate below is guarded the same way.)
+        if action == CleanupAction::Stop
+            && let Some(mut record) = live.or_else(|| {
                 crate::state::load_instance_record(&state.project_dir, &target.machine_id)
-                && record.external_id == target.external_id
-            {
-                record.phase = Phase::Stopped;
-                state.save_record(&target.machine_id, &record)?;
-            }
+            })
+            && record.external_id == target.external_id
+        {
+            record.phase = Phase::Stopped;
+            state.save_record(&target.machine_id, &record)?;
         }
         if action == CleanupAction::Terminate
             && crate::state::load_instance_record(&state.project_dir, &target.machine_id)

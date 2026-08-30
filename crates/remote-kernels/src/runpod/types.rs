@@ -70,6 +70,24 @@ pub const POD_STATUSES: &[&str] = &[
     "TERMINATED",
 ];
 
+/// What a pod whose status we could not read is called, in every string a
+/// user might see. v1 rendered a missing `desiredStatus` this way.
+pub const UNKNOWN_STATUS: &str = "unknown";
+
+/// Whether a 409 from `POST /action` is already the outcome we wanted (the
+/// pod is in a status that satisfies the requested transition). A `start` on
+/// a RUNNING-but-broken pod is fine; a `stop` that was refused while the pod
+/// is still RUNNING must surface. Lives with the statuses it reads so the
+/// API client does not have to reach into the runtime layer above it.
+pub fn conflict_satisfies(action: &str, status: &str) -> bool {
+    match action {
+        "stop" => matches!(status, "EXITED" | "TERMINATED"),
+        "start" => matches!(status, "RUNNING" | "STARTING" | "PROVISIONING"),
+        "terminate" => status == "TERMINATED",
+        _ => false,
+    }
+}
+
 /// The `Cloud` enum — the values `cloud-type` accepts.
 pub const CLOUDS: &[&str] = &["SECURE", "COMMUNITY"];
 
@@ -165,72 +183,72 @@ pub struct PodActionRequest<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct Pod {
     pub id: String,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub name: Option<String>,
     /// One of [`POD_STATUSES`] — kept as a string on purpose (D7).
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub status: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub image: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub args: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub disk: Option<u32>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub ports: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub env: HashMap<String, String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub cloud: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub data_center_id: Option<String>,
     /// Current cost in USD/hour; `0.0` while EXITED or TERMINATED.
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub cost: Option<f64>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub gpu: Option<GpuInfo>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub mounts: Option<MountsInfo>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub ssh: Option<PodSsh>,
     /// Null unless the pod is RUNNING.
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub runtime: Option<PodRuntime>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuInfo {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub id: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountsInfo {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub persistent: Option<PersistentMountInfo>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub network: Vec<NetworkMountInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentMountInfo {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub size: Option<u32>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkMountInfo {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub volume_id: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub path: Option<String>,
 }
 
@@ -240,22 +258,22 @@ pub struct NetworkMountInfo {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSsh {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub proxy: Option<PodSshEndpoint>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub direct: Option<PodSshEndpoint>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSshEndpoint {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub host: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub port: Option<u16>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub username: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub command: Option<String>,
 }
 
@@ -265,22 +283,22 @@ pub struct PodSshEndpoint {
 pub struct PodRuntime {
     /// Seconds since the container started. Observed live: a pod on its way
     /// out reports `-1`, hence the signed type (and the lenient parse).
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub uptime: Option<i64>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub ports: Vec<PodRuntimePort>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodRuntimePort {
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub private: Option<u16>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub public: Option<u16>,
-    #[serde(default, rename = "type", deserialize_with = "lenient")]
+    #[serde(default, rename = "type", deserialize_with = "crate::lenient")]
     pub port_type: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "crate::lenient")]
     pub ip: Option<String>,
 }
 
@@ -311,22 +329,6 @@ pub struct ProbePodsResponse {
 pub struct ProbePod {
     pub id: String,
     pub name: String,
-}
-
-/// Deserialize a response field, degrading to its default instead of failing
-/// the whole parse. This covers three cases at once: a missing field, an
-/// explicit `null` (which `#[serde(default)]` alone does not handle), and a
-/// value the field's type cannot represent — `RunPod` reports
-/// `runtime.uptime: -1` on a pod that is shutting down (observed live
-/// 2026-08-18), and one such field must never make `describe()` fail on a
-/// machine that is still billing.
-fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Default + serde::de::DeserializeOwned,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(T::deserialize(value).unwrap_or_default())
 }
 
 impl Pod {
@@ -363,5 +365,42 @@ impl Pod {
         self.ports
             .as_deref()
             .is_none_or(|p| p.iter().any(|m| m.starts_with("8888/")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conflict_satisfies;
+
+    #[test]
+    fn action_conflict_is_treated_as_success_only_when_satisfied() {
+        for (action, status) in [
+            ("stop", "EXITED"),
+            ("stop", "TERMINATED"),
+            ("start", "RUNNING"),
+            ("start", "STARTING"),
+            ("start", "PROVISIONING"),
+            // pod_action is reachable with any action string; terminate goes
+            // through DELETE today, so this arm is defensive — and untested
+            // is how a defensive arm rots.
+            ("terminate", "TERMINATED"),
+        ] {
+            assert!(
+                conflict_satisfies(action, status),
+                "{action} on {status} is already the outcome we wanted"
+            );
+        }
+        for (action, status) in [
+            ("stop", "RUNNING"),
+            ("start", "EXITED"),
+            ("start", "ERROR"),
+            ("terminate", "RUNNING"),
+            ("terminate", "EXITED"),
+        ] {
+            assert!(
+                !conflict_satisfies(action, status),
+                "{action} on {status} must surface"
+            );
+        }
     }
 }

@@ -866,17 +866,7 @@ impl AppState {
     /// Write an instance's durable record. Called immediately after provider
     /// allocation (phase = Provisioning) and on every phase change.
     pub fn save_record(&self, machine_id: &str, record: &InstanceRecord) -> anyhow::Result<()> {
-        let dir = instance_dir(&self.project_dir, machine_id);
-        std::fs::create_dir_all(&dir)?;
-        ensure_gitignore(&self.project_dir);
-        let json = serde_json::to_string_pretty(record)?;
-        let path = dir.join("state.json");
-        let temporary = dir.join(format!(".state.{}.tmp", std::process::id()));
-        std::fs::write(&temporary, json)?;
-        std::fs::File::open(&temporary)?.sync_all()?;
-        std::fs::rename(&temporary, &path)?;
-        std::fs::File::open(&dir)?.sync_all()?;
-        Ok(())
+        write_json_atomic(&self.project_dir, machine_id, "state", "state.json", record)
     }
 
     /// Remove an instance's durable record (after terminate).
@@ -894,13 +884,7 @@ impl AppState {
                 let _ = std::fs::remove_dir_all(&managed_dir);
             }
         }
-        let dir = instance_dir(&self.project_dir, machine_id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-            if let Some(parent) = dir.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
-        }
+        remove_instance_dir(&self.project_dir, machine_id)?;
         if !epoch.has_instance_records()? {
             epoch.close_epoch(crate::ledger::now_ms())?;
         }
@@ -915,13 +899,7 @@ impl AppState {
         validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
         let managed_dir = self.keys_root.join("instances").join(machine_id);
         let _ = std::fs::remove_dir_all(&managed_dir);
-        let dir = instance_dir(&self.project_dir, machine_id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-            if let Some(parent) = dir.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
-        }
+        remove_instance_dir(&self.project_dir, machine_id)?;
         Ok(())
     }
 
@@ -1013,7 +991,49 @@ impl AppState {
 }
 
 /// List all persisted instance records for a project.
-pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)> {
+/// Delete one machine's state directory and make the deletion durable. The
+/// parent fsync is what stops a crash from resurrecting a record for a
+/// machine that no longer exists.
+fn remove_instance_dir(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {
+    let dir = instance_dir(project_dir, machine_id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+        if let Some(parent) = dir.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+/// Persist one JSON record durably: write a per-process temp file, fsync it,
+/// rename it over the target, then fsync the directory. Every record under
+/// `instances/<machine_id>/` goes through here — a partially written state
+/// or lifecycle file is a machine this tool can no longer account for.
+fn write_json_atomic<T: Serialize>(
+    project_dir: &Path,
+    machine_id: &str,
+    tmp_stem: &str,
+    filename: &str,
+    value: &T,
+) -> anyhow::Result<()> {
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    let dir = instance_dir(project_dir, machine_id);
+    std::fs::create_dir_all(&dir)?;
+    ensure_gitignore(project_dir);
+    let temporary = dir.join(format!(".{tmp_stem}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    std::fs::File::open(&temporary)?.sync_all()?;
+    std::fs::rename(temporary, dir.join(filename))?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    Ok(())
+}
+
+/// Every record of one kind under `instances/`, sorted by machine id.
+/// `load` decides what a directory without that record means.
+fn list_records<T>(
+    project_dir: &Path,
+    load: impl Fn(&Path, &str) -> Option<T>,
+) -> Vec<(String, T)> {
     let instances_dir = state_dir(project_dir).join("instances");
     let Ok(entries) = std::fs::read_dir(&instances_dir) else {
         return Vec::new();
@@ -1021,12 +1041,16 @@ pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)
     let mut records = Vec::new();
     for entry in entries.flatten() {
         let machine_id = entry.file_name().to_string_lossy().to_string();
-        if let Some(record) = load_instance_record(project_dir, &machine_id) {
+        if let Some(record) = load(project_dir, &machine_id) {
             records.push((machine_id, record));
         }
     }
     records.sort_by(|a, b| a.0.cmp(&b.0));
     records
+}
+
+pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)> {
+    list_records(project_dir, load_instance_record)
 }
 
 pub fn load_instance_record(project_dir: &Path, machine_id: &str) -> Option<InstanceRecord> {
@@ -1078,16 +1102,13 @@ pub fn save_lifecycle_record(
     machine_id: &str,
     lifecycle: &LifecycleRecord,
 ) -> anyhow::Result<()> {
-    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-    let dir = instance_dir(project_dir, machine_id);
-    std::fs::create_dir_all(&dir)?;
-    ensure_gitignore(project_dir);
-    let temporary = dir.join(format!(".lifecycle.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, serde_json::to_vec_pretty(lifecycle)?)?;
-    std::fs::File::open(&temporary)?.sync_all()?;
-    std::fs::rename(temporary, dir.join("lifecycle.json"))?;
-    std::fs::File::open(&dir)?.sync_all()?;
-    Ok(())
+    write_json_atomic(
+        project_dir,
+        machine_id,
+        "lifecycle",
+        "lifecycle.json",
+        lifecycle,
+    )
 }
 
 fn unconfirmed_path(project_dir: &Path, machine_id: &str) -> PathBuf {
@@ -1102,16 +1123,13 @@ pub fn save_unconfirmed_record(
     machine_id: &str,
     record: &UnconfirmedRecord,
 ) -> anyhow::Result<()> {
-    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-    let dir = instance_dir(project_dir, machine_id);
-    std::fs::create_dir_all(&dir)?;
-    ensure_gitignore(project_dir);
-    let temporary = dir.join(format!(".unconfirmed.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, serde_json::to_vec_pretty(record)?)?;
-    std::fs::File::open(&temporary)?.sync_all()?;
-    std::fs::rename(temporary, unconfirmed_path(project_dir, machine_id))?;
-    std::fs::File::open(&dir)?.sync_all()?;
-    Ok(())
+    write_json_atomic(
+        project_dir,
+        machine_id,
+        "unconfirmed",
+        "unconfirmed.json",
+        record,
+    )
 }
 
 /// A marker file that is there but cannot be turned into a record. It must
@@ -1153,19 +1171,7 @@ pub fn load_unconfirmed_record(
 pub fn list_unconfirmed_records(
     project_dir: &Path,
 ) -> Vec<(String, Result<UnconfirmedRecord, UnreadableMarker>)> {
-    let instances_dir = state_dir(project_dir).join("instances");
-    let Ok(entries) = std::fs::read_dir(&instances_dir) else {
-        return Vec::new();
-    };
-    let mut records = Vec::new();
-    for entry in entries.flatten() {
-        let machine_id = entry.file_name().to_string_lossy().to_string();
-        if let Some(record) = load_unconfirmed_record(project_dir, &machine_id) {
-            records.push((machine_id, record));
-        }
-    }
-    records.sort_by(|a, b| a.0.cmp(&b.0));
-    records
+    list_records(project_dir, load_unconfirmed_record)
 }
 
 /// Drop just the marker, keeping whatever else the instance directory holds

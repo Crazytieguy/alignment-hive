@@ -90,6 +90,8 @@ pub struct VastRuntime {
     name_prefix: String,
     /// Pre-SSH orphan guard window (config `orphan-halt-mins`).
     orphan_halt_mins: u64,
+    /// The config file every `[vast]` message tells the reader to edit.
+    config_path: String,
 }
 
 impl VastRuntime {
@@ -99,6 +101,7 @@ impl VastRuntime {
             vast: config.vast.clone().unwrap_or_default(),
             name_prefix: config.name.clone(),
             orphan_halt_mins: config.orphan_halt_mins,
+            config_path: config.config_path(),
         }
     }
 
@@ -110,6 +113,7 @@ impl VastRuntime {
             vast: config.vast.clone().unwrap_or_default(),
             name_prefix: config.name.clone(),
             orphan_halt_mins: config.orphan_halt_mins,
+            config_path: config.config_path(),
         }
     }
 
@@ -204,12 +208,12 @@ impl VastRuntime {
         let limit = overrides.limit.unwrap_or(self.vast.search_limit);
         let offers = self.client.search_offers(filters, limit).await?;
         if offers.is_empty() {
-            return Ok(
+            return Ok(format!(
                 "No vast.ai offers matched. Loosen the filters: raise max_dph, drop \
                  gpu_name constraints, or override the baseline filters (see the \
-                 [vast] section of remote-kernels.toml) via the query parameter."
-                    .to_string(),
-            );
+                 [vast] section of {}) via the query parameter.",
+                self.config_path
+            ));
         }
 
         let mut out = String::from(
@@ -264,11 +268,12 @@ impl VastRuntime {
         if offers.is_empty() {
             anyhow::bail!(
                 "No vast.ai offers matched the filters (gpu-name {:?}, vm={}, max-dph {:?}). \
-                 Loosen [vast] settings in remote-kernels.toml, try a different gpu_type, or \
-                 pick hosts explicitly via search_vast_offers().",
+                 Loosen [vast] settings in {}, try a different gpu_type, or pick hosts \
+                 explicitly via search_vast_offers().",
                 self.vast.gpu_name,
                 self.vast.vm,
-                self.vast.max_dph
+                self.vast.max_dph,
+                self.config_path
             );
         }
         Ok(offers
@@ -339,9 +344,10 @@ impl VastRuntime {
             !offers.is_empty(),
             "None of the {} offers in vast_offers are usable: {}. Offers churn quickly — \
              call search_vast_offers() again and pass a fresh shortlist (max-dph and vm \
-             constraints from remote-kernels.toml still apply).",
+             constraints from {} still apply).",
             ids.len(),
-            skipped.join("; ")
+            skipped.join("; "),
+            self.config_path
         );
         Ok(offers)
     }

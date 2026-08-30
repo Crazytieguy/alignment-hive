@@ -140,19 +140,19 @@ pub fn validate_config_with_budget_source(
                 .to_string(),
         );
     }
-    // Our own typed RunPod knobs whose legal values v2 constrains. Failing
-    // at startup (like provision-timeout-mins) beats discovering it in a
-    // 422 that costs a create round trip; passthrough extras deliberately
-    // stay a provision-time check so a stale one can't block a vast-only
-    // server.
-    //
-    // A [runpod] value left over from earlier use must not stop a vast- or
-    // Kubernetes-only server from booting, though: the value only ever
-    // matters to a pod create, which validates it again and fails closed.
-    // So it is fatal only where RunPod is the runtime this server reaches
-    // for by default, and a startup warning everywhere else.
-    if let Err(message) = runpod::validate_storage_and_cloud(&config.runpod, &config.config_path())
-    {
+    // Both RunPod preflight checks follow ONE rule. Failing at startup beats
+    // discovering the same thing in a 422 that costs a create round trip —
+    // but a [runpod] value left over from earlier use must not stop a vast-
+    // or Kubernetes-only server from booting, and every one of these is
+    // re-validated when a pod is actually created (the create body's own
+    // validation, and the BudgetUnenforceable gate), where it fails closed.
+    // So: fatal where RunPod is the runtime this server reaches for by
+    // default, a startup warning everywhere else.
+    let runpod_preflight = [
+        runpod::validate_storage_and_cloud(&config.runpod, &config.config_path()).err(),
+        runpod_budget_enforceable(config, budget_source).err(),
+    ];
+    for message in runpod_preflight.into_iter().flatten() {
         if config.default_runtime == "runpod" {
             return Err(message);
         }
@@ -187,8 +187,21 @@ pub fn validate_config_with_budget_source(
             ));
         }
     }
-    if let Some(source) = budget_source
-        && config.runpod.jupyter_access == crate::config::JupyterAccess::Proxy
+    Ok(())
+}
+
+/// Whether a budgeted `[runpod]` config could enforce that budget at all: a
+/// proxy-only pod has nothing on it that can end the run when the money is
+/// spent. Checked again per machine at provision (`BudgetUnenforceable`),
+/// where it fails closed regardless of which runtime is the default.
+fn runpod_budget_enforceable(
+    config: &Config,
+    budget_source: Option<BudgetSource>,
+) -> Result<(), String> {
+    let Some(source) = budget_source else {
+        return Ok(());
+    };
+    if config.runpod.jupyter_access == crate::config::JupyterAccess::Proxy
         && !config.runpod_ssh_expected()
         && !(source == BudgetSource::Toml && config.runpod.allow_unenforced_budget)
     {
@@ -654,8 +667,9 @@ impl AnyRuntime {
             "kubernetes" => {
                 let k8s = config.kubernetes.clone().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "The kubernetes runtime requires a [kubernetes] section in \
-                         remote-kernels.toml (at minimum: pod-template = \"path/to/pod.yaml\")."
+                        "The kubernetes runtime requires a [kubernetes] section in {} \
+                         (at minimum: pod-template = \"path/to/pod.yaml\").",
+                        config.config_path()
                     )
                 })?;
                 Ok(Self::Kubernetes(kubernetes::KubernetesRuntime::new(

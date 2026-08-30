@@ -44,7 +44,7 @@ use std::time::Duration;
 use crate::config::{Cleanup, Config};
 use crate::runpod::client::{CreateDisposition, RunPodClient, RunPodError};
 use crate::runpod::types::{
-    CreateGpuConfig, CreatePodRequest, Mounts, NetworkMount, PersistentMount, Pod,
+    CreateGpuConfig, CreatePodRequest, Mounts, NetworkMount, PersistentMount, Pod, UNKNOWN_STATUS,
 };
 
 use super::{
@@ -255,46 +255,17 @@ impl RunPodRuntime {
                     fields.allowed_cuda_versions = Some(versions);
                 }
                 "min-cuda-version" => {
-                    fields.min_cuda_version = Some(
-                        value
-                            .as_str()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "[runpod] min-cuda-version must be a string, e.g. \
-                                     \"12.1\" — edit {config}"
-                                )
-                            })?
-                            .to_string(),
-                    );
+                    fields.min_cuda_version =
+                        Some(expect_str(value, key, Some("\"12.1\""), config)?);
                 }
                 "container-registry-auth-id" => {
-                    fields.registry = Some(
-                        value
-                            .as_str()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "[runpod] container-registry-auth-id must be a string \
-                                     — edit {config}"
-                                )
-                            })?
-                            .to_string(),
-                    );
+                    fields.registry = Some(expect_str(value, key, None, config)?);
                 }
                 // This plugin's own template recommended the singular for
                 // years; RunPod takes a list. Mapping it is free and keeps
                 // those configs starting.
                 "data-center-id" => {
-                    data_center_id = Some(
-                        value
-                            .as_str()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "[runpod] data-center-id must be a string, e.g. \
-                                     \"EU-RO-1\" — edit {config}"
-                                )
-                            })?
-                            .to_string(),
-                    );
+                    data_center_id = Some(expect_str(value, key, Some("\"EU-RO-1\""), config)?);
                 }
                 _ => {
                     let camel = to_camel_case(key);
@@ -765,6 +736,21 @@ pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities
     }
 }
 
+/// One shape for every `[runpod]` key whose value has to be a string, so
+/// three near-identical validators cannot drift apart. `example` is shown
+/// when there is a useful one.
+fn expect_str(
+    value: &toml::Value,
+    key: &str,
+    example: Option<&str>,
+    config: &str,
+) -> anyhow::Result<String> {
+    value.as_str().map(str::to_string).ok_or_else(|| {
+        let example = example.map_or_else(String::new, |example| format!(", e.g. {example}"));
+        anyhow::anyhow!("[runpod] {key} must be a string{example} — edit {config}")
+    })
+}
+
 /// The `[runpod]` keys the config file may legitimately set beyond the typed
 /// ones: every create field this runtime neither manages nor conflicts with,
 /// plus the typed keys that map onto one. Derived from the spec constants,
@@ -862,10 +848,6 @@ pub(crate) fn args_from_argv(argv: &[String]) -> String {
         .join(" ")
 }
 
-/// What a pod whose status we could not read is called, in every string a
-/// user might see. v1 rendered a missing `desiredStatus` this way.
-pub(crate) const UNKNOWN_STATUS: &str = "unknown";
-
 /// Map a v2 `PodStatus` string onto the runtime-agnostic status.
 ///
 /// `PROVISIONING`/`STARTING` are the normal early states in v2 (v1's
@@ -880,19 +862,6 @@ pub(crate) fn instance_status_from(status: &str) -> InstanceStatus {
         "TERMINATED" => InstanceStatus::Gone,
         "PROVISIONING" | "STARTING" => InstanceStatus::Provisioning,
         other => InstanceStatus::Unknown(other.to_string()),
-    }
-}
-
-/// Whether a 409 from `POST /action` is already the outcome we wanted (the
-/// pod is in a status that satisfies the requested transition). A `start` on
-/// a RUNNING-but-broken pod is fine; a `stop` that was refused while the pod
-/// is still RUNNING must surface.
-pub(crate) fn conflict_satisfies(action: &str, status: &str) -> bool {
-    match action {
-        "stop" => matches!(status, "EXITED" | "TERMINATED"),
-        "start" => matches!(status, "RUNNING" | "STARTING" | "PROVISIONING"),
-        "terminate" => status == "TERMINATED",
-        _ => false,
     }
 }
 
@@ -930,10 +899,8 @@ pub(crate) fn validate_storage_and_cloud(
 /// record, so a live, still-billing pod would vanish from status and cost
 /// tracking.
 fn is_pod_not_found(err: &anyhow::Error) -> bool {
-    matches!(
-        err.downcast_ref::<crate::runpod::client::RunPodError>(),
-        Some(crate::runpod::client::RunPodError::Api { status: 404, .. })
-    )
+    err.downcast_ref::<RunPodError>()
+        .is_some_and(RunPodError::is_not_found)
 }
 
 impl Runtime for RunPodRuntime {
@@ -971,10 +938,22 @@ impl Runtime for RunPodRuntime {
         let mut all_bad_request = true;
         let mut last_detail: Option<String> = None;
 
+        // Everything in the create body except the GPU id is the same for
+        // every candidate, and building it can fail on local config alone —
+        // so build it once, before any provider call, and substitute the
+        // candidate's id per attempt.
+        let Some(first) = gpu_type_ids.first() else {
+            anyhow::bail!(
+                "No GPU types to try — add one to [runpod] gpu-type-ids in {}.",
+                self.config_path
+            );
+        };
+        let (mut input, note) = self.pod_create_request(req, first)?;
+        let name = input.name.clone();
+        let guard_armed = input.args.is_some();
+
         for gpu_type in &gpu_type_ids {
-            let (input, note) = self.pod_create_request(req, gpu_type)?;
-            let name = input.name.clone();
-            let guard_armed = input.args.is_some();
+            input.gpu.id.clone_from(gpu_type);
 
             tracing::info!(gpu_type = %gpu_type, "Trying GPU type...");
 
@@ -1936,38 +1915,6 @@ mod tests {
         assert!(
             matches!(instance_status_from("HIBERNATING"), InstanceStatus::Unknown(s) if s == "HIBERNATING")
         );
-    }
-
-    #[test]
-    fn action_conflict_is_treated_as_success_only_when_satisfied() {
-        for (action, status) in [
-            ("stop", "EXITED"),
-            ("stop", "TERMINATED"),
-            ("start", "RUNNING"),
-            ("start", "STARTING"),
-            ("start", "PROVISIONING"),
-            // pod_action is reachable with any action string; terminate goes
-            // through DELETE today, so this arm is defensive — and untested
-            // is how a defensive arm rots.
-            ("terminate", "TERMINATED"),
-        ] {
-            assert!(
-                conflict_satisfies(action, status),
-                "{action} on {status} is already the outcome we wanted"
-            );
-        }
-        for (action, status) in [
-            ("stop", "RUNNING"),
-            ("start", "EXITED"),
-            ("start", "ERROR"),
-            ("terminate", "RUNNING"),
-            ("terminate", "EXITED"),
-        ] {
-            assert!(
-                !conflict_satisfies(action, status),
-                "{action} on {status} must surface"
-            );
-        }
     }
 
     #[test]
