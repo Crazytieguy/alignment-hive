@@ -375,6 +375,15 @@ impl JupyterEndpoint {
 /// Everything a runtime needs (beyond the external id) to open a connection.
 #[derive(Debug, Clone)]
 pub struct ConnectionContext {
+    /// The machine id this connection belongs to. A runtime that has to
+    /// refuse the open needs it: the caller's next move is a tool call
+    /// naming this machine.
+    pub machine_id: String,
+    /// Whether this open is part of a fresh `start()` (as opposed to an
+    /// attach or a resume). It decides what the agent should do next when
+    /// the open fails: a fresh machine can simply be started again, an
+    /// existing one must not be.
+    pub fresh: bool,
     pub ssh_key_path: PathBuf,
     /// Per-instance TOFU known-hosts file (see [`crate::ssh_exec::SshEndpoint`]).
     /// SSH-less runtimes (kubernetes, fake) ignore it.

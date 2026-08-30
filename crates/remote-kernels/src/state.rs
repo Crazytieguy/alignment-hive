@@ -186,6 +186,10 @@ pub struct UnconfirmedRecord {
     pub ssh_key_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// When the provider was last asked whether `expected_name` exists.
+    /// Bounds how often a `status()` loop re-probes; zero means never asked.
+    #[serde(default)]
+    pub last_checked_epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,10 +486,11 @@ pub async fn acquire_operation_lock(
     .await?
 }
 
-/// Non-blocking variant for synchronous startup work (key migration): the
-/// same flock, but an already-held lock returns `None` instead of waiting —
-/// startup must not block behind another session's long-running operation.
-fn try_operation_lock(project_dir: &Path, machine_id: &str) -> Option<std::fs::File> {
+/// Non-blocking variant: the same flock, but an already-held lock returns
+/// `None` instead of waiting. Used wherever waiting is the wrong answer —
+/// startup key migration, and `status()`, which must report and move on
+/// rather than hang behind another session's long-running operation.
+pub fn try_operation_lock(project_dir: &Path, machine_id: &str) -> Option<std::fs::File> {
     let path = operation_lock_path(project_dir, machine_id);
     std::fs::create_dir_all(path.parent()?).ok()?;
     let file = std::fs::OpenOptions::new()
@@ -1109,14 +1114,45 @@ pub fn save_unconfirmed_record(
     Ok(())
 }
 
-pub fn load_unconfirmed_record(project_dir: &Path, machine_id: &str) -> Option<UnconfirmedRecord> {
-    validate_machine_id(machine_id).ok()?;
-    let content = std::fs::read_to_string(unconfirmed_path(project_dir, machine_id)).ok()?;
-    serde_json::from_str(&content).ok()
+/// A marker file that is there but cannot be turned into a record. It must
+/// never be silently dropped: it is the only local trace of a machine that
+/// may be billing, so the failure to read it is itself news for the user.
+#[derive(Debug, Clone)]
+pub struct UnreadableMarker {
+    pub path: PathBuf,
+    pub error: String,
 }
 
-/// Every unconfirmed create still waiting to be settled.
-pub fn list_unconfirmed_records(project_dir: &Path) -> Vec<(String, UnconfirmedRecord)> {
+/// `None` — no marker at all. `Some(Ok)` — a marker that parsed.
+/// `Some(Err)` — a marker that exists and could not be read.
+pub fn load_unconfirmed_record(
+    project_dir: &Path,
+    machine_id: &str,
+) -> Option<Result<UnconfirmedRecord, UnreadableMarker>> {
+    validate_machine_id(machine_id).ok()?;
+    let path = unconfirmed_path(project_dir, machine_id);
+    let unreadable = |error: String| {
+        Some(Err(UnreadableMarker {
+            path: path.clone(),
+            error,
+        }))
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => return unreadable(error.to_string()),
+    };
+    match serde_json::from_str(&content) {
+        Ok(record) => Some(Ok(record)),
+        Err(error) => unreadable(error.to_string()),
+    }
+}
+
+/// Every unconfirmed create still waiting to be settled, including the ones
+/// whose marker could not be read.
+pub fn list_unconfirmed_records(
+    project_dir: &Path,
+) -> Vec<(String, Result<UnconfirmedRecord, UnreadableMarker>)> {
     let instances_dir = state_dir(project_dir).join("instances");
     let Ok(entries) = std::fs::read_dir(&instances_dir) else {
         return Vec::new();

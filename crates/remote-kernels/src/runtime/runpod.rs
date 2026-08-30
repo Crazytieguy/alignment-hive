@@ -317,8 +317,9 @@ impl RunPodRuntime {
                             .unwrap_or_default();
                         anyhow::bail!(
                             "[runpod] {key} is not a field RunPod's pod-create API accepts, \
-                             so it would reject the whole request.{hint} Fields it does \
-                             accept here: {PASSTHROUGH_FIELD_LIST}. Edit {config}."
+                             so it would reject the whole request.{hint} Keys it does accept \
+                             here: {}. Edit {config}.",
+                            passthrough_field_list()
                         );
                     }
                     fields.extra.insert(camel, toml_to_json(value));
@@ -459,10 +460,14 @@ impl RunPodRuntime {
     /// The server keeps a durable marker under the machine id from here, so
     /// `status()` can settle it later (see
     /// [`crate::runtime::UnconfirmedCreate`]).
+    /// The message must never say "retry start()": a second `start()` mints a
+    /// second billing pod, which is exactly the outcome this whole path
+    /// exists to prevent.
     fn unconfirmed_create(
         &self,
         error: &RunPodError,
         name: &str,
+        machine_id: &str,
         guard_armed: bool,
     ) -> anyhow::Error {
         let outlook = if guard_armed {
@@ -471,14 +476,15 @@ impl RunPodRuntime {
                 self.orphan_halt_mins
             )
         } else {
-            "if it exists it keeps billing until terminated".to_string()
+            format!("if it exists it keeps billing until terminate(instance=\"{machine_id}\")")
         };
         anyhow::Error::new(super::UnconfirmedCreate {
             cause: error.to_string(),
             summary: format!(
                 "Creating the pod failed with an unclear outcome ({error}). No second pod \
-                 was created. A pod named {name} may exist at RunPod; status() keeps \
-                 checking and adopts it if it appears, and {outlook}. Retry start()."
+                 was created. A pod named {name} may exist at RunPod and is tracked as \
+                 machine {machine_id}: status() adopts it if it appears, and {outlook}. \
+                 Call status() before starting another machine."
             ),
             expected_name: name.to_string(),
             self_halt_mins: guard_armed.then_some(self.orphan_halt_mins),
@@ -521,16 +527,29 @@ impl RunPodRuntime {
         self.runpod.ssh_expected()
     }
 
-    /// The failure the start must not survive when a pod the config expects
-    /// SSH on never produced an SSH endpoint. One message for both clouds:
-    /// the symptom is the same, and nothing here establishes a cause.
-    fn ssh_expectation_unmet(&self) -> anyhow::Error {
-        anyhow::anyhow!(
-            "No direct SSH endpoint appeared for this pod within {SSH_WAIT_MINUTES} \
-             minutes. Retry start(). If it keeps happening on community cloud, set \
-             [runpod] cloud-type = \"SECURE\" in {}.",
-            self.config_path
-        )
+    /// The failure the open must not survive when a pod the config expects
+    /// SSH on never produced an SSH endpoint. The symptom is the same on
+    /// both clouds, but the next action is not: a pod this call just created
+    /// can be started again, while an existing machine must not be — a
+    /// second `start()` there would mint a second billing pod and strand
+    /// this one.
+    fn ssh_expectation_unmet(&self, ctx: &ConnectionContext) -> anyhow::Error {
+        if ctx.fresh {
+            anyhow::anyhow!(
+                "No direct SSH endpoint appeared for this pod within {SSH_WAIT_MINUTES} \
+                 minutes. Retry start(). If it keeps happening on community cloud, set \
+                 [runpod] cloud-type = \"SECURE\" in {}.",
+                self.config_path
+            )
+        } else {
+            anyhow::anyhow!(
+                "No direct SSH endpoint appeared for machine {} within {SSH_WAIT_MINUTES} \
+                 minutes. Retry attach(\"{}\"). If it keeps happening, stop() the machine (it \
+                 keeps its data) and tell the user.",
+                ctx.machine_id,
+                ctx.machine_id
+            )
+        }
     }
 
     /// The pod's port mappings, derived from the Jupyter access mode. Only
@@ -656,11 +675,10 @@ impl RunPodRuntime {
             return (
                 None,
                 Some(format!(
-                    "this machine cannot clean itself up before this session reaches it: \
-                     that needs SSH, which this pod has no guarantee of. If this process \
-                     dies during the first minutes of provisioning, the pod keeps billing \
-                     until stopped. Set [runpod] cloud-type = \"SECURE\" in {} to get it, \
-                     or [runpod] image-start-cmd = \"\" to silence this note.",
+                    "This machine has no SSH guarantee, so if this process dies during \
+                     provisioning it may keep billing. Set [runpod] cloud-type = \"SECURE\" \
+                     in {} to enable automatic cleanup; otherwise tell the user it needs \
+                     manual cleanup.",
                     self.config_path
                 )),
             );
@@ -747,11 +765,33 @@ pub(crate) fn capabilities(runpod: &crate::config::RunpodConfig) -> Capabilities
     }
 }
 
-/// The create fields a `[runpod]` passthrough may legitimately set (the rest
-/// are managed here), plus the older names that still work by mapping.
-const PASSTHROUGH_FIELD_LIST: &str = "dataCenterIds, globalNetworking, startJupyter, \
-     templateId, and the [runpod] keys allowed-cuda-versions, min-cuda-version, \
-     container-registry-auth-id";
+/// The `[runpod]` keys the config file may legitimately set beyond the typed
+/// ones: every create field this runtime neither manages nor conflicts with,
+/// plus the typed keys that map onto one. Derived from the spec constants,
+/// so a spec change cannot leave this message behind, and rendered as the
+/// kebab-case keys the file actually uses — never `RunPod`'s camelCase API
+/// names, which are not what the reader would type.
+fn passthrough_field_list() -> String {
+    let mut keys: Vec<String> = crate::runpod::types::CREATE_POD_FIELDS
+        .iter()
+        .filter(|field| {
+            !crate::runpod::types::MANAGED_CREATE_FIELDS.contains(*field)
+                && !crate::runpod::types::CONFLICTING_CREATE_FIELDS.contains(*field)
+        })
+        .map(|field| to_kebab_case(field))
+        .chain(
+            [
+                "allowed-cuda-versions",
+                "min-cuda-version",
+                "container-registry-auth-id",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .collect();
+    keys.sort();
+    keys.join(", ")
+}
 
 /// Where the `[runpod]` extras end up in the v2 body.
 #[derive(Default)]
@@ -781,8 +821,8 @@ fn managed_field_hint(camel: &str) -> &'static str {
         "disk" => "Use [runpod] container-disk-gb.",
         "env" => "Use the top-level env table (or env-file).",
         "name" => "Use the top-level name key.",
-        "startSsh" => "SSH is requested for every pod.",
-        "registry" => "Use [runpod] container-registry-auth-id.",
+        "startSsh" => "Remove it; SSH is requested for every pod.",
+        "registry" => "Set [runpod] container-registry-auth-id instead.",
         _ => "Use its typed [runpod] key instead.",
     }
 }
@@ -984,7 +1024,12 @@ impl Runtime for RunPodRuntime {
                             Ok(None) => {}
                             Err(probe) => {
                                 tracing::warn!(error = %probe, "create outcome unsettled");
-                                return Err(self.unconfirmed_create(&error, &name, guard_armed));
+                                return Err(self.unconfirmed_create(
+                                    &error,
+                                    &name,
+                                    &req.machine_id,
+                                    guard_armed,
+                                ));
                             }
                         }
                         if attempt == 3 {
@@ -1017,7 +1062,12 @@ impl Runtime for RunPodRuntime {
                             tracing::warn!(pod_id = %pod.id, "create outcome unknown; adopted the pod it created");
                             return Ok(Self::handle_with_note(&pod, note.as_ref()));
                         }
-                        return Err(self.unconfirmed_create(&error, &name, guard_armed));
+                        return Err(self.unconfirmed_create(
+                            &error,
+                            &name,
+                            &req.machine_id,
+                            guard_armed,
+                        ));
                     }
                 }
             }
@@ -1030,10 +1080,9 @@ impl Runtime for RunPodRuntime {
         if all_bad_request && !failures.is_empty() {
             let _ = write!(
                 msg,
-                "\nEvery GPU type was refused by RunPod (400). Last reason from RunPod: \
-                 {}. If the reason is about capacity, retry later or add other GPU types \
-                 to [runpod] gpu-type-ids in {}; otherwise the request itself was \
-                 rejected — tell the user the reason above.\n",
+                "\nEvery GPU type was refused by RunPod (400). Last reason from RunPod: {}. \
+                 If it names capacity, retry start() later; otherwise tell the user the \
+                 reason and ask them to fix [runpod] in {}.\n",
                 last_detail.as_deref().unwrap_or("(none given)"),
                 self.config_path
             );
@@ -1148,7 +1197,7 @@ impl Runtime for RunPodRuntime {
                     external_id,
                     "no SSH endpoint on a pod that expects one: {e}"
                 );
-                return Err(self.ssh_expectation_unmet());
+                return Err(self.ssh_expectation_unmet(ctx));
             }
             Err(e) => {
                 tracing::warn!(external_id, "No SSH connectivity: {e}");
@@ -1369,7 +1418,7 @@ impl Connection for RunPodConnection {
              The endpoint is sticky for this session — live kernels cannot migrate — \
              so stop() and attach() again to get the tunnel back. If no SSH transport \
              exists, this machine has NO automatic shutdown: always stop() or terminate() \
-             it explicitly, or it bills until stopped at the provider dashboard."
+             it explicitly, or it bills until you stop() or terminate() it."
                 .to_string()
         })
     }
@@ -1463,6 +1512,21 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 }
 
 /// Convert kebab-case to camelCase for `RunPod` API field names.
+/// The inverse of [`to_camel_case`]: an API field name as the `[runpod]` key
+/// a user would write.
+fn to_kebab_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        if c.is_ascii_uppercase() {
+            result.push('-');
+            result.extend(c.to_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn to_camel_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = false;
@@ -1741,7 +1805,10 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("no longer supports it — remove it"), "{err}");
-        assert!(err.contains("dataCenterIds"), "the accepted set: {err}");
+        // The accepted set is listed as [runpod] keys, never as RunPod's
+        // camelCase API names — those are not what the reader would type.
+        assert!(err.contains("data-center-ids"), "the accepted set: {err}");
+        assert!(!err.contains("dataCenterIds"), "{err}");
 
         // Colliding with a field we manage ourselves.
         let err = body_err("[runpod]\nimage = \"my/image:latest\"");
@@ -1785,8 +1852,9 @@ mod tests {
         }
         // ...and it is no longer advertised as an accepted passthrough.
         assert!(
-            !PASSTHROUGH_FIELD_LIST.contains("cpu"),
-            "{PASSTHROUGH_FIELD_LIST}"
+            !passthrough_field_list().contains("cpu"),
+            "{}",
+            passthrough_field_list()
         );
 
         // templateId, by contrast, composes: v2 resolves the template at
@@ -2311,7 +2379,15 @@ mod tests {
             // The agent is never sent to the console: status() settles it.
             assert!(!error.contains("console"), "{label}: {error}");
             assert!(
-                error.contains("status() keeps checking"),
+                error.contains("status() adopts it if it appears"),
+                "{label}: {error}"
+            );
+            // A second start() mints a second billing pod — the one outcome
+            // this whole path exists to prevent — so it must never be the
+            // suggested next move.
+            assert!(!error.contains("Retry start()"), "{label}: {error}");
+            assert!(
+                error.contains("Call status() before starting another machine"),
                 "{label}: {error}"
             );
             assert_eq!(
@@ -2421,7 +2497,10 @@ mod tests {
             error.contains("A pod named remote-kernels-m1 may exist at RunPod"),
             "the message must not claim the create did nothing: {error}"
         );
-        assert!(error.contains("status() keeps checking"), "{error}");
+        assert!(
+            error.contains("status() adopts it if it appears"),
+            "{error}"
+        );
         assert_eq!(
             fake.count("POST /v2/pods "),
             1,
@@ -2508,7 +2587,7 @@ mod tests {
         );
         let message = error.to_string();
         assert!(
-            message.contains("keeps billing until terminated"),
+            message.contains("keeps billing until terminate(instance=\"m1\")"),
             "{message}"
         );
     }
@@ -2570,28 +2649,58 @@ mod tests {
         }
     }
 
-    /// One message for both clouds: it reports the symptom, gives one thing
-    /// to do, and claims no cause. `support-public-ip` is gone from the UI,
-    /// so no message may name it — but a config that still carries it keeps
-    /// exactly the behavior it had (SSH expected, guard armed).
+    fn ssh_context(fresh: bool) -> ConnectionContext {
+        ConnectionContext {
+            machine_id: "m1".to_string(),
+            fresh,
+            ssh_key_path: std::path::PathBuf::from("/dev/null"),
+            known_hosts_path: std::path::PathBuf::from("/dev/null"),
+            jupyter_token: "t".to_string(),
+            proxy_port_mapped: true,
+        }
+    }
+
+    /// One message per cloud, two per situation: the symptom is identical on
+    /// SECURE and COMMUNITY, but a fresh pod can simply be started again
+    /// while an existing machine must not be — a second `start()` there
+    /// would mint a second billing pod. `support-public-ip` is gone from the
+    /// UI, so no message may name it, but a config that still carries it
+    /// keeps exactly the behavior it had (SSH expected, guard armed).
     #[test]
-    fn ssh_expectation_failure_is_one_message_for_both_clouds() {
+    fn ssh_expectation_failure_branches_on_fresh_versus_attach() {
         let secure = runtime_with("");
         let community =
             runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
-        assert_eq!(
-            secure.ssh_expectation_unmet().to_string(),
-            community.ssh_expectation_unmet().to_string()
-        );
+        for fresh in [true, false] {
+            assert_eq!(
+                secure
+                    .ssh_expectation_unmet(&ssh_context(fresh))
+                    .to_string(),
+                community
+                    .ssh_expectation_unmet(&ssh_context(fresh))
+                    .to_string()
+            );
+        }
 
-        let message = secure.ssh_expectation_unmet().to_string();
+        let message = secure.ssh_expectation_unmet(&ssh_context(true)).to_string();
         assert!(message.contains("No direct SSH endpoint"), "{message}");
         assert!(message.contains("2 minutes"), "the window: {message}");
         assert!(message.contains("Retry start()"), "{message}");
         assert!(message.contains("cloud-type = \"SECURE\""), "{message}");
         assert!(message.contains("remote-kernels.toml"), "{message}");
+
+        // The attach rendering must never send the reader back to start().
+        let attach = secure
+            .ssh_expectation_unmet(&ssh_context(false))
+            .to_string();
+        assert!(attach.contains("for machine m1"), "{attach}");
+        assert!(attach.contains("Retry attach(\"m1\")"), "{attach}");
+        assert!(attach.contains("stop() the machine"), "{attach}");
+        assert!(!attach.contains("start()"), "{attach}");
+
         for gone in ["support-public-ip", "supportPublicIp", "orphan guard"] {
             assert!(!message.contains(gone), "{gone} survives: {message}");
+            assert!(!attach.contains(gone), "{gone} survives: {attach}");
         }
 
         // The deprecated flag still selects the old behavior for configs

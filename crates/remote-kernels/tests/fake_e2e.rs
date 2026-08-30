@@ -1800,12 +1800,14 @@ async fn an_unconfirmed_create_is_adopted_by_status() {
     );
 }
 
-/// The same marker, when the provider really did make nothing: terminate()
-/// on it must be executable (the status row tells the agent to call it) and
-/// must leave nothing behind.
+/// `terminate()` on a marker acts only on a machine the provider actually
+/// shows. With nothing listed under the name it terminates nothing and keeps
+/// the marker: "not listed" is never "not created", and forgetting the only
+/// local trace of a machine that may be billing is the failure mode this
+/// whole path exists to prevent.
 #[tokio::test]
 #[ignore = "needs uv + network for jupyter-server; run with --ignored"]
-async fn terminating_an_unconfirmed_create_that_made_nothing_clears_it() {
+async fn terminating_an_unlisted_unconfirmed_create_keeps_its_marker() {
     let dir = tempfile::tempdir().unwrap();
     let server = server_in(dir.path(), None);
 
@@ -1829,6 +1831,7 @@ async fn terminating_an_unconfirmed_create_that_made_nothing_clears_it() {
     let (machine_id, marker) = remote_kernels::state::list_unconfirmed_records(dir.path())
         .pop()
         .expect("marker");
+    let marker = marker.expect("a freshly written marker parses");
     // Take the machine away behind the tool's back: now nothing wears the
     // name, exactly like a create that was never committed.
     let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
@@ -1837,11 +1840,62 @@ async fn terminating_an_unconfirmed_create_that_made_nothing_clears_it() {
     }
 
     let text = terminate(&server, Some(&machine_id)).await;
-    assert!(text.contains("Nothing is billing"), "{text}");
+    assert!(text.contains("nothing was terminated"), "{text}");
+    assert!(text.contains("was kept"), "{text}");
+    assert!(
+        remote_kernels::state::load_unconfirmed_record(dir.path(), &machine_id)
+            .is_some_and(|marker| marker.is_ok()),
+        "{text}"
+    );
+}
+
+/// `stop()` gets the same marker-aware handling as `terminate()`: the one
+/// machine wearing the name is stopped and promoted to a durable stopped
+/// record, so it can be resumed rather than stranded.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn stopping_an_unconfirmed_create_promotes_it_to_a_stopped_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE", "1") };
+    let error = server
+        .start(Parameters(remote_kernels::server::StartParams {
+            label: Some("stop-me".to_string()),
+            runtime: None,
+            gpu_type: None,
+            image: None,
+            vast_offers: None,
+            priority: None,
+            wait: Some(false),
+        }))
+        .await
+        .unwrap_err();
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_UNCONFIRMED_CREATE") };
+    assert!(error.to_string().contains("unclear outcome"));
+
+    let (machine_id, _) = remote_kernels::state::list_unconfirmed_records(dir.path())
+        .pop()
+        .expect("marker");
+    let result = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("was stopped"), "{text}");
     assert!(
         remote_kernels::state::load_unconfirmed_record(dir.path(), &machine_id).is_none(),
         "{text}"
     );
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("a stopped machine keeps its data and needs a record to resume from");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Stopped);
+    assert_eq!(record.label.as_deref(), Some("stop-me"));
 }
 
 #[tokio::test]
