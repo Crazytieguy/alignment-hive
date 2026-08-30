@@ -155,8 +155,8 @@ impl SshEndpoint {
                     "{HOST_KEY_MISMATCH_PREFIX} {}@{}:{} presented a host key that does \
                      not match the pinned one. Likely cause: the machine was stopped and \
                      resumed outside this tool (providers regenerate host keys) — but it \
-                     can also mean the connection is being intercepted. If you know why \
-                     (e.g. a console resume), delete {} and reconnect to re-pin.",
+                     can also mean the connection is being intercepted. If you know why, \
+                     delete {} and reconnect to re-pin.",
                     self.user,
                     self.host,
                     self.port,

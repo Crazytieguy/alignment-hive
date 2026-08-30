@@ -806,7 +806,7 @@ impl Config {
             r#"# RunPod runtime configuration. Known fields are typed; any extra fields are
 # passed through to RunPod's pod-create API (kebab-case is converted to
 # camelCase). They must be fields that API accepts — anything else is
-# rejected here, before the call, naming this file.
+# rejected here, before the call.
 [runpod]
 # Cleanup mode for RunPod machines when the session ends:
 #   "stop"      — preserve machine (reliable on RunPod; storage costs apply)
@@ -838,7 +838,8 @@ impl Config {
 # A machine that can't run the on-machine watchdog (the process the plugin
 # installs over SSH to enforce cleanup and budget even after this server
 # disconnects) is normally refused when a budget is set — e.g. a COMMUNITY
-# pod, which has no SSH. Set true to allow such machines anyway. Applies
+# pod, which has no guaranteed SSH. Set true to allow such machines anyway.
+# Applies
 # only to this file's budget-cap; a REMOTE_KERNELS_BUDGET budget is never
 # waivable from project config.
 # allow-unenforced-budget = false
@@ -874,10 +875,10 @@ impl Config {
 # network-volume-id = "vol_abc123"
 
 # Cloud type: "SECURE" or "COMMUNITY".
-# COMMUNITY is cheaper but may have less reliable availability, and its pods
-# run Jupyter over RunPod's token-protected public proxy: sync/download, the
-# on-machine watchdog and budget enforcement all need SSH, which only SECURE
-# pods are guaranteed to have.
+# COMMUNITY is cheaper but may have less reliable availability. SSH is not
+# guaranteed on COMMUNITY; Jupyter uses RunPod's token-protected public
+# proxy unless you set cloud-type = "SECURE". Sync/download, the on-machine
+# watchdog and budget enforcement all need SSH.
 # Default: "{default_cloud_type}"
 # cloud-type = "{default_cloud_type}"
 
@@ -890,7 +891,8 @@ impl Config {
 # automatically to the default image; set it when using a custom image — a
 # wrong value keeps SSH/Jupyter from starting — or to "" to disable the
 # guard. The guard is also skipped with disabled cleanup, on COMMUNITY
-# cloud (no SSH to disarm it), and when start(image=...) overrides the
+# cloud (SSH is not guaranteed there, so nothing may be able to disarm it),
+# and when start(image=...) overrides the
 # configured image.
 # Default: "{default_image_start_cmd}" for the default image, unset otherwise (no guard).
 # image-start-cmd = "{default_image_start_cmd}"

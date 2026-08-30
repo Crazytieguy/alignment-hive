@@ -40,8 +40,9 @@ Edge cases:
 - **CMD can't be determined confidently**: set `image-start-cmd = ""` and
   warn the user explicitly what that costs: a crash during the first
   minutes of provisioning leaves the pod billing until stopped by hand
-  (RunPod console, or `attach()`/`status()` from a later session, which
-  can supervise or end it — `start()` always creates a fresh machine).
+  (a later session can `stop(instance=...)` or `terminate(instance=...)`
+  it, or `attach()`/`status()` to supervise it — `start()` always creates a
+  fresh machine).
 - `docker-start-cmd` is not a field RunPod's API has, and `start()` rejects
   it. Put the image's start command in `image-start-cmd` (the guard wraps
   it), or set `image-start-cmd = ""` to run the image unwrapped.
@@ -55,9 +56,8 @@ the endpoint remains internet-reachable with the token. Users who need
 Jupyter physically unreachable from the internet must set
 `jupyter-access = "tunnel"`: no public mapping is created at all, at the
 cost that a resume whose SSH never returns cannot fall back.
-Community-cloud pods use the public proxy (token-protected). Everything
-that rides SSH — sync, download, the on-machine watchdog, the pre-SSH orphan
-guard, and budget enforcement — is unavailable there, and
-`jupyter-access = "tunnel"` is rejected for such a config. Only
-`cloud-type = "SECURE"` guarantees SSH, so that is what to set when any of
-those matter.
+Community-cloud pods use the public proxy (token-protected). Sync,
+download, automatic cleanup, and budget enforcement require SSH; only
+`cloud-type = "SECURE"` guarantees it, so set that when those features
+matter. (`jupyter-access = "tunnel"` is rejected for a config without that
+guarantee.)

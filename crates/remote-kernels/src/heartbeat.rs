@@ -31,7 +31,7 @@ use crate::state::{AppState, FenceReason};
 macro_rules! no_auto_shutdown {
     () => {
         ", so it has NO automatic shutdown: if the session ends without stop() or terminate(), \
-         it bills until stopped at the provider dashboard — always stop or terminate it \
+         it bills until you stop() or terminate() it — always stop or terminate it \
          explicitly"
     };
     ($cause:literal) => {
