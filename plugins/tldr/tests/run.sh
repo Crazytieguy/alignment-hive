@@ -144,18 +144,22 @@ EOF
 )
 assert_block "20k escaped quotes classify in time" "$out"
 
-# --- Stop hook: sentinel behavior ---
+# --- Stop hook: sentinel written only when a TL;DR is actually requested ---
 rm -rf "$D"
 printf '{"briefTranscript": true}' >"$H/.claude.json"
 build_stop_input "$short_msg" | run_stop "$H" "$D" >/dev/null
 [ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus on creates sentinel" "$s" "created"
+check "focus on without a block: no sentinel" "$s" "missing"
+
+build_stop_input "$long_multiline" | run_stop "$H" "$D" >/dev/null
+[ -f "$D/seen-focus" ] && s=created || s=missing
+check "focus on with a block: sentinel created" "$s" "created"
 
 rm -rf "$D"
 printf '{"other": 1}' >"$H/.claude.json"
-build_stop_input "$short_msg" | run_stop "$H" "$D" >/dev/null
+build_stop_input "$long_multiline" | run_stop "$H" "$D" >/dev/null
 [ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus off creates nothing" "$s" "missing"
+check "focus off with a block: no sentinel" "$s" "missing"
 
 rm -f "$H/.claude.json"
 out=$(build_stop_input "$long_multiline" | run_stop "$H" "$D")
@@ -178,7 +182,7 @@ import json, sys
 o = json.load(sys.stdin)
 h = o["hookSpecificOutput"]
 assert h["hookEventName"] == "SessionStart", h
-expected = "When the Stop hook asks you to TL;DR your last message, reply with one plain sentence and no \"TL;DR:\" prefix. Don'"'"'t shorten or pre-summarize messages to preempt the hook — the separate TL;DR message is what lets /focus toggle between the summary and the full message."
+expected = "When the Stop hook asks you to TL;DR your last message, reply with one plain sentence and no \"TL;DR:\" prefix. Don'"'"'t shorten or pre-summarize messages to preempt the hook — the separate TL;DR message is what lets /focus toggle between the summary and the full message. If the user asks for more detail — especially detail you'"'"'ve already given — they may be seeing only the TL;DRs; tell them to turn /focus off."
 ctx_ok = "ctx-ok" if h["additionalContext"] == expected else "ctx-BAD:" + repr(h["additionalContext"])
 print(o.get("systemMessage", "NONE") + "|" + ctx_ok)
 '
@@ -206,9 +210,10 @@ printf '{"briefTranscript": true}' >"$H/.claude.json"
 out=$(run_start "$H" "$D")
 check "focus already on: no nudge" "$out" "NONE|ctx-ok"
 [ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus already on: sentinel written" "$s" "created"
+check "focus already on: sentinel NOT written" "$s" "missing"
 
 rm -f "$H/.claude.json"
+mkdir -p "$D" && touch "$D/seen-focus"
 out=$(run_start "$H" "$D")
 check "sentinel present: no nudge" "$out" "NONE|ctx-ok"
 

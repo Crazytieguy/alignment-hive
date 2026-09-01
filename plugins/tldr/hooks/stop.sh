@@ -11,17 +11,13 @@
 # accumulate incrementally, so no decoded copy of the message is ever built
 # and escape-dense messages stay far under the hook timeout.
 
-input=$(cat) || exit 0
+. "${0%/*}/lib.sh" 2>/dev/null || exit 0
+
+IFS= read -r -d '' input || : # builtin read to EOF; no cat fork per turn
 
 case $input in
   *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
 esac
-
-# First sighting of /focus enabled: record it so the SessionStart nudge stops.
-if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ ! -f "$CLAUDE_PLUGIN_DATA/seen-focus" ] \
-  && grep -q '"briefTranscript"[[:space:]]*:[[:space:]]*true' "$HOME/.claude.json" 2>/dev/null; then
-  mkdir -p "$CLAUDE_PLUGIN_DATA" 2>/dev/null && touch "$CLAUDE_PLUGIN_DATA/seen-focus" 2>/dev/null
-fi
 
 # Locate the message key WITHOUT ${var#*pattern} over the whole input: that
 # matcher is quadratic in bash 3.2 (measured in whole seconds at tens of KB).
@@ -33,10 +29,12 @@ fi
 KEY='"last_assistant_message"'
 klen=${#KEY}
 ilen=${#input}
+step=4096
+wlen=$((step + klen - 1)) # overlap so a key straddling a step is still seen
 off=0
 found=-1
 while [ "$off" -lt "$ilen" ]; do
-  window=${input:$off:4224} # 4096 step + overlap so a straddling key is seen
+  window=${input:$off:$wlen}
   case $window in
     *"$KEY"*)
       pre=${window%%"$KEY"*}
@@ -44,7 +42,7 @@ while [ "$off" -lt "$ilen" ]; do
       break
       ;;
   esac
-  off=$((off + 4096))
+  off=$((off + step))
 done
 [ "$found" -ge 0 ] || exit 0
 rest=${input:$((found + klen))}
@@ -61,23 +59,21 @@ line_has=0  # current line has a non-space character
 prev_join=0 # last counted character was non-space (a word may continue)
 
 # count_literal <chunk>: fold a run of plain characters (no newlines, no
-# backslashes) into the word/line tallies. Word splitting via positional
-# params — no herestring (each <<< costs a temp file, ruinous in a hot loop).
+# backslashes) into the word/line tallies. One word-split via positional
+# params does double duty — zero fields means an all-whitespace chunk — with
+# no herestring (each <<< costs a temp file, ruinous in a hot loop). The
+# caller keeps globbing disabled (set -f) for the whole scan.
 count_literal() {
   local chunk=$1 n
   [ -n "$chunk" ] || return 0
-  case $chunk in
-    *[![:space:]]*) line_has=1 ;;
-    *)
-      prev_join=0
-      return 0
-      ;;
-  esac
-  set -f
   # shellcheck disable=SC2086
   set -- $chunk
-  set +f
   n=$#
+  if [ "$n" -eq 0 ]; then
+    prev_join=0
+    return 0
+  fi
+  line_has=1
   case ${chunk:0:1} in
     [[:space:]]) : ;;
     *) [ "$prev_join" = 1 ] && n=$((n - 1)) ;;
@@ -102,7 +98,9 @@ count_nonspace_char() {
 }
 
 # Indexed access into a bash 3.2 array walks a linked list, so iterate with
-# for (linear overall) rather than parts[i] (quadratic overall).
+# for (linear overall) rather than parts[i] (quadratic overall). Globbing off
+# for the whole scan: count_literal word-splits unquoted.
+set -f
 IFS="$b" read -ra parts <<<"$rest" || exit 0
 closed=""
 opener=0 # 1 = this part follows an escape-opening backslash
@@ -151,10 +149,16 @@ for part in "${parts[@]}"; do
   count_literal "$lit"
   opener=1
 done
+set +f
 [ -n "$closed" ] || exit 0 # no terminating quote: malformed, fail open
 [ "$line_has" = 1 ] && nonblank=$((nonblank + 1))
 
 if [ "$words" -gt 100 ] && [ "$nonblank" -gt 1 ]; then
+  # A TL;DR is being requested while /focus is on: the user is seeing the
+  # pairing in action, so retire the SessionStart nudge forever.
+  if ! focus_seen && focus_is_on; then
+    mark_focus_seen
+  fi
   printf '%s\n' '{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence, no \"TL;DR:\" prefix."}'
 fi
 exit 0

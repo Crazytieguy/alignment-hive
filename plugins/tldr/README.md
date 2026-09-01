@@ -7,10 +7,3 @@ One-sentence TL;DR after every long reply — pairs with `/focus` to collapse me
 **TL;DR after long replies** — A Stop hook asks Claude to follow up any reply over ~100 words with a single plain sentence. The full reply is untouched; the TL;DR arrives as a separate short message right after it.
 
 **Pairs with `/focus`** — Claude Code's focus view collapses each turn down to its final message — which, with this plugin, is the TL;DR. Toggle `/focus` to switch between skimming one-liners and reading full replies. Focus view is only available in the fullscreen renderer (`/tui fullscreen`).
-
-**A one-line pointer until you've tried it** — Sessions start with a short reminder that `/focus` exists. It disappears permanently the first time the plugin sees focus view enabled.
-
-## Notes
-
-- Hooks are pure bash — no jq, python, or other dependencies.
-- The "seen /focus" marker lives in the plugin's data directory and survives plugin updates; delete `seen-focus` there to get the pointer back.
