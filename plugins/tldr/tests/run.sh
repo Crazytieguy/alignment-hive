@@ -127,6 +127,23 @@ raw='{"last_assistant_message":"'"${W101}${NL}${W101}"'", broken}'
 out=$(printf '%s' "$raw" | run_stop "$H" "$D")
 assert_block "garbage after a valid close still classifies" "$out"
 
+# Performance regression: escape-dense messages must classify well under the
+# 10s hook timeout (the scanner must stay linear, not quadratic).
+out=$(python3 - "$H" "$D" <<'EOF'
+import json, os, subprocess, sys
+text = 'w"w ' * 20000 + chr(10) + "closing line of words " * 30
+payload = json.dumps({"stop_hook_active": False, "last_assistant_message": text})
+env = {**os.environ, "HOME": sys.argv[1], "CLAUDE_PLUGIN_DATA": sys.argv[2]}
+try:
+    r = subprocess.run(["bash", "../hooks/stop.sh"], input=payload,
+                       capture_output=True, text=True, timeout=5, env=env)
+    print(r.stdout.strip())
+except subprocess.TimeoutExpired:
+    print("TIMEOUT")
+EOF
+)
+assert_block "20k escaped quotes classify in time" "$out"
+
 # --- Stop hook: sentinel behavior ---
 rm -rf "$D"
 printf '{"briefTranscript": true}' >"$H/.claude.json"
