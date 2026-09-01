@@ -105,6 +105,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
 - **Cross-model review**: `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code
 - **Cross-model subagents (experimental)**: `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental alternative to the codex plugin
+- **Reply TL;DRs**: `tldr@alignment-hive` — One-sentence TL;DR after every long reply; /focus then collapses messages to their TL;DRs
 
 #### Platform-specific entries for remote-kernels and model-router
 
@@ -124,6 +125,7 @@ Two rules for these entries specifically:
 | precis | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
 | codex | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
 | model-router | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/model-router/README.md` |
+| tldr | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/tldr/README.md` |
 
 For non-alignment-hive plugins, add the marketplace and install with the CLI (values from the table below; re-adding an already-known marketplace is harmless):
 
