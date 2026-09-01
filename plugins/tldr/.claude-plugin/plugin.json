@@ -1,0 +1,5 @@
+{
+  "name": "tldr",
+  "version": "0.1.0",
+  "description": "One-sentence TL;DR after every long reply — pairs with /focus to collapse messages to their TL;DRs."
+}

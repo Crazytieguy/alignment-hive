@@ -105,6 +105,11 @@
         "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-x86_64-unknown-linux-gnu.zip"
       },
       "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (Linux, x86_64)"
+    },
+    {
+      "name": "tldr",
+      "source": "./plugins/tldr",
+      "description": "One-sentence TL;DR after every long reply — pairs with /focus to collapse messages to their TL;DRs."
     }
   ]
 }
