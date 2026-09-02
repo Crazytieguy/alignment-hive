@@ -25,6 +25,28 @@
   display: block;
   pointer-events: none;
   will-change: transform;
+  /* the field is painted by JS after hydration; rather than popping in once
+     the bundle lands, it fades up from black (.is-lit is added right after
+     the first paint). An animation rather than a transition: it runs from
+     whenever the class lands, even if the stylesheet arrived that same frame. */
+  opacity: 0;
+}
+
+.kintsugi-canvas.is-lit {
+  opacity: 1;
+  animation: kintsugi-lit 1.1s ease-out;
+}
+
+@keyframes kintsugi-lit {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kintsugi-canvas.is-lit {
+    animation: none;
+  }
 }
 
 .kintsugi-scrim {
@@ -33,7 +55,7 @@
   pointer-events: none;
   background: radial-gradient(
     620px 250px at 50% 46%,
-    rgba(32, 26, 15, 0.45),
+    color-mix(in srgb, var(--background) 45%, transparent),
     transparent 72%
   );
 }
@@ -57,10 +79,10 @@
   line-height: 1.14;
   margin: 0 0 1rem;
   max-width: 22ch;
-  color: #efe6cf;
+  color: var(--foreground);
   text-shadow:
-    0 0 18px #201a0f,
-    0 0 6px #201a0f;
+    0 0 18px var(--background),
+    0 0 6px var(--background);
 }
 
 .kintsugi-s {
@@ -69,8 +91,8 @@
   max-width: 64ch;
   margin: 0;
   font-weight: 400;
-  color: rgba(239, 230, 207, 0.85);
+  color: color-mix(in srgb, var(--foreground) 85%, transparent);
   text-shadow:
-    0 0 14px #201a0f,
-    0 0 5px #201a0f;
+    0 0 14px var(--background),
+    0 0 5px var(--background);
 }

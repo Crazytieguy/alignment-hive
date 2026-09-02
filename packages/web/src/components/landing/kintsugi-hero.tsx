@@ -460,7 +460,6 @@ function mapPoint(st: HeroState, u: number, v: number): void {
   }
 }
 
-
 // ---------- build: conformal hex lattice + point cloud ----------
 function build(st: HeroState): void {
   makeSprites(st);
@@ -552,8 +551,7 @@ function build(st: HeroState): void {
       mapPoint(st, u, v);
       const cxm = mapPt.x;
       const cym = mapPt.y;
-      let inside =
-        cxm >= -8 && cxm <= w + 8 && cym >= -8 && cym <= docH + 8;
+      let inside = cxm >= -8 && cxm <= w + 8 && cym >= -8 && cym <= docH + 8;
       for (let k6 = 0; k6 < 6 && !inside; k6++) {
         mapPoint(st, u + FVX[k6], v + FVY[k6]);
         inside =
@@ -892,7 +890,13 @@ function paint(st: HeroState): void {
       if (HALO_A > 0) {
         const hd = d * 2;
         ctx.globalAlpha = HALO_A * g;
-        ctx.drawImage(st.haloSpr[ps][pc], px[j] - hd * 0.5, y - hd * 0.5, hd, hd);
+        ctx.drawImage(
+          st.haloSpr[ps][pc],
+          px[j] - hd * 0.5,
+          y - hd * 0.5,
+          hd,
+          hd,
+        );
       }
       ctx.globalAlpha = g;
       ctx.drawImage(st.lockSpr[ps][pc], px[j] - d * 0.5, y - d * 0.5, d, d);
@@ -1037,7 +1041,9 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
         secB.push(r.top + scY);
         secC.push((r.top + r.bottom) / 2 + scY);
         if (name === "testimonials") {
-          for (const q of Array.from(el.querySelectorAll("blockquote"))) {
+          // text columns to damp under: the section marks them with
+          // [data-star-column] (the carousel's visible slot, not its slides)
+          for (const q of el.querySelectorAll("[data-star-column]")) {
             const qr = q.getBoundingClientRect();
             cols.push({
               x0: qr.left,
@@ -1089,6 +1095,8 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
     }
 
     resize();
+    // first frame is on the canvas: fade it up (see .kintsugi-canvas in the css)
+    canvas.classList.add("is-lit");
 
     let pendingResize = 0;
     const queueResize = (): void => {
@@ -1103,16 +1111,44 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
     observer.observe(document.body);
     window.addEventListener("resize", queueResize);
 
-    const onPointerMove = (ev: PointerEvent): void => {
-      if (ev.pointerType && ev.pointerType !== "mouse") return; // touch: wander is the show
-      // viewport coords: the focus target follows the cursor through scrolls
-      // (converted to document coords at frame time, not event time)
-      st.curX = ev.clientX;
-      st.curY = ev.clientY;
+    // viewport coords: the focus target follows the pointer through scrolls
+    // (converted to document coords at frame time, not event time)
+    let touchRelease = 0;
+    const follow = (x: number, y: number): void => {
+      st.curX = x;
+      st.curY = y;
       st.curOn = true;
+      if (touchRelease) {
+        clearTimeout(touchRelease);
+        touchRelease = 0;
+      }
+    };
+    // Pointer events steer for the mouse only; touch and pen go through the
+    // touch events below (pens fire compat touch events), so a pen lift or a
+    // stray tap on a hybrid device can't drop focus out from under the mouse.
+    const onPointerMove = (ev: PointerEvent): void => {
+      if (ev.pointerType !== "mouse") return;
+      follow(ev.clientX, ev.clientY);
     };
     const onPointerOut = (ev: PointerEvent): void => {
+      if (ev.pointerType !== "mouse") return;
       if (!ev.relatedTarget) st.curOn = false; // left the window
+    };
+    // Touch: taps and drags pull the focus like a cursor does. Touch events
+    // (not pointer events) so a drag keeps steering while the page scrolls;
+    // after the finger lifts the focus lingers a few seconds, then drifts
+    // back into the wander.
+    const onTouch = (ev: TouchEvent): void => {
+      const t = ev.touches[0];
+      if (t) follow(t.clientX, t.clientY);
+    };
+    const onTouchEnd = (ev: TouchEvent): void => {
+      if (ev.touches.length > 0) return; // another finger is still down
+      if (touchRelease) clearTimeout(touchRelease);
+      touchRelease = window.setTimeout(() => {
+        st.curOn = false;
+        touchRelease = 0;
+      }, 3000);
     };
     const onBlur = (): void => {
       st.curOn = false;
@@ -1164,6 +1200,10 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerout", onPointerOut);
       window.addEventListener("blur", onBlur);
+      window.addEventListener("touchstart", onTouch, { passive: true });
+      window.addEventListener("touchmove", onTouch, { passive: true });
+      window.addEventListener("touchend", onTouchEnd);
+      window.addEventListener("touchcancel", onTouchEnd);
 
       let lastNow: number | null = null;
       const frame = (now: number): void => {
@@ -1204,6 +1244,11 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerout", onPointerOut);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener("touchstart", onTouch);
+      window.removeEventListener("touchmove", onTouch);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
+      if (touchRelease) clearTimeout(touchRelease);
     };
   }, []);
 
