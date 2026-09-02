@@ -105,7 +105,16 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
 - **Cross-model review**: `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code
 - **Cross-model subagents (experimental)**: `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental alternative to the codex plugin
-- **Reply TL;DRs**: `tldr@alignment-hive` — One-sentence TL;DR after every long reply; /focus then collapses messages to their TL;DRs
+- **Reply TL;DRs**: `tldr@alignment-hive` — One-sentence TL;DR after every long reply; /focus then collapses messages to their TL;DRs — **Always recommend**
+- **Hidden-payload stripping**: `agent-sanitizer@agent-sanitizer` — Catches prompt injections hidden inside text that looks harmless: invisible characters, hidden HTML and look-alike glyphs are stripped before Claude reads them — **Always recommend**
+
+#### After installing agent-sanitizer
+
+Ask one follow-up, Yes / No:
+
+> **Secret redaction** (off by default): redacts credentials from tool output on your machine before Claude sees them, so they can't end up in a commit, another tool call, or the transcript. Needs python3 or uv on PATH; occasionally over-redacts credential-shaped text.
+
+On Yes, set `AGENT_SANITIZER_SECRETS_ENABLED` to `"1"` in the `env` block of the settings file the install scope wrote to (`.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`). On No, record it in `.claude/hive/align-rejected.md`.
 
 #### Platform-specific entries for remote-kernels and model-router
 
@@ -126,6 +135,7 @@ Two rules for these entries specifically:
 | codex | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
 | model-router | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/model-router/README.md` |
 | tldr | `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/tldr/README.md` |
+| agent-sanitizer | `https://raw.githubusercontent.com/AlexanderMattTurner/agent-sanitizer/main/README.md` |
 
 For non-alignment-hive plugins, add the marketplace and install with the CLI (values from the table below; re-adding an already-known marketplace is harmless):
 
@@ -138,6 +148,7 @@ claude plugin install <plugin> --scope <scope>
 |---|---|---|---|
 | precis | `precis@precis` | `precis` | `Crazytieguy/precis` |
 | codex | `codex@codex-plugin-cc` | `codex-plugin-cc` | `Crazytieguy/codex-plugin-cc` |
+| agent-sanitizer | `agent-sanitizer@agent-sanitizer` | `agent-sanitizer` | `AlexanderMattTurner/agent-sanitizer` |
 
 Then add `"autoUpdate": true` to the `extraKnownMarketplaces.<marketplace>` entry that `marketplace add` wrote to the scoped settings file — there is no CLI flag for auto-update. It is on by default for recommended non-alignment-hive marketplaces: they iterate quickly and benefit from auto-refresh, and the user has already opted in by accepting the recommendation. Claude Code (v2.1.140+) propagates the field to `~/.claude/plugins/known_marketplaces.json` on next session start.
 
@@ -151,13 +162,13 @@ If the install fails because the alignment-hive marketplace is missing, run `cla
 
 #### Marketplace auto-update — retroactive sweep
 
-Recommended non-alignment-hive marketplaces (hardcoded): `precis`, `codex-plugin-cc`. Update this list whenever the plugin list above changes.
+Recommended non-alignment-hive marketplaces (hardcoded): `precis`, `codex-plugin-cc`, `agent-sanitizer`. Update this list whenever the plugin list above changes.
 
 Some users may have these marketplaces installed without `autoUpdate: true` (installed before this skill enabled it by default, or installed via the `/plugin` TUI). For each affected marketplace, ask once whether to enable auto-update; idempotent — skip anything already enabled or already declined.
 
 1. Read all four settings files (`~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude/settings.json`, `.claude/settings.local.json`) and `~/.claude/plugins/known_marketplaces.json`.
 2. For each settings file, record where each plugin is enabled (`enabledPlugins` keys with value `true` → extract `<plugin>@<marketplace>`) and where each marketplace is declared (`extraKnownMarketplaces.<marketplace>` and its `autoUpdate` value if any).
-3. For each candidate marketplace where: name ∈ `{precis, codex-plugin-cc}` AND at least one plugin from it is enabled in some settings file AND `autoUpdate` is not already `true` in **any** settings file's `extraKnownMarketplaces.<marketplace>.autoUpdate` AND `autoUpdate` is not already `true` in the registry entry AND not already recorded as declined in `.claude/hive/align-rejected.md` → include in the ask.
+3. For each candidate marketplace where: name ∈ `{precis, codex-plugin-cc, agent-sanitizer}` AND at least one plugin from it is enabled in some settings file AND `autoUpdate` is not already `true` in **any** settings file's `extraKnownMarketplaces.<marketplace>.autoUpdate` AND `autoUpdate` is not already `true` in the registry entry AND not already recorded as declined in `.claude/hive/align-rejected.md` → include in the ask.
 4. Ask via `AskUserQuestion` using the same pattern as the plugin recommendations above: one `Question` per candidate marketplace, two options each (Yes / No), all questions batched in a single tool call.
 5. For Yes answers, determine the target settings file by walking this preference order until a match is found, then edit that file:
    - The file that already declares the marketplace in its `extraKnownMarketplaces` (add `"autoUpdate": true` to the existing entry, preserve other fields). If multiple files declare it, prefer the most local: `.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.json`. Declarations in `~/.claude/settings.local.json` don't count here — step 6 handles them.
