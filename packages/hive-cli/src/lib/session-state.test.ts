@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { discoverSessions } from './session-state';
 
 // Colliding sanitized dir names can put another project's transcripts in this
