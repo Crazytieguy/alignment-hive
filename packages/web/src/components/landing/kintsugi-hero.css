@@ -34,7 +34,8 @@
 
 .kintsugi-canvas.is-lit {
   opacity: 1;
-  animation: kintsugi-lit 8s linear;
+  /* ease-in-out cubic: a slow start so the field emerges, then settles */
+  animation: kintsugi-lit 8s cubic-bezier(0.65, 0, 0.35, 1);
 }
 
 @keyframes kintsugi-lit {
