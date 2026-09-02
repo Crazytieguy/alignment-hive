@@ -34,7 +34,7 @@
 
 .kintsugi-canvas.is-lit {
   opacity: 1;
-  animation: kintsugi-lit 8s ease-out;
+  animation: kintsugi-lit 8s linear;
 }
 
 @keyframes kintsugi-lit {
