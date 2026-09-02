@@ -3,6 +3,7 @@ import { getAuth, getSignInUrl } from "@workos/authkit-tanstack-react-start";
 import { z } from "zod";
 import { Button } from "@alignment-hive/ui";
 import { KintsugiHero } from "@/components/landing/kintsugi-hero";
+import { TestimonialCarousel } from "@/components/landing/testimonial-carousel";
 import type { CSSProperties, ReactNode } from "react";
 // Hero display font, self-hosted via fontsource (subsets beyond latin are
 // declared with unicode-range and never downloaded for this page's copy).
@@ -38,13 +39,9 @@ const sectionPad = "py-[clamp(2.75rem,6vw,4rem)]";
 const railGrid =
   "md:grid md:grid-cols-[11rem_minmax(0,1fr)] md:gap-x-10 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-x-14";
 const sectionHeading =
-  "mb-7 text-[0.82rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground md:mb-0 md:mt-1.5";
+  "mb-7 text-[0.84rem] font-semibold uppercase tracking-[0.16em] text-primary/90 md:mb-0 md:mt-1.5";
 const inlineLink =
   "text-primary underline decoration-1 underline-offset-2 hover:opacity-80";
-// the landing page is dark-locked (.theme-dark on the root), so accents use
-// the dark-theme amber values unconditionally
-const hexAmber = "text-[#C68F2A]";
-
 // Hero H1 display treatment: Fraunces, tuned for this size (serif displays
 // need less negative tracking than the sans).
 const heroFontStyle: CSSProperties = {
@@ -59,7 +56,13 @@ const heroFontStyle: CSSProperties = {
 // Shared copy (single source for all layout variants — do not fork strings)
 // ---------------------------------------------------------------------------
 
+// Shown one at a time, in this order.
 const TESTIMONIALS = [
+  {
+    attribution: "MATS fellow",
+    quote:
+      "a step function change in my research productivity. good to get 1) a productivity reflection and perspective with an expert like Yoav who's also familiar with eng research workflow 2) up-to-date on the latest agentic features",
+  },
   {
     attribution: "MATS fellow",
     quote:
@@ -70,10 +73,20 @@ const TESTIMONIALS = [
     quote:
       "Thanks for the Claude Code setup boost. It's so much fun talking and sharing workflows, especially when the advice comes from someone who has put in enough hours and not just hyping things up like influencers.",
   },
+  {
+    attribution: "MATS fellow",
+    quote:
+      "I very strongly recommend attending a session with Yoav. My workflow has leveled up massively since our session -- I just wish I had signed up sooner!",
+  },
+  {
+    attribution: "MATS fellow",
+    quote:
+      "Yoav was uniquely helpful at MATS. He helped me make real technical headway in just a couple meetings, and ultimately led me to reconsider the mechanics underlying my core project.",
+  },
 ] as const;
 
 const WORKSHOPS_COPY =
-  "Hands-on workshops for AI safety orgs and fellowships: Claude Code setup and best practices, agentic research workflows, and figuring out together what better tooling can do for your work. For a workshop, consulting, or a collaboration, email me.";
+  "Talks, workshops, and consulting for AI safety fellowships and research orgs: where the state of the art of reliable agent delegation lies, tools and techniques that help you get there, and personalized hands-on advice.";
 
 const TOOLS_INTRO =
   "Open source and shaped by concrete bottlenecks in real research work. Here are some of the most-used tools in the collection:";
@@ -116,8 +129,8 @@ function ToolName({ name, href }: { name: string; href?: string }) {
 function AboutCopy() {
   return (
     <>
-      Alignment Hive is built by Yoav Tzfati: MATS alum (scalable oversight
-      with NYU's Alignment Research Group, then the{" "}
+      Alignment Hive is built by Yoav Tzfati: MATS alum (scalable oversight with
+      NYU's Alignment Research Group, then the{" "}
       <a href="https://sl5.org/" className={inlineLink}>
         Security Level 5 task force
       </a>
@@ -234,7 +247,6 @@ function Home() {
       </div>
 
       <ErrorBanner />
-
     </div>
   );
 }
@@ -254,13 +266,7 @@ function LandingSections() {
         data-star-section="testimonials"
         className={`${wrap} ${sectionPad}`}
       >
-        <div className="grid grid-cols-1 gap-[clamp(2rem,5vw,4rem)] md:grid-cols-2">
-          {TESTIMONIALS.map((t) => (
-            <Testimonial key={t.attribution} attribution={t.attribution}>
-              {t.quote}
-            </Testimonial>
-          ))}
-        </div>
+        <TestimonialCarousel items={TESTIMONIALS} />
       </section>
 
       <section
@@ -269,7 +275,7 @@ function LandingSections() {
         aria-labelledby="work-h"
       >
         <h2 id="work-h" className={sectionHeading}>
-          Workshops &amp; consulting
+          Talks, workshops, &amp; consulting
         </h2>
         <div>
           <p className="max-w-[38rem] leading-relaxed">{WORKSHOPS_COPY}</p>
@@ -332,29 +338,6 @@ function LandingSections() {
   );
 }
 
-function Testimonial({
-  attribution,
-  children,
-}: {
-  attribution: string;
-  children: ReactNode;
-}) {
-  return (
-    <blockquote className="relative pt-6 [text-wrap:pretty]">
-      <span
-        aria-hidden="true"
-        className={`absolute -top-2 -left-0.5 text-[3.2rem] leading-none ${hexAmber}`}
-      >
-        &ldquo;
-      </span>
-      <p className="italic leading-relaxed">{children}</p>
-      <footer className="mt-3 text-[0.85rem] tracking-[0.04em] text-muted-foreground">
-        &mdash; {attribution}
-      </footer>
-    </blockquote>
-  );
-}
-
 function Tool({
   name,
   href,
@@ -396,4 +379,3 @@ function ErrorBanner() {
     </div>
   );
 }
-
