@@ -2,6 +2,18 @@
 
 @source "../**/*.tsx";
 
+/* `dark:` follows the OS preference AND the .theme-dark lock below, so
+ * components with dark: styles (e.g. Button's outline variant) render the
+ * same for every visitor of a dark-locked page. */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    @slot;
+  }
+  &:where(.theme-dark, .theme-dark *) {
+    @slot;
+  }
+}
+
 /* Kintsugi palette: ivory/ink light theme, umber/cream dark theme, amber
  * family (#8C5A00 #B07A10 #C68F2A #E3A63C) as the primary/accent scale. */
 :root {
@@ -83,36 +95,36 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #201a0f;
-    --foreground: #efe6cf;
-    --card: #2a2313;
-    --card-foreground: #efe6cf;
-    --popover: #2a2313;
-    --popover-foreground: #efe6cf;
+    --background: #0e0e13;
+    --foreground: #ede7d8;
+    --card: #16161d;
+    --card-foreground: #ede7d8;
+    --popover: #16161d;
+    --popover-foreground: #ede7d8;
     --primary: #e3a63c;
-    --primary-foreground: #201a0f;
-    --secondary: #2a2313;
-    --secondary-foreground: #efe6cf;
-    --muted: #2a2313;
-    --muted-foreground: #bbab85;
-    --accent: #352c18;
-    --accent-foreground: #efe6cf;
+    --primary-foreground: #0e0e13;
+    --secondary: #16161d;
+    --secondary-foreground: #ede7d8;
+    --muted: #16161d;
+    --muted-foreground: #b0a996;
+    --accent: #1f2027;
+    --accent-foreground: #ede7d8;
     --destructive: oklch(0.704 0.191 22.216);
-    --border: #3e3520;
-    --input: #4a3f26;
+    --border: #2b2c34;
+    --input: #383841;
     --ring: #c68f2a;
     --chart-1: #e3a63c;
     --chart-2: #c68f2a;
     --chart-3: #b07a10;
     --chart-4: #f0bc5f;
-    --chart-5: #bbab85;
-    --sidebar: #2a2313;
-    --sidebar-foreground: #efe6cf;
+    --chart-5: #b0a996;
+    --sidebar: #16161d;
+    --sidebar-foreground: #ede7d8;
     --sidebar-primary: #e3a63c;
-    --sidebar-primary-foreground: #201a0f;
-    --sidebar-accent: #352c18;
-    --sidebar-accent-foreground: #efe6cf;
-    --sidebar-border: #3e3520;
+    --sidebar-primary-foreground: #0e0e13;
+    --sidebar-accent: #1f2027;
+    --sidebar-accent-foreground: #ede7d8;
+    --sidebar-border: #2b2c34;
     --sidebar-ring: #c68f2a;
   }
 }
@@ -120,39 +132,44 @@
 /* Opt-in dark lock: a page that must always render dark (the landing page)
  * puts .theme-dark on its root element, overriding the OS preference for
  * that subtree only. Keep these values in sync with the
- * prefers-color-scheme block above. */
+ * prefers-color-scheme block above.
+ *
+ * Dark ground is "Dusk": oklch(0.165 0.012 285), a near-black with a hint
+ * of violet, chosen 2026-09-01 so the warm amber and cream sit on a cool
+ * ground instead of a brown one. Surfaces step up in lightness on the same
+ * hue (+0.04 card, +0.08 accent, +0.13 border, +0.18 input). */
 .theme-dark {
   color-scheme: dark;
-  --background: #201a0f;
-  --foreground: #efe6cf;
-  --card: #2a2313;
-  --card-foreground: #efe6cf;
-  --popover: #2a2313;
-  --popover-foreground: #efe6cf;
+  --background: #0e0e13;
+  --foreground: #ede7d8;
+  --card: #16161d;
+  --card-foreground: #ede7d8;
+  --popover: #16161d;
+  --popover-foreground: #ede7d8;
   --primary: #e3a63c;
-  --primary-foreground: #201a0f;
-  --secondary: #2a2313;
-  --secondary-foreground: #efe6cf;
-  --muted: #2a2313;
-  --muted-foreground: #bbab85;
-  --accent: #352c18;
-  --accent-foreground: #efe6cf;
+  --primary-foreground: #0e0e13;
+  --secondary: #16161d;
+  --secondary-foreground: #ede7d8;
+  --muted: #16161d;
+  --muted-foreground: #b0a996;
+  --accent: #1f2027;
+  --accent-foreground: #ede7d8;
   --destructive: oklch(0.704 0.191 22.216);
-  --border: #3e3520;
-  --input: #4a3f26;
+  --border: #2b2c34;
+  --input: #383841;
   --ring: #c68f2a;
   --chart-1: #e3a63c;
   --chart-2: #c68f2a;
   --chart-3: #b07a10;
   --chart-4: #f0bc5f;
-  --chart-5: #bbab85;
-  --sidebar: #2a2313;
-  --sidebar-foreground: #efe6cf;
+  --chart-5: #b0a996;
+  --sidebar: #16161d;
+  --sidebar-foreground: #ede7d8;
   --sidebar-primary: #e3a63c;
-  --sidebar-primary-foreground: #201a0f;
-  --sidebar-accent: #352c18;
-  --sidebar-accent-foreground: #efe6cf;
-  --sidebar-border: #3e3520;
+  --sidebar-primary-foreground: #0e0e13;
+  --sidebar-accent: #1f2027;
+  --sidebar-accent-foreground: #ede7d8;
+  --sidebar-border: #2b2c34;
   --sidebar-ring: #c68f2a;
 }
 
