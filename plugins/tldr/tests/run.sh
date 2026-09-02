@@ -127,6 +127,56 @@ raw='{"last_assistant_message":"'"${W101}${NL}${W101}"'", broken}'
 out=$(printf '%s' "$raw" | run_stop "$H" "$D")
 assert_block "garbage after a valid close still classifies" "$out"
 
+# --- Stop hook: background-session markers carried into the TL;DR request ---
+# A line starting with "needs input:", "result:" or "failed:" (the job
+# classifier's markers) makes the request ask for a TL;DR starting with it.
+MARKED='{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence that starts with \"%s:\", no \"TL;DR:\" prefix."}'
+assert_marked() { # <name> <actual> <marker>
+  check "$1" "$2" "${MARKED//%s/$3}"
+}
+
+out=$(build_stop_input "'${W101}'+chr(10)+'needs input: which office?'" | run_stop "$H" "$D")
+assert_marked "needs input on the last line" "$out" "needs input"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'result: the fix is landed.'+chr(10)" | run_stop "$H" "$D")
+assert_marked "result line followed by a newline" "$out" "result"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'failed: wrong repo.'" | run_stop "$H" "$D")
+assert_marked "failed line" "$out" "failed"
+
+out=$(build_stop_input "'result: first line headline'+chr(10)+'${W101}'" | run_stop "$H" "$D")
+assert_marked "marker on the first line" "$out" "result"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'  Needs Input :  which office?'" | run_stop "$H" "$D")
+assert_marked "marker is case-insensitive with blanks around it" "$out" "needs input"
+
+out=$(build_stop_input "'${W101}'+chr(10)+chr(9)+'result: tabbed'" | run_stop "$H" "$D")
+assert_marked "encoded tab before the marker" "$out" "result"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'result: one'+chr(10)+'needs input: two'" | run_stop "$H" "$D")
+assert_marked "last marker wins (needs input after result)" "$out" "needs input"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'needs input: one'+chr(10)+'result: two'" | run_stop "$H" "$D")
+assert_marked "last marker wins (result after needs input)" "$out" "result"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'The result: was fine.'" | run_stop "$H" "$D")
+assert_block "marker mid-line is not a marker" "$out"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'results: all green'" | run_stop "$H" "$D")
+assert_block "a longer word is not a marker" "$out"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'needs input from you on this'" | run_stop "$H" "$D")
+assert_block "marker word without a colon is not a marker" "$out"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'blocked: not a documented marker'" | run_stop "$H" "$D")
+assert_block "blocked: is not carried" "$out"
+
+out=$(build_stop_input "'${W101}'+chr(10)+'\"result:\" is escaped'" | run_stop "$H" "$D")
+assert_block "escaped quote before the word is not a marker" "$out"
+
+out=$(build_stop_input "'short reply.'+chr(10)+'needs input: still short'" | run_stop "$H" "$D")
+assert_silent "marker in a short message: no TL;DR at all" "$out"
+
 # Performance regression: escape-dense messages must classify well under the
 # 10s hook timeout (the scanner must stay linear, not quadratic).
 out=$(python3 - "$H" "$D" <<'EOF'
