@@ -29,16 +29,19 @@ function DefaultErrorComponent({
         An unexpected error occurred. Please try again.
       </p>
       <Button onClick={reset}>Try again</Button>
-      {isDev && (
-        <details className="mt-6">
-          <summary className="cursor-pointer text-muted-foreground">
-            Error details
-          </summary>
-          <pre className="mt-2 p-4 bg-muted rounded-md overflow-auto text-sm">
-            {error.stack || error.message}
-          </pre>
-        </details>
-      )}
+      {/* The message is shown in production too: a failure that only
+          reproduces on a phone is otherwise undiagnosable (no devtools).
+          The stack stays dev-only. */}
+      <details className="mt-6" open={isDev}>
+        <summary className="cursor-pointer text-muted-foreground">
+          Error details
+        </summary>
+        <pre className="mt-2 p-4 bg-muted rounded-md overflow-auto text-sm whitespace-pre-wrap">
+          {isDev
+            ? error.stack || error.message
+            : `${error.name}: ${error.message}`}
+        </pre>
+      </details>
     </div>
   );
 }
