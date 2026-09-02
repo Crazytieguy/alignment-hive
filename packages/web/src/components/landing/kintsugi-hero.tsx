@@ -290,7 +290,8 @@ interface HeroState {
   fx: number;
   fy: number;
   fOn: boolean;
-  wasCur: boolean; // curOn last tick (to catch the release)
+  ax: number; // wander curve position this tick, doc coords
+  ay: number;
   wox: number; // wander offset: set on release so the curve passes through
   woy: number; // the focus where the cursor left it, then decays slowly
   secB: number[]; // section boundaries (tops of testimonials..about), doc coords
@@ -753,22 +754,16 @@ function targets(st: HeroState, tsec: number, dt: number): void {
     st.fy = ay;
     st.fOn = true;
   }
+  st.ax = ax;
+  st.ay = ay;
   const dt60 = dt * 60;
-  // When the cursor lets go (finger lifts, mouse leaves the window) the
-  // wander resumes from where the focus is, not from where the curve would
-  // have been: the curve is shifted to pass through the focus at release.
-  // The shift then decays over ~60s — slower than the wander's own motion,
-  // so the recentering is never visible as a pull.
-  if (st.wasCur && !st.curOn) {
-    st.wox = st.fx - ax;
-    st.woy = st.fy - ay;
-  }
-  st.wasCur = st.curOn;
-  if (!st.curOn) {
-    const keep = Math.pow(1 - 1 / 3600, dt60); // 60s time constant
-    st.wox *= keep;
-    st.woy *= keep;
-  }
+  // The release offset (set by release() below) shifts the wander curve to
+  // pass through wherever the cursor left the focus; it decays over ~60s,
+  // slower than the wander's own motion, so the recentering is never
+  // visible as a pull.
+  const keep = Math.pow(1 - 1 / 3600, dt60); // 60s time constant
+  st.wox *= keep;
+  st.woy *= keep;
   const tx = st.curOn ? st.curX : ax + st.wox;
   const ty = st.curOn ? st.curY + st.scrollY : ay + st.woy;
   const er = st.curOn ? 0.022 : 0.012; // lazy pull toward cursor, lazier drift back
@@ -981,7 +976,8 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       fx: 0,
       fy: 0,
       fOn: false,
-      wasCur: false,
+      ax: 0,
+      ay: 0,
       wox: 0,
       woy: 0,
       secB: [],
@@ -1153,9 +1149,16 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       if (ev.pointerType !== "mouse") return;
       follow(ev.clientX, ev.clientY);
     };
+    // Letting go: the wander resumes from where the focus is, not from where
+    // the curve would have been — shift the curve to pass through the focus.
+    const release = (): void => {
+      st.wox = st.fx - st.ax;
+      st.woy = st.fy - st.ay;
+      st.curOn = false;
+    };
     const onPointerOut = (ev: PointerEvent): void => {
       if (ev.pointerType !== "mouse") return;
-      if (!ev.relatedTarget) st.curOn = false; // left the window
+      if (!ev.relatedTarget) release(); // left the window
     };
     // Touch: taps and drags pull the focus like a cursor does. Touch events
     // (not pointer events) so a drag keeps steering while the page scrolls;
@@ -1169,13 +1172,11 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       if (ev.touches.length > 0) return; // another finger is still down
       if (touchRelease) clearTimeout(touchRelease);
       touchRelease = window.setTimeout(() => {
-        st.curOn = false;
+        release();
         touchRelease = 0;
       }, 3000);
     };
-    const onBlur = (): void => {
-      st.curOn = false;
-    };
+    const onBlur = release;
 
     let raf = 0;
     let pendingScroll = 0;
