@@ -8022,7 +8022,7 @@ mod fencing_tests {
                 .unwrap();
         }
 
-        crate::ledger::fault::arm_post_append_failure();
+        crate::ledger::fault::arm_post_append_failure(&machine_id);
         server
             .open_billing_interval(&machine_id, "already billing at the provider")
             .await

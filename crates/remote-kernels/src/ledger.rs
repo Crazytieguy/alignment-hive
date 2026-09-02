@@ -200,17 +200,33 @@ const APPEND_ATTEMPTS: u32 = 3;
 /// difference is the whole reason the interval's uuid is minted once.
 #[cfg(all(test, feature = "fake-runtime"))]
 pub(crate) mod fault {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
 
-    static POST_APPEND_FAILURE: AtomicBool = AtomicBool::new(false);
+    /// Keyed by machine: tests run in parallel and each commits to its own
+    /// ledger, so a process-wide flag would trip whichever test committed
+    /// next, not the one that armed it.
+    static POST_APPEND_FAILURE: Mutex<Option<String>> = Mutex::new(None);
 
-    /// Fail the next `commit_wal` once, after its append is durable.
-    pub(crate) fn arm_post_append_failure() {
-        POST_APPEND_FAILURE.store(true, Ordering::SeqCst);
+    fn armed() -> std::sync::MutexGuard<'static, Option<String>> {
+        POST_APPEND_FAILURE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub(super) fn take_post_append_failure() -> bool {
-        POST_APPEND_FAILURE.swap(false, Ordering::SeqCst)
+    /// Fail the next `commit_wal` for `machine_id` once, after its append is
+    /// durable.
+    pub(crate) fn arm_post_append_failure(machine_id: &str) {
+        *armed() = Some(machine_id.to_string());
+    }
+
+    pub(super) fn take_post_append_failure(machine_id: &str) -> bool {
+        let mut armed = armed();
+        if armed.as_deref() == Some(machine_id) {
+            *armed = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -605,7 +621,7 @@ impl EpochGuard {
         std::fs::remove_file(&wal_path)?;
         sync_parent(&wal_path)?;
         #[cfg(all(test, feature = "fake-runtime"))]
-        if fault::take_post_append_failure() {
+        if fault::take_post_append_failure(machine_id) {
             return Err(LedgerError::Io(std::io::Error::other(
                 "injected failure after the append was durable",
             )));
