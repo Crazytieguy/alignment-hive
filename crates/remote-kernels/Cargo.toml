@@ -1,6 +1,6 @@
 [package]
 name = "remote-kernels"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 description = "MCP server for spinning up cloud GPU instances and interacting with persistent Jupyter kernels"
 license = "MIT"
