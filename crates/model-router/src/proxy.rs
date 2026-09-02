@@ -417,6 +417,7 @@ async fn claude_response(
 /// user picked for the work. `Err` returns the capture so the caller can
 /// continue to the Anthropic passthrough.
 #[allow(clippy::too_many_arguments)] // mirrors websearch_response's shape
+#[allow(clippy::result_large_err)] // the Err returns the capture for the passthrough fallback
 async fn scrape_on_origin_route(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -750,6 +751,7 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
 /// Claude agent: answer it from Anthropic natively. `Err` returns the
 /// capture record so the caller can continue with the GPT path (transport /
 /// transient failures only; caller-error statuses are surfaced).
+#[allow(clippy::result_large_err)] // the Err returns the capture for the passthrough fallback
 async fn claude_origin_on_gpt_branch(
     state: &AppState,
     parts: &axum::http::request::Parts,

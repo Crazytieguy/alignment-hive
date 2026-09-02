@@ -2,6 +2,9 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
+// Async trait fns that never await are the trait's contract (a provider with no
+// stop step still implements `stop`), not a mistake to rewrite into `impl Future`.
+#![allow(clippy::unused_async_trait_impl)]
 
 /// Install the process-wide rustls crypto provider. kube and tungstenite link
 /// rustls with different provider features (aws-lc-rs vs ring), and rustls
