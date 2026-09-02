@@ -290,6 +290,9 @@ interface HeroState {
   fx: number;
   fy: number;
   fOn: boolean;
+  wasCur: boolean; // curOn last tick (to catch the release)
+  wox: number; // wander offset: set on release so the curve passes through
+  woy: number; // the focus where the cursor left it, then decays slowly
   secB: number[]; // section boundaries (tops of testimonials..about), doc coords
   secC: number[]; // section anchor centers (about's extends to the footer)
   cols: { x0: number; x1: number; y0: number; y1: number }[]; // text columns
@@ -750,9 +753,24 @@ function targets(st: HeroState, tsec: number, dt: number): void {
     st.fy = ay;
     st.fOn = true;
   }
-  const tx = st.curOn ? st.curX : ax;
-  const ty = st.curOn ? st.curY + st.scrollY : ay;
   const dt60 = dt * 60;
+  // When the cursor lets go (finger lifts, mouse leaves the window) the
+  // wander resumes from where the focus is, not from where the curve would
+  // have been: the curve is shifted to pass through the focus at release.
+  // The shift then decays over ~60s — slower than the wander's own motion,
+  // so the recentering is never visible as a pull.
+  if (st.wasCur && !st.curOn) {
+    st.wox = st.fx - ax;
+    st.woy = st.fy - ay;
+  }
+  st.wasCur = st.curOn;
+  if (!st.curOn) {
+    const keep = Math.pow(1 - 1 / 3600, dt60); // 60s time constant
+    st.wox *= keep;
+    st.woy *= keep;
+  }
+  const tx = st.curOn ? st.curX : ax + st.wox;
+  const ty = st.curOn ? st.curY + st.scrollY : ay + st.woy;
   const er = st.curOn ? 0.022 : 0.012; // lazy pull toward cursor, lazier drift back
   const ef = 1 - Math.pow(1 - er, dt60);
   st.fx += (tx - st.fx) * ef;
@@ -963,6 +981,9 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       fx: 0,
       fy: 0,
       fOn: false,
+      wasCur: false,
+      wox: 0,
+      woy: 0,
       secB: [],
       secC: [],
       cols: [],
@@ -1016,16 +1037,18 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       if (!stage || !canvas) return;
       const vw = Math.max(320, window.innerWidth);
       const vh = Math.max(200, window.innerHeight);
-      // The parked canvas's own footprint (absolute + translate3d, clamped
-      // to the previous docH) extends scrollHeight, which would ratchet
-      // docH — it could grow but never shrink after a reflow. Hide the
-      // canvas for the measurement; nothing paints mid-task, so the toggle
-      // is invisible.
-      canvas.style.display = "none";
-      const docH = Math.max(vh, document.documentElement.scrollHeight);
-      canvas.style.display = "";
-      const rect = stage.getBoundingClientRect();
       const scY = window.scrollY;
+      // Document height is the body's own box, not scrollHeight: the parked
+      // canvas (absolute + translate3d, clamped to the previous docH) sits
+      // in scrollHeight, which would ratchet docH — it could grow but never
+      // shrink after a reflow. (Hiding the canvas for the measurement
+      // instead passes it through display:none, which restarts its fade-in
+      // animation — visibly, on every mobile URL-bar resize.)
+      const docH = Math.max(
+        vh,
+        document.body.getBoundingClientRect().bottom + scY,
+      );
+      const rect = stage.getBoundingClientRect();
       const heroTop = rect.top + scY;
       const heroH = Math.max(200, rect.height);
       // per-section geometry: real section rects + testimonial text columns,

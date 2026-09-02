@@ -5,17 +5,40 @@ import { Button } from "@alignment-hive/ui";
 import { KintsugiHero } from "@/components/landing/kintsugi-hero";
 import { TestimonialCarousel } from "@/components/landing/testimonial-carousel";
 import type { CSSProperties, ReactNode } from "react";
-// Hero display font, self-hosted via fontsource (subsets beyond latin are
-// declared with unicode-range and never downloaded for this page's copy).
-import "@fontsource-variable/fraunces/opsz.css";
+// Hero display font, self-hosted via fontsource. Only the latin subset is
+// used; it is declared in this route's head (below) rather than through
+// fontsource's stylesheet so the face can be preloaded and use
+// font-display: optional.
+import frauncesLatinUrl from "@fontsource-variable/fraunces/files/fraunces-latin-opsz-normal.woff2?url";
 
 const searchSchema = z.object({
   error: z.string().optional().catch(undefined),
 });
 
+// The H1 is the first thing on the page. With fontsource's default
+// font-display: swap it painted in Georgia and swapped to Fraunces once the
+// file arrived (that fetch only starts after the stylesheet is parsed).
+// Preloading starts the fetch with the HTML, and `optional` means the font is
+// either there for the first paint or not used for this page view — a
+// fallback heading, never a swap mid-read. Chrome holds first render briefly
+// for a preloaded optional font, so on a normal connection it is there.
+const frauncesFace = `@font-face{font-family:"Fraunces Variable";font-style:normal;font-weight:100 900;font-display:optional;src:url(${frauncesLatinUrl}) format("woff2-variations")}`;
+
 export const Route = createFileRoute("/")({
   component: Home,
   validateSearch: searchSchema,
+  head: () => ({
+    links: [
+      {
+        rel: "preload",
+        as: "font",
+        type: "font/woff2",
+        href: frauncesLatinUrl,
+        crossOrigin: "anonymous",
+      },
+    ],
+    styles: [{ children: frauncesFace }],
+  }),
   loader: async () => {
     const { user } = await getAuth();
     const signInUrl = await getSignInUrl();
