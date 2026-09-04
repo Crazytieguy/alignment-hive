@@ -228,9 +228,13 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         ));
     }
 
-    if let Some(config) = &config {
-        let client = crate::client_window::resolve(home.as_deref(), &project);
-        checks.extend(crate::context_check::check(config, client));
+    if let Some(config) = config {
+        checks.extend(context_window_checks(
+            config,
+            dirs,
+            home.as_deref(),
+            &project,
+        ));
         checks.extend(fallback_model_check(home.as_deref(), &project));
     }
 
@@ -241,6 +245,31 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         base_url,
         checks,
     }
+}
+
+/// The `context-windows` check as doctor runs it: the windows the service
+/// discovered at its last start are applied first (the config on disk does
+/// not carry them), then the picker rows that size routes client-side are
+/// read, and the check sees both. Failing to re-prepare the config with the
+/// cached windows is reported in the check's place.
+fn context_window_checks(
+    mut config: Config,
+    dirs: &Dirs,
+    home: Option<&std::path::Path>,
+    project: &std::path::Path,
+) -> Vec<Check> {
+    if let Err(error) = crate::discovery::apply_cached_windows(&mut config, dirs) {
+        return vec![Check {
+            name: "context-windows",
+            ok: false,
+            detail: format!("applying the discovered context windows failed: {error:#}"),
+        }];
+    }
+    let client = crate::client_window::resolve(home, project);
+    let rows = crate::claude_settings::picker_behaves_as(home);
+    crate::context_check::check(&config, client, &rows)
+        .into_iter()
+        .collect()
 }
 
 /// Fails when a settings `fallbackModel` chain is in effect: Claude Code
@@ -773,6 +802,75 @@ mod tests {
         );
         let check = fallback_model_check(Some(home.path()), project.path()).unwrap();
         assert!(check.detail.contains("(opus)"), "{}", check.detail);
+    }
+
+    /// The doctor wiring end to end: the service's cached discovery reaches
+    /// the check, and so does the user file's picker row.
+    #[test]
+    fn context_windows_check_sees_cached_discovery_and_picker_rows() {
+        let state = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            config_dir: state.path().join("config"),
+            state_dir: state.path().to_path_buf(),
+            cache_dir: state.path().join("cache"),
+        };
+        let load = || {
+            let mut config: Config = toml::from_str(
+                r#"
+declared-context-window = 250000
+[[openai-providers]]
+name = "openrouter"
+base-url = "https://openrouter.ai/api/v1"
+[[openai-providers.models]]
+name = "moonshotai/kimi-k3"
+routing-id = "kimi-k3"
+display-name = "Kimi K3"
+"#,
+            )
+            .unwrap();
+            config.prepare().unwrap();
+            config
+        };
+        write_settings(
+            home.path(),
+            "settings.json",
+            r#"{"modelPicker":{"options":[{"model":"kimi-k3","behavesAs":"claude-opus-4-8"}]}}"#,
+        );
+        let cache = |window: u64| {
+            std::fs::write(
+                state.path().join("context-windows.json"),
+                // The cache key is `<provider>\u{1f}<host model id>`, which
+                // JSON has to carry escaped.
+                format!("{{\"openrouter\\u001fmoonshotai/kimi-k3\": {window}}}"),
+            )
+            .unwrap();
+        };
+        let run = || {
+            let checks = context_window_checks(load(), &dirs, Some(home.path()), project.path());
+            assert_eq!(checks.len(), 1, "{checks:?}");
+            checks.into_iter().next().unwrap()
+        };
+
+        // No discovery yet: the row is reported, nothing is judged.
+        let check = run();
+        assert!(check.ok, "{check:?}");
+        assert!(check.detail.contains("real unknown"), "{check:?}");
+
+        cache(202_752);
+        let check = run();
+        assert!(!check.ok, "{check:?}");
+        assert!(
+            check.detail.contains("behavesAs claude-opus-4-8"),
+            "{check:?}"
+        );
+        assert!(check.detail.contains("guarantees 202752"), "{check:?}");
+
+        cache(1_048_576);
+        let check = run();
+        assert!(check.ok, "{check:?}");
+        assert!(check.detail.contains("real 1048576"), "{check:?}");
     }
 
     #[test]

@@ -86,46 +86,79 @@ which would inherit the larger number and start sending the Codex backend
 requests past its limit. The declared value stays where the GPT routes need
 it.
 
-That same believed window drives **auto-compaction** — Claude Code compacts
-when the usage reported for a conversation approaches it — and the router
-controls the reported numbers. That is what the second option below uses.
+### The window that counts
 
-### The two options
+The number every option below works from is the window the host
+**guarantees**, not the one it advertises: the `guaranteed` figure
+`verify-providers` prints. On OpenRouter one model slug is served by
+several sub-providers with different windows — Kimi K3 is 1M on most and
+8K on one — and routing does not account for prompt size, so a request can
+land on the narrowest. Pinning fixes it: in
+`https://openrouter.ai/settings/privacy` the user sets account-wide
+**allowed providers** (or ignores the narrow one), which applies to every
+API request. The router reads OpenRouter's public catalog and cannot see
+those account settings, so after pinning, set `context-window = <tokens>`
+in the model's entry by hand to the window the pinned providers serve.
+Pointing the entry at one provider's own OpenAI-compatible endpoint
+instead — Moonshot, Fireworks and Together each publish one — gets the same
+result without the dashboard.
+
+### The three options
 
 **A. Leave it alone.** The model is clipped to 258400 and every number Claude
 Code displays is true.
 
-**B. Scale the route's reported usage.** Add to the model's entry:
+**B. Map the picker row to a 1M Claude entry** — for a guaranteed window
+of 1M or more. In the model's `modelPicker` row (step 7) add
+`"behavesAs": "claude-opus-4-8"`:
+```json
+{ "model": "kimi-k3", "label": "Kimi K3", "behavesAs": "claude-opus-4-8" }
+```
+Claude Code then handles that routing ID like Opus 4.8 client-side — a 1M
+window, adaptive thinking, effort passthrough — while the request still
+names the routing ID and goes to the host. Every displayed number stays
+true, the other routes keep the declared window, and the row applies
+wherever the routing ID is resolved: the picker, agent definitions,
+Workflow `agent()` calls. The field is undocumented (present since Claude
+Code 2.1.258; the settings schema validates it); if a release drops it the
+model falls back to the clipped window, nothing worse. Use
+`claude-opus-4-8`, not a newer entry: Opus 5 and Fable add a server-side
+fallback field and Sonnet 5 a much larger system prompt. `max_tokens`
+becomes 64000, which OpenRouter accepts for Kimi K3 and GLM-5.2. Rows are
+read at session start, so they apply to sessions started after the file is
+saved. Never combine with C on one route: `doctor` fails the combination
+when the row is in `~/.claude/settings.json`; a `modelPicker` in managed
+settings or passed with `--settings` replaces the user file's and doctor
+does not see it, so keep the two apart by hand there.
+
+**C. Scale the route's reported usage** — for a guaranteed window between
+258400 and 1M, where no Claude entry matches. Add to the model's entry:
 ```toml
 context-window-scaling = true
 ```
 The router divides that route's reported usage by `real window / 258400`, so
-Claude Code compacts at the model's real limit instead of at 258400. It reads
-the real window from the host's catalog at startup and leaves the route
-unscaled if what it finds is no larger than 258400 anyway. `doctor` lists the
-window it settled on for each route, and fails when a route asked for scaling
-and nothing was found — then set `context-window = <tokens>` in that model's
-entry, using the host's own number as-is (Claude Code holds back up to 20000
-tokens of the declared window for output, which is roughly 8% of a 1M window
-once scaled, so it needs no margin subtracted).
-
-On OpenRouter one model slug is served by several sub-providers with
-different windows — Kimi K3 is 1M on most and 8K on one — and routing does not
-account for prompt size, so the router scales against the narrowest, which
-usually means it declines to scale at all. Pinning is worth it: in
-`https://openrouter.ai/settings/privacy` the user sets account-wide **allowed
-providers** (or ignores the narrow one), which applies to every API request.
-The router reads OpenRouter's public catalog and cannot see those account
-settings, so after pinning, set `context-window` in the entry by hand to the
-window the pinned providers serve. Pointing the entry at one provider's own
-OpenAI-compatible endpoint instead — Moonshot, Fireworks and Together each
-publish one — gets the same result without the dashboard.
+Claude Code compacts at the model's real limit instead of at 258400 (auto-
+compaction fires when the usage reported for a conversation approaches the
+believed window, and the router controls the reported numbers). It reads
+the real window from the host's catalog at service start and leaves the
+route unscaled if what it finds is no larger than 258400 anyway. `doctor`
+lists the window it settled on for each route, and fails when a route asked
+for scaling and nothing was found — then set `context-window = <tokens>` in
+that model's entry, using the host's own number as-is (Claude Code holds
+back up to 20000 tokens of the declared window for output, which is roughly
+8% of a 1M window once scaled, so it needs no margin subtracted).
 
 Cost: for a scaled route the token counts Claude Code shows are in the
 declared coordinate system, not the real one — at 1M real tokens the meter
 reads 258400 and calls it full. Percentages stay right; absolute token counts
 and that route's cost telemetry do not. Nothing outside the router config
 changes.
+
+Switching a route between B and C: B → C is remove the row, end every
+Claude Code session that started with it, then enable scaling and restart
+the service; C → B is disable scaling and restart the service, then add the
+row and start new sessions. A session that loaded the row while the router
+scales that route overruns.
 
 ### Models whose window is *below* 258400
 
@@ -139,8 +172,12 @@ of their own if the user wants their full window back.
 
 ### After applying the choice
 
-Re-run `$ROUTER verify-providers` and `$ROUTER doctor`. Doctor reports the
-client window it resolved, each route's status — matched, clipped, scaled, or
-`OVERRUN RISK` — and flags a running service whose resolved value is stale.
+Re-run `$ROUTER verify-providers`, `$ROUTER service restart` (the service
+discovers each route's guaranteed window at start and doctor reads what it
+found), and `$ROUTER doctor`. Doctor reports the client window it resolved,
+each route's status — matched, clipped, scaled, sized by a `behavesAs` row,
+or `OVERRUN RISK` — and flags a running service whose resolved value is
+stale. A `behavesAs` row mapping to `claude-opus-4-8` fails when the
+guaranteed window is below 1M.
 Env changes need a Claude Code restart; config changes need
 `$ROUTER service restart`.

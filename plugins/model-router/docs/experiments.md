@@ -1742,3 +1742,40 @@ the `effort` capability drop it and send budgeted thinking.
   (compaction at 4× the real window). Doctor's `context-windows` check
   reads only `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and would call such a route
   "clipped".
+
+### `behavesAs` on real open-weights routes (OpenRouter, same day)
+
+Temporary `[[openai-providers]]` block: `moonshotai/kimi-k3` → `kimi-k3`,
+`z-ai/glm-5.2` → `glm-5.2` (host windows 1048576 both; `verify-providers`
+flags GLM's as 202752 guaranteed across sub-providers). Row under test:
+`{"model": "<id>", "behavesAs": "claude-opus-4-8"}` via `--settings`.
+
+- Direct gateway curl with `max_tokens: 64000`: both models answered
+  (`stop_reason: end_turn`), so the 64000 the target implies is accepted
+  by both hosts.
+- `claude -p --model kimi-k3` / `glm-5.2`: contextWindow 258400 without the
+  row, 1000000 with it; every run answered.
+- 363K-token single prompt (24000 numbered lines, ~1.67 MB) on `kimi-k3`
+  with the row: answered correctly (last line number and a word from line
+  17777), `inputTokens` 363133, 35 s. Without the row: refused
+  client-side in 140 ms, `"Prompt is too long"`, no request sent — the
+  clipping is a hard wall, not a compaction nuisance.
+- These runs prove the mechanism, not OpenRouter's routing: each request
+  happened to land on a wide sub-provider. The window that matters is the
+  one the host guarantees across every eligible sub-provider (Kimi K3
+  1048576, GLM-5.2 202752 on an unpinned account).
+- Router 0.1.17 (this branch): discovery now fetches every provider
+  model's guaranteed window at service start (not only scaling routes) and
+  doctor applies the cached result before its `context-windows` check,
+  which also reads `behavesAs` rows from `~/.claude/settings.json`.
+  End-to-end with a temp state dir and a temp HOME whose picker maps both
+  routes to `claude-opus-4-8`: the service wrote the two windows above to
+  `context-windows.json`; doctor then reported `kimi-k3 sized by Claude
+  Code's claude-opus-4-8 entry (… real 1048576)` green and `glm-5.2
+  OVERRUN RISK: behavesAs claude-opus-4-8 gives it a 1000000 window but the
+  host guarantees 202752; pin the host's providers or drop the row` red.
+  Before 0.1.17 doctor never saw discovered windows at all (discovery ran
+  in `serve` only), so a scaling route relying on discovery read as
+  "wants scaling but no context window was discovered" — fixed by the
+  same change.
+- Provider block and key removed after the run.

@@ -7,6 +7,7 @@
 //! however well-formed. Managed (admin) settings sit above all of these and
 //! are not read here.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Claude Code's settings files in precedence order, highest first.
@@ -34,6 +35,42 @@ pub(crate) fn winning_setting(
         let value = key.iter().try_fold(&settings, |node, key| node.get(key))?;
         Some((path, value.clone()))
     })
+}
+
+/// The `behavesAs` target of every `modelPicker` row in the user settings
+/// file, keyed by the row's `model` (both trimmed; rows without a non-empty
+/// target are left out).
+///
+/// Claude Code honours `modelPicker` from managed settings, `--settings`,
+/// and `~/.claude/settings.json` only — never from a project checkout — and
+/// the highest of those that defines it replaces the rest whole. Only the
+/// user file is readable here: a managed or `--settings` picker is
+/// invisible, and so are the rows a running session loaded at its start.
+/// Callers must say so rather than report the user file as the truth.
+pub(crate) fn picker_behaves_as(home: Option<&Path>) -> BTreeMap<String, String> {
+    let Some(home) = home else {
+        return BTreeMap::new();
+    };
+    let path = home.join(".claude/settings.json");
+    let Some(settings) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+    else {
+        return BTreeMap::new();
+    };
+    settings
+        .get("modelPicker")
+        .and_then(|picker| picker.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let model = row.get("model")?.as_str()?.trim();
+            let target = row.get("behavesAs")?.as_str()?.trim();
+            (!model.is_empty() && !target.is_empty())
+                .then(|| (model.to_string(), target.to_string()))
+        })
+        .collect()
 }
 
 /// Test fixture: writes `.claude/<name>` under `dir`.
@@ -70,5 +107,41 @@ mod tests {
         assert_eq!(path, project.path().join(".claude/settings.json"));
         assert_eq!(value, "x");
         assert!(winning_setting(Some(home.path()), project.path(), &["env", "C"]).is_none());
+    }
+
+    #[test]
+    fn picker_rows_come_from_the_user_file_only() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(picker_behaves_as(None).is_empty());
+        assert!(picker_behaves_as(Some(home.path())).is_empty());
+
+        write_settings(
+            home.path(),
+            "settings.json",
+            r#"{"modelPicker":{"options":[
+                {"model":" kimi-k3 ","label":"Kimi K3","behavesAs":" claude-opus-4-8 "},
+                {"model":"gpt-5.6-sol","label":"GPT-5.6 Sol"},
+                {"model":"glm-5.2","behavesAs":"  "},
+                {"model":"","behavesAs":"claude-opus-4-8"},
+                {"behavesAs":"claude-opus-4-8"},
+                "not a row"
+            ]}}"#,
+        );
+        let rows = picker_behaves_as(Some(home.path()));
+        assert_eq!(
+            rows,
+            BTreeMap::from([("kimi-k3".to_string(), "claude-opus-4-8".to_string())])
+        );
+
+        // Malformed file: nothing, not a panic.
+        write_settings(home.path(), "settings.json", "{ not json");
+        assert!(picker_behaves_as(Some(home.path())).is_empty());
+        // A well-formed file whose picker is the wrong shape: also nothing.
+        write_settings(
+            home.path(),
+            "settings.json",
+            r#"{"modelPicker":{"options":"x"}}"#,
+        );
+        assert!(picker_behaves_as(Some(home.path())).is_empty());
     }
 }

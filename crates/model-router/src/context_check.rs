@@ -8,12 +8,21 @@
 //! matches the client's actual value (every scaled route silently compacting
 //! at the wrong point).
 
+use std::collections::BTreeMap;
+
 use crate::client_window::{self, ClientWindow, client_context_window};
-use crate::config::Config;
+use crate::config::{Config, ModelRoute};
 use crate::doctor::Check;
 
+/// The one `behavesAs` target the setup skill recommends for a routed model
+/// with a 1M window, and the window Claude Code gives a route mapped to it.
+/// Not a catalog: the crate knows the window of its own recommendation and
+/// nothing else, and reports any other target without checking it.
+pub const DOCUMENTED_BEHAVES_AS: &str = "claude-opus-4-8";
+pub const DOCUMENTED_BEHAVES_AS_WINDOW: u64 = 1_000_000;
+
 /// How one route's real window compares with what the client believes.
-enum RouteStatus {
+enum RouteStatus<'a> {
     Matched,
     Clipped {
         client: u64,
@@ -31,11 +40,35 @@ enum RouteStatus {
     /// runs unscaled — the one case the user has to resolve by hand.
     Undiscovered,
     Unknown,
+    /// A `modelPicker` row sizes this route client-side from a Claude
+    /// catalog entry, so the client window above does not apply to it.
+    BehavesAs {
+        target: &'a str,
+        actual: Option<u64>,
+    },
+    /// The documented target promises the client more than the host
+    /// guarantees.
+    BehavesAsOverrun {
+        target: &'a str,
+        actual: u64,
+    },
+    /// Both mechanisms on one route: the router scales usage for a client
+    /// that already believes the target's window, so compaction lands far
+    /// past the real one.
+    ScaledBehavesAs {
+        target: &'a str,
+    },
 }
 
-impl RouteStatus {
+impl RouteStatus<'_> {
     const fn is_ok(&self) -> bool {
-        !matches!(self, Self::Overrun { .. } | Self::Undiscovered)
+        !matches!(
+            self,
+            Self::Overrun { .. }
+                | Self::Undiscovered
+                | Self::BehavesAsOverrun { .. }
+                | Self::ScaledBehavesAs { .. }
+        )
     }
 
     /// The line this route contributes, or `None` when it agrees with the
@@ -58,18 +91,70 @@ impl RouteStatus {
                  set `context-window` for it in the config"
             ),
             Self::Unknown => format!("{routing_id} real window unknown"),
+            Self::BehavesAs { target, actual } => {
+                let real = actual.map_or_else(
+                    || {
+                        "real unknown until the service has discovered the host's window"
+                            .to_string()
+                    },
+                    |actual| format!("real {actual}"),
+                );
+                let checked = if *target == DOCUMENTED_BEHAVES_AS {
+                    ""
+                } else {
+                    "; target window not checked"
+                };
+                format!(
+                    "{routing_id} sized by Claude Code's {target} entry (behavesAs row in \
+                     ~/.claude/settings.json, for sessions started after it was saved; \
+                     {real}{checked})"
+                )
+            }
+            Self::BehavesAsOverrun { target, actual } => format!(
+                "{routing_id} OVERRUN RISK: behavesAs {target} gives it a \
+                 {DOCUMENTED_BEHAVES_AS_WINDOW} window but the host guarantees {actual}; pin \
+                 the host's providers or drop the row"
+            ),
+            Self::ScaledBehavesAs { target } => format!(
+                "{routing_id} OVERRUN RISK: behavesAs {target} in its ~/.claude/settings.json \
+                 picker row and context-window-scaling in the config; sessions that load the \
+                 row size it from {target}'s entry and the scaled usage compacts far past the \
+                 real window — drop one"
+            ),
         })
     }
 }
 
-/// Builds the `context-windows` check, or `None` when no route says anything
-/// about context windows (nothing to verify, nothing to warn about).
+/// The status of a route a picker row sizes client-side.
+fn behaves_as_status<'a>(route: &ModelRoute, target: &'a str) -> RouteStatus<'a> {
+    if route.context_window_scaling || route.usage_scale.is_some() {
+        return RouteStatus::ScaledBehavesAs { target };
+    }
+    match route.context_window {
+        Some(actual)
+            if target == DOCUMENTED_BEHAVES_AS && actual < DOCUMENTED_BEHAVES_AS_WINDOW =>
+        {
+            RouteStatus::BehavesAsOverrun { target, actual }
+        }
+        actual => RouteStatus::BehavesAs { target, actual },
+    }
+}
+
+/// Builds the `context-windows` check, or `None` when neither the config nor
+/// a picker row says anything about context windows (nothing to verify,
+/// nothing to warn about). `behaves_as` maps routing IDs to the `behavesAs`
+/// target of their `~/.claude/settings.json` picker row — the only picker
+/// source the router can read; see [`crate::claude_settings`].
 #[must_use]
-pub fn check(config: &Config, client: ClientWindow) -> Option<Check> {
-    if config
-        .effective_models()
-        .all(|route| route.context_window.is_none() && !route.context_window_scaling)
-    {
+pub fn check(
+    config: &Config,
+    client: ClientWindow,
+    behaves_as: &BTreeMap<String, String>,
+) -> Option<Check> {
+    let row_for = |route: &ModelRoute| behaves_as.get(&route.routing_id).map(String::as_str);
+    if config.effective_models().all(|route| {
+        route.context_window.is_none() && !route.context_window_scaling && row_for(route).is_none()
+    }) {
         return None;
     }
     // The client's own value is authoritative when we can see it; the config's
@@ -79,24 +164,29 @@ pub fn check(config: &Config, client: ClientWindow) -> Option<Check> {
     let mut ok = true;
     let mut matched = 0_usize;
     let mut notes = Vec::new();
+    let mut rows_seen = false;
     let believed = client_context_window(declared);
     for route in config.effective_models() {
-        let status = match (route.context_window, route.usage_scale) {
-            (Some(actual), Some(scale)) => RouteStatus::Scaled {
+        let status = match (row_for(route), route.context_window, route.usage_scale) {
+            (Some(target), _, _) => {
+                rows_seen = true;
+                behaves_as_status(route, target)
+            }
+            (None, Some(actual), Some(scale)) => RouteStatus::Scaled {
                 ratio: scale.ratio(),
                 actual,
             },
-            (Some(actual), None) if actual < believed => RouteStatus::Overrun {
+            (None, Some(actual), None) if actual < believed => RouteStatus::Overrun {
                 client: believed,
                 actual,
             },
-            (Some(actual), None) if actual > believed => RouteStatus::Clipped {
+            (None, Some(actual), None) if actual > believed => RouteStatus::Clipped {
                 client: believed,
                 actual,
             },
-            (Some(_), None) => RouteStatus::Matched,
-            (None, _) if route.context_window_scaling => RouteStatus::Undiscovered,
-            (None, _) => RouteStatus::Unknown,
+            (None, Some(_), None) => RouteStatus::Matched,
+            (None, None, _) if route.context_window_scaling => RouteStatus::Undiscovered,
+            (None, None, _) => RouteStatus::Unknown,
         };
         ok &= status.is_ok();
         match status.describe(&route.routing_id) {
@@ -107,6 +197,13 @@ pub fn check(config: &Config, client: ClientWindow) -> Option<Check> {
     if matched > 0 {
         notes.push(format!("{matched} matched"));
     }
+    // A green result must say what it could not see: a managed or
+    // `--settings` picker replaces the user file's rows whole.
+    let scope = rows_seen.then(|| {
+        "picker rows read from ~/.claude/settings.json only; a managed or --settings \
+         modelPicker replaces them and is not checked here"
+            .to_string()
+    });
 
     // Drift only matters where a ratio depends on the declaration. Without
     // scaling it is unused, so a mismatch is not worth a red check.
@@ -133,6 +230,7 @@ pub fn check(config: &Config, client: ClientWindow) -> Option<Check> {
         ok,
         detail: [head]
             .into_iter()
+            .chain(scope)
             .chain(drift)
             .chain(notes)
             .collect::<Vec<_>>()
@@ -190,7 +288,11 @@ context-window-scaling = {scaling}
     }
 
     fn checked(source: &str, client: ClientWindow) -> Check {
-        check(&config(source), client).unwrap()
+        check(&config(source), client, &BTreeMap::new()).unwrap()
+    }
+
+    fn kimi_row(target: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([("kimi-k3".to_string(), target.to_string())])
     }
 
     #[test]
@@ -198,7 +300,109 @@ context-window-scaling = {scaling}
         let mut bare: Config = toml::from_str("").unwrap();
         bare.models.clear();
         bare.prepare().unwrap();
-        assert!(check(&bare, ClientWindow::Unresolved).is_none());
+        assert!(check(&bare, ClientWindow::Unresolved, &BTreeMap::new()).is_none());
+        // A row for an ID that is not a route says nothing either.
+        assert!(
+            check(
+                &bare,
+                ClientWindow::Unresolved,
+                &kimi_row("claude-opus-4-8")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_picker_row_sizes_the_route_and_scopes_the_result() {
+        // The route declares no window and does not scale: without the row
+        // the config would say nothing about windows at all.
+        let source = provider(1_000_000, false).replace("context-window = 1000000\n", "");
+        let check = check(
+            &config(&source),
+            ClientWindow::Environment(250_000),
+            &kimi_row("claude-opus-4-8"),
+        )
+        .unwrap();
+        assert!(check.ok, "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("kimi-k3 sized by Claude Code's claude-opus-4-8 entry"),
+            "{check:?}"
+        );
+        assert!(check.detail.contains("real unknown"), "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("read from ~/.claude/settings.json only"),
+            "{check:?}"
+        );
+        // Never "clipped" against a client window that does not apply (the
+        // built-in GPT routes still are, against their own 258400).
+        assert!(!check.detail.contains("kimi-k3 clipped"), "{check:?}");
+    }
+
+    #[test]
+    fn the_documented_target_is_checked_against_the_hosts_window() {
+        let below = check(
+            &config(&provider(202_752, false)),
+            ClientWindow::Environment(250_000),
+            &kimi_row("claude-opus-4-8"),
+        )
+        .unwrap();
+        assert!(!below.ok, "{below:?}");
+        assert!(
+            below
+                .detail
+                .contains("kimi-k3 OVERRUN RISK: behavesAs claude-opus-4-8"),
+            "{below:?}"
+        );
+        assert!(below.detail.contains("guarantees 202752"), "{below:?}");
+
+        let enough = check(
+            &config(&provider(1_048_576, false)),
+            ClientWindow::Environment(250_000),
+            &kimi_row("claude-opus-4-8"),
+        )
+        .unwrap();
+        assert!(enough.ok, "{enough:?}");
+        assert!(enough.detail.contains("real 1048576"), "{enough:?}");
+        assert!(
+            !enough.detail.contains("target window not checked"),
+            "{enough:?}"
+        );
+
+        // Any other target: reported, not judged.
+        let other = check(
+            &config(&provider(202_752, false)),
+            ClientWindow::Environment(250_000),
+            &kimi_row("claude-sonnet-5"),
+        )
+        .unwrap();
+        assert!(other.ok, "{other:?}");
+        assert!(
+            other.detail.contains("target window not checked"),
+            "{other:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_and_scaling_on_one_route_is_an_overrun() {
+        let check = check(
+            &config(&provider(1_000_000, true)),
+            ClientWindow::Environment(250_000),
+            &kimi_row("claude-opus-4-8"),
+        )
+        .unwrap();
+        assert!(!check.ok, "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("context-window-scaling in the config"),
+            "{check:?}"
+        );
+        assert!(check.detail.contains("drop one"), "{check:?}");
+        assert!(!check.detail.contains("scaled x"), "{check:?}");
     }
 
     #[test]
@@ -238,7 +442,12 @@ context-window-scaling = {scaling}
     fn the_clients_own_value_overrides_the_declaration_even_without_scaling() {
         // Option B: the global was raised but the bare GPT routes are still
         // routable, so they now believe 1M against a real 250K ceiling.
-        let check = check(&config(""), ClientWindow::Environment(1_000_000)).unwrap();
+        let check = check(
+            &config(""),
+            ClientWindow::Environment(1_000_000),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(!check.ok);
         assert!(
             check.detail.contains("gpt-5.6-sol OVERRUN RISK"),

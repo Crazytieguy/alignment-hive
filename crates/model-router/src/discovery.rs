@@ -1,12 +1,15 @@
 //! Context-window discovery for `[[openai-providers]]` routes.
 //!
 //! A route that opts into `context-window-scaling` needs its real window, and
-//! the host already publishes it. Asking the host beats asking the user: the
-//! number is provider-specific, changes when a model is upgraded, and a
-//! mistyped one moves the compaction point silently.
+//! `doctor` reports every route against it; the host already publishes it.
+//! Asking the host beats asking the user: the number is provider-specific,
+//! changes when a model is upgraded, and a mistyped one moves the compaction
+//! point silently.
 //!
-//! The answer is cached in the state directory so a provider outage degrades
-//! to the last known window rather than to no scaling at all.
+//! The service fetches at start and caches the answer in the state directory
+//! ([`fetch_context_windows`]); both the service and `doctor` then apply the
+//! cache ([`apply_cached_windows`]), so a provider outage degrades to the last
+//! known window and `doctor` sees the same numbers the service runs with.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -23,22 +26,31 @@ const CACHE_FILE: &str = "context-windows.json";
 /// against.
 const OPENROUTER_HOST: &str = "openrouter.ai";
 
-/// Fills in `context-window` for every scaling route that did not configure
-/// one explicitly. Never fails the caller: a route left without a window is
-/// simply not scaled (its model gets the window Claude Code already believes
-/// it has), which `doctor` reports.
-pub async fn fill_context_windows(config: &mut Config, dirs: &Dirs) {
-    let wanted: Vec<(String, String)> = config
+/// The provider models whose window the host has to supply: every
+/// `[[openai-providers.models]]` entry without an explicit `context-window`.
+/// Not only scaling routes — `doctor` reports every route against the host's
+/// number, and a route sized by a `behavesAs` picker row is checked against
+/// it.
+fn undeclared_models(config: &Config) -> Vec<(String, String)> {
+    config
         .openai_providers
         .iter()
         .flat_map(|provider| {
             provider
                 .models
                 .iter()
-                .filter(|model| model.context_window_scaling && model.context_window.is_none())
+                .filter(|model| model.context_window.is_none())
                 .map(|model| (provider.name.clone(), model.name.clone()))
         })
-        .collect();
+        .collect()
+}
+
+/// Asks each host for the windows of its undeclared models and refreshes the
+/// cache in the state directory. Never fails the caller: an unreachable host
+/// leaves the cache as it was, and [`apply_cached_windows`] works from that.
+/// Service start only — `doctor` reads the cache this leaves behind.
+pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
+    let wanted = undeclared_models(config);
     if wanted.is_empty() {
         return;
     }
@@ -76,19 +88,39 @@ pub async fn fill_context_windows(config: &mut Config, dirs: &Dirs) {
         }
     }
     write_cache(&cache_path, &cache);
+}
 
-    let declared = config.declared_context_window;
+/// Fills in `context-window` for every undeclared provider model from the
+/// cache [`fetch_context_windows`] maintains, then re-prepares the config so
+/// the usage scales reflect the windows. A route with no cached window is
+/// left as it was, which `doctor` reports.
+///
+/// A scaling route only takes a window larger than the client's: scaling
+/// cannot help below it, and a discovered number must never fail the config
+/// the way a hand-written one does — Claude traffic would stop with it. A
+/// route that does not scale takes the host's number as-is; it only informs.
+///
+/// # Errors
+/// Returns the error of re-preparing the config, which the applied windows
+/// themselves cannot cause (they are positive, and only scaling routes are
+/// validated against the declaration).
+pub fn apply_cached_windows(config: &mut Config, dirs: &Dirs) -> anyhow::Result<()> {
+    if undeclared_models(config).is_empty() {
+        return Ok(());
+    }
+    let cache = read_cache(&dirs.state_dir.join(CACHE_FILE));
+    let believed = client_context_window(config.declared_context_window);
     for provider in &mut config.openai_providers {
         for model in &mut provider.models {
-            if !model.context_window_scaling || model.context_window.is_some() {
+            if model.context_window.is_some() {
                 continue;
             }
-            let believed = client_context_window(declared);
-            match cache.get(&cache_key(&provider.name, &model.name)).copied() {
-                // Only a window larger than the client's is scalable, and a
-                // discovered number must never fail the config the way a
-                // hand-written one does: Claude traffic would stop with it.
-                Some(window) if window > believed => {
+            let cached = cache
+                .get(&cache_key(&provider.name, &model.name))
+                .copied()
+                .filter(|window| *window > 0);
+            match cached {
+                Some(window) if !model.context_window_scaling || window > believed => {
                     tracing::info!(model = model.name, window, "discovered context window");
                     model.context_window = Some(window);
                 }
@@ -99,14 +131,16 @@ pub async fn fill_context_windows(config: &mut Config, dirs: &Dirs) {
                     "discovered context window is not larger than the one Claude Code already \
                      believes; leaving this route unscaled"
                 ),
-                None => tracing::warn!(
+                None if model.context_window_scaling => tracing::warn!(
                     model = model.name,
                     "no context window discovered; this route will not be scaled — set \
                      `context-window` explicitly to scale it anyway"
                 ),
+                None => {}
             }
         }
     }
+    config.prepare()
 }
 
 fn cache_key(provider: &str, model: &str) -> String {
@@ -239,5 +273,84 @@ mod tests {
         assert!(read_cache(&path).is_empty());
         write_cache(&path, &BTreeMap::from([("k".to_string(), 7)]));
         assert_eq!(read_cache(&path).get("k"), Some(&7));
+    }
+
+    fn dirs_in(dir: &Path) -> Dirs {
+        Dirs {
+            config_dir: dir.join("config"),
+            state_dir: dir.to_path_buf(),
+            cache_dir: dir.join("cache"),
+        }
+    }
+
+    fn two_route_config() -> Config {
+        let mut config: Config = toml::from_str(
+            r#"
+declared-context-window = 250000
+[[openai-providers]]
+name = "openrouter"
+base-url = "https://openrouter.ai/api/v1"
+[[openai-providers.models]]
+name = "moonshotai/kimi-k3"
+routing-id = "kimi-k3"
+display-name = "Kimi K3"
+context-window-scaling = true
+[[openai-providers.models]]
+name = "z-ai/glm-5.2"
+routing-id = "glm-5.2"
+display-name = "GLM-5.2"
+"#,
+        )
+        .unwrap();
+        config.prepare().unwrap();
+        config
+    }
+
+    fn route_window(config: &Config, routing_id: &str) -> Option<u64> {
+        config
+            .effective_models()
+            .find(|route| route.routing_id == routing_id)
+            .unwrap()
+            .context_window
+    }
+
+    #[test]
+    fn cached_windows_reach_every_undeclared_route_and_scale_only_above_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(dir.path());
+        let mut config = two_route_config();
+        // No cache yet: nothing changes and nothing fails.
+        apply_cached_windows(&mut config, &dirs).unwrap();
+        assert_eq!(route_window(&config, "kimi-k3"), None);
+        assert_eq!(route_window(&config, "glm-5.2"), None);
+
+        write_cache(
+            &dir.path().join(CACHE_FILE),
+            &BTreeMap::from([
+                (cache_key("openrouter", "moonshotai/kimi-k3"), 1_048_576),
+                (cache_key("openrouter", "z-ai/glm-5.2"), 202_752),
+            ]),
+        );
+        let mut config = two_route_config();
+        apply_cached_windows(&mut config, &dirs).unwrap();
+        assert_eq!(route_window(&config, "kimi-k3"), Some(1_048_576));
+        // The plain route takes the host's number even below the client's
+        // window: it is what doctor has to warn about.
+        assert_eq!(route_window(&config, "glm-5.2"), Some(202_752));
+        let kimi = config
+            .effective_models()
+            .find(|route| route.routing_id == "kimi-k3")
+            .unwrap();
+        assert!(kimi.usage_scale.is_some(), "re-prepare computes the scale");
+
+        // A scaling route never takes a window at or below the client's: the
+        // config would have refused it hand-written.
+        write_cache(
+            &dir.path().join(CACHE_FILE),
+            &BTreeMap::from([(cache_key("openrouter", "moonshotai/kimi-k3"), 200_000)]),
+        );
+        let mut config = two_route_config();
+        apply_cached_windows(&mut config, &dirs).unwrap();
+        assert_eq!(route_window(&config, "kimi-k3"), None);
     }
 }
