@@ -1687,7 +1687,8 @@ pointing one arm's `env.ANTHROPIC_BASE_URL` at a local stub that records
   change are moot under the standing decision above (the nonessential
   change lands in the enterprise-gateway bootstrap path). `modelPicker` rows
   take `{ model, label?, description?, behavesAs? }`; `description` is the
-  row subtitle, default "Custom model" — setup now writes one.
+  row subtitle, default "Custom model (<id>)", which already carries the
+  routing ID — left alone.
 
 ### `behavesAs` on `modelPicker` rows (undocumented)
 

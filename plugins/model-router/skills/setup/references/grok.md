@@ -42,7 +42,7 @@ Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
 5. **`/model` picker row**: add to the step-5 `modelPicker` options in
    `~/.claude/settings.json`:
    ```json
-   { "model": "grok-4.6", "label": "Grok 4.6", "description": "xAI subscription via model-router" }
+   { "model": "grok-4.6", "label": "Grok 4.6" }
    ```
    With project-scoped wiring there is only the single-slot env pair; if
    the user prefers Grok in it, replace both values
