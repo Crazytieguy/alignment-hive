@@ -351,6 +351,27 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
         .await;
     }
 
+    // A route that asked for sub-provider pinning and has no selection is
+    // not in the child config either; answering here keeps the reason
+    // attached to the failure instead of the child's generic 400.
+    if let Some(route) = decision.route
+        && let (Some(wanted), None) = (route.min_context_window, &route.pinned_providers)
+    {
+        return local_error_response(
+            &state,
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            &format!(
+                "{} is not served: it wants sub-providers serving at least {wanted} tokens and \
+                 the service's last lookup found none that qualify; lower min-context-window or \
+                 run `model-router verify-providers`, then `model-router service restart`",
+                route.routing_id
+            ),
+            capture,
+        )
+        .await;
+    }
+
     match decision.branch {
         Branch::Claude => claude_response(&state, &parts, body, &decision, capture).await,
         Branch::Gpt => gpt_response(&state, &parts, body, &decision, capture).await,

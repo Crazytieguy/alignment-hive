@@ -475,6 +475,8 @@ async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape(
                 display_name: "Kimi K2.7".to_string(),
                 context_window: None,
                 context_window_scaling: false,
+                min_context_window: None,
+                pinned_providers: None,
             }],
         }],
         ..Config::default()
@@ -628,6 +630,8 @@ async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
             context_window: Some(1_000_000),
             context_window_scaling: true,
             usage_scale: None,
+            min_context_window: None,
+            pinned_providers: None,
         }],
         ..Config::default()
     };
@@ -2432,4 +2436,43 @@ async fn shutdown_waits_for_in_flight_search_streams() {
             .count(),
         1
     );
+}
+
+/// A route that asked for sub-provider pinning and has no selection is
+/// answered by the router itself, with the reason, before any upstream.
+#[tokio::test]
+async fn an_unpinned_route_is_refused_with_the_reason() {
+    let mut config = Config {
+        upstreams: stub_upstreams(),
+        models: vec![ModelRoute {
+            routing_id: "glm-5.2".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "openai-compat--glm-5.2".to_string(),
+            display_name: "GLM-5.2".to_string(),
+            family: model_router::config::ModelFamily::OpenAiCompat,
+            context_window: None,
+            context_window_scaling: false,
+            usage_scale: None,
+            min_context_window: Some(2_000_000),
+            pinned_providers: None,
+        }],
+        ..Config::default()
+    };
+    config.prepare().unwrap();
+    let app = model_router::proxy::app(config).await.unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"model":"glm-5.2","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("not_found_error"), "{body}");
+    assert!(body.contains("glm-5.2 is not served"), "{body}");
+    assert!(body.contains("at least 2000000 tokens"), "{body}");
 }

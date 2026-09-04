@@ -93,15 +93,18 @@ The number every option below works from is the window the host
 `verify-providers` prints. On OpenRouter one model slug is served by
 several sub-providers with different windows — Kimi K3 is 1M on most and
 8K on one — and routing does not account for prompt size, so a request can
-land on the narrowest. Pinning fixes it: in
-`https://openrouter.ai/settings/privacy` the user sets account-wide
-**allowed providers** (or ignores the narrow one), which applies to every
-API request. The router reads OpenRouter's public catalog and cannot see
-those account settings, so after pinning, set `context-window = <tokens>`
-in the model's entry by hand to the window the pinned providers serve.
+land on the narrowest. The router pins the sub-providers for you: set in
+the model's entry
+```toml
+min-context-window = 1000000
+```
+and the service routes that model only to sub-providers serving at least
+that, re-picking them from OpenRouter's endpoint list at every start;
+`verify-providers` shows which it pins and which it excludes. A model with
+no qualifying sub-provider is not served rather than served unpinned.
 Pointing the entry at one provider's own OpenAI-compatible endpoint
-instead — Moonshot, Fireworks and Together each publish one — gets the same
-result without the dashboard.
+instead — Moonshot, Fireworks and Together each publish one — sidesteps the
+question.
 
 ### The three options
 
@@ -109,8 +112,8 @@ result without the dashboard.
 Code displays is true.
 
 **B. Map the picker row to a 1M Claude entry** — for a guaranteed window
-of 1M or more. In the model's `modelPicker` row (step 7) add
-`"behavesAs": "claude-opus-4-8"`:
+of 1M or more (on OpenRouter, `min-context-window = 1000000`). In the
+model's `modelPicker` row (step 7) add `"behavesAs": "claude-opus-4-8"`:
 ```json
 { "model": "kimi-k3", "label": "Kimi K3", "behavesAs": "claude-opus-4-8" }
 ```
@@ -124,7 +127,8 @@ drops it, the model falls back to the clipped window. Not together with C
 on the same route.
 
 **C. Scale the route's reported usage** — for a guaranteed window between
-258400 and 1M, where no Claude entry matches. Add to the model's entry:
+258400 and 1M, where no Claude entry matches (on OpenRouter,
+`min-context-window` = that window). Add to the model's entry:
 ```toml
 context-window-scaling = true
 ```

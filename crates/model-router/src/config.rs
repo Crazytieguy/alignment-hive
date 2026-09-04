@@ -306,6 +306,40 @@ pub struct ProviderModel {
     /// scaled — see [`crate::client_window::UsageScale`].
     #[serde(default)]
     pub context_window_scaling: bool,
+
+    /// `OpenRouter` only: route this model solely to sub-providers whose
+    /// window is at least this many tokens. The service picks them from the
+    /// host's endpoint list at start ([`crate::discovery`]) and pins them
+    /// per request through the child config; a model that asks for this and
+    /// has no applicable selection is not served at all rather than served
+    /// unpinned. Independent of `context-window`, which stays the route's
+    /// window claim.
+    pub min_context_window: Option<u64>,
+
+    /// The sub-provider slugs the service pinned for this model, from the
+    /// last successful lookup for at least [`Self::min_context_window`].
+    /// Filled by [`crate::discovery::apply_cached_windows`]; never read from
+    /// TOML. `None` with `min_context_window` set means: not served.
+    #[serde(skip)]
+    pub pinned_providers: Option<Vec<String>>,
+}
+
+impl ProviderModel {
+    /// Whether this model may be served: everything but a model that asked
+    /// for sub-provider pinning and has no applicable selection.
+    #[must_use]
+    pub fn is_served(&self) -> bool {
+        self.min_context_window.is_none() || self.pinned_providers.is_some()
+    }
+}
+
+/// Whether `base_url` is `OpenRouter`, the one host with sub-provider routing
+/// and the only one whose requests may carry a `provider` preference. Exact
+/// host match on the parsed URL: a lookalike such as
+/// `openrouter.ai.example.com` is another host.
+#[must_use]
+pub fn is_openrouter(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| url.host_str() == Some("openrouter.ai"))
 }
 
 /// The internal `CLIProxyAPI` alias for a provider model. Routing IDs are
@@ -345,6 +379,14 @@ pub struct ModelRoute {
     /// client-side window for this routing ID; never read from TOML.
     #[serde(skip)]
     pub usage_scale: Option<UsageScale>,
+
+    /// See [`ProviderModel::min_context_window`]; generated routes only.
+    #[serde(skip)]
+    pub min_context_window: Option<u64>,
+
+    /// See [`ProviderModel::pinned_providers`]; generated routes only.
+    #[serde(skip)]
+    pub pinned_providers: Option<Vec<String>>,
 }
 
 impl ModelRoute {
@@ -508,6 +550,11 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 #context-window-scaling = true
 # Override for the discovered window, for hosts whose catalog reports none.
 #context-window = 1048576
+# OpenRouter only: route this model solely to sub-providers serving at least
+# this many tokens (OpenRouter otherwise routes to any of them, and their
+# windows differ). The service picks and pins them at start; `verify-providers`
+# shows which. A model with no qualifying sub-provider is not served.
+#min-context-window = 1000000
 
 # What Claude Code believes routed models' context windows are. Read from
 # ~/.claude/settings.json (or the project's) at startup, so it normally needs
@@ -533,6 +580,8 @@ fn default_models() -> Vec<ModelRoute> {
         context_window: Some(GPT_CONTEXT_WINDOW),
         context_window_scaling: false,
         usage_scale: None,
+        min_context_window: None,
+        pinned_providers: None,
     })
     .collect()
 }
@@ -551,6 +600,8 @@ fn grok_models(scaling: bool) -> Vec<ModelRoute> {
             context_window: Some(context_window),
             context_window_scaling: scaling,
             usage_scale: None,
+            min_context_window: None,
+            pinned_providers: None,
         })
         .collect()
 }
@@ -701,6 +752,8 @@ impl Config {
                 context_window: model.context_window,
                 context_window_scaling: model.context_window_scaling,
                 usage_scale: None,
+                min_context_window: model.min_context_window,
+                pinned_providers: model.pinned_providers.clone(),
             })
         });
         let grok = if self.grok.enabled {
@@ -893,6 +946,23 @@ impl Config {
                     provider.name,
                     model.name
                 );
+                if let Some(min) = model.min_context_window {
+                    ensure!(
+                        min > 0,
+                        "openai-provider {} model {} min-context-window must be greater than zero",
+                        provider.name,
+                        model.name
+                    );
+                    ensure!(
+                        is_openrouter(&provider.base_url),
+                        "openai-provider {} model {} sets min-context-window, which only \
+                         OpenRouter supports (it pins the sub-providers OpenRouter may route \
+                         to); a host without sub-provider routing serves one window — set \
+                         `context-window` instead",
+                        provider.name,
+                        model.name
+                    );
+                }
             }
         }
         Ok(())

@@ -58,6 +58,11 @@ enum RouteStatus<'a> {
     ScaledBehavesAs {
         target: &'a str,
     },
+    /// The route asked for sub-providers serving at least `wanted` and the
+    /// service has no applicable selection, so it is not served at all.
+    Unpinned {
+        wanted: u64,
+    },
 }
 
 impl RouteStatus<'_> {
@@ -68,6 +73,7 @@ impl RouteStatus<'_> {
                 | Self::Undiscovered
                 | Self::BehavesAsOverrun { .. }
                 | Self::ScaledBehavesAs { .. }
+                | Self::Unpinned { .. }
         )
     }
 
@@ -121,6 +127,12 @@ impl RouteStatus<'_> {
                  row size it from {target}'s entry and the scaled usage compacts far past the \
                  real window — drop one"
             ),
+            Self::Unpinned { wanted } => format!(
+                "{routing_id} NOT SERVED: it wants sub-providers serving at least {wanted} \
+                 tokens and the service's last lookup found none that qualify (or has never \
+                 succeeded); lower min-context-window or check `verify-providers`, then \
+                 `service restart`"
+            ),
         })
     }
 }
@@ -153,7 +165,10 @@ pub fn check(
 ) -> Option<Check> {
     let row_for = |route: &ModelRoute| behaves_as.get(&route.routing_id).map(String::as_str);
     if config.effective_models().all(|route| {
-        route.context_window.is_none() && !route.context_window_scaling && row_for(route).is_none()
+        route.context_window.is_none()
+            && !route.context_window_scaling
+            && route.min_context_window.is_none()
+            && row_for(route).is_none()
     }) {
         return None;
     }
@@ -167,6 +182,22 @@ pub fn check(
     let mut rows_seen = false;
     let believed = client_context_window(declared);
     for route in config.effective_models() {
+        if let (Some(wanted), None) = (route.min_context_window, &route.pinned_providers) {
+            ok = false;
+            notes.push(
+                RouteStatus::Unpinned { wanted }
+                    .describe(&route.routing_id)
+                    .expect("Unpinned always describes itself"),
+            );
+            continue;
+        }
+        if let Some(providers) = &route.pinned_providers {
+            notes.push(format!(
+                "{} pinned to {} sub-provider(s) from the service's last lookup",
+                route.routing_id,
+                providers.len()
+            ));
+        }
         let status = match (row_for(route), route.context_window, route.usage_scale) {
             (Some(target), _, _) => {
                 rows_seen = true;
@@ -383,6 +414,45 @@ context-window-scaling = {scaling}
         assert!(
             other.detail.contains("target window not checked"),
             "{other:?}"
+        );
+    }
+
+    #[test]
+    fn a_route_that_wants_a_pin_and_has_none_is_not_served_and_a_pinned_one_says_so() {
+        let source = provider(1_000_000, false).replace(
+            "context-window = 1000000\n",
+            "min-context-window = 1000000\n",
+        );
+        // Nothing else about windows is configured: the pin alone makes the
+        // check exist, and its absence is red.
+        let check = check(
+            &config(&source),
+            ClientWindow::Environment(250_000),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(!check.ok, "{check:?}");
+        assert!(check.detail.contains("kimi-k3 NOT SERVED"), "{check:?}");
+
+        let mut pinned = config(&source);
+        pinned.openai_providers[0].models[0].context_window = Some(1_000_000);
+        pinned.openai_providers[0].models[0].pinned_providers =
+            Some(vec!["decart".into(), "fireworks".into()]);
+        pinned.prepare().unwrap();
+        let check = super::check(
+            &pinned,
+            ClientWindow::Environment(250_000),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(check.ok, "{check:?}");
+        assert!(
+            check.detail.contains("kimi-k3 pinned to 2 sub-provider(s)"),
+            "{check:?}"
+        );
+        assert!(
+            check.detail.contains("kimi-k3 clipped to 250000"),
+            "{check:?}"
         );
     }
 

@@ -1,0 +1,139 @@
+{
+  "data": {
+    "id": "z-ai/glm-5.2",
+    "endpoints": [
+      {
+        "tag": "baidu/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "streamlake/fp8",
+        "context_length": 1024000
+      },
+      {
+        "tag": "deepinfra/fp4",
+        "context_length": 1048576
+      },
+      {
+        "tag": "novita/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "ambient/fp8",
+        "context_length": 202752
+      },
+      {
+        "tag": "decart/fp4",
+        "context_length": 1048576
+      },
+      {
+        "tag": "digitalocean",
+        "context_length": 262144
+      },
+      {
+        "tag": "coreweave/fp4",
+        "context_length": 1048576
+      },
+      {
+        "tag": "atlas-cloud/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "alibaba/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "gmicloud/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "reka/fp8",
+        "context_length": 262144
+      },
+      {
+        "tag": "siliconflow/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "inceptron/fp4",
+        "context_length": 1048576
+      },
+      {
+        "tag": "phala/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "mistral/zdr",
+        "context_length": 1048576
+      },
+      {
+        "tag": "mistral",
+        "context_length": 1048576
+      },
+      {
+        "tag": "baseten/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "crusoe/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "together",
+        "context_length": 512000
+      },
+      {
+        "tag": "fireworks",
+        "context_length": 1048576
+      },
+      {
+        "tag": "baseten/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "venice/fp8",
+        "context_length": 1000000
+      },
+      {
+        "tag": "parasail/fp4",
+        "context_length": 262144
+      },
+      {
+        "tag": "friendli",
+        "context_length": 1048576
+      },
+      {
+        "tag": "cloudflare",
+        "context_length": 262144
+      },
+      {
+        "tag": "z-ai/fp8",
+        "context_length": 1048576
+      },
+      {
+        "tag": "mistral/eu",
+        "context_length": 1048576
+      },
+      {
+        "tag": "baseten/fast",
+        "context_length": 1048576
+      },
+      {
+        "tag": "fireworks/fast-us",
+        "context_length": 1048576
+      },
+      {
+        "tag": "baseten/fast",
+        "context_length": 1048576
+      },
+      {
+        "tag": "fireworks/fast",
+        "context_length": 1048576
+      },
+      {
+        "tag": "alibaba/fast",
+        "context_length": 1048576
+      }
+    ]
+  }
+}

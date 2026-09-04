@@ -1807,8 +1807,39 @@ flags GLM's as 202752 guaranteed across sub-providers). Row under test:
   `tag` (the slug `only` expects), `context_length` and
   `max_completion_tokens`; for GLM-5.2, 33 endpoints from 25 providers,
   windows from 202752 (Ambient) to 1048576.
-- Consequence: the router can pin sub-providers per model itself — pick
-  the endpoints whose `context_length` covers the wanted window, emit a
-  `payload.override-raw` rule setting `provider.only` to their slugs in the
-  generated child config, and treat the smallest of those windows as the
-  guaranteed one — no dashboard step. Proposed, not implemented.
+- Standalone child pinned to `provider.only = ["fireworks","decart"]`:
+  the `/v1/messages` response `id` is OpenRouter's generation id
+  (`gen-…`), and `GET /api/v1/generation?id=` (after ~10 s) reports
+  `provider_name: "Fireworks"` — the observation the end-to-end test below
+  rests on.
+
+### Router-side pinning, end to end (router 0.1.18, same day)
+
+`min-context-window = N` on an `[[openai-providers.models]]` entry
+(OpenRouter only). Temp config/state/HOME, child on its own port, real
+OpenRouter with the user's key; production router untouched.
+
+- `min-context-window = 1000000` on glm-5.2: the service cached
+  `{window: 1000000, pin: {min: 1000000, providers: [19 slugs]}}`,
+  excluding ambient (202752), cloudflare, digitalocean, parasail, reka
+  (262144) and together (512000); the generated child config carried one
+  `payload.override-raw` rule scoped by the alias `openai-compat--glm-5.2`
+  with `provider.only` = those 19 slugs. Doctor: `glm-5.2 pinned to 19
+  sub-provider(s) from the service's last lookup; glm-5.2 clipped to 258400
+  (real 1000000)`. `verify-providers`: `pinned 19 of 25 sub-providers
+  serving at least 1000000: guaranteed 1000000; excluded ambient 202752,
+  …`, exit 0. Five requests through the router all answered; their
+  generation records named CoreWeave, Crusoe, StreamLake ×3 — every one in
+  the pinned set.
+- `min-context-window = 2000000`: the cache entry became
+  `{window: 202752, pin: null}` (tombstone), the child config listed only
+  kimi-k3 and no payload section, a glm-5.2 request was refused by the
+  router with 404 `not_found_error` "glm-5.2 is not served: it wants
+  sub-providers serving at least 2000000 tokens …" (before this change
+  the child answered 400 "unknown provider for model
+  openai-compat--glm-5.2"), a kimi-k3 request through the same child
+  answered, doctor was red with the NOT SERVED note, and
+  `verify-providers` exited 1 listing every provider's window.
+- Cache/threshold unit tests cover raising and lowering the bar over a
+  cached selection, removing the field, the tombstone, and an explicit
+  `context-window` alongside the pin.

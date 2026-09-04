@@ -173,23 +173,68 @@ routing:
         empty = yaml_quote(""),
         strategy = yaml_quote("round-robin"),
     );
-    let mut keyed = providers
+    // A model that asked for sub-provider pinning and has none is left out
+    // (fail closed: model-not-found beats running unpinned), and a provider
+    // with nothing left is left out whole — an empty `models:` list is a
+    // shape CLIProxyAPI has never been shown to accept.
+    let served: Vec<(
+        &crate::config::OpenAiProvider,
+        Vec<&crate::config::ProviderModel>,
+    )> = providers
         .iter()
-        .filter(|provider| provider.api_key.is_some());
-    if keyed.clone().next().is_some() {
+        .filter(|provider| provider.api_key.is_some())
+        .map(|provider| {
+            (
+                provider,
+                provider
+                    .models
+                    .iter()
+                    .filter(|model| model.is_served())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .filter(|(_, models)| !models.is_empty())
+        .collect();
+    if !served.is_empty() {
         yaml.push_str("\nopenai-compatibility:\n");
-        for provider in keyed.by_ref() {
+        for (provider, models) in &served {
             let api_key = provider.api_key.as_deref().expect("filtered to Some");
             let _ = writeln!(yaml, "  - name: {}", yaml_quote(&provider.name));
             let _ = writeln!(yaml, "    base-url: {}", yaml_quote(&provider.base_url));
             yaml.push_str("    api-key-entries:\n");
             let _ = writeln!(yaml, "      - api-key: {}", yaml_quote(api_key));
             yaml.push_str("    models:\n");
-            for model in &provider.models {
+            for model in models {
                 let _ = writeln!(yaml, "      - name: {}", yaml_quote(&model.name));
                 let alias = crate::config::derived_alias(&model.routing_id);
                 let _ = writeln!(yaml, "        alias: {}", yaml_quote(&alias));
             }
+        }
+    }
+    // Sub-provider pins ride CLIProxyAPI's payload rules: one rule per
+    // pinned model, scoped by the model's alias (unique per route, unlike
+    // the upstream name), setting OpenRouter's `provider.only`. Measured to
+    // reach OpenRouter (docs/experiments.md, provider pinning).
+    let pinned: Vec<(&crate::config::ProviderModel, &Vec<String>)> = served
+        .iter()
+        .flat_map(|(_, models)| models.iter().copied())
+        .filter_map(|model| Some((model, model.pinned_providers.as_ref()?)))
+        .collect();
+    if !pinned.is_empty() {
+        yaml.push_str("\npayload:\n  override-raw:\n");
+        for (model, providers) in pinned {
+            let alias = crate::config::derived_alias(&model.routing_id);
+            let preference = serde_json::json!({ "only": providers }).to_string();
+            let _ = writeln!(yaml, "    - models:");
+            let _ = writeln!(yaml, "        - name: {}", yaml_quote(&alias));
+            let _ = writeln!(yaml, "          protocol: {}", yaml_quote("openai"));
+            let _ = writeln!(yaml, "      params:");
+            let _ = writeln!(
+                yaml,
+                "        {}: {}",
+                yaml_quote("provider"),
+                yaml_quote(&preference)
+            );
         }
     }
     yaml
@@ -1110,6 +1155,65 @@ mod tests {
                 serde_yaml::Value::from("openai-compat--glm-5.2")
             );
         }
+    }
+
+    #[test]
+    fn pinned_models_get_one_payload_rule_each_and_unpinned_askers_are_left_out() {
+        let mut provider = test_provider("openrouter", "glm-5.2");
+        provider.base_url = "https://openrouter.ai/api/v1".to_string();
+        provider.models[0].min_context_window = Some(1_000_000);
+        provider.models[0].pinned_providers =
+            Some(vec!["decart".to_string(), "fireworks".to_string()]);
+        provider.models.push(crate::config::ProviderModel {
+            name: "moonshotai/kimi-k3".to_string(),
+            routing_id: "kimi-k3".to_string(),
+            display_name: "Kimi K3".to_string(),
+            ..Default::default()
+        });
+        let yaml = upstream_config_yaml(1, std::path::Path::new("/a"), "s", &[provider.clone()]);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let rules = parsed["payload"]["override-raw"].as_sequence().unwrap();
+        assert_eq!(rules.len(), 1, "one rule for the one pinned model");
+        assert_eq!(
+            rules[0]["models"][0]["name"],
+            serde_yaml::Value::from("openai-compat--glm-5.2")
+        );
+        assert_eq!(
+            rules[0]["models"][0]["protocol"],
+            serde_yaml::Value::from("openai")
+        );
+        assert_eq!(
+            rules[0]["params"]["provider"],
+            serde_yaml::Value::from(r#"{"only":["decart","fireworks"]}"#)
+        );
+        assert_eq!(
+            parsed["openai-compatibility"][0]["models"]
+                .as_sequence()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // The pinned model loses its selection (fail closed): it is gone
+        // from the models list, the rule with it, the other model stays.
+        provider.models[0].pinned_providers = None;
+        let yaml = upstream_config_yaml(1, std::path::Path::new("/a"), "s", &[provider.clone()]);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert!(parsed["payload"].is_null());
+        let models = parsed["openai-compatibility"][0]["models"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0]["alias"],
+            serde_yaml::Value::from("openai-compat--kimi-k3")
+        );
+
+        // Nothing served on the provider: no entry at all, no empty list.
+        provider.models.truncate(1);
+        let yaml = upstream_config_yaml(1, std::path::Path::new("/a"), "s", &[provider]);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert!(parsed["openai-compatibility"].is_null());
     }
 
     #[test]

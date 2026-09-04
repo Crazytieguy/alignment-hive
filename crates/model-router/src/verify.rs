@@ -33,6 +33,35 @@ pub struct ModelCheck {
     pub advertised_context_length: Option<u64>,
     /// The `context-window` configured for this model, when set.
     pub configured_context_window: Option<u64>,
+    /// The sub-provider selection for a model with `min-context-window`.
+    pub pin: Option<PinCheck>,
+}
+
+/// What `min-context-window` would pin, from the host's current endpoint
+/// list: the same selection the service makes at start.
+#[derive(Debug, Serialize)]
+pub struct PinCheck {
+    pub wanted: u64,
+    /// Qualifying provider slugs; empty when none serves `wanted`.
+    pub providers: Vec<String>,
+    /// The smallest window among the qualifying providers.
+    pub guaranteed: Option<u64>,
+    /// Providers below the bar, with the narrowest window each serves.
+    pub excluded: Vec<ExcludedProvider>,
+    /// The endpoint lookup itself failed, so nothing is known.
+    pub lookup_failed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExcludedProvider {
+    pub provider: String,
+    pub window: u64,
+}
+
+impl PinCheck {
+    fn satisfied(&self) -> bool {
+        !self.providers.is_empty()
+    }
 }
 
 impl ModelCheck {
@@ -139,18 +168,14 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
     for model in &provider.models {
         let entry = catalog.iter().find(|entry| entry.id == model.name);
         let advertised = entry.and_then(|entry| entry.context_length);
-        let guaranteed = match advertised {
-            Some(advertised) => {
-                crate::discovery::host_window(client, base, api_key, &model.name, advertised).await
-            }
-            None => None,
-        };
+        let (guaranteed, pin) = window_and_pin(client, base, api_key, model, advertised).await;
         report.models.push(ModelCheck {
             found: entry.is_some(),
             host_context_length: guaranteed,
             advertised_context_length: advertised
                 .filter(|advertised| Some(*advertised) != guaranteed),
             configured_context_window: model.context_window,
+            pin,
             name: model.name.clone(),
             routing_id: model.routing_id.clone(),
         });
@@ -161,22 +186,92 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
         .iter()
         .filter(|check| check.oversized().is_some())
         .count();
-    report.ok = missing == 0 && oversized == 0;
+    let unpinnable = report
+        .models
+        .iter()
+        .filter(|check| check.pin.as_ref().is_some_and(|pin| !pin.satisfied()))
+        .count();
+    report.ok = missing == 0 && oversized == 0 && unpinnable == 0;
     report.detail = if missing > 0 {
         format!(
             "{missing} of {} configured models not in the provider's /models list",
             report.models.len()
         )
-    } else if oversized == 0 {
-        format!("all {} configured models found", report.models.len())
-    } else {
+    } else if oversized > 0 {
         format!(
             "all {} configured models found, but {oversized} configured context-window(s) \
              exceed the host's own limit",
             report.models.len()
         )
+    } else if unpinnable > 0 {
+        format!(
+            "all {} configured models found, but {unpinnable} cannot be pinned to any \
+             sub-provider serving its min-context-window and would not be served",
+            report.models.len()
+        )
+    } else {
+        format!("all {} configured models found", report.models.len())
     };
     report
+}
+
+/// The host's guaranteed window for one model and, when the model asks for
+/// sub-provider pinning, the selection the service would make.
+async fn window_and_pin(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    model: &crate::config::ProviderModel,
+    advertised: Option<u64>,
+) -> (Option<u64>, Option<PinCheck>) {
+    match (advertised, model.min_context_window) {
+        (None, min) => (None, min.map(failed_pin)),
+        (Some(advertised), None) => (
+            crate::discovery::host_window(client, base, api_key, &model.name, advertised).await,
+            None,
+        ),
+        // Validation limits min-context-window to OpenRouter, so the
+        // endpoint list exists to ask for.
+        (Some(advertised), Some(wanted)) => {
+            match crate::discovery::openrouter_endpoints(client, base, api_key, &model.name).await {
+                Some(endpoints) => (
+                    crate::discovery::narrowest(&endpoints)
+                        .map(|narrowest| narrowest.min(advertised)),
+                    Some(pin_check(&endpoints, wanted)),
+                ),
+                None => (None, Some(failed_pin(wanted))),
+            }
+        }
+    }
+}
+
+fn pin_check(endpoints: &[crate::discovery::Endpoint], wanted: u64) -> PinCheck {
+    let (providers, guaranteed) = crate::discovery::select_providers(endpoints, wanted)
+        .map_or((Vec::new(), None), |(providers, window)| {
+            (providers, Some(window))
+        });
+    let excluded = crate::discovery::narrowest_by_provider(endpoints)
+        .into_iter()
+        .filter(|(_, window)| *window < wanted)
+        .map(|(provider, window)| ExcludedProvider { provider, window })
+        .collect();
+    PinCheck {
+        wanted,
+        providers,
+        guaranteed,
+        excluded,
+        lookup_failed: false,
+    }
+}
+
+fn failed_pin(wanted: u64) -> PinCheck {
+    PinCheck {
+        wanted,
+        providers: Vec::new(),
+        guaranteed: None,
+        excluded: Vec::new(),
+        lookup_failed: true,
+    }
 }
 
 /// One entry of a provider's `/models` catalog.
@@ -262,9 +357,46 @@ pub fn render(reports: &[ProviderReport]) -> (String, bool) {
                 check.name,
                 check.routing_id
             );
+            if let Some(pin) = &check.pin {
+                let _ = writeln!(out, "               {}", describe_pin(pin));
+            }
         }
     }
     (out, all_ok)
+}
+
+fn describe_pin(pin: &PinCheck) -> String {
+    if pin.lookup_failed {
+        return format!(
+            "min-context-window {}: the sub-provider lookup failed, so nothing can be pinned \
+             — NOT SERVED until it succeeds",
+            pin.wanted
+        );
+    }
+    let excluded = if pin.excluded.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; excluded {}",
+            pin.excluded
+                .iter()
+                .map(|e| format!("{} {}", e.provider, e.window))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    match pin.guaranteed {
+        Some(guaranteed) => format!(
+            "pinned {} of {} sub-providers serving at least {}: guaranteed {guaranteed}{excluded}",
+            pin.providers.len(),
+            pin.providers.len() + pin.excluded.len(),
+            pin.wanted
+        ),
+        None => format!(
+            "NO sub-provider serves at least {} tokens — NOT SERVED{excluded}",
+            pin.wanted
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -312,7 +444,49 @@ mod tests {
             host_context_length: host,
             advertised_context_length: None,
             configured_context_window: configured,
+            pin: None,
         }
+    }
+
+    #[test]
+    fn a_pin_that_nothing_satisfies_fails_the_provider_and_says_so() {
+        let endpoints = crate::discovery::parse_endpoints(
+            br#"{"data":{"endpoints":[
+                {"tag":"wide/fp8","context_length":1048576},
+                {"tag":"narrow","context_length":202752}
+            ]}}"#,
+        )
+        .unwrap();
+        let satisfied = pin_check(&endpoints, 1_000_000);
+        assert!(satisfied.satisfied());
+        assert_eq!(satisfied.providers, vec!["wide".to_string()]);
+        assert_eq!(satisfied.guaranteed, Some(1_048_576));
+        assert_eq!(satisfied.excluded.len(), 1);
+        assert!(
+            describe_pin(&satisfied).contains("pinned 1 of 2 sub-providers"),
+            "{}",
+            describe_pin(&satisfied)
+        );
+        assert!(describe_pin(&satisfied).contains("excluded narrow 202752"));
+
+        let unsatisfied = pin_check(&endpoints, 2_000_000);
+        assert!(!unsatisfied.satisfied());
+        assert!(describe_pin(&unsatisfied).contains("NOT SERVED"));
+        assert!(describe_pin(&failed_pin(1)).contains("lookup failed"));
+
+        let mut report = ProviderReport {
+            provider: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            ok: true,
+            detail: String::new(),
+            models: vec![check(Some(202_752), None)],
+        };
+        report.models[0].pin = Some(unsatisfied);
+        let (rendered, all_ok) = render(&[report]);
+        assert!(rendered.contains("NOT SERVED"), "{rendered}");
+        // `ok` is the provider's verdict as computed by verify_one; render
+        // only echoes it, so the exit status follows what verify_one set.
+        assert!(all_ok);
     }
 
     #[test]
