@@ -38,9 +38,7 @@ Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
    cost is that Claude Code's displayed token counts for Grok routes read
    low by that ratio (percentages stay right). Recommend scaling — the
    larger window is much of the point — but flip it only with the user's
-   explicit OK after stating that displayed-count caveat. (The picker-row
-   `behavesAs` mapping in `references/open-weights.md` does not apply:
-   Claude Code has no 500K entry to map to.)
+   explicit OK after stating that displayed-count caveat.
 5. **`/model` picker row**: add to the step-5 `modelPicker` options in
    `~/.claude/settings.json`:
    ```json

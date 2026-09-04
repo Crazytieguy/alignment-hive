@@ -114,22 +114,14 @@ of 1M or more. In the model's `modelPicker` row (step 7) add
 ```json
 { "model": "kimi-k3", "label": "Kimi K3", "behavesAs": "claude-opus-4-8" }
 ```
-Claude Code then handles that routing ID like Opus 4.8 client-side — a 1M
-window, adaptive thinking, effort passthrough — while the request still
-names the routing ID and goes to the host. Every displayed number stays
-true, the other routes keep the declared window, and the row applies
-wherever the routing ID is resolved: the picker, agent definitions,
-Workflow `agent()` calls. The field is undocumented (present since Claude
-Code 2.1.258; the settings schema validates it); if a release drops it the
-model falls back to the clipped window, nothing worse. Use
-`claude-opus-4-8`, not a newer entry: Opus 5 and Fable add a server-side
-fallback field and Sonnet 5 a much larger system prompt. `max_tokens`
-becomes 64000, which OpenRouter accepts for Kimi K3 and GLM-5.2. Rows are
-read at session start, so they apply to sessions started after the file is
-saved. Never combine with C on one route: `doctor` fails the combination
-when the row is in `~/.claude/settings.json`; a `modelPicker` in managed
-settings or passed with `--settings` replaces the user file's and doctor
-does not see it, so keep the two apart by hand there.
+Claude Code then gives that routing ID Opus 4.8's client-side profile, 1M
+window included; the request still names the routing ID and goes to the
+host. Every displayed number stays true, the other routes keep the declared
+window, and the row applies wherever the routing ID is resolved — the
+picker, agent definitions, Workflow `agent()` calls — in sessions started
+after it is saved. The field is undocumented; if a Claude Code release
+drops it, the model falls back to the clipped window. Not together with C
+on the same route.
 
 **C. Scale the route's reported usage** — for a guaranteed window between
 258400 and 1M, where no Claude entry matches. Add to the model's entry:
@@ -154,11 +146,9 @@ reads 258400 and calls it full. Percentages stay right; absolute token counts
 and that route's cost telemetry do not. Nothing outside the router config
 changes.
 
-Switching a route between B and C: B → C is remove the row, end every
-Claude Code session that started with it, then enable scaling and restart
-the service; C → B is disable scaling and restart the service, then add the
-row and start new sessions. A session that loaded the row while the router
-scales that route overruns.
+When moving a route from B to C, end the sessions that loaded the row
+before enabling scaling: a session that believes the row's window while
+the router scales that route overruns.
 
 ### Models whose window is *below* 258400
 
@@ -174,10 +164,6 @@ of their own if the user wants their full window back.
 
 Re-run `$ROUTER verify-providers`, `$ROUTER service restart` (the service
 discovers each route's guaranteed window at start and doctor reads what it
-found), and `$ROUTER doctor`. Doctor reports the client window it resolved,
-each route's status — matched, clipped, scaled, sized by a `behavesAs` row,
-or `OVERRUN RISK` — and flags a running service whose resolved value is
-stale. A `behavesAs` row mapping to `claude-opus-4-8` fails when the
-guaranteed window is below 1M.
+found), and `$ROUTER doctor`.
 Env changes need a Claude Code restart; config changes need
 `$ROUTER service restart`.

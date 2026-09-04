@@ -1779,3 +1779,36 @@ flags GLM's as 202752 guaranteed across sub-providers). Row under test:
   "wants scaling but no context window was discovered" — fixed by the
   same change.
 - Provider block and key removed after the run.
+
+### OpenRouter provider pinning: what the gateway can and cannot do (same day)
+
+- OpenRouter has no API for account-level allowed/ignored providers; those
+  live in the dashboard (`/settings/privacy`) and apply to every request.
+  Request-level `provider` preferences exist: `only`, `ignore`, `order`,
+  `allow_fallbacks`, `require_parameters`, …; a request's `only` narrows
+  within the account list and ignores merge. Direct to OpenRouter,
+  `provider.only = ["Nonexistent"]` fails with "No allowed providers are
+  available for the selected model. Providers serving z-ai/glm-5.2-…:
+  baidu, streamlake, deepinfra, …" — i.e. the list names *slugs*.
+- Through the gateway, a top-level `provider` object in the Anthropic body
+  (or under `metadata`) is dropped by CLIProxyAPI's translation: the
+  request succeeded normally both ways.
+- CLIProxyAPI's `payload` rules do reach the upstream body. Standalone
+  child (7.2.132, port 8318) with one openai-compatibility model
+  (`z-ai/glm-5.2` alias `glm-5.2`) and
+  `payload.override-raw: [{models: [{name: "z-ai/glm-5.2", protocol:
+  "openai"}], params: {"provider": "{\"only\":[\"Nonexistent\"]}"}}]`:
+  the Anthropic-format request came back with OpenRouter's "No allowed
+  providers" error, so the injected preference reached OpenRouter. The rule
+  also matched by alias name, without `protocol`, and as a non-raw
+  `override` with `"provider.only.0": "Nonexistent"`. A no-rule control
+  answered normally.
+- `/models/{id}/endpoints` lists every sub-provider with `provider_name`,
+  `tag` (the slug `only` expects), `context_length` and
+  `max_completion_tokens`; for GLM-5.2, 33 endpoints from 25 providers,
+  windows from 202752 (Ambient) to 1048576.
+- Consequence: the router can pin sub-providers per model itself — pick
+  the endpoints whose `context_length` covers the wanted window, emit a
+  `payload.override-raw` rule setting `provider.only` to their slugs in the
+  generated child config, and treat the smallest of those windows as the
+  guaranteed one — no dashboard step. Proposed, not implemented.
