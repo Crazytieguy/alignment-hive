@@ -332,7 +332,10 @@ pub(crate) struct Endpoint {
     /// (`atlas-cloud/fp8` → `atlas-cloud`), which is what `provider.only`
     /// and `OpenRouter`'s own error messages name.
     pub(crate) provider: String,
-    pub(crate) context_length: u64,
+    /// `None` when the host did not report a usable number for this
+    /// endpoint. Unknown is treated as unsafe everywhere: it disqualifies
+    /// its provider from a pin and leaves the unpinned window unknown.
+    pub(crate) context_length: Option<u64>,
 }
 
 /// The sub-providers `OpenRouter` may route `model` to, with their windows.
@@ -357,41 +360,53 @@ pub(crate) async fn openrouter_endpoints(
     (!endpoints.is_empty()).then_some(endpoints)
 }
 
+/// Every endpoint in the document, or `None` when one of them cannot be
+/// attributed to a provider: a request could land on it, so a list that
+/// leaves it out would vouch for routing it does not describe.
 pub(crate) fn parse_endpoints(body: &[u8]) -> Option<Vec<Endpoint>> {
     let document: serde_json::Value = serde_json::from_slice(body).ok()?;
-    Some(
-        document
-            .get("data")?
-            .get("endpoints")?
-            .as_array()?
-            .iter()
-            .filter_map(|endpoint| {
-                let tag = endpoint.get("tag")?.as_str()?;
-                let provider = tag.split('/').next()?.trim();
-                let context_length = endpoint.get("context_length")?.as_u64()?;
-                (!provider.is_empty()).then(|| Endpoint {
-                    provider: provider.to_string(),
-                    context_length,
-                })
+    document
+        .get("data")?
+        .get("endpoints")?
+        .as_array()?
+        .iter()
+        .map(|endpoint| {
+            let tag = endpoint.get("tag")?.as_str()?;
+            let provider = tag.split('/').next()?.trim();
+            (!provider.is_empty()).then(|| Endpoint {
+                provider: provider.to_string(),
+                context_length: endpoint
+                    .get("context_length")
+                    .and_then(serde_json::Value::as_u64),
             })
-            .collect(),
-    )
+        })
+        .collect()
 }
 
 /// The smallest window across every endpoint — the only one an unpinned
-/// request is sure to get.
+/// request is sure to get; `None` when any endpoint's window is unknown.
 pub(crate) fn narrowest(endpoints: &[Endpoint]) -> Option<u64> {
-    endpoints.iter().map(|e| e.context_length).min()
+    endpoints
+        .iter()
+        .map(|e| e.context_length)
+        .try_fold(u64::MAX, |narrowest, window| Some(narrowest.min(window?)))
+        .filter(|_| !endpoints.is_empty())
 }
 
 /// Each sub-provider's narrowest endpoint window — the window a request
-/// routed to that provider is sure to get.
-pub(crate) fn narrowest_by_provider(endpoints: &[Endpoint]) -> BTreeMap<String, u64> {
-    let mut windows: BTreeMap<String, u64> = BTreeMap::new();
+/// routed to that provider is sure to get — or `None` when one of its
+/// endpoints has no known window.
+pub(crate) fn narrowest_by_provider(endpoints: &[Endpoint]) -> BTreeMap<String, Option<u64>> {
+    let mut windows: BTreeMap<String, Option<u64>> = BTreeMap::new();
     for endpoint in endpoints {
         windows
             .entry(endpoint.provider.clone())
-            .and_modify(|window| *window = (*window).min(endpoint.context_length))
+            .and_modify(|window| {
+                *window = match (*window, endpoint.context_length) {
+                    (Some(known), Some(this)) => Some(known.min(this)),
+                    _ => None,
+                }
+            })
             .or_insert(endpoint.context_length);
     }
     windows
@@ -404,6 +419,7 @@ pub(crate) fn narrowest_by_provider(endpoints: &[Endpoint]) -> BTreeMap<String, 
 pub(crate) fn select_providers(endpoints: &[Endpoint], min: u64) -> Option<(Vec<String>, u64)> {
     let qualifying: Vec<(String, u64)> = narrowest_by_provider(endpoints)
         .into_iter()
+        .filter_map(|(provider, window)| Some((provider, window?)))
         .filter(|(_, window)| *window >= min)
         .collect();
     let window = qualifying.iter().map(|(_, window)| *window).min()?;
@@ -522,15 +538,15 @@ mod tests {
         let endpoints = vec![
             Endpoint {
                 provider: "wide".into(),
-                context_length: 1_048_576,
+                context_length: Some(1_048_576),
             },
             Endpoint {
                 provider: "mixed".into(),
-                context_length: 1_048_576,
+                context_length: Some(1_048_576),
             },
             Endpoint {
                 provider: "mixed".into(),
-                context_length: 8_192,
+                context_length: Some(8_192),
             },
         ];
         let (providers, window) = select_providers(&endpoints, 1_000_000).unwrap();
@@ -539,12 +555,33 @@ mod tests {
     }
 
     #[test]
+    fn an_endpoint_with_no_known_window_disqualifies_its_provider_and_the_unpinned_window() {
+        let endpoints = vec![
+            Endpoint {
+                provider: "wide".into(),
+                context_length: Some(1_048_576),
+            },
+            Endpoint {
+                provider: "shady".into(),
+                context_length: Some(1_048_576),
+            },
+            Endpoint {
+                provider: "shady".into(),
+                context_length: None,
+            },
+        ];
+        let (providers, window) = select_providers(&endpoints, 1_000_000).unwrap();
+        assert_eq!(providers, vec!["wide".to_string()]);
+        assert_eq!(window, 1_048_576);
+        assert_eq!(narrowest(&endpoints), None);
+        assert_eq!(narrowest_by_provider(&endpoints)["shady"], None);
+    }
+
+    #[test]
     fn endpoint_tags_reduce_to_provider_slugs() {
         let body = br#"{"data":{"endpoints":[
             {"tag":"atlas-cloud/fp8","context_length":1048576},
             {"tag":"cloudflare","context_length":262144},
-            {"tag":"","context_length":1},
-            {"context_length":5},
             {"tag":"x/y","context_length":"nope"}
         ]}}"#;
         let endpoints = parse_endpoints(body).unwrap();
@@ -553,14 +590,26 @@ mod tests {
             vec![
                 Endpoint {
                     provider: "atlas-cloud".into(),
-                    context_length: 1_048_576
+                    context_length: Some(1_048_576)
                 },
                 Endpoint {
                     provider: "cloudflare".into(),
-                    context_length: 262_144
+                    context_length: Some(262_144)
+                },
+                Endpoint {
+                    provider: "x".into(),
+                    context_length: None
                 },
             ]
         );
+        // An endpoint that cannot be attributed to a provider fails the
+        // whole list: a request could still land on it.
+        for unattributable in [
+            br#"{"data":{"endpoints":[{"tag":"","context_length":1}]}}"#.as_slice(),
+            br#"{"data":{"endpoints":[{"context_length":5}]}}"#.as_slice(),
+        ] {
+            assert!(parse_endpoints(unattributable).is_none());
+        }
         assert!(parse_endpoints(b"{}").is_none());
     }
 

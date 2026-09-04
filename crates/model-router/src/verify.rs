@@ -55,7 +55,9 @@ pub struct PinCheck {
 #[derive(Debug, Serialize)]
 pub struct ExcludedProvider {
     pub provider: String,
-    pub window: u64,
+    /// The narrowest window the provider serves, or `None` when one of its
+    /// endpoints reports none — unknown counts as too small.
+    pub window: Option<u64>,
 }
 
 impl PinCheck {
@@ -234,11 +236,19 @@ async fn window_and_pin(
         // endpoint list exists to ask for.
         (Some(advertised), Some(wanted)) => {
             match crate::discovery::openrouter_endpoints(client, base, api_key, &model.name).await {
-                Some(endpoints) => (
-                    crate::discovery::narrowest(&endpoints)
-                        .map(|narrowest| narrowest.min(advertised)),
-                    Some(pin_check(&endpoints, wanted)),
-                ),
+                // With a satisfied pin the route only ever reaches the
+                // selected providers, so their guarantee is the host's;
+                // without one it is the unpinned narrowest, as for any
+                // other model.
+                Some(endpoints) => {
+                    let pin = pin_check(&endpoints, wanted);
+                    let host = match pin.guaranteed {
+                        Some(guaranteed) => Some(guaranteed.min(advertised)),
+                        None => crate::discovery::narrowest(&endpoints)
+                            .map(|narrowest| narrowest.min(advertised)),
+                    };
+                    (host, Some(pin))
+                }
                 None => (None, Some(failed_pin(wanted))),
             }
         }
@@ -252,7 +262,7 @@ fn pin_check(endpoints: &[crate::discovery::Endpoint], wanted: u64) -> PinCheck 
         });
     let excluded = crate::discovery::narrowest_by_provider(endpoints)
         .into_iter()
-        .filter(|(_, window)| *window < wanted)
+        .filter(|(_, window)| window.is_none_or(|window| window < wanted))
         .map(|(provider, window)| ExcludedProvider { provider, window })
         .collect();
     PinCheck {
@@ -380,7 +390,10 @@ fn describe_pin(pin: &PinCheck) -> String {
             "; excluded {}",
             pin.excluded
                 .iter()
-                .map(|e| format!("{} {}", e.provider, e.window))
+                .map(|e| match e.window {
+                    Some(window) => format!("{} {window}", e.provider),
+                    None => format!("{} (window unknown)", e.provider),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -449,6 +462,29 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_window_is_judged_against_the_pinned_guarantee_not_the_unpinned_floor() {
+        // What verify_one derives for `min-context-window = 1000000` plus
+        // `context-window = 1000000` on a model whose unpinned floor is
+        // 202752: the host window is the pin's guarantee, so the explicit
+        // window is not oversized.
+        let endpoints = crate::discovery::parse_endpoints(
+            br#"{"data":{"endpoints":[
+                {"tag":"wide/fp8","context_length":1048576},
+                {"tag":"narrow","context_length":202752}
+            ]}}"#,
+        )
+        .unwrap();
+        let pin = pin_check(&endpoints, 1_000_000);
+        let host = pin.guaranteed.map(|g| g.min(1_048_576));
+        let mut model = check(host, Some(1_000_000));
+        model.pin = Some(pin);
+        assert!(model.oversized().is_none(), "{model:?}");
+        // Above the guarantee it is oversized again.
+        model.configured_context_window = Some(1_048_577);
+        assert!(model.oversized().is_some());
+    }
+
+    #[test]
     fn a_pin_that_nothing_satisfies_fails_the_provider_and_says_so() {
         let endpoints = crate::discovery::parse_endpoints(
             br#"{"data":{"endpoints":[
@@ -472,6 +508,24 @@ mod tests {
         let unsatisfied = pin_check(&endpoints, 2_000_000);
         assert!(!unsatisfied.satisfied());
         assert!(describe_pin(&unsatisfied).contains("NOT SERVED"));
+
+        // A provider with an endpoint of unknown window is excluded and
+        // said to be.
+        let shady = crate::discovery::parse_endpoints(
+            br#"{"data":{"endpoints":[
+                {"tag":"wide/fp8","context_length":1048576},
+                {"tag":"shady/fp8","context_length":1048576},
+                {"tag":"shady/fp4"}
+            ]}}"#,
+        )
+        .unwrap();
+        let checked = pin_check(&shady, 1_000_000);
+        assert_eq!(checked.providers, vec!["wide".to_string()]);
+        assert!(
+            describe_pin(&checked).contains("excluded shady (window unknown)"),
+            "{}",
+            describe_pin(&checked)
+        );
         assert!(describe_pin(&failed_pin(1)).contains("lookup failed"));
 
         let mut report = ProviderReport {
