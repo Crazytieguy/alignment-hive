@@ -140,9 +140,9 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
         let entry = catalog.iter().find(|entry| entry.id == model.name);
         let advertised = entry.and_then(|entry| entry.context_length);
         let guaranteed = match advertised {
-            Some(advertised) => Some(
-                crate::discovery::host_window(client, base, api_key, &model.name, advertised).await,
-            ),
+            Some(advertised) => {
+                crate::discovery::host_window(client, base, api_key, &model.name, advertised).await
+            }
             None => None,
         };
         report.models.push(ModelCheck {
@@ -245,7 +245,15 @@ pub fn render(reports: &[ProviderReport]) -> (String, bool) {
                     ),
                     None => format!("  (host context {host})"),
                 },
-                (None, None) => String::new(),
+                // The catalog spoke but the sub-provider lookup did not:
+                // the headline is the largest window, not a guarantee.
+                (None, None) => match check.advertised_context_length {
+                    Some(advertised) => format!(
+                        "  (host context: guaranteed window unknown — the sub-provider lookup \
+                         failed; {advertised} advertised, not guaranteed)"
+                    ),
+                    None => String::new(),
+                },
             };
             let _ = writeln!(
                 out,

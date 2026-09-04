@@ -45,6 +45,11 @@ fn undeclared_models(config: &Config) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The most a service start waits on discovery altogether. It runs before
+/// the listener binds, so every Claude request is held behind it; a slow
+/// host costs at most this, and the cache covers what did not arrive.
+const DISCOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Asks each host for the windows of its undeclared models and refreshes the
 /// cache in the state directory. Never fails the caller: an unreachable host
 /// leaves the cache as it was, and [`apply_cached_windows`] works from that.
@@ -60,7 +65,7 @@ pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(15))
         .build()
     {
         Ok(client) => client,
@@ -70,21 +75,31 @@ pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
         }
     };
 
+    let deadline = tokio::time::Instant::now() + DISCOVERY_DEADLINE;
     for provider in &config.openai_providers {
         if !wanted.iter().any(|(name, _)| name == &provider.name) {
             continue;
         }
-        match discover_provider(&client, provider).await {
-            Ok(windows) => {
+        match tokio::time::timeout_at(deadline, discover_provider(&client, provider)).await {
+            Ok(Ok(windows)) => {
                 for (model, window) in windows {
                     cache.insert(cache_key(&provider.name, &model), window);
                 }
             }
-            Err(error) => tracing::warn!(
+            Ok(Err(error)) => tracing::warn!(
                 provider = provider.name,
                 %error,
                 "context-window discovery failed; falling back to the cached windows"
             ),
+            Err(_) => {
+                tracing::warn!(
+                    provider = provider.name,
+                    "context-window discovery ran past its {}s deadline; falling back to the \
+                     cached windows",
+                    DISCOVERY_DEADLINE.as_secs()
+                );
+                break;
+            }
         }
     }
     write_cache(&cache_path, &cache);
@@ -169,48 +184,53 @@ async fn discover_provider(
     let catalog = crate::verify::parse_catalog(&body)
         .ok_or_else(|| anyhow::anyhow!("provider /models response has no data[].id list"))?;
 
-    let mut windows = BTreeMap::new();
-    for model in &provider.models {
-        let Some(aggregate) = catalog
+    // One lookup per model, side by side: on OpenRouter each is its own
+    // request, and a stalled one must not serialise behind the others.
+    let lookups = provider.models.iter().filter_map(|model| {
+        let aggregate = catalog
             .iter()
             .find(|entry| entry.id == model.name)
-            .and_then(|entry| entry.context_length)
-        else {
-            continue;
-        };
-        windows.insert(
-            model.name.clone(),
-            host_window(client, base, api_key, &model.name, aggregate).await,
-        );
-    }
-    Ok(windows)
+            .and_then(|entry| entry.context_length)?;
+        Some(async move {
+            let window = host_window(client, base, api_key, &model.name, aggregate).await;
+            (model.name.clone(), window)
+        })
+    });
+    Ok(futures_util::future::join_all(lookups)
+        .await
+        .into_iter()
+        .filter_map(|(model, window)| Some((model, window?)))
+        .collect())
 }
 
 /// The window a host actually guarantees for `model_id`, given the aggregate
-/// its catalog advertises.
+/// its catalog advertises — or `None` when that cannot be established.
 ///
 /// On `OpenRouter` those differ: provider routing is not documented to
 /// consider prompt size, so a request can land on any sub-provider and only
-/// the narrowest is safe. Restricting providers account-side is what unlocks
-/// the advertised number, and `context-window` then overrides this.
+/// the narrowest is safe. The aggregate is the *largest* of them, so when the
+/// per-model lookup fails it is not a fallback: nothing is guaranteed, and a
+/// caller that stored the aggregate would vouch for a window some
+/// sub-provider does not have. Restricting providers account-side is what
+/// unlocks the advertised number, and `context-window` then overrides this.
 pub(crate) async fn host_window(
     client: &reqwest::Client,
     base: &str,
     api_key: &str,
     model_id: &str,
     aggregate: u64,
-) -> u64 {
+) -> Option<u64> {
     if !base.contains(OPENROUTER_HOST) {
-        return aggregate;
+        return Some(aggregate);
     }
     openrouter_min_window(client, base, api_key, model_id)
         .await
-        .map_or(aggregate, |narrowest| narrowest.min(aggregate))
+        .map(|narrowest| narrowest.min(aggregate))
 }
 
 /// The smallest `context_length` among the sub-providers `OpenRouter` may route
 /// this model to. `None` when the endpoints call fails or reports nothing —
-/// the caller then keeps the aggregate.
+/// the caller then leaves the window unknown.
 async fn openrouter_min_window(
     client: &reqwest::Client,
     base: &str,
