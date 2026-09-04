@@ -7,6 +7,24 @@ phases: first with the GPT branch set to the built-in stub (sections that say
 upstream (the Workflow measurements and "Live e2e results"). "Emitted" below =
 observed in captured request bodies/headers.
 
+## Standing decisions
+
+Choices the setup rests on, with the measurement that would reopen them.
+Re-check on Claude Code releases that touch the named area.
+
+- **Gateway model discovery stays off; picker rows come from `modelPicker`.**
+  Discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) is skipped
+  outright while `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is set — the
+  binary logs `[gatewayDiscovery] skipped: _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL
+  is set` — and the flag is what keeps Claude models at 1M behind the router
+  (200000 without it, re-measured on 2.1.258). Even with the flag off,
+  discovery filters the gateway's list to IDs matching
+  `/(claude|anthropic)/i` (2.1.258 binary), so no `gpt-*`/`grok-*` route can
+  appear through it, and it fires only in interactive sessions. Reopens if:
+  bare Claude IDs get 1M behind a non-first-party base URL without the flag
+  (step 6 window check), or the discovery filter admits arbitrary IDs.
+  History: 2.1.216 notes below, `modelPicker` section (2026-08-25).
+
 ## Answers to the design doc's open questions
 
 ### Dynamic general-purpose delegation (central workflow) — BLOCKED as specced
@@ -1628,3 +1646,84 @@ view, not the agent's self-report, shows which model served a subagent —
 skill space on a rare edge case. Retest triggers:
 a changelog entry touching `fallbackModel`, `--fallback-model`,
 `CLAUDE_CODE_NO_MODEL_FALLBACK`, or subagent model errors.
+
+## Claude Code 2.1.257 review (2026-09-04, Claude Code 2.1.258, router 0.1.24)
+
+Method: `claude -p … --output-format json | jq '.modelUsage'` through the
+live tokened router (user settings: first-party flag,
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=258400`), per-arm `--settings` JSON, plus
+string extraction from the 2.1.258 binary. Request bodies were captured by
+pointing one arm's `env.ANTHROPIC_BASE_URL` at a local stub that records
+`/v1/messages` and answers a canned SSE stream.
+
+### Fable 5.1
+
+- `--model fable` and `--model best` resolve to `claude-fable-5-1`,
+  contextWindow 1000000; `claude-fable-5` still served. The release note's
+  "gateway sessions keep resolving to Fable 5" is a per-provider default
+  (`fable: {default: "claude-fable-5-1", per_provider: {gateway:
+  "claude-fable-5"}}`) for the enterprise gateway provider
+  (`CLAUDE_CODE_USE_GATEWAY`), not for `ANTHROPIC_BASE_URL` proxies.
+- Catalog: Fable 5.1 is `tier_10_50_cache_read_0_25` (cache read $0.25/Mtok
+  vs $1 on Fable 5); API pricing only — subscription billing already
+  discounted cache reads, so the choosing-models cost paragraph stands.
+  New capability `fable_5_1_prompt_bundle`; `fallback_3p` is Fable 5.
+- Router: nothing to change. The Claude branch is byte-exact and names no
+  model.
+
+### `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`
+
+- Sonnet main spawning `model-router:gpt-5.6-sol(medium)`: control
+  `modelUsage` lists `claude-sonnet-5` and `gpt-5.6-sol`; with the variable
+  set, `claude-sonnet-5` only — the agent ran on the subagent default, the
+  request never reached the GPT branch, and nothing said so. Workflow logs
+  `Workflow agent model "…" ignored: CLAUDE_CODE_SUBAGENT_MODEL_FORCE is
+  set`; the Agent tool path has no equivalent. Not acted on: no reason to
+  expect a router user to set it.
+
+### Gateway discovery changes
+
+- The new `description` on discovered entries and the nonessential-traffic
+  change are moot under the standing decision above (the nonessential
+  change lands in the enterprise-gateway bootstrap path). `modelPicker` rows
+  take `{ model, label?, description?, behavesAs? }`; `description` is the
+  row subtitle, default "Custom model" — setup now writes one.
+
+### `behavesAs` on `modelPicker` rows (undocumented)
+
+Schema text: "For a model this version of Claude Code does not know: the ID
+of a model it does know whose client-side handling — prompt profile,
+capability and effort defaults — applies to it. Changes neither the row's
+label nor the model ID sent." Not in any changelog. Measured with
+`{"model":"gpt-5.6-sol","behavesAs":"<target>"}` in `--settings`:
+
+| target | window | max_tokens | thinking | `output_config.effort` | `fallbacks` | system bytes |
+|---|---|---|---|---|---|---|
+| (none, control) | 258400 | 32000 | adaptive | xhigh | — | 6017 |
+| claude-opus-4-8 | 1000000 | 64000 | adaptive | xhigh | — | 5888 |
+| claude-opus-5 | 1000000 | 64000 | adaptive | xhigh | `"default"` | 9297 |
+| claude-sonnet-5 | 1000000 | 64000 | adaptive | xhigh | — | 27291 |
+| claude-sonnet-4-5 | not measured (catalog 200000) | 32000 | enabled, budget 31999 | dropped | — | 27416 |
+
+- The window comes from the target's catalog entry and beats
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`; other routes keep the env value
+  (per-route windows without scaling, for the two window sizes the catalog
+  has: 200000 and 1000000).
+- It follows the routing ID everywhere it is resolved, not only the picker:
+  a project agent with `model: gpt-5.6-sol` and a Workflow
+  `agent(…, {model: 'gpt-5.6-sol'})` both reported 1000000 with the row
+  set; their `modelUsage` key becomes `gpt-5.6-sol[1m]` (suffix is
+  client-side; the router still matched the bare route and the requests
+  succeeded on Codex). `grok-4.6` with the row: 1000000, request succeeded
+  on the xAI path.
+- Target choice matters: opus-4-8 keeps the lean prompt, adaptive thinking
+  and effort passthrough with no `fallbacks` field; opus-5 adds
+  `fallbacks: "default"` and the refusal-fallback prompt section; sonnet-5
+  and older sonnets pull in the 27 KB non-lean prompt, and pre-effort
+  models drop `output_config.effort` and switch to budgeted thinking.
+  `max_tokens` rises to 64000 for every 1M target.
+- Hazard: a row with `behavesAs` and `context-window-scaling = true` on the
+  same route would scale usage against a client that already believes 1M
+  (compaction at 4× the real window). Doctor's `context-windows` check
+  reads only `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and would call such a route
+  "clipped".

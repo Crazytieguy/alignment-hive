@@ -109,13 +109,15 @@ here works until the binary resolves.
    ```json
    "modelPicker": {
      "options": [
-       { "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol" },
-       { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra" },
-       { "model": "gpt-5.6-luna", "label": "GPT-5.6 Luna" }
+       { "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "description": "Codex subscription via model-router" },
+       { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "description": "Codex subscription via model-router" },
+       { "model": "gpt-5.6-luna", "label": "GPT-5.6 Luna", "description": "Codex subscription via model-router" }
      ]
    }
    ```
-   The rows follow the built-in Claude models, and a routed ID picked there
+   `description` is the row's subtitle in the picker (without it, every
+   row reads "Custom model"); it says where that row's requests go. The
+   rows follow the built-in Claude models, and a routed ID picked there
    gets the declared context window like any other. Rows are never checked
    against the router — an unserved row is selectable and fails on its
    first turn — so drop a row when its route goes. Two cases keep the
@@ -144,8 +146,10 @@ here works until the binary resolves.
    Picker rows: `/model` in a fresh interactive session lists them after
    the Claude models.
    1M windows, to confirm they survive the current Claude Code version:
-   `claude -p 'say ok' --model claude-fable-5 --output-format json | jq
-   '.modelUsage[].contextWindow'` — it must print 1000000. On 200000,
+   `claude -p 'say ok' --model fable --output-format json | jq
+   '.modelUsage[].contextWindow'` — it must print 1000000 (the alias
+   follows the current Fable, so the check keeps testing the model users
+   actually run). On 200000,
    re-check the step 5 wiring first (right settings file; run from inside
    the project if the wiring is project-scoped); only if it is correct did
    a Claude Code release drop the flag.
