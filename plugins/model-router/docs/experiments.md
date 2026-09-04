@@ -1698,13 +1698,27 @@ capability and effort defaults — applies to it. Changes neither the row's
 label nor the model ID sent." Not in any changelog. Measured with
 `{"model":"gpt-5.6-sol","behavesAs":"<target>"}` in `--settings`:
 
-| target | window | max_tokens | thinking | `output_config.effort` | `fallbacks` | system bytes |
+| target | window | max_tokens | thinking | `output_config.effort` (session xhigh) | `fallbacks` | system bytes |
 |---|---|---|---|---|---|---|
 | (none, control) | 258400 | 32000 | adaptive | xhigh | — | 6017 |
 | claude-opus-4-8 | 1000000 | 64000 | adaptive | xhigh | — | 5888 |
 | claude-opus-5 | 1000000 | 64000 | adaptive | xhigh | `"default"` | 9297 |
+| claude-opus-4-7 | catalog 1000000 | 64000 | adaptive | xhigh | — | 27291 |
 | claude-sonnet-5 | 1000000 | 64000 | adaptive | xhigh | — | 27291 |
-| claude-sonnet-4-5 | not measured (catalog 200000) | 32000 | enabled, budget 31999 | dropped | — | 27416 |
+| claude-fable-5 | catalog 1000000 | 64000 | adaptive | xhigh | `"default"` | 10239 |
+| claude-fable-5-1 | 1000000 | 64000 | adaptive | xhigh | `"default"` | 12018 |
+| claude-opus-4-6 | 200000 | 64000 | adaptive | high (clamped) | — | 27291 |
+| claude-sonnet-4-6 | catalog 200000 | 32000 | adaptive | high (clamped) | — | 27291 |
+| claude-sonnet-4-5 | catalog 200000 | 32000 | enabled, budget 31999 | dropped | — | 27416 |
+| claude-haiku-4-5 | catalog 200000 | 32000 | enabled, budget 31999 | dropped | — | 27291 |
+
+"window" is `modelUsage[].contextWindow` through the live router where
+measured; "catalog N" rows were captured on the stub only. System bytes are
+the joined `system` blocks of the first request. Only entries with
+`lean_prompt` (opus-4-8, opus-5, the fables) get the ~6–12 KB prompt; the
+rest carry the 27 KB one. Effort clamps to the target's ceiling
+(`xhigh_effort` missing on opus-4-6/sonnet-4-6 → `high`); targets without
+the `effort` capability drop it and send budgeted thinking.
 
 - The window comes from the target's catalog entry and beats
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS`; other routes keep the env value
