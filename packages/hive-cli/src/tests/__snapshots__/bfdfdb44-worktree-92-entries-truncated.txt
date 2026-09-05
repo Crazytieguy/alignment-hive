@@ -9,7 +9,7 @@
   <local-command-stdout></local-command-stdout>
 4|20:28|user
   I want to do a comprehensive test of the deno-sandbox. To start, please try it out however you like
-5|20:28|thinking
+5|20:28|thinking|0words
 6|20:28|assistant
   Let me try out the deno-sandbox with a few basic tests.
 7|20:28|tool|Write|.claude/deno-sandbox/bfdfdb44-58bd-4d57-a6bc-57d26c8585da.ts|written=57lines
@@ -106,7 +106,7 @@
 16|20:29|system|subtype=turn_duration
 17|20:30|user
   Let's try some permission grants, and then I want you to enter a worktree and see if things still work
-18|20:30|thinking
+18|20:30|thinking|0words
 19|20:30|assistant
   Let me grant a few permissions and test them.
 20|20:30|tool|Bash|command="deno-sandbox-grant --allow-write=/tmp/deno-test --allow-net=example.com"|description="Grant write and net permissions to deno sandbox"
@@ -213,7 +213,7 @@
 43|20:35|system|subtype=turn_duration
 44|20:35|user
   Wait what "known issue" are you referring to?
-45|20:35|thinking
+45|20:35|thinking|0words
 46|20:35|assistant
   I was referencing a memory I have about a worktree permission bug. Let me check if it actually applies here.
 47|20:35|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/memory/project_worktree_permission_bug.md|result=115words

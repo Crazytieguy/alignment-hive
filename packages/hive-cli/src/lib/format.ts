@@ -100,12 +100,15 @@ export interface FormatBlockOptions {
   prevDate?: string;
   cwd?: string;
   truncation?: TruncationStrategy;
+  /** A budgeted read: thinking collapses to a word count even when the session fits without a limit. */
+  collapseThinking?: boolean;
   fieldFilter?: ReadFieldFilter;
   parentIndicator?: number | string;
 }
 
 export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {}): string | null {
-  const { sessionPrefix, showTimestamp, prevDate, cwd, truncation, fieldFilter, parentIndicator } = options;
+  const { sessionPrefix, showTimestamp, prevDate, cwd, truncation, collapseThinking, fieldFilter, parentIndicator } =
+    options;
 
   const parts: Array<string> = [];
   if (sessionPrefix) parts.push(sessionPrefix);
@@ -120,9 +123,12 @@ export function formatBlock(block: LogicalBlock, options: FormatBlockOptions = {
       parts.push('thinking');
       const expand = fieldFilter?.hasExplicitExpandRule('thinking') ?? false;
       const redacted = fieldFilter?.isRedacted('thinking') ?? false;
-      // Shown as a word count under a word limit unless --expand thinking asked for it.
-      if (redacted || (!expand && truncation?.type !== 'full' && truncation?.type !== 'matchContext')) {
-        parts.push(formatFieldValue(block.content));
+      // Shown as a word count on a budgeted read unless --expand thinking asked for it; the word
+      // budget never counts it (see collectWordCountsFromBlocks), so it must not print either.
+      if (redacted || (!expand && collapseThinking)) {
+        // Always a count, never the word itself: collapsed thinking should not leak content.
+        const count = countWords(block.content);
+        parts.push(`${count}word${count === 1 ? '' : 's'}`);
         return parts.join('|');
       }
       return formatBlockContent(parts.join('|'), block.content, expand ? { type: 'full' } : truncation);
@@ -740,6 +746,7 @@ export function formatBlocks(blocks: Array<LogicalBlock>, options: BlocksFormatO
         prevDate,
         cwd,
         truncation,
+        collapseThinking: truncate && !options.truncation,
         fieldFilter,
         parentIndicator: entryIndicator,
       });

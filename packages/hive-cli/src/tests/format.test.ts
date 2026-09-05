@@ -94,6 +94,16 @@ describe('format truncated sessions', () => {
   }
 });
 
+describe('format under budget', () => {
+  test('thinking stays collapsed when the session fits without a per-field limit', async () => {
+    // Thinking is left out of the word budget, so a session whose other fields fit must not print it.
+    const output = await formatFixture('cb6aa757');
+    expect(output).not.toMatch(/Limited to \d+ words per field/);
+    expect(output).toMatch(/\|thinking\|\d+words\n/);
+    expect(output).not.toMatch(/\|thinking\n/);
+  });
+});
+
 describe('format with tight truncation', () => {
   // These three fit the default 2000-word budget, so only a low target exercises word-limit truncation.
   for (const name of [
