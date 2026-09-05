@@ -1,25 +1,26 @@
-import { ensureStateDir, getConfig, loadTranscriptsDirs } from '../lib/config';
+import { ensureStateDir, getStateDir, loadTranscriptsDirs } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupRawSession } from '../lib/session-lookup';
 import { excludeSessionChecked } from '../lib/session-state';
-import { loadSessionStateWithAgentMigration } from '../lib/upload-session';
+import { loadSessionStateWithMigrations } from '../lib/upload-session';
 
 export async function uploadExclude(args: Array<string>): Promise<number> {
-  const config = getConfig();
-  const cwd = process.cwd();
-  const stateDir = config.getStateDir(cwd);
-  await ensureStateDir(stateDir);
-
-  const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-  if (transcriptsDirs.length === 0) {
-    printInfo(hive.upload.noSessions);
-    return 0;
+  const all = args.includes('--all');
+  const prefix = args[0];
+  if (!all && !prefix) {
+    printError(hive.upload.excludeUsage);
+    return 1;
   }
+
+  const cwd = process.cwd();
+  const stateDir = getStateDir(cwd);
+  await ensureStateDir(stateDir);
 
   // Backfill-aware state, same as the list/review paths — a reopened session must gate as
   // pending (excludable), not as uploaded.
-  const state = await loadSessionStateWithAgentMigration(stateDir, transcriptsDirs, cwd);
+  const transcriptsDirs = await loadTranscriptsDirs(stateDir);
+  const state = await loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd);
   const { parentSessions, sessionById } = state;
 
   if (parentSessions.length === 0) {
@@ -27,7 +28,7 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
     return 0;
   }
 
-  if (args.includes('--all')) {
+  if (all) {
     let count = 0;
     for (const session of parentSessions) {
       const { result } = await excludeSessionChecked(stateDir, state, session);
@@ -41,27 +42,13 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
     return 0;
   }
 
-  if (args.length === 0) {
-    printError(hive.upload.excludeUsage);
+  const result = lookupRawSession([...sessionById.values()], prefix);
+  if (!result.found) {
+    printError(result.error);
     return 1;
   }
-
-  const prefix = args[0];
-  const result = lookupRawSession(parentSessions, prefix);
-
-  if (!result.found) {
-    // Check if they tried to exclude an agent session
-    const agentSession = sessionById.get(prefix) ?? [...sessionById.values()].find((s) => s.sessionId.startsWith(prefix));
-    if (agentSession?.agentId) {
-      printError(hive.upload.agentCannotExclude);
-      return 1;
-    }
-    printError(result.error);
-    if (result.matches) {
-      for (const m of result.matches) {
-        console.log(`  ${m.sessionId.slice(0, 16)}`);
-      }
-    }
+  if (result.session.agentId) {
+    printError(hive.upload.agentCannotExclude);
     return 1;
   }
 

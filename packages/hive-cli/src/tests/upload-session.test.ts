@@ -2,7 +2,14 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { discoverParseableRunIds, discoverWorkflowRuns } from '../lib/upload-session';
+import { statePaths } from '../lib/config';
+import { hive } from '../lib/messages';
+import {
+  discoverWorkflowRuns,
+  readAndSanitizeSession,
+  readParseableRunBlobs,
+  uploadOneSession,
+} from '../lib/upload-session';
 import type { DiscoveredSession } from '../lib/session-state';
 
 const SID = 'parent-session-xyz';
@@ -44,7 +51,12 @@ beforeAll(async () => {
   // Over-long indexed scalars — must be capped so saveWorkflowRuns can never be failed by them.
   await writeFile(
     join(workflowsDir, 'wf_run3.json'),
-    JSON.stringify({ runId: 'wf_run3', workflowName: 'n'.repeat(600), status: 's'.repeat(600) }),
+    JSON.stringify({
+      runId: 'wf_run3',
+      workflowName: 'n'.repeat(600),
+      status: 's'.repeat(600),
+      summary: 'x'.repeat(2001),
+    }),
   );
 
   // Non-run files / dirs that must be ignored.
@@ -75,12 +87,13 @@ describe('discoverWorkflowRuns', () => {
     expect(byId.has('wf_broken')).toBe(false); // malformed JSON gated out
   });
 
-  test('over-long indexed scalars are capped (workflowName, status)', async () => {
+  test('over-long indexed scalars are capped (workflowName, status, summary)', async () => {
     const runs = await discoverWorkflowRuns(parent, new Set());
     const run3 = runs.find((r) => r.row.workflowRunId === 'wf_run3')!.row;
     expect(run3.workflowName!.length).toBe(501); // 500 + ellipsis
     expect(run3.workflowName!.endsWith('…')).toBe(true);
     expect(run3.status!.length).toBe(501);
+    expect(run3.summary!.length).toBe(2001);
     // The full values remain in the blob.
     const blob = runs.find((r) => r.row.workflowRunId === 'wf_run3')!.blob as Record<string, unknown>;
     expect(String(blob.workflowName).length).toBe(600);
@@ -100,9 +113,6 @@ describe('discoverWorkflowRuns', () => {
       agentCount: 3,
       durationMs: 1200,
     });
-
-    const run2 = runs.find((r) => r.row.workflowRunId === 'wf_run2')!.row;
-    expect(run2).toEqual({ workflowRunId: 'wf_run2', runId: 'wf_run2' });
   });
 
   test('home paths are redacted to ~ across keys + values, boundary-aware', async () => {
@@ -124,9 +134,63 @@ describe('discoverWorkflowRuns', () => {
   });
 });
 
-describe('discoverParseableRunIds', () => {
+describe('readParseableRunBlobs', () => {
   test('returns parseable run ids only — malformed files are gated out', async () => {
-    const ids = await discoverParseableRunIds(parent, new Set());
-    expect([...ids].sort()).toEqual(['wf_run1', 'wf_run2', 'wf_run3']);
+    const ids = [...(await readParseableRunBlobs(parent, new Set())).keys()];
+    expect(ids.sort()).toEqual(['wf_run1', 'wf_run2', 'wf_run3']);
+  });
+});
+
+describe('readAndSanitizeSession', () => {
+  test('redacts entries and summary and collects cwds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-read-'));
+    const path = join(dir, 's.jsonl');
+    const TOKEN = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
+    await writeFile(
+      path,
+      [
+        JSON.stringify({ type: 'summary', summary: `found ${TOKEN} here`, leafUuid: 'u1' }),
+        JSON.stringify({
+          type: 'user',
+          uuid: 'u1',
+          parentUuid: null,
+          timestamp: 't',
+          cwd: '/proj',
+          message: { role: 'user', content: `here ${TOKEN}` },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          uuid: 'a1',
+          parentUuid: 'u1',
+          timestamp: 't',
+          message: { role: 'assistant', content: 'ok' },
+        }),
+      ].join('\n'),
+    );
+    const r = await readAndSanitizeSession(path);
+    const text = JSON.stringify(r.sanitizedEntries) + r.summary;
+    expect(text).not.toContain('ghp_');
+    expect(text).toContain('[REDACTED:');
+    expect(r.cwds).toEqual(new Set(['/proj']));
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('uploadOneSession', () => {
+  test('a local sharing-disabled marker stops the upload before anything is read or sent', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'hive-optout-'));
+    await writeFile(statePaths(stateDir).sharingDisabled, '');
+    const result = await uploadOneSession({
+      session: { sessionId: 's1', path: join(stateDir, 'missing.jsonl'), mtime: new Date(0) },
+      state: { agentsByParent: new Map() },
+      statusCtx: { uploadedMap: new Map(), excludedSet: new Set(), consentMtime: 0, snoozeUntil: null },
+      consentWindows: { global: [{ start: 0, end: Infinity }], project: [{ start: 0, end: Infinity }] },
+      transcriptsDirs: [],
+      checkoutId: 'c',
+      ids: { directory: '/proj' },
+      stateDir,
+    });
+    expect(result).toEqual({ ok: false, error: hive.upload.noProjectConsent });
+    await rm(stateDir, { recursive: true, force: true });
   });
 });

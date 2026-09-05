@@ -1,17 +1,18 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { statePaths } from '../lib/config';
 import {
   MAX_RUN_UPLOAD_ATTEMPTS,
-  canExclude,
-  canUpload,
   computeSessionStatus,
+  discoverSessions,
   excludeSessionChecked,
-  formatSessionStatus,
-  getStatusColor,
   hasIncompleteUpload,
-  isEligibleForAutoUpload,
+  isSessionExcluded,
+  loadSessionState,
   needsWorkflowReopen,
   runWorkflowBackfill,
 } from '../lib/session-state';
@@ -23,7 +24,7 @@ function makeSession(overrides: Partial<DiscoveredSession> = {}): DiscoveredSess
   return {
     sessionId: 'test-session-1',
     path: '/fake/path.jsonl',
-    mtime: new Date(Date.now() - 2 * DAY_MS), // 2 days ago by default (past review period)
+    mtime: new Date(Date.now() - 2 * DAY_MS), // past the review period by default
     ...overrides,
   };
 }
@@ -32,60 +33,109 @@ function makeCtx(overrides: Partial<StatusContext> = {}): StatusContext {
   return {
     uploadedMap: new Map(),
     excludedSet: new Set(),
-    consentMtime: Date.now() - 2 * DAY_MS, // 2 days ago by default (past review period)
+    consentMtime: Date.now() - 2 * DAY_MS, // past the review period by default
     snoozeUntil: null,
     ...overrides,
   };
 }
 
+/** An uploaded record for the session's current content. */
+function uploadedFor(session: DiscoveredSession, overrides: Partial<UploadedEntry> = {}): UploadedEntry {
+  return {
+    sessionId: session.sessionId,
+    rawMtime: session.mtime.toISOString(),
+    uploadedAt: new Date().toISOString(),
+    agentSessionIds: [],
+    ...overrides,
+  };
+}
+
+// Colliding sanitized dir names can put another project's transcripts in this
+// project's directory — discoverSessions must not attribute those sessions here.
+describe('discoverSessions', () => {
+  let base: string;
+  let projectRepo: string;
+  let foreignRepo: string;
+  let transcriptsDir: string;
+
+  function writeSession(name: string, cwd: string | null, lines?: Array<object>): void {
+    const entries = lines ?? [
+      cwd ? { type: 'user', cwd, sessionId: name } : { type: 'user', sessionId: name },
+      { type: 'assistant', message: { content: 'hi' } },
+    ];
+    writeFileSync(join(transcriptsDir, `${name}.jsonl`), entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  }
+
+  beforeAll(() => {
+    base = mkdtempSync(join(tmpdir(), 'hive-session-filter-'));
+    projectRepo = join(base, 'proj.dot');
+    foreignRepo = join(base, 'proj-dot');
+    transcriptsDir = join(base, 'transcripts');
+    for (const dir of [projectRepo, foreignRepo, transcriptsDir]) mkdirSync(dir);
+    execSync('git init -q', { cwd: projectRepo });
+    execSync('git init -q', { cwd: foreignRepo });
+
+    writeSession('own-session', projectRepo);
+    writeSession('foreign-session', foreignRepo);
+    writeSession('deleted-cwd-session', join(base, 'gone', 'worktree'));
+    writeSession('no-cwd-session', null);
+    writeSession('user-only', projectRepo, [{ type: 'user', cwd: projectRepo, sessionId: 'user-only' }]);
+    writeSession('agent-user-only', projectRepo, [{ type: 'user', cwd: projectRepo, sessionId: 'own-session' }]);
+  });
+
+  afterAll(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test('drops sessions whose cwd resolves to a different project', async () => {
+    const sessions = await discoverSessions([transcriptsDir], projectRepo);
+    const ids = sessions.map((s) => s.sessionId).sort();
+    expect(ids).toEqual(['agent-user-only', 'deleted-cwd-session', 'no-cwd-session', 'own-session']);
+  });
+
+  test('drops parent sessions with no assistant message but keeps agent files', async () => {
+    const ids = (await discoverSessions([transcriptsDir], projectRepo)).map((s) => s.sessionId);
+    expect(ids).not.toContain('user-only');
+    expect(ids).toContain('agent-user-only');
+  });
+});
+
+describe('loadSessionState', () => {
+  test('rejects instead of treating an unreadable excluded-sessions file as empty', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'hive-state-'));
+    await mkdir(statePaths(stateDir).excludedSessions); // a directory, not a file
+    await expect(loadSessionState(stateDir, [], stateDir)).rejects.toThrow();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+});
+
 describe('computeSessionStatus', () => {
   test('returns excluded for sessions in excludedSet', () => {
     const session = makeSession();
-    const ctx = makeCtx({ excludedSet: new Set(['test-session-1']) });
+    const ctx = makeCtx({ excludedSet: new Set([session.sessionId]) });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'excluded' });
   });
 
   test('returns uploaded when uploaded with same mtime and agentSessionIds', () => {
-    const mtime = new Date(Date.now() - 2 * DAY_MS);
-    const session = makeSession({ mtime });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: mtime.toISOString(),
-      uploadedAt: new Date().toISOString(),
-      agentSessionIds: [],
-    };
-    const ctx = makeCtx({ uploadedMap: new Map([['test-session-1', uploaded]]) });
+    const session = makeSession();
+    const ctx = makeCtx({ uploadedMap: new Map([[session.sessionId, uploadedFor(session)]]) });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'uploaded' });
   });
 
-  test('returns uploaded for legacy upload without migration', () => {
-    const mtime = new Date(Date.now() - 2 * DAY_MS);
-    const session = makeSession({ mtime });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: mtime.toISOString(),
-      uploadedAt: new Date().toISOString(),
-      // no agentSessionIds — legacy
-    };
+  test('returns uploaded for a record without agentSessionIds when nothing was reopened', () => {
+    const session = makeSession();
     const ctx = makeCtx({
-      uploadedMap: new Map([['test-session-1', uploaded]]),
+      uploadedMap: new Map([[session.sessionId, uploadedFor(session, { agentSessionIds: undefined })]]),
       migrationTimestamp: null,
     });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'uploaded' });
   });
 
-  test('returns pending for legacy upload during migration review period', () => {
-    const mtime = new Date(Date.now() - 2 * DAY_MS);
-    const session = makeSession({ mtime });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: mtime.toISOString(),
-      uploadedAt: new Date().toISOString(),
-    };
-    const migrationTimestamp = Date.now() - 1000; // just migrated
+  test('a reopened upload is pending during the reopen review period', () => {
+    const session = makeSession();
     const ctx = makeCtx({
-      uploadedMap: new Map([['test-session-1', uploaded]]),
-      migrationTimestamp,
+      uploadedMap: new Map([[session.sessionId, uploadedFor(session, { agentSessionIds: undefined })]]),
+      migrationTimestamp: Date.now() - 1000, // just reopened
     });
     const status = computeSessionStatus(session, ctx);
     expect(status.type).toBe('pending');
@@ -95,34 +145,20 @@ describe('computeSessionStatus', () => {
     }
   });
 
-  test('returns ready for legacy upload after migration review period', () => {
-    const mtime = new Date(Date.now() - 2 * DAY_MS);
-    const session = makeSession({ mtime });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: mtime.toISOString(),
-      uploadedAt: new Date().toISOString(),
-    };
-    const migrationTimestamp = Date.now() - 2 * DAY_MS; // migrated 2 days ago
+  test('a reopened upload is ready after the reopen review period', () => {
+    const session = makeSession();
     const ctx = makeCtx({
-      uploadedMap: new Map([['test-session-1', uploaded]]),
-      migrationTimestamp,
+      uploadedMap: new Map([[session.sessionId, uploadedFor(session, { agentSessionIds: undefined })]]),
+      migrationTimestamp: Date.now() - 2 * DAY_MS,
     });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'ready' });
   });
 
-  test('returns snoozed for legacy upload after migration when snoozed', () => {
-    const mtime = new Date(Date.now() - 2 * DAY_MS);
-    const session = makeSession({ mtime });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: mtime.toISOString(),
-      uploadedAt: new Date().toISOString(),
-    };
-    const migrationTimestamp = Date.now() - 2 * DAY_MS;
+  test('a reopened upload is snoozed after the review period when snoozed', () => {
+    const session = makeSession();
     const ctx = makeCtx({
-      uploadedMap: new Map([['test-session-1', uploaded]]),
-      migrationTimestamp,
+      uploadedMap: new Map([[session.sessionId, uploadedFor(session, { agentSessionIds: undefined })]]),
+      migrationTimestamp: Date.now() - 2 * DAY_MS,
       snoozeUntil: Date.now() + DAY_MS,
     });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'snoozed' });
@@ -135,17 +171,15 @@ describe('computeSessionStatus', () => {
   });
 
   test('returns pending when session is within session review period', () => {
-    const session = makeSession({ mtime: new Date(Date.now() - 1000) }); // just now
+    const session = makeSession({ mtime: new Date(Date.now() - 1000) });
     const ctx = makeCtx({ consentMtime: Date.now() - 3 * DAY_MS });
-    const status = computeSessionStatus(session, ctx);
-    expect(status.type).toBe('pending');
+    expect(computeSessionStatus(session, ctx).type).toBe('pending');
   });
 
   test('returns pending when consent is within review period', () => {
-    const session = makeSession({ mtime: new Date(Date.now() - 3 * DAY_MS) }); // old session
-    const ctx = makeCtx({ consentMtime: Date.now() - 1000 }); // consent just given
-    const status = computeSessionStatus(session, ctx);
-    expect(status.type).toBe('pending');
+    const session = makeSession({ mtime: new Date(Date.now() - 3 * DAY_MS) });
+    const ctx = makeCtx({ consentMtime: Date.now() - 1000 });
+    expect(computeSessionStatus(session, ctx).type).toBe('pending');
   });
 
   test('returns snoozed for eligible session when snoozed', () => {
@@ -155,98 +189,29 @@ describe('computeSessionStatus', () => {
   });
 
   test('excluded takes precedence over everything', () => {
-    const mtime = new Date(Date.now() - 2 * DAY_MS);
-    const session = makeSession({ mtime });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: mtime.toISOString(),
-      uploadedAt: new Date().toISOString(),
-      agentSessionIds: [],
-    };
+    const session = makeSession();
     const ctx = makeCtx({
-      excludedSet: new Set(['test-session-1']),
-      uploadedMap: new Map([['test-session-1', uploaded]]),
+      excludedSet: new Set([session.sessionId]),
+      uploadedMap: new Map([[session.sessionId, uploadedFor(session)]]),
       snoozeUntil: Date.now() + DAY_MS,
     });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'excluded' });
   });
 
   test('uploaded with changed mtime is treated as new session', () => {
-    const session = makeSession({ mtime: new Date(Date.now() - 2 * DAY_MS) });
-    const uploaded: UploadedEntry = {
-      sessionId: 'test-session-1',
-      rawMtime: new Date(Date.now() - 5 * DAY_MS).toISOString(), // different mtime
-      uploadedAt: new Date().toISOString(),
-      agentSessionIds: [],
-    };
-    const ctx = makeCtx({ uploadedMap: new Map([['test-session-1', uploaded]]) });
-    // mtime changed → not considered uploaded, goes through normal eligibility
+    const session = makeSession();
+    const stale = uploadedFor(session, { rawMtime: new Date(Date.now() - 5 * DAY_MS).toISOString() });
+    const ctx = makeCtx({ uploadedMap: new Map([[session.sessionId, stale]]) });
     expect(computeSessionStatus(session, ctx)).toEqual({ type: 'ready' });
-  });
-});
-
-describe('status helper functions', () => {
-  test('canExclude', () => {
-    expect(canExclude({ type: 'ready' }, false)).toBe(true);
-    expect(canExclude({ type: 'pending', remainingMs: 1000 }, false)).toBe(true);
-    expect(canExclude({ type: 'snoozed' }, false)).toBe(true);
-    expect(canExclude({ type: 'excluded' }, false)).toBe(false);
-    expect(canExclude({ type: 'uploaded' }, false)).toBe(false);
-  });
-
-  test('canExclude refuses any state with a partial upload (data may already be on the server)', () => {
-    expect(canExclude({ type: 'ready' }, true)).toBe(false);
-    expect(canExclude({ type: 'pending', remainingMs: 1000 }, true)).toBe(false);
-    expect(canExclude({ type: 'snoozed' }, true)).toBe(false);
-  });
-
-  test('canUpload', () => {
-    expect(canUpload({ type: 'ready' })).toBe(true);
-    expect(canUpload({ type: 'pending', remainingMs: 1000 })).toBe(true);
-    expect(canUpload({ type: 'snoozed' })).toBe(false);
-    expect(canUpload({ type: 'excluded' })).toBe(false);
-    expect(canUpload({ type: 'uploaded' })).toBe(false);
-  });
-
-  test('isEligibleForAutoUpload', () => {
-    expect(isEligibleForAutoUpload({ type: 'ready' })).toBe(true);
-    expect(isEligibleForAutoUpload({ type: 'pending', remainingMs: 1000 })).toBe(false);
-    expect(isEligibleForAutoUpload({ type: 'snoozed' })).toBe(false);
-    expect(isEligibleForAutoUpload({ type: 'excluded' })).toBe(false);
-    expect(isEligibleForAutoUpload({ type: 'uploaded' })).toBe(false);
-  });
-
-  test('formatSessionStatus', () => {
-    expect(formatSessionStatus({ type: 'ready' })).toBe('ready');
-    expect(formatSessionStatus({ type: 'excluded' })).toBe('excluded');
-    expect(formatSessionStatus({ type: 'uploaded' })).toBe('uploaded');
-    expect(formatSessionStatus({ type: 'snoozed' })).toBe('snoozed');
-    expect(formatSessionStatus({ type: 'pending', remainingMs: 2 * 60 * 60 * 1000 })).toBe('pending (2h)');
-    expect(formatSessionStatus({ type: 'pending', remainingMs: 30 * 60 * 1000 })).toBe('pending (1h)');
-    expect(formatSessionStatus({ type: 'pending', remainingMs: 0 })).toBe('pending (0h)');
-  });
-
-  test('formatSessionStatus surfaces a partial upload for pre-upload states only', () => {
-    expect(formatSessionStatus({ type: 'ready' }, true)).toBe('partially uploaded');
-    expect(formatSessionStatus({ type: 'pending', remainingMs: 1000 }, true)).toBe('partially uploaded');
-    expect(formatSessionStatus({ type: 'snoozed' }, true)).toBe('partially uploaded');
-    expect(formatSessionStatus({ type: 'uploaded' }, true)).toBe('uploaded');
-    expect(formatSessionStatus({ type: 'excluded' }, true)).toBe('excluded');
-  });
-
-  test('getStatusColor', () => {
-    expect(getStatusColor({ type: 'ready' })).toBe('green');
-    expect(getStatusColor({ type: 'uploaded' })).toBe('blue');
-    expect(getStatusColor({ type: 'pending', remainingMs: 1000 })).toBe('yellow');
-    expect(getStatusColor({ type: 'snoozed' })).toBe('yellow');
-    expect(getStatusColor({ type: 'excluded' })).toBe('default');
-    expect(getStatusColor({ type: 'ready' }, true)).toBe('yellow');
   });
 });
 
 describe('hasIncompleteUpload', () => {
   const uploadedEntry = (uploadedAt: string): UploadedEntry => ({
-    sessionId: 's', rawMtime: 'm', uploadedAt, agentSessionIds: [],
+    sessionId: 's',
+    rawMtime: 'm',
+    uploadedAt,
+    agentSessionIds: [],
   });
 
   test('false with no started marker', () => {
@@ -285,36 +250,28 @@ describe('excludeSessionChecked', () => {
     await rm(stateDir, { recursive: true, force: true });
   });
 
-  const mtime = new Date(Date.now() - 2 * DAY_MS);
-  const session = (): DiscoveredSession => makeSession({ sessionId: 'sess-1', mtime });
+  const session = (): DiscoveredSession => makeSession({ sessionId: 'sess-1' });
   const emptyState = () => ({
     uploadedMap: new Map<string, UploadedEntry>(),
     excludedSet: new Set<string>(),
     startedMap: new Map<string, number>(),
     migrationTimestamp: null,
   });
-  const uploadedEntry = (): UploadedEntry => ({
-    sessionId: 'sess-1',
-    rawMtime: mtime.toISOString(),
-    uploadedAt: new Date().toISOString(),
-    agentSessionIds: [],
-  });
 
   test('records exclusion for an excludable session', async () => {
     const outcome = await excludeSessionChecked(stateDir, emptyState(), session());
     expect(outcome).toEqual({ result: 'excluded', hadPriorUpload: false });
-    const content = await readFile(join(stateDir, 'excluded-sessions'), 'utf-8');
-    expect(content).toBe('sess-1\n');
+    expect(await isSessionExcluded(stateDir, 'sess-1')).toBe(true);
   });
 
   test('refuses uploaded and partial sessions without writing', async () => {
-    const uploadedState = { ...emptyState(), uploadedMap: new Map([['sess-1', uploadedEntry()]]) };
+    const uploadedState = { ...emptyState(), uploadedMap: new Map([['sess-1', uploadedFor(session())]]) };
     expect((await excludeSessionChecked(stateDir, uploadedState, session())).result).toBe('denied-uploaded');
 
     const partialState = { ...emptyState(), startedMap: new Map([['sess-1', Date.now()]]) };
     expect((await excludeSessionChecked(stateDir, partialState, session())).result).toBe('denied-partial');
 
-    expect(readFile(join(stateDir, 'excluded-sessions'), 'utf-8')).rejects.toThrow();
+    expect(await isSessionExcluded(stateDir, 'sess-1')).toBe(false);
   });
 
   test('reports already-excluded sessions', async () => {
@@ -324,10 +281,9 @@ describe('excludeSessionChecked', () => {
 
   test('excluding a reopened session succeeds but reports the prior upload', async () => {
     // A backfill reopen drops agentSessionIds in-memory; the entry (and the server data) remain.
-    const reopened: UploadedEntry = { ...uploadedEntry(), agentSessionIds: undefined };
     const state = {
       ...emptyState(),
-      uploadedMap: new Map([['sess-1', reopened]]),
+      uploadedMap: new Map([['sess-1', uploadedFor(session(), { agentSessionIds: undefined })]]),
       migrationTimestamp: Date.now() - 2 * DAY_MS,
     };
     const outcome = await excludeSessionChecked(stateDir, state, session());
@@ -352,8 +308,16 @@ describe('needsWorkflowReopen (parse-gated — no run-id loop)', () => {
   });
 
   test('reopens when a parseable run file is not in the recorded workflowRunIds', () => {
-    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: ['wf_1'] };
-    expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')], ['wf_1', 'wf_2'])).toBe(true);
+    const uploaded: UploadedEntry = {
+      sessionId: 'p',
+      rawMtime: 'm',
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'],
+      workflowRunIds: ['wf_1'],
+    };
+    expect(
+      needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')], ['wf_1', 'wf_2']),
+    ).toBe(true);
   });
 
   test('reopens a legacy upload (no workflowRunIds field) that has a parseable run file', () => {
@@ -362,7 +326,13 @@ describe('needsWorkflowReopen (parse-gated — no run-id loop)', () => {
   });
 
   test('does NOT reopen when agents and parseable runs are all recorded — a malformed run file (absent from parseableRunIds) must not loop', () => {
-    const uploaded: UploadedEntry = { sessionId: 'p', rawMtime: 'm', uploadedAt: 't', agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: [] };
+    const uploaded: UploadedEntry = {
+      sessionId: 'p',
+      rawMtime: 'm',
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'],
+      workflowRunIds: [],
+    };
     expect(needsWorkflowReopen(uploaded, [agentSession('agent-x'), agentSession('agent-y', 'wf_1')], [])).toBe(false);
   });
 
@@ -373,16 +343,24 @@ describe('needsWorkflowReopen (parse-gated — no run-id loop)', () => {
 
   test('reopens for a worktree-only run via recorded discoveredRunIds (invisible to parent-dir discovery)', () => {
     const uploaded: UploadedEntry = {
-      sessionId: 'p', rawMtime: 'm', uploadedAt: 't',
-      agentSessionIds: ['agent-x'], workflowRunIds: ['wf_1'], discoveredRunIds: ['wf_1', 'wf_worktree'],
+      sessionId: 'p',
+      rawMtime: 'm',
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x'],
+      workflowRunIds: ['wf_1'],
+      discoveredRunIds: ['wf_1', 'wf_worktree'],
     };
     expect(needsWorkflowReopen(uploaded, [agentSession('agent-x')], ['wf_1'])).toBe(true);
   });
 
   test('run-keyed reopen stops after MAX_RUN_UPLOAD_ATTEMPTS; agent-keyed reopen is unaffected', () => {
     const capped: UploadedEntry = {
-      sessionId: 'p', rawMtime: 'm', uploadedAt: 't',
-      agentSessionIds: ['agent-x'], workflowRunIds: [], runUploadAttempts: MAX_RUN_UPLOAD_ATTEMPTS,
+      sessionId: 'p',
+      rawMtime: 'm',
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x'],
+      workflowRunIds: [],
+      runUploadAttempts: MAX_RUN_UPLOAD_ATTEMPTS,
     };
     expect(needsWorkflowReopen(capped, [agentSession('agent-x')], ['wf_stuck'])).toBe(false);
     // A missing agent still reopens even at the cap.
@@ -411,12 +389,14 @@ describe('runWorkflowBackfill', () => {
       uploadedMap: new Map([['p', uploaded]]),
       excludedSet: new Set(),
       startedMap: new Map(),
-      migrationTimestamp: null,
     };
   }
 
   const uploadedMissingAgent = (mtime: Date): UploadedEntry => ({
-    sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't', agentSessionIds: ['agent-x'],
+    sessionId: 'p',
+    rawMtime: mtime.toISOString(),
+    uploadedAt: 't',
+    agentSessionIds: ['agent-x'],
   });
   const withWorkflowAgent = (): Array<DiscoveredSession> => [agentSession('agent-x'), agentSession('agent-y', 'wf_1')];
   const noRuns = (): Promise<Array<string>> => Promise.resolve([]);
@@ -425,7 +405,7 @@ describe('runWorkflowBackfill', () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
     const state = makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent());
 
-    const ts = await runWorkflowBackfill(state, stateDir, null, noRuns);
+    const ts = await runWorkflowBackfill(state, stateDir, noRuns);
     expect(typeof ts).toBe('number');
     expect(state.uploadedMap.get('p')!.agentSessionIds).toBeUndefined();
 
@@ -439,40 +419,33 @@ describe('runWorkflowBackfill', () => {
     expect(status.type).toBe('pending');
   });
 
-  test('writes a FRESH review window even when a stale agent-migration timestamp exists', async () => {
-    const mtime = new Date(Date.now() - 5 * DAY_MS);
-    const state = makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent());
-    const staleAgentTs = Date.now() - 30 * DAY_MS; // long-expired agent-migration window
-
-    const ts = await runWorkflowBackfill(state, stateDir, staleAgentTs, noRuns);
-    expect(ts).toBeGreaterThan(Date.now() - DAY_MS); // fresh, not the stale agent ts
-
-    const status = computeSessionStatus(state.parentSessions[0], {
-      uploadedMap: state.uploadedMap,
-      excludedSet: state.excludedSet,
-      consentMtime: Date.now() - 5 * DAY_MS,
-      snoozeUntil: null,
-      migrationTimestamp: ts,
-    });
-    expect(status.type).toBe('pending'); // within the fresh window, NOT immediately ready
-  });
-
   test('reuses the persisted window on a later run (stable; no reset each run)', async () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
-    const first = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null, noRuns);
-    const second = await runWorkflowBackfill(makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()), stateDir, null, noRuns);
+    const first = await runWorkflowBackfill(
+      makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()),
+      stateDir,
+      noRuns,
+    );
+    const second = await runWorkflowBackfill(
+      makeState(uploadedMissingAgent(mtime), mtime, withWorkflowAgent()),
+      stateDir,
+      noRuns,
+    );
     expect(second).toBe(first);
   });
 
   test('leaves a fully-recorded upload untouched', async () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
     const uploaded: UploadedEntry = {
-      sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't',
-      agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: ['wf_1'],
+      sessionId: 'p',
+      rawMtime: mtime.toISOString(),
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'],
+      workflowRunIds: ['wf_1'],
     };
     const state = makeState(uploaded, mtime, withWorkflowAgent());
 
-    const ts = await runWorkflowBackfill(state, stateDir, null, () => Promise.resolve(['wf_1']));
+    const ts = await runWorkflowBackfill(state, stateDir, () => Promise.resolve(['wf_1']));
     expect(ts).toBeNull();
     expect(state.uploadedMap.get('p')!.agentSessionIds).toEqual(['agent-x', 'agent-y']);
   });
@@ -480,12 +453,15 @@ describe('runWorkflowBackfill', () => {
   test('reopens when a parseable run file is missing from the recorded workflowRunIds', async () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
     const uploaded: UploadedEntry = {
-      sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't',
-      agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: ['wf_1'],
+      sessionId: 'p',
+      rawMtime: mtime.toISOString(),
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'],
+      workflowRunIds: ['wf_1'],
     };
     const state = makeState(uploaded, mtime, withWorkflowAgent());
 
-    const ts = await runWorkflowBackfill(state, stateDir, null, () => Promise.resolve(['wf_1', 'wf_2']));
+    const ts = await runWorkflowBackfill(state, stateDir, () => Promise.resolve(['wf_1', 'wf_2']));
     expect(typeof ts).toBe('number');
     expect(state.uploadedMap.get('p')!.agentSessionIds).toBeUndefined();
   });
@@ -493,12 +469,15 @@ describe('runWorkflowBackfill', () => {
   test('a run-discovery error is best-effort — no reopen, state loading unaffected', async () => {
     const mtime = new Date(Date.now() - 5 * DAY_MS);
     const uploaded: UploadedEntry = {
-      sessionId: 'p', rawMtime: mtime.toISOString(), uploadedAt: 't',
-      agentSessionIds: ['agent-x', 'agent-y'], workflowRunIds: [],
+      sessionId: 'p',
+      rawMtime: mtime.toISOString(),
+      uploadedAt: 't',
+      agentSessionIds: ['agent-x', 'agent-y'],
+      workflowRunIds: [],
     };
     const state = makeState(uploaded, mtime, withWorkflowAgent());
 
-    const ts = await runWorkflowBackfill(state, stateDir, null, () => Promise.reject(new Error('boom')));
+    const ts = await runWorkflowBackfill(state, stateDir, () => Promise.reject(new Error('boom')));
     expect(ts).toBeNull();
     expect(state.uploadedMap.get('p')!.agentSessionIds).toEqual(['agent-x', 'agent-y']);
   });

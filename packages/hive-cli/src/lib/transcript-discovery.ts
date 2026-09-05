@@ -1,40 +1,80 @@
 import { execSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getToolResultText, isKnownContentBlock, parseKnownEntry } from '@alignment-hive/session-data';
-import { ensureStateDir, getClaudeProjectDir, getMainWorktreePath, loadTranscriptsDirs, parseCwdFromLine, statePaths } from './config';
+import {
+  addTranscriptsDirs,
+  getClaudeProjectDir,
+  getMainWorktreePath,
+  listWorktreePaths,
+  loadTranscriptsDirs,
+} from './config';
 
-const CWD_READ_BYTES = 8192;
+/** Extract cwd from a JSONL line. Returns null if the line doesn't contain a valid cwd. */
+export function parseCwdFromLine(line: string): string | null {
+  if (!line.includes('"cwd"')) return null;
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    if (typeof parsed.cwd === 'string' && parsed.cwd.startsWith('/')) {
+      return parsed.cwd;
+    }
+  } catch {}
+  return null;
+}
+
+/** Every distinct cwd recorded in a session file's content. */
+export function extractCwds(content: string): Set<string> {
+  const cwds = new Set<string>();
+  for (const line of content.split('\n')) {
+    const cwd = parseCwdFromLine(line);
+    if (cwd) cwds.add(cwd);
+  }
+  return cwds;
+}
+
+const HEAD_READ_BYTES = 8192;
+const HEAD_READ_MAX = 1024 * 1024;
 
 /**
- * Extract the cwd recorded in a session file. Only reads the first 8KB since
- * cwd appears in early entries. Returns null if none found or unreadable.
+ * Read a file line by line from the start, stopping at the first line for which `find`
+ * returns a value. Reads at most HEAD_READ_MAX bytes. Null on no match or unreadable file.
  */
-export function extractCwdFromFile(filePath: string): string | null {
+export function findInFileHead<T>(filePath: string, find: (line: string) => T | null): T | null {
   try {
     const fd = openSync(filePath, 'r');
     try {
-      const buf = Buffer.alloc(CWD_READ_BYTES);
-      const bytesRead = readSync(fd, buf, 0, CWD_READ_BYTES, 0);
-      const content = buf.toString('utf-8', 0, bytesRead);
-      for (const line of content.split('\n')) {
-        const cwd = parseCwdFromLine(line);
-        if (cwd) return cwd;
+      const buf = Buffer.alloc(HEAD_READ_BYTES);
+      let carry = '';
+      for (let pos = 0; pos < HEAD_READ_MAX; pos += HEAD_READ_BYTES) {
+        const bytesRead = readSync(fd, buf, 0, HEAD_READ_BYTES, pos);
+        if (bytesRead === 0) break;
+        const lines = (carry + buf.toString('utf-8', 0, bytesRead)).split('\n');
+        carry = lines.pop() ?? '';
+        for (const line of lines) {
+          const found = find(line);
+          if (found !== null) return found;
+        }
       }
+      return carry ? find(carry) : null;
     } finally {
       closeSync(fd);
     }
   } catch {
-    // skip unreadable files
+    return null;
   }
-  return null;
 }
 
 /**
- * Extract the cwd from the first session file in a project directory
- * that has a "cwd" field. Returns null if none found.
+ * The cwd recorded in a session file, from the first complete line that carries one. The
+ * first user line often exceeds 8KB (it carries the CLAUDE.md and memory system-reminders),
+ * so this reads until a whole line is available rather than a fixed prefix.
  */
+export function extractCwdFromFile(filePath: string): string | null {
+  return findInFileHead(filePath, parseCwdFromLine);
+}
+
+/** The cwd from the first session file in a project directory that has one. */
 export function extractCwd(projectDir: string): string | null {
   try {
     const entries = readdirSync(projectDir);
@@ -52,10 +92,8 @@ export function extractCwd(projectDir: string): string | null {
 const GIT_LOG_HASH_PATTERN = /\b([a-f0-9]{7,12})\b/g;
 
 /**
- * Extract commit hashes from git log tool results in a JSONL session file.
- * Finds Bash tool_use blocks with "git log" commands, then extracts hashes
- * from their corresponding tool_result blocks. Returns hashes from the first
- * matching git log result found.
+ * Commit hashes from the first `git log` Bash result in the file. Lines are only JSON-parsed
+ * when they could hold a git log tool_use or a pending tool_result.
  */
 function extractGitLogHashes(filePath: string): Array<string> {
   let content: string;
@@ -73,7 +111,6 @@ function extractGitLogHashes(filePath: string): Array<string> {
   for (const line of lines) {
     if (!line) continue;
 
-    // Quick pre-filter: only parse lines that could contain git log tool_use or matching tool_result
     const hasGitLog = line.includes('git log');
     const hasToolResult = pendingToolIds.size > 0 && line.includes('tool_result');
     if (!hasGitLog && !hasToolResult) continue;
@@ -85,7 +122,7 @@ function extractGitLogHashes(filePath: string): Array<string> {
       continue;
     }
 
-    const { data: entry } = parseKnownEntry(parsed);
+    const entry = parseKnownEntry(parsed);
     if (!entry) continue;
 
     if (entry.type === 'assistant' && hasGitLog) {
@@ -126,10 +163,7 @@ function extractGitLogHashes(filePath: string): Array<string> {
   return [];
 }
 
-/**
- * Extract commit hashes from git log results across a transcript dir.
- * Reads non-agent JSONL files until it finds one with git log tool results.
- */
+/** Hashes from the first session in the dir that has a git log result. */
 function extractGitLogHashesFromDir(transcriptDir: string): Array<string> {
   let files: Array<string>;
   try {
@@ -145,33 +179,19 @@ function extractGitLogHashesFromDir(transcriptDir: string): Array<string> {
   return [];
 }
 
-/**
- * Verify commit hashes against a project repo using git cat-file --batch-check.
- * Returns true if 2+ hashes exist as commits in the repo.
- */
+/** True if 2+ of the hashes are commits in the repo at projectDir (git cat-file --batch-check). */
 function verifyHashesAgainstRepo(hashes: Array<string>, projectDir: string): boolean {
-  const validHashes = hashes.filter((h) => /^[a-f0-9]{7,40}$/.test(h));
-  if (validHashes.length < 2) return false;
-
-  const input = validHashes.join('\n') + '\n';
   try {
     const output = execSync('git cat-file --batch-check', {
       cwd: projectDir,
       encoding: 'utf-8',
-      input,
+      input: hashes.join('\n') + '\n',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let verified = 0;
-    for (const line of output.split('\n')) {
-      if (line.includes(' commit ')) {
-        verified++;
-        if (verified >= 2) return true;
-      }
-    }
+    return output.split('\n').filter((line) => line.includes(' commit ')).length >= 2;
   } catch {
-    // git command failed
+    return false;
   }
-  return false;
 }
 
 export interface TranscriptScanData {
@@ -189,8 +209,6 @@ function buildTranscriptScanData(): TranscriptScanData {
   const projectsBase = join(homedir(), '.claude', 'projects');
   const mainPathMap = new Map<string, Array<string>>();
   const cwdMap = new Map<string, string>();
-
-  if (!existsSync(projectsBase)) return { mainPathMap, cwdMap };
 
   try {
     const entries = readdirSync(projectsBase, { withFileTypes: true });
@@ -215,34 +233,23 @@ function buildTranscriptScanData(): TranscriptScanData {
       dirs.push(transcriptDir);
     }
   } catch {
-    // skip unreadable directory
+    // missing or unreadable projects dir
   }
 
   return { mainPathMap, cwdMap };
 }
 
-/**
- * Discover worktree transcript dirs for a project and add them to transcripts-dirs.
- *
- * Strategy 1: `git worktree list` on the main repo to find active + stale worktree paths,
- *   then check if ~/.claude/projects/<normalized-path> exists for each.
- * Strategy 2: Use pre-built scan data to find dirs whose sessions resolve to this project.
- * Strategy 3: Subpath matching — if the session's cwd was inside the project dir.
- * Strategy 4: Commit hash verification — find git log output in sessions, verify hashes
- *   against the project repo. Only runs on dirs with deleted cwds not matched by 1-3.
- *
- * Returns existing and discovered counts.
- */
 export interface DiscoverResult {
   existing: number;
   discovered: number;
 }
 
+/** Find transcript dirs belonging to this project (the numbered strategies below) and register them. */
 export async function discoverWorktreeTranscriptDirs(
   projectDir: string,
   stateDir: string,
-  scanData?: TranscriptScanData,
-  commitHashCandidates?: Map<string, Array<string>>,
+  scanData: TranscriptScanData,
+  commitHashCandidates: Map<string, Array<string>> = new Map(),
 ): Promise<DiscoverResult> {
   const existing = await loadTranscriptsDirs(stateDir);
   const existingSet = new Set(existing);
@@ -259,25 +266,13 @@ export async function discoverWorktreeTranscriptDirs(
   addIfNew(getClaudeProjectDir(projectDir));
 
   // Strategy 1: git worktree list → construct expected dir names
-  try {
-    const output = execSync('git worktree list --porcelain', {
-      cwd: projectDir,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    for (const match of output.matchAll(/^worktree (.+)$/gm)) {
-      const worktreePath = match[1];
-      if (worktreePath === projectDir) continue;
-      addIfNew(getClaudeProjectDir(worktreePath));
-    }
-  } catch {
-    // git command failed — continue with other strategies
+  for (const worktreePath of listWorktreePaths(projectDir)) {
+    if (worktreePath !== projectDir) addIfNew(getClaudeProjectDir(worktreePath));
   }
 
   // Strategy 2: use scan data to find dirs whose sessions resolve to this project
-  const { mainPathMap, cwdMap } = scanData ?? buildTranscriptScanData();
-  const matchingDirs = mainPathMap.get(projectDir) ?? [];
-  for (const dir of matchingDirs) {
+  const { mainPathMap, cwdMap } = scanData;
+  for (const dir of mainPathMap.get(projectDir) ?? []) {
     addIfNew(dir);
   }
 
@@ -292,28 +287,21 @@ export async function discoverWorktreeTranscriptDirs(
   for (const [transcriptDir, cwd] of cwdMap) {
     if (existingSet.has(transcriptDir)) continue;
     if (existsSync(cwd)) continue;
-    if (cwd === projectDir || cwd.startsWith(projectDirPrefix)) {
+    if (cwd.startsWith(projectDirPrefix)) {
       addIfNew(transcriptDir);
     }
   }
 
   // Strategy 4: commit hash verification for deleted worktrees outside the project dir.
   // Uses pre-extracted hashes from git log results, verified via git cat-file --batch-check.
-  if (commitHashCandidates) {
-    for (const [transcriptDir, hashes] of commitHashCandidates) {
-      if (existingSet.has(transcriptDir)) continue;
-      if (verifyHashesAgainstRepo(hashes, projectDir)) {
-        addIfNew(transcriptDir);
-      }
+  for (const [transcriptDir, hashes] of commitHashCandidates) {
+    if (existingSet.has(transcriptDir)) continue;
+    if (verifyHashesAgainstRepo(hashes, projectDir)) {
+      addIfNew(transcriptDir);
     }
   }
 
-  // Single batch append if anything was discovered — the file is add-only and
-  // deduped on load, so appending avoids clobbering concurrent writers.
-  if (discovered.length > 0) {
-    await ensureStateDir(stateDir);
-    writeFileSync(statePaths(stateDir).transcriptsDirs, discovered.join('\n') + '\n', { flag: 'a' });
-  }
+  await addTranscriptsDirs(stateDir, discovered);
 
   return { existing: existing.length, discovered: discovered.length };
 }
@@ -357,16 +345,4 @@ export async function discoverWorktreeTranscriptDirsForAll(
     totalExisting += result.existing;
   }
   return { existing: totalExisting, discovered: totalDiscovered };
-}
-
-/**
- * Discover worktree transcript dirs for a single project.
- * Convenience wrapper that builds scan data and commit hash candidates internally.
- */
-export async function discoverWorktreeTranscriptDirsForOne(
-  projectDir: string,
-  stateDir: string,
-  log?: (msg: string) => void,
-): Promise<DiscoverResult> {
-  return discoverWorktreeTranscriptDirsForAll([{ projectDir, stateDir }], log);
 }

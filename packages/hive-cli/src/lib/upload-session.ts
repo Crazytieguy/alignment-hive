@@ -6,92 +6,116 @@ import {
   computeConsentWindows,
   extractSessionSummary,
   extractWorkflowRunRow,
+  formatSessionStatus,
   isInConsentWindow,
 } from '@alignment-hive/session-data';
-import { getClaudeProjectDir, parseCwdFromLine, statePaths } from './config';
+import { getClaudeProjectDir, isSharingDisabledLocally, readStateFile, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
-import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
-import { sanitizeDeep } from './sanitize';
-import { isSessionExcluded, loadSessionState, loadUploadedSessions, recordUploadStarted, recordUploadedSessions, runAgentMigration, runWorkflowBackfill } from './session-state';
-import type { WorkflowRunUpload } from './convex';
-import type { KnownEntry, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
-import type { DiscoveredSession } from './session-state';
+import { hive } from './messages';
+import { buildSessionMeta, parseEntries } from './session-format';
+import { sanitizeDeep, sanitizeString } from './sanitize';
+import {
+  computeSessionStatus,
+  findAgentsForParent,
+  hasIncompleteUpload,
+  isSessionExcluded,
+  loadSessionState,
+  loadUploadedSessions,
+  recordUploadStarted,
+  recordUploadedSessions,
+  runWorkflowBackfill,
+} from './session-state';
+import { extractCwds } from './transcript-discovery';
+import type { ProjectIds } from './config';
+import type { Id } from '../../../web/convex/_generated/dataModel';
+import type { UploadRecord, WorkflowRunUpload } from './convex';
+import type { DiscoveredSession, SessionState, StatusContext } from './session-state';
+import type { ConsentWindow, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
 
-async function readCommitHash(stateDir: string, sessionId: string): Promise<string | undefined> {
-  try {
-    const hash = await readFile(statePaths(stateDir).commitHash(sessionId), 'utf-8');
-    return hash.trim() || undefined;
-  } catch {
-    return undefined;
-  }
+const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
+const SUMMARY_CONCURRENCY = 10;
+
+/** Split into fixed-size chunks (bounds the per-mutation arg-array size for large workflows). */
+function chunk<T>(arr: Array<T>, size: number): Array<Array<T>> {
+  const out: Array<Array<T>> = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** Map over items with at most `size` calls in flight at once. */
+export async function mapBatched<T, TResult>(
+  items: Array<T>,
+  size: number,
+  fn: (item: T) => Promise<TResult>,
+): Promise<Array<TResult>> {
+  const out: Array<TResult> = [];
+  for (const batch of chunk(items, size)) out.push(...(await Promise.all(batch.map(fn))));
+  return out;
 }
 
 /** Read, parse, and sanitize a session file. Also extracts cwds for worktree agent discovery. */
 export async function readAndSanitizeSession(sessionPath: string) {
   const rawContent = await readFile(sessionPath, 'utf-8');
-
-  const entries: Array<KnownEntry> = [];
-  const cwds = new Set<string>();
-  for (const rawEntry of parseJsonl(rawContent)) {
-    const { entry } = transformEntry(rawEntry);
-    if (entry) {
-      entries.push(entry as KnownEntry);
-      if ('cwd' in entry && typeof entry.cwd === 'string' && entry.cwd.startsWith('/')) {
-        cwds.add(entry.cwd);
-      }
-    }
-  }
-
-  const sanitizedEntries = entries.map((e) => sanitizeDeep(e));
+  const entries = parseEntries(rawContent);
   const rawSummary = extractSessionSummary(entries);
-  const summary = rawSummary ? sanitizeDeep(rawSummary) : undefined;
-  const hasAssistant = entries.some((e) => e.type === 'assistant');
-
-  return { sanitizedEntries, summary, hasAssistant, cwds };
+  return {
+    sanitizedEntries: entries.map((e) => sanitizeDeep(e)),
+    summary: rawSummary ? sanitizeString(rawSummary) : undefined,
+    cwds: extractCwds(rawContent),
+  };
 }
 
-/** Parse all entries and extract a sanitized summary. Same logic as readAndSanitizeSession. */
+export type SessionReadResult = Awaited<ReturnType<typeof readAndSanitizeSession>>;
+
 export async function readSessionSummary(sessionPath: string): Promise<string> {
-  const rawContent = await readFile(sessionPath, 'utf-8');
-
-  const entries: Array<KnownEntry> = [];
-  for (const rawEntry of parseJsonl(rawContent)) {
-    const { entry } = transformEntry(rawEntry);
-    if (entry) entries.push(entry as KnownEntry);
-  }
-
-  const rawSummary = extractSessionSummary(entries);
-  return rawSummary ? sanitizeDeep(rawSummary) : '';
+  const summary = extractSessionSummary(parseEntries(await readFile(sessionPath, 'utf-8')));
+  return summary ? sanitizeString(summary) : '';
 }
 
-/** Extract cwds from a session file without full parsing or sanitization. For migration only. */
-async function readSessionCwds(sessionPath: string) {
-  const rawContent = await readFile(sessionPath, 'utf-8');
-  const cwds = new Set<string>();
-  for (const line of rawContent.split('\n')) {
-    const cwd = parseCwdFromLine(line);
-    if (cwd) cwds.add(cwd);
-  }
-  return { cwds };
-}
-
-/** Load session state and run one-time agent migration if needed. */
-export async function loadSessionStateWithAgentMigration(stateDir: string, transcriptsDirs: Array<string>, projectCwd?: string) {
+/** Load session state, then apply the workflow backfill (reopens uploads missing workflow data). */
+export async function loadSessionStateWithMigrations(
+  stateDir: string,
+  transcriptsDirs: Array<string>,
+  projectCwd: string,
+): Promise<SessionState & { migrationTimestamp: number | null }> {
   const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd);
-  const migrationTimestamp = await runAgentMigration(
-    state, stateDir, transcriptsDirs,
-    readSessionCwds,
-  );
-  // Reopen already-uploaded parents that are missing newly-discovered workflow subagents or
-  // parseable-but-unrecorded run metadata. Run discovery checks the parent's own project dir
-  // only (empty cwd set): parsing every uploaded parent session for worktree cwds on each state
-  // load would be prohibitive — worktree runs are covered by the discoveredRunIds recorded at
-  // upload time (see needsWorkflowReopen).
-  const effectiveMigrationTs = await runWorkflowBackfill(
-    state, stateDir, migrationTimestamp,
-    (parent) => discoverParseableRunIds(parent, new Set()),
-  );
-  return { ...state, migrationTimestamp: effectiveMigrationTs };
+  // Run discovery reads the parent's own project dir only (empty cwd set): parsing every uploaded
+  // parent for worktree cwds on each state load would be prohibitive, and worktree runs come back
+  // via the discoveredRunIds recorded at upload (see needsWorkflowReopen).
+  const migrationTimestamp = await runWorkflowBackfill(state, stateDir, async (parent) => [
+    ...(await readParseableRunBlobs(parent, new Set())).keys(),
+  ]);
+  return { ...state, migrationTimestamp };
+}
+
+export interface SessionRow {
+  session: DiscoveredSession;
+  status: ReturnType<typeof computeSessionStatus>;
+  partialUpload: boolean;
+  statusLabel: string;
+  summary: string;
+}
+
+/**
+ * The session list as the user sees it (CLI table and review UI): newest first, with status,
+ * partial-upload flag and a sanitized summary.
+ */
+export async function summarizeSessions(
+  state: Pick<SessionState, 'parentSessions' | 'uploadedMap' | 'excludedSet' | 'startedMap'>,
+  statusCtx: StatusContext,
+): Promise<Array<SessionRow>> {
+  const sorted = [...state.parentSessions].sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  return mapBatched(sorted, SUMMARY_CONCURRENCY, async (session) => {
+    const status = computeSessionStatus(session, statusCtx);
+    const partialUpload = hasIncompleteUpload(session.sessionId, state.uploadedMap, state.startedMap);
+    return {
+      session,
+      status,
+      partialUpload,
+      statusLabel: formatSessionStatus(status, partialUpload),
+      summary: await readSessionSummary(session.path).catch(() => ''),
+    };
+  });
 }
 
 /** Build NDJSON upload content from sanitized entries. */
@@ -100,27 +124,22 @@ function buildUploadContent(
   sessionId: string,
   checkoutId: string,
   rawMtime: string,
-  agent?: { parentSessionId?: string; agentType?: string; workflowRunId?: string },
+  agent?: Pick<DiscoveredSession, 'parentSessionId' | 'agentType' | 'workflowRunId'>,
 ) {
-  const meta = {
-    _type: 'session-meta' as const,
-    version: SESSION_FORMAT_VERSION,
+  const meta = buildSessionMeta({
     sessionId,
     checkoutId,
     extractedAt: new Date().toISOString(),
     rawMtime,
     messageCount: sanitizedEntries.length,
-    ...(agent?.parentSessionId && { parentSessionId: agent.parentSessionId }),
-    ...(agent?.agentType && { agentType: agent.agentType }),
-    ...(agent?.workflowRunId && { workflowRunId: agent.workflowRunId }),
-  };
-
+    ...agent,
+  });
   const lines = [JSON.stringify(meta), ...sanitizedEntries.map((e) => JSON.stringify(e))];
   return `${lines.join('\n')}\n`;
 }
 
 /** Upload a file to a Convex storage URL. Returns the storageId. */
-async function uploadToStorage(url: string, content: string) {
+async function uploadToStorage(url: string, content: string): Promise<Id<'_storage'>> {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-ndjson' },
@@ -135,48 +154,24 @@ async function uploadToStorage(url: string, content: string) {
   if (!result.storageId) {
     throw new Error('No storage ID returned');
   }
-  return result.storageId;
+  return result.storageId as Id<'_storage'>;
 }
 
 export interface ConsentWindows {
-  global: Array<{ start: number; end: number }>;
-  project: Array<{ start: number; end: number }>;
+  global: Array<ConsentWindow>;
+  project: Array<ConsentWindow>;
 }
 
-/** Compute consent windows for the current project. Returns null if unavailable. */
-export async function loadConsentWindows(
-  ids: { directory: string; gitRemote?: string },
-): Promise<ConsentWindows | null> {
+export async function loadConsentWindows(ids: ProjectIds): Promise<ConsentWindows> {
   const consentHistory = await getConsentHistory(ids);
-  if (!consentHistory) return null;
   return {
     global: computeConsentWindows(consentHistory.global),
     project: computeConsentWindows(consentHistory.project),
   };
 }
 
-/** Check if a session's mtime falls within consent windows. */
-export function isInConsentWindows(mtime: number, windows: ConsentWindows | null) {
-  if (!windows) return true; // No history available — let backend enforce
+export function isInConsentWindows(mtime: number, windows: ConsentWindows): boolean {
   return isInConsentWindow(mtime, windows.global) && isInConsentWindow(mtime, windows.project);
-}
-
-export type SessionReadResult = Awaited<ReturnType<typeof readAndSanitizeSession>>;
-
-export interface UploadParentOpts {
-  parent: DiscoveredSession;
-  parentRead: SessionReadResult;
-  agents: Array<DiscoveredSession>;
-  checkoutId: string;
-  ids: { directory: string; gitRemote?: string };
-  stateDir: string;
-}
-
-/** Split into fixed-size chunks (bounds the per-mutation arg-array size for large workflows). */
-function chunk<T>(arr: Array<T>, size: number): Array<Array<T>> {
-  const out: Array<Array<T>> = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
 }
 
 function escapeRegExp(s: string): string {
@@ -217,7 +212,7 @@ interface DiscoveredWorkflowRun {
  * what keeps the backfill loop-safe (malformed files never count as runs), so both discovery
  * flavors below must share it.
  */
-async function readParseableRunBlobs(
+export async function readParseableRunBlobs(
   parent: DiscoveredSession,
   cwds: Set<string>,
 ): Promise<Map<string, WorkflowRunBlob>> {
@@ -250,11 +245,6 @@ async function readParseableRunBlobs(
   return byRunId;
 }
 
-/** Parseable run ids only — no sanitization (the backfill calls this on every state load). */
-export async function discoverParseableRunIds(parent: DiscoveredSession, cwds: Set<string>): Promise<Array<string>> {
-  return [...(await readParseableRunBlobs(parent, cwds)).keys()];
-}
-
 /**
  * Find a parent session's workflow runs, sanitize each blob (secret redaction + home-path
  * normalization), and extract the indexed row.
@@ -266,119 +256,160 @@ export async function discoverWorkflowRuns(
   const home = homedir();
   const runs: Array<DiscoveredWorkflowRun> = [];
   for (const [workflowRunId, data] of await readParseableRunBlobs(parent, cwds)) {
-    // Strict: run blobs are arbitrary script-built JSON, so keys and SAFE_KEYS-named values
-    // (name, cwd, ...) must be scanned too — unlike schema-shaped transcript entries.
-    const blob = redactHomePaths(sanitizeDeep(data, { strict: true }), home);
-    const row = extractWorkflowRunRow(workflowRunId, blob);
-    // Cap every indexed scalar so the saveWorkflowRuns mutation args stay well under Convex
-    // limits regardless of blob contents (full text remains in the storage blob) — an over-long
-    // field would fail the save on EVERY retry, burning the backfill's bounded reopen attempts.
-    if (row.summary && row.summary.length > MAX_ROW_SUMMARY) {
-      row.summary = `${row.summary.slice(0, MAX_ROW_SUMMARY)}…`;
-    }
-    if (row.workflowName && row.workflowName.length > MAX_ROW_FIELD) {
-      row.workflowName = `${row.workflowName.slice(0, MAX_ROW_FIELD)}…`;
-    }
-    if (row.status && row.status.length > MAX_ROW_FIELD) {
-      row.status = `${row.status.slice(0, MAX_ROW_FIELD)}…`;
-    }
-    runs.push({ row, blob });
+    // strict: see sanitizeDeep
+    const blob = redactHomePaths(sanitizeDeep(data, true), home);
+    runs.push({ row: extractWorkflowRunRow(workflowRunId, blob), blob });
   }
   return runs;
 }
 
-const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
-const MAX_ROW_SUMMARY = 2000; // cap the indexed run-summary scalar (full text stays in the blob)
-const MAX_ROW_FIELD = 500; // cap the short indexed scalars (workflowName, status)
+export type UploadResult = { ok: true; agentCount: number; alreadyUploaded?: true } | { ok: false; error: string };
+
+export interface UploadOneOpts {
+  session: DiscoveredSession;
+  state: Pick<SessionState, 'agentsByParent'>;
+  statusCtx: StatusContext;
+  consentWindows: ConsentWindows;
+  transcriptsDirs: Array<string>;
+  checkoutId: string;
+  ids: ProjectIds;
+  stateDir: string;
+}
 
 /**
- * Upload a parent session, all its agents (Task + workflow subagents), and its workflow
- * run-metadata using the bulk backend endpoints. Shared by upload-send.ts and review-router.ts.
- *
- * Consent model: agents and runs inherit their parent's consent. Consent is verified once for the
- * parent (by the backend in generateUploadUrls/saveUploads/saveWorkflowRuns). The parent is saved
- * first so its record exists before agents/runs reference it. Large workflows are chunked across
- * round trips; the local uploaded-sessions record is written only after everything succeeds, so a
- * partial failure simply retries (all backend writes are idempotent upserts).
+ * The single-session upload path shared by `hive upload send` and the review UI: gate on status
+ * and consent windows, read and sanitize, find agents, upload. Never throws; failures come back
+ * as `{ ok: false, error }`.
  */
-export async function uploadParentWithAgents(opts: UploadParentOpts) {
-  const { parent, parentRead, agents, checkoutId, ids, stateDir } = opts;
-
-  if (!parentRead.hasAssistant) {
-    return { parentSuccess: false, agentSuccesses: 0, agentFailures: 0, error: 'No assistant messages' } as const;
+export async function uploadOneSession(opts: UploadOneOpts): Promise<UploadResult> {
+  const { session, statusCtx, consentWindows, transcriptsDirs } = opts;
+  const status = computeSessionStatus(session, statusCtx);
+  if (status.type === 'excluded')
+    return { ok: false, error: hive.upload.sessionExcluded(session.sessionId.slice(0, 8)) };
+  if (status.type === 'uploaded') return { ok: true, agentCount: 0, alreadyUploaded: true };
+  const veto = await uploadVeto(opts.stateDir, session.sessionId);
+  if (veto) return { ok: false, error: veto };
+  if (!isInConsentWindows(session.mtime.getTime(), consentWindows)) {
+    return { ok: false, error: hive.upload.outsideConsentWindow };
   }
+  try {
+    const parentRead = await readAndSanitizeSession(session.path);
+    const agents = await findAgentsForParent(session, opts.state.agentsByParent, transcriptsDirs, parentRead.cwds);
+    return await uploadParentWithAgents({ parent: session, parentRead, agents, ...opts });
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+interface UploadParentOpts {
+  parent: DiscoveredSession;
+  parentRead: SessionReadResult;
+  agents: Array<DiscoveredSession>;
+  checkoutId: string;
+  ids: ProjectIds;
+  stateDir: string;
+}
+
+/**
+ * Upload a parent session, then its agents, then (best-effort) its workflow run metadata. Agents
+ * and runs inherit the parent's consent, which the backend checks once per call. The parent is
+ * saved first so agents and runs can reference its record. Every backend write is an idempotent
+ * upsert, so a failed attempt is simply retried on the next state load; only run-upload failures
+ * are tolerated (recorded via discoveredRunIds / runUploadAttempts so the workflow backfill can
+ * reopen the parent, bounded by MAX_RUN_UPLOAD_ATTEMPTS). Backend failures throw.
+ */
+/**
+ * A reason to stop an upload that was eligible when the caller loaded its state: the local
+ * opt-out (`hive consent disable`) or an exclusion recorded since (the review UI's upload and
+ * exclude are independent requests). Read fresh from disk immediately before every transfer and
+ * every backend save, so a marker written during the slow work in between (reading, sanitizing,
+ * URL minting) stops the next send; only a request already in flight completes.
+ */
+async function uploadVeto(stateDir: string, sessionId: string): Promise<string | null> {
+  if (isSharingDisabledLocally(stateDir)) return hive.upload.noProjectConsent;
+  if (await isSessionExcluded(stateDir, sessionId)) return 'Session was excluded during upload';
+  return null;
+}
+
+class UploadVetoedError extends Error {}
+
+async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadResult> {
+  const { parent, parentRead, agents, checkoutId, ids, stateDir } = opts;
+  const assertNoVeto = async (): Promise<void> => {
+    const reason = await uploadVeto(stateDir, parent.sessionId);
+    if (reason) throw new UploadVetoedError(reason);
+  };
+  const send = async (url: string, content: string): Promise<Id<'_storage'>> => {
+    await assertNoVeto();
+    return uploadToStorage(url, content);
+  };
 
   const rawMtime = parent.mtime.toISOString();
-  const lastModified = new Date(rawMtime).getTime();
-  const commitHash = await readCommitHash(stateDir, parent.sessionId);
-  const validLastModified = isFinite(lastModified) ? lastModified : undefined;
-  const consentIds = { directory: ids.directory, gitRemote: ids.gitRemote, lastModified: validLastModified };
+  const consentIds = { directory: ids.directory, gitRemote: ids.gitRemote, lastModified: parent.mtime.getTime() };
   const sessionMeta = {
+    ...consentIds,
     checkoutId,
-    directory: ids.directory,
-    gitRemote: ids.gitRemote,
-    lastModified: validLastModified,
-    sessionStartGitCommitHash: commitHash,
+    sessionStartGitCommitHash:
+      (await readStateFile(statePaths(stateDir).commitHash(parent.sessionId)))?.trim() || undefined,
   };
-  const fail = (error: string, agentFailures = 0) =>
-    ({ parentSuccess: false, agentSuccesses: 0, agentFailures, error } as const);
 
   // 1. Upload + save the PARENT first, so its record exists before agents/runs reference it.
-  const parentUrls = await generateUploadUrls(parent.sessionId, [], consentIds);
-  const parentUrl = parentUrls?.[parent.sessionId];
-  if (!parentUrl) return fail('Failed to get upload URL for parent session');
+  await assertNoVeto();
+  const parentUrl = (await generateUploadUrls(parent.sessionId, [], consentIds))[parent.sessionId];
+  if (!parentUrl) throw new Error('No upload URL for parent session');
   // Record the attempt before the first byte reaches the backend: a mid-flight failure must
   // leave a local trace — the exclusion veto is refused for such sessions (hasIncompleteUpload)
   // because the partial data may already have been downloaded. Fail closed if the trace can't
   // be written. (Deliberately after the URL mint, so an offline/auth failure — which sends
   // nothing — doesn't spuriously block exclusion.)
   try {
-    await recordUploadStarted(stateDir, parent.sessionId, rawMtime);
+    await recordUploadStarted(stateDir, parent.sessionId);
   } catch {
-    return fail('Failed to record upload start');
+    throw new Error('Failed to record upload start');
   }
-  let parentStorageId: string;
-  try {
-    parentStorageId = await uploadToStorage(
-      parentUrl,
-      buildUploadContent(parentRead.sanitizedEntries, parent.sessionId, checkoutId, rawMtime),
-    );
-  } catch (err) {
-    return fail(err instanceof Error ? err.message : 'Parent upload failed');
-  }
-  // An exclusion may have been recorded since the caller loaded its state snapshot (the review
-  // UI's upload and exclude are independent requests). Re-check fresh from disk before the
-  // first accessor-visible write; a write landing inside the remaining ms-scale window loses
-  // the race, but the recorded exclusion still stops all future uploads.
-  if (await isSessionExcluded(stateDir, parent.sessionId)) {
-    return fail('Session was excluded during upload');
-  }
-  const parentSaved = await saveUploads(parent.sessionId, sessionMeta, [
-    { sessionId: parent.sessionId, storageId: parentStorageId, summary: parentRead.summary, lineCount: parentRead.sanitizedEntries.length },
+  const parentStorageId = await send(
+    parentUrl,
+    buildUploadContent(parentRead.sanitizedEntries, parent.sessionId, checkoutId, rawMtime),
+  );
+  // Before the first accessor-visible write. A write landing inside the remaining ms-scale
+  // window loses the race, but the recorded veto still stops all future uploads.
+  await assertNoVeto();
+  await saveUploads(parent.sessionId, sessionMeta, [
+    {
+      sessionId: parent.sessionId,
+      storageId: parentStorageId,
+      summary: parentRead.summary,
+      lineCount: parentRead.sanitizedEntries.length,
+    },
   ]);
-  if (!parentSaved) return fail('Failed to save parent upload');
 
-  // 2. Upload agents in chunks: one URL mint + blob uploads run CONCURRENTLY within the chunk + one
-  //    save per chunk. (Read+sanitize+network per agent is independent; serializing them made large
-  //    workflows take minutes.)
+  // 2. Agents in chunks: one URL mint, concurrent blob uploads, one save per chunk.
   for (const batch of chunk(agents, UPLOAD_CHUNK)) {
-    const urls = await generateUploadUrls(parent.sessionId, batch.map((a) => a.sessionId), consentIds);
-    if (!urls) return fail('Failed to get upload URLs for agents');
-
-    const settled = await Promise.allSettled(
-      batch.map(async (agent): Promise<Parameters<typeof saveUploads>[2][number]> => {
+    await assertNoVeto();
+    const urls = await generateUploadUrls(
+      parent.sessionId,
+      batch.map((a) => a.sessionId),
+      consentIds,
+    );
+    const uploads = await Promise.all(
+      batch.map(async (agent): Promise<UploadRecord> => {
         const url = urls[agent.sessionId];
         if (!url) throw new Error('No upload URL for agent');
         const agentRead = await readAndSanitizeSession(agent.path);
-        const content = buildUploadContent(agentRead.sanitizedEntries, agent.sessionId, checkoutId, agent.mtime.toISOString(), {
-          parentSessionId: parent.sessionId,
-          agentType: agent.agentType,
-          workflowRunId: agent.workflowRunId,
-        });
-        const storageId = await uploadToStorage(url, content);
+        const content = buildUploadContent(
+          agentRead.sanitizedEntries,
+          agent.sessionId,
+          checkoutId,
+          agent.mtime.toISOString(),
+          {
+            parentSessionId: parent.sessionId,
+            agentType: agent.agentType,
+            workflowRunId: agent.workflowRunId,
+          },
+        );
         return {
           sessionId: agent.sessionId,
-          storageId,
+          storageId: await send(url, content),
           summary: agentRead.summary,
           lineCount: agentRead.sanitizedEntries.length,
           parentSessionId: parent.sessionId,
@@ -387,51 +418,45 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
         };
       }),
     );
-
-    const uploads: Parameters<typeof saveUploads>[2] = [];
-    let failed = 0;
-    for (const r of settled) {
-      if (r.status === 'fulfilled') uploads.push(r.value);
-      else failed++;
-    }
-    if (failed > 0) return fail(`${failed} agent upload(s) failed`, failed);
-    if (uploads.length > 0 && !(await saveUploads(parent.sessionId, sessionMeta, uploads))) {
-      return fail('Failed to save agent uploads');
-    }
+    await assertNoVeto();
+    await saveUploads(parent.sessionId, sessionMeta, uploads);
   }
 
-  // 3. Upload workflow run-metadata blobs in chunks — BEST-EFFORT. The parent + agents (the primary
-  //    content) are already saved, so a run failure must not force a full re-upload loop. Any
-  //    parseable run not in uploadedRunIds reopens this parent via the workflow backfill on a later
-  //    state load (malformed run files never reopen — they can never upload).
+  // 3. Workflow run-metadata blobs in chunks, BEST-EFFORT: the parent + agents are already saved,
+  //    so a run failure must not force a full re-upload loop. Any parseable run not in
+  //    uploadedRunIds reopens this parent via the workflow backfill on a later state load.
   const runs = await discoverWorkflowRuns(parent, parentRead.cwds);
   const uploadedRunIds: Array<string> = [];
   for (const batch of chunk(runs, UPLOAD_CHUNK)) {
-    const urls = await generateUploadUrls(parent.sessionId, [], consentIds, batch.map((r) => r.row.workflowRunId));
-    if (!urls) break;
-
-    const settled = await Promise.allSettled(
-      batch.map(async (run): Promise<WorkflowRunUpload> => {
-        const url = urls[run.row.workflowRunId];
-        if (!url) throw new Error('No upload URL for workflow run');
-        return { ...run.row, storageId: await uploadToStorage(url, JSON.stringify(run.blob)) };
-      }),
-    );
-    // Best-effort: only a fully-successful batch is saved/recorded; stop on the first failure
-    // (the backfill reopens any runs we didn't record).
-    if (settled.some((r) => r.status === 'rejected')) break;
-    const saveRuns = settled.map((r) => (r as PromiseFulfilledResult<WorkflowRunUpload>).value);
-    if (saveRuns.length > 0 && !(await saveWorkflowRuns(parent.sessionId, consentIds, saveRuns))) {
+    await assertNoVeto();
+    try {
+      const urls = await generateUploadUrls(
+        parent.sessionId,
+        [],
+        consentIds,
+        batch.map((r) => r.row.workflowRunId),
+      );
+      const saveRuns = await Promise.all(
+        batch.map(async (run): Promise<WorkflowRunUpload> => {
+          const url = urls[run.row.workflowRunId];
+          if (!url) throw new Error('No upload URL for workflow run');
+          return { ...run.row, storageId: await send(url, JSON.stringify(run.blob)) };
+        }),
+      );
+      await assertNoVeto();
+      await saveWorkflowRuns(parent.sessionId, consentIds, saveRuns);
+      uploadedRunIds.push(...saveRuns.map((r) => r.workflowRunId));
+    } catch (err) {
+      if (err instanceof UploadVetoedError) throw err;
+      if (process.env.DEBUG)
+        console.error(`workflow run upload failed: ${err instanceof Error ? err.message : String(err)}`);
       break;
     }
-    uploadedRunIds.push(...saveRuns.map((r) => r.workflowRunId));
   }
 
-  // 4. Record the parent locally with its agents + runs. workflowRunIds = what actually saved;
-  //    discoveredRunIds = every parseable run seen this attempt (cwd-aware, covers worktree runs
-  //    the backfill's parent-dir-only discovery can't see); runUploadAttempts counts consecutive
-  //    attempts with a failed run so the backfill's reopen stays bounded — a fully-recorded
-  //    attempt resets it.
+  // 4. Record the parent locally. workflowRunIds = what actually saved; discoveredRunIds = every
+  //    parseable run seen this attempt (cwd-aware); runUploadAttempts counts consecutive attempts
+  //    with a failed run so the backfill's reopen stays bounded, and a full success resets it.
   const discoveredRunIds = runs.map((r) => r.row.workflowRunId);
   const allRunsRecorded = uploadedRunIds.length === discoveredRunIds.length;
   const prevAttempts = allRunsRecorded
@@ -443,10 +468,10 @@ export async function uploadParentWithAgents(opts: UploadParentOpts) {
       rawMtime,
       agentSessionIds: agents.map((a) => a.sessionId),
       workflowRunIds: uploadedRunIds,
-      ...(discoveredRunIds.length > 0 && { discoveredRunIds }),
-      ...(!allRunsRecorded && { runUploadAttempts: prevAttempts + 1 }),
+      discoveredRunIds,
+      runUploadAttempts: allRunsRecorded ? undefined : prevAttempts + 1,
     },
   ]);
 
-  return { parentSuccess: true, agentSuccesses: agents.length, agentFailures: 0 } as const;
+  return { ok: true, agentCount: agents.length };
 }

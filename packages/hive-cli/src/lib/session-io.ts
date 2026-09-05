@@ -2,11 +2,8 @@ import { createReadStream } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { basename, join } from 'node:path';
-import { SESSION_FORMAT_VERSION, parseJsonl, transformEntry } from './session-format';
-import { getClaudeProjectDir, getConfig, getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
-import {  discoverSessions } from './session-state';
-import type {DiscoveredSession} from './session-state';
-import type { KnownEntry, SessionMeta } from '@alignment-hive/session-data';
+import { buildSessionMeta, parseEntries } from './session-format';
+import { findInFileHead } from './transcript-discovery';
 import type { ReadSessionResult } from './session-format';
 
 /** Count non-empty lines in a file by streaming (no parsing) */
@@ -20,25 +17,21 @@ export async function countRawLines(filePath: string): Promise<number> {
   return count;
 }
 
-/** Extract parentSessionId from a flat agent file by reading its first line's sessionId field. */
-async function extractParentSessionId(agentPath: string): Promise<string | undefined> {
-  const stream = createReadStream(agentPath, { encoding: 'utf-8' });
-  const rl = createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
+/** parentSessionId of a flat agent file: the sessionId field of its first line. */
+function extractParentSessionId(agentPath: string): string | undefined {
+  let first = true;
+  return (
+    findInFileHead(agentPath, (line) => {
+      if (!first) return null;
+      first = false;
       try {
         const parsed = JSON.parse(line) as Record<string, unknown>;
-        if (typeof parsed.sessionId === 'string') return parsed.sessionId;
-      } catch {}
-      return undefined;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  } finally {
-    rl.close();
-    stream.destroy();
-  }
+        return typeof parsed.sessionId === 'string' ? parsed.sessionId : null;
+      } catch {
+        return null;
+      }
+    }) ?? undefined
+  );
 }
 
 export interface RawSessionRef {
@@ -49,8 +42,18 @@ export interface RawSessionRef {
   workflowRunId?: string;
 }
 
-const AGENT_PREFIX = 'agent-';
+export interface DiscoveredSession extends RawSessionRef {
+  sessionId: string;
+  mtime: Date;
+}
+
+export const AGENT_PREFIX = 'agent-';
 const isAgentFile = (f: string): boolean => f.endsWith('.jsonl') && f.startsWith(AGENT_PREFIX);
+
+/** The rule for resolving a user-typed id prefix against a transcript file name: `abc` matches `abc...` and `agent-abc...`. */
+export function matchesSessionPrefix(fileName: string, prefix: string): boolean {
+  return fileName.startsWith(prefix) || fileName.startsWith(`${AGENT_PREFIX}${prefix}`);
+}
 
 /** Read an agent's sibling `<agent>.meta.json` to get its agentType, if present. */
 export async function readAgentType(agentJsonlPath: string): Promise<string | undefined> {
@@ -71,10 +74,7 @@ export async function readAgentType(agentJsonlPath: string): Promise<string | un
  * the main discovery path (findRawSessions) and the worktree path (findWorktreeAgents) so the
  * two never drift.
  */
-export async function scanSubagentDir(
-  subagentsDir: string,
-  parentSessionId: string,
-): Promise<Array<RawSessionRef>> {
+export async function scanSubagentDir(subagentsDir: string, parentSessionId: string): Promise<Array<RawSessionRef>> {
   const listing = await readdir(subagentsDir).catch(() => [] as Array<string>);
   if (listing.length === 0) return [];
   const present = new Set(listing);
@@ -92,7 +92,11 @@ export async function scanSubagentDir(
     };
     refs.push(ref);
     if (siblings.has(`${stem}.meta.json`)) {
-      metaReads.push(readAgentType(ref.path).then((t) => { if (t) ref.agentType = t; }));
+      metaReads.push(
+        readAgentType(ref.path).then((t) => {
+          if (t) ref.agentType = t;
+        }),
+      );
     }
   };
 
@@ -125,23 +129,22 @@ export async function scanSubagentDir(
 }
 
 export async function findRawSessions(rawDir: string): Promise<Array<RawSessionRef>> {
-  const files = await readdir(rawDir);
-  const rootPresent = new Set(files);
+  const entries = await readdir(rawDir, { withFileTypes: true });
+  const rootPresent = new Set(entries.map((e) => e.name));
   const sessions: Array<RawSessionRef> = [];
   const flatAgentFiles: Array<{ path: string; agentId: string }> = [];
   const dirScans: Array<Promise<Array<RawSessionRef>>> = [];
 
-  for (const f of files) {
-    if (f.endsWith('.jsonl')) {
-      if (f.startsWith(AGENT_PREFIX)) {
-        flatAgentFiles.push({ path: join(rawDir, f), agentId: basename(f, '.jsonl').slice(AGENT_PREFIX.length) });
-      } else {
-        sessions.push({ path: join(rawDir, f) });
-      }
-      continue;
+  for (const e of entries) {
+    const f = e.name;
+    if (e.isDirectory()) {
+      // Per-session dir: scan its subagents/ subtree.
+      dirScans.push(scanSubagentDir(join(rawDir, f, 'subagents'), f));
+    } else if (isAgentFile(f)) {
+      flatAgentFiles.push({ path: join(rawDir, f), agentId: basename(f, '.jsonl').slice(AGENT_PREFIX.length) });
+    } else if (f.endsWith('.jsonl')) {
+      sessions.push({ path: join(rawDir, f) });
     }
-    // f is a per-session dir; scan its subagents/ subtree.
-    dirScans.push(scanSubagentDir(join(rawDir, f, 'subagents'), f));
   }
 
   for (const scanned of await Promise.all(dirScans)) sessions.push(...scanned);
@@ -151,11 +154,8 @@ export async function findRawSessions(rawDir: string): Promise<Array<RawSessionR
   const flatResults = await Promise.all(
     flatAgentFiles.map(async ({ path, agentId }) => {
       const stem = basename(path, '.jsonl');
-      const [parentSessionId, agentType] = await Promise.all([
-        extractParentSessionId(path),
-        rootPresent.has(`${stem}.meta.json`) ? readAgentType(path) : Promise.resolve(undefined),
-      ]);
-      return { path, agentId, parentSessionId, ...(agentType && { agentType }) };
+      const agentType = rootPresent.has(`${stem}.meta.json`) ? await readAgentType(path) : undefined;
+      return { path, agentId, parentSessionId: extractParentSessionId(path), ...(agentType && { agentType }) };
     }),
   );
   sessions.push(...flatResults);
@@ -163,82 +163,41 @@ export async function findRawSessions(rawDir: string): Promise<Array<RawSessionR
   return sessions;
 }
 
-export async function readRawSession(
-  rawPath: string,
-  checkoutId?: string,
-  agentMeta?: Pick<DiscoveredSession, 'parentSessionId' | 'agentType' | 'workflowRunId'>,
-): Promise<ReadSessionResult> {
-  let content: string;
-  let fileStat: Awaited<ReturnType<typeof stat>>;
+/** Stat a scanned ref into a DiscoveredSession; null if the file vanished between scan and stat. */
+export async function toDiscoveredSession(ref: RawSessionRef): Promise<DiscoveredSession | null> {
   try {
-    [content, fileStat] = await Promise.all([readFile(rawPath, 'utf-8'), stat(rawPath)]);
+    const { mtime } = await stat(ref.path);
+    return { ...ref, sessionId: basename(ref.path, '.jsonl'), mtime };
+  } catch {
+    return null;
+  }
+}
+
+/** Parse a discovered session's file for local reading. Null when the file is gone or empty. */
+export async function readRawSession(session: DiscoveredSession): Promise<ReadSessionResult> {
+  let content: string;
+  try {
+    content = await readFile(session.path, 'utf-8');
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    return { error: `Failed to read ${rawPath}: ${err instanceof Error ? err.message : String(err)}` };
+    return { error: `Failed to read ${session.path}: ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  const entries: Array<KnownEntry> = [];
-  for (const rawEntry of parseJsonl(content)) {
-    const { entry } = transformEntry(rawEntry);
-    if (entry) entries.push(entry);
-  }
-
+  const entries = parseEntries(content);
   if (entries.length === 0) return null;
 
-  const filename = basename(rawPath, '.jsonl');
-  const isAgent = filename.startsWith('agent-');
-  const agentId = isAgent ? filename.slice('agent-'.length) : undefined;
-
-  const meta: SessionMeta = {
-    _type: 'session-meta',
-    version: SESSION_FORMAT_VERSION,
-    sessionId: filename,
-    checkoutId: checkoutId ?? 'local',
-    rawMtime: fileStat.mtime.toISOString(),
-    messageCount: entries.length,
-    ...(agentId && { agentId }),
-    ...(agentMeta?.parentSessionId && { parentSessionId: agentMeta.parentSessionId }),
-    ...(agentMeta?.agentType && { agentType: agentMeta.agentType }),
-    ...(agentMeta?.workflowRunId && { workflowRunId: agentMeta.workflowRunId }),
-  };
-
-  return { meta, entries };
-}
-
-/** Discover all sessions (parents + agents) for a cwd, retaining their metadata. */
-export async function discoverRawSessions(cwd: string): Promise<Array<DiscoveredSession>> {
-  const stateDir = getConfig().getStateDir(cwd);
-  let dirs = await loadTranscriptsDirs(stateDir);
-
-  if (dirs.length === 0) {
-    dirs = [getClaudeProjectDir(cwd)];
-  }
-
-  return discoverSessions(dirs, cwd);
-}
-
-// --- SessionSource ---
-
-export interface SessionSource {
-  listSessionFiles: (cwd: string) => Promise<Array<string>>;
-  readSession: (path: string) => Promise<ReadSessionResult>;
-}
-
-// listSessionFiles must be called before readSession — it resolves the checkoutId
-export function createRawSessionSource(): SessionSource {
-  let checkoutId: string | undefined;
-  // Retain discovered records so readSession can stamp agent metadata
-  // (parentSessionId/agentType/workflowRunId) that isn't recoverable from the path alone.
-  let metaByPath = new Map<string, DiscoveredSession>();
-
+  const { sessionId, agentId, parentSessionId, agentType, workflowRunId } = session;
   return {
-    async listSessionFiles(cwd: string) {
-      const stateDir = getConfig().getStateDir(cwd);
-      checkoutId = await getOrCreateCheckoutId(stateDir);
-      const sessions = await discoverRawSessions(cwd);
-      metaByPath = new Map(sessions.map((s) => [s.path, s]));
-      return sessions.map((s) => s.path);
-    },
-    readSession: (path) => readRawSession(path, checkoutId, metaByPath.get(path)),
+    meta: buildSessionMeta({
+      sessionId,
+      checkoutId: 'local',
+      rawMtime: session.mtime.toISOString(),
+      messageCount: entries.length,
+      agentId,
+      parentSessionId,
+      agentType,
+      workflowRunId,
+    }),
+    entries,
   };
 }
