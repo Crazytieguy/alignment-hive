@@ -18,8 +18,9 @@ presentation/
 # Built plugin archives (scripts/plugin-archives.py)
 /dist/
 
-# Review app build output
+# Review app build output and hive-cli release binaries
 packages/review-app/dist/
+packages/hive-cli/dist/
 
 # Rust
 target/

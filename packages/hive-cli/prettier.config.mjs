@@ -1,10 +1,6 @@
-/** @type {import('prettier').Config} **/
-const config = {
+/** @type {import('prettier').Config} */
+export default {
   quoteProps: 'consistent',
   singleQuote: true,
-  trailingComma: 'all',
   printWidth: 120,
-  semi: true,
 };
-
-export default config;

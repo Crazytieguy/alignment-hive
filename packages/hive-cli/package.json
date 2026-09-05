@@ -6,9 +6,10 @@
   "license": "MIT",
   "scripts": {
     "test": "bun test",
-    "lint": "tsc --noEmit -p src/tsconfig.json && eslint src --report-unused-disable-directives --max-warnings 0",
+    "lint": "tsc -p src/tsconfig.json && eslint src --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write src",
+    "generate-secret-rules": "bun src/scripts/generate-secret-rules.ts",
     "build:dev": "bun build --compile src/cli.ts --outfile ../../.dev/hive --define 'process.env.ALIGNMENT_HIVE_DEV=\"1\"'"
   },
   "dependencies": {

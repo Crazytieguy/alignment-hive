@@ -4,12 +4,9 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["./**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["**/*"]
 }
