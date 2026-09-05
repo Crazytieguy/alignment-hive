@@ -36,11 +36,9 @@ vendor.
    Then ask the user to swap in their real key (their own editor; pasting it
    into the chat also works if they don't mind it in the transcript).
 4. `$ROUTER verify-providers` — checks every configured model against the
-   host's authenticated `/models` endpoint without printing the key, and
-   reports each model's context window as the host advertises it. If a model
-   reports `missing`, fix its `name` to an exact ID from the host's catalog
-   and re-run until everything is `found`. The reported windows are what the
-   next step is about.
+   host's authenticated `/models` endpoint without printing the key. If a
+   model reports `missing`, fix its `name` to an exact ID from the host's
+   catalog and re-run until everything is `found`.
 5. **Settle context windows** — read the section below and walk the user
    through the choice.
 6. Create a subagent per model so Claude can delegate to it: copy the
@@ -76,79 +74,60 @@ ID**. The router has no say, and no API response can tell it otherwise:
 - Setup writes `CLAUDE_CODE_MAX_CONTEXT_TOKENS=258400`, the Codex backend's
   effective input limit behind the GPT routes (272K × 95%).
 
-Every routed ID shares that one number — GPT's, every open-weights
-model's, and the Grok routes' if configured. Kimi K3 and GLM-5.2 have 1M-token windows, so a 258400 declaration
-clips them to a quarter of their capacity.
+Every routed ID shares that one number. Kimi K3 and GLM-5.2 have 1M-token
+windows, so a 258400 declaration clips them to a quarter of their capacity.
 
 **Raising the global value is not an option**, so don't offer it: the shipped
-GPT agents and the `choosing-models` skill name the `gpt-5.6-*` IDs,
-which would inherit the larger number and start sending the Codex backend
-requests past its limit. The declared value stays where the GPT routes need
-it.
+GPT agents and the `choosing-models` skill name the `gpt-5.6-*` IDs, which
+would inherit the larger number and start sending the Codex backend
+requests past its limit.
 
-### The window that counts
+### On OpenRouter, pin the window first
 
-The number every option below works from is the window the host
-**guarantees**, not the one it advertises: the `guaranteed` figure
-`verify-providers` prints. On OpenRouter one model slug is served by
-several sub-providers with different windows — Kimi K3 is 1M on most and
-8K on one — and routing does not account for prompt size, so a request can
-land on the narrowest. The router pins the sub-providers for you: set in
-the model's entry
+OpenRouter spreads each model over several sub-providers with different
+windows. Set in the model's entry
 ```toml
 min-context-window = 1000000
 ```
-and the service routes that model only to sub-providers serving at least
-that, re-picking them from OpenRouter's endpoint list at every start;
-`verify-providers` shows which it pins and which it excludes. A model with
-no qualifying sub-provider is not served rather than served unpinned.
-Pointing the entry at one provider's own OpenAI-compatible endpoint
-instead — Moonshot, Fireworks and Together each publish one — sidesteps the
-question.
+to exclude the sub-providers that don't serve that window. The options
+below then work from that number (on other hosts, from the window
+`verify-providers` reports). Or point the entry at one provider's own
+endpoint — Moonshot, Fireworks and Together each publish one — and skip
+this.
 
 ### The three options
 
 **A. Leave it alone.** The model is clipped to 258400 and every number Claude
 Code displays is true.
 
-**B. Map the picker row to a 1M Claude entry** — for a guaranteed window
-of 1M or more (on OpenRouter, `min-context-window = 1000000`). In the
+**B. Map the picker row to a 1M Claude entry** — for a 1M window. In the
 model's `modelPicker` row (step 7) add `"behavesAs": "claude-opus-4-8"`:
 ```json
 { "model": "kimi-k3", "label": "Kimi K3", "behavesAs": "claude-opus-4-8" }
 ```
 Claude Code then gives that routing ID Opus 4.8's client-side profile, 1M
 window included; the request still names the routing ID and goes to the
-host. Every displayed number stays true, the other routes keep the declared
-window, and the row applies wherever the routing ID is resolved — the
-picker, agent definitions, Workflow `agent()` calls — in sessions started
-after it is saved. The field is undocumented; if a Claude Code release
-drops it, the model falls back to the clipped window. Not together with C
-on the same route.
+host. The row applies wherever the routing ID is resolved — the picker,
+agent definitions, Workflow `agent()` calls — in sessions started after it
+is saved. The field is undocumented; if a Claude Code release drops it, the
+model falls back to the clipped window. Not together with C on the same
+route.
 
-**C. Scale the route's reported usage** — for a guaranteed window between
-258400 and 1M, where no Claude entry matches (on OpenRouter,
-`min-context-window` = that window). Add to the model's entry:
+**C. Scale the route's reported usage** — for a window between 258400 and
+1M. Add to the model's entry:
 ```toml
 context-window-scaling = true
 ```
 The router divides that route's reported usage by `real window / 258400`, so
-Claude Code compacts at the model's real limit instead of at 258400 (auto-
-compaction fires when the usage reported for a conversation approaches the
-believed window, and the router controls the reported numbers). It reads
-the real window from the host's catalog at service start and leaves the
-route unscaled if what it finds is no larger than 258400 anyway. `doctor`
-lists the window it settled on for each route, and fails when a route asked
-for scaling and nothing was found — then set `context-window = <tokens>` in
-that model's entry, using the host's own number as-is (Claude Code holds
-back up to 20000 tokens of the declared window for output, which is roughly
-8% of a 1M window once scaled, so it needs no margin subtracted).
+Claude Code compacts at the model's real limit instead of at 258400. The
+real window comes from the host at service start; if `doctor` says none
+was found, set `context-window = <tokens>` in the entry, using the host's
+own number as-is (no margin).
 
-Cost: for a scaled route the token counts Claude Code shows are in the
+Cost: the token counts Claude Code shows for a scaled route are in the
 declared coordinate system, not the real one — at 1M real tokens the meter
-reads 258400 and calls it full. Percentages stay right; absolute token counts
-and that route's cost telemetry do not. Nothing outside the router config
-changes.
+reads 258400 and calls it full. Percentages stay right; absolute token
+counts and that route's cost telemetry do not.
 
 When moving a route from B to C, end the sessions that loaded the row
 before enabling scaling: a session that believes the row's window while
@@ -166,8 +145,5 @@ of their own if the user wants their full window back.
 
 ### After applying the choice
 
-Re-run `$ROUTER verify-providers`, `$ROUTER service restart` (the service
-discovers each route's guaranteed window at start and doctor reads what it
-found), and `$ROUTER doctor`.
-Env changes need a Claude Code restart; config changes need
-`$ROUTER service restart`.
+`$ROUTER service restart`, then `$ROUTER verify-providers` and `$ROUTER
+doctor`. Env changes need a Claude Code restart.
