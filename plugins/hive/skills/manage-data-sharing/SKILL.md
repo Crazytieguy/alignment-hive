@@ -13,18 +13,19 @@ In brief: sessions are conversation transcripts (prompts, responses, tool calls,
 
 ## Flow
 
-If loaded from `/hive:align`, the consent status output is already available above. Otherwise, run `hive consent status` to check state. Walk through the steps below in order, skipping steps that don't apply.
+If loaded from `/hive:align`, the consent status output is already available above. Otherwise, run `hive consent status`. Unless it reports `Session sharing: enabled`, the project-level steps below cannot apply: point the user to `https://alignment-hive.com/consent` (or to `curl -fsSL https://alignment-hive.com/install.sh | bash` when not authenticated) and stop. The `Local markers` line names the marker files that exist in the `State dir` the status prints; every marker below is a file in that directory. Walk through the steps in order, skipping steps that don't apply.
 
 ### Step 1: Enable project sharing
 
-**When:** `Session sharing: enabled` but `Current project: not enabled`, and `.claude/hive/sharing-disabled` does not exist.
+**When:** `Current project: not enabled`, and either the user asked to enable sharing or the `sharing-disabled` marker is absent (`hive consent enable` removes it).
 
 **Ask:** "Sessions from this project would be shared with the alignment research community. Enable sharing for this project?"
 
 Provide the context needed to decide: sessions go through a 24-hour review period before upload. During that window, the user can review or exclude any session.
 
 - If accepted: run `hive consent enable`.
-- If declined: run `mkdir -p .claude/hive && echo '' > .claude/hive/sharing-disabled`.
+- If declined: run `hive consent disable`.
+- If the marker is present and the user did not ask to enable sharing: mention in one line that sharing is off for this project and can be re-enabled by asking.
 
 ### Step 2: Disable project sharing
 
@@ -36,16 +37,16 @@ Provide the context needed to decide: sessions go through a 24-hour review perio
 
 ### Step 3: Grant repo access
 
-**When:** Project sharing is enabled, the project has a GitHub remote, `Repo visibility: private`, `Repo link: not-linked`, and `.claude/hive/repo-linking-declined` does not exist.
+**When:** Project sharing is enabled, `Repo visibility: private`, `Repo link: not-linked`, and the `repo-linking-declined` marker is absent.
 
-**Skip silently when:** repo is public, already linked, not on GitHub, no `Repo visibility` line in status output, visibility or link status is `unknown`, or `.claude/hive/repo-linking-declined` exists.
+**Skip silently** when the conditions above don't hold, including when visibility or link status is `unknown`.
 
 **Ask:** "This is a private repo. Would you like to grant repo access so researchers can see the code your sessions reference?"
 
 Provide the context needed to decide: this grants read access to all files and history in the repositories selected on GitHub's page. The user chooses which repos and can revoke access anytime.
 
 - If accepted: provide `https://github.com/apps/alignment-hive/installations/new`. Mention existing access can be managed at `https://github.com/settings/installations`.
-- If declined: run `mkdir -p .claude/hive && echo '' > .claude/hive/repo-linking-declined`.
+- If declined: create the `repo-linking-declined` marker in the State dir (`mkdir -p <state dir> && touch <state dir>/repo-linking-declined`).
 
 ### Step 4: Summary
 

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Bootstrap script for hive CLI binary.
-# Ensures the correct version is cached and updates ~/.local/bin/hive.
-# exec's the binary with all arguments, so the caller can pipe stdin to it.
+# Ensures the correct version is cached and that ~/.local/bin/hive points at it, then exec's
+# the binary with all arguments, so the caller can pipe stdin to it.
 #
 # Outputs JSON systemMessage to stdout for expected issues (not installed, download failed).
 # Unexpected errors go to stderr (caller redirects to error log).
@@ -15,7 +15,7 @@ CACHE_BASE="$HOME/.cache/hive"
 # --- Check if hive is installed globally ---
 
 if ! command -v hive >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/hive" ]; then
-  echo '{"systemMessage": "\u001b[1mhive:\u001b[0m to install, run \u001b[1;35m$ curl -fsSL https://alignment-hive.com/install.sh | bash\u001b[0m"}'
+  echo '{"systemMessage": "\u001b[1;34mhive:\u001b[0m to install, run \u001b[1;35m$ curl -fsSL https://alignment-hive.com/install.sh | bash\u001b[0m"}'
   exit 0
 fi
 
@@ -38,9 +38,8 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
 case "$OS" in
-  linux)  ;;
-  darwin) ;;
-  *)      echo "Unsupported OS: $OS" >&2; exit 1 ;;
+  linux|darwin) ;;
+  *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
 case "$ARCH" in
@@ -63,21 +62,25 @@ if [ ! -x "$BINARY" ]; then
   echo "Downloading hive-cli v${VERSION} for ${TARGET}..." >&2
   mkdir -p "$CACHE_DIR"
 
+  # The hook can be killed on its timeout mid-download; never leave a partial file behind.
   TMPFILE="$CACHE_DIR/.hive.tmp.$$"
-  if ! curl -fSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
+  trap 'rm -f "$TMPFILE"' EXIT
+  if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
     echo "Failed to download hive-cli v${VERSION} from $DOWNLOAD_URL" >&2
-    rm -f "$TMPFILE"
-    echo '{"systemMessage": "\u001b[1mhive:\u001b[0m CLI update failed"}'
+    echo '{"systemMessage": "\u001b[1;34mhive:\u001b[0m CLI update failed"}'
     exit 0
   fi
 
   chmod +x "$TMPFILE"
   mv "$TMPFILE" "$BINARY"
-
-  mkdir -p "$HOME/.local/bin"
-  ln -sf "$BINARY" "$HOME/.local/bin/hive"
+  trap - EXIT
 
   echo "Installed hive-cli v${VERSION}" >&2
 fi
+
+# Every start, not only after a download: the symlink must track this plugin's cli-version,
+# not whichever version was downloaded last.
+mkdir -p "$HOME/.local/bin"
+ln -sf "$BINARY" "$HOME/.local/bin/hive"
 
 exec "$BINARY" "$@"

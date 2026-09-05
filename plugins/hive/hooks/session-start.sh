@@ -1,42 +1,25 @@
 #!/bin/bash
 set -euo pipefail
 
-# SessionStart hook for the hive plugin.
-# Minimal bash: sets up env, registers transcript dir, delegates to binary.
-# Prefer exiting 0 — a non-zero exit just shows a small warning message to the user.
-#
-# Only runs full logic on "startup" and "clear" (fresh context).
-# Skips "resume", "compact", and "fork" (continuations where state is already
-# recorded — a fork copies an existing conversation).
+# SessionStart hook for the hive plugin: minimal bash that records session state and
+# delegates to the binary. Prefer exiting 0 — a non-zero exit shows a warning to the user.
 
-PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"
-
-# --- Parse hook input from stdin ---
+source "${CLAUDE_PLUGIN_ROOT}/scripts/common.sh"
 
 HOOK_INPUT=$(cat)
-SOURCE=$(echo "$HOOK_INPUT" | jq -r '.source // "startup"')
-SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // ""')
 
-# --- Resolve main worktree path for state dir ---
-
-resolve_state_dir() {
-  local main_worktree
-  main_worktree=$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //' || echo "")
-  if [ -z "$main_worktree" ]; then
-    main_worktree="$CLAUDE_PROJECT_DIR"
-  fi
-  echo "$main_worktree/.claude/hive"
-}
-
-STATE_DIR="$(resolve_state_dir)"
-
-# Ensure state directory exists
-mkdir -p "$STATE_DIR"
-
+STATE_DIR="$(resolve_state_dir "$CLAUDE_PROJECT_DIR")"
 ERROR_LOG="$STATE_DIR/error.log"
 
 # Exit 0 on unexpected errors — log them for debugging
 trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error at line $LINENO" >> "$ERROR_LOG" 2>/dev/null; exit 0' ERR
+
+mkdir -p "$STATE_DIR"
+[ -f "$STATE_DIR/.gitignore" ] || echo '*' > "$STATE_DIR/.gitignore"
+
+SOURCE=$(echo "$HOOK_INPUT" | jq -r '.source // "startup"')
+SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // ""')
+TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // ""')
 
 # --- Record git commit hash for this session id ---
 # Runs before the resume/compact/fork early-exit: a forked session has a new
@@ -45,12 +28,10 @@ trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error 
 # skipped by the early-exit below. Same-id resumes keep their original hash
 # via the file-existence guard.
 
-if [ -n "$SESSION_ID" ]; then
-  if [ ! -f "$STATE_DIR/${SESSION_ID}-commit.txt" ]; then
-    COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
-    if [ -n "$COMMIT_HASH" ]; then
-      echo "$COMMIT_HASH" > "$STATE_DIR/${SESSION_ID}-commit.txt"
-    fi
+if [ -n "$SESSION_ID" ] && [ ! -f "$STATE_DIR/${SESSION_ID}-commit.txt" ]; then
+  COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "")
+  if [ -n "$COMMIT_HASH" ]; then
+    echo "$COMMIT_HASH" > "$STATE_DIR/${SESSION_ID}-commit.txt"
   fi
 fi
 
@@ -61,7 +42,6 @@ fi
 # Derived from transcript_path rather than recomputing Claude Code's
 # project-dir naming (which sanitizes and truncates; see toClaudeProjectDirName).
 
-TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // ""')
 if [ -n "$TRANSCRIPT_PATH" ]; then
   TRANSCRIPT_DIR=$(dirname "$TRANSCRIPT_PATH")
   if [ -d "$TRANSCRIPT_DIR" ]; then
@@ -80,20 +60,13 @@ fi
 
 # --- Delegate to binary (handles version check, consent, uploads) ---
 
-# Pass plugin version so binary can do its version check
-PLUGIN_VERSION=""
-if [ -f "$PLUGIN_JSON" ]; then
-  PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
+export HIVE_PLUGIN_VERSION="$(plugin_version "$CLAUDE_PLUGIN_ROOT")"
+
+# Dev binary shortcircuit: use the locally-built binary when running from the repo
+if [[ "$CLAUDE_PLUGIN_ROOT" == "${CLAUDE_PROJECT_DIR}"/* ]] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
+  HIVE="$CLAUDE_PROJECT_DIR/.dev/hive"
+else
+  # Bootstrap: ensure the correct CLI version is cached, updated, and exec'd
+  HIVE="${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"
 fi
-export HIVE_PLUGIN_VERSION="$PLUGIN_VERSION"
-
-# Dev binary shortcircuit: use locally-built binary when running from the repo
-if [[ "${CLAUDE_PLUGIN_ROOT:-}" == "${CLAUDE_PROJECT_DIR}"/* ]] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
-  echo "$HOOK_INPUT" | "$CLAUDE_PROJECT_DIR/.dev/hive" session-start 2>>"$ERROR_LOG" || true
-  exit 0
-fi
-
-# Bootstrap: ensure the correct CLI version is cached, updated, and exec'd
-echo "$HOOK_INPUT" | "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh" session-start 2>>"$ERROR_LOG" || true
-
-exit 0
+echo "$HOOK_INPUT" | "$HIVE" session-start 2>>"$ERROR_LOG" || true

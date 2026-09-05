@@ -1,45 +1,18 @@
 #!/bin/bash
 set -euo pipefail
-# Outputs status info for the align command
+# Status block for /hive:align.
 
-# Get plugin root from script location (script is in plugins/hive/scripts/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLUGIN_ROOT="${1:-$(dirname "$SCRIPT_DIR")}"
-PROJECT_DIR="${2:-$PWD}"
+PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/common.sh"
 
-# Resolve main worktree path for state dir
-resolve_state_dir() {
-  local main_worktree
-  main_worktree=$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //' || echo "")
-  if [ -z "$main_worktree" ]; then
-    main_worktree="$PROJECT_DIR"
-  fi
-  echo "$main_worktree/.claude/hive"
-}
+STATE_DIR="$(resolve_state_dir "$PWD")"
+PLUGIN_VERSION="$(plugin_version "$PLUGIN_ROOT")"
+LAST_VERSION=$(cat "$STATE_DIR/align-version" 2>/dev/null || echo "never run")
 
-STATE_DIR="$(resolve_state_dir)"
-
-# Get plugin version
-PLUGIN_JSON="$PLUGIN_ROOT/.claude-plugin/plugin.json"
-if [ -f "$PLUGIN_JSON" ]; then
-  PLUGIN_VERSION=$(grep '"version"' "$PLUGIN_JSON" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "unknown")
-else
-  PLUGIN_VERSION="unknown"
-fi
-
-# Get last run version
-VERSION_FILE="$STATE_DIR/align-version"
-if [ -f "$VERSION_FILE" ]; then
-  LAST_VERSION=$(cat "$VERSION_FILE")
-  RUN_TYPE="follow-up"
-else
-  LAST_VERSION="never run"
-  RUN_TYPE="first-time"
-fi
-
-echo "**Plugin version**: $PLUGIN_VERSION"
+echo "**Plugin version**: ${PLUGIN_VERSION:-unknown}"
 echo "**Last run version**: $LAST_VERSION"
-echo "**Run type**: $RUN_TYPE"
+echo "**State dir**: $STATE_DIR"
 
 # Platform-specific marketplace entries for the plugins that ship a binary.
 # Resolved here rather than in the command prose so the target triple has one
@@ -56,17 +29,25 @@ case "$(uname -m 2>/dev/null)" in
 esac
 
 CATALOG="$HOME/.claude/plugins/marketplaces/alignment-hive/.claude-plugin/marketplace.json"
-AVAILABLE=""
-if [ -n "$OS_TRIPLE" ] && [ -n "$ARCH_TRIPLE" ]; then
+if [ -z "$OS_TRIPLE" ] || [ -z "$ARCH_TRIPLE" ]; then
+  echo "**Platform entry suffix**: none (unsupported platform)"
+  echo "**Platform entries available for**: none"
+elif [ ! -f "$CATALOG" ]; then
+  echo "**Platform entry suffix**: -${ARCH_TRIPLE}-${OS_TRIPLE}"
+  echo "**Platform entries available for**: unknown (alignment-hive marketplace catalog not found; add the marketplace first)"
+else
   SUFFIX="-${ARCH_TRIPLE}-${OS_TRIPLE}"
+  AVAILABLE=""
   for plugin in model-router remote-kernels; do
-    if grep -q "\"${plugin}${SUFFIX}\"" "$CATALOG" 2>/dev/null; then
+    if grep -q "\"${plugin}${SUFFIX}\"" "$CATALOG"; then
       AVAILABLE="$AVAILABLE $plugin"
     fi
   done
-else
-  SUFFIX="none (unsupported platform)"
+  echo "**Platform entry suffix**: $SUFFIX"
+  echo "**Platform entries available for**:${AVAILABLE:- none}"
 fi
 
-echo "**Platform entry suffix**: $SUFFIX"
-echo "**Platform entries available for**:${AVAILABLE:- none}"
+echo
+echo "## Previously Rejected"
+echo
+cat "$STATE_DIR/align-rejected.md" 2>/dev/null || echo "(none recorded)"

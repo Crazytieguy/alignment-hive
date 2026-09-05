@@ -4,19 +4,11 @@ CLI for alignment-hive session sharing and management. Powers the `hive` plugin.
 
 ## Development
 
-**Important:** Always run commands from the monorepo root (`alignment-hive/`).
-
-When committing changes, always run:
-- `bun run --filter '@alignment-hive/hive-cli' test`
-- `bun run --filter '@alignment-hive/hive-cli' lint`
-
-Both must pass before committing.
-
-**Important:** Never pipe test output (e.g., `bun test 2>&1 | head`). This causes the process to stall indefinitely. Always run tests without piping.
+Before committing, `bun run --filter '@alignment-hive/hive-cli' test` and `bun run --filter '@alignment-hive/hive-cli' lint` must both pass. Never pipe test output (e.g. `bun test 2>&1 | head`): the process stalls indefinitely.
 
 ## User-Facing Messages
 
-All user-facing strings (CLI output, error messages, help text) should be defined in `src/lib/messages.ts`. This centralizes text for consistency and potential i18n.
+User-facing strings (CLI output, errors, help) live in `src/lib/messages.ts`.
 
 ## Regenerating Snapshot Tests
 
@@ -27,41 +19,8 @@ UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-cli' test
 
 ## Version Sync
 
-When bumping the version in `package.json`, also bump `plugins/hive/cli-version` to match. The hive plugin uses this to download the correct binary for users.
-
-The retrieval skill dynamically includes `--help` output. When CLI behavior changes, update the `--help` text in the command file and bump the plugin version.
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `ALIGNMENT_HIVE_CLIENT_ID` | Override WorkOS client ID (for staging/testing). |
-| `ALIGNMENT_HIVE_CONVEX_URL` | Override Convex deployment URL (for local dev). Set in `.env.local`. |
-| `DEBUG` | Set to `1` to enable debug logging. |
+Bump `plugins/hive/cli-version` together with `package.json` (`bootstrap.sh` downloads the binary for that version), then bump the plugin version so the marketplace ships the new file. The retrieval skill embeds `hive local search --help` and `read --help` at load, so keep `usage` in `src/lib/messages.ts` current when flags change.
 
 ## Dev Binary
 
-Build and run the dev binary:
-```bash
-bun run --filter '@alignment-hive/hive-cli' build:dev
-.dev/hive <command>
-```
-
-The dev binary embeds `ALIGNMENT_HIVE_DEV=1` at build time via `--define`, which causes `loadEnvFiles()` to load `.env` and `.env.local` from CWD. This gives it staging defaults (from `.env`) and per-dev overrides like `ALIGNMENT_HIVE_CONVEX_URL` (from `.env.local`). The production binary skips env file loading entirely and uses hardcoded production defaults.
-
-Example commands:
-```bash
-.dev/hive upload list          # List sessions with status
-.dev/hive upload review        # Open local review UI
-.dev/hive upload exclude <id>  # Exclude a session
-.dev/hive upload snooze 24h    # Pause uploads
-.dev/hive upload send          # Upload all eligible sessions
-.dev/hive upload send <id>     # Upload a specific session
-.dev/hive consent status       # Check consent status
-```
-
-## Local Development with Staging Auth
-
-Staging defaults (`ALIGNMENT_HIVE_CLIENT_ID`, `ALIGNMENT_HIVE_AUTH_FILE`) are in the checked-in root `.env` file. These are only loaded by the dev binary (see above).
-
-Per-dev overrides (e.g. `ALIGNMENT_HIVE_CONVEX_URL`) go in root `.env.local`, which is created by `bash scripts/setup-web.sh`.
+`bun run --filter '@alignment-hive/hive-cli' build:dev` writes `.dev/hive` at the repo root. It is compiled with `ALIGNMENT_HIVE_DEV=1`, so it loads `.env.local` (per-dev overrides such as `ALIGNMENT_HIVE_CONVEX_URL`; created by `bash scripts/setup-web.sh`) and then `.env` (checked-in staging defaults: `ALIGNMENT_HIVE_CLIENT_ID`, `ALIGNMENT_HIVE_AUTH_FILE`, `ALIGNMENT_HIVE_URL`) from the cwd. The production binary never reads env files. `DEBUG=1` enables debug logging in either.

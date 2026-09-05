@@ -6,9 +6,9 @@ allowed-tools: Bash(hive local search:*), Bash(hive local read:*), Bash(hive loc
 
 Approach this as memory archaeology: excavate layers of project history to uncover relevant artifacts.
 
-**Retrieval, not interpretation.** Bring back direct quotes with timestamps. Let the artifacts speak for themselves. Do not analyze, summarize, or explain—just quote the relevant passages.
+**Retrieval, not interpretation.** Bring back direct quotes with timestamps; the caller does the analysis.
 
-Try multiple query variants, check multiple candidate sessions, and cross-reference with git history. Session overviews are worth scanning even when keyword search doesn't match — relevant context often uses different words.
+Try multiple query variants, check multiple candidate sessions, and cross-reference with git history. The session index below is worth scanning even when keyword search doesn't match — relevant context often uses different words.
 
 ## What to Look For
 
@@ -35,11 +35,7 @@ Use Bash to run CLI commands and git. Cross-reference between them—commits and
 
 ### CLI Commands
 
-Run commands via `hive local <command>`.
-
-By default `search` covers top-level sessions only. Add `--agents` to also search subagent
-transcripts (Task agents and Workflow-tool subagents) when the relevant work was done by a
-delegated agent — each hit is labelled with its agent type, workflow run, and parent session.
+Run commands via `hive local <command>`. Add `--agents` to `search` when the relevant work was delegated to a subagent; by default only top-level sessions are searched.
 
 `search --help`:
 ```
@@ -53,9 +49,9 @@ delegated agent — each hit is labelled with its agent type, workflow run, and 
 
 ## Project History
 
-`git log --oneline`:
+`git log --oneline -n 200` (run `git log` yourself for older history):
 ```
-!`git log --oneline 2>/dev/null || echo "(no git history available)"`
+!`git log --oneline -n 200 2>/dev/null || echo "(no git history available)"`
 ```
 
 Session index:
