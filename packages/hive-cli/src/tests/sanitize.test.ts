@@ -1,0 +1,276 @@
+import { describe, expect, test } from 'bun:test';
+import { detectSecrets, sanitizeDeep, sanitizeString } from '../lib/sanitize';
+
+// High-entropy test tokens (repeated characters fail entropy checks); GitHub PATs are ghp_ + 36 alphanumerics.
+const TEST_GITHUB_TOKEN = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
+const TEST_GITHUB_TOKEN_2 = 'ghp_9z8Y7x6W5v4U3t2S1r0Q9p8O7n6M5l4K3jTu';
+
+describe('sanitizeString', () => {
+  test('splices the redaction marker exactly in place', () => {
+    expect(sanitizeString(`found ${TEST_GITHUB_TOKEN} here`)).toBe('found [REDACTED:github-pat] here');
+  });
+
+  test('preserves non-secret content', () => {
+    const content = 'Hello, this is a normal message.';
+    expect(sanitizeString(content)).toBe(content);
+    expect(detectSecrets(content)).toHaveLength(0);
+  });
+
+  test('handles multiple secrets in one string', () => {
+    const webhook1 = 'https://hooks.slack.com/services/T11111111/B11111111/AAAAAAAAAAAAAAAAAAAAAA11';
+    const webhook2 = 'https://hooks.slack.com/services/T22222222/B22222222/BBBBBBBBBBBBBBBBBBBBBB22';
+    const sanitized = sanitizeString(`webhooks: ${webhook1} and ${webhook2}`);
+
+    expect(sanitized).not.toContain('hooks.slack.com');
+    expect(sanitized.match(/\[REDACTED:/g)?.length).toBe(2);
+  });
+
+  test('a secret matched by two overlapping rules is redacted once, whole', () => {
+    const sanitized = sanitizeString(`api_key = "${TEST_GITHUB_TOKEN}"`);
+    expect(sanitized.match(/\[REDACTED:/g)?.length).toBe(1);
+    expect(sanitized).not.toContain('ghp_');
+  });
+});
+
+describe('sanitizeDeep', () => {
+  test('handles mixed nested structures', () => {
+    const input = {
+      users: [
+        { name: 'Alice', token: TEST_GITHUB_TOKEN },
+        { name: 'Bob', token: null },
+      ],
+      config: {
+        apiKey: TEST_GITHUB_TOKEN_2,
+        enabled: true,
+        count: 42,
+        missing: undefined,
+      },
+    };
+    const sanitized = sanitizeDeep(input);
+
+    expect(sanitized.users[0].name).toBe('Alice');
+    expect(sanitized.users[0].token).toContain('[REDACTED:');
+    expect(sanitized.users[1].name).toBe('Bob');
+    expect(sanitized.users[1].token).toBe(null);
+    expect(sanitized.config.apiKey).toContain('[REDACTED:');
+    expect(sanitized.config.enabled).toBe(true);
+    expect(sanitized.config.count).toBe(42);
+    expect(sanitized.config.missing).toBeUndefined();
+  });
+
+  test('handles deeply nested structures within depth limit', () => {
+    let nested: Record<string, unknown> = { value: TEST_GITHUB_TOKEN };
+    for (let i = 0; i < 50; i++) {
+      nested = { child: nested };
+    }
+
+    const sanitized = sanitizeDeep(nested);
+
+    let current = sanitized;
+    for (let i = 0; i < 50; i++) {
+      current = current.child as Record<string, unknown>;
+    }
+    expect(current.value).toContain('[REDACTED:');
+  });
+
+  test('drops subtrees past the depth limit instead of passing them through', () => {
+    // 150 levels deep — past the 100 limit, so the secret is never scanned and the whole
+    // subtree must be dropped rather than returned unsanitized.
+    let nested: Record<string, unknown> = { value: TEST_GITHUB_TOKEN };
+    for (let i = 0; i < 150; i++) {
+      nested = { child: nested };
+    }
+
+    const sanitized = sanitizeDeep(nested);
+
+    expect(JSON.stringify(sanitized)).not.toContain('ghp_');
+    expect(JSON.stringify(sanitized)).toContain('[TRUNCATED:max-depth]');
+  });
+
+  test('drops over-deep arrays too', () => {
+    let nested: unknown = TEST_GITHUB_TOKEN;
+    for (let i = 0; i < 150; i++) {
+      nested = [nested];
+    }
+
+    expect(JSON.stringify(sanitizeDeep(nested))).not.toContain('ghp_');
+  });
+});
+
+describe('SAFE_KEYS', () => {
+  test('skips sanitization for known-safe string fields', () => {
+    const input = {
+      uuid: TEST_GITHUB_TOKEN,
+      type: 'user',
+      timestamp: '2025-01-01T00:00:00Z',
+      sessionId: 'sess-12345',
+      content: TEST_GITHUB_TOKEN,
+    };
+
+    const sanitized = sanitizeDeep(input);
+
+    expect(sanitized.uuid).toBe(input.uuid);
+    expect(sanitized.type).toBe(input.type);
+    expect(sanitized.timestamp).toBe(input.timestamp);
+    expect(sanitized.sessionId).toBe(input.sessionId);
+    expect(sanitized.content).toContain('[REDACTED:');
+    expect(sanitized.content).not.toContain('ghp_');
+  });
+
+  test('strict mode disables the SAFE_KEYS skip (workflow run blobs carry arbitrary values)', () => {
+    const input = {
+      name: TEST_GITHUB_TOKEN, // SAFE_KEYS-named, but the value is a secret
+      cwd: '/home/user/project',
+    };
+
+    const sanitized = sanitizeDeep(input, true);
+
+    expect(sanitized.name).toContain('[REDACTED:');
+    expect(sanitized.name).not.toContain('ghp_');
+    expect(sanitized.cwd).toBe('/home/user/project');
+  });
+
+  test('strict mode sanitizes object keys; the default walk leaves them untouched', () => {
+    const input = { [TEST_GITHUB_TOKEN]: 'value', normalKey: 'other' };
+
+    const strict = sanitizeDeep(input, true);
+    const strictKeys = Object.keys(strict);
+    expect(strictKeys.some((k) => k.includes('[REDACTED:'))).toBe(true);
+    expect(strictKeys.some((k) => k.includes('ghp_'))).toBe(false);
+    expect(strict.normalKey).toBe('other');
+
+    const lax = sanitizeDeep(input);
+    expect(Object.keys(lax)).toContain(TEST_GITHUB_TOKEN);
+  });
+
+  test('strict mode sanitizes keys in nested structures', () => {
+    const input = { result: { items: [{ [TEST_GITHUB_TOKEN]: 'nested' }] } };
+
+    const sanitized = sanitizeDeep(input, true);
+
+    const nestedKeys = Object.keys(sanitized.result.items[0]);
+    expect(nestedKeys.some((k) => k.includes('[REDACTED:'))).toBe(true);
+    expect(nestedKeys.some((k) => k.includes('ghp_'))).toBe(false);
+  });
+
+  test('sanitizes non-string safe key values', () => {
+    // A safe key whose value is an object is still walked.
+    const input = { type: { nested: TEST_GITHUB_TOKEN } };
+    const sanitized = sanitizeDeep(input) as { type: { nested: string } };
+    expect(sanitized.type.nested).toContain('[REDACTED:');
+  });
+});
+
+describe('high-entropy safety net', () => {
+  test('catches high-entropy secrets without known patterns', () => {
+    // A WorkOS-style key that doesn't match any specific pattern
+    const unknownSecret = 'sk_a2V5XzAxS0VXSDRKNVZLODU5M0JTUEQ5NlBOMlFaLGVDQ1dtZkF1d0NhT0xlTHhKRTBsOTROQ3k';
+    const secrets = detectSecrets(unknownSecret);
+    expect(secrets.length).toBeGreaterThan(0);
+    expect(secrets[0].ruleId).toBe('high-entropy-secret');
+  });
+
+  test('excludes hex-only strings (hashes)', () => {
+    const sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const sha1 = 'da39a3ee5e6b4b0d3255bfef95601890afd80709';
+    const gitCommit = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+
+    expect(detectSecrets(sha256)).toHaveLength(0);
+    expect(detectSecrets(sha1)).toHaveLength(0);
+    expect(detectSecrets(gitCommit)).toHaveLength(0);
+  });
+
+  test('excludes short strings', () => {
+    expect(detectSecrets('aBcDeFgHiJkLmNoPqRs')).toHaveLength(0); // 19 chars
+  });
+
+  test('excludes low-entropy strings', () => {
+    expect(detectSecrets('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toHaveLength(0);
+  });
+
+  test('excludes file paths', () => {
+    const paths = [
+      'hive-mind/cli/lib/format.ts',
+      '~/.claude/plans/squishy-booping-beacon.md',
+      'plugins/hive-mind/skills/retrieval/SKILL.md',
+      'web/src/routes/_authenticated/welcome.tsx',
+      '/Users/yoav/projects/alignment-hive/',
+    ];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
+  });
+
+  test('excludes absolute paths without extensions', () => {
+    const paths = [
+      '/Users/yoav/projects/alignment-hive',
+      '/Users/yoav/worktrees/alignment-hive/agile-glow-5',
+      '/private/var/folders/21/3gpj27c974j5vc436plct78w0000gn/T/coven-vcr',
+    ];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
+  });
+
+  test('excludes paths with long extensions', () => {
+    const paths = ['cli/lib/fixtures/02ed589a-8b41-4004-a7aa-d15cb62f24d3.jsonl', 'web/.env.local.example'];
+    for (const path of paths) {
+      expect(detectSecrets(path)).toHaveLength(0);
+    }
+  });
+
+  test('excludes URLs and domain paths', () => {
+    const urls = [
+      '//github.com/BerriAI/litellm/issues/new',
+      '//img.shields.io/badge/status-active-green',
+      'github.com/jesseduffield/lazygit/pkg/gui/types',
+      '//www.convex.dev/components/cloudflare-r2',
+    ];
+    for (const url of urls) {
+      expect(detectSecrets(url)).toHaveLength(0);
+    }
+  });
+
+  test('excludes dot-separated code identifiers', () => {
+    const identifiers = [
+      'block.source.media_type',
+      'process.env.BUN_INSTALL',
+      'import.meta.env.VITE_CONVEX_URL',
+      'convexQueryClient.hashFn',
+    ];
+    for (const id of identifiers) {
+      expect(detectSecrets(id)).toHaveLength(0);
+    }
+  });
+
+  test('excludes Anthropic API IDs', () => {
+    const ids = [
+      'toolu_01VvYAgQKN4qngQwybRp6S6E',
+      'msg_01QSWm3cMnqs7nQLQtsnQuYU',
+      'req_011CXCDYvAUswJ9fhTQbwhd6',
+      'agent_msg_01WRNsKYxa9VL4PKMVz41SqE',
+    ];
+    for (const id of ids) {
+      expect(detectSecrets(id)).toHaveLength(0);
+    }
+  });
+
+  test('excludes hyphenated word sequences', () => {
+    for (const name of ['snappy-questing-clover', 'robust-skipping-meadow']) {
+      expect(detectSecrets(name)).toHaveLength(0);
+    }
+  });
+
+  test('excludes MIME types and model paths', () => {
+    for (const val of ['application/x-www-form-urlencoded', 'anthropic/claude-sonnet-4-5-20250929']) {
+      expect(detectSecrets(val)).toHaveLength(0);
+    }
+  });
+
+  test('still catches base64 secrets containing slashes', () => {
+    // AWS secret access key format — base64 with slashes must NOT be excluded
+    for (const secret of ['wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'aB3cD4eF5/gH6iJ7kL8/mN9oP0qR1sT2uV3wX4y']) {
+      expect(detectSecrets(secret).length).toBeGreaterThan(0);
+    }
+  });
+});

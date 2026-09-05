@@ -1,4 +1,5 @@
-import { ALL_KEYWORDS, SECRET_RULES } from './secret-rules';
+import { SECRET_RULES } from './secret-rules';
+import type { SecretRule } from './secret-rules';
 
 const MAX_SANITIZE_DEPTH = 100;
 const MIN_SECRET_LENGTH = 8;
@@ -25,27 +26,25 @@ const SAFE_KEYS = new Set([
   'gitBranch',
 ]);
 
-function mightContainSecrets(content: string): boolean {
-  const lower = content.toLowerCase();
-  for (const keyword of ALL_KEYWORDS) {
-    if (lower.includes(keyword)) {
-      return true;
-    }
-  }
-  return false;
-}
+/**
+ * Safety net for secrets no gitleaks rule names: any long high-entropy token that is not hex
+ * (hashes) and does not look like a path, URL, identifier or ephemeral API id.
+ */
+const HIGH_ENTROPY_RULE: SecretRule = {
+  id: 'high-entropy-secret',
+  regex: new RegExp(`(?<![A-Za-z0-9_\\-./+=])([A-Za-z0-9_\\-./+=]{20,200})(?![A-Za-z0-9_\\-./+=])`, 'g'),
+  entropy: 4.0,
+};
+
+const ALL_RULES: Array<SecretRule> = [...SECRET_RULES, HIGH_ENTROPY_RULE];
 
 export interface SecretMatch {
   ruleId: string;
-  match: string;
   start: number;
   end: number;
-  entropy?: number;
 }
 
 function shannonEntropy(data: string): number {
-  if (!data) return 0;
-
   const charCounts = new Map<string, number>();
   for (const char of data) {
     charCounts.set(char, (charCounts.get(char) || 0) + 1);
@@ -62,14 +61,10 @@ function shannonEntropy(data: string): number {
 }
 
 /**
- * Check if a high-entropy string is likely a non-secret (file path, URL, code identifier, etc.)
- * rather than an actual secret. Used to reduce false positives from the high-entropy safety net.
- *
- * Conservative: only excludes patterns that are clearly not secrets.
- * Data-driven: validated against ~6K real session files with 94.8% false positive reduction.
+ * Heuristics that keep the high-entropy safety net from flagging paths, URLs, code identifiers
+ * and ephemeral API ids; tuned against real session files, so only add exclusions with evidence.
  */
 function looksLikeNonSecret(s: string): boolean {
-  // Path with trailing slash
   if (s.endsWith('/')) return true;
 
   let slashCount = 0;
@@ -85,7 +80,6 @@ function looksLikeNonSecret(s: string): boolean {
     if (s.split('/').some((seg) => seg.includes('.'))) return true;
   }
 
-  // Single slash with file extension of any length (e.g., path/file.jsonl)
   if (slashCount === 1 && /\.\w+$/.test(s)) return true;
 
   // Single slash where both segments are word-like (model paths, MIME types)
@@ -94,7 +88,6 @@ function looksLikeNonSecret(s: string): boolean {
     if (parts.length === 2 && parts.every((p) => /^[a-zA-Z0-9][\w.-]*$/.test(p))) return true;
   }
 
-  // No slashes from here
   if (slashCount > 0) return false;
 
   // Dot-separated identifiers with 2+ segments (process.env, block.source.media_type)
@@ -103,7 +96,6 @@ function looksLikeNonSecret(s: string): boolean {
     if (dotParts.length >= 2 && dotParts.every((p) => /^[a-zA-Z_$][\w$]*$/.test(p))) return true;
   }
 
-  // UUID pattern (8-4-4-4-12 hex)
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return true;
 
   // Anthropic API IDs — ephemeral, not secrets
@@ -118,68 +110,26 @@ function looksLikeNonSecret(s: string): boolean {
   return false;
 }
 
-let _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
-export function getDetectSecretsStats() {
-  return _stats;
-}
-export function resetDetectSecretsStats() {
-  _stats = { calls: 0, keywordHits: 0, regexRuns: 0, totalMs: 0 };
-}
-
+/** Non-overlapping secret spans in content, earliest first; when rules overlap the earliest span wins. */
 export function detectSecrets(content: string): Array<SecretMatch> {
-  const t0 = process.env.DEBUG ? performance.now() : 0;
-  _stats.calls++;
-
-  if (content.length < MIN_SECRET_LENGTH) {
-    return [];
-  }
+  if (content.length < MIN_SECRET_LENGTH) return [];
 
   const matches: Array<SecretMatch> = [];
-
   const lowerContent = content.toLowerCase();
-  const hasAnyKeyword = mightContainSecrets(content);
-  if (hasAnyKeyword) _stats.keywordHits++;
 
-  for (const rule of SECRET_RULES) {
-    if (rule.keywords && rule.keywords.length > 0) {
-      if (!hasAnyKeyword) continue;
-      const hasKeyword = rule.keywords.some((k) => lowerContent.includes(k));
-      if (!hasKeyword) continue;
-    }
-    _stats.regexRuns++;
+  for (const rule of ALL_RULES) {
+    if (rule.keywords?.length && !rule.keywords.some((k) => lowerContent.includes(k))) continue;
     rule.regex.lastIndex = 0;
 
     let match: RegExpExecArray | null;
     while ((match = rule.regex.exec(content)) !== null) {
       const secretValue = match[1] || match[0];
-      const start = match.index;
-      const end = start + match[0].length;
-
-      const entropy = rule.entropy ? shannonEntropy(secretValue) : undefined;
-      if (rule.entropy && entropy !== undefined && entropy < rule.entropy) {
+      if (rule.entropy && shannonEntropy(secretValue) < rule.entropy) continue;
+      if (rule === HIGH_ENTROPY_RULE && (/^[0-9a-fA-F]+$/.test(secretValue) || looksLikeNonSecret(secretValue))) {
         continue;
       }
-
-      // Skip hex-only strings if the rule requires it (e.g., high-entropy safety net)
-      if (rule.notHexOnly && /^[0-9a-fA-F]+$/.test(secretValue)) {
-        continue;
-      }
-
-      if (rule.id === 'high-entropy-secret' && looksLikeNonSecret(secretValue)) {
-        continue;
-      }
-
-      matches.push({
-        ruleId: rule.id,
-        match: match[0],
-        start,
-        end,
-        entropy,
-      });
-
-      if (match[0].length === 0) {
-        rule.regex.lastIndex++;
-      }
+      matches.push({ ruleId: rule.id, start: match.index, end: match.index + match[0].length });
+      if (match[0].length === 0) rule.regex.lastIndex++;
     }
   }
 
@@ -188,65 +138,44 @@ export function detectSecrets(content: string): Array<SecretMatch> {
   const deduped: Array<SecretMatch> = [];
   for (const m of matches) {
     const last = deduped.at(-1);
-    if (last === undefined || m.start >= last.end) {
-      deduped.push(m);
-    }
+    if (last === undefined || m.start >= last.end) deduped.push(m);
   }
-
-  if (process.env.DEBUG) {
-    _stats.totalMs += performance.now() - t0;
-  }
-
   return deduped;
 }
 
 export function sanitizeString(content: string): string {
-  if (content.length < MIN_SECRET_LENGTH) {
-    return content;
-  }
-
   const secrets = detectSecrets(content);
-
-  if (secrets.length === 0) {
-    return content;
-  }
+  if (secrets.length === 0) return content;
 
   let result = content;
   for (let i = secrets.length - 1; i >= 0; i--) {
     const secret = secrets[i];
     result = `${result.slice(0, secret.start)}[REDACTED:${secret.ruleId}]${result.slice(secret.end)}`;
   }
-
   return result;
 }
 
-export interface SanitizeDeepOptions {
-  /**
-   * Also scan object keys and disable the SAFE_KEYS value skip. Transcript entries are
-   * schema-shaped (keys are field names; SAFE_KEYS values are ids/paths), so the default walk
-   * skips them — but arbitrary script-built structures like workflow run blobs can carry a
-   * secret as a key or under a SAFE_KEYS name, so they must be walked strictly.
-   */
-  strict?: boolean;
-}
-
-export function sanitizeDeep<T>(value: T, opts: SanitizeDeepOptions = {}, depth = 0): T {
-  // Past the cap the subtree is dropped, not passed through: returning it unscanned would let
-  // anything nested below the cap (secrets included) reach storage unredacted.
+/**
+ * Redact secrets in every string of a value. Transcript entries are schema-shaped (keys are
+ * field names; SAFE_KEYS values are ids/paths), so the default walk skips both. `strict` also
+ * scans keys and SAFE_KEYS values: arbitrary script-built structures like workflow run blobs can
+ * carry a secret in either. Subtrees below MAX_SANITIZE_DEPTH are dropped, not passed through.
+ */
+export function sanitizeDeep<T>(value: T, strict = false, depth = 0): T {
   if (depth > MAX_SANITIZE_DEPTH) return TRUNCATED_PLACEHOLDER as T;
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return sanitizeString(value) as T;
-  if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, opts, depth + 1)) as T;
+  if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, strict, depth + 1)) as T;
 
   if (typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      if (!opts.strict && SAFE_KEYS.has(key) && typeof val === 'string') {
+      if (!strict && SAFE_KEYS.has(key) && typeof val === 'string') {
         result[key] = val;
       } else {
         // In strict mode two keys redacting to the same placeholder collide (last one wins) —
         // acceptable: secrets must not survive as keys in the first place.
-        result[opts.strict ? sanitizeString(key) : key] = sanitizeDeep(val, opts, depth + 1);
+        result[strict ? sanitizeString(key) : key] = sanitizeDeep(val, strict, depth + 1);
       }
     }
     return result as T;
