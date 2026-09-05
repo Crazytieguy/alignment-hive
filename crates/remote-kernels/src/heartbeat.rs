@@ -55,6 +55,9 @@ pub enum AcquireMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisionStatus {
     Pending,
+    /// Lease held and watchdog installed (budget enforceable); startup
+    /// commands may still be running.
+    Supervised,
     Active,
     Unsupervisable(String),
     Refused(String),
@@ -278,8 +281,11 @@ async fn establish_and_run(
     }
     // All setup writes happen only after acquiring authority and while the
     // local operation lock prevents another project server from rotating it.
-    run_startup_commands(conn, machine_id, startup_commands).await;
-
+    // Startup commands run AFTER the watchdog is installed (below): the
+    // server treats an unconfirmed watchdog as an unenforceable budget and
+    // terminates the machine, so anything slow in front of the install --
+    // a package install, even a 1 s installer on a slow host -- used to end
+    // the machine before it could be used.
     let budget = budget.map(|budget| BudgetFeed {
         state: Arc::clone(state),
         budget,
@@ -338,6 +344,8 @@ async fn establish_and_run(
             "Could not clear inherited budget deadline: {e:#}"
         );
     }
+    let _ = status.send(SupervisionStatus::Supervised);
+    run_startup_commands(conn, machine_id, startup_commands).await;
     let _ = status.send(SupervisionStatus::Active);
     drop(operation_lock);
 

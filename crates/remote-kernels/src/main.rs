@@ -87,14 +87,21 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let server = server::RemoteKernelsServer::new_with_budget(config, app_state, budget);
     let shutdown_server = server.clone();
 
-    let reconcile_messages = server.reconcile().await;
-    for message in &reconcile_messages {
-        tracing::info!("{message}");
-    }
-    // Startup reconcile findings surface via status(), and this session's
-    // running machines are picked back up automatically in the background.
-    server.queue_alerts(reconcile_messages).await;
-    server.spawn_auto_reattach();
+    // Startup reconcile (one provider round-trip per durable record) runs in
+    // the background: Claude Code gives an MCP server 30 s by default to
+    // answer the handshake, and a single stale record made the reconcile
+    // exceed that, leaving the plugin unavailable for the whole session.
+    // Findings surface via status(); this session's running machines are
+    // picked back up automatically once the reconcile has settled them.
+    let reconcile_server = server.clone();
+    tokio::spawn(async move {
+        let reconcile_messages = reconcile_server.reconcile().await;
+        for message in &reconcile_messages {
+            tracing::info!("{message}");
+        }
+        reconcile_server.queue_alerts(reconcile_messages).await;
+        reconcile_server.spawn_auto_reattach();
+    });
 
     tracing::info!("Starting remote-kernels MCP server");
 
