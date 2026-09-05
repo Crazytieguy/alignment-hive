@@ -35,15 +35,20 @@ Read the consent status output above. Handle errors first, then check if data sh
 
 **If "Session sharing: enabled"**: load the `manage-data-sharing` skill; it reads the same status output, runs whichever of its steps apply, and skips the rest silently. If it finds nothing to do, note the sharing status in one line and move on.
 
-### autopilot Deprecation
+### Superseded plugins
 
-If `autopilot@alignment-hive` is enabled in any of the four settings files, note that Claude Code's built-in auto mode supersedes autopilot (except for the deno sandbox) — it uses a model-based classifier instead of a static allow-list. Ask whether to remove it; Pro users (no auto mode access yet) or users who rely on the deno sandbox may want to keep it. Record a keep in `.claude/hive/align-rejected.md` (e.g. "Kept autopilot"). If not installed, skip silently.
+Check the four settings files for these keys (a key declared only in `~/.claude/settings.local.json` is stale rather than working, and still worth removing):
+
+- `hive-mind@alignment-hive`: hive handles session sharing now; offer to remove it.
+- `autopilot@alignment-hive`: Claude Code's built-in auto mode supersedes it (except for the deno sandbox) — it uses a model-based classifier instead of a static allow-list. Ask whether to remove it; users who rely on the deno sandbox may want to keep it.
+
+Record a keep in `.claude/hive/align-rejected.md` (e.g. "Kept autopilot") so it is not asked again. If neither key is present, skip silently.
 
 ### Bundled-binary Migration (remote-kernels, model-router)
 
-For each plugin listed under **Platform entries available for** in Status, offer the switch wherever the plain `<plugin>@alignment-hive` key is enabled (rationale and rules under Platform-specific entries below). If the plain key is in `.claude/settings.json`, say so prominently: that file is usually checked in, so removing it takes the plugin away from collaborators, who each need the platform entry for their own machine — the user can decline and keep the shared key. On yes, run the install-then-clean procedure with `<plugin><suffix>@alignment-hive`.
+For each plugin listed under **Platform entries available for** in Status, offer the switch wherever the plain `<plugin>@alignment-hive` key is enabled in any of the four settings files (rationale and rules under Platform-specific entries below). If the plain key is in `.claude/settings.json`, say so prominently: that file is usually checked in, so removing it takes the plugin away from collaborators, who each need the platform entry for their own machine — the user can decline and keep the shared key. On yes, run the install-then-clean procedure with `<plugin><suffix>@alignment-hive`.
 
-**Repair:** a platform-specific key enabled only in `~/.claude/settings.local.json`, or enabled anywhere but failing with a "not cached" error, is broken. Offer the same install-then-clean procedure; no plain key needs to exist.
+**Repair:** a platform-specific key in `~/.claude/settings.local.json` (stale even if a working copy exists elsewhere), or one enabled anywhere but failing with a "not cached" error, is broken. Offer the same install-then-clean procedure; no plain key needs to exist.
 
 Record declines in `.claude/hive/align-rejected.md`. Skip silently if nothing applies.
 
@@ -55,7 +60,7 @@ Record declines in `.claude/hive/align-rejected.md`. Skip silently if nothing ap
 
 ### Recommendations
 
-Walk through the checklist below. Skip items already implemented and items listed under Previously Rejected. Offer everything else; implement if accepted, and note the reason in the rejected file if declined.
+Walk through the checklist below. Skip items already implemented and anything listed under Previously Rejected — that list covers the sections above too (kept superseded plugins, declined migrations). If Status was unavailable, read `.claude/hive/align-rejected.md` in the main worktree yourself. Offer everything else; implement if accepted, and note the reason in the rejected file if declined.
 
 ## Checklist
 
@@ -65,7 +70,7 @@ Check the four settings files to discover already-installed plugins. A plugin en
 
 **Install with the claude CLI, never by editing `enabledPlugins` by hand** — a settings entry alone installs nothing (archive-sourced plugins in particular never load without a real install). Default to project-level: `--scope project` (shared via `.claude/settings.json`) or `--scope local` (machine-only, `.claude/settings.local.json`), unless the user explicitly asks for a global install (`--scope user`). Infer from existing project-level settings whether the user prefers local-only or shared — if unclear, ask once and use that for all installations.
 
-Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin gets three options: **Yes** (install), **No** (skip), **Tell me more**. After the user responds, process "Tell me more" answers one plugin at a time in sequence: (1) fetch the full, untruncated content of that plugin's README (use curl — WebFetch summarizes), (2) present the full README content to the user verbatim (the READMEs are already concise — do not summarize or truncate), (3) ask a fresh AskUserQuestion with only **Yes** / **No**. Do not advance to the next "Tell me more" plugin until the current one has a Yes/No answer.
+Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin gets three options: **Yes** (install), **No** (skip), **Tell me more**. After the user responds, process "Tell me more" answers one plugin at a time in sequence: (1) fetch the full, untruncated content of that plugin's README (use curl — WebFetch summarizes), (2) present the README to the user — verbatim when it is short, and as a faithful summary that keeps every setup step when it is long, (3) ask a fresh AskUserQuestion with only **Yes** / **No**. Do not advance to the next "Tell me more" plugin until the current one has a Yes/No answer.
 
 #### Plugin list
 
@@ -87,7 +92,7 @@ On Yes, set `AGENT_SANITIZER_SECRETS_ENABLED` to `"1"` in the `env` block of the
 
 #### Platform-specific entries for remote-kernels and model-router
 
-These two plugins ship a compiled binary; the plain key downloads it separately, so a plugin update briefly runs against the previous binary, while the marketplace's per-platform entry bundles it. For every plugin listed under **Platform entries available for** in Status, install `<plugin><suffix>@alignment-hive` with the suffix reported there (e.g. `remote-kernels-aarch64-apple-darwin@alignment-hive`) instead of the plain key; a plugin not listed there has no entry for this platform (or the catalog could not be consulted), so use the plain key.
+These two plugins ship a compiled binary; the plain key downloads it separately, so a plugin update briefly runs against the previous binary, while the marketplace's per-platform entry bundles it. For every plugin listed under **Platform entries available for** in Status, install `<plugin><suffix>@alignment-hive` with the suffix reported there (e.g. `remote-kernels-aarch64-apple-darwin@alignment-hive`) instead of the plain key; a plugin not listed there has no entry for this platform, so use the plain key. If Status says the catalog could not be consulted, add the marketplace and re-run `align-status.sh` before choosing.
 
 - **Never `--scope project`.** The key names a platform, so it must never land in a checked-in file — a teammate on another OS would get an archive that refuses to run. Install with `--scope local`, or `--scope user` for a global install; this overrides the shared/local preference inferred above.
 - **Never both.** A platform-specific entry and its plain counterpart define the same commands, skills and hooks. Exactly one key per plugin across the four settings files — use the install-then-clean procedure above.
@@ -115,9 +120,9 @@ The marketplace name is the part of the coordinate after `@`. After `marketplace
 
 For each marketplace in the table above that has a plugin enabled in some settings file, no `autoUpdate: true` in any settings file's `extraKnownMarketplaces.<marketplace>` or in `~/.claude/plugins/known_marketplaces.json`, and no decline recorded in the rejected file: ask once (Yes / No, batched like the plugin questions). Skip the section if nothing qualifies.
 
-On Yes, add `"autoUpdate": true` to the marketplace's `extraKnownMarketplaces` entry in the most local settings file that already declares it (`.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.json`); if none declares it, add a full entry (source from the table) to the file that enables the plugin, same preference order. Never promote a third-party marketplace into a more-shared file than the user chose for the plugin itself. On No, record it in the rejected file.
+On Yes, add `"autoUpdate": true` to the marketplace's `extraKnownMarketplaces` entry (keep its other fields) in the most local settings file that already declares it (`.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.json`); if none declares it, add a full entry (source from the table) to the file that enables the plugin, same preference order. Never promote a third-party marketplace into a more-shared file than the user chose for the plugin itself. On No, record it in the rejected file.
 
-A marketplace declared in `~/.claude/settings.local.json` (an older version of this flow wrote there) is stale: merge its `autoUpdate` into the supported declaration and delete it, or if it is declared nowhere else, `claude plugin marketplace add <github-repo> --scope user`, verify with `claude plugin marketplace list`, set `autoUpdate`, then delete it. On verification failure delete nothing.
+A marketplace declared in `~/.claude/settings.local.json` (an older version of this flow wrote there) is stale: carry an `"autoUpdate": true` from it into the supported declaration and delete it, or if it is declared nowhere else, `claude plugin marketplace add <github-repo> --scope user`, verify with `claude plugin marketplace list`, set `autoUpdate`, then delete it. On verification failure delete nothing.
 
 #### alignment-hive auto-update verification
 
@@ -131,11 +136,11 @@ Check `cleanupPeriodDays` in the four settings files. If it's unset or below 365
 
 ### Tooling (varies by project)
 
-Recommend modern, well-maintained tooling for the project (dependency management, build, lint, typecheck, format). Ask before installing anything.
+Recommend modern, well-maintained tooling for the project (dependency management, build, lint, typecheck, format, anything else that would improve the workflow). Ask before installing anything.
 
 ### Reload + Setup
 
-After installs, tell the user to restart Claude (`/exit` then `claude`): each new plugin's SessionStart hook nudges about its own setup, and any marketplace with auto-update enabled refreshes at session start.
+After installs, tell the user to restart Claude (`/exit` then `claude`): plugins with a setup skill make it available then and nudge about it from their SessionStart hook, and any marketplace with auto-update enabled refreshes at session start.
 
 ## Completion
 
