@@ -178,8 +178,8 @@ export const backfillSummaries = internalAction({
         if (!line.trim()) continue;
         try {
           const parsed = JSON.parse(line);
-          const result = parseKnownEntry(parsed);
-          if (result.data) entries.push(result.data);
+          const entry = parseKnownEntry(parsed);
+          if (entry) entries.push(entry);
         } catch {
           // skip unparseable lines
         }

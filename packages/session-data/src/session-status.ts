@@ -1,7 +1,4 @@
-/**
- * Upload status domain shared by the CLI and the review UI, so eligibility rules (especially
- * the exclusion veto — privacy-critical) have exactly one implementation.
- */
+/** Upload status and eligibility rules, shared by the CLI and the review UI. */
 
 export type SessionStatus =
   | { type: 'excluded' }
@@ -34,6 +31,14 @@ export function isEligibleForAutoUpload(status: SessionStatus): boolean {
   return status.type === 'ready';
 }
 
+/** '1h 30m', or '30m' under an hour; minutes round up. */
+export function formatRemaining(ms: number): string {
+  const totalMinutes = Math.ceil(ms / 60_000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 export function formatSessionStatus(status: SessionStatus, hasPartialUpload = false): string {
   // An incomplete upload attempt overrides the eligibility label: the user needs to know some
   // data is already on the server (and why Exclude is unavailable). Retry keeps following the
@@ -42,14 +47,16 @@ export function formatSessionStatus(status: SessionStatus, hasPartialUpload = fa
     return 'partially uploaded';
   }
   switch (status.type) {
-    case 'excluded': return 'excluded';
-    case 'uploaded': return 'uploaded';
-    case 'ready': return 'ready';
-    case 'snoozed': return 'snoozed';
-    case 'pending': {
-      const remainingHours = Math.max(0, Math.ceil(status.remainingMs / (60 * 60 * 1000)));
-      return `pending (${remainingHours}h)`;
-    }
+    case 'excluded':
+      return 'excluded';
+    case 'uploaded':
+      return 'uploaded';
+    case 'ready':
+      return 'ready';
+    case 'snoozed':
+      return 'snoozed';
+    case 'pending':
+      return `pending (${formatRemaining(status.remainingMs)})`;
   }
 }
 
@@ -59,9 +66,14 @@ export function getStatusColor(
 ): 'green' | 'blue' | 'yellow' | 'default' {
   if (hasPartialUpload && isPreUploadState(status)) return 'yellow';
   switch (status.type) {
-    case 'ready': return 'green';
-    case 'uploaded': return 'blue';
-    case 'pending': case 'snoozed': return 'yellow';
-    default: return 'default';
+    case 'ready':
+      return 'green';
+    case 'uploaded':
+      return 'blue';
+    case 'pending':
+    case 'snoozed':
+      return 'yellow';
+    default:
+      return 'default';
   }
 }

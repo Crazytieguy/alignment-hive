@@ -13,8 +13,8 @@ import {
 function parseAndBuildBlocks(rawEntries: Array<unknown>) {
   const entries: KnownEntry[] = [];
   for (const rawEntry of rawEntries) {
-    const parsed = parseKnownEntry(rawEntry);
-    if (parsed.data) entries.push(parsed.data);
+    const entry = parseKnownEntry(rawEntry);
+    if (entry) entries.push(entry);
   }
   return parseSession(entries);
 }

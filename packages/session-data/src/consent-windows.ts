@@ -1,14 +1,6 @@
 /**
- * Consent window computation for determining session visibility.
- *
- * A session is visible to readers only if its lastModified timestamp falls
- * within a consent window for BOTH global and project consent layers.
- *
- * Window rules:
- * - First consent is retroactive: window starts at 0 (covers legacy data)
- * - Subsequent consents start at their timestamp time (gap sessions excluded)
- * - Revocations close the current window at their timestamp time
- * - A currently-active consent has end = Infinity
+ * Consent windows: a session is visible to readers only if its lastModified falls inside a
+ * window of BOTH the global and the project consent timelines.
  */
 
 export interface ConsentEvent {
@@ -18,49 +10,29 @@ export interface ConsentEvent {
 
 export interface ConsentWindow {
   start: number;
-  end: number; // Infinity if currently active
+  end: number;
 }
 
 /**
- * Compute consent windows from an event log.
- *
- * Events are sorted by time. The first opt-in opens a window at time 0
- * (retroactive for legacy data). Subsequent opt-ins open windows at their
- * timestamp time. Opt-outs close the current window.
+ * Windows from an event log. The first opt-in is retroactive (starts at 0, covering legacy
+ * data); later opt-ins start at their timestamp; an opt-out closes the open window; an open
+ * window ends at Infinity.
  */
-export function computeConsentWindows(
-  events: ConsentEvent[],
-): ConsentWindow[] {
-  const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
-  const windows: ConsentWindow[] = [];
-  let isOpen = false;
-  let isFirst = true;
-
-  for (const event of sorted) {
-    if (event.sessionSharing && !isOpen) {
-      windows.push({
-        start: isFirst ? 0 : event.timestamp,
-        end: Infinity,
-      });
-      isOpen = true;
-      isFirst = false;
-    } else if (!event.sessionSharing && isOpen) {
-      // Close the current window
+export function computeConsentWindows(events: Array<ConsentEvent>): Array<ConsentWindow> {
+  const windows: Array<ConsentWindow> = [];
+  for (const event of [...events].sort((a, b) => a.timestamp - b.timestamp)) {
+    const open = windows.at(-1)?.end === Infinity;
+    if (event.sessionSharing && !open) {
+      windows.push({ start: windows.length === 0 ? 0 : event.timestamp, end: Infinity });
+    } else if (!event.sessionSharing && open) {
       windows[windows.length - 1].end = event.timestamp;
-      isOpen = false;
     }
   }
-
   return windows;
 }
 
-/**
- * Check if a timestamp falls within any consent window.
- */
-export function isInConsentWindow(
-  timestamp: number,
-  windows: ConsentWindow[],
-): boolean {
+/** Whether a timestamp falls within any window (start inclusive, end exclusive). */
+export function isInConsentWindow(timestamp: number, windows: Array<ConsentWindow>): boolean {
   return windows.some((w) => timestamp >= w.start && timestamp < w.end);
 }
 
@@ -76,7 +48,7 @@ export interface ProjectConsentEvent extends ConsentEvent, ProjectIdentifiers {}
 export interface ProjectGroup {
   directories: Set<string>;
   gitRemotes: Set<string>;
-  events: ProjectConsentEvent[];
+  events: Array<ProjectConsentEvent>;
 }
 
 /**
@@ -84,7 +56,7 @@ export interface ProjectGroup {
  * Absolute paths (starting with /) are directories; everything else is a git remote.
  */
 export function classifyLegacyProject(project: string): ProjectIdentifiers {
-  if (project.startsWith("/")) {
+  if (project.startsWith('/')) {
     return { directory: project };
   }
   return { gitRemote: project };
@@ -111,6 +83,14 @@ export function extractIdentifiers(record: {
   return {};
 }
 
+/** The lookup keys an identifier pair maps to; the single definition of the key encoding. */
+function identifierKeys({ directory, gitRemote }: ProjectIdentifiers): Array<string> {
+  const keys: Array<string> = [];
+  if (directory) keys.push(`dir:${directory}`);
+  if (gitRemote) keys.push(`remote:${gitRemote.toLowerCase()}`);
+  return keys;
+}
+
 /**
  * Group consent events for one user into connected components.
  *
@@ -119,72 +99,46 @@ export function extractIdentifiers(record: {
  * consent timelines across identifiers so that consenting by path
  * and later by remote produces one continuous timeline.
  */
-export function groupProjectConsentEvents(events: ProjectConsentEvent[]): {
-  groups: ProjectGroup[];
+export function groupProjectConsentEvents(events: Array<ProjectConsentEvent>): {
+  groups: Array<ProjectGroup>;
   lookup: Map<string, number>;
 } {
-  const groups: ProjectGroup[] = [];
+  const groups: Array<ProjectGroup> = [];
   const lookup = new Map<string, number>();
 
   for (const event of events) {
-    const keys: string[] = [];
-    if (event.directory) keys.push(`dir:${event.directory}`);
-    if (event.gitRemote) keys.push(`remote:${event.gitRemote.toLowerCase()}`);
+    const keys = identifierKeys(event);
+    const matched = [...new Set(keys.map((k) => lookup.get(k)).filter((i): i is number => i !== undefined))].sort(
+      (a, b) => a - b,
+    );
 
-    // Find all existing groups that match any of this event's identifiers
-    const matchedGroupIndices = new Set<number>();
-    for (const key of keys) {
-      const idx = lookup.get(key);
-      if (idx !== undefined) matchedGroupIndices.add(idx);
-    }
-
-    if (matchedGroupIndices.size === 0) {
-      // New group
-      const idx = groups.length;
-      groups.push({
-        directories: new Set(event.directory ? [event.directory] : []),
-        gitRemotes: new Set(event.gitRemote ? [event.gitRemote] : []),
-        events: [event],
-      });
-      for (const key of keys) lookup.set(key, idx);
-    } else if (matchedGroupIndices.size === 1) {
-      // Add to existing group
-      const idx = [...matchedGroupIndices][0];
-      const group = groups[idx];
-      if (event.directory) group.directories.add(event.directory);
-      if (event.gitRemote) group.gitRemotes.add(event.gitRemote);
-      group.events.push(event);
-      for (const key of keys) lookup.set(key, idx);
+    let targetIdx: number;
+    if (matched.length === 0) {
+      targetIdx = groups.length;
+      groups.push({ directories: new Set(), gitRemotes: new Set(), events: [] });
     } else {
-      // Merge multiple groups — pick the lowest index as target
-      const indices = [...matchedGroupIndices].sort((a, b) => a - b);
-      const targetIdx = indices[0];
+      // Merge every other matched group into the lowest-indexed one.
+      targetIdx = matched[0];
       const target = groups[targetIdx];
-
-      for (let i = 1; i < indices.length; i++) {
-        const sourceIdx = indices[i];
+      for (const sourceIdx of matched.slice(1)) {
         const source = groups[sourceIdx];
         for (const d of source.directories) target.directories.add(d);
         for (const r of source.gitRemotes) target.gitRemotes.add(r);
         target.events.push(...source.events);
-        // Redirect all lookup entries from source to target
-        for (const [key, val] of lookup) {
-          if (val === sourceIdx) lookup.set(key, targetIdx);
-        }
-        // Mark source as merged (empty)
-        groups[sourceIdx] = { directories: new Set(), gitRemotes: new Set(), events: [] };
+        for (const [key, val] of lookup) if (val === sourceIdx) lookup.set(key, targetIdx);
+        groups[sourceIdx] = { directories: new Set(), gitRemotes: new Set(), events: [] }; // merged away; compacted below
       }
-
-      // Add current event
-      if (event.directory) target.directories.add(event.directory);
-      if (event.gitRemote) target.gitRemotes.add(event.gitRemote);
-      target.events.push(event);
-      for (const key of keys) lookup.set(key, targetIdx);
     }
+
+    const target = groups[targetIdx];
+    if (event.directory) target.directories.add(event.directory);
+    if (event.gitRemote) target.gitRemotes.add(event.gitRemote);
+    target.events.push(event);
+    for (const key of keys) lookup.set(key, targetIdx);
   }
 
   // Compact: remove empty (merged) groups, reindex
-  const compacted: ProjectGroup[] = [];
+  const compacted: Array<ProjectGroup> = [];
   const oldToNew = new Map<number, number>();
   for (let i = 0; i < groups.length; i++) {
     if (groups[i].events.length > 0) {
@@ -201,28 +155,15 @@ export function groupProjectConsentEvents(events: ProjectConsentEvent[]): {
   return { groups: compacted, lookup: compactedLookup };
 }
 
-/**
- * Find the group index for given identifiers.
- * Returns undefined if no match or if identifiers match different groups (ambiguous).
- */
+/** Group index for the identifiers, or undefined when nothing matches or they match different groups. */
 export function findGroupForIdentifiers(
   lookup: Map<string, number>,
   identifiers: ProjectIdentifiers,
 ): number | undefined {
-  let result: number | undefined;
-
-  if (identifiers.directory) {
-    const idx = lookup.get(`dir:${identifiers.directory}`);
-    if (idx !== undefined) result = idx;
-  }
-
-  if (identifiers.gitRemote) {
-    const idx = lookup.get(`remote:${identifiers.gitRemote.toLowerCase()}`);
-    if (idx !== undefined) {
-      if (result !== undefined && result !== idx) return undefined; // ambiguous
-      result = idx;
-    }
-  }
-
-  return result;
+  const found = new Set(
+    identifierKeys(identifiers)
+      .map((k) => lookup.get(k))
+      .filter((i) => i !== undefined),
+  );
+  return found.size === 1 ? [...found][0] : undefined;
 }

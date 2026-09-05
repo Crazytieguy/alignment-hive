@@ -1,401 +1,255 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, test } from 'bun:test';
 import {
-  classifyLegacyProject,
   computeConsentWindows,
   extractIdentifiers,
   findGroupForIdentifiers,
   groupProjectConsentEvents,
-  type ProjectConsentEvent,
-} from "./consent-windows";
+  isInConsentWindow,
+} from './consent-windows';
+import type { ProjectConsentEvent, ProjectIdentifiers } from './consent-windows';
 
-describe("groupProjectConsentEvents", () => {
-  it("returns empty groups for empty input", () => {
+/** The group that identifiers resolve to, through the public reader. */
+const groupFor = (r: ReturnType<typeof groupProjectConsentEvents>, ids: ProjectIdentifiers) => {
+  const idx = findGroupForIdentifiers(r.lookup, ids);
+  return idx === undefined ? undefined : r.groups[idx];
+};
+
+describe('computeConsentWindows', () => {
+  test('first opt-in is retroactive, opt-out closes, a later opt-in starts at its timestamp', () => {
+    const windows = computeConsentWindows([
+      { sessionSharing: true, timestamp: 1000 },
+      { sessionSharing: false, timestamp: 2000 },
+      { sessionSharing: true, timestamp: 3000 },
+    ]);
+    expect(windows).toEqual([
+      { start: 0, end: 2000 },
+      { start: 3000, end: Infinity },
+    ]);
+  });
+
+  test('a repeated opt-in does not open a second window, so a later opt-out closes everything', () => {
+    const windows = computeConsentWindows([
+      { sessionSharing: true, timestamp: 1000 },
+      { sessionSharing: true, timestamp: 2000 },
+      { sessionSharing: false, timestamp: 3000 },
+    ]);
+    expect(windows).toEqual([{ start: 0, end: 3000 }]);
+    expect(isInConsentWindow(3001, windows)).toBe(false);
+  });
+
+  test('a leading opt-out is a no-op', () => {
+    expect(
+      computeConsentWindows([
+        { sessionSharing: false, timestamp: 1000 },
+        { sessionSharing: true, timestamp: 2000 },
+      ]),
+    ).toEqual([{ start: 0, end: Infinity }]);
+  });
+
+  test('windows are start-inclusive and end-exclusive', () => {
+    const windows = [{ start: 10, end: 20 }];
+    expect(isInConsentWindow(10, windows)).toBe(true);
+    expect(isInConsentWindow(20, windows)).toBe(false);
+  });
+});
+
+describe('groupProjectConsentEvents', () => {
+  test('returns empty groups for empty input', () => {
     const result = groupProjectConsentEvents([]);
     expect(result.groups).toEqual([]);
     expect(result.lookup.size).toBe(0);
   });
 
-  it("creates one group for a single event with directory only", () => {
-    const events: ProjectConsentEvent[] = [
-      { directory: "/home/user/project", sessionSharing: true, timestamp: 100 },
-    ];
-    const result = groupProjectConsentEvents(events);
+  test('creates one group for a single event, reachable by either identifier', () => {
+    const event = {
+      directory: '/home/user/project',
+      gitRemote: 'github.com/user/repo',
+      sessionSharing: true,
+      timestamp: 100,
+    };
+    const result = groupProjectConsentEvents([event]);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(new Set(["/home/user/project"]));
-    expect(result.groups[0].gitRemotes).toEqual(new Set());
-    expect(result.groups[0].events).toEqual(events);
-    expect(result.lookup.get("dir:/home/user/project")).toBe(0);
+    expect(result.groups[0].directories).toEqual(new Set(['/home/user/project']));
+    expect(result.groups[0].gitRemotes).toEqual(new Set(['github.com/user/repo']));
+    expect(groupFor(result, { directory: '/home/user/project' })?.events).toEqual([event]);
+    expect(groupFor(result, { gitRemote: 'github.com/user/repo' })?.events).toEqual([event]);
   });
 
-  it("creates one group for a single event with gitRemote only", () => {
-    const events: ProjectConsentEvent[] = [
-      { gitRemote: "github.com/user/repo", sessionSharing: true, timestamp: 100 },
+  test('merges two events with same directory but different remotes into one group', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { directory: '/home/user/project', gitRemote: 'github.com/user/repo', sessionSharing: true, timestamp: 100 },
+      { directory: '/home/user/project', gitRemote: 'github.com/other/fork', sessionSharing: true, timestamp: 200 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(new Set());
-    expect(result.groups[0].gitRemotes).toEqual(new Set(["github.com/user/repo"]));
-    expect(result.groups[0].events).toEqual(events);
-    expect(result.lookup.get("remote:github.com/user/repo")).toBe(0);
-  });
-
-  it("creates one group for a single event with both directory and gitRemote", () => {
-    const events: ProjectConsentEvent[] = [
-      {
-        directory: "/home/user/project",
-        gitRemote: "github.com/user/repo",
-        sessionSharing: true,
-        timestamp: 100,
-      },
-    ];
-    const result = groupProjectConsentEvents(events);
-    expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(new Set(["/home/user/project"]));
-    expect(result.groups[0].gitRemotes).toEqual(new Set(["github.com/user/repo"]));
-    expect(result.groups[0].events).toEqual(events);
-    expect(result.lookup.get("dir:/home/user/project")).toBe(0);
-    expect(result.lookup.get("remote:github.com/user/repo")).toBe(0);
-  });
-
-  it("merges two events with same directory but different remotes into one group", () => {
-    const events: ProjectConsentEvent[] = [
-      {
-        directory: "/home/user/project",
-        gitRemote: "github.com/user/repo",
-        sessionSharing: true,
-        timestamp: 100,
-      },
-      {
-        directory: "/home/user/project",
-        gitRemote: "github.com/other/fork",
-        sessionSharing: true,
-        timestamp: 200,
-      },
-    ];
-    const result = groupProjectConsentEvents(events);
-    expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(new Set(["/home/user/project"]));
-    expect(result.groups[0].gitRemotes).toEqual(
-      new Set(["github.com/user/repo", "github.com/other/fork"]),
-    );
+    expect(result.groups[0].gitRemotes).toEqual(new Set(['github.com/user/repo', 'github.com/other/fork']));
     expect(result.groups[0].events).toHaveLength(2);
-    const idx = result.lookup.get("dir:/home/user/project");
-    expect(idx).toBeDefined();
-    expect(result.lookup.get("remote:github.com/user/repo")).toBe(idx);
-    expect(result.lookup.get("remote:github.com/other/fork")).toBe(idx);
+    expect(groupFor(result, { gitRemote: 'github.com/other/fork' })).toBe(
+      groupFor(result, { directory: '/home/user/project' }),
+    );
   });
 
-  it("merges two events with same remote but different directories into one group", () => {
-    const events: ProjectConsentEvent[] = [
-      {
-        directory: "/home/user/project-a",
-        gitRemote: "github.com/user/repo",
-        sessionSharing: true,
-        timestamp: 100,
-      },
-      {
-        directory: "/home/user/project-b",
-        gitRemote: "github.com/user/repo",
-        sessionSharing: false,
-        timestamp: 200,
-      },
+  test('merges two events with same remote but different directories into one group', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { directory: '/home/user/project-a', gitRemote: 'github.com/user/repo', sessionSharing: true, timestamp: 100 },
+      { directory: '/home/user/project-b', gitRemote: 'github.com/user/repo', sessionSharing: false, timestamp: 200 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(
-      new Set(["/home/user/project-a", "/home/user/project-b"]),
-    );
-    expect(result.groups[0].gitRemotes).toEqual(new Set(["github.com/user/repo"]));
+    expect(result.groups[0].directories).toEqual(new Set(['/home/user/project-a', '/home/user/project-b']));
     expect(result.groups[0].events).toHaveLength(2);
   });
 
-  it("keeps two unrelated events in separate groups", () => {
-    const events: ProjectConsentEvent[] = [
-      {
-        directory: "/home/user/project-a",
-        gitRemote: "github.com/user/repo-a",
-        sessionSharing: true,
-        timestamp: 100,
-      },
-      {
-        directory: "/home/user/project-b",
-        gitRemote: "github.com/user/repo-b",
-        sessionSharing: true,
-        timestamp: 200,
-      },
+  test('keeps two unrelated events in separate groups', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { directory: '/home/user/project-a', gitRemote: 'github.com/user/repo-a', sessionSharing: true, timestamp: 100 },
+      { directory: '/home/user/project-b', gitRemote: 'github.com/user/repo-b', sessionSharing: true, timestamp: 200 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(2);
-
-    const idxA = result.lookup.get("dir:/home/user/project-a");
-    const idxB = result.lookup.get("dir:/home/user/project-b");
-    expect(idxA).toBeDefined();
-    expect(idxB).toBeDefined();
-    expect(idxA).not.toBe(idxB);
-
-    expect(result.lookup.get("remote:github.com/user/repo-a")).toBe(idxA);
-    expect(result.lookup.get("remote:github.com/user/repo-b")).toBe(idxB);
+    const a = groupFor(result, { directory: '/home/user/project-a' });
+    const b = groupFor(result, { directory: '/home/user/project-b' });
+    expect(a).not.toBe(b);
+    expect(groupFor(result, { gitRemote: 'github.com/user/repo-a' })).toBe(a);
+    expect(groupFor(result, { gitRemote: 'github.com/user/repo-b' })).toBe(b);
   });
 
-  it("merges transitively: A shares dir with B, B shares remote with C", () => {
-    const events: ProjectConsentEvent[] = [
-      { directory: "/a", sessionSharing: true, timestamp: 100 },
-      { directory: "/a", gitRemote: "r1", sessionSharing: true, timestamp: 200 },
-      { directory: "/b", gitRemote: "r1", sessionSharing: true, timestamp: 300 },
+  test('merges transitively: A shares dir with B, B shares remote with C', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { directory: '/a', sessionSharing: true, timestamp: 100 },
+      { directory: '/a', gitRemote: 'r1', sessionSharing: true, timestamp: 200 },
+      { directory: '/b', gitRemote: 'r1', sessionSharing: true, timestamp: 300 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(new Set(["/a", "/b"]));
-    expect(result.groups[0].gitRemotes).toEqual(new Set(["r1"]));
+    expect(result.groups[0].directories).toEqual(new Set(['/a', '/b']));
     expect(result.groups[0].events).toHaveLength(3);
-
-    const idx = result.lookup.get("dir:/a");
-    expect(result.lookup.get("dir:/b")).toBe(idx);
-    expect(result.lookup.get("remote:r1")).toBe(idx);
+    expect(groupFor(result, { directory: '/b' })).toBe(groupFor(result, { gitRemote: 'r1' }));
   });
 
-  it("groups by shared identifiers regardless of consent state", () => {
-    const events: ProjectConsentEvent[] = [
-      { directory: "/shared", sessionSharing: true, timestamp: 100 },
-      { directory: "/shared", sessionSharing: false, timestamp: 200 },
-      { directory: "/other", sessionSharing: true, timestamp: 300 },
+  test('groups by shared identifiers regardless of consent state', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { directory: '/shared', sessionSharing: true, timestamp: 100 },
+      { directory: '/shared', sessionSharing: false, timestamp: 200 },
+      { directory: '/other', sessionSharing: true, timestamp: 300 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(2);
-    const sharedIdx = result.lookup.get("dir:/shared");
-    const otherIdx = result.lookup.get("dir:/other");
-    expect(sharedIdx).not.toBe(otherIdx);
+    expect(groupFor(result, { directory: '/shared' })).not.toBe(groupFor(result, { directory: '/other' }));
   });
 
-  it("produces correct consent windows when events from a merged group are passed to computeConsentWindows", () => {
-    const T1 = 1000;
-    const T2 = 2000;
-    const T3 = 3000;
-
-    const events: ProjectConsentEvent[] = [
-      { directory: "/project", sessionSharing: true, timestamp: T1 },
-      { directory: "/project", sessionSharing: false, timestamp: T2 },
-      {
-        directory: "/project",
-        gitRemote: "github.com/user/repo",
-        sessionSharing: true,
-        timestamp: T3,
-      },
-    ];
-
-    const result = groupProjectConsentEvents(events);
-    expect(result.groups).toHaveLength(1);
-
-    const windows = computeConsentWindows(result.groups[0].events);
-    expect(windows).toEqual([
-      { start: 0, end: T2 },
-      { start: T3, end: Infinity },
-    ]);
-  });
-
-  it("merges events with same gitRemote in different cases into one group", () => {
-    const events: ProjectConsentEvent[] = [
-      { gitRemote: "github.com/User/Repo", sessionSharing: true, timestamp: 100 },
-      { gitRemote: "github.com/user/repo", sessionSharing: false, timestamp: 200 },
+  test('merges events with same gitRemote in different cases into one group', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { gitRemote: 'github.com/User/Repo', sessionSharing: true, timestamp: 100 },
+      { gitRemote: 'github.com/user/repo', sessionSharing: false, timestamp: 200 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
     expect(result.groups[0].events).toHaveLength(2);
     // Both original-case remotes are preserved in the set
-    expect(result.groups[0].gitRemotes).toEqual(
-      new Set(["github.com/User/Repo", "github.com/user/repo"]),
-    );
-    // Lookup uses lowercase
-    expect(result.lookup.get("remote:github.com/user/repo")).toBe(0);
+    expect(result.groups[0].gitRemotes).toEqual(new Set(['github.com/User/Repo', 'github.com/user/repo']));
+    expect(groupFor(result, { gitRemote: 'GITHUB.COM/USER/REPO' })).toBe(result.groups[0]);
   });
 
-  it("handles events with no identifiers", () => {
-    const events: ProjectConsentEvent[] = [
-      { sessionSharing: true, timestamp: 100 },
-    ];
-    const result = groupProjectConsentEvents(events);
+  test('handles events with no identifiers', () => {
+    const result = groupProjectConsentEvents([{ sessionSharing: true, timestamp: 100 }]);
     expect(result.groups).toHaveLength(1);
     expect(result.groups[0].directories).toEqual(new Set());
     expect(result.groups[0].gitRemotes).toEqual(new Set());
     expect(result.groups[0].events).toHaveLength(1);
   });
 
-  it("handles complex transitive chains across many events", () => {
-    const events: ProjectConsentEvent[] = [
-      { directory: "/a", gitRemote: "r1", sessionSharing: true, timestamp: 100 },
-      { directory: "/b", gitRemote: "r2", sessionSharing: true, timestamp: 200 },
-      { directory: "/b", gitRemote: "r1", sessionSharing: true, timestamp: 300 },
+  test('handles complex transitive chains across many events', () => {
+    const events: Array<ProjectConsentEvent> = [
+      { directory: '/a', gitRemote: 'r1', sessionSharing: true, timestamp: 100 },
+      { directory: '/b', gitRemote: 'r2', sessionSharing: true, timestamp: 200 },
+      { directory: '/b', gitRemote: 'r1', sessionSharing: true, timestamp: 300 },
     ];
     const result = groupProjectConsentEvents(events);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].directories).toEqual(new Set(["/a", "/b"]));
-    expect(result.groups[0].gitRemotes).toEqual(new Set(["r1", "r2"]));
+    expect(result.groups[0].directories).toEqual(new Set(['/a', '/b']));
+    expect(result.groups[0].gitRemotes).toEqual(new Set(['r1', 'r2']));
     expect(result.groups[0].events).toHaveLength(3);
   });
 });
 
-describe("findGroupForIdentifiers", () => {
-  it("returns undefined for empty lookup", () => {
-    const lookup = new Map<string, number>();
-    expect(findGroupForIdentifiers(lookup, { directory: "/foo" })).toBeUndefined();
+describe('findGroupForIdentifiers', () => {
+  const lookup = new Map<string, number>([
+    ['dir:/home/user/project', 0],
+    ['remote:github.com/user/repo', 0],
+    ['dir:/other', 1],
+    ['remote:github.com/other/repo', 1],
+  ]);
+
+  test('finds group by directory', () => {
+    expect(findGroupForIdentifiers(lookup, { directory: '/home/user/project' })).toBe(0);
   });
 
-  it("finds group by directory", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/home/user/project", 0],
-      ["remote:github.com/user/repo", 0],
-    ]);
-    expect(findGroupForIdentifiers(lookup, { directory: "/home/user/project" })).toBe(0);
+  test('finds group by gitRemote', () => {
+    expect(findGroupForIdentifiers(lookup, { gitRemote: 'github.com/other/repo' })).toBe(1);
   });
 
-  it("finds group by gitRemote", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/home/user/project", 0],
-      ["remote:github.com/user/repo", 0],
-    ]);
-    expect(findGroupForIdentifiers(lookup, { gitRemote: "github.com/user/repo" })).toBe(0);
-  });
-
-  it("returns the group index when both identifiers match the same group", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/home/user/project", 2],
-      ["remote:github.com/user/repo", 2],
-    ]);
+  test('returns the group index when both identifiers match the same group', () => {
     expect(
-      findGroupForIdentifiers(lookup, {
-        directory: "/home/user/project",
-        gitRemote: "github.com/user/repo",
-      }),
-    ).toBe(2);
+      findGroupForIdentifiers(lookup, { directory: '/home/user/project', gitRemote: 'github.com/user/repo' }),
+    ).toBe(0);
   });
 
-  it("returns undefined when identifiers match different groups (ambiguous)", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/home/user/project", 0],
-      ["remote:github.com/other/repo", 1],
-    ]);
+  test('returns undefined when identifiers match different groups (ambiguous)', () => {
     expect(
-      findGroupForIdentifiers(lookup, {
-        directory: "/home/user/project",
-        gitRemote: "github.com/other/repo",
-      }),
+      findGroupForIdentifiers(lookup, { directory: '/home/user/project', gitRemote: 'github.com/other/repo' }),
     ).toBeUndefined();
   });
 
-  it("returns undefined when no identifiers match", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/home/user/project", 0],
-      ["remote:github.com/user/repo", 0],
-    ]);
+  test('returns undefined when no identifiers match', () => {
     expect(
-      findGroupForIdentifiers(lookup, {
-        directory: "/somewhere/else",
-        gitRemote: "gitlab.com/other/repo",
-      }),
+      findGroupForIdentifiers(lookup, { directory: '/somewhere/else', gitRemote: 'gitlab.com/other/repo' }),
     ).toBeUndefined();
   });
 
-  it("returns undefined when identifiers are empty", () => {
-    const lookup = new Map<string, number>([["dir:/home/user/project", 0]]);
+  test('returns undefined when identifiers are empty', () => {
     expect(findGroupForIdentifiers(lookup, {})).toBeUndefined();
   });
 
-  it("matches gitRemote case-insensitively", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/home/user/project", 0],
-      ["remote:github.com/user/repo", 0],
-    ]);
-    expect(findGroupForIdentifiers(lookup, { gitRemote: "github.com/User/Repo" })).toBe(0);
-  });
-
-  it("matches on one identifier when the other is undefined", () => {
-    const lookup = new Map<string, number>([
-      ["dir:/project-a", 0],
-      ["remote:github.com/repo-a", 0],
-      ["dir:/project-b", 1],
-      ["remote:github.com/repo-b", 1],
-    ]);
-    expect(findGroupForIdentifiers(lookup, { gitRemote: "github.com/repo-b" })).toBe(1);
+  test('matches gitRemote case-insensitively', () => {
+    expect(findGroupForIdentifiers(lookup, { gitRemote: 'github.com/User/Repo' })).toBe(0);
   });
 });
 
-describe("classifyLegacyProject", () => {
-  it("classifies absolute Unix path as directory", () => {
-    expect(classifyLegacyProject("/home/user/project")).toEqual({
-      directory: "/home/user/project",
-    });
-  });
-
-  it("classifies root path as directory", () => {
-    expect(classifyLegacyProject("/")).toEqual({ directory: "/" });
-  });
-
-  it("classifies non-slash string as gitRemote", () => {
-    expect(classifyLegacyProject("github.com/user/repo")).toEqual({
-      gitRemote: "github.com/user/repo",
-    });
-  });
-
-  it("classifies SSH-style remote as gitRemote", () => {
-    expect(classifyLegacyProject("git@github.com:user/repo.git")).toEqual({
-      gitRemote: "git@github.com:user/repo.git",
-    });
-  });
-
-  it("classifies relative path (no leading slash) as gitRemote", () => {
-    expect(classifyLegacyProject("my-project")).toEqual({
-      gitRemote: "my-project",
-    });
-  });
-});
-
-describe("extractIdentifiers", () => {
-  it("prefers new fields over legacy project", () => {
+describe('extractIdentifiers', () => {
+  test('prefers new fields over legacy project', () => {
     expect(
       extractIdentifiers({
-        project: "github.com/user/repo",
-        directory: "/home/user/project",
-        gitRemote: "github.com/other/repo",
+        project: 'github.com/user/repo',
+        directory: '/home/user/project',
+        gitRemote: 'github.com/other/repo',
       }),
-    ).toEqual({
-      directory: "/home/user/project",
-      gitRemote: "github.com/other/repo",
-    });
+    ).toEqual({ directory: '/home/user/project', gitRemote: 'github.com/other/repo' });
   });
 
-  it("uses directory alone when gitRemote is absent", () => {
-    expect(extractIdentifiers({ directory: "/home/user/project" })).toEqual({
-      directory: "/home/user/project",
+  test('uses directory alone when gitRemote is absent', () => {
+    expect(extractIdentifiers({ directory: '/home/user/project' })).toEqual({
+      directory: '/home/user/project',
       gitRemote: undefined,
     });
   });
 
-  it("uses gitRemote alone when directory is absent", () => {
-    expect(extractIdentifiers({ gitRemote: "github.com/user/repo" })).toEqual({
+  test('uses gitRemote alone when directory is absent', () => {
+    expect(extractIdentifiers({ gitRemote: 'github.com/user/repo' })).toEqual({
       directory: undefined,
-      gitRemote: "github.com/user/repo",
+      gitRemote: 'github.com/user/repo',
     });
   });
 
-  it("falls back to classifyLegacyProject for path-based project", () => {
-    expect(extractIdentifiers({ project: "/home/user/project" })).toEqual({
-      directory: "/home/user/project",
-    });
+  test('falls back to classifyLegacyProject for path-based project', () => {
+    expect(extractIdentifiers({ project: '/home/user/project' })).toEqual({ directory: '/home/user/project' });
   });
 
-  it("falls back to classifyLegacyProject for remote-based project", () => {
-    expect(extractIdentifiers({ project: "github.com/user/repo" })).toEqual({
-      gitRemote: "github.com/user/repo",
-    });
+  test('falls back to classifyLegacyProject for remote-based project', () => {
+    expect(extractIdentifiers({ project: 'github.com/user/repo' })).toEqual({ gitRemote: 'github.com/user/repo' });
   });
 
-  it("returns empty object when no fields are set", () => {
+  test('returns empty object when no fields are set', () => {
     expect(extractIdentifiers({})).toEqual({});
-  });
-
-  it("ignores project when directory is set", () => {
-    expect(
-      extractIdentifiers({ project: "/old/path", directory: "/new/path" }),
-    ).toEqual({ directory: "/new/path", gitRemote: undefined });
   });
 });

@@ -1,17 +1,14 @@
 import { z } from 'zod';
 
 /**
- * The full Workflow run-metadata object, as written to `<session>/workflows/wf_<id>.json`.
- * Permissive (looseObject) so new fields emitted by the Workflow tool are preserved in the
- * sanitized storage blob rather than silently dropped. The known scalar fields are declared so
- * the row extractor and UI can rely on them — but every one of them is cosmetic, so each
- * carries a .catch(): if a future Claude Code version drifts a field's type (status becomes an
- * object, summary: null), the run degrades to a missing stat instead of being dropped entirely,
- * fleet-wide, by a failed parse. runId falls back to the path-derived wf_<id> in
- * extractWorkflowRunRow, so no single field can lose a run.
+ * Run metadata as written to `<session>/workflows/wf_<id>.json`. looseObject so fields this
+ * schema doesn't know about still reach the stored blob. Every declared field is cosmetic and
+ * carries a .catch(): if a future Claude Code version changes a field's type, the run loses a
+ * stat instead of being dropped fleet-wide by a failed parse (runId falls back to the filename
+ * in extractWorkflowRunRow).
  */
 export const WorkflowRunBlobSchema = z.looseObject({
-  runId: z.string().catch(''),
+  runId: z.string().optional().catch(undefined),
   workflowName: z.string().optional().catch(undefined),
   summary: z.string().optional().catch(undefined),
   status: z.string().optional().catch(undefined),
@@ -41,15 +38,21 @@ export interface WorkflowRunRow {
   durationMs?: number;
 }
 
+// Caps keep the row (a mutation argument) small regardless of blob contents; the full text stays
+// in the storage blob. An over-long field would fail the save on every retry.
+const MAX_SUMMARY = 2000;
+const MAX_FIELD = 500;
+const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+
 /** Extract the indexed scalar row from a parsed run-metadata blob. */
 export function extractWorkflowRunRow(workflowRunId: string, blob: WorkflowRunBlob): WorkflowRunRow {
   return {
     workflowRunId,
     // The filename IS the run's identity; a missing/drifted runId field must not lose the run.
     runId: blob.runId || workflowRunId,
-    ...(blob.workflowName !== undefined && { workflowName: blob.workflowName }),
-    ...(blob.summary !== undefined && { summary: blob.summary }),
-    ...(blob.status !== undefined && { status: blob.status }),
+    ...(blob.workflowName !== undefined && { workflowName: cap(blob.workflowName, MAX_FIELD) }),
+    ...(blob.summary !== undefined && { summary: cap(blob.summary, MAX_SUMMARY) }),
+    ...(blob.status !== undefined && { status: cap(blob.status, MAX_FIELD) }),
     ...(blob.totalTokens !== undefined && { totalTokens: blob.totalTokens }),
     ...(blob.totalToolCalls !== undefined && { totalToolCalls: blob.totalToolCalls }),
     ...(blob.agentCount !== undefined && { agentCount: blob.agentCount }),

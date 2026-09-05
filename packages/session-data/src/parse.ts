@@ -4,14 +4,14 @@ import { isKnownContentBlock } from './schemas';
 function isNoiseBlock(block: ContentBlock): boolean {
   if (!isKnownContentBlock(block)) return false;
 
-  if (block.type === 'tool_result' && 'content' in block) {
+  if (block.type === 'tool_result') {
     const content = block.content;
     if (typeof content === 'string' && content.startsWith('Todos have been modified successfully')) {
       return true;
     }
   }
 
-  if (block.type === 'text' && 'text' in block) {
+  if (block.type === 'text') {
     const text = block.text.trim();
     if (text.startsWith('<system-reminder>') && text.endsWith('</system-reminder>')) {
       return true;
@@ -21,61 +21,23 @@ function isNoiseBlock(block: ContentBlock): boolean {
   return false;
 }
 
-function isSkippedEntryType(entry: KnownEntry): boolean {
-  return entry.type === 'file-history-snapshot' || entry.type === 'queue-operation';
-}
-
 function isToolResultOnly(entry: UserEntry): boolean {
   const content = entry.message.content;
   if (!Array.isArray(content)) return false;
-
-  const meaningfulBlocks = content.filter((b) => isKnownContentBlock(b) && !isNoiseBlock(b));
-  if (meaningfulBlocks.length === 0) return true;
-
-  return meaningfulBlocks.every((b) => b.type === 'tool_result');
+  return content.filter((b) => isKnownContentBlock(b) && !isNoiseBlock(b)).every((b) => b.type === 'tool_result');
 }
 
-function extractUserText(entry: UserEntry): string {
+/** The user's own text in an entry: text blocks minus system-reminder noise, joined. */
+export function extractUserText(entry: UserEntry): string {
   const content = entry.message.content;
   if (!content) return '';
   if (typeof content === 'string') return content;
 
   const textParts: Array<string> = [];
   for (const block of content) {
-    if (!isKnownContentBlock(block)) continue;
-    if (isNoiseBlock(block)) continue;
-    if (block.type === 'tool_result') continue;
-    if (block.type === 'text' && 'text' in block) {
-      textParts.push(block.text);
-    }
+    if (isKnownContentBlock(block) && block.type === 'text' && !isNoiseBlock(block)) textParts.push(block.text);
   }
-
   return textParts.join('\n');
-}
-
-interface ToolResultInfo {
-  content: string;
-  agentId?: string;
-}
-
-function findToolResult(entries: Array<KnownEntry>, toolUseId: string): ToolResultInfo | undefined {
-  for (const entry of entries) {
-    if (entry.type !== 'user') continue;
-    const content = entry.message.content;
-    if (!Array.isArray(content)) continue;
-
-    for (const block of content) {
-      if (!isKnownContentBlock(block)) continue;
-      if (block.type === 'tool_result' && 'tool_use_id' in block && block.tool_use_id === toolUseId) {
-        const agentId = 'agentId' in entry && typeof entry.agentId === 'string' ? entry.agentId : undefined;
-        return {
-          content: getToolResultText(block.content),
-          agentId,
-        };
-      }
-    }
-  }
-  return undefined;
 }
 
 export function getToolResultText(content: string | Array<ContentBlock> | undefined): string {
@@ -85,47 +47,80 @@ export function getToolResultText(content: string | Array<ContentBlock> | undefi
   const parts: Array<string> = [];
   for (const block of content) {
     if (!isKnownContentBlock(block)) continue;
-    if (block.type === 'text' && 'text' in block) {
+    if (block.type === 'text') {
       parts.push(block.text);
-    } else if (block.type === 'image' && 'source' in block) {
+    } else if (block.type === 'image') {
       parts.push(`[image:${block.source.media_type}]`);
-    } else if (block.type === 'document' && 'source' in block) {
+    } else if (block.type === 'document') {
       parts.push(`[document:${block.source.media_type}]`);
     }
   }
   return parts.join('\n');
 }
 
-function findLastSummaryIndex(entries: Array<KnownEntry>): number {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].type === 'summary') {
-      return i;
-    }
-  }
-  return -1;
+interface BlockBase {
+  lineNumber: number;
+  /** Line of the parent entry; null for a root entry; undefined when unknown. */
+  parentLineNumber?: number | null;
 }
 
-export function parseSession(entries: Array<KnownEntry>) {
-  const blocks = [];
+interface EntryBlock extends BlockBase {
+  timestamp: string;
+  uuid: string;
+  parentUuid: string | null;
+}
+
+export type LogicalBlock =
+  | (EntryBlock & { type: 'user'; content: string; cwd?: string; gitBranch?: string })
+  | (EntryBlock & { type: 'assistant'; content: string; model?: string })
+  | (EntryBlock & { type: 'thinking'; content: string })
+  | (EntryBlock & {
+      type: 'tool';
+      toolName: string;
+      toolInput: Record<string, unknown>;
+      toolResult?: string;
+      toolUseId: string;
+      agentId?: string;
+    })
+  | (BlockBase & { type: 'system'; content: string; timestamp?: string; subtype?: string; level?: string })
+  | (BlockBase & { type: 'summary'; content: string });
+
+/**
+ * Flatten a session's entries into displayable blocks. Tool results are attached to their
+ * tool_use (first result per id wins), so tool-result-only user entries produce no block.
+ */
+export function parseSession(entries: Array<KnownEntry>): Array<LogicalBlock> {
+  const toolResults = new Map<string, { content: string; agentId?: string }>();
+  for (const entry of entries) {
+    if (entry.type !== 'user' || !Array.isArray(entry.message.content)) continue;
+    for (const block of entry.message.content) {
+      if (isKnownContentBlock(block) && block.type === 'tool_result' && !toolResults.has(block.tool_use_id)) {
+        toolResults.set(block.tool_use_id, { content: getToolResultText(block.content), agentId: entry.agentId });
+      }
+    }
+  }
+
+  const blocks: Array<LogicalBlock> = [];
   const uuidToLine = new Map<string, number>();
   let lineNumber = 0;
-  const lastSummaryIndex = findLastSummaryIndex(entries);
+  let lastSummaryIndex = -1;
+  for (let i = entries.length - 1; i >= 0 && lastSummaryIndex === -1; i--) {
+    if (entries[i].type === 'summary') lastSummaryIndex = i;
+  }
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
 
-    if (isSkippedEntryType(entry)) continue;
     if (entry.type === 'summary' && i !== lastSummaryIndex) continue;
 
     if (entry.type === 'user') {
       if (isToolResultOnly(entry)) continue;
 
       lineNumber++;
-      if (entry.uuid) uuidToLine.set(entry.uuid, lineNumber);
+      uuidToLine.set(entry.uuid, lineNumber);
       blocks.push({
-        type: 'user' as const,
+        type: 'user',
         lineNumber,
-        parentLineNumber: undefined as number | null | undefined,
         content: extractUserText(entry),
         timestamp: entry.timestamp,
         uuid: entry.uuid,
@@ -134,86 +129,42 @@ export function parseSession(entries: Array<KnownEntry>) {
         gitBranch: entry.gitBranch,
       });
     } else if (entry.type === 'assistant') {
-      const content = entry.message.content;
+      const raw = entry.message.content;
+      const content = typeof raw === 'string' ? (raw ? [{ type: 'text' as const, text: raw }] : []) : (raw ?? []);
+      const meaningfulBlocks = content.filter(
+        (b) => isKnownContentBlock(b) && !isNoiseBlock(b) && b.type !== 'tool_result',
+      );
+      if (meaningfulBlocks.length === 0) continue;
 
-      // Handle string content
-      if (typeof content === 'string') {
-        if (content) {
-          lineNumber++;
-          if (entry.uuid) uuidToLine.set(entry.uuid, lineNumber);
+      lineNumber++;
+      uuidToLine.set(entry.uuid, lineNumber);
+      const base = { lineNumber, timestamp: entry.timestamp, uuid: entry.uuid, parentUuid: entry.parentUuid };
+
+      for (const contentBlock of content) {
+        if (!isKnownContentBlock(contentBlock) || isNoiseBlock(contentBlock)) continue;
+
+        if (contentBlock.type === 'text') {
+          blocks.push({ type: 'assistant', ...base, content: contentBlock.text, model: entry.message.model });
+        } else if (contentBlock.type === 'thinking') {
+          blocks.push({ type: 'thinking', ...base, content: contentBlock.thinking });
+        } else if (contentBlock.type === 'tool_use') {
+          const resultInfo = toolResults.get(contentBlock.id);
           blocks.push({
-            type: 'assistant' as const,
-            lineNumber,
-            parentLineNumber: undefined as number | null | undefined,
-            content,
-            timestamp: entry.timestamp,
-            uuid: entry.uuid,
-            parentUuid: entry.parentUuid,
-            model: entry.message.model,
+            type: 'tool',
+            ...base,
+            toolName: contentBlock.name,
+            toolInput: contentBlock.input,
+            toolResult: resultInfo?.content,
+            toolUseId: contentBlock.id,
+            agentId: resultInfo?.agentId,
           });
-        }
-        continue;
-      }
-
-      if (Array.isArray(content)) {
-        const meaningfulBlocks = content.filter(
-          (b) => isKnownContentBlock(b) && !isNoiseBlock(b) && b.type !== 'tool_result',
-        );
-        if (meaningfulBlocks.length === 0) continue;
-
-        lineNumber++;
-        if (entry.uuid) uuidToLine.set(entry.uuid, lineNumber);
-        const entryLineNumber = lineNumber;
-
-        for (const contentBlock of content) {
-          if (!isKnownContentBlock(contentBlock)) continue;
-          if (isNoiseBlock(contentBlock)) continue;
-
-          if (contentBlock.type === 'text' && 'text' in contentBlock) {
-            blocks.push({
-              type: 'assistant' as const,
-              lineNumber: entryLineNumber,
-              parentLineNumber: undefined as number | null | undefined,
-              content: contentBlock.text,
-              timestamp: entry.timestamp,
-              uuid: entry.uuid,
-              parentUuid: entry.parentUuid,
-              model: entry.message.model,
-            });
-          } else if (contentBlock.type === 'thinking' && 'thinking' in contentBlock) {
-            blocks.push({
-              type: 'thinking' as const,
-              lineNumber: entryLineNumber,
-              parentLineNumber: undefined as number | null | undefined,
-              content: contentBlock.thinking,
-              timestamp: entry.timestamp,
-              uuid: entry.uuid,
-              parentUuid: entry.parentUuid,
-            });
-          } else if (contentBlock.type === 'tool_use' && 'input' in contentBlock) {
-            const resultInfo = findToolResult(entries, contentBlock.id);
-            blocks.push({
-              type: 'tool' as const,
-              lineNumber: entryLineNumber,
-              parentLineNumber: undefined as number | null | undefined,
-              toolName: contentBlock.name,
-              toolInput: contentBlock.input,
-              toolResult: resultInfo?.content,
-              toolUseId: contentBlock.id,
-              agentId: resultInfo?.agentId,
-              timestamp: entry.timestamp,
-              uuid: entry.uuid,
-              parentUuid: entry.parentUuid,
-            });
-          }
         }
       }
     } else if (entry.type === 'system') {
       lineNumber++;
       blocks.push({
-        type: 'system' as const,
+        type: 'system',
         lineNumber,
-        parentLineNumber: undefined as number | null | undefined,
         content: entry.content ?? '',
         timestamp: entry.timestamp,
         subtype: entry.subtype,
@@ -221,26 +172,14 @@ export function parseSession(entries: Array<KnownEntry>) {
       });
     } else if (entry.type === 'summary') {
       lineNumber++;
-      blocks.push({
-        type: 'summary' as const,
-        lineNumber,
-        parentLineNumber: undefined as number | null | undefined,
-        content: entry.summary,
-      });
+      blocks.push({ type: 'summary', lineNumber, content: entry.summary });
     }
   }
 
   for (const block of blocks) {
-    const parentUuid = block.parentUuid;
-    const uuid = block.uuid;
-    if (parentUuid) {
-      block.parentLineNumber = uuidToLine.get(parentUuid);
-    } else if (uuid) {
-      block.parentLineNumber = null;
-    }
+    if (!('uuid' in block)) continue;
+    block.parentLineNumber = block.parentUuid ? uuidToLine.get(block.parentUuid) : null;
   }
 
   return blocks;
 }
-
-export type LogicalBlock = ReturnType<typeof parseSession>[number];

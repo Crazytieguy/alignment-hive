@@ -45,21 +45,19 @@ export const SearchResultBlockSchema = z.looseObject({
 });
 
 /** Catch-all for unknown content block types. Strips base64 source data to prevent uploading binary blobs. */
-const UnknownBlockSchema = z
-  .looseObject({ type: z.string() })
-  .transform((obj) => {
-    const source = obj.source;
-    if (
-      source &&
-      typeof source === 'object' &&
-      !Array.isArray(source) &&
-      (source as Record<string, unknown>).type === 'base64'
-    ) {
-      const { data, ...rest } = source as Record<string, unknown>;
-      return { ...obj, source: rest };
-    }
-    return obj;
-  });
+const UnknownBlockSchema = z.looseObject({ type: z.string() }).transform((obj) => {
+  const source = obj.source;
+  if (
+    source &&
+    typeof source === 'object' &&
+    !Array.isArray(source) &&
+    (source as Record<string, unknown>).type === 'base64'
+  ) {
+    const { data, ...rest } = source as Record<string, unknown>;
+    return { ...obj, source: rest };
+  }
+  return obj;
+});
 
 const ToolResultContentBlockSchema = z
   .discriminatedUnion('type', [
@@ -113,7 +111,6 @@ export const UserMessageObjectSchema = z
     role: z.string(),
     content: MessageContentSchema.optional(),
     id: z.string().optional(),
-    usage: z.unknown().optional(),
   })
   .transform(({ id, ...rest }) => rest);
 
@@ -124,7 +121,6 @@ export const AssistantMessageObjectSchema = z
     model: z.string().optional(),
     stop_reason: z.string().nullish(),
     id: z.string().optional(),
-    usage: z.unknown().optional(),
   })
   .transform(({ id, ...rest }) => rest);
 
@@ -150,9 +146,6 @@ export const UserEntrySchema = z
     requestId: z.string().optional(),
     slug: z.string().optional(),
     userType: z.string().optional(),
-    imagePasteIds: z.unknown(),
-    thinkingMetadata: z.unknown().optional(),
-    todos: z.unknown().optional(),
   })
   .transform(({ toolUseResult, requestId, slug, userType, ...rest }) => {
     const agentId =
@@ -209,34 +202,9 @@ export type UserEntry = z.infer<typeof UserEntrySchema>;
 export type AssistantEntry = z.infer<typeof AssistantEntrySchema>;
 export type SystemEntry = z.infer<typeof SystemEntrySchema>;
 
-const KNOWN_ENTRY_TYPES = [
-  'user',
-  'assistant',
-  'summary',
-  'system',
-  'file-history-snapshot',
-  'queue-operation',
-] as const;
-
-export function isKnownEntryType(type: unknown): type is (typeof KNOWN_ENTRY_TYPES)[number] {
-  return typeof type === 'string' && KNOWN_ENTRY_TYPES.includes(type as (typeof KNOWN_ENTRY_TYPES)[number]);
-}
-
-export type ParseResult = { data: KnownEntry; error?: undefined } | { data: null; error?: string };
-
-export function parseKnownEntry(data: unknown): ParseResult {
+export function parseKnownEntry(data: unknown): KnownEntry | null {
   const parsed = KnownEntrySchema.safeParse(data);
-  if (parsed.success) {
-    return { data: parsed.data };
-  }
-
-  const entryType = (data as { type?: unknown }).type;
-  if (isKnownEntryType(entryType)) {
-    const errorDetails = parsed.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ');
-    return { data: null, error: `${entryType}: ${errorDetails}` };
-  }
-
-  return { data: null };
+  return parsed.success ? parsed.data : null;
 }
 
 export const SessionMetaSchema = z.object({
@@ -251,10 +219,6 @@ export const SessionMetaSchema = z.object({
   parentSessionId: z.string().optional(),
   agentType: z.string().optional(),
   workflowRunId: z.string().optional(),
-  rawLineCount: z.number().optional(),
-  schemaErrors: z.array(z.string()).optional(),
-  excluded: z.boolean().optional(),
-  uploadedAt: z.string().optional(),
 });
 
 export type SessionMeta = z.infer<typeof SessionMetaSchema>;

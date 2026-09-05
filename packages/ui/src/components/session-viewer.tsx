@@ -83,10 +83,8 @@ export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFrom
         for (let i = 1; i < lines.length; i++) {
           try {
             const raw = JSON.parse(lines[i]);
-            const result = parseKnownEntry(raw);
-            if (result.data) {
-              entries.push(result.data);
-            }
+            const entry = parseKnownEntry(raw);
+            if (entry) entries.push(entry);
           } catch {}
         }
 

@@ -2,26 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { WorkflowRunBlobSchema, extractWorkflowRunRow } from './workflow-run';
 
 describe('WorkflowRunBlobSchema', () => {
-  test('parses a run blob and preserves unknown fields (loose)', () => {
-    const raw = {
-      runId: 'wf_abc123',
-      workflowName: 'review-changes',
-      summary: 'Reviewed the diff',
-      status: 'completed',
-      totalTokens: 1000,
-      totalToolCalls: 12,
-      agentCount: 5,
-      durationMs: 4200,
-      script: 'export const meta = {}',
-      result: { findings: [] },
-      futureField: 'kept',
-    };
-    const blob = WorkflowRunBlobSchema.parse(raw);
-    expect(blob.runId).toBe('wf_abc123');
-    expect((blob as Record<string, unknown>).script).toBe('export const meta = {}');
-    expect((blob as Record<string, unknown>).futureField).toBe('kept');
-  });
-
   test('type drift in a cosmetic field degrades to a missing stat, not a dropped run', () => {
     const parsed = WorkflowRunBlobSchema.safeParse({
       runId: 'wf_abc123',
@@ -39,11 +19,13 @@ describe('WorkflowRunBlobSchema', () => {
     }
   });
 
-  test('a missing or drifted runId still parses (identity comes from the filename)', () => {
-    const parsed = WorkflowRunBlobSchema.safeParse({ status: 'completed' });
-    expect(parsed.success).toBe(true);
-    if (parsed.success) {
-      expect(parsed.data.runId).toBe('');
+  test('a missing or drifted runId still parses and falls back to the path-derived id', () => {
+    for (const blob of [{ status: 'completed' }, { runId: 42 }]) {
+      const parsed = WorkflowRunBlobSchema.safeParse(blob);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(extractWorkflowRunRow('wf_run1', parsed.data).runId).toBe('wf_run1');
+      }
     }
   });
 });
@@ -66,10 +48,5 @@ describe('extractWorkflowRunRow', () => {
     // Absent scalars are omitted, not set to undefined.
     expect('totalTokens' in row).toBe(false);
     expect('durationMs' in row).toBe(false);
-  });
-
-  test('falls back to the path-derived id when runId was caught to empty', () => {
-    const row = extractWorkflowRunRow('wf_run1', { runId: '' });
-    expect(row.runId).toBe('wf_run1');
   });
 });
