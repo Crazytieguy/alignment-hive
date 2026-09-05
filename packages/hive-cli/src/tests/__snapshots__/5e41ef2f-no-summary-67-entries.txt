@@ -270,7 +270,7 @@
 32|02:54|thinking
   Now let me ask the user about which fields to keep.
 
-33|02:55|tool|AskUserQuestion|questions=2|result="User has answered your questions: \"Should we keep the `usage` field on messages? It contains token counts (input/output tokens, cache hits) - small data (~100 bytes) that could be useful for cost/usage analytics.\"=\"Keep usage\", \"Should we keep `thinkingMetadata` and `todos` on user entries? think..."
+33|02:55|tool|AskUserQuestion|questions=2|result="User has answered your questions: \"Should we keep the `usage` field on messages? It contains token counts (input/output tokens, cache hits) - small data (~100 bytes) that could be useful for cost/usage analytics.\"=\"Keep usage\", \"Should we keep `thinkingMetadata` and `todos` on user entries? thinkingMetadata is small (~50 bytes) and indicates thinking configuration. todos shows task breakdown state (variable size).\"=\"Keep both\". You can now continue with the user's answers in mind."
 
 34|03:00|thinking
   The user wants to:

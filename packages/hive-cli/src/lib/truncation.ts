@@ -1,55 +1,30 @@
 const MIN_WORD_LIMIT = 6;
 
+/** Character spans of the whitespace-separated words in text. */
+export function splitIntoWords(text: string): Array<{ start: number; end: number }> {
+  return [...text.matchAll(/\S+/g)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
 export function countWords(text: string): number {
-  if (!text) return 0;
-  return text.split(/\s+/).filter((w) => w.length > 0).length;
+  return splitIntoWords(text).length;
 }
 
-export function truncateWords(
-  text: string,
-  skip: number,
-  limit: number,
-): {
-  text: string;
-  wordCount: number;
-  remaining: number;
-  truncated: boolean;
-} {
-  const wordPattern = /\S+/g;
-  const matches: Array<{ word: string; start: number; end: number }> = [];
-  let match;
-  while ((match = wordPattern.exec(text)) !== null) {
-    matches.push({ word: match[0], start: match.index, end: match.index + match[0].length });
-  }
-
-  const totalWords = matches.length;
-
-  if (skip >= totalWords) {
-    return { text: '', wordCount: 0, remaining: 0, truncated: false };
-  }
-
-  const afterSkipCount = totalWords - skip;
-  const startIdx = skip;
-  const endIdx = Math.min(skip + limit, totalWords);
-  const wordsToInclude = endIdx - startIdx;
-
-  if (wordsToInclude === 0) {
-    return { text: '', wordCount: 0, remaining: 0, truncated: false };
-  }
-
-  const startPos = matches[startIdx].start;
-  const endPos = matches[endIdx - 1].end;
-  const extracted = text.slice(startPos, endPos);
-
-  const remaining = afterSkipCount - wordsToInclude;
-  return {
-    text: extracted,
-    wordCount: wordsToInclude,
-    remaining,
-    truncated: remaining > 0,
-  };
+export function countLines(text: string): number {
+  return text ? text.split('\n').length : 0;
 }
 
+/** Words [skip, skip + limit) of text, with the original whitespace between them, and how many follow. */
+export function truncateWords(text: string, skip: number, limit: number): { text: string; remaining: number } {
+  const words = splitIntoWords(text);
+  const end = Math.min(skip + limit, words.length);
+  if (end <= skip) return { text: '', remaining: 0 };
+  return { text: text.slice(words[skip].start, words[end - 1].end), remaining: words.length - end };
+}
+
+/**
+ * The per-field word limit that brings the total under targetTotal, letting short fields
+ * through whole; null when everything already fits.
+ */
 export function computeUniformLimit(wordCounts: Array<number>, targetTotal: number): number | null {
   if (wordCounts.length === 0) return null;
 
@@ -61,13 +36,10 @@ export function computeUniformLimit(wordCounts: Array<number>, targetTotal: numb
   let prefixSum = 0;
 
   for (let k = 0; k < n; k++) {
-    const remaining = n - k;
-    const L = (targetTotal - prefixSum) / remaining;
-    if (L <= sorted[k]) {
-      return Math.max(MIN_WORD_LIMIT, Math.floor(L));
-    }
+    const L = (targetTotal - prefixSum) / (n - k);
+    if (L <= sorted[k]) return Math.max(MIN_WORD_LIMIT, Math.floor(L));
     prefixSum += sorted[k];
   }
 
-  return Math.max(MIN_WORD_LIMIT, Math.floor(targetTotal / n));
+  throw new Error('unreachable: total > targetTotal guarantees some L <= sorted[k]');
 }

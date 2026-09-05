@@ -70,7 +70,7 @@
 
   Let me ask clarifying questions to understand what they want.
 
-9|22:02|tool|AskUserQuestion|questions=4|result="User has answered your questions: \"What's the primary audience for the README - scholars who will use the plugins, scholars who want to contribute, or both equally?\"=\"Users first, but language and content shouldn't over-index on MATS, I'm intending for this to be useful to the alignment community..."
+9|22:02|tool|AskUserQuestion|questions=4|result="User has answered your questions: \"What's the primary audience for the README - scholars who will use the plugins, scholars who want to contribute, or both equally?\"=\"Users first, but language and content shouldn't over-index on MATS, I'm intending for this to be useful to the alignment community generally\", \"What tone/style do you want for the README?\"=\"Between minimal and friendly. Can get more technical towards the bottom, but we can also add nested README files for more technical information on particular plugins (such as hive-mind)\", \"Should the README mention hive-mind at all, or keep it abstract until it's more mature?\"=\"Mention briefly\", \"What should happen to the 'Current Plan' and 'Immediate Next Steps' sections?\"=\"Move to docs/plan.md\". You can now continue with the user's answers in mind."
 
 10|22:05|thinking
   Good, I have some answers. Let me ask a few more questions to clarify:
@@ -78,7 +78,7 @@
   2. Should there be a roadmap or "what's coming" section?
   3. Any specific sections they want to see?
 
-11|22:05|tool|AskUserQuestion|questions=3|result="User has answered your questions: \"How would you describe the core value proposition in one sentence? What problem does this solve?\"=\"I like the infrastructure framing, but I'd like to lean a bit more into both the concept of accelerating safety research, and of sharing knowledge (not just tools)..."
+11|22:05|tool|AskUserQuestion|questions=3|result="User has answered your questions: \"How would you describe the core value proposition in one sentence? What problem does this solve?\"=\"I like the infrastructure framing, but I'd like to lean a bit more into both the concept of accelerating safety research, and of sharing knowledge (not just tools). hive-mind is one way to share knowledge, but I also expect researchers to sometimes explicitly contribute knowledge through agent skills and plugins. Another approach point: I expect large orgs to benefit from shared tooling and knowledge in a way that individual researchers won't, so I want to give level the playing field by giving alignment researchers some of the same benefits\", \"Should the README include a 'Roadmap' or 'Coming Soon' section?\"=\"Now that you mention it, I think the file should be named \"roadmap\" rather than \"plan\", and we could link to it. Also - planning that's specific to hive-mind should just be in the hive-mind plan, don't duplicate\", \"What sections do you want in the README?\"=\"Minimal\". You can now continue with the user's answers in mind."
 
 12|22:11|thinking
   Good, I'm getting a clearer picture. Let me ask about a few more specifics:
@@ -86,7 +86,7 @@
   2. The installation section - just the commands, or more context?
   3. Should I mention the MATS connection at all?
 
-13|22:11|tool|AskUserQuestion|questions=3|result="User has answered your questions: \"For the Contributing section, what level of detail?\"=\"Pretty minimal. Mention that the plugin-dev plugin is installed automatically when cloning, so claude can help with plugin development. Also mention that I'm happy to receive feedback and suggestions: issues,..."
+13|22:11|tool|AskUserQuestion|questions=3|result="User has answered your questions: \"For the Contributing section, what level of detail?\"=\"Pretty minimal. Mention that the plugin-dev plugin is installed automatically when cloning, so claude can help with plugin development. Also mention that I'm happy to receive feedback and suggestions: issues, slack DMs, and any other method are encouraged\", \"Should MATS be mentioned in the README?\"=\"Brief context\", \"For the About section, should I draft something for you to react to, or do you have specific wording in mind?\"=\"You draft. You can actually load the tweet writing skill to get some idea of my style, though this isn't as length-constrained as my tweets\". You can now continue with the user's answers in mind."
 
 14|22:14|thinking
   Good, I have enough context now. Let me:

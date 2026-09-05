@@ -1,35 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  ReadFieldFilter,
-  SEARCH_DEFAULT_FIELDS,
-  SearchFieldFilter,
-  SelectFilter,
-  parseFieldList,
-} from '../lib/field-filter';
+import { ReadFieldFilter, SearchFieldFilter, SelectFilter, parseFieldList } from '../lib/field-filter';
 
 describe('parseFieldList', () => {
-  test('empty string returns empty array', () => {
+  test('splits on commas, trims, and drops empty entries', () => {
     expect(parseFieldList('')).toEqual([]);
-  });
-
-  test('single field', () => {
-    expect(parseFieldList('user')).toEqual(['user']);
-  });
-
-  test('multiple fields', () => {
-    expect(parseFieldList('user,assistant,thinking')).toEqual(['user', 'assistant', 'thinking']);
-  });
-
-  test('trims whitespace', () => {
-    expect(parseFieldList(' user , assistant ')).toEqual(['user', 'assistant']);
-  });
-
-  test('filters empty entries', () => {
-    expect(parseFieldList('user,,assistant')).toEqual(['user', 'assistant']);
-  });
-
-  test('handles tool field paths', () => {
-    expect(parseFieldList('tool:Bash:result,tool:Edit')).toEqual(['tool:Bash:result', 'tool:Edit']);
+    expect(parseFieldList(' user ,, tool:Bash:result ')).toEqual(['user', 'tool:Bash:result']);
   });
 });
 
@@ -73,9 +48,9 @@ describe('ReadFieldFilter', () => {
       expect(filter.hasExplicitExpandRule('thinking')).toBe(false);
     });
 
-    test('hasExplicitExpandRule returns false for default-shown fields', () => {
-      const filter = new ReadFieldFilter([], []);
-      expect(filter.hasExplicitExpandRule('tool:Bash:result')).toBe(false);
+    test('hasExplicitExpandRule ignores a matching redact rule', () => {
+      const filter = new ReadFieldFilter([], ['thinking']);
+      expect(filter.hasExplicitExpandRule('thinking')).toBe(false);
     });
   });
 
@@ -116,7 +91,6 @@ describe('ReadFieldFilter', () => {
     });
 
     test('equal specificity: redact wins', () => {
-      // redact comes after expand in constructor, so redact should win for same specificity
       const filter = new ReadFieldFilter(['user'], ['user']);
       expect(filter.isRedacted('user')).toBe(true);
     });
@@ -124,7 +98,7 @@ describe('ReadFieldFilter', () => {
 });
 
 describe('SelectFilter', () => {
-  test('includes matching block type', () => {
+  test('includes matching block type, with a bare tool pattern covering every tool', () => {
     const filter = new SelectFilter(['user', 'tool']);
     expect(filter.includes('user')).toBe(true);
     expect(filter.includes('tool:Bash')).toBe(true);
@@ -137,23 +111,10 @@ describe('SelectFilter', () => {
     expect(filter.includes('tool:Edit')).toBe(false);
     expect(filter.includes('tool')).toBe(false);
   });
-
-  test('includes with broad tool match', () => {
-    const filter = new SelectFilter(['tool']);
-    expect(filter.includes('tool:Bash')).toBe(true);
-    expect(filter.includes('tool:Edit')).toBe(true);
-    expect(filter.includes('user')).toBe(false);
-  });
 });
 
 describe('SearchFieldFilter', () => {
   describe('default search fields', () => {
-    test('defaults are correct', () => {
-      expect(SEARCH_DEFAULT_FIELDS).toEqual(
-        new Set(['user', 'assistant', 'thinking', 'tool:input', 'system', 'summary']),
-      );
-    });
-
     test('null searchIn uses defaults', () => {
       const filter = new SearchFieldFilter(null);
       expect(filter.isSearchable('user')).toBe(true);
@@ -195,9 +156,10 @@ describe('SearchFieldFilter', () => {
       expect(filter.isSearchable('tool:Bash:input')).toBe(true);
     });
 
-    test('tool:input matches when tool:Bash:input specified', () => {
+    test('a tool-specific scope does not widen to every tool', () => {
       const filter = new SearchFieldFilter(['tool:Bash:input']);
-      expect(filter.isSearchable('tool:input')).toBe(true);
+      expect(filter.isSearchable('tool:Bash:input')).toBe(true);
+      expect(filter.isSearchable('tool:input')).toBe(false);
     });
 
     test('bare tool matches both inputs and results', () => {
@@ -206,7 +168,6 @@ describe('SearchFieldFilter', () => {
       expect(filter.isSearchable('tool:result')).toBe(true);
       expect(filter.isSearchable('tool:Bash:input')).toBe(true);
       expect(filter.isSearchable('tool:Bash:result')).toBe(true);
-      // Should not match non-tool fields
       expect(filter.isSearchable('user')).toBe(false);
       expect(filter.isSearchable('assistant')).toBe(false);
     });

@@ -28,29 +28,29 @@
 
 
   Now let me fetch the WorkOS documentation pages in parallel.
-5|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=165words
-6|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=110words
-7|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=161words
+5|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract all details about the device authorization flow: exact API endpoints, request parameters, response formats (JSON fields), polling behavior (interval, error codes like authorization_pending, slow_down, expired_token), success response format (access_token, refresh_token, user object). Include any curl examples or CLI/bash examples. Include the full request and response JSON structures."|result=165words
+6|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract all details about the device authorization flow API reference: exact API endpoints, request parameters, response formats (JSON fields), polling behavior, error codes, success response. Include any curl examples."|result=110words
+7|07:57|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Look for any mention of device authorization flow, device code flow, CLI authentication, or bash/shell script examples. Extract relevant details about authentication methods available."|result=161words
 8|07:58|assistant
   Those pages redirected to the general AuthKit docs. Let me try more specific URLs and the API reference.
-9|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=113words
-10|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=94words
-11|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=128words
+9|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract all details about authenticating with device code: exact API endpoints, request parameters, response formats (JSON fields), polling behavior, error codes, success response. Include any curl examples."|result=113words
+10|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract all details about creating a device authorization: exact API endpoint, request parameters (client_id, etc.), response format (device_code, user_code, verification_uri, interval, expires_in). Include any curl examples."|result=94words
+11|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract all details about the device authorization flow guide: steps, endpoints, request/response formats, polling, error handling. Include any curl or CLI examples."|result=128words
 12|07:58|assistant
   All those URLs seem to redirect to the generic AuthKit page. Let me try the llms.txt approach and the actual API reference section.
-13|07:58|tool|WebFetch|url=https://workos.com/llms.txt|result=6words
-14|07:58|tool|WebFetch|url=https://workos.com/docs/reference|result=6words
-15|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=6words
+13|07:58|tool|WebFetch|url=https://workos.com/llms.txt|prompt="List all available URLs, especially any related to device authorization, device flow, device code, CLI authentication, or API reference for user management authentication endpoints."|result=6words
+14|07:58|tool|WebFetch|url=https://workos.com/docs/reference|prompt="Look for any links or sections related to device authorization, device code, device flow, CLI authentication. List all API reference categories and their URLs."|result=6words
+15|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract all details about device authorization flow."|result=6words
 16|07:58|assistant
   Let me try a few more approaches - the MCP fetch tool and direct WorkOS API docs.
 17|07:58|tool|ToolSearch|query=select:mcp__llms-fetch__fetch|max_results=1
 18|07:58|tool|mcp__llms-fetch__fetch|url=https://workos.com/docs|result=174words
-19|07:58|tool|WebFetch|url=https://workos.com/docs/reference/user-management|result=113words
+19|07:58|tool|WebFetch|url=https://workos.com/docs/reference/user-management|prompt="List all API endpoints mentioned, especially any related to device authorization, device code, authenticate. List the full URL structure of API reference sections."|result=113words
 20|07:58|assistant
   The WorkOS docs site seems to use heavy client-side rendering. Let me try the API reference directly and also search for their OpenAPI spec or developer blog posts about device flow.
 21|07:58|tool|mcp__llms-fetch__fetch|url=https://workos.com/docs/reference|result=254words
-22|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=6words
-23|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]?q=device|result=6words
+22|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Extract any information about device authorization flow implementation, API endpoints, request/response formats."|result=6words
+23|07:58|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]?q=device|prompt="Find any references to device authorization, device code, device flow in the WorkOS Node SDK. List relevant file paths, function names, and any API endpoint URLs mentioned."|result=6words
 24|07:58|assistant
   Let me look at the WorkOS Node SDK source code on GitHub and search for device flow documentation more specifically.
 25|07:58|tool|ToolSearch|query=select:Bash,WebSearch|max_results=2

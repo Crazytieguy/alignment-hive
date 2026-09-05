@@ -1,39 +1,38 @@
-/**
- * Tests for CLI commands: search and read
- *
- * These tests verify public behavior by:
- * 1. Creating temp session files
- * 2. Mocking process.cwd and process.argv
- * 3. Capturing console output
- * 4. Verifying expected results
- */
+// Drives searchCore/readCore/indexCore through an in-memory SessionSource and asserts on captured console output.
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
-import { SessionMetaSchema, parseKnownEntry } from '@alignment-hive/session-data';
-import type { KnownEntry } from '@alignment-hive/session-data';
+import { parseKnownEntry } from '@alignment-hive/session-data';
+import { computeSignificantLocations, indexCore } from '../commands/index';
+import { readCore } from '../commands/read';
+import { searchCore } from '../commands/search';
+import { computeMinimalPrefixes } from '../lib/session-lookup';
 import type { ReadSessionResult } from '../lib/session-format';
-import type { SessionSource } from '../lib/session-io';
+import type { SessionSource } from '../commands/local';
 
-// Test session data
 function createTestSession(
   sessionId: string,
   entries: Array<object>,
-  options?: { agentId?: string; agentType?: string; workflowRunId?: string; parentSessionId?: string },
-): string {
-  const meta = {
-    _type: 'session-meta',
-    version: '0.1',
-    sessionId,
-    checkoutId: 'test-checkout-id',
-    extractedAt: '2025-01-01T00:00:00Z',
-    rawMtime: '2025-01-01T00:00:00Z',
-    messageCount: entries.length,
-    ...(options?.agentId && { agentId: options.agentId }),
-    ...(options?.agentType && { agentType: options.agentType }),
-    ...(options?.workflowRunId && { workflowRunId: options.workflowRunId }),
-    ...(options?.parentSessionId && { parentSessionId: options.parentSessionId }),
+  options?: {
+    agentId?: string;
+    agentType?: string;
+    workflowRunId?: string;
+    parentSessionId?: string;
+    rawMtime?: string;
+  },
+): ReadSessionResult {
+  const { rawMtime = '2025-01-01T00:00:00Z', ...agent } = options ?? {};
+  return {
+    meta: {
+      _type: 'session-meta',
+      version: '0.1',
+      sessionId,
+      checkoutId: 'test',
+      rawMtime,
+      messageCount: entries.length,
+      ...agent,
+    },
+    entries: entries.map((e) => parseKnownEntry(e)!),
   };
-  return [JSON.stringify(meta), ...entries.map((e) => JSON.stringify(e))].join('\n');
 }
 
 const userEntry = (uuid: string, content: string) => ({
@@ -66,14 +65,14 @@ const assistantWithThinking = (uuid: string, parentUuid: string, thinking: strin
   },
 });
 
-const assistantWithToolUse = (uuid: string, parentUuid: string, toolName: string, input: object) => ({
+const assistantWithToolUse = (uuid: string, parentUuid: string, toolName: string, input: object, id = 'tool-1') => ({
   type: 'assistant',
   uuid,
   parentUuid,
   timestamp: '2025-01-01T00:00:01Z',
   message: {
     role: 'assistant',
-    content: [{ type: 'tool_use', id: 'tool-1', name: toolName, input }],
+    content: [{ type: 'tool_use', id, name: toolName, input }],
   },
 });
 
@@ -88,70 +87,49 @@ const userWithToolResult = (uuid: string, parentUuid: string, toolUseId: string,
   },
 });
 
-/** Parse JSONL session content into a ReadSessionResult, same as the real source but in-memory. */
-function parseSessionContent(sessionId: string, content: string): ReadSessionResult {
-  const lines = content.split('\n').filter((l) => l.trim());
-  if (lines.length === 0) return null;
-
-  const metaParsed = SessionMetaSchema.safeParse(JSON.parse(lines[0]));
-  if (!metaParsed.success) return { error: `Invalid meta for ${sessionId}` };
-
-  const entries: Array<KnownEntry> = [];
-  for (let i = 1; i < lines.length; i++) {
-    const result = parseKnownEntry(JSON.parse(lines[i]));
-    if (result.data) entries.push(result.data);
-  }
-  return { meta: metaParsed.data, entries };
-}
-
-/** Create an in-memory SessionSource backed by a Map of sessionId → JSONL content. */
-function createInMemorySource(sessions: Map<string, string>): SessionSource {
+function createInMemorySource(sessions: Map<string, ReadSessionResult>): SessionSource {
   return {
-    // eslint-disable-next-line @typescript-eslint/require-await
-    async listSessionFiles() {
-      return [...sessions.keys()];
-    },
-    // eslint-disable-next-line @typescript-eslint/require-await
-    async readSession(sessionId: string) {
-      const content = sessions.get(sessionId);
-      if (!content) return null;
-      return parseSessionContent(sessionId, content);
-    },
+    listSessionFiles: () => Promise.resolve([...sessions.keys()]),
+    readSession: (id) => Promise.resolve(sessions.get(id) ?? null),
   };
 }
 
+let sessions: Map<string, ReadSessionResult>;
+let source: SessionSource;
+let consoleOutput: Array<string>;
+let errorOutput: Array<string>;
+let logSpy: ReturnType<typeof spyOn>;
+let errorSpy: ReturnType<typeof spyOn>;
+
+beforeEach(() => {
+  sessions = new Map();
+  source = createInMemorySource(sessions);
+  consoleOutput = [];
+  errorOutput = [];
+  logSpy = spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
+    consoleOutput.push(args.map(String).join(' '));
+  });
+  errorSpy = spyOn(console, 'error').mockImplementation((...args: Array<unknown>) => {
+    errorOutput.push(args.map(String).join(' '));
+  });
+});
+
+afterEach(() => {
+  logSpy.mockRestore();
+  errorSpy.mockRestore();
+});
+
 describe('search command', () => {
-  let sessions: Map<string, string>;
-  let source: SessionSource;
-  let originalArgv: Array<string>;
-  let consoleOutput: Array<string>;
-  let consoleSpy: ReturnType<typeof spyOn>;
-
-  beforeEach(() => {
-    sessions = new Map();
-    source = createInMemorySource(sessions);
-    originalArgv = process.argv;
-    consoleOutput = [];
-    consoleSpy = spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
-      consoleOutput.push(args.map(String).join(' '));
-    });
-  });
-
-  afterEach(() => {
-    process.argv = originalArgv;
-    consoleSpy.mockRestore();
-  });
-
   test('finds simple pattern in session', async () => {
-    sessions.set('test-session-1.jsonl', createTestSession('test-session-1', [
+    sessions.set(
+      'test-session-1.jsonl',
+      createTestSession('test-session-1', [
         userEntry('1', 'Hello world'),
         assistantEntry('2', '1', 'Hi there! How can I help with your TODO list?'),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', 'TODO'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['TODO']);
 
     expect(consoleOutput.some((line) => line.includes('TODO'))).toBe(true);
     // Uses minimal prefix - "test" is unique enough
@@ -168,114 +146,140 @@ describe('search command', () => {
         workflowRunId: 'wf_run1',
       }),
     );
-    const { searchCore } = await import('../commands/search');
 
     // Default: agent content is not searched.
-    process.argv = ['node', 'cli', 'search', 'NEEDLE_IN_AGENT'];
-    consoleOutput = [];
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['NEEDLE_IN_AGENT']);
     expect(consoleOutput.join('\n')).not.toContain('NEEDLE_IN_AGENT');
 
     // --agents: agent content is searched and attributed by type + run.
-    process.argv = ['node', 'cli', 'search', 'NEEDLE_IN_AGENT', '--agents'];
     consoleOutput = [];
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['NEEDLE_IN_AGENT', '--agents']);
     const out = consoleOutput.join('\n');
     expect(out).toContain('NEEDLE_IN_AGENT');
     expect(out).toContain('workflow-subagent');
     expect(out).toContain('wf_run1');
   });
 
-  test("-s <parent> --agents scopes agents by their parentSessionId (not their filename)", async () => {
+  test('-s <parent> --agents scopes agents by their parentSessionId (not their filename)', async () => {
     sessions.set('parent-abc.jsonl', createTestSession('parent-abc', [userEntry('1', 'parent body')]));
     // In-scope agent: parent matches the -s prefix.
-    sessions.set('agent-9f7.jsonl', createTestSession('agent-9f7', [userEntry('1', 'SCOPED_NEEDLE here')], {
-      agentId: '9f7', parentSessionId: 'parent-abc', agentType: 'workflow-subagent', workflowRunId: 'wf_x',
-    }));
+    sessions.set(
+      'agent-9f7.jsonl',
+      createTestSession('agent-9f7', [userEntry('1', 'SCOPED_NEEDLE here')], {
+        agentId: '9f7',
+        parentSessionId: 'parent-abc',
+        agentType: 'workflow-subagent',
+        workflowRunId: 'wf_x',
+      }),
+    );
     // Out-of-scope agent: same needle, different parent — must be excluded.
-    sessions.set('agent-aaa.jsonl', createTestSession('agent-aaa', [userEntry('1', 'SCOPED_NEEDLE elsewhere')], {
-      agentId: 'aaa', parentSessionId: 'other-parent',
-    }));
-    const { searchCore } = await import('../commands/search');
+    sessions.set(
+      'agent-aaa.jsonl',
+      createTestSession('agent-aaa', [userEntry('1', 'SCOPED_NEEDLE elsewhere')], {
+        agentId: 'aaa',
+        parentSessionId: 'other-parent',
+      }),
+    );
 
-    process.argv = ['node', 'cli', 'search', 'SCOPED_NEEDLE', '-s', 'parent-abc', '--agents'];
-    consoleOutput = [];
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['SCOPED_NEEDLE', '-s', 'parent-abc', '--agents']);
     const out = consoleOutput.join('\n');
     expect(out).toContain('here'); // the in-scope agent's match
     expect(out).not.toContain('elsewhere'); // the out-of-scope agent was excluded by parent scope
   });
 
-  test("-s <typo> --agents exits 1 with a not-found error instead of silently matching nothing", async () => {
+  test('-s <typo> --agents exits 1 with a not-found error instead of silently matching nothing', async () => {
     sessions.set('parent-abc.jsonl', createTestSession('parent-abc', [userEntry('1', 'parent body')]));
-    sessions.set('agent-9f7.jsonl', createTestSession('agent-9f7', [userEntry('1', 'needle here')], {
-      agentId: '9f7', parentSessionId: 'parent-abc',
-    }));
-    const { searchCore } = await import('../commands/search');
+    sessions.set(
+      'agent-9f7.jsonl',
+      createTestSession('agent-9f7', [userEntry('1', 'needle here')], {
+        agentId: '9f7',
+        parentSessionId: 'parent-abc',
+      }),
+    );
 
     // Agent files pass the filename prefilter, so without the scoped-session check this used to
     // exit 0 with no output — retrieval agents would misread that as "no matches".
-    process.argv = ['node', 'cli', 'search', 'needle', '-s', 'nonexistent', '--agents'];
-    expect(await searchCore(source, process.argv.slice(3))).toBe(1);
+    expect(await searchCore(source, ['needle', '-s', 'nonexistent', '--agents'])).toBe(1);
 
     // But a valid -s whose file simply contains no pattern match is a normal empty result, not
     // a not-found error.
-    process.argv = ['node', 'cli', 'search', 'NO_SUCH_PATTERN', '-s', 'parent-abc', '--agents'];
-    expect(await searchCore(source, process.argv.slice(3))).toBe(0);
+    expect(await searchCore(source, ['NO_SUCH_PATTERN', '-s', 'parent-abc', '--agents'])).toBe(0);
   });
 
-  test("search -- <token> treats the token after -- as a literal pattern (e.g. --agents)", async () => {
-    sessions.set('s1.jsonl', createTestSession('s1', [userEntry('1', 'this mentions --agents literally')]));
-    const { searchCore } = await import('../commands/search');
+  test('-s <agent id> without --agents searches that agent instead of silently matching nothing', async () => {
+    sessions.set('parent-abc.jsonl', createTestSession('parent-abc', [userEntry('1', 'parent body')]));
+    sessions.set(
+      'agent-9f7.jsonl',
+      createTestSession('agent-9f7', [userEntry('1', 'AGENT_NEEDLE here')], {
+        agentId: '9f7',
+        parentSessionId: 'parent-abc',
+      }),
+    );
 
-    process.argv = ['node', 'cli', 'search', '--', '--agents'];
-    consoleOutput = [];
-    await searchCore(source, process.argv.slice(3));
+    expect(await searchCore(source, ['AGENT_NEEDLE', '-s', '9f7'])).toBe(0);
+    expect(consoleOutput.join('\n')).toContain('AGENT_NEEDLE');
+  });
+
+  test('search -- <token> treats the token after -- as a literal pattern (e.g. --agents)', async () => {
+    sessions.set('s1.jsonl', createTestSession('s1', [userEntry('1', 'this mentions --agents literally')]));
+
+    await searchCore(source, ['--', '--agents']);
     expect(consoleOutput.join('\n')).toContain('--agents');
   });
 
+  test('an unknown flag before the pattern is an error, not a pattern', async () => {
+    sessions.set('s1.jsonl', createTestSession('s1', [userEntry('1', 'NEEDLE')]));
+
+    expect(await searchCore(source, ['--agent', 'NEEDLE'])).toBe(1);
+    expect(errorOutput.join('\n')).toContain('Unknown flag: --agent');
+    expect(consoleOutput).toEqual([]);
+  });
+
+  test('a value flag with no value is an error', async () => {
+    sessions.set('s1.jsonl', createTestSession('s1', [userEntry('1', 'NEEDLE')]));
+
+    expect(await searchCore(source, ['NEEDLE', '-s'])).toBe(1);
+    expect(errorOutput.join('\n')).toContain('Missing value for -s');
+  });
+
   test('case insensitive search with -i flag', async () => {
-    sessions.set('test-session-2.jsonl', createTestSession('test-session-2', [userEntry('1', 'hello'), assistantEntry('2', '1', 'HELLO back to you')]),
+    sessions.set(
+      'test-session-2.jsonl',
+      createTestSession('test-session-2', [userEntry('1', 'hello'), assistantEntry('2', '1', 'HELLO back to you')]),
     );
 
     // Without -i, should not match lowercase when searching uppercase
-    process.argv = ['node', 'cli', 'search', 'HELLO'];
-    const { searchCore } = await import('../commands/search');
-    consoleOutput = [];
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['HELLO']);
     const withoutI = consoleOutput.filter((line) => line.includes('hello')).length;
 
     // With -i, should match both
-    process.argv = ['node', 'cli', 'search', '-i', 'HELLO'];
     consoleOutput = [];
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['-i', 'HELLO']);
     const withI = consoleOutput.filter((line) => line.toLowerCase().includes('hello')).length;
 
     expect(withI).toBeGreaterThan(withoutI);
   });
 
   test('count mode with -c flag', async () => {
-    sessions.set('test-session-3.jsonl', createTestSession('test-session-3', [
+    sessions.set(
+      'test-session-3.jsonl',
+      createTestSession('test-session-3', [
         userEntry('1', 'error one'),
         assistantEntry('2', '1', 'error two and error three'),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '-c', 'error'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
-
-    // Should output session:count format (with minimal prefix)
-    expect(consoleOutput.some((line) => /test.*:\d+/.test(line))).toBe(true);
+    await searchCore(source, ['-c', 'error']);
+    expect(consoleOutput).toEqual(['test:2']);
   });
 
   test('list mode with -l flag', async () => {
-    sessions.set('test-session-4.jsonl', createTestSession('test-session-4', [userEntry('1', 'find me'), assistantEntry('2', '1', 'found you')]),
+    sessions.set(
+      'test-session-4.jsonl',
+      createTestSession('test-session-4', [userEntry('1', 'find me'), assistantEntry('2', '1', 'found you')]),
     );
 
-    process.argv = ['node', 'cli', 'search', '-l', 'find'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['-l', 'find']);
 
     // Should output only session ID, not the matching line (with minimal prefix)
     expect(consoleOutput.length).toBe(1);
@@ -284,55 +288,78 @@ describe('search command', () => {
   });
 
   test('max matches with -m flag', async () => {
-    sessions.set('test-session-5.jsonl', createTestSession('test-session-5', [
+    sessions.set(
+      'test-session-5.jsonl',
+      createTestSession('test-session-5', [
         userEntry('1', 'match1'),
-        assistantEntry('2', '1', 'match2\nmatch3\nmatch4\nmatch5'),
+        assistantEntry('2', '1', 'match2\nmatch3'),
+        userEntry('3', 'match4'),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '-m', '2', 'match'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['-m', '2', 'match']);
 
-    // Should stop after 2 matching blocks (block headers start with session prefix and line number)
-    const blockCount = consoleOutput.filter((line) => /^test.*\|\d+\|/.test(line)).length;
+    // Three blocks match; -m 2 cuts one (block headers start with session prefix and line number)
+    const blockCount = consoleOutput
+      .join('\n')
+      .split('\n')
+      .filter((line) => /^test.*\|\d+\|/.test(line)).length;
     expect(blockCount).toBe(2);
   });
 
-  test('context lines with -C flag', async () => {
-    sessions.set('test-session-6.jsonl', createTestSession('test-session-6', [
-        userEntry('1', 'line1\nline2\nTARGET\nline4\nline5'),
-        assistantEntry('2', '1', 'ok'),
+  test('context words with -C flag', async () => {
+    const before = Array.from({ length: 10 }, (_, i) => `b${i}`).join(' ');
+    const after = Array.from({ length: 10 }, (_, i) => `a${i}`).join(' ');
+    sessions.set(
+      'test-session-6.jsonl',
+      createTestSession('test-session-6', [userEntry('1', `${before} TARGET ${after}`)]),
+    );
+
+    await searchCore(source, ['-C', '1', 'TARGET']);
+
+    const output = consoleOutput.join('\n');
+    expect(output).toContain('b9 TARGET a0');
+    expect(output).not.toContain('b8');
+    expect(output).not.toContain('a1');
+  });
+
+  test('a long non-matching field of a matching tool block is collapsed to a word count', async () => {
+    const result = Array.from({ length: 100 }, (_, i) => `out${i}`).join(' ');
+    sessions.set(
+      'test-session-6b.jsonl',
+      createTestSession('test-session-6b', [
+        userEntry('1', 'commit it'),
+        assistantWithToolUse('2', '1', 'Bash', { command: 'git commit -m "wip"' }),
+        userWithToolResult('3', '2', 'tool-1', result),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '-C', '1', 'TARGET'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['git commit']);
 
-    // Should show context lines around match
     const output = consoleOutput.join('\n');
-    expect(output).toContain('line2');
-    expect(output).toContain('TARGET');
-    expect(output).toContain('line4');
+    expect(output).toContain('git commit');
+    expect(output).toContain('100words');
+    expect(output).not.toContain('out42');
   });
 
   test('searches thinking blocks', async () => {
-    sessions.set('test-session-7.jsonl', createTestSession('test-session-7', [
+    sessions.set(
+      'test-session-7.jsonl',
+      createTestSession('test-session-7', [
         userEntry('1', 'question'),
         assistantWithThinking('2', '1', 'Let me think about SECRET_THOUGHT', 'Here is my answer'),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', 'SECRET_THOUGHT'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['SECRET_THOUGHT']);
 
     expect(consoleOutput.some((line) => line.includes('SECRET_THOUGHT'))).toBe(true);
   });
 
   test('searches tool inputs', async () => {
-    sessions.set('test-session-8.jsonl', createTestSession('test-session-8', [
+    sessions.set(
+      'test-session-8.jsonl',
+      createTestSession('test-session-8', [
         userEntry('1', 'read a file'),
         assistantWithToolUse('2', '1', 'Read', { file_path: '/path/to/SPECIAL_FILE.txt' }),
         userWithToolResult('3', '2', 'tool-1', 'file contents'),
@@ -340,18 +367,47 @@ describe('search command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', 'SPECIAL_FILE'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['SPECIAL_FILE']);
 
     expect(consoleOutput.some((line) => line.includes('SPECIAL_FILE'))).toBe(true);
   });
 
-  test('does not search tool-result-only entries by default', async () => {
-    // Tool-result-only user entries are skipped by getLogicalEntries
-    // because they're displayed merged with the tool_use that triggered them.
-    // This test verifies that behavior.
-    sessions.set('test-session-9.jsonl', createTestSession('test-session-9', [
+  test('searches nested tool inputs', async () => {
+    sessions.set(
+      'test-session-8b.jsonl',
+      createTestSession('test-session-8b', [
+        userEntry('1', 'plan'),
+        assistantWithToolUse('2', '1', 'TodoWrite', { todos: [{ content: 'NESTED_NEEDLE task', status: 'pending' }] }),
+      ]),
+    );
+
+    await searchCore(source, ['NESTED_NEEDLE']);
+
+    // The collapsed-by-default todos field is the one that matched, so it is shown.
+    expect(consoleOutput.join('\n')).toContain('NESTED_NEEDLE');
+  });
+
+  test('--in tool:Bash:input scopes to Bash inputs, not every tool input', async () => {
+    sessions.set(
+      'test-session-8c.jsonl',
+      createTestSession('test-session-8c', [
+        userEntry('1', 'go'),
+        assistantWithToolUse('2', '1', 'Bash', { command: 'echo BASH_NEEDLE' }, 'tool-1'),
+        assistantWithToolUse('3', '2', 'Read', { file_path: '/READ_NEEDLE.txt' }, 'tool-2'),
+      ]),
+    );
+
+    await searchCore(source, ['--in', 'tool:Bash:input', 'NEEDLE']);
+
+    const output = consoleOutput.join('\n');
+    expect(output).toContain('BASH_NEEDLE');
+    expect(output).not.toContain('READ_NEEDLE');
+  });
+
+  test('does not search tool results by default', async () => {
+    sessions.set(
+      'test-session-9.jsonl',
+      createTestSession('test-session-9', [
         userEntry('1', 'run command'),
         assistantWithToolUse('2', '1', 'Bash', { command: 'ls' }),
         userWithToolResult('3', '2', 'tool-1', 'UNIQUE_OUTPUT_12345'),
@@ -359,16 +415,15 @@ describe('search command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', 'UNIQUE_OUTPUT_12345'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['UNIQUE_OUTPUT_12345']);
 
-    // Tool result content in tool-result-only entries is not searched by default
     expect(consoleOutput.some((line) => line.includes('UNIQUE_OUTPUT_12345'))).toBe(false);
   });
 
   test('searches tool results with --in tool:result flag', async () => {
-    sessions.set('test-session-10.jsonl', createTestSession('test-session-10', [
+    sessions.set(
+      'test-session-10.jsonl',
+      createTestSession('test-session-10', [
         userEntry('1', 'run command'),
         assistantWithToolUse('2', '1', 'Bash', { command: 'ls' }),
         userWithToolResult('3', '2', 'tool-1', 'SEARCHABLE_OUTPUT_67890'),
@@ -376,72 +431,47 @@ describe('search command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '--in', 'tool:result', 'SEARCHABLE_OUTPUT_67890'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['--in', 'tool:result', 'SEARCHABLE_OUTPUT_67890']);
 
-    // With --in tool:result, tool result content IS searched
     expect(consoleOutput.some((line) => line.includes('SEARCHABLE_OUTPUT_67890'))).toBe(true);
   });
 
   test('filters to specific session with -s flag', async () => {
-    // Create two sessions
-    sessions.set('session-aaa111.jsonl', createTestSession('session-aaa111', [userEntry('1', 'FINDME in aaa'), assistantEntry('2', '1', 'response')]),
+    sessions.set(
+      'session-aaa111.jsonl',
+      createTestSession('session-aaa111', [userEntry('1', 'FINDME in aaa'), assistantEntry('2', '1', 'response')]),
     );
-    sessions.set('session-bbb222.jsonl', createTestSession('session-bbb222', [userEntry('1', 'FINDME in bbb'), assistantEntry('2', '1', 'response')]),
+    sessions.set(
+      'session-bbb222.jsonl',
+      createTestSession('session-bbb222', [userEntry('1', 'FINDME in bbb'), assistantEntry('2', '1', 'response')]),
     );
 
-    process.argv = ['node', 'cli', 'search', '-s', 'session-aaa', 'FINDME'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['-s', 'session-aaa', 'FINDME']);
 
-    // Should find in aaa session only
     expect(consoleOutput.some((line) => line.includes('aaa'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('bbb'))).toBe(false);
   });
 
-  test('skips agent sessions', async () => {
-    // Regular session
-    sessions.set('regular-session.jsonl', createTestSession('regular-session', [userEntry('1', 'FINDME regular'), assistantEntry('2', '1', 'response')]),
-    );
-
-    // Agent session (should be skipped)
-    sessions.set('agent-abc123.jsonl', createTestSession('agent-abc123', [userEntry('1', 'FINDME agent'), assistantEntry('2', '1', 'response')], {
-        agentId: 'abc123',
-      }),
-    );
-
-    process.argv = ['node', 'cli', 'search', 'FINDME'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
-
-    // Should find regular session
-    expect(consoleOutput.some((line) => line.includes('regular'))).toBe(true);
-    // Should NOT find agent session content
-    expect(consoleOutput.some((line) => line.includes('agent'))).toBe(false);
-  });
-
   test('handles regex patterns', async () => {
-    sessions.set('test-session-10.jsonl', createTestSession('test-session-10', [userEntry('1', 'error123 and error456'), assistantEntry('2', '1', 'ok')]),
+    sessions.set(
+      'test-session-10.jsonl',
+      createTestSession('test-session-10', [userEntry('1', 'error123 and error456'), assistantEntry('2', '1', 'ok')]),
     );
 
-    process.argv = ['node', 'cli', 'search', 'error\\d+'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['error\\d+']);
 
     expect(consoleOutput.some((line) => line.includes('error123'))).toBe(true);
   });
 
   test('shows usage when no pattern provided', async () => {
-    process.argv = ['node', 'cli', 'search'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
-
+    expect(await searchCore(source, [])).toBe(1);
     expect(consoleOutput.some((line) => line.includes('Usage'))).toBe(true);
   });
 
   test('filters by --after time', async () => {
-    sessions.set('time-test-1.jsonl', createTestSession('time-test-1', [
+    sessions.set(
+      'time-test-1.jsonl',
+      createTestSession('time-test-1', [
         { ...userEntry('1', 'OLD message'), timestamp: '2020-01-01T00:00:00Z' },
         { ...assistantEntry('2', '1', 'old response'), timestamp: '2020-01-01T00:00:01Z' },
         { ...userEntry('3', 'NEW message'), timestamp: '2025-06-01T00:00:00Z' },
@@ -449,16 +479,16 @@ describe('search command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '--after', '2024-01-01', 'message'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['--after', '2024-01-01', 'message']);
 
     expect(consoleOutput.some((line) => line.includes('NEW'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('OLD'))).toBe(false);
   });
 
   test('filters by --before time', async () => {
-    sessions.set('time-test-2.jsonl', createTestSession('time-test-2', [
+    sessions.set(
+      'time-test-2.jsonl',
+      createTestSession('time-test-2', [
         { ...userEntry('1', 'OLD message'), timestamp: '2020-01-01T00:00:00Z' },
         { ...assistantEntry('2', '1', 'old response'), timestamp: '2020-01-01T00:00:01Z' },
         { ...userEntry('3', 'NEW message'), timestamp: '2025-06-01T00:00:00Z' },
@@ -466,25 +496,23 @@ describe('search command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '--before', '2021-01-01', 'message'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['--before', '2021-01-01', 'message']);
 
     expect(consoleOutput.some((line) => line.includes('OLD'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('NEW'))).toBe(false);
   });
 
   test('combines --after and --before for time window', async () => {
-    sessions.set('time-test-3.jsonl', createTestSession('time-test-3', [
+    sessions.set(
+      'time-test-3.jsonl',
+      createTestSession('time-test-3', [
         { ...userEntry('1', 'EARLY message'), timestamp: '2020-01-01T00:00:00Z' },
         { ...userEntry('2', 'MIDDLE message'), timestamp: '2023-06-01T00:00:00Z' },
         { ...userEntry('3', 'LATE message'), timestamp: '2025-06-01T00:00:00Z' },
       ]),
     );
 
-    process.argv = ['node', 'cli', 'search', '--after', '2022-01-01', '--before', '2024-01-01', 'message'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
+    await searchCore(source, ['--after', '2022-01-01', '--before', '2024-01-01', 'message']);
 
     expect(consoleOutput.some((line) => line.includes('MIDDLE'))).toBe(true);
     expect(consoleOutput.some((line) => line.includes('EARLY'))).toBe(false);
@@ -494,63 +522,34 @@ describe('search command', () => {
   test('shows error for invalid --after time spec', async () => {
     sessions.set('time-test-4.jsonl', createTestSession('time-test-4', [userEntry('1', 'test')]));
 
-    const errorOutput: Array<string> = [];
-    const errorSpy = spyOn(console, 'error').mockImplementation((...args: Array<unknown>) => {
-      errorOutput.push(args.map(String).join(' '));
-    });
-
-    process.argv = ['node', 'cli', 'search', '--after', 'invalid-time', 'test'];
-    const { searchCore } = await import('../commands/search');
-    await searchCore(source, process.argv.slice(3));
-
-    errorSpy.mockRestore();
+    await searchCore(source, ['--after', 'invalid-time', 'test']);
 
     expect(errorOutput.some((line) => line.includes('Invalid --after'))).toBe(true);
   });
 });
 
 describe('read command', () => {
-  let sessions: Map<string, string>;
-  let source: SessionSource;
-  let originalArgv: Array<string>;
-  let consoleOutput: Array<string>;
-  let consoleSpy: ReturnType<typeof spyOn>;
-
-  beforeEach(() => {
-    sessions = new Map();
-    source = createInMemorySource(sessions);
-    originalArgv = process.argv;
-    consoleOutput = [];
-    consoleSpy = spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
-      consoleOutput.push(args.map(String).join(' '));
-    });
-  });
-
-  afterEach(() => {
-    process.argv = originalArgv;
-    consoleSpy.mockRestore();
-  });
-
   test('reads all entries with full content when under target', async () => {
-    sessions.set('read-test-1.jsonl', createTestSession('read-test-1', [
+    sessions.set(
+      'read-test-1.jsonl',
+      createTestSession('read-test-1', [
         userEntry('1', 'line1\nline2\nline3\nline4\nline5'),
         assistantEntry('2', '1', 'response'),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'read', 'read-tes'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+    await readCore(source, ['read-tes']);
 
     const output = consoleOutput.join('\n');
-    // Should show full content since it's under the target word limit
     expect(output).toContain('line1');
     expect(output).toContain('line5');
     expect(output).toContain('response');
   });
 
   test('reads specific entry by number', async () => {
-    sessions.set('read-test-3.jsonl', createTestSession('read-test-3', [
+    sessions.set(
+      'read-test-3.jsonl',
+      createTestSession('read-test-3', [
         userEntry('1', 'first entry'),
         assistantEntry('2', '1', 'second entry'),
         userEntry('3', 'third entry'),
@@ -558,57 +557,91 @@ describe('read command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'read', 'read-test-3', '2'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+    await readCore(source, ['read-test-3', '2']);
 
     const output = consoleOutput.join('\n');
     expect(output).toContain('second entry');
+    expect(output).not.toContain('first entry');
+    expect(output).not.toContain('third entry');
   });
 
   test('session prefix matching', async () => {
-    sessions.set('abcd1234-full-session-id.jsonl', createTestSession('abcd1234-full-session-id', [
+    sessions.set(
+      'abcd1234-full-session-id.jsonl',
+      createTestSession('abcd1234-full-session-id', [
         userEntry('1', 'found by prefix'),
         assistantEntry('2', '1', 'response'),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'read', 'abcd'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+    await readCore(source, ['abcd']);
+
+    expect(consoleOutput.join('\n')).toContain('found by prefix');
+  });
+
+  test('a bare agent id reads the agent session', async () => {
+    sessions.set(
+      'agent-abc123.jsonl',
+      createTestSession('agent-abc123', [userEntry('1', 'agent content here')], { agentId: 'abc123' }),
+    );
+
+    expect(await readCore(source, ['abc123'])).toBe(0);
+    expect(consoleOutput.join('\n')).toContain('agent content here');
+  });
+
+  test('--select and --redact shape the output', async () => {
+    sessions.set(
+      'read-filter-1.jsonl',
+      createTestSession('read-filter-1', [
+        userEntry('1', 'user words here'),
+        assistantWithToolUse('2', '1', 'Bash', { command: 'ls -la' }),
+        userWithToolResult('3', '2', 'tool-1', 'listing'),
+        assistantEntry('4', '3', 'assistant reply'),
+      ]),
+    );
+
+    await readCore(source, ['read-filter-1', '--select', 'user,assistant', '--redact', 'user']);
 
     const output = consoleOutput.join('\n');
-    expect(output).toContain('found by prefix');
+    expect(output).toContain('user|3words');
+    expect(output).toContain('assistant reply');
+    expect(output).not.toContain('ls -la');
   });
 
   test('reports error for non-existent entry number', async () => {
-    sessions.set('read-test-9.jsonl', createTestSession('read-test-9', [userEntry('1', 'only entry'), assistantEntry('2', '1', 'response')]),
+    sessions.set(
+      'read-test-9.jsonl',
+      createTestSession('read-test-9', [userEntry('1', 'only entry'), assistantEntry('2', '1', 'response')]),
     );
 
-    const errorOutput: Array<string> = [];
-    const errorSpy = spyOn(console, 'error').mockImplementation((...args: Array<unknown>) => {
-      errorOutput.push(args.map(String).join(' '));
-    });
-
-    process.argv = ['node', 'cli', 'read', 'read-test-9', '99'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
-
-    errorSpy.mockRestore();
+    await readCore(source, ['read-test-9', '99']);
 
     expect(errorOutput.some((line) => line.includes('not found'))).toBe(true);
   });
 
-  test('shows usage when no session provided', async () => {
-    process.argv = ['node', 'cli', 'read'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+  test('an unknown flag, a missing flag value, or an invalid number is an error', async () => {
+    sessions.set('read-test-10.jsonl', createTestSession('read-test-10', [userEntry('1', 'x')]));
 
+    expect(await readCore(source, ['--targt', '500', 'read-test-10'])).toBe(1);
+    expect(errorOutput.join('\n')).toContain('Unknown flag: --targt');
+    expect(await readCore(source, ['read-test-10', '--expand'])).toBe(1);
+    expect(errorOutput.join('\n')).toContain('Missing value for --expand');
+    expect(await readCore(source, ['read-test-10', '--target', 'nope'])).toBe(1);
+    expect(errorOutput.join('\n')).toContain('Invalid --target value: "nope"');
+    expect(await readCore(source, ['read-test-10', '--target', '500oops'])).toBe(1);
+    expect(await readCore(source, ['read-test-10', '--skip', '1.5'])).toBe(1);
+    expect(consoleOutput).toEqual([]);
+  });
+
+  test('shows usage when no session provided', async () => {
+    expect(await readCore(source, [])).toBe(1);
     expect(consoleOutput.some((line) => line.includes('Usage'))).toBe(true);
   });
 
   test('reads range of entries with N-M syntax', async () => {
-    sessions.set('read-range-1.jsonl', createTestSession('read-range-1', [
+    sessions.set(
+      'read-range-1.jsonl',
+      createTestSession('read-range-1', [
         userEntry('1', 'entry one'),
         assistantEntry('2', '1', 'entry two'),
         userEntry('3', 'entry three'),
@@ -618,23 +651,21 @@ describe('read command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'read', 'read-range-1', '2-4'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+    await readCore(source, ['read-range-1', '2-4']);
 
     const output = consoleOutput.join('\n');
-    // Should show entries 2, 3, 4
     expect(output).toContain('entry two');
     expect(output).toContain('entry three');
     expect(output).toContain('entry four');
-    // Should NOT show entries 1, 5, 6
     expect(output).not.toContain('entry one');
     expect(output).not.toContain('entry five');
     expect(output).not.toContain('entry six');
   });
 
   test('range read preserves original line numbers', async () => {
-    sessions.set('read-range-2.jsonl', createTestSession('read-range-2', [
+    sessions.set(
+      'read-range-2.jsonl',
+      createTestSession('read-range-2', [
         userEntry('1', 'entry one'),
         assistantEntry('2', '1', 'entry two'),
         userEntry('3', 'entry three'),
@@ -642,12 +673,9 @@ describe('read command', () => {
       ]),
     );
 
-    process.argv = ['node', 'cli', 'read', 'read-range-2', '3-4'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+    await readCore(source, ['read-range-2', '3-4']);
 
     const output = consoleOutput.join('\n');
-    // Line numbers should be 3 and 4, not 1 and 2
     expect(output).toMatch(/^3\|/m);
     expect(output).toMatch(/^4\|/m);
     expect(output).not.toMatch(/^1\|/m);
@@ -655,214 +683,201 @@ describe('read command', () => {
   });
 
   test('range read shows truncation notice when truncating', async () => {
-    // Create entries with enough content to trigger truncation (500 words each, 1500 total)
-    // Use --target 100 to force truncation
     const longContent = Array.from({ length: 500 }, (_, i) => `word${i}`).join(' ');
-    sessions.set('read-range-4.jsonl', createTestSession('read-range-4', [
+    sessions.set(
+      'read-range-4.jsonl',
+      createTestSession('read-range-4', [
         userEntry('1', longContent),
         assistantEntry('2', '1', longContent),
         userEntry('3', longContent),
       ]),
     );
 
-    process.argv = ['node', 'cli', 'read', 'read-range-4', '1-3', '--target', '100'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
+    await readCore(source, ['read-range-4', '1-3', '--target', '100']);
 
-    const output = consoleOutput.join('\n');
-    // Should show truncation notice
-    expect(output).toMatch(/Limited to \d+ words per field/);
+    expect(consoleOutput.join('\n')).toMatch(/Limited to \d+ words per field/);
+  });
+
+  test('the --skip hint advances past the words already skipped', async () => {
+    const longContent = Array.from({ length: 500 }, (_, i) => `word${i}`).join(' ');
+    sessions.set(
+      'read-skip-1.jsonl',
+      createTestSession('read-skip-1', [userEntry('1', longContent), assistantEntry('2', '1', longContent)]),
+    );
+
+    await readCore(source, ['read-skip-1', '--target', '100', '--skip', '50']);
+
+    const hint = consoleOutput.join('\n').match(/Limited to (\d+) words per field\. Use --skip (\d+) for more/);
+    expect(hint).not.toBeNull();
+    expect(Number(hint![2])).toBe(50 + Number(hint![1]));
   });
 
   test('range read reports error for invalid range', async () => {
-    sessions.set('read-range-5.jsonl', createTestSession('read-range-5', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
+    sessions.set(
+      'read-range-5.jsonl',
+      createTestSession('read-range-5', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
     );
 
-    const errorOutput: Array<string> = [];
-    const errorSpy = spyOn(console, 'error').mockImplementation((...args: Array<unknown>) => {
-      errorOutput.push(args.map(String).join(' '));
-    });
+    await readCore(source, ['read-range-5', '5-3']);
 
-    process.argv = ['node', 'cli', 'read', 'read-range-5', '5-3'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
-
-    errorSpy.mockRestore();
-
-    // Should show error about invalid range (end < start)
     expect(errorOutput.some((line) => line.includes('Invalid range'))).toBe(true);
   });
 
   test('range read reports error for range beyond session', async () => {
-    sessions.set('read-range-6.jsonl', createTestSession('read-range-6', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
+    sessions.set(
+      'read-range-6.jsonl',
+      createTestSession('read-range-6', [userEntry('1', 'entry'), assistantEntry('2', '1', 'response')]),
     );
 
-    const errorOutput: Array<string> = [];
-    const errorSpy = spyOn(console, 'error').mockImplementation((...args: Array<unknown>) => {
-      errorOutput.push(args.map(String).join(' '));
-    });
+    await readCore(source, ['read-range-6', '10-20']);
 
-    process.argv = ['node', 'cli', 'read', 'read-range-6', '10-20'];
-    const { readCore } = await import('../commands/read');
-    await readCore(source, process.argv.slice(3));
-
-    errorSpy.mockRestore();
-
-    // Should show error about no entries found
     expect(errorOutput.some((line) => line.includes('No entries found'))).toBe(true);
   });
 });
 
+describe('index command', () => {
+  test('lists sessions newest first with commits, stats and escaped file refs', async () => {
+    sessions.set(
+      'older-session.jsonl',
+      createTestSession(
+        'older-session',
+        [
+          userEntry('1', 'add @foo handling please'),
+          assistantWithToolUse(
+            '2',
+            '1',
+            'Edit',
+            { file_path: `${process.cwd()}/src/a.ts`, old_string: 'x\ny', new_string: 'x\ny\nz' },
+            'tool-1',
+          ),
+          assistantWithToolUse('3', '2', 'Bash', { command: 'git commit -m "add @foo handling"' }, 'tool-2'),
+          userWithToolResult('4', '3', 'tool-2', '[main abc1234] add @foo handling'),
+          assistantWithToolUse('5', '4', 'Bash', { command: "git commit -m 'error handling'" }, 'tool-3'),
+          userWithToolResult('6', '5', 'tool-3', '[main def5678] error handling'),
+          assistantWithToolUse('7', '6', 'Bash', { command: 'git commit -m "nothing"' }, 'tool-4'),
+          userWithToolResult('8', '7', 'tool-4', 'nothing to commit, working tree clean'),
+        ],
+        { rawMtime: '2025-01-01T10:00:00Z' },
+      ),
+    );
+    sessions.set(
+      'newer-session.jsonl',
+      createTestSession('newer-session', [userEntry('1', 'later work')], { rawMtime: '2025-02-01T10:00:00Z' }),
+    );
+
+    expect(await indexCore(source, ['--escape-file-refs'])).toBe(0);
+
+    expect(consoleOutput[0]).toMatch(/^ID\|DATETIME\|MSGS\|/);
+    expect(consoleOutput[1]).toMatch(/^newe\|2025-02-01T10:00\|/);
+    expect(consoleOutput[2]).toMatch(/^olde\|2025-01-01T10:00\|/);
+
+    const older = consoleOutput[2].split('|');
+    expect(older[3]).toBe('1'); // USER_MESSAGES
+    expect(older[4]).toBe('3'); // BASH_CALLS
+    expect(older[7]).toBe('+3'); // LINES_ADDED
+    expect(older[8]).toBe('-2'); // LINES_REMOVED
+    expect(older[10]).toBe('src/a.ts'); // SIGNIFICANT_LOCATIONS
+    expect(older[12]).toBe('abc1234 def5678'); // the failed commit is dropped
+    expect(consoleOutput[2]).not.toMatch(/[^\\]@/);
+  });
+
+  test('rejects unknown flags', async () => {
+    expect(await indexCore(source, ['--verbose'])).toBe(1);
+    expect(errorOutput.join('\n')).toContain('Unknown flag: --verbose');
+  });
+});
+
 describe('computeMinimalPrefixes', () => {
-  // Import dynamically to avoid module caching issues
-  const getFunction = async () => {
-    const mod = await import('../commands/index');
-    return mod.computeMinimalPrefixes;
-  };
-
-  test('returns minimum 4 character prefixes', async () => {
-    const computeMinimalPrefixes = await getFunction();
+  test('returns minimum 4 character prefixes', () => {
     const result = computeMinimalPrefixes(['abcd1234', 'efgh5678']);
-
     expect(result.get('abcd1234')).toBe('abcd');
     expect(result.get('efgh5678')).toBe('efgh');
   });
 
-  test('extends prefix when collision exists', async () => {
-    const computeMinimalPrefixes = await getFunction();
+  test('extends prefix when collision exists', () => {
     const result = computeMinimalPrefixes(['abcd1234', 'abcd5678', 'efgh0000']);
-
-    // abcd1234 and abcd5678 share "abcd", need 5 chars to distinguish
     expect(result.get('abcd1234')).toBe('abcd1');
     expect(result.get('abcd5678')).toBe('abcd5');
     expect(result.get('efgh0000')).toBe('efgh');
   });
 
-  test('handles longer shared prefixes', async () => {
-    const computeMinimalPrefixes = await getFunction();
+  test('handles longer shared prefixes', () => {
     const result = computeMinimalPrefixes(['abcdef12', 'abcdef34', 'abcdef56']);
-
-    // All share "abcdef", need 7 chars
     expect(result.get('abcdef12')).toBe('abcdef1');
     expect(result.get('abcdef34')).toBe('abcdef3');
     expect(result.get('abcdef56')).toBe('abcdef5');
   });
 
-  test('handles single ID', async () => {
-    const computeMinimalPrefixes = await getFunction();
-    const result = computeMinimalPrefixes(['only-one-id']);
-
-    expect(result.get('only-one-id')).toBe('only');
+  test('handles single ID', () => {
+    expect(computeMinimalPrefixes(['only-one-id']).get('only-one-id')).toBe('only');
   });
 
-  test('handles empty array', async () => {
-    const computeMinimalPrefixes = await getFunction();
-    const result = computeMinimalPrefixes([]);
-
-    expect(result.size).toBe(0);
+  test('handles empty array', () => {
+    expect(computeMinimalPrefixes([]).size).toBe(0);
   });
 
-  test('handles IDs shorter than minimum length', async () => {
-    const computeMinimalPrefixes = await getFunction();
+  test('handles IDs shorter than minimum length', () => {
     const result = computeMinimalPrefixes(['ab', 'cd']);
-
     expect(result.get('ab')).toBe('ab');
     expect(result.get('cd')).toBe('cd');
   });
 });
 
 describe('computeSignificantLocations', () => {
-  const getFunction = async () => {
-    const mod = await import('../commands/index');
-    return mod.computeSignificantLocations;
-  };
-
   const cwd = '/project';
 
-  test('returns empty for empty input', async () => {
-    const computeSignificantLocations = await getFunction();
-    const result = computeSignificantLocations(new Map(), cwd);
-
-    expect(result).toEqual([]);
+  test('returns empty for empty input', () => {
+    expect(computeSignificantLocations(new Map(), cwd)).toEqual([]);
   });
 
-  test('returns single file when all work in one file', async () => {
-    const computeSignificantLocations = await getFunction();
+  test('returns single file when all work in one file', () => {
     const stats = new Map([['/project/src/main.ts', { added: 100, removed: 50 }]]);
-    const result = computeSignificantLocations(stats, cwd);
-
-    expect(result).toEqual(['src/main.ts']);
+    expect(computeSignificantLocations(stats, cwd)).toEqual(['src/main.ts']);
   });
 
-  test('drills into dominant child (>50% of parent)', async () => {
-    const computeSignificantLocations = await getFunction();
-    // src/ has 100 lines total, src/components/ has 80 (80% of parent)
+  test('drills into dominant child (>50% of parent)', () => {
     const stats = new Map([
       ['/project/src/components/Button.tsx', { added: 80, removed: 0 }],
       ['/project/src/utils.ts', { added: 20, removed: 0 }],
     ]);
-    const result = computeSignificantLocations(stats, cwd);
-
-    // Should drill into components since it's >50% of src
-    expect(result).toContain('src/components/Button.tsx');
+    expect(computeSignificantLocations(stats, cwd)).toEqual(['src/components/Button.tsx']);
   });
 
-  test('stops at directory when no dominant child', async () => {
-    const computeSignificantLocations = await getFunction();
-    // src/components/ has 3 files, each ~33% - no dominant child
+  test('stops at directory when no dominant child', () => {
     const stats = new Map([
       ['/project/src/components/A.tsx', { added: 34, removed: 0 }],
       ['/project/src/components/B.tsx', { added: 33, removed: 0 }],
       ['/project/src/components/C.tsx', { added: 33, removed: 0 }],
     ]);
-    const result = computeSignificantLocations(stats, cwd);
-
-    // Should stop at components/ since no child is >50%
-    expect(result).toContain('src/components/');
+    expect(computeSignificantLocations(stats, cwd)).toEqual(['src/components/']);
   });
 
-  test('excludes paths below 30% threshold', async () => {
-    const computeSignificantLocations = await getFunction();
-    // Two locations: one with 80%, one with 20%
+  test('keeps a significant directory whose dominant child is itself insignificant', () => {
+    const stats = new Map([
+      ['/project/src/a.ts', { added: 22, removed: 0 }],
+      ['/project/src/b.ts', { added: 18, removed: 0 }],
+      ['/project/other/w.ts', { added: 15, removed: 0 }],
+      ['/project/other/x.ts', { added: 15, removed: 0 }],
+      ['/project/other/y.ts', { added: 15, removed: 0 }],
+      ['/project/other/z.ts', { added: 15, removed: 0 }],
+    ]);
+    expect(computeSignificantLocations(stats, cwd)).toEqual(['src/', 'other/']);
+  });
+
+  test('excludes paths below 30% threshold', () => {
     const stats = new Map([
       ['/project/src/main.ts', { added: 80, removed: 0 }],
       ['/project/tests/test.ts', { added: 20, removed: 0 }],
     ]);
-    const result = computeSignificantLocations(stats, cwd);
-
-    expect(result).toContain('src/main.ts');
-    expect(result).not.toContain('tests/test.ts');
-    expect(result).not.toContain('tests/');
+    expect(computeSignificantLocations(stats, cwd)).toEqual(['src/main.ts']);
   });
 
-  test('limits to 3 results', async () => {
-    const computeSignificantLocations = await getFunction();
-    // 5 equally significant locations (each 20%, but we'll make them >30% each somehow)
-    // Actually need them each >30%, so let's use a different approach
-    // Each file is in a different top-level dir, and each is >30%
-    const stats = new Map([
-      ['/project/a/file.ts', { added: 26, removed: 0 }],
-      ['/project/b/file.ts', { added: 26, removed: 0 }],
-      ['/project/c/file.ts', { added: 26, removed: 0 }],
-      ['/project/d/file.ts', { added: 22, removed: 0 }], // This one is <30%
-    ]);
-    const result = computeSignificantLocations(stats, cwd);
-
-    // Only first 3 should be returned (a, b, c are each ~26% which is close to 30%)
-    // Actually 26/100 = 26% which is < 30%, let me adjust
-    expect(result.length).toBeLessThanOrEqual(3);
-  });
-
-  test('adds trailing slash for directories', async () => {
-    const computeSignificantLocations = await getFunction();
+  test('adds trailing slash for directories', () => {
     const stats = new Map([
       ['/project/src/a.ts', { added: 40, removed: 0 }],
       ['/project/src/b.ts', { added: 40, removed: 0 }],
       ['/project/other.ts', { added: 20, removed: 0 }],
     ]);
-    const result = computeSignificantLocations(stats, cwd);
-
-    // src/ should have trailing slash since it's a directory
-    expect(result.some((r) => r === 'src/')).toBe(true);
+    expect(computeSignificantLocations(stats, cwd)).toEqual(['src/']);
   });
 });

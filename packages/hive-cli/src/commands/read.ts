@@ -2,95 +2,78 @@ import { basename } from 'node:path';
 import { parseSession } from '@alignment-hive/session-data';
 import { ReadFieldFilter, SelectFilter, parseFieldList } from '../lib/field-filter';
 import { formatBlocks, formatSession } from '../lib/format';
+import { parseWholeNumber } from '../lib/args';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
-import type { SessionSource } from '../lib/session-io';
+import { matchesSessionPrefix } from '../lib/session-io';
+import type { SessionSource } from './local';
 
-function printUsage(): void {
-  console.log(usage.read());
-}
+const VALUE_FLAGS = new Set(['--target', '--skip', '--expand', '--redact', '--select']);
 
 export async function readCore(source: SessionSource, args: Array<string>): Promise<number> {
   if (args.includes('--help') || args.includes('-h')) {
-    printUsage();
+    console.log(usage.read);
     return 0;
   }
-
   if (args.length === 0) {
-    printUsage();
+    console.log(usage.read);
     return 1;
   }
 
-  function parseNumericFlag(argList: Array<string>, flag: string): number | null {
-    const idx = argList.indexOf(flag);
-    if (idx === -1) return null;
-    const value = argList[idx + 1];
-    if (!value) return null;
-    const num = parseInt(value, 10);
-    return isNaN(num) || num < 0 ? null : num;
-  }
-
-  function parseStringFlag(argList: Array<string>, flag: string): string | null {
-    const idx = argList.indexOf(flag);
-    if (idx === -1) return null;
-    return argList[idx + 1] ?? null;
-  }
-
-  const targetWords = parseNumericFlag(args, '--target');
-  const skipWords = parseNumericFlag(args, '--skip');
-  const expandFields = parseStringFlag(args, '--expand');
-  const redactFields = parseStringFlag(args, '--redact');
-  const selectFields = parseStringFlag(args, '--select');
-
-  let fieldFilter: ReadFieldFilter | undefined;
-  if (expandFields || redactFields) {
-    const expand = expandFields ? parseFieldList(expandFields) : [];
-    const redact = redactFields ? parseFieldList(redactFields) : [];
-    fieldFilter = new ReadFieldFilter(expand, redact);
-  }
-
-  let selectFilter: SelectFilter | undefined;
-  if (selectFields) {
-    selectFilter = new SelectFilter(parseFieldList(selectFields));
-  }
-
-  const flagsWithValues = new Set(['--skip', '--target', '--expand', '--redact', '--select']);
-  const filteredArgs = args.filter((a, i) => {
-    if (flagsWithValues.has(a)) return false;
-    for (const flag of flagsWithValues) {
-      const flagIdx = args.indexOf(flag);
-      if (flagIdx !== -1 && i === flagIdx + 1) return false;
+  const flags: Record<string, string | undefined> = {};
+  const positional: Array<string> = [];
+  for (let i = 0; i < args.length; i++) {
+    if (!VALUE_FLAGS.has(args[i])) {
+      positional.push(args[i]);
+      continue;
     }
-    return true;
-  });
-  const sessionIdPrefix = filteredArgs[0];
-  const entryArg = filteredArgs[1];
+    const value = args[i + 1] as string | undefined;
+    if (value === undefined || VALUE_FLAGS.has(value)) {
+      printError(errors.missingFlagValue(args[i]));
+      return 1;
+    }
+    flags[args[i]] = value;
+    i++;
+  }
+  const unknownFlag = positional.find((a) => a.startsWith('-'));
+  if (unknownFlag) {
+    printError(errors.unknownFlag(unknownFlag));
+    return 1;
+  }
+  let targetWords: number | undefined;
+  let skipWords: number | undefined;
+  for (const flag of ['--target', '--skip'] as const) {
+    const value = flags[flag];
+    if (value === undefined) continue;
+    const n = parseWholeNumber(value);
+    if (n === null) {
+      printError(errors.invalidNonNegative(flag, value));
+      return 1;
+    }
+    if (flag === '--target') targetWords = n;
+    else skipWords = n;
+  }
+  const [sessionIdPrefix, entryArg] = positional;
+
+  const expand = flags['--expand'];
+  const redact = flags['--redact'];
+  const fieldFilter =
+    expand || redact ? new ReadFieldFilter(parseFieldList(expand ?? ''), parseFieldList(redact ?? '')) : undefined;
+  const select = flags['--select'];
+  const selectFilter = select ? new SelectFilter(parseFieldList(select)) : undefined;
 
   const cwd = process.cwd();
-
-  let files: Array<string>;
-  try {
-    files = await source.listSessionFiles(cwd);
-  } catch {
-    printError(errors.noSessions);
-    return 1;
-  }
-
+  const files = await source.listSessionFiles(cwd);
   if (files.length === 0) {
     printError(errors.noSessions);
     return 1;
   }
 
-  const matches = files.filter((f) => {
-    const name = basename(f, '.jsonl');
-    return name.startsWith(sessionIdPrefix) || name === `agent-${sessionIdPrefix}`;
-  });
-
+  const matches = files.filter((f) => matchesSessionPrefix(basename(f, '.jsonl'), sessionIdPrefix));
   if (matches.length === 0) {
     printError(errors.sessionNotFound(sessionIdPrefix));
     return 1;
   }
-
   if (matches.length > 1) {
     printError(errors.multipleSessions(sessionIdPrefix));
     for (const m of matches.slice(0, 5)) {
@@ -101,8 +84,6 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
     }
     return 1;
   }
-
-  const sessionFile = matches[0];
 
   let entryNumber: number | null = null;
   let rangeStart: number | null = null;
@@ -126,70 +107,36 @@ export async function readCore(source: SessionSource, args: Array<string>): Prom
     }
   }
 
-  const sessionResult = await source.readSession(sessionFile);
-  if (!sessionResult || 'error' in sessionResult) {
-    if (sessionResult && 'error' in sessionResult) {
-      printError(sessionResult.error);
-    } else {
-      printError(errors.emptySession);
-    }
-    return 1;
-  }
-  if (sessionResult.entries.length === 0) {
+  const sessionResult = await source.readSession(matches[0]);
+  if (!sessionResult) {
     printError(errors.emptySession);
     return 1;
   }
-
+  if ('error' in sessionResult) {
+    printError(sessionResult.error);
+    return 1;
+  }
   const { entries } = sessionResult;
 
   if (entryNumber === null && rangeStart === null) {
-    const output = formatSession(entries, {
-      truncate: true,
-      targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined,
-      fieldFilter,
-      selectFilter,
-    });
-    console.log(output);
+    console.log(formatSession(entries, { targetWords, skipWords, fieldFilter, selectFilter }));
     return 0;
   }
 
   const blocks = parseSession(entries);
-  const lineNumbers = [...new Set(blocks.map((b) => b.lineNumber))];
-  const maxLine = lineNumbers.at(-1) ?? 0;
-
-  if (rangeStart !== null && rangeEnd !== null) {
-    const rangeBlocks = blocks.filter((b) => b.lineNumber >= rangeStart && b.lineNumber <= rangeEnd);
-
-    if (rangeBlocks.length === 0) {
-      printError(errors.rangeNotFound(rangeStart, rangeEnd, maxLine));
-      return 1;
-    }
-
-    const output = formatBlocks(rangeBlocks, {
-      truncate: true,
-      targetWords: targetWords ?? undefined,
-      skipWords: skipWords ?? undefined,
-      fieldFilter,
-      selectFilter,
-      cwd,
-    });
-    console.log(output);
-  } else if (entryNumber !== null) {
-    const entryBlocks = blocks.filter((b) => b.lineNumber === entryNumber);
-    if (entryBlocks.length === 0) {
-      printError(errors.entryNotFound(entryNumber, maxLine));
-      return 1;
-    }
-
-    const output = formatBlocks(entryBlocks, {
-      truncate: false,
-      fieldFilter,
-      selectFilter,
-      cwd,
-    });
-    console.log(output);
+  const maxLine = blocks.at(-1)?.lineNumber ?? 0;
+  const [lo, hi] = entryNumber !== null ? [entryNumber, entryNumber] : [rangeStart!, rangeEnd!];
+  const selected = blocks.filter((b) => b.lineNumber >= lo && b.lineNumber <= hi);
+  if (selected.length === 0) {
+    printError(
+      entryNumber !== null ? errors.entryNotFound(entryNumber, maxLine) : errors.rangeNotFound(lo, hi, maxLine),
+    );
+    return 1;
   }
 
+  // A single entry is printed untruncated; a range gets the same word budget as a whole session.
+  console.log(
+    formatBlocks(selected, { truncate: entryNumber === null, targetWords, skipWords, fieldFilter, selectFilter, cwd }),
+  );
   return 0;
 }

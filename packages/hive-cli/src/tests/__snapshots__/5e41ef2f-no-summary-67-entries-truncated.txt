@@ -2,14 +2,35 @@
 1|2026-01-05T02:50|user
   I'd like to iterate a bit on @hive-mind-cli/src/lib/schemas.ts:
   - Can a ToolResultBlock contain another ToolResultBlock recursively? If not, can we get rid of the recursive type?
-  - I'd like to make sure we're not removing fields that could...83words
+  - I'd like to make sure we're not removing fields that could plausibly be useful, don't contain a large amount of data, and can't contain sensitive data. Could you check if we should skip less fields? See @docs/claude-code-jsonl-format.md 
+  - Ideally I want the schemas to be self-compatible (transformed data is compatible with the original schema). That way we can use the same schemas to parse later when we work on retrieval. Can you document this constraint? Better yet: is there any way to enforce it with typescript (or with a test)? Is it even possible?
 2|02:51|thinking|487words
 3|02:51|assistant
   Let me analyze these questions carefully.
 
   ## 1. Recursive ToolResultBlock
 
-  Looking at the schema, `ToolResultBlockSchema.content` can contain `ContentBlockSchema`, which includes `ToolResultBlockSchema` - so yes, technically recursive. But checking the docs and practical usage: tool results contain the output...245words
+  Looking at the schema, `ToolResultBlockSchema.content` can contain `ContentBlockSchema`, which includes `ToolResultBlockSchema` - so yes, technically recursive. But checking the docs and practical usage: tool results contain the output of tool execution (text, images, documents), never other tool results. Tools don't return tool results.
+
+  We can simplify by removing the recursion.
+
+  ## 2. Fields being stripped
+
+  Currently stripped fields:
+
+  | Field | Location | Keep? | Reasoning |
+  |-------|----------|-------|-----------|
+  | `id` | Message objects | No | Internal Anthropic ID, low retrieval value |
+  | `usage` | Message objects | **Maybe** | Token stats useful for analysis, small, not sensitive |
+  | `toolUseResult` | UserEntry | No | Redundant with `message.content` tool_result blocks |
+  | `requestId` | User/Assistant | No | API request ID, low value |
+  | `slug` | User/Assistant | **Yes** | Human-readable session name, small, useful |
+  | `userType` | User/Assistant | No | Always "external", zero information |
+  | `imagePasteIds` | UserEntry | No | References without images are useless |
+  | `thinkingMetadata` | UserEntry | **Maybe** | Config info, small |
+  | `todos` | UserEntry | **Maybe** | Task progress, could be large but useful |
+
+  **Recommendation**: Keep `slug`. Consider keeping `usage` and `todos` - they have analytical value....70words
 4|02:51|tool|TodoWrite|todos=4
 5|02:51|thinking|7words
 6|02:51|tool|Edit|hive-mind-cli/src/lib/schemas.ts|-36|+57
@@ -27,7 +48,8 @@
 18|02:52|user|parent=start
   I'd like to iterate a bit on @hive-mind-cli/src/lib/schemas.ts:
   - Can a ToolResultBlock contain another ToolResultBlock recursively? If not, can we get rid of the recursive type?
-  - I'd like to make sure we're not removing fields that could...83words
+  - I'd like to make sure we're not removing fields that could plausibly be useful, don't contain a large amount of data, and can't contain sensitive data. Could you check if we should skip less fields? See @docs/claude-code-jsonl-format.md 
+  - Ideally I want the schemas to be self-compatible (transformed data is compatible with the original schema). That way we can use the same schemas to parse later when we work on retrieval. Can you document this constraint? Better yet: is there any way to enforce it with typescript (or with a test)? Is it even possible?
 19|02:53|thinking|105words
 20|02:53|assistant|"I'll explore the codebase to understand the context better and read the referenced documentation."
 21|02:53|tool|Task|Explore|session=agent-aacc414|description="Explore ToolResultBlock recursion"|prompt=77words|result=453words
@@ -42,7 +64,7 @@
 30|02:54|assistant|"Now I have a clear understanding. Let me write my plan and then ask clarifying questions about which fields to preserve."
 31|02:54|tool|Write|/Users/yoav/.claude/plans/bubbly-moseying-pike.md|written=99lines
 32|02:54|thinking|11words
-33|02:55|tool|AskUserQuestion|questions=2|result="User has answered your questions: \"Should we keep the `usage` field on messages? It contains token counts (input/output tokens, cache hits) - small data (~100 bytes) that could be useful for cost/usage analytics.\"=\"Keep usage\", \"Should we keep `thinkingMetadata`"...32words
+33|02:55|tool|AskUserQuestion|questions=2|result="User has answered your questions: \"Should we keep the `usage` field on messages? It contains token counts (input/output tokens, cache hits) - small data (~100 bytes) that could be useful for cost/usage analytics.\"=\"Keep usage\", \"Should we keep `thinkingMetadata` and `todos` on user entries? thinkingMetadata is small (~50 bytes) and indicates thinking configuration. todos shows task breakdown state (variable size).\"=\"Keep both\". You can now continue with the user's answers in mind."
 34|03:00|thinking|28words
 35|03:00|assistant|"Let me update the plan with your decisions and finalize it:"
 36|03:00|tool|Edit|/Users/yoav/.claude/plans/bubbly-moseying-pike.md|-98|+134
@@ -55,14 +77,18 @@
 
   **Three changes to `schemas.ts`:**
   1. **Remove ToolResultBlock recursion** - Replace the lazy getter with explicit allowed types (text, image, document). Tool results don't contain other tool results in practice.
-  2. **Keep...31words
+  2. **Keep more fields** - Stop stripping `usage`, `thinkingMetadata`, and `todos` per your preference.
+  3. **Self-compatibility** - Make stripped fields optional so transformed data can be re-parsed. Add test to enforce this constraint.
 42|03:00|tool|ExitPlanMode|plan=484words
 43|03:04|user|"[Request interrupted by user for tool use]"
 44|03:07|user
   A couple comments:
   - What is "slug" exactly?
   - Let's keep imagePasteIds
-  - Testing: is there no way to do this with typescript so that it's more proven? We shouldn't have to maintain and run a bunch of...27words
+  - Testing: is there no way to do this with typescript so that it's more proven? We shouldn't have to maintain and run a bunch of tests cases for this if it can be proven
+  - We should make sure that extraction.ts doesn't further transform the data in an incompatible way
+
+  Otherwise great!
 45|03:07|thinking|337words
 46|03:07|assistant|"Good questions! Let me investigate these:"
 47|03:07|tool|Grep|pattern=slug|docs/claude-code-jsonl-format.md|output_mode=content|result=98words
@@ -76,7 +102,16 @@
 
   **Key findings:**
   1. **slug** = human-readable session name (auto-generated, like "fix-auth-bug"). Could be useful, but also might be low-value since we have summaries.
-  2. **sanitizeDeep** is self-compatible...52words
+  2. **sanitizeDeep** is self-compatible - it only replaces string content with `[REDACTED:rule-id]`, doesn't change structure.
+  3. **TypeScript enforcement** - YES! We can use compile-time type assertions:
+
+  ```typescript
+  // Compile-time assertion - fails if output doesn't extend input
+  type AssertSelfCompatible<T extends z.ZodType> = 
+    z.output<T> extends z.input<T> ? true : never;
+
+  const _userEntry: AssertSelfCompatible<typeof UserEntrySchema> = true;
+  ```
 54|03:08|tool|Edit|/Users/yoav/.claude/plans/bubbly-moseying-pike.md|-134|+115
 55|03:09|thinking|46words
 56|03:09|assistant
@@ -131,7 +166,29 @@
   (pass) detectSecrets > detects GitHub token [6.81ms]
   (pass) detectSecrets > detects Slack webhook [1.87ms]
   (pass) detectSecrets > returns empty for clean content [0.47ms]
-  (pass) sanitizeString > replaces GitHub token with redaction marker [1.27ms]...452words
+  (pass) sanitizeString > replaces GitHub token with redaction marker [1.27ms]
+  (pass) sanitizeString > preserves non-secret content [0.22ms]
+  (pass) sanitizeString > handles token at end of string [0.21ms]
+  (pass) sanitizeDeep > sanitizes strings in nested objects [0.70ms]
+  (pass) sanitizeDeep > sanitizes strings in arrays [0.73ms]
+  (pass) sanitizeDeep > handles mixed nested structures [0.43ms]
+  (pass) sanitizeDeep > preserves null and undefined [0.20ms]
+  (pass) sanitizeDeep > preserves numbers and booleans [0.09ms]
+  (pass) sanitizeDeep > handles deeply nested structures within depth limit [0.51ms]
+  (pass) sanitizeString edge cases > handles multiple secrets in one string [1.28ms]
+  (pass) sanitizeString edge cases > handles empty string [0.07ms]
+
+  src/lib/extraction.test.ts:
+  (pass) parseJsonl > parses valid JSONL lines [1.39ms]
+  (pass) parseJsonl > skips empty lines
+  (pass) parseJsonl > skips malformed lines [1.15ms]
+  (pass) transformEntry > strips file-history-snapshot entries [11.83ms]
+  (pass) transformEntry > strips queue-operation entries [1.96ms]
+  (pass) content block transformation > strips base64 data from image blocks [2.50ms]
+  (pass) content block transformation > strips base64 data from document blocks [2.15ms]
+  (pass) metadata stripping > strips low-value fields, keeps usage [1.64ms]
+  (pass) metadata line > writes correct metadata as first line [2.40ms]
+  (pass) summary validation >...277words
 96|03:22|thinking|10words
 97|03:22|assistant|"All tests pass. Let me finalize:"
 98|03:22|tool|TodoWrite|todos=5
@@ -144,7 +201,21 @@
   1. **Simplified ToolResultBlock** - Removed recursive type definition, replaced with explicit allowed types (`TextBlockSchema`, `ImageBlockSchema`, `DocumentBlockSchema`, `UnknownContentBlockSchema`)
 
   2. **Keep more fields:**
-     - `usage` on message objects (was stripped, now kept)...84words
+     - `usage` on message objects (was stripped, now kept)
+     - `thinkingMetadata`, `todos`, `imagePasteIds` on user entries (were stripped, now kept)
+
+  3. **Made `data` optional** in `Base64SourceSchema` for self-compatibility
+
+  4. **Added TypeScript compile-time assertions** (`AssertSelfCompatible<T>`) that enforce schemas accept their own output as input - no runtime tests needed
+
+  **`hive-mind-cli/src/lib/extraction.test.ts`:**
+  - Updated test name and assertions to verify `usage` is kept
+
+  **Final stripped fields:**
+  - `data` (Base64Source) - large, can contain sensitive data
+  - `id` (message objects) - low retrieval value
+  - `toolUseResult` - redundant with message.content
+  - `requestId`, `slug`, `userType` - low value
 101|03:27|user|"Great! Please commit"
 102|03:27|thinking|25words
 103|03:27|tool|Bash|command="git status"|description="Show working tree status"
@@ -155,7 +226,11 @@
 
   Changes not staged for commit:
     (use "git add <file>..." to update what will be committed)
-    (use "git restore...23words
+    (use "git restore <file>..." to discard changes in working directory)
+  	modified:   src/lib/extraction.test.ts
+  	modified:   src/lib/schemas.ts
+
+  no changes added to commit (use "git add" and/or "git commit -a")
 104|03:27|tool|Bash|command="git diff"|description="Show staged and unstaged changes"
 [result]
   diff --git a/hive-mind-cli/src/lib/extraction.test.ts b/hive-mind-cli/src/lib/extraction.test.ts
@@ -166,7 +241,56 @@
    });
    
    describe("metadata stripping", () => {
-  -  test("strips requestId, slug, userType from entries", async () => {...586words
+  -  test("strips requestId, slug, userType from entries", async () => {
+  +  test("strips low-value fields, keeps usage", async () => {
+       const { extractSession } = await import("./extraction");
+       const { mkdtemp, writeFile, readFile, rm } = await import(
+         "node:fs/promises"
+  @@ -300,13 +300,13 @@ describe("metadata stripping", () => {
+         expect(extracted.uuid).toBe("1");
+         expect(extracted.sessionId).toBe("sess-123");
+         expect(extracted.cwd).toBe("/home/user");
+  +      expect(extracted.message.usage).toEqual({ input: 100, output: 50 });
+   
+         // Should strip these
+         expect(extracted.requestId).toBeUndefined();
+         expect(extracted.slug).toBeUndefined();
+         expect(extracted.userType).toBeUndefined();
+         expect(extracted.message.id).toBeUndefined();
+  -      expect(extracted.message.usage).toBeUndefined();
+       } finally {
+         await rm(tempDir, { recursive: true });
+       }
+  diff --git a/hive-mind-cli/src/lib/schemas.ts b/hive-mind-cli/src/lib/schemas.ts
+  index a14e570..23358ad 100644
+  --- a/hive-mind-cli/src/lib/schemas.ts
+  +++ b/hive-mind-cli/src/lib/schemas.ts
+  @@ -17,21 +17,12 @@ export const ToolUseBlockSchema = z.looseObject({
+     input: z.record(z.string(), z.unknown()),
+   });
+   
+  -// Getter defers evaluation to handle circular reference with ContentBlockSchema
+  -export const ToolResultBlockSchema = z.looseObject({
+  -  type: z.literal("tool_result"),
+  -  tool_use_id: z.string(),
+  -  get content(): z.ZodUnion<[z.ZodString, z.ZodArray<z.ZodTypeAny>]> {
+  -    return z.union([z.string(), z.array(ContentBlockSchema)]);
+  -  },
+  -});
+  -
+  -// Strip base64 data, keep metadata
+  +// Strip base64 data, keep metadata (data is optional for self-compatibility)
+   const Base64SourceSchema = z
+     .looseObject({
+       type: z.literal("base64"),
+       media_type: z.string(),
+  -    data: z.string(),
+  +    data: z.string().optional(),
+     })
+     .transform(({ data, ...rest }) => rest);
+   
+  @@ -45,6 +36,22 @@ export const DocumentBlockSchema = z.looseObject({
+     source:...411words
 105|03:27|tool|Bash|command="git log --oneline -5"|description="Show recent commit messages"
 [result]
   f394e2e Fix extract command to not count skipped sessions
@@ -182,7 +306,15 @@
 
   - Remove unnecessary recursive type from ToolResultBlock (tool_result never
     contains other tool_result blocks in practice)
-  - Keep usage, thinkingMetadata,...35words
+  - Keep usage, thinkingMetadata, todos, imagePasteIds fields for analytics
+  - Make stripped fields optional so schemas accept transformed data
+  - Add compile-time TypeScript assertions to enforce self-compatibility
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+  EOF
+  )"
 [result]
   Exit code 128
   warning: could not open directory 'hive-mind-cli/hive-mind-cli/src/lib/': No such file or directory
@@ -195,7 +327,15 @@
 
   - Remove unnecessary recursive type from ToolResultBlock (tool_result never
     contains other tool_result blocks in practice)
-  - Keep usage, thinkingMetadata,...35words
+  - Keep usage, thinkingMetadata, todos, imagePasteIds fields for analytics
+  - Make stripped fields optional so schemas accept transformed data
+  - Add compile-time TypeScript assertions to enforce self-compatibility
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+  EOF
+  )"
 [result]
   [main ebca273] Improve schemas: simplify recursion, keep more fields, add self-compatibility
    3 files changed, 66 insertions(+), 33 deletions(-)
@@ -222,4 +362,4 @@
               <command-message>exit</command-message>
               <command-args></command-args>
 116|03:28|user|"<local-command-stdout>Bye!</local-command-stdout>"
-[Limited to 38 words per field. Use --skip 38 for more.]
+[Limited to 213 words per field. Use --skip 213 for more.]

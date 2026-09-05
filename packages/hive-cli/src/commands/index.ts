@@ -1,10 +1,12 @@
 import { homedir } from 'node:os';
-import { extractSessionSummary, getToolResultText, isKnownContentBlock, parseSession } from '@alignment-hive/session-data';
+import { extractSessionSummary, parseSession } from '@alignment-hive/session-data';
 import { errors, usage } from '../lib/messages';
 import { printError } from '../lib/output';
-import type { ReadSessionResult } from '../lib/session-format';
-import type { ContentBlock, KnownEntry, LogicalBlock, SessionMeta } from '@alignment-hive/session-data';
-import type { SessionSource } from '../lib/session-io';
+import { computeMinimalPrefixes } from '../lib/session-lookup';
+import { countLines } from '../lib/truncation';
+import { mapBatched } from '../lib/upload-session';
+import type { KnownEntry, LogicalBlock, SessionMeta } from '@alignment-hive/session-data';
+import type { SessionSource } from './local';
 
 interface SessionInfo {
   meta: SessionMeta;
@@ -12,51 +14,13 @@ interface SessionInfo {
   blocks: Array<LogicalBlock>;
 }
 
-const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const KNOWN_FLAGS = new Set(['--escape-file-refs']);
 
-export function computeMinimalPrefixes(ids: Array<string>): Map<string, string> {
-  const result = new Map<string, string>();
-  const minLen = 4;
-
-  for (const id of ids) {
-    let len = minLen;
-    while (len < id.length) {
-      const prefix = id.slice(0, len);
-      const conflicts = ids.filter((other) => other !== id && other.startsWith(prefix));
-      if (conflicts.length === 0) break;
-      len++;
-    }
-    result.set(id, id.slice(0, len));
-  }
-
-  return result;
-}
-
-function formatRelativeDateTime(
-  rawMtime: string,
-  prevDate: string,
-  prevYear: string,
-): { display: string; date: string; year: string } {
-  const dateObj = new Date(rawMtime);
-  const year = String(dateObj.getFullYear());
-  const month = MONTH_NAMES[dateObj.getMonth()];
-  const day = String(dateObj.getDate()).padStart(2, '0');
-  const hours = String(dateObj.getHours()).padStart(2, '0');
-  const minutes = String(dateObj.getMinutes()).padStart(2, '0');
-
-  const date = `${month}${day}`;
-  const time = `T${hours}:${minutes}`;
-
-  let display: string;
-  if (year !== prevYear && prevYear !== '') {
-    display = `${year}${date}${time}`;
-  } else if (date !== prevDate) {
-    display = `${date}${time}`;
-  } else {
-    display = time;
-  }
-
-  return { display, date, year };
+/** UTC date and time from an ISO timestamp, omitting the date when it equals the previous row's. */
+function formatRelativeDateTime(rawMtime: string, prevDate: string): { display: string; date: string } {
+  const date = rawMtime.slice(0, 10);
+  const time = `T${rawMtime.slice(11, 16)}`;
+  return { display: date === prevDate ? time : `${date}${time}`, date };
 }
 
 interface SessionStats {
@@ -75,79 +39,61 @@ interface FileStats {
   removed: number;
 }
 
-const READ_BATCH_SIZE = 10;
-
 export async function indexCore(source: SessionSource, args: Array<string>): Promise<number> {
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(usage.index());
+    console.log(usage.index);
     return 0;
+  }
+  const unknownFlag = args.find((a) => a.startsWith('-') && !KNOWN_FLAGS.has(a));
+  if (unknownFlag) {
+    printError(errors.unknownFlag(unknownFlag));
+    return 1;
   }
 
   const escapeFileRefs = args.includes('--escape-file-refs');
   const cwd = process.cwd();
 
-  let files: Array<string>;
-  try {
-    files = await source.listSessionFiles(cwd);
-  } catch {
-    printError(errors.noSessions);
-    return 1;
-  }
-
+  const files = await source.listSessionFiles(cwd);
   if (files.length === 0) {
     printError(errors.noSessions);
     return 1;
   }
 
-  // Read sessions in batches to bound memory for large session counts
-  const results: Array<ReadSessionResult> = [];
-  for (let i = 0; i < files.length; i += READ_BATCH_SIZE) {
-    const batch = files.slice(i, i + READ_BATCH_SIZE);
-    const batchResults = await Promise.all(batch.map((file) => source.readSession(file)));
-    results.push(...batchResults);
-  }
+  const results = await mapBatched(files, 10, (file) => source.readSession(file));
 
+  // Keyed by the id a Task tool result refers to: agentId for agents, sessionId otherwise.
   const allSessions = new Map<string, SessionInfo>();
   for (const sessionResult of results) {
-    if (!sessionResult || 'error' in sessionResult) {
-      if (sessionResult && 'error' in sessionResult) {
-        printError(sessionResult.error);
-      }
+    if (!sessionResult) continue;
+    if ('error' in sessionResult) {
+      printError(sessionResult.error);
       continue;
     }
-    const blocks = parseSession(sessionResult.entries);
-    const sessionInfo: SessionInfo = { ...sessionResult, blocks };
-    allSessions.set(sessionResult.meta.sessionId, sessionInfo);
-    if (sessionResult.meta.agentId) {
-      allSessions.set(sessionResult.meta.agentId, sessionInfo);
-    }
+    allSessions.set(sessionResult.meta.agentId ?? sessionResult.meta.sessionId, {
+      ...sessionResult,
+      blocks: parseSession(sessionResult.entries),
+    });
   }
 
   const mainSessions = Array.from(allSessions.values()).filter((s) => !s.meta.agentId);
   mainSessions.sort((a, b) => b.meta.rawMtime.localeCompare(a.meta.rawMtime));
-
-  const sessionIds = mainSessions.map((s) => s.meta.sessionId);
-  const idPrefixes = computeMinimalPrefixes(sessionIds);
+  const idPrefixes = computeMinimalPrefixes(mainSessions.map((s) => s.meta.sessionId));
 
   console.log(
     'ID|DATETIME|MSGS|USER_MESSAGES|BASH_CALLS|WEB_FETCHES|WEB_SEARCHES|LINES_ADDED|LINES_REMOVED|FILES_TOUCHED|SIGNIFICANT_LOCATIONS|SUMMARY|COMMITS',
   );
   let prevDate = '';
-  let prevYear = '';
   for (const session of mainSessions) {
-    const prefix = idPrefixes.get(session.meta.sessionId) || session.meta.sessionId.slice(0, 8);
-    const { line, date, year } = formatSessionLine(
+    const { line, date } = formatSessionLine(
       session,
       allSessions,
       cwd,
-      prefix,
+      idPrefixes.get(session.meta.sessionId)!,
       prevDate,
-      prevYear,
       escapeFileRefs,
     );
     console.log(line);
     prevDate = date;
-    prevYear = year;
   }
 
   return 0;
@@ -159,27 +105,22 @@ function formatSessionLine(
   cwd: string,
   idPrefix: string,
   prevDate: string,
-  prevYear: string,
   escapeFileRefs: boolean,
-): { line: string; date: string; year: string } {
+): { line: string; date: string } {
   const { meta, entries } = session;
-  const msgs = String(meta.messageCount);
-  const rawSummary = extractSessionSummary(entries) || '';
-  const summary = escapeFileRefs ? rawSummary.replace(/@/g, '\\@') : rawSummary;
-
-  const commits = findGitCommits(entries).filter((c) => c.success);
-  const commitList = commits
+  const commitList = findGitCommits(session.blocks)
+    .filter((c) => c.success)
     .map((c) => c.hash || (c.message.length > 50 ? `${c.message.slice(0, 47)}...` : c.message))
     .join(' ');
 
-  const stats = computeSessionStats(session.blocks, allSessions, new Set(), cwd);
+  const stats = computeSessionStats(session.blocks, allSessions, cwd);
   const fmt = (n: number) => (n === 0 ? '' : String(n));
-  const { display: datetime, date, year } = formatRelativeDateTime(meta.rawMtime, prevDate, prevYear);
+  const { display: datetime, date } = formatRelativeDateTime(meta.rawMtime, prevDate);
 
   const line = [
     idPrefix,
     datetime,
-    msgs,
+    String(meta.messageCount),
     fmt(stats.userCount),
     fmt(stats.bashCount),
     fmt(stats.fetchCount),
@@ -188,18 +129,21 @@ function formatSessionLine(
     stats.linesRemoved === 0 ? '' : `-${stats.linesRemoved}`,
     fmt(stats.filesTouched),
     stats.significantLocations.join(','),
-    summary,
+    extractSessionSummary(entries) || '',
     commitList,
   ].join('|');
 
-  return { line, date, year };
+  // The retrieval skill embeds this output, where a bare @word is read as a file reference.
+  return { line: escapeFileRefs ? line.replace(/@/g, '\\@') : line, date };
 }
 
+/** Stats for a session including the work its subagents did (their edits count toward every column). */
 function computeSessionStats(
   blocks: Array<LogicalBlock>,
   allSessions: Map<string, SessionInfo>,
-  visited: Set<string>,
   cwd: string,
+  visited = new Set<string>(),
+  fileStats = new Map<string, FileStats>(),
 ): SessionStats {
   const stats: SessionStats = {
     userCount: 0,
@@ -212,7 +156,6 @@ function computeSessionStats(
     searchCount: 0,
   };
 
-  const fileStats = new Map<string, FileStats>();
   const subagentIds: Array<string> = [];
 
   for (const block of blocks) {
@@ -272,9 +215,7 @@ function computeSessionStats(
     const subSession = allSessions.get(agentId);
     if (!subSession) continue;
 
-    const subStats = computeSessionStats(subSession.blocks, allSessions, visited, cwd);
-    stats.linesAdded += subStats.linesAdded;
-    stats.linesRemoved += subStats.linesRemoved;
+    const subStats = computeSessionStats(subSession.blocks, allSessions, cwd, visited, fileStats);
     stats.bashCount += subStats.bashCount;
     stats.fetchCount += subStats.fetchCount;
     stats.searchCount += subStats.searchCount;
@@ -290,21 +231,19 @@ function computeSessionStats(
   return stats;
 }
 
-function countLines(s: string): number {
-  if (!s) return 0;
-  let count = 1;
-  for (const c of s) {
-    if (c === '\n') count++;
-  }
-  return count;
-}
-
 interface PathNode {
   children: Map<string, PathNode>;
   added: number;
   removed: number;
 }
 
+const SIGNIFICANT_THRESHOLD = 0.3;
+const DOMINANT_THRESHOLD = 0.5;
+
+/**
+ * Paths (relative to cwd, or ~/) holding over 30% of the changed lines, drilling into a child
+ * only while it holds over half of its parent and still clears the 30% threshold itself.
+ */
 export function computeSignificantLocations(fileStats: Map<string, FileStats>, cwd: string): Array<string> {
   if (fileStats.size === 0) return [];
 
@@ -319,72 +258,46 @@ export function computeSignificantLocations(fileStats: Map<string, FileStats>, c
     } else if (normalizedPath.startsWith(homePrefix)) {
       normalizedPath = '~/' + normalizedPath.slice(homePrefix.length);
     }
-    const parts = normalizedPath.split('/');
     let node = root;
-
-    for (const part of parts) {
+    for (const part of normalizedPath.split('/')) {
       if (!node.children.has(part)) {
         node.children.set(part, { children: new Map(), added: 0, removed: 0 });
       }
       node = node.children.get(part)!;
     }
-
     node.added = stats.added;
     node.removed = stats.removed;
   }
 
-  function calculateTotals(node: PathNode): { added: number; removed: number } {
-    let added = node.added;
-    let removed = node.removed;
+  function calculateTotals(node: PathNode): void {
     for (const child of node.children.values()) {
-      const childTotals = calculateTotals(child);
-      added += childTotals.added;
-      removed += childTotals.removed;
+      calculateTotals(child);
+      node.added += child.added;
+      node.removed += child.removed;
     }
-    node.added = added;
-    node.removed = removed;
-    return { added, removed };
   }
   calculateTotals(root);
 
   const totalLines = root.added + root.removed;
   if (totalLines === 0) return [];
 
-  const SIGNIFICANT_THRESHOLD = 0.3;
-  const DOMINANT_THRESHOLD = 0.5;
-
   const results: Array<string> = [];
-
-  function findSignificant(node: PathNode, path: string) {
+  function findSignificant(node: PathNode, path: string): void {
     const nodeLines = node.added + node.removed;
-    const nodePercent = nodeLines / totalLines;
-
-    if (nodePercent <= SIGNIFICANT_THRESHOLD) return;
-
-    let dominantChild: { name: string; node: PathNode } | null = null;
+    if (nodeLines / totalLines <= SIGNIFICANT_THRESHOLD) return;
     for (const [name, child] of node.children) {
       const childLines = child.added + child.removed;
-      const childPercentOfParent = childLines / nodeLines;
-      if (childPercentOfParent > DOMINANT_THRESHOLD) {
-        dominantChild = { name, node: child };
-        break;
+      if (childLines / nodeLines > DOMINANT_THRESHOLD && childLines / totalLines > SIGNIFICANT_THRESHOLD) {
+        findSignificant(child, `${path}/${name}`);
+        return;
       }
     }
-
-    if (dominantChild) {
-      const childPath = path ? `${path}/${dominantChild.name}` : dominantChild.name;
-      findSignificant(dominantChild.node, childPath);
-    } else if (path) {
-      const isDirectory = node.children.size > 0;
-      results.push(isDirectory ? `${path}/` : path);
-    }
+    results.push(node.children.size > 0 ? `${path}/` : path);
   }
-
   for (const [name, child] of root.children) {
     findSignificant(child, name);
   }
-
-  return results.slice(0, 3);
+  return results;
 }
 
 interface GitCommit {
@@ -393,60 +306,28 @@ interface GitCommit {
   success: boolean;
 }
 
-function findGitCommits(entries: Array<KnownEntry>): Array<GitCommit> {
+/** Commits from Bash `git commit` calls; one with a result succeeded iff the result carries a hash. */
+function findGitCommits(blocks: Array<LogicalBlock>): Array<GitCommit> {
   const commits: Array<GitCommit> = [];
-  const pendingCommits = new Map<string, string>();
-
-  for (const entry of entries) {
-    if (entry.type === 'assistant') {
-      const content = entry.message.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const block of content) {
-        if (!isKnownContentBlock(block)) continue;
-        if (block.type === 'tool_use' && 'name' in block && block.name === 'Bash') {
-          const input = block.input;
-          const command = input.command;
-          if (typeof command === 'string' && command.includes('git commit')) {
-            const message = extractCommitMessage(command);
-            if (message && 'id' in block && typeof block.id === 'string') {
-              pendingCommits.set(block.id, message);
-            }
-          }
-        }
-      }
-    } else if (entry.type === 'user') {
-      const content = entry.message.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const block of content) {
-        if (!isKnownContentBlock(block)) continue;
-        if (block.type === 'tool_result' && 'tool_use_id' in block) {
-          const toolUseId = block.tool_use_id;
-          const message = pendingCommits.get(toolUseId);
-          if (message) {
-            const resultContent = getToolResultText(block.content as string | Array<ContentBlock> | undefined);
-            const success = resultContent.includes('[') && !resultContent.includes('error');
-            const hash = extractCommitHash(resultContent);
-            commits.push({ hash, message, success });
-            pendingCommits.delete(toolUseId);
-          }
-        }
-      }
+  for (const block of blocks) {
+    if (block.type !== 'tool' || block.toolName !== 'Bash') continue;
+    const command = block.toolInput.command;
+    if (typeof command !== 'string' || !command.includes('git commit')) continue;
+    const message = extractCommitMessage(command);
+    if (!message) continue;
+    if (block.toolResult === undefined) {
+      commits.push({ hash: undefined, message, success: true });
+      continue;
     }
+    const hash = extractCommitHash(block.toolResult);
+    commits.push({ hash, message, success: hash !== undefined });
   }
-
-  for (const message of pendingCommits.values()) {
-    commits.push({ hash: undefined, message, success: true });
-  }
-
   return commits;
 }
 
+/** The hash in "[<branch or state> abc1234] message". */
 function extractCommitHash(output: string): string | undefined {
-  // Parse "[branch abc1234] message" format
-  const match = output.match(/\[[\w/-]+\s+([a-f0-9]{7,})\]/);
-  return match?.[1];
+  return output.match(/\[.+?\s+([a-f0-9]{7,})\]/)?.[1];
 }
 
 function extractCommitMessage(command: string): string | undefined {
@@ -457,17 +338,11 @@ function extractCommitMessage(command: string): string | undefined {
     if (firstLine) return firstLine;
   }
 
-  // -m "message" (not heredoc)
-  const mFlagMatch = command.match(/git commit[^"']*-m\s*["'](?!\$\()([^"']+)["']/);
-  if (mFlagMatch) return mFlagMatch[1].trim();
+  // -m "message" or -m 'message', each quote style with its own class so an apostrophe inside
+  // double quotes does not end the message.
+  const mFlagMatch = command.match(/-m\s*(?:"(?!\$\()((?:[^"\\]|\\.)*)"|'([^']*)')/);
+  if (mFlagMatch) return ((mFlagMatch[1] as string | undefined) ?? mFlagMatch[2]).trim() || undefined;
 
-  // Simple -m message (no quotes)
-  const simpleMatch = command.match(/git commit[^-]*-m\s+(\S+)/);
-  if (simpleMatch && !simpleMatch[1].startsWith('"') && !simpleMatch[1].startsWith("'")) {
-    return simpleMatch[1];
-  }
-
-  return undefined;
+  // -m message (no quotes)
+  return command.match(/-m\s+([^\s"']\S*)/)?.[1];
 }
-
-

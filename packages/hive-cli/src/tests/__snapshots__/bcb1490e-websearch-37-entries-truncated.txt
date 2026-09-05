@@ -41,7 +41,7 @@
 12|03:15|user
   Will I be able to set up a custom email domain if I own alignment-hive.com through vercel and I'm on the free workos plan?
 13|03:15|tool|ToolSearch|query=select:WebFetch|max_results=1
-14|03:15|tool|WebFetch|url=https://workos.com/docs/email|result=162words
+14|03:15|tool|WebFetch|url=https://workos.com/docs/email|prompt="What are the requirements for setting up a custom email domain? Is it available on the free plan? What DNS records are needed? How does it work with domain providers like Vercel?"|result=162words
 15|03:15|tool|WebSearch|query="WorkOS custom email domain free plan pricing requirements 2026"|result=239words
 16|03:16|assistant
   Custom email domains on WorkOS cost **$99/month** on top of any plan — they're not included in the free tier.

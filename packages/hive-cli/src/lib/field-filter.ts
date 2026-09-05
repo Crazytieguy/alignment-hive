@@ -35,44 +35,26 @@ export class ReadFieldFilter {
   private rules: Array<FieldRule>;
 
   constructor(expand: Array<string>, redact: Array<string>) {
-    this.rules = [];
+    // Redact first so the stable sort keeps 'redact wins' among equal specificity.
+    this.rules = [
+      ...redact.map((field) => ({ field, action: 'redact' as const, specificity: specificity(field) })),
+      ...expand.map((field) => ({ field, action: 'expand' as const, specificity: specificity(field) })),
+    ].sort((a, b) => b.specificity - a.specificity);
+  }
 
-    for (const field of expand) {
-      this.rules.push({ field, action: 'expand', specificity: specificity(field) });
-    }
-    for (const field of redact) {
-      this.rules.push({ field, action: 'redact', specificity: specificity(field) });
-    }
-
-    this.rules.sort((a, b) => {
-      if (b.specificity !== a.specificity) return b.specificity - a.specificity;
-      if (a.action === 'redact' && b.action !== 'redact') return -1;
-      if (b.action === 'redact' && a.action !== 'redact') return 1;
-      return 0;
-    });
+  private firstRule(field: string): FieldRule | undefined {
+    return this.rules.find((rule) => matches(rule.field, field));
   }
 
   /** Returns true when the field should be collapsed to a word count / redactedForm. */
   isRedacted(field: string, defaultRedacted?: boolean): boolean {
-    for (const rule of this.rules) {
-      if (matches(rule.field, field)) {
-        return rule.action === 'redact';
-      }
-    }
-    if (defaultRedacted !== undefined) return defaultRedacted;
-    // Non-tool block types (user, assistant, thinking, system, summary) are shown by default.
-    // Tool fields always provide defaultRedacted, so this fallback only applies to block types.
-    return false;
+    const rule = this.firstRule(field);
+    return rule ? rule.action === 'redact' : (defaultRedacted ?? false);
   }
 
   /** Returns true only when an explicit --expand rule matches. Defaults don't count. */
   hasExplicitExpandRule(field: string): boolean {
-    for (const rule of this.rules) {
-      if (matches(rule.field, field)) {
-        return rule.action === 'expand';
-      }
-    }
-    return false;
+    return this.firstRule(field)?.action === 'expand';
   }
 }
 
@@ -92,18 +74,13 @@ export class SearchFieldFilter {
   private searchFields: Set<string>;
 
   constructor(searchIn: Array<string> | null) {
-    if (searchIn === null || searchIn.length === 0) {
-      this.searchFields = new Set(SEARCH_DEFAULT_FIELDS);
-    } else {
-      this.searchFields = new Set(searchIn);
-    }
+    this.searchFields = new Set(searchIn === null || searchIn.length === 0 ? SEARCH_DEFAULT_FIELDS : searchIn);
   }
 
+  /** Whether a probed field falls under one of the requested scopes (a scope never widens to its parents). */
   isSearchable(field: string): boolean {
     for (const searchField of this.searchFields) {
-      if (matches(searchField, field) || matches(field, searchField)) {
-        return true;
-      }
+      if (matches(searchField, field)) return true;
     }
     return false;
   }

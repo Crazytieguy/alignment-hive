@@ -24,17 +24,17 @@
 5|23:40|tool|WebSearch|query="\"tool_reference\" anthropic claude API content block"|result=248words
 6|23:40|tool|WebSearch|query="\"tool_reference\" claude code session format JSONL"|result=339words
 7|23:40|tool|WebSearch|query="anthropic API tool_result content block types \"tool_reference\""|result=268words
-8|23:40|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=72words
+8|23:40|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Search this page for any mention of \"tool_reference\" content block type. Also list all content block types that can appear inside tool_result content arrays. What types are documented?"|result=72words
 9|23:40|assistant
   Let me follow the redirect and also check additional sources.
-10|23:40|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|result=251words
-11|23:40|tool|WebFetch|url=https://docs.anthropic.com/en/api/messages|result=72words
-12|23:40|tool|WebFetch|url=https://code.claude.com/docs/en/cli-reference|result=2051words
+10|23:40|tool|WebFetch|url=https:[REDACTED:high-entropy-secret]|prompt="Search this page for any mention of \"tool_reference\" content block type. Also list all content block types that can appear inside tool_result content arrays. What types are documented?"|result=251words
+11|23:40|tool|WebFetch|url=https://docs.anthropic.com/en/api/messages|prompt="Search for any mention of \"tool_reference\" as a content block type. List all content block types that are documented, especially those that can appear inside tool_result content arrays."|result=72words
+12|23:40|tool|WebFetch|url=https://code.claude.com/docs/en/cli-reference|prompt="Search for any mention of \"tool_reference\" content blocks or any documentation about the JSONL session format and the types of content blocks used in tool results."|result=2051words
 13|23:40|tool|WebSearch|query="claude code \"tool_reference\" \"tool_name\" content block type session"|result=290words
 14|23:40|assistant
   The last search gave us the key lead -- the "Tool search tool" documentation page. Let me fetch that and the Messages API reference.
-15|23:40|tool|WebFetch|url=https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool|result=250words
-16|23:40|tool|WebFetch|url=https://platform.claude.com/docs/en/api/messages|result=179words
+15|23:40|tool|WebFetch|url=https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool|prompt="Extract ALL information about tool_reference content blocks. What is their shape/schema? When are they used? How do they appear in tool_result content arrays? What fields do they have? Show any JSON examples that include tool_reference blocks."|result=250words
+16|23:40|tool|WebFetch|url=https://platform.claude.com/docs/en/api/messages|prompt="Search for any mention of \"tool_reference\" as a content block type. List ALL content block types documented for tool_result content arrays. What types can appear inside the content field of a tool_result?"|result=179words
 17|23:41|assistant
   Now let me read the full tool search tool documentation to get the complete picture.
 18|23:41|tool|Read|/Users/yoav/.claude/projects/-Users-yoav-projects-alignment-hive/027a631d-2780-4e09-b0c2-42dac48d5a85/tool-results/toolu_01HWTh3qZNRcizUaux5tFY6q.txt|result=258words
