@@ -1,16 +1,10 @@
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
-import {
-  AuthDataSchema,
-  getAuthData,
-  getUserDisplayName,
-  saveAuthData,
-} from '../lib/auth';
+import { AuthDataSchema, getAuthData, postWorkos, saveAuthData } from '../lib/auth';
+import { openBrowser } from '../lib/browser';
 import { getClientId } from '../lib/config';
-import { errors, setup as msg } from '../lib/messages';
+import { setup as msg } from '../lib/messages';
 import { colors, printError, printInfo, printSuccess, printWarning } from '../lib/output';
-
-const WORKOS_API_URL = 'https://api.workos.com/user_management';
 
 const DeviceAuthResponseSchema = z.object({
   device_code: z.string(),
@@ -42,35 +36,6 @@ async function confirm(message: string, defaultYes = false): Promise<boolean> {
   });
 }
 
-async function openBrowser(url: string): Promise<boolean> {
-  if (process.platform === 'darwin') {
-    try {
-      await Bun.spawn(['open', url]).exited;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  if (process.platform === 'linux') {
-    // Try xdg-open first, then fall back to wslview for WSL
-    for (const cmd of ['xdg-open', 'wslview']) {
-      try {
-        await Bun.spawn([cmd, url]).exited;
-        return true;
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  return false;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function checkExistingAuth(): Promise<boolean> {
   try {
     const authData = await getAuthData();
@@ -87,13 +52,7 @@ async function checkExistingAuth(): Promise<boolean> {
 async function deviceAuthFlow(): Promise<number> {
   printInfo(msg.starting);
 
-  const response = await fetch(`${WORKOS_API_URL}/authorize/device`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: getClientId() }),
-  });
-
-  const data = await response.json();
+  const { data } = await postWorkos('/authorize/device', { client_id: getClientId() });
   const errorResult = ErrorResponseSchema.safeParse(data);
   if (errorResult.success && errorResult.data.error) {
     printError(msg.startFailed(errorResult.data.error));
@@ -127,27 +86,19 @@ async function deviceAuthFlow(): Promise<number> {
   const expiresAt = startTime + deviceAuth.expires_in * 1000;
 
   while (Date.now() < expiresAt) {
-    await sleep(interval);
+    await Bun.sleep(interval);
 
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
 
-    const tokenResponse = await fetch(`${WORKOS_API_URL}/authenticate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-        device_code: deviceAuth.device_code,
-        client_id: getClientId(),
-      }),
+    const { data: tokenData } = await postWorkos('/authenticate', {
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      device_code: deviceAuth.device_code,
+      client_id: getClientId(),
     });
 
-    const tokenData = await tokenResponse.json();
     const authResult = AuthDataSchema.safeParse(tokenData);
     if (authResult.success) {
-      await saveAuthData({
-        ...authResult.data,
-        authenticated_at: Date.now(),
-      });
+      await saveAuthData(authResult.data);
 
       console.log('');
       printSuccess(msg.success);
@@ -156,23 +107,21 @@ async function deviceAuthFlow(): Promise<number> {
       return 0;
     }
 
-    const errorData = tokenData as {
-      error?: string;
-      error_description?: string;
-    };
+    const pollError = ErrorResponseSchema.safeParse(tokenData);
+    const errorCode = pollError.success ? pollError.data.error : undefined;
 
-    if (errorData.error === 'authorization_pending') {
+    if (errorCode === 'authorization_pending') {
       process.stdout.write(`\r  ${msg.waitingProgress(elapsed)}`);
       continue;
     }
 
-    if (errorData.error === 'slow_down') {
+    if (errorCode === 'slow_down') {
       interval += 1000;
       continue;
     }
 
-    printError(msg.authFailed(errorData.error || 'unknown error'));
-    if (errorData.error_description) printInfo(errorData.error_description);
+    printError(msg.authFailed(errorCode ?? 'unknown error'));
+    if (pollError.success && pollError.data.error_description) printInfo(pollError.data.error_description);
     return 1;
   }
 
@@ -184,19 +133,18 @@ async function showStatus(): Promise<number> {
   try {
     const authData = await getAuthData();
     if (authData) {
-      const displayName = getUserDisplayName(authData.user);
-      console.log(errors.loginStatusYes(displayName));
+      console.log(msg.loginStatusYes(authData.user.first_name || authData.user.email));
     } else {
-      console.log(errors.loginStatusNo);
+      console.log(msg.loginStatusNo);
     }
   } catch {
-    console.log(errors.loginStatusNo);
+    console.log(msg.loginStatusNo);
   }
   return 0;
 }
 
-export async function login(): Promise<number> {
-  if (process.argv.includes('--status')) {
+export async function login(args: Array<string>): Promise<number> {
+  if (args.includes('--status')) {
     return showStatus();
   }
 

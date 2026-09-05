@@ -1,14 +1,20 @@
 import { getAuthData } from '../lib/auth';
-import { getConfig, getOrCreateCheckoutId, getProjectIdentifiers, loadTranscriptsDirs } from '../lib/config';
+import {
+  getOrCreateCheckoutId,
+  getProjectIdentifiers,
+  getStateDir,
+  isSharingDisabledLocally,
+  loadTranscriptsDirs,
+} from '../lib/config';
 import { heartbeatSession } from '../lib/convex';
 import { countRawLines } from '../lib/session-io';
 import { discoverSessions } from '../lib/session-state';
 
 export async function hiveHeartbeat(): Promise<number> {
-  const config = getConfig();
   const cwd = process.cwd();
-  const stateDir = config.getStateDir(cwd);
+  const stateDir = getStateDir(cwd);
 
+  if (isSharingDisabledLocally(stateDir)) return 0;
   const authData = await getAuthData();
   if (!authData) return 1;
 
@@ -22,22 +28,23 @@ export async function hiveHeartbeat(): Promise<number> {
   const ids = getProjectIdentifiers(cwd);
 
   let failures = 0;
-  const parentSessions = allSessions.filter((s) => !s.agentId);
-  for (const s of parentSessions) {
-    let messageCount: number;
+  for (const s of allSessions.filter((session) => !session.agentId)) {
+    let lineCount: number;
     try {
-      messageCount = await countRawLines(s.path);
+      lineCount = await countRawLines(s.path);
     } catch {
-      continue;
+      continue; // file vanished between discovery and read
     }
 
+    // A `hive consent disable` during a long scan stops the remaining heartbeats.
+    if (isSharingDisabledLocally(stateDir)) return 0;
     try {
       await heartbeatSession({
         sessionId: s.sessionId,
         checkoutId,
         directory: ids.directory,
         gitRemote: ids.gitRemote,
-        lineCount: messageCount,
+        lineCount,
         lastModified: s.mtime.getTime(),
       });
     } catch (error) {

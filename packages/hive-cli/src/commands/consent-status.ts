@@ -1,7 +1,14 @@
+import { existsSync } from 'node:fs';
 import { getAuthData } from '../lib/auth';
-import { getProjectIdentifiers, matchesProject } from '../lib/config';
+import {
+  getProjectIdentifiers,
+  getStateDir,
+  isProjectSharingEnabled,
+  projectDisplayName,
+  statePaths,
+} from '../lib/config';
 import { getConsentStatus, getProjectSharing, getRepoLinkStatus } from '../lib/convex';
-import { checkRepoVisibility } from '../lib/github';
+import { checkRepoVisibility, githubRepoPath } from '../lib/github';
 import { hive } from '../lib/messages';
 
 export async function consentStatus(): Promise<number> {
@@ -11,8 +18,10 @@ export async function consentStatus(): Promise<number> {
     return 0;
   }
 
-  const consent = await getConsentStatus();
-  if (consent === null) {
+  let consent;
+  try {
+    consent = await getConsentStatus();
+  } catch {
     console.log(hive.consent.statusFetchFailed);
     return 0;
   }
@@ -28,20 +37,26 @@ export async function consentStatus(): Promise<number> {
   if (consent.sessionSharing) {
     const cwd = process.cwd();
     const ids = getProjectIdentifiers(cwd);
-    const allProjects = await getProjectSharing();
-    const projectConsent = matchesProject(allProjects, ids);
-    const projectEnabled = !!projectConsent?.sessionSharing;
-    const displayName = ids.gitRemote ?? ids.directory;
-    console.log(hive.consent.statusProject(displayName, projectEnabled));
+    const projectEnabled = isProjectSharingEnabled(await getProjectSharing(), ids);
+    console.log(hive.consent.statusProject(projectDisplayName(ids), projectEnabled));
 
-    // Repo visibility and link status for GitHub repos
-    if (ids.gitRemote?.startsWith('github.com/')) {
-      const repoPath = ids.gitRemote.replace('github.com/', '');
-      const visibility = await checkRepoVisibility(repoPath);
-      console.log(`Repo visibility: ${visibility}`);
+    // The align command and the manage-data-sharing skill act on these files; the state dir
+    // is the main worktree's, which a cwd-relative path in a worktree would miss.
+    const stateDir = getStateDir(cwd);
+    const paths = statePaths(stateDir);
+    const markers = [
+      ['sharing-disabled', paths.sharingDisabled],
+      ['repo-linking-declined', paths.repoLinkingDeclined],
+    ]
+      .filter(([, path]) => existsSync(path))
+      .map(([name]) => name);
+    console.log(hive.consent.statusStateDir(stateDir));
+    console.log(hive.consent.statusLocalMarkers(markers));
 
-      const linkStatus = await getRepoLinkStatus(ids.gitRemote);
-      console.log(`Repo link: ${linkStatus ?? 'unknown'}`);
+    const repoPath = githubRepoPath(ids.gitRemote);
+    if (repoPath) {
+      console.log(hive.consent.statusRepoVisibility(await checkRepoVisibility(repoPath)));
+      console.log(hive.consent.statusRepoLink((await getRepoLinkStatus(ids.gitRemote!)) ?? 'unknown'));
     }
   }
 

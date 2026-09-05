@@ -2,274 +2,159 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { getAuthData } from './auth';
 import { getProjectIdentifiers, matchesProject } from './config';
+import { hive } from './messages';
+import type { ProjectIds } from './config';
+import type { ConsentEvent, WorkflowRunRow } from '@alignment-hive/session-data';
 import type { Id } from '../../../web/convex/_generated/dataModel';
-import type { ProjectIdentifiers } from '@alignment-hive/session-data';
-
-const CONVEX_URL = process.env.ALIGNMENT_HIVE_CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud';
-
-function debugLog(message: string): void {
-  if (process.env.DEBUG) {
-    console.error(`[convex] ${message}`);
-  }
-}
 
 let clientInstance: ConvexHttpClient | null = null;
 
-export function getConvexClient(): ConvexHttpClient {
-  if (!clientInstance) {
-    clientInstance = new ConvexHttpClient(CONVEX_URL);
-  }
+function getConvexClient(): ConvexHttpClient {
+  clientInstance ??= new ConvexHttpClient(
+    process.env.ALIGNMENT_HIVE_CONVEX_URL ?? 'https://grateful-warbler-176.convex.cloud',
+  );
   return clientInstance;
 }
 
-/** Get an authenticated Convex client, refreshing the token if needed. Returns null if not logged in. Throws on refresh failure. */
-export async function getAuthenticatedClient(): Promise<ConvexHttpClient | null> {
+/**
+ * Run a backend call as the logged-in user. Throws the not-authenticated message when there is no
+ * login, and lets backend or network failures propagate: callers that must stay quiet catch.
+ */
+async function withClient<T>(fn: (client: ConvexHttpClient) => Promise<T>): Promise<T> {
   const authData = await getAuthData();
-  if (!authData) return null;
+  if (!authData) throw new Error(hive.upload.notAuthenticated);
   const client = getConvexClient();
   client.setAuth(authData.access_token);
-  return client;
+  return fn(client);
 }
 
-export async function pingCheckout(checkoutId: string): Promise<boolean> {
-  try {
-    const client = getConvexClient();
-    await client.mutation(api.sessions.upsertCheckout, { checkoutId });
-    return true;
-  } catch (error) {
-    debugLog(`pingCheckout failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
+export async function pingCheckout(checkoutId: string): Promise<void> {
+  await getConvexClient().mutation(api.sessions.upsertCheckout, { checkoutId });
 }
 
-export type { ProjectIdentifiers };
+/** A query result the backend only returns null for when it does not recognize the caller. */
+function orNotAuthenticated<T>(value: T | null): T {
+  if (value === null) throw new Error(hive.upload.notAuthenticated);
+  return value;
+}
 
-export async function heartbeatSession(session: {
+export function heartbeatSession(session: {
   sessionId: string;
   checkoutId: string;
-  project?: string;
   directory?: string;
   gitRemote?: string;
   lineCount: number;
   lastModified?: number;
-  parentSessionId?: string;
-}): Promise<boolean> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return false;
-
+}): Promise<void> {
+  return withClient(async (client) => {
     await client.mutation(api.sessions.heartbeatSession, session);
-    return true;
-  } catch (error) {
-    debugLog(`heartbeatSession failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
+  });
 }
 
-export async function generateUploadUrls(
+export interface ConsentIdentifiers {
+  directory?: string;
+  gitRemote?: string;
+  lastModified?: number;
+}
+
+export function generateUploadUrls(
   sessionId: string,
   agentSessionIds: Array<string>,
-  consentIdentifiers: {
-    directory?: string;
-    gitRemote?: string;
-    lastModified?: number;
-  },
+  consentIdentifiers: ConsentIdentifiers,
   workflowRunIds: Array<string> = [],
-): Promise<Record<string, string> | null> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return null;
-
-    return await client.mutation(api.sessions.generateUploadUrls, {
+): Promise<Record<string, string>> {
+  return withClient((client) =>
+    client.mutation(api.sessions.generateUploadUrls, {
       sessionId,
       agentSessionIds,
       // Omit when empty (the arg is optional server-side): during a deploy-skew window an old
       // backend rejects unknown args, which would break EVERY upload instead of workflow ones.
       ...(workflowRunIds.length > 0 && { workflowRunIds }),
       ...consentIdentifiers,
-    });
-  } catch (error) {
-    debugLog(`generateUploadUrls failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
-  }
+    }),
+  );
 }
 
-export async function saveUploads(
-  parentSessionId: string,
-  sessionMeta: {
-    checkoutId: string;
-    directory?: string;
-    gitRemote?: string;
-    lastModified?: number;
-    sessionStartGitCommitHash?: string;
-  },
-  uploads: Array<{
-    sessionId: string;
-    storageId: string;
-    summary?: string;
-    lineCount: number;
-    parentSessionId?: string;
-    agentType?: string;
-    workflowRunId?: string;
-  }>,
-): Promise<boolean> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return false;
-
-    await client.mutation(api.sessions.saveUploads, {
-      parentSessionId,
-      ...sessionMeta,
-      uploads: uploads.map((u) => ({
-        ...u,
-        storageId: u.storageId as unknown as Id<"_storage">,
-      })),
-    });
-    return true;
-  } catch (error) {
-    debugLog(`saveUploads failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-export interface WorkflowRunUpload {
-  workflowRunId: string;
-  runId: string;
-  storageId: string;
-  workflowName?: string;
+export interface UploadRecord {
+  sessionId: string;
+  storageId: Id<'_storage'>;
   summary?: string;
-  status?: string;
-  totalTokens?: number;
-  totalToolCalls?: number;
-  agentCount?: number;
-  durationMs?: number;
+  lineCount: number;
+  parentSessionId?: string;
+  agentType?: string;
+  workflowRunId?: string;
 }
 
-export async function saveWorkflowRuns(
+export function saveUploads(
   parentSessionId: string,
-  meta: { directory?: string; gitRemote?: string; lastModified?: number },
+  sessionMeta: ConsentIdentifiers & { checkoutId: string; sessionStartGitCommitHash?: string },
+  uploads: Array<UploadRecord>,
+): Promise<void> {
+  return withClient(async (client) => {
+    await client.mutation(api.sessions.saveUploads, { parentSessionId, ...sessionMeta, uploads });
+  });
+}
+
+export interface WorkflowRunUpload extends WorkflowRunRow {
+  storageId: Id<'_storage'>;
+}
+
+export function saveWorkflowRuns(
+  parentSessionId: string,
+  meta: ConsentIdentifiers,
   runs: Array<WorkflowRunUpload>,
-): Promise<boolean> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return false;
-
-    await client.mutation(api.sessions.saveWorkflowRuns, {
-      parentSessionId,
-      ...meta,
-      runs: runs.map((r) => ({
-        ...r,
-        storageId: r.storageId as unknown as Id<"_storage">,
-      })),
-    });
-    return true;
-  } catch (error) {
-    debugLog(`saveWorkflowRuns failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
+): Promise<void> {
+  return withClient(async (client) => {
+    await client.mutation(api.sessions.saveWorkflowRuns, { parentSessionId, ...meta, runs });
+  });
 }
 
-export async function getConsentStatus(): Promise<{ hasConsent: boolean; sessionSharing: boolean } | null> {
+export function getConsentStatus(): Promise<{ hasConsent: boolean; sessionSharing: boolean }> {
+  return withClient(async (client) => orNotAuthenticated(await client.query(api.consent.getConsentStatus, {})));
+}
+
+export function getProjectSharing() {
+  return withClient((client) => client.query(api.consent.getProjectSharing, {}));
+}
+
+export function getConsentHistory(
+  identifiers: ProjectIds,
+): Promise<{ global: Array<ConsentEvent>; project: Array<ConsentEvent> }> {
+  return withClient(async (client) =>
+    orNotAuthenticated(await client.query(api.consent.getConsentHistory, identifiers)),
+  );
+}
+
+export function updateProjectSharing(
+  changes: Array<{ identifier: ProjectIds; sessionSharing: boolean }>,
+): Promise<void> {
+  return withClient(async (client) => {
+    await client.mutation(api.consent.updateProjectSharing, { changes });
+  });
+}
+
+/** Display-only status: null when it cannot be determined. */
+export async function getRepoLinkStatus(gitRemote: string): Promise<'linked' | 'not-linked' | null> {
   try {
-    const client = await getAuthenticatedClient();
-    if (!client) return null;
-    return await client.query(api.consent.getConsentStatus, {});
-  } catch (error) {
-    debugLog(`getConsentStatus failed: ${error instanceof Error ? error.message : String(error)}`);
+    return await withClient((client) =>
+      client.query(api.github.getRepoLinkStatus, { gitRemote: gitRemote.toLowerCase() }),
+    );
+  } catch {
     return null;
   }
 }
 
-export interface ProjectSharingState {
-  directories: Array<string>;
-  gitRemotes: Array<string>;
-  sessionSharing: boolean;
-  latestAt: number;
-}
-
-export async function getProjectSharing(): Promise<Array<ProjectSharingState>> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return [];
-    return await client.query(api.consent.getProjectSharing, {});
-  } catch (error) {
-    debugLog(`getProjectSharing failed: ${error instanceof Error ? error.message : String(error)}`);
-    return [];
-  }
-}
-
-export async function getConsentHistory(identifiers: ProjectIdentifiers): Promise<{
-  global: Array<{ sessionSharing: boolean; timestamp: number }>;
-  project: Array<{ sessionSharing: boolean; timestamp: number }>;
-} | null> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return null;
-    return await client.query(api.consent.getConsentHistory, identifiers);
-  } catch (error) {
-    debugLog(`getConsentHistory failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
-  }
-}
-
-/** Narrow ProjectIdentifiers (both optional) to the Convex union (at least one required). */
-function narrowIdentifier(
-  id: ProjectIdentifiers,
-): { directory: string; gitRemote?: string } | { directory?: string; gitRemote: string } {
-  if (id.directory) return { directory: id.directory, gitRemote: id.gitRemote };
-  if (id.gitRemote) return { gitRemote: id.gitRemote };
-  throw new Error('At least one of directory or gitRemote is required');
-}
-
-export async function updateProjectSharing(
-  changes: Array<{ identifier: ProjectIdentifiers; sessionSharing: boolean }>,
-): Promise<boolean> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return false;
-    await client.mutation(api.consent.updateProjectSharing, {
-      changes: changes.map(({ identifier, sessionSharing }) => ({
-        identifier: narrowIdentifier(identifier),
-        sessionSharing,
-      })),
-    });
-    return true;
-  } catch (error) {
-    debugLog(`updateProjectSharing failed: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-
-export type RepoLinkStatus = "linked" | "not-linked";
-
-export async function getRepoLinkStatus(gitRemote: string): Promise<RepoLinkStatus | null> {
-  try {
-    const client = await getAuthenticatedClient();
-    if (!client) return null;
-    return await client.query(api.github.getRepoLinkStatus, { gitRemote: gitRemote.toLowerCase() });
-  } catch (error) {
-    debugLog(`getRepoLinkStatus failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
-  }
-}
-
-/** Resolve project consent state for the current project. */
-export async function resolveProjectConsent(cwd: string) {
-  const authData = await getAuthData();
-  if (!authData) return { error: 'not-authenticated' } as const;
-
-  const [consent, allProjects] = await Promise.all([
-    getConsentStatus(),
-    getProjectSharing(),
-  ]);
-
-  if (!consent?.hasConsent || !consent.sessionSharing) return { error: 'no-consent' } as const;
+/**
+ * The consent gate for uploading from cwd. Throws a user-facing message when not logged in,
+ * when global sharing is off, or when this project is not enabled.
+ */
+export async function resolveProjectConsent(cwd: string): Promise<{ consentMtime: number; ids: ProjectIds }> {
+  const [consent, allProjects] = await Promise.all([getConsentStatus(), getProjectSharing()]);
+  if (!consent.hasConsent || !consent.sessionSharing) throw new Error(hive.upload.noConsent);
 
   const ids = getProjectIdentifiers(cwd);
   const projectConsent = matchesProject(allProjects, ids);
-  if (!projectConsent?.sessionSharing) return { error: 'no-project-consent' } as const;
+  if (!projectConsent?.sessionSharing) throw new Error(hive.upload.noProjectConsent);
 
-  return { consentMtime: projectConsent.latestAt, ids } as const;
+  return { consentMtime: projectConsent.latestAt, ids };
 }
-
-export { api };

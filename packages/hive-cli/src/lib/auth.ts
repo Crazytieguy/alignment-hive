@@ -1,39 +1,43 @@
-import { mkdir } from 'node:fs/promises';
 import { z } from 'zod';
-import { getAuthDir, getAuthFile, getClientId } from './config';
+import { getAuthFile, getClientId } from './config';
 import { errors } from './messages';
 
-const WORKOS_API_URL = 'https://api.workos.com/user_management';
+export const WORKOS_API_URL = 'https://api.workos.com/user_management';
 
-const AuthUserSchema = z.object({
-  id: z.string(),
-  email: z.string(),
-  first_name: z.string().nullish(),
-  last_name: z.string().nullish(),
-});
+// Refresh a token this close to expiry so it cannot expire in flight.
+const EXPIRY_MARGIN_S = 60;
 
 export const AuthDataSchema = z.object({
   access_token: z.string(),
   refresh_token: z.string(),
-  user: AuthUserSchema,
-  authenticated_at: z.number().optional(),
+  user: z.object({
+    id: z.string(),
+    email: z.string(),
+    first_name: z.string().nullish(),
+    last_name: z.string().nullish(),
+  }),
 });
 
-export type AuthUser = z.infer<typeof AuthUserSchema>;
 export type AuthData = z.infer<typeof AuthDataSchema>;
 
+/** Form-encoded POST to the WorkOS user-management API. */
+export async function postWorkos(
+  path: string,
+  params: Record<string, string>,
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const response = await fetch(`${WORKOS_API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params),
+  });
+  return { ok: response.ok, status: response.status, data: await response.json() };
+}
+
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
   try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-
-    let payload = parts[1];
-    const padding = 4 - (payload.length % 4);
-    if (padding < 4) {
-      payload += '='.repeat(padding);
-    }
-
-    return JSON.parse(atob(payload));
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
   } catch {
     return null;
   }
@@ -42,18 +46,18 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 function isTokenExpired(token: string): boolean {
   const payload = decodeJwtPayload(token);
   if (!payload || typeof payload.exp !== 'number') return true;
-  return payload.exp <= Math.floor(Date.now() / 1000);
+  return payload.exp - EXPIRY_MARGIN_S <= Math.floor(Date.now() / 1000);
 }
 
-/** Read auth data from disk. Returns null if no auth file. Throws on corrupt data. */
-export async function readAuthData(): Promise<AuthData | null> {
+/** Auth data from disk. Returns null if no auth file. Throws on corrupt data. */
+async function readAuthData(): Promise<AuthData | null> {
   const file = Bun.file(getAuthFile());
   if (!(await file.exists())) return null;
   let data: unknown;
   try {
     data = await file.json();
   } catch {
-    throw new Error(errors.authSchemaError("invalid JSON"));
+    throw new Error(errors.authSchemaError('invalid JSON'));
   }
   const parsed = AuthDataSchema.safeParse(data);
   if (!parsed.success) {
@@ -63,67 +67,52 @@ export async function readAuthData(): Promise<AuthData | null> {
 }
 
 export async function saveAuthData(data: AuthData): Promise<void> {
-  await mkdir(getAuthDir(), { recursive: true });
   await Bun.write(getAuthFile(), JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
 async function refreshToken(authData: AuthData): Promise<AuthData> {
-  const response = await fetch(`${WORKOS_API_URL}/authenticate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: authData.refresh_token,
-      client_id: getClientId(),
-    }),
+  const { ok, status, data } = await postWorkos('/authenticate', {
+    grant_type: 'refresh_token',
+    refresh_token: authData.refresh_token,
+    client_id: getClientId(),
   });
-
-  if (!response.ok) {
-    throw new Error(errors.refreshFailed(response.status));
-  }
-
-  const data = await response.json();
+  if (!ok) throw new Error(errors.refreshFailed(status));
   const parsed = AuthDataSchema.safeParse(data);
-  if (!parsed.success) {
-    throw new Error(errors.refreshFailed(response.status));
-  }
-
-  return {
-    ...parsed.data,
-    authenticated_at: authData.authenticated_at,
-  };
+  if (!parsed.success) throw new Error(errors.unexpectedResponse);
+  return parsed.data;
 }
 
+let inflightRefresh: Promise<AuthData> | null = null;
+
 /**
- * Get auth data with a valid (non-expired) access token.
- * Returns null if not logged in. Throws if token refresh fails.
- *
- * On refresh, the updated token is saved to disk. If the refresh fails
- * but another process has already refreshed (concurrent CLI invocations),
- * the fresh token from disk is returned instead.
+ * Auth data with an unexpired access token. The file is re-read on every call so a `hive login`
+ * in another process takes effect at once (the review server runs for hours); a refresh is
+ * shared between concurrent callers so a single-use refresh token is never spent twice.
+ * Returns null if not logged in. Throws if the refresh fails.
  */
 export async function getAuthData(): Promise<AuthData | null> {
   const authData = await readAuthData();
   if (!authData) return null;
+  if (!isTokenExpired(authData.access_token)) return authData;
+  inflightRefresh ??= refreshAndSave(authData).finally(() => {
+    inflightRefresh = null;
+  });
+  return inflightRefresh;
+}
 
-  if (!isTokenExpired(authData.access_token)) {
-    return authData;
-  }
-
+async function refreshAndSave(authData: AuthData): Promise<AuthData> {
   try {
     const refreshed = await refreshToken(authData);
+    // A `hive login` (or another process's refresh) that landed while the request was in flight
+    // wins: overwriting it would silently switch this process back to the old account.
+    const current = await readAuthData();
+    if (current && current.refresh_token !== authData.refresh_token) return current;
     await saveAuthData(refreshed);
     return refreshed;
   } catch (refreshError) {
-    // Refresh failed — check if another process already refreshed
+    // Another CLI process may have refreshed (and saved) in the meantime.
     const freshData = await readAuthData();
-    if (freshData && !isTokenExpired(freshData.access_token)) {
-      return freshData;
-    }
+    if (freshData && !isTokenExpired(freshData.access_token)) return freshData;
     throw refreshError;
   }
-}
-
-export function getUserDisplayName(user: AuthUser): string {
-  return user.first_name || user.email;
 }
