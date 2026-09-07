@@ -283,4 +283,7 @@ export const hive = {
       `uploading ${count} session${count === 1 ? '' : 's'} in ${delayMin}m`,
     reviewHint: `${boldMagenta('$ hive upload review')} ${dim('to preview')}`,
   },
+  checkoutPing: {
+    timedOut: (seconds: number): string => `checkout ping gave up after ${seconds}s`,
+  },
 };
