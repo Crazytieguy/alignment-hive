@@ -48,6 +48,7 @@ const COMMANDS = new Map<string, () => Promise<number>>([
     },
   ],
   ['heartbeat', async () => (await import('./commands/hive-heartbeat')).hiveHeartbeat()],
+  ['checkout-ping', async () => (await import('./commands/checkout-ping')).checkoutPing()],
   ['login', async () => (await import('./commands/login')).login(process.argv.slice(3))],
   ['local', async () => (await import('./commands/local')).local()],
   [
@@ -75,7 +76,7 @@ async function main(): Promise<void> {
   const command = process.argv[2];
 
   if (!command || isHelp(command)) {
-    console.log('Usage: hive <session-start|upload|heartbeat|login|local|consent>');
+    console.log('Usage: hive <session-start|upload|heartbeat|checkout-ping|login|local|consent>');
     process.exit(command ? 0 : 1);
   }
 

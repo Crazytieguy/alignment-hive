@@ -4,7 +4,6 @@ import { writeFile } from 'node:fs/promises';
 import { formatRemaining } from '@alignment-hive/session-data';
 import {
   ensureStateDir,
-  getOrCreateCheckoutId,
   getStateDir,
   isSharingDisabledLocally,
   loadTranscriptsDirs,
@@ -12,7 +11,7 @@ import {
   readTimestamp,
   statePaths,
 } from '../lib/config';
-import { pingCheckout, resolveProjectConsent } from '../lib/convex';
+import { resolveProjectConsent } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
 import { hive } from '../lib/messages';
 import { colors } from '../lib/output';
@@ -81,14 +80,13 @@ export async function hiveSessionStart(): Promise<number> {
   const alignNudge = await checkAlignVersion(stateDir);
   if (alignNudge) messages.push(alignNudge);
 
-  // Runs alongside everything else; awaited in flush so process.exit cannot cut it off.
-  const ping = getOrCreateCheckoutId(stateDir)
-    .then(pingCheckout)
-    .catch(() => {});
+  // Detached so startup never waits on the network; an in-process request would either block
+  // the hook or be cut off by process.exit. Before the sharing opt-out on purpose: the ping
+  // counts installs, sharing or not.
+  spawnBackgroundCommand(['checkout-ping'], stateDir);
 
-  const flush = async (): Promise<number> => {
+  const flush = (): number => {
     emitHookMessages(messages, hookInput);
-    await ping;
     return 0;
   };
 
