@@ -1,6 +1,6 @@
 ---
 name: lit-review
-description: Generate comprehensive literature review from research proposal. Use this skill when the user asks for a "literature review", "lit review", "find related papers", "search for papers about", "what papers exist on", or wants to understand the research landscape for a topic. Can also be invoked with /lit-review.
+description: Generate comprehensive literature review from research proposal. Use this skill when the user asks for a "literature review", "lit review", "find related papers", "search for papers about", "what papers exist on", or wants to understand the research landscape for a topic.
 ---
 
 # Literature Review Generator
@@ -75,21 +75,13 @@ Before starting the automated process, explain what permissions will be needed:
 >
 > - **Run Python scripts** - These search databases, download papers, and process results
 > - **Read and write files** - To save papers, summaries, and reports to your folder
-> - **Make web requests** - To search Semantic Scholar, arXiv, LessWrong, and optionally Google Scholar
+> - **Make web requests** - To search Semantic Scholar, arXiv, and Google Scholar (scraped, may get rate limited), fetch LessWrong/Alignment Forum posts, and download PDFs from the publisher links those sources return
 >
-> The scripts are part of this plugin and run locally on your machine. No data is sent anywhere except the search queries to the academic databases.
+> The scripts are part of this plugin and run locally on your machine; your search queries go to those sources (and to WebSearch for the forum posts) and nowhere else.
 >
 > You may see permission prompts as I work—these are normal. Let me know if you have any questions before we begin."
 
 Wait for the user to confirm they're comfortable proceeding.
-
-**Optional enhancement - Exa Search API:**
-
-> "By the way, if you want higher-quality search results, you can optionally set up an Exa API key. Exa is a semantic search engine designed for AI—it finds more relevant results than keyword search.
->
-> It's free to sign up at https://exa.ai and you get generous free credits. If you have a key, set it as `EXA_API_KEY` in your environment and I'll use it automatically.
->
-> This is totally optional—the literature review works fine without it."
 
 ---
 
@@ -154,7 +146,6 @@ mkdir -p <output_dir>/raw_results
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
   --queries <output_dir>/search_terms.json \
   --output-dir <output_dir>/raw_results \
-  --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review \
   --arxiv-limit 10 \
   --semantic-scholar-limit 10 \
   --google-scholar-limit 10
@@ -198,32 +189,6 @@ The scraper:
 - Collects up to 500 comments per post (with author, score, threading)
 - Handles both LW and AF URLs through the same endpoint
 
-<!--
-INTERNAL NOTES FOR FUTURE CLAUDES - Exa Search API:
-
-If the user has an Exa API key (EXA_API_KEY environment variable), you can use the
-Exa search script for higher-quality semantic search results:
-
-```bash
-uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/search_exa.py \
-  --queries <output_dir>/search_terms.json \
-  --output <output_dir>/raw_results/exa_results.json \
-  --ai-safety-domains
-```
-
-Exa (https://exa.ai) provides:
-- Semantic/neural search (not just keyword matching)
-- High-quality curated index
-- Better results for technical/research queries
-- Free tier with generous limits
-
-To use Exa, the user needs to:
-1. Sign up at https://exa.ai (free)
-2. Get an API key from the dashboard
-3. Set EXA_API_KEY environment variable or add to .env file
-
-Exa search can supplement or replace the WebSearch approach for LW/AF when available.
--->
 
 ### Phase 3: Deduplicate
 
@@ -245,7 +210,7 @@ These three stages run as a **pipeline** for maximum throughput. Papers flow thr
 Create directories and start the pipeline script. It downloads PDFs, converts them to markdown, and processes LW/AF posts—all incrementally. Each completed markdown file path is printed to stdout as it becomes ready.
 
 ```bash
-mkdir -p <output_dir>/papers <output_dir>/summaries
+mkdir -p <output_dir>/summaries
 
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/process_papers_pipeline.py \
   --input <output_dir>/deduplicated.json \
@@ -259,17 +224,17 @@ Run this command **in the background** using the Bash tool's `run_in_background`
 While the pipeline runs, repeatedly check for new markdown files that need summarization. **Loop until the pipeline finishes and all papers are summarized:**
 
 1. List markdown files in `<output_dir>/papers/` that do NOT yet have a corresponding summary in `<output_dir>/summaries/`
-2. For any unsummarized files found, spawn up to 5 summarizer agents simultaneously using the Task tool (one call per paper, all in the same message)
+2. For any unsummarized files found, spawn up to 5 `mats:summarizer` subagents simultaneously with the Agent tool (one call per paper, all in the same message); if one fails, retry it once, then leave that paper without a summary and move on
 3. Wait for the current batch to complete
 4. Check the pipeline's background task status—if it's still running, wait ~15 seconds and go back to step 1. If the status is unavailable or errors (e.g., the session was backgrounded or resumed mid-run), don't wait for it—re-run the `process_papers_pipeline.py` command with the same arguments (it skips existing PDFs and markdown, so re-running is safe) and continue the loop.
-5. Once the pipeline finishes, do one final check for any remaining unsummarized papers and process them
+5. Once the pipeline finishes, do one final check for any remaining unsummarized papers and process them. Papers the pipeline lists as failed have no markdown and get no summary; don't chase them.
 
 Each summarizer agent should receive:
 - The paper markdown path
 - The original proposal content (for relevance assessment)
 - The output summary path
 
-Example Task prompt for each agent:
+Example prompt for each agent:
 ```
 Summarize the paper at: <output_dir>/papers/<paper_id>.md
 
@@ -280,8 +245,6 @@ Write the summary to: <output_dir>/summaries/<paper_id>.md
 
 Follow the summarizer agent instructions for output format.
 ```
-
-This pipelined approach means summarization starts within seconds of the first paper being ready, rather than waiting for all downloads and conversions to finish.
 
 ### Phase 7: Generate Catalog
 
@@ -340,7 +303,6 @@ mkdir -p <output_dir>/raw_results_stage2
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/run_searches.py \
   --queries <output_dir>/search_terms_stage2.json \
   --output-dir <output_dir>/raw_results_stage2 \
-  --scripts-dir ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review \
   --arxiv-limit 100 \
   --semantic-scholar-limit 100 \
   --google-scholar-limit 50
@@ -361,7 +323,7 @@ Collect all URLs into `<output_dir>/raw_results_stage2/lesswrong_urls.json` and 
 
 ### Phase 11: Merge and Deduplicate
 
-Combine Stage 1 and Stage 2 results:
+Combine all stages so far (one `--input-dir` per stage):
 
 ```bash
 uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
@@ -373,12 +335,7 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/dedup_papers.py \
 
 ### Phase 12: Download, Convert, and Summarize New Papers (Pipelined)
 
-1. Compare `deduplicated_merged.json` to original `deduplicated.json` to identify NEW papers
-2. Write the new papers to a temporary JSON file (e.g., `<output_dir>/new_papers_stage2.json`)
-3. Run the pipeline + summarization loop from Phases 4-6 on the new papers only:
-   - Start `process_papers_pipeline.py` in the background with `--input <output_dir>/new_papers_stage2.json`
-   - Spawn summarizer agents for papers as they become ready
-   - Continue until all new papers are processed and summarized
+Run the pipeline and summarization loop from Phases 4-6 with `--input <output_dir>/deduplicated_merged.json`. The pipeline skips papers that already have markdown and the loop skips papers that already have summaries, so only the new papers (and any Stage 1 download failures) are processed.
 
 ### Phase 13: Evaluate and Decide Next Steps
 
