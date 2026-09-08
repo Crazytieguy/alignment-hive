@@ -10,7 +10,7 @@
     {
       "name": "hive-mind",
       "source": "./plugins/hive-mind",
-      "description": "Share session learnings with the alignment research community"
+      "description": "Deprecated: superseded by hive. Share session learnings with the alignment research community"
     },
     {
       "name": "llms-fetch-mcp",

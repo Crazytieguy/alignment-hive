@@ -15,9 +15,9 @@ Output for `which bun`:
 !`which bun || echo "not found"`
 ```
 
-Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js login --status` (only if bun is installed):
+Output for `bun ${CLAUDE_PLUGIN_ROOT}/cli.js login --status`:
 ```
-!`which bun > /dev/null && bun ${CLAUDE_PLUGIN_ROOT}/cli.js login --status || echo "bun not installed"`
+!`bun ${CLAUDE_PLUGIN_ROOT}/cli.js login --status 2>&1 || echo "(login --status failed; see above, or bun is not installed)"`
 ```
 
 ## Step 1: Install Bun and Set Up Command

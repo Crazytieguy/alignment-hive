@@ -1,7 +1,7 @@
 ---
 name: retrieval
 description: Retrieval instructions for searching session history. Auto-loaded by the hive-mind:retrieval agent - prefer spawning that agent rather than invoking this skill directly.
-allowed-tools: Bash(command -v hive-mind:*), Bash(printf:*), Bash(hive-mind:*), Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git:*)
+allowed-tools: Bash(command -v hive-mind:*), Bash(printf:*), Bash(hive-mind:*), Bash(bun ${CLAUDE_PLUGIN_ROOT}/cli.js:*), Bash(git log:*)
 ---
 
 Approach this as memory archaeology: excavate layers of project history to uncover relevant artifacts.
@@ -35,7 +35,7 @@ Use Bash to run CLI commands and git. Cross-reference between them—commits and
 
 ### CLI Commands
 
-Run commands via: !`command -v hive-mind >/dev/null 2>&1 && echo '\x60hive-mind <command>\x60' || echo '\x60bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>\x60'`
+Run commands via `hive-mind <command>`, or `bun ${CLAUDE_PLUGIN_ROOT}/cli.js <command>` if `hive-mind` is not on PATH (the help output below shows which one worked).
 
 `search --help`:
 ```
