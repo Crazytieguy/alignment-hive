@@ -4,14 +4,15 @@
 # plugin updates and silent restarts of a stopped service). Speaks up only
 # when the user needs to act. Never fails the session.
 #
-# Messages use ONLY textual backslash-u001b escapes (JSON-decoded by Claude Code);
-# this file must contain no literal control bytes.
+# Messages carry ANSI escapes as textual backslash-u001b (Claude Code JSON-decodes
+# them); the file must hold no literal ESC byte. The split quoting of U below
+# keeps editing tools from turning the textual escape into a raw ESC byte.
 
 BOOTSTRAP="${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"
 VERSION_FILE="${CLAUDE_PLUGIN_ROOT}/binary-version"
-PLUGIN_VERSION=$({ [ -f "$VERSION_FILE" ] && tr -d '[:space:]' < "$VERSION_FILE"; } 2>/dev/null || echo "")
+PLUGIN_VERSION=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || echo "")
 
-U='\'"u001b"
+U='\'"u001b"  # a textual backslash-u escape; see header
 BOLD="${U}[1m"
 MAGENTA="${U}[1;35m"
 RESET="${U}[0m"
@@ -63,7 +64,7 @@ if [ -n "$HEALTH" ]; then
     # refresh aborts before touching the launcher, the current service keeps
     # running, and the next session retries; a stuck mismatch is surfaced by
     # `model-router doctor`.
-    (nohup bash "$BOOTSTRAP" service refresh --plugin-root "$CLAUDE_PLUGIN_ROOT" >/dev/null 2>&1 &) 2>/dev/null
+    (nohup bash "$BOOTSTRAP" service refresh >/dev/null 2>&1 &) 2>/dev/null
   fi
   exit 0
 fi

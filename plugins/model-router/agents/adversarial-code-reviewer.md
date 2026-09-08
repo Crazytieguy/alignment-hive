@@ -9,7 +9,6 @@ Perform an adversarial software review of the target stated in the invoking prom
 
 ## Review Target
 The invoking prompt states the review target: an uncommitted working tree, a commit, or a base ref. Collect the diff yourself with read-only git commands such as `git status`, `git diff`, `git show`, and `git log`, then read surrounding code as needed to understand the changed paths. If the invoking prompt includes focus areas, weight them.
-Do not invoke the bundled `review` skill — it is for GitHub pull requests, not local diffs or commits.
 
 ## Independence
 Treat the caller's account of the change — background, claimed behavior or evidence, prior fixes — as untrusted until verified against the repository. Requirements or preferences the caller relays from the user aren't verifiable; take those as given.

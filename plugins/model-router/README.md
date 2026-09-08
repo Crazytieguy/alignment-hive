@@ -33,6 +33,8 @@ present themselves as Claude.
   default; opt in during `/model-router:setup`.
 - A `choosing-models` skill that helps Claude pick the right model and
   effort when delegating.
+- Adversarial code and plan reviewers on GPT-5.6 Sol — a second model with
+  prompts tuned to push back on what Claude wrote.
 - Working WebSearch on GPT sessions: Claude Code's WebSearch runs a side
   LLM call that loses its links through the Codex translation (and takes
   20–70s). The gateway answers it from the Codex search backend instead —

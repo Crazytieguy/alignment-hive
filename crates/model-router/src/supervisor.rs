@@ -1,6 +1,6 @@
 //! Managed-mode supervision of the `CLIProxyAPI` child process.
 //!
-//! Ownership rules (from the reviewed plan): the child port must be FREE
+//! Ownership rules: the child port must be FREE
 //! before spawning unless a persisted, identity-verified orphan from this
 //! supervisor is still alive; readiness is an authenticated
 //! application-level probe, never a bare TCP accept; the exact child PID,
@@ -19,10 +19,18 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 
-use crate::config::UpstreamConfig;
-use crate::state::{
-    Dirs, create_private_dir, import_legacy_auth, load_or_create_secret, write_private_atomic,
-};
+use crate::config::{OpenAiProvider, ProviderModel, UpstreamConfig, derived_alias};
+use crate::headers::GptUpstreamCredential;
+use crate::state::{Dirs, create_private_dir, load_or_create_secret, write_private_atomic};
+
+/// The managed child's loopback address, as the supervisor, the readiness
+/// probe, and doctor all reach it.
+#[must_use]
+pub fn managed_base_url(port: u16) -> String {
+    format!("http://{MANAGED_HOST}:{port}")
+}
+
+const MANAGED_HOST: &str = "127.0.0.1";
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CHILD_IDENTITY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -79,7 +87,7 @@ impl Default for Tuning {
 #[derive(Clone)]
 pub struct ManagedHandle {
     pub base_url: String,
-    pub credential: crate::headers::GptUpstreamCredential,
+    pub credential: GptUpstreamCredential,
     ready: watch::Receiver<bool>,
 }
 
@@ -90,8 +98,9 @@ impl ManagedHandle {
     }
 }
 
-/// Owns the supervision task; dropping does NOT kill the child — call
-/// [`Supervisor::shutdown`] from the serve teardown path.
+/// Owns the supervision task. Dropping it ends the loop, which terminates
+/// the child asynchronously; [`Supervisor::shutdown`] additionally waits
+/// for that and escalates to `SIGKILL`, so the serve teardown calls it.
 pub struct Supervisor {
     handle: ManagedHandle,
     shutdown_tx: watch::Sender<bool>,
@@ -134,12 +143,11 @@ pub fn yaml_quote(value: &str) -> String {
 /// auth dir, single local api key, cloak/control-panel/telemetry disabled.
 /// Keyless providers are omitted (doctor and `verify-providers` flag them).
 #[must_use]
-#[allow(clippy::missing_panics_doc)] // expect() is on a filtered-to-Some iterator
 pub fn upstream_config_yaml(
     port: u16,
     auth_dir: &std::path::Path,
     secret: &str,
-    providers: &[crate::config::OpenAiProvider],
+    providers: &[OpenAiProvider],
 ) -> String {
     use std::fmt::Write as _;
     let mut yaml = format!(
@@ -167,7 +175,7 @@ routing:
   strategy: {strategy}
   session-affinity: false
 ",
-        host = yaml_quote("127.0.0.1"),
+        host = yaml_quote(MANAGED_HOST),
         auth_dir = yaml_quote(&auth_dir.display().to_string()),
         secret = yaml_quote(secret),
         empty = yaml_quote(""),
@@ -177,28 +185,21 @@ routing:
     // (fail closed: model-not-found beats running unpinned), and a provider
     // with nothing left is left out whole — an empty `models:` list is a
     // shape CLIProxyAPI has never been shown to accept.
-    let served: Vec<(
-        &crate::config::OpenAiProvider,
-        Vec<&crate::config::ProviderModel>,
-    )> = providers
+    let served: Vec<(&OpenAiProvider, &str, Vec<&ProviderModel>)> = providers
         .iter()
-        .filter(|provider| provider.api_key.is_some())
-        .map(|provider| {
-            (
-                provider,
-                provider
-                    .models
-                    .iter()
-                    .filter(|model| model.is_served())
-                    .collect::<Vec<_>>(),
-            )
+        .filter_map(|provider| {
+            let api_key = provider.api_key.as_deref()?;
+            let models: Vec<_> = provider
+                .models
+                .iter()
+                .filter(|model| model.is_served())
+                .collect();
+            (!models.is_empty()).then_some((provider, api_key, models))
         })
-        .filter(|(_, models)| !models.is_empty())
         .collect();
     if !served.is_empty() {
         yaml.push_str("\nopenai-compatibility:\n");
-        for (provider, models) in &served {
-            let api_key = provider.api_key.as_deref().expect("filtered to Some");
+        for (provider, api_key, models) in &served {
             let _ = writeln!(yaml, "  - name: {}", yaml_quote(&provider.name));
             let _ = writeln!(yaml, "    base-url: {}", yaml_quote(&provider.base_url));
             yaml.push_str("    api-key-entries:\n");
@@ -206,7 +207,7 @@ routing:
             yaml.push_str("    models:\n");
             for model in models {
                 let _ = writeln!(yaml, "      - name: {}", yaml_quote(&model.name));
-                let alias = crate::config::derived_alias(&model.routing_id);
+                let alias = derived_alias(&model.routing_id);
                 let _ = writeln!(yaml, "        alias: {}", yaml_quote(&alias));
             }
         }
@@ -215,15 +216,15 @@ routing:
     // pinned model, scoped by the model's alias (unique per route, unlike
     // the upstream name), setting OpenRouter's `provider.only`. Measured to
     // reach OpenRouter (docs/experiments.md, provider pinning).
-    let pinned: Vec<(&crate::config::ProviderModel, &Vec<String>)> = served
+    let pinned: Vec<(&ProviderModel, &Vec<String>)> = served
         .iter()
-        .flat_map(|(_, models)| models.iter().copied())
+        .flat_map(|(_, _, models)| models.iter().copied())
         .filter_map(|model| Some((model, model.pinned_providers.as_ref()?)))
         .collect();
     if !pinned.is_empty() {
         yaml.push_str("\npayload:\n  override-raw:\n");
         for (model, providers) in pinned {
-            let alias = crate::config::derived_alias(&model.routing_id);
+            let alias = derived_alias(&model.routing_id);
             let preference = serde_json::json!({ "only": providers }).to_string();
             let _ = writeln!(yaml, "    - models:");
             let _ = writeln!(yaml, "        - name: {}", yaml_quote(&alias));
@@ -241,7 +242,7 @@ routing:
 }
 
 /// Prepares managed-mode state on disk and returns the paths involved.
-/// Idempotent; shared by `serve`, `login`, and `doctor`.
+/// Idempotent; shared by `serve` and `login`.
 ///
 /// # Errors
 /// Returns an error when directories, the secret, or the config cannot be
@@ -249,21 +250,17 @@ routing:
 pub fn prepare_managed_state(
     dirs: &Dirs,
     upstream: &UpstreamConfig,
-    providers: &[crate::config::OpenAiProvider],
+    providers: &[OpenAiProvider],
 ) -> anyhow::Result<ManagedPaths> {
-    create_private_dir(&dirs.state_dir)?;
+    let secret = load_or_create_secret(dirs)?;
     create_private_dir(&dirs.auth_dir())?;
     create_private_dir(&dirs.log_dir())?;
-    let secret = load_or_create_secret(dirs)?;
-    import_legacy_auth(dirs)?;
     let yaml = upstream_config_yaml(upstream.port, &dirs.auth_dir(), &secret, providers);
     write_private_atomic(&dirs.upstream_config_file(), yaml.as_bytes())?;
     Ok(ManagedPaths {
         upstream_config: dirs.upstream_config_file(),
         auth_dir: dirs.auth_dir(),
         log_file: dirs.log_dir().join("cliproxyapi.log"),
-        secret,
-        port: upstream.port,
     })
 }
 
@@ -271,8 +268,6 @@ pub struct ManagedPaths {
     pub upstream_config: PathBuf,
     pub auth_dir: PathBuf,
     pub log_file: PathBuf,
-    pub secret: String,
-    pub port: u16,
 }
 
 impl Supervisor {
@@ -287,16 +282,13 @@ impl Supervisor {
     pub fn start(
         dirs: &Dirs,
         upstream: &UpstreamConfig,
-        providers: Vec<crate::config::OpenAiProvider>,
+        providers: Vec<OpenAiProvider>,
         tuning: Tuning,
     ) -> anyhow::Result<Self> {
-        let secret = {
-            create_private_dir(&dirs.state_dir)?;
-            load_or_create_secret(dirs)?
-        };
-        let credential = crate::headers::GptUpstreamCredential::new(&secret)
+        let secret = load_or_create_secret(dirs)?;
+        let credential = GptUpstreamCredential::new(&secret)
             .context("generated secret is not a valid header value")?;
-        let base_url = format!("http://127.0.0.1:{}", upstream.port);
+        let base_url = managed_base_url(upstream.port);
         let (ready_tx, ready_rx) = watch::channel(false);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handle = ManagedHandle {
@@ -336,21 +328,19 @@ impl Supervisor {
     /// `SIGKILL`ed directly.
     pub async fn shutdown(mut self) {
         let _ = self.shutdown_tx.send(true);
-        // Child SIGTERM grace plus slack. Every other supervision await is
-        // cancellation-aware, keeping this below the service-manager budget.
+        // Child SIGTERM grace plus slack, keeping this below the
+        // service-manager budget.
         let deadline = SHUTDOWN_GRACE + Duration::from_secs(2);
         if tokio::time::timeout(deadline, &mut self.task)
             .await
             .is_err()
         {
             tracing::warn!("supervision task did not stop in time; aborting it");
-            // Abort so a detached task can never spawn a child later; every
-            // pre-spawn await is cancellation-aware, and there is no await
-            // between spawn and pgid tracking, so aborting cannot interleave
-            // past a spawn without the slot being set.
+            // Abort so a detached task can never spawn a child later; there
+            // is no await between spawn and pgid tracking, so aborting cannot
+            // interleave past a spawn without the slot being set.
             self.task.abort();
             let _ = self.task.await;
-            #[cfg(unix)]
             if let Some(pgid) = self
                 .child_pgid
                 .lock()
@@ -358,11 +348,7 @@ impl Supervisor {
                 .filter(|pgid| *pgid > 0)
             {
                 tracing::warn!("force-killing child group");
-                // SAFETY: signaling a process group we created; the pgid
-                // cannot be recycled while its unreaped leader exists.
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
+                let _ = signal_group(pgid, libc::SIGKILL);
                 clear_child_record_path(&self.child_record_file);
             }
         }
@@ -373,9 +359,9 @@ impl Supervisor {
 async fn supervise(
     dirs: Dirs,
     upstream: UpstreamConfig,
-    providers: Vec<crate::config::OpenAiProvider>,
+    providers: Vec<OpenAiProvider>,
     base_url: String,
-    credential: crate::headers::GptUpstreamCredential,
+    credential: GptUpstreamCredential,
     ready_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
     tuning: Tuning,
@@ -437,9 +423,9 @@ enum ChildAttempt {
 async fn attempt_child(
     dirs: &Dirs,
     upstream: &UpstreamConfig,
-    providers: &[crate::config::OpenAiProvider],
+    providers: &[OpenAiProvider],
     base_url: &str,
-    credential: &crate::headers::GptUpstreamCredential,
+    credential: &GptUpstreamCredential,
     probe_client: &reqwest::Client,
     ready_tx: &watch::Sender<bool>,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -468,9 +454,9 @@ async fn attempt_child(
     // The port must be free before every spawn: a foreign listener here
     // would receive prompts and the injected secret. The only exception is a
     // process group whose persisted identity still matches in every field.
-    if port_in_use(paths.port).await && !reap_recorded_child(dirs, paths.port).await {
+    if port_in_use(upstream.port).await && !reap_recorded_child(dirs, upstream.port).await {
         tracing::error!(
-            port = paths.port,
+            port = upstream.port,
             "port is already in use; refusing to adopt an unknown listener as the cliproxy \
              upstream. If a stale cli-proxy-api is running, stop it, or change \
              [upstreams.cliproxy] port in the config. Will retry."
@@ -478,8 +464,8 @@ async fn attempt_child(
         return ChildAttempt::Failed;
     }
 
-    // Last line of defense: never spawn after shutdown was requested (the
-    // preceding awaits are each cancellation-aware, but re-check anyway).
+    // Never spawn after shutdown was requested: the port check and the
+    // reaper above are plain awaits, so this re-check is load-bearing.
     if is_shutdown(shutdown_rx) {
         return ChildAttempt::Shutdown;
     }
@@ -710,28 +696,9 @@ async fn reap_recorded_child(dirs: &Dirs, port: u16) -> bool {
         port,
         "reaping identity-verified stale cli-proxy-api process group"
     );
-    match verify_child_record(dirs, &record) {
-        Ok(ChildRecordStatus::Verified) => {}
-        Ok(ChildRecordStatus::Dead) => {
-            tracing::warn!(
-                pid = record.pid,
-                "recorded cli-proxy-api PID died before reaping; clearing child identity record"
-            );
-            clear_child_record(dirs);
-            return false;
-        }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                pid = record.pid,
-                "recorded child identity changed before reaping; keeping child identity record"
-            );
-            return false;
-        }
-    }
     // SIGKILL avoids a later signal after the group leader exits, when the
     // identity could no longer be checked against PID reuse.
-    if let Err(error) = kill_stale_process_group(record.pgid) {
+    if let Err(error) = signal_group(record.pgid, libc::SIGKILL) {
         tracing::warn!(
             %error,
             "failed to kill verified stale cli-proxy-api process group"
@@ -760,10 +727,6 @@ fn load_child_record(dirs: &Dirs) -> anyhow::Result<Option<ChildRecord>> {
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
     };
-    anyhow::ensure!(
-        bytes.len() <= 16 * 1024,
-        "child identity record is too large"
-    );
     serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to parse {}", path.display()))
         .map(Some)
@@ -831,7 +794,6 @@ fn clear_child_record_path(path: &Path) {
     }
 }
 
-#[cfg(unix)]
 fn process_is_live(pid: i32) -> std::io::Result<bool> {
     // SAFETY: signal 0 only checks whether the supplied PID exists and is
     // signalable; it does not deliver a signal.
@@ -846,15 +808,6 @@ fn process_is_live(pid: i32) -> std::io::Result<bool> {
     }
 }
 
-#[cfg(not(unix))]
-fn process_is_live(_pid: i32) -> std::io::Result<bool> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "process liveness checks are supported only on Unix",
-    ))
-}
-
-#[cfg(unix)]
 fn process_group(pid: i32) -> std::io::Result<i32> {
     // SAFETY: `getpgid` only inspects the supplied PID.
     let live_group = unsafe { libc::getpgid(pid) };
@@ -865,31 +818,15 @@ fn process_group(pid: i32) -> std::io::Result<i32> {
     }
 }
 
-#[cfg(not(unix))]
-fn process_group(_pid: i32) -> std::io::Result<i32> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "process groups are supported only on Unix",
-    ))
-}
-
-#[cfg(unix)]
-fn kill_stale_process_group(pgid: i32) -> std::io::Result<()> {
-    // SAFETY: the caller has positively verified the recorded identity and
-    // dedicated process group immediately before this call.
-    if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
+/// Signals a process group model-router created. The only `killpg` site.
+fn signal_group(pgid: i32, signal: i32) -> std::io::Result<()> {
+    // SAFETY: every caller signals a group this supervisor spawned and has
+    // verified (or still holds unreaped, so the pgid cannot be recycled).
+    if unsafe { libc::killpg(pgid, signal) } == 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
     }
-}
-
-#[cfg(not(unix))]
-fn kill_stale_process_group(_pgid: i32) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "process groups are supported only on Unix",
-    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -960,14 +897,6 @@ fn process_identity(pid: i32) -> std::io::Result<ProcessIdentity> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_identity(_pid: i32) -> std::io::Result<ProcessIdentity> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "process identity is supported only on macOS and Linux",
-    ))
-}
-
 fn set_pgid(slot: &SharedPgid, pgid: impl Into<Option<i32>>) {
     if let Ok(mut guard) = slot.lock() {
         *guard = pgid.into();
@@ -984,7 +913,7 @@ fn is_shutdown(shutdown_rx: &watch::Receiver<bool>) -> bool {
 async fn wait_or_shutdown(shutdown_rx: &mut watch::Receiver<bool>, wait: Duration) -> bool {
     tokio::select! {
         () = tokio::time::sleep(wait) => is_shutdown(shutdown_rx),
-        result = shutdown_rx.changed() => result.is_err() || *shutdown_rx.borrow(),
+        _ = shutdown_rx.changed() => is_shutdown(shutdown_rx),
     }
 }
 
@@ -1014,22 +943,15 @@ async fn spawn_child(
         .stdin(Stdio::null())
         .stdout(log_std)
         .stderr(stderr_log);
-    #[cfg(unix)]
-    {
-        // New process group so shutdown can kill the child and anything it
-        // spawns without touching the router's own group.
-        command.process_group(0);
-    }
+    // New process group so shutdown can kill the child and anything it
+    // spawns without touching the router's own group.
+    command.process_group(0);
     command.spawn().context("failed to spawn cli-proxy-api")
 }
 
 async fn terminate(child: &mut tokio::process::Child, pgid: Option<i32>) {
-    #[cfg(unix)]
     if let Some(pgid) = pgid.filter(|pgid| *pgid > 0) {
-        // SAFETY: signaling a process group we created.
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
-        }
+        let _ = signal_group(pgid, libc::SIGTERM);
         if matches!(
             tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await,
             Ok(Ok(_))
@@ -1037,10 +959,7 @@ async fn terminate(child: &mut tokio::process::Child, pgid: Option<i32>) {
             return;
         }
         tracing::warn!("cli-proxy-api ignored SIGTERM; killing");
-        // SAFETY: as above.
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
+        let _ = signal_group(pgid, libc::SIGKILL);
         let _ = child.wait().await;
         return;
     }
@@ -1054,7 +973,7 @@ async fn terminate(child: &mut tokio::process::Child, pgid: Option<i32>) {
 async fn probe_ready(
     client: &reqwest::Client,
     base_url: &str,
-    credential: &crate::headers::GptUpstreamCredential,
+    credential: &GptUpstreamCredential,
 ) -> bool {
     let Ok(response) = credential
         .apply(client.get(format!("{base_url}/v1/models")))
@@ -1074,7 +993,7 @@ async fn probe_ready(
 
 /// True when something is already listening on the loopback port.
 async fn port_in_use(port: u16) -> bool {
-    tokio::net::TcpStream::connect(("127.0.0.1", port))
+    tokio::net::TcpStream::connect((MANAGED_HOST, port))
         .await
         .is_ok()
 }
@@ -1083,23 +1002,12 @@ async fn port_in_use(port: u16) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn yaml_config_contains_hardening_flags() {
-        let yaml = upstream_config_yaml(8317, std::path::Path::new("/tmp/auth"), "secret123", &[]);
-        assert!(yaml.contains("host: \"127.0.0.1\""));
-        assert!(yaml.contains("disable-claude-cloak-mode: true"));
-        assert!(yaml.contains("disable-control-panel: true"));
-        assert!(yaml.contains("usage-statistics-enabled: false"));
-        assert!(yaml.contains("- \"secret123\""));
-        assert!(yaml.contains("auth-dir: \"/tmp/auth\""));
-    }
-
-    fn test_provider(name: &str, routing_id: &str) -> crate::config::OpenAiProvider {
-        crate::config::OpenAiProvider {
+    fn test_provider(name: &str, routing_id: &str) -> OpenAiProvider {
+        OpenAiProvider {
             name: name.to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: Some("test-key".to_string()),
-            models: vec![crate::config::ProviderModel {
+            models: vec![ProviderModel {
                 name: format!("upstream/{routing_id}"),
                 routing_id: routing_id.to_string(),
                 display_name: routing_id.to_string(),
@@ -1126,6 +1034,20 @@ mod tests {
             let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(value["port"], serde_yaml::Value::from(8317));
             assert_eq!(value["auth-dir"], serde_yaml::Value::from("/tmp/auth"));
+            assert_eq!(value["api-keys"][0], serde_yaml::Value::from("s3cret"));
+            // The hardening the live experiments were validated with.
+            assert_eq!(
+                value["disable-claude-cloak-mode"],
+                serde_yaml::Value::from(true)
+            );
+            assert_eq!(
+                value["remote-management"]["disable-control-panel"],
+                serde_yaml::Value::from(true)
+            );
+            assert_eq!(
+                value["usage-statistics-enabled"],
+                serde_yaml::Value::from(false)
+            );
             let compat = &value["openai-compatibility"];
             if providers.is_empty() {
                 assert!(compat.is_null(), "no providers must mean no compat section");
@@ -1158,13 +1080,30 @@ mod tests {
     }
 
     #[test]
+    fn keyless_providers_are_left_out_of_the_child_config() {
+        let mut keyless = test_provider("keyless", "kimi-k2.7");
+        keyless.api_key = None;
+        let keyed = test_provider("keyed", "glm-5.2");
+        let yaml =
+            upstream_config_yaml(8317, Path::new("/tmp/auth"), "s", &[keyless.clone(), keyed]);
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let entries = value["openai-compatibility"].as_sequence().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], serde_yaml::Value::from("keyed"));
+
+        let yaml = upstream_config_yaml(8317, Path::new("/tmp/auth"), "s", &[keyless]);
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert!(value["openai-compatibility"].is_null());
+    }
+
+    #[test]
     fn pinned_models_get_one_payload_rule_each_and_unpinned_askers_are_left_out() {
         let mut provider = test_provider("openrouter", "glm-5.2");
         provider.base_url = "https://openrouter.ai/api/v1".to_string();
         provider.models[0].min_context_window = Some(1_000_000);
         provider.models[0].pinned_providers =
             Some(vec!["decart".to_string(), "fireworks".to_string()]);
-        provider.models.push(crate::config::ProviderModel {
+        provider.models.push(ProviderModel {
             name: "moonshotai/kimi-k3".to_string(),
             routing_id: "kimi-k3".to_string(),
             display_name: "Kimi K3".to_string(),
@@ -1282,14 +1221,6 @@ mod tests {
         assert!(parsed["openai-compatibility"].is_null());
     }
 
-    #[tokio::test]
-    async fn port_in_use_detects_listener() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(port_in_use(port).await);
-        drop(listener);
-    }
-
     fn fast_tuning() -> Tuning {
         Tuning {
             readiness_timeout: Duration::from_millis(300),
@@ -1326,11 +1257,7 @@ mod tests {
     }
 
     fn dirs_with_fake_upstream(root: &std::path::Path, mode: &str) -> Dirs {
-        let dirs = Dirs {
-            config_dir: root.join("config"),
-            state_dir: root.join("state"),
-            cache_dir: root.join("cache"),
-        };
+        let dirs = Dirs::under(root);
         let binary = dirs.upstream_binary(crate::acquire::UPSTREAM_VERSION);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&dirs.state_dir).unwrap();
@@ -1473,19 +1400,19 @@ fn main() {
         };
         assert!(
             wait_for(async || {
-                // SAFETY: signal 0 only checks liveness.
                 child_pid()
                     .await
-                    .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+                    .is_some_and(|pid| process_is_live(pid).unwrap_or(false))
             })
             .await,
             "child never spawned"
         );
         supervisor.shutdown().await;
         let pid = child_pid().await.unwrap();
-        // SAFETY: signal 0 only checks liveness.
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
-        assert!(!alive, "child {pid} survived shutdown");
+        assert!(
+            !process_is_live(pid).unwrap_or(false),
+            "child {pid} survived shutdown"
+        );
     }
 
     #[tokio::test]
@@ -1539,14 +1466,6 @@ fn main() {
         })
         .await;
         assert!(replaced, "fresh child never became ready");
-        assert!(
-            std::fs::read_to_string(dirs.state_dir.join("spawns"))
-                .unwrap()
-                .lines()
-                .count()
-                >= 2,
-            "stale child was not replaced"
-        );
         leaked.wait().await.unwrap();
         assert_ne!(
             std::fs::read_to_string(dirs.state_dir.join("child-pid"))

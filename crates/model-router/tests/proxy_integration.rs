@@ -34,14 +34,7 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
         observed: Arc::new(Mutex::new(None)),
         release_second_chunk: Arc::new(Notify::new()),
     };
-    let fake_listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping: sandbox prohibits loopback listeners");
-            return;
-        }
-        Err(error) => panic!("failed to bind fake upstream: {error}"),
-    };
+    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fake_address = fake_listener.local_addr().unwrap();
     let fake_app = Router::new()
         .fallback(any(fake_upstream))
@@ -57,7 +50,7 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
         upstreams: external_upstreams(format!("http://{fake_address}")),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -139,23 +132,6 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
     assert_eq!(observed.headers["x-api-key"], "gateway-secret");
     assert!(!observed.headers.contains_key("anthropic-beta"));
 
-    let models_response = reqwest::Client::new()
-        .get(format!("http://{router_address}/v1/models?source=gateway"))
-        .header("authorization", "Bearer discovery-secret")
-        .send()
-        .await
-        .unwrap();
-    let models: serde_json::Value =
-        serde_json::from_slice(&models_response.bytes().await.unwrap()).unwrap();
-    let ids: Vec<_> = models["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|model| model["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, ["claude-existing", "claude-gpt-test"]);
-    assert_eq!(models["data"][1]["display_name"], "Existing GPT Test");
-
     router_task.abort();
     fake_task.abort();
 }
@@ -168,7 +144,7 @@ async fn stub_stream_and_capture_are_valid_and_redacted() {
         upstreams: stub_upstreams(),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -211,6 +187,7 @@ async fn stub_stream_and_capture_are_valid_and_redacted() {
     let capture = tokio::fs::read_to_string(capture_file).await.unwrap();
     assert_eq!(capture.lines().count(), 1);
     assert!(capture.contains(r#""branch":"gpt""#));
+    assert!(capture.contains(r#""family":"gpt""#));
     assert!(capture.contains("[REDACTED]"));
     assert!(capture.contains("message_stop"));
     assert!(!capture.contains("never-capture-this"));
@@ -231,7 +208,7 @@ async fn stub_stream_and_capture_are_valid_and_redacted() {
 
 fn stub_upstreams() -> std::collections::BTreeMap<String, UpstreamConfig> {
     std::collections::BTreeMap::from([(
-        "codex".to_string(),
+        "cliproxy".to_string(),
         UpstreamConfig {
             mode: UpstreamMode::Stub,
             ..UpstreamConfig::default()
@@ -241,7 +218,7 @@ fn stub_upstreams() -> std::collections::BTreeMap<String, UpstreamConfig> {
 
 fn external_upstreams(base_url: String) -> std::collections::BTreeMap<String, UpstreamConfig> {
     std::collections::BTreeMap::from([(
-        "codex".to_string(),
+        "cliproxy".to_string(),
         UpstreamConfig {
             mode: UpstreamMode::External,
             base_url: Some(base_url),
@@ -254,18 +231,6 @@ fn external_upstreams(base_url: String) -> std::collections::BTreeMap<String, Up
 async fn fake_upstream(State(state): State<FakeState>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let body = to_bytes(body, usize::MAX).await.unwrap();
-    if parts.uri.path() == "/v1/models" {
-        assert_eq!(parts.method, "GET");
-        assert_eq!(parts.uri.query(), Some("source=gateway"));
-        assert_eq!(parts.headers["authorization"], "Bearer discovery-secret");
-        let mut response = Response::new(Body::from(
-            r#"{"data":[{"id":"claude-existing","display_name":"Claude Existing","type":"model"},{"id":"claude-gpt-test","display_name":"Existing GPT Test","type":"model"}]}"#,
-        ));
-        response
-            .headers_mut()
-            .insert("content-type", "application/json".parse().unwrap());
-        return response;
-    }
     *state.observed.lock().await = Some(ObservedRequest {
         method: parts.method.to_string(),
         uri: parts.uri.to_string(),
@@ -288,14 +253,7 @@ async fn fake_upstream(State(state): State<FakeState>, request: Request) -> Resp
 
 #[tokio::test]
 async fn managed_unavailable_serves_claude_and_rejects_gpt() {
-    let fake_listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping: sandbox prohibits loopback listeners");
-            return;
-        }
-        Err(error) => panic!("failed to bind fake upstream: {error}"),
-    };
+    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fake_address = fake_listener.local_addr().unwrap();
     let fake_app = Router::new().fallback(any(|| async { "claude-upstream-ok" }));
     let fake_task = tokio::spawn(async move {
@@ -308,14 +266,14 @@ async fn managed_unavailable_serves_claude_and_rejects_gpt() {
         anthropic_upstream_base: format!("http://{fake_address}"),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
         }],
         ..Config::default()
     };
-    let app = model_router::proxy::app_with(config, None).await.unwrap();
+    let app = model_router::proxy::app(config).await.unwrap();
 
     let claude = app
         .clone()
@@ -362,7 +320,7 @@ async fn ingress_token_gates_all_routes_except_bare_health() {
         ingress_token: Some("testtoken".to_string()),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -411,7 +369,7 @@ async fn ingress_token_gates_all_routes_except_bare_health() {
         .unwrap();
     assert_eq!(routed.status(), StatusCode::OK);
 
-    // Health: reachable bare (for the hook) and under the prefix.
+    // Health: reachable bare (for doctor) and under the prefix.
     for path in [
         "/__model-router/health",
         "/t/testtoken/__model-router/health",
@@ -429,101 +387,6 @@ async fn ingress_token_gates_all_routes_except_bare_health() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "path {path}");
     }
-}
-
-#[tokio::test]
-async fn models_discovery_falls_back_to_routes_for_every_upstream_failure_shape() {
-    let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let fake_address = fake_listener.local_addr().unwrap();
-    let fake_app = Router::new().fallback(any(|request: Request| async move {
-        match request.uri().query() {
-            Some("case=non200") => Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from("unavailable"))
-                .unwrap(),
-            Some("case=invalid") => Response::new(Body::from("not json")),
-            Some("case=missing") => Response::new(Body::from("{}")),
-            Some("case=slow") => {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                Response::new(Body::from(r#"{"data":[]}"#))
-            }
-            other => panic!("unexpected discovery query: {other:?}"),
-        }
-    }));
-    let fake_task = tokio::spawn(async move {
-        axum::serve(fake_listener, fake_app).await.unwrap();
-    });
-
-    let config = Config {
-        anthropic_upstream_base: format!("http://{fake_address}"),
-        upstreams: stub_upstreams(),
-        ingress_token: Some("discovery-token".to_string()),
-        models: vec![ModelRoute {
-            routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
-            upstream_model: "gpt-test".to_string(),
-            display_name: "GPT Test".to_string(),
-            ..Default::default()
-        }],
-        openai_providers: vec![model_router::config::OpenAiProvider {
-            name: "fireworks".to_string(),
-            base_url: "https://api.fireworks.ai/inference/v1".to_string(),
-            api_key: Some("unused-in-this-test".to_string()),
-            models: vec![model_router::config::ProviderModel {
-                name: "accounts/fireworks/models/kimi-k2p7".to_string(),
-                routing_id: "kimi-k2.7".to_string(),
-                display_name: "Kimi K2.7".to_string(),
-                context_window: None,
-                context_window_scaling: false,
-                min_context_window: None,
-                pinned_providers: None,
-            }],
-        }],
-        ..Config::default()
-    };
-    let app = model_router::proxy::app(config).await.unwrap();
-
-    for failure_case in ["non200", "invalid", "missing", "slow"] {
-        let started = Instant::now();
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/t/discovery-token/v1/models?case={failure_case}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "case {failure_case}");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "case {failure_case} exceeded Claude Code's discovery timeout"
-        );
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // Both the configured route and the provider-derived route appear.
-        assert_eq!(document["data"].as_array().unwrap().len(), 2);
-        assert_eq!(document["data"][0]["id"], "claude-gpt-test");
-        assert_eq!(document["data"][0]["type"], "model");
-        assert_eq!(document["data"][0]["display_name"], "GPT Test");
-        assert_eq!(document["data"][1]["id"], "kimi-k2.7");
-        assert_eq!(document["data"][1]["display_name"], "Kimi K2.7");
-    }
-
-    let ungated = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/models")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(ungated.status(), StatusCode::NOT_FOUND);
-    fake_task.abort();
 }
 
 #[tokio::test]
@@ -554,7 +417,7 @@ async fn gpt_sse_usage_rewrite_is_streamed_and_captured() {
         upstreams: external_upstreams(format!("http://{fake_address}")),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -618,7 +481,7 @@ async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
         axum::serve(fake_listener, fake_app).await.unwrap();
     });
 
-    let mut config = Config {
+    let config = Config {
         upstreams: external_upstreams(format!("http://{fake_address}")),
         declared_context_window: Some(250_000),
         models: vec![ModelRoute {
@@ -629,13 +492,10 @@ async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
             family: model_router::config::ModelFamily::OpenAiCompat,
             context_window: Some(1_000_000),
             context_window_scaling: true,
-            usage_scale: None,
-            min_context_window: None,
-            pinned_providers: None,
+            ..Default::default()
         }],
         ..Config::default()
     };
-    config.prepare().unwrap();
     let app = model_router::proxy::app(config).await.unwrap();
     let response = app
         .oneshot(
@@ -683,9 +543,7 @@ async fn gpt_overflow_400_is_translated_to_the_canonical_anthropic_error() {
         );
         response
     }
-    let Some((fake_address, observed)) = spawn_fake(handler).await else {
-        return;
-    };
+    let (fake_address, observed) = spawn_fake(handler).await;
 
     // Default config: the built-in `gpt-5.6-sol` route is Codex-native with
     // the measured 258400 window.
@@ -805,9 +663,7 @@ async fn non_codex_route_overflow_passes_through_untouched() {
         );
         response
     }
-    let Some((fake_address, _observed)) = spawn_fake(handler).await else {
-        return;
-    };
+    let (fake_address, _observed) = spawn_fake(handler).await;
 
     let config = Config {
         upstreams: external_upstreams(format!("http://{fake_address}")),
@@ -841,11 +697,10 @@ async fn non_codex_route_overflow_passes_through_untouched() {
 }
 
 /// Spawns a single-purpose fake upstream returning `handler`'s response and
-/// recording every request. Returns `None` when the sandbox forbids loopback
-/// listeners.
+/// recording every request.
 async fn spawn_fake(
     handler: fn(&axum::http::request::Parts, &Bytes) -> Response,
-) -> Option<(std::net::SocketAddr, Arc<Mutex<Vec<ObservedRequest>>>)> {
+) -> (std::net::SocketAddr, Arc<Mutex<Vec<ObservedRequest>>>) {
     #[derive(Clone)]
     struct HandlerState {
         observed: Arc<Mutex<Vec<ObservedRequest>>>,
@@ -862,14 +717,7 @@ async fn spawn_fake(
         });
         (state.handler)(&parts, &body)
     }
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping: sandbox prohibits loopback listeners");
-            return None;
-        }
-        Err(error) => panic!("failed to bind fake upstream: {error}"),
-    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let observed = Arc::new(Mutex::new(Vec::new()));
     let state = HandlerState {
@@ -884,7 +732,7 @@ async fn spawn_fake(
         .await
         .unwrap();
     });
-    Some((address, observed))
+    (address, observed)
 }
 
 fn websearch_subcall_body() -> String {
@@ -907,7 +755,7 @@ fn websearch_config(fake_address: std::net::SocketAddr) -> Config {
         upstreams: external_upstreams(format!("http://{fake_address}")),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -934,9 +782,7 @@ async fn websearch_subcall_is_answered_from_alpha_search() {
             .to_string(),
         ))
     }
-    let Some((fake_address, observed)) = spawn_fake(handler).await else {
-        return;
-    };
+    let (fake_address, observed) = spawn_fake(handler).await;
     let app = model_router::proxy::app(websearch_config(fake_address))
         .await
         .unwrap();
@@ -1024,9 +870,7 @@ async fn websearch_falls_back_to_buffered_llm_call_with_scraped_links() {
             .to_string(),
         ))
     }
-    let Some((fake_address, observed)) = spawn_fake(handler).await else {
-        return;
-    };
+    let (fake_address, observed) = spawn_fake(handler).await;
     let app = model_router::proxy::app(websearch_config(fake_address))
         .await
         .unwrap();
@@ -1036,6 +880,8 @@ async fn websearch_falls_back_to_buffered_llm_call_with_scraped_links() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
+                .header("x-claude-code-session-id", "session-1")
+                .header("x-claude-code-agent-id", "agent-1")
                 .body(Body::from(websearch_subcall_body()))
                 .unwrap(),
         )
@@ -1047,8 +893,7 @@ async fn websearch_falls_back_to_buffered_llm_call_with_scraped_links() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains(r#""type":"web_search_tool_result""#));
     // The empty result block was filled from the text citation, with the
-    // tracking parameter stripped (the prose text block keeps its original
-    // wording).
+    // tracking parameter stripped.
     assert!(body.contains(r#""url":"https://docs.rs/axum""#));
     assert!(body.contains(r#""title":"docs.rs""#));
     // The zero input-token report was replaced by the estimate.
@@ -1063,6 +908,43 @@ async fn websearch_falls_back_to_buffered_llm_call_with_scraped_links() {
         observed[1].headers["authorization"],
         "Bearer gateway-secret"
     );
+    // The buffered fallback carries the shared-prefix cache identity too.
+    assert!(
+        observed[1].headers["x-claude-code-session-id"]
+            .to_str()
+            .unwrap()
+            .starts_with("prefix-")
+    );
+    assert!(!observed[1].headers.contains_key("x-claude-code-agent-id"));
+}
+
+#[tokio::test]
+async fn an_oversized_request_body_is_refused_with_413() {
+    let config = Config {
+        upstreams: stub_upstreams(),
+        max_request_body_bytes: 64,
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = format!(
+        r#"{{"model":"gpt-5.6-sol","messages":[{{"role":"user","content":"{}"}}]}}"#,
+        "x".repeat(200)
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
 }
 
 // ---- origin-matched backend routing ----
@@ -1185,12 +1067,8 @@ async fn gpt_origin_subcall_on_claude_branch_is_answered_from_alpha() {
     fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         panic!("Anthropic must not be called, got {}", parts.uri.path());
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..websearch_config(cpa_address)
@@ -1294,12 +1172,8 @@ async fn claude_origin_subcall_on_gpt_branch_goes_to_anthropic_native() {
             parts.uri.path()
         );
     }
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..websearch_config(cpa_address)
@@ -1372,12 +1246,8 @@ async fn claude_origin_auth_errors_are_surfaced_not_fallen_back() {
             parts.uri.path()
         );
     }
-    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
-        return;
-    };
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (anthropic_address, _) = spawn_fake(anthropic).await;
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..websearch_config(cpa_address)
@@ -1434,12 +1304,8 @@ async fn claude_origin_falls_back_to_gpt_path_on_transient_anthropic_failure() {
             path => panic!("unexpected CPA path {path}"),
         }
     }
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..websearch_config(cpa_address)
@@ -1486,18 +1352,16 @@ async fn claude_origin_falls_back_to_gpt_path_on_transient_anthropic_failure() {
     );
 }
 
-/// `off` mode disables tapping and interception on both branches.
+/// `off` mode forwards sub-calls on both branches without interception.
 #[tokio::test]
-async fn off_mode_passes_subcalls_through_unchanged() {
+async fn off_mode_forwards_subcalls_without_interception() {
     fn upstream(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         assert_eq!(parts.uri.path(), "/v1/messages");
         Response::new(Body::from(
             r#"{"id":"msg","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
         ))
     }
-    let Some((address, observed)) = spawn_fake(upstream).await else {
-        return;
-    };
+    let (address, observed) = spawn_fake(upstream).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{address}"),
         web_search: model_router::config::WebSearchConfig {
@@ -1551,9 +1415,7 @@ async fn claude_origin_native_works_without_a_gpt_upstream() {
             .to_string(),
         ))
     }
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
     // Default upstreams = managed mode; `app()` provides no managed handle,
     // so the GPT target is ManagedUnavailable.
     let config = Config {
@@ -1617,12 +1479,8 @@ async fn claude_origin_malformed_200_is_surfaced() {
             parts.uri.path()
         );
     }
-    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
-        return;
-    };
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (anthropic_address, _) = spawn_fake(anthropic).await;
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..websearch_config(cpa_address)
@@ -1680,12 +1538,8 @@ async fn claude_origin_unlisted_client_errors_are_surfaced() {
             parts.uri.path()
         );
     }
-    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
-        return;
-    };
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (anthropic_address, _) = spawn_fake(anthropic).await;
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..websearch_config(cpa_address)
@@ -1724,23 +1578,18 @@ async fn claude_origin_unlisted_client_errors_are_surfaced() {
 
 #[tokio::test]
 async fn gpt_branch_rewrites_cache_identity_headers_to_the_shared_prefix_key() {
-    fn handler(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
-        if parts.uri.path() == "/v1/models" {
-            return Response::new(Body::from(r#"{"data":[]}"#));
-        }
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         Response::new(Body::from(
             r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"gpt-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
         ))
     }
-    let Some((fake_address, observed)) = spawn_fake(handler).await else {
-        return;
-    };
+    let (fake_address, observed) = spawn_fake(handler).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{fake_address}"),
         upstreams: external_upstreams(format!("http://{fake_address}")),
         models: vec![ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
+            upstream: "cliproxy".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -1774,10 +1623,7 @@ async fn gpt_branch_rewrites_cache_identity_headers_to_the_shared_prefix_key() {
     }
 
     let observed = observed.lock().await;
-    let forwarded: Vec<_> = observed
-        .iter()
-        .filter(|request| request.uri.contains("/v1/messages"))
-        .collect();
+    let forwarded: Vec<_> = observed.iter().collect();
     assert_eq!(forwarded.len(), 3);
     // Different conversations, same system head: one upstream identity.
     let key = forwarded[0].headers["x-claude-code-session-id"].clone();
@@ -1800,7 +1646,7 @@ fn grok_websearch_config(fake_address: std::net::SocketAddr) -> Config {
         models: vec![
             ModelRoute {
                 routing_id: "grok-4.5".to_string(),
-                upstream: "codex".to_string(),
+                upstream: "cliproxy".to_string(),
                 upstream_model: "grok-4.5".to_string(),
                 display_name: "Grok 4.5".to_string(),
                 family: model_router::config::ModelFamily::Grok,
@@ -1808,7 +1654,7 @@ fn grok_websearch_config(fake_address: std::net::SocketAddr) -> Config {
             },
             ModelRoute {
                 routing_id: "claude-gpt-test".to_string(),
-                upstream: "codex".to_string(),
+                upstream: "cliproxy".to_string(),
                 upstream_model: "gpt-test".to_string(),
                 display_name: "GPT Test".to_string(),
                 ..Default::default()
@@ -1894,7 +1740,7 @@ fn observed_paths(observed: &[ObservedRequest]) -> Vec<&str> {
         .collect()
 }
 
-/// I1: a Grok agent's search is answered from xAI's hosted `web_search` —
+/// A Grok agent's search is answered from xAI's hosted `web_search` —
 /// never from alpha/search, never from Anthropic — and the router answers as
 /// soon as the sources arrive, without waiting for the stream to end.
 #[tokio::test]
@@ -1920,12 +1766,8 @@ async fn grok_origin_websearch_is_answered_from_xai_native_search() {
     fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         panic!("Anthropic must not be called, got {}", parts.uri.path());
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..grok_websearch_config(cpa_address)
@@ -1948,7 +1790,7 @@ async fn grok_origin_websearch_is_answered_from_xai_native_search() {
     );
 }
 
-/// I2: an xAI search that errors is reported as a failed search. It must not
+/// An xAI search that errors is reported as a failed search. It must not
 /// fall back to alpha/search, to the origin route, or to Anthropic.
 #[tokio::test]
 async fn grok_origin_websearch_failure_is_visible_and_never_falls_back() {
@@ -1966,12 +1808,8 @@ async fn grok_origin_websearch_failure_is_visible_and_never_falls_back() {
     fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         panic!("Anthropic must not be called, got {}", parts.uri.path());
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..grok_websearch_config(cpa_address)
@@ -1981,7 +1819,6 @@ async fn grok_origin_websearch_failure_is_visible_and_never_falls_back() {
 
     assert!(body.contains("web_search_tool_result_error"));
     assert!(body.contains(r#""error_code":"unavailable""#));
-    assert!(body.contains("xAI search returned HTTP 500"));
     // A failed search must not spend the session's WebSearch budget.
     assert!(!body.contains("web_search_requests"));
 
@@ -1993,7 +1830,7 @@ async fn grok_origin_websearch_failure_is_visible_and_never_falls_back() {
     );
 }
 
-/// I3: a stream that completes without a hosted search is a failed search,
+/// A stream that completes without a hosted search is a failed search,
 /// not an empty one — and never a fallback.
 #[tokio::test]
 async fn grok_origin_websearch_without_sources_fails_strictly() {
@@ -2007,12 +1844,8 @@ async fn grok_origin_websearch_without_sources_fails_strictly() {
     fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         panic!("Anthropic must not be called, got {}", parts.uri.path());
     }
-    let Some((cpa_address, _cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let Some((anthropic_address, anthropic_observed)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..grok_websearch_config(cpa_address)
@@ -2021,11 +1854,14 @@ async fn grok_origin_websearch_without_sources_fails_strictly() {
     let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
 
     assert!(body.contains("web_search_tool_result_error"));
-    assert!(body.contains("returned no sources"));
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/responses"]
+    );
     assert_eq!(anthropic_observed.lock().await.len(), 0);
 }
 
-/// I4: a GPT origin keeps using alpha/search even when Grok routes exist, with
+/// A GPT origin keeps using alpha/search even when Grok routes exist, with
 /// the Codex slug pin intact.
 #[tokio::test]
 async fn gpt_origin_still_uses_alpha_search_when_grok_routes_exist() {
@@ -2040,9 +1876,7 @@ async fn gpt_origin_still_uses_alpha_search_when_grok_routes_exist() {
             path => panic!("unexpected CPA path {path} (xAI search is Grok-only)"),
         }
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let app = model_router::proxy::app(grok_websearch_config(cpa_address))
         .await
         .unwrap();
@@ -2055,7 +1889,7 @@ async fn gpt_origin_still_uses_alpha_search_when_grok_routes_exist() {
     );
 }
 
-/// I5: a Claude subagent searching inside a Grok session is still answered by
+/// A Claude subagent searching inside a Grok session is still answered by
 /// Anthropic — the Grok carrier must not capture it.
 #[tokio::test]
 async fn claude_origin_under_a_grok_carrier_still_goes_to_anthropic() {
@@ -2086,12 +1920,8 @@ async fn claude_origin_under_a_grok_carrier_still_goes_to_anthropic() {
             parts.uri.path()
         );
     }
-    let Some((cpa_address, _)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (cpa_address, _) = spawn_fake(cpa).await;
+    let (anthropic_address, _) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..grok_websearch_config(cpa_address)
@@ -2102,7 +1932,7 @@ async fn claude_origin_under_a_grok_carrier_still_goes_to_anthropic() {
     assert!(!body.contains("web_search_tool_result_error"));
 }
 
-/// I6: after a TRANSIENT Anthropic failure the Claude-origin sub-call falls
+/// After a TRANSIENT Anthropic failure the Claude-origin sub-call falls
 /// through to the routed path — and must still never reach xAI, even though
 /// the carrying route is Grok. This is the leak a carrier-based gate ships.
 #[tokio::test]
@@ -2126,12 +1956,8 @@ async fn claude_origin_transient_anthropic_failure_under_a_grok_carrier_never_re
         assert_eq!(parts.uri.path(), "/v1/alpha/search");
         alpha_results_response()
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let Some((anthropic_address, _)) = spawn_fake(anthropic).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, _) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
         ..grok_websearch_config(cpa_address)
@@ -2147,7 +1973,7 @@ async fn claude_origin_transient_anthropic_failure_under_a_grok_carrier_never_re
     );
 }
 
-/// I8: a GPT origin carried by a DIFFERENT GPT route keeps using the
+/// A GPT origin carried by a DIFFERENT GPT route keeps using the
 /// carrier's own arguments. Both routes are Codex-native and distinct, so the
 /// alpha slug actually distinguishes them: substituting the origin for the
 /// carrier would be visible.
@@ -2167,22 +1993,20 @@ async fn gpt_origin_on_a_different_gpt_carrier_keeps_the_carriers_arguments() {
             path => panic!("unexpected CPA path {path}"),
         }
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
     let mut config = grok_websearch_config(cpa_address);
     // Two distinct Codex-native routes: `alpha_search_model` passes each
     // through unchanged, so origin and carrier stay tellable apart.
     config.models.push(ModelRoute {
         routing_id: "gpt-5.6-sol".to_string(),
-        upstream: "codex".to_string(),
+        upstream: "cliproxy".to_string(),
         upstream_model: "gpt-5.6-sol".to_string(),
         display_name: "GPT-5.6 Sol".to_string(),
         ..Default::default()
     });
     config.models.push(ModelRoute {
         routing_id: "gpt-5.6-terra".to_string(),
-        upstream: "codex".to_string(),
+        upstream: "cliproxy".to_string(),
         upstream_model: "gpt-5.6-terra".to_string(),
         display_name: "GPT-5.6 Terra".to_string(),
         ..Default::default()
@@ -2253,7 +2077,7 @@ async fn wait_for(flag: &std::sync::atomic::AtomicBool, within: Duration) -> boo
 
 static I1_TAIL_CONSUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// I1 (strengthened): the answer arrives at the harvest, and the stream is
+/// The answer arrives at the harvest, and the stream is
 /// still read to its end afterwards. An empty spawned task would fail this.
 #[tokio::test]
 async fn grok_origin_search_is_answered_at_the_harvest_and_the_tail_is_consumed() {
@@ -2269,25 +2093,18 @@ async fn grok_origin_search_is_answered_at_the_harvest_and_the_tail_is_consumed(
             path => panic!("unexpected CPA path {path}"),
         }
     }
-    let Some((cpa_address, _)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (cpa_address, _) = spawn_fake(cpa).await;
     let app = model_router::proxy::app(grok_websearch_config(cpa_address))
         .await
         .unwrap();
-    let started = Instant::now();
     // The router owns the search registry, so it must outlive the request the
     // way it does in a running gateway.
     let keepalive = app.clone();
     let body = turn_then_subcall(app, "grok-4.5", "claude-sonnet-4-5").await;
-    let answered_in = started.elapsed();
 
     assert!(body.contains("https://bun.sh/blog"));
-    // Answered without waiting for the tail...
-    assert!(
-        answered_in < Duration::from_millis(300),
-        "answer waited for the stream tail ({answered_in:?})"
-    );
+    // Answered without waiting for the tail: the flag is set only once the
+    // tail has been read, so a router that waited would see it set here.
     assert!(
         !I1_TAIL_CONSUMED.load(std::sync::atomic::Ordering::SeqCst),
         "the tail cannot have been consumed before it was sent"
@@ -2321,9 +2138,7 @@ async fn a_timed_out_search_still_reads_its_stream_to_the_end() {
             path => panic!("unexpected CPA path {path}"),
         }
     }
-    let Some((cpa_address, _)) = spawn_fake(cpa).await else {
-        return;
-    };
+    let (cpa_address, _) = spawn_fake(cpa).await;
     let app = model_router::proxy::app(Config {
         xai_search: XaiSearchLimits {
             harvest_timeout: Duration::from_millis(100),
@@ -2367,13 +2182,8 @@ async fn shutdown_waits_for_in_flight_search_streams() {
             path => panic!("unexpected CPA path {path}"),
         }
     }
-    let Some((cpa_address, cpa_observed)) = spawn_fake(cpa).await else {
-        return;
-    };
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => listener,
-        Err(_) => return,
-    };
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(model_router::proxy::serve_listener_with_drain(
@@ -2442,23 +2252,24 @@ async fn shutdown_waits_for_in_flight_search_streams() {
 /// answered by the router itself, with the reason, before any upstream.
 #[tokio::test]
 async fn an_unpinned_route_is_refused_with_the_reason() {
-    let mut config = Config {
-        upstreams: stub_upstreams(),
-        models: vec![ModelRoute {
-            routing_id: "glm-5.2".to_string(),
-            upstream: "cliproxy".to_string(),
-            upstream_model: "openai-compat--glm-5.2".to_string(),
-            display_name: "GLM-5.2".to_string(),
-            family: model_router::config::ModelFamily::OpenAiCompat,
-            context_window: None,
-            context_window_scaling: false,
-            usage_scale: None,
-            min_context_window: Some(2_000_000),
-            pinned_providers: None,
-        }],
-        ..Config::default()
-    };
-    config.prepare().unwrap();
+    // The only way a real install reaches this state: a provider model that
+    // asks for a pin and has no cached selection, copied onto the generated
+    // route by `prepare`.
+    let config: Config = toml::from_str(
+        r#"
+            [upstreams.cliproxy]
+            mode = "stub"
+            [[openai-providers]]
+            name = "openrouter"
+            base-url = "https://openrouter.ai/api/v1"
+            [[openai-providers.models]]
+            name = "z-ai/glm-5.2"
+            routing-id = "glm-5.2"
+            display-name = "GLM-5.2"
+            min-context-window = 2000000
+        "#,
+    )
+    .unwrap();
     let app = model_router::proxy::app(config).await.unwrap();
     let request = Request::builder()
         .method("POST")

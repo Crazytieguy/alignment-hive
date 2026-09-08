@@ -30,17 +30,8 @@ use sha2::{Digest, Sha256};
 /// Code's system prompts (git status, memory index) sits well past it.
 const HEAD_BUDGET_BYTES: usize = 2048;
 
-/// The per-conversation Claude Code attribution block. Volatile per
-/// conversation (it carries a content hash), and `CLIProxyAPI` strips it
-/// before the Codex upstream sees the prompt, so it must not participate in
-/// the prefix identity either.
-const ATTRIBUTION_PREFIX: &str = "x-anthropic-billing-header:";
-
 /// Derives the shared-prefix prompt-cache identity for a GPT-bound request:
-/// a stable function of the body's model and system-prompt head. Computed at
-/// the egress layer over the forwarded body — itself a deterministic
-/// function of the client body and route — so every GPT forwarding path
-/// carries it structurally.
+/// a stable function of the body's model and system-prompt head.
 ///
 /// Reads only the top-level `model` and `system` values (DOM-free scan, like
 /// [`crate::routing::substitute_model`]); the conversation is never parsed.
@@ -60,16 +51,16 @@ pub fn shared_prefix_key(body: &[u8]) -> Option<String> {
         let system: Value = serde_json::from_slice(&body[system_range]).ok()?;
         let mut remaining = HEAD_BUDGET_BYTES;
         match &system {
-            Value::String(text) => hash_within_budget(&mut hasher, text, &mut remaining),
+            Value::String(text) => hash_head(&mut hasher, text, &mut remaining),
             Value::Array(blocks) => {
                 for block in blocks {
                     let Some(text) = block.get("text").and_then(Value::as_str) else {
                         continue;
                     };
-                    if text.trim_start().starts_with(ATTRIBUTION_PREFIX) {
+                    if crate::identity::is_attribution_block(text) {
                         continue;
                     }
-                    hash_within_budget(&mut hasher, text, &mut remaining);
+                    hash_head(&mut hasher, text, &mut remaining);
                     if remaining == 0 {
                         break;
                     }
@@ -86,23 +77,12 @@ pub fn shared_prefix_key(body: &[u8]) -> Option<String> {
     ))
 }
 
-fn hash_within_budget(hasher: &mut Sha256, text: &str, remaining: &mut usize) {
-    let slice = truncate_to(text, *remaining);
-    hasher.update(slice.as_bytes());
-    *remaining -= slice.len();
-}
-
-/// The longest prefix of `text` that fits in `budget` bytes without
-/// splitting a UTF-8 character.
-fn truncate_to(text: &str, budget: usize) -> &str {
-    if text.len() <= budget {
-        return text;
-    }
-    let mut end = budget;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+/// Hashes the longest prefix of `text` that fits the remaining budget
+/// without splitting a UTF-8 character.
+fn hash_head(hasher: &mut Sha256, text: &str, remaining: &mut usize) {
+    let end = text.floor_char_boundary((*remaining).min(text.len()));
+    hasher.update(&text.as_bytes()[..end]);
+    *remaining -= end;
 }
 
 #[cfg(test)]

@@ -53,32 +53,36 @@ impl GptUpstreamCredential {
         })
     }
 
-    /// Attaches both credential forms to a reqwest request, keeping the
-    /// readiness probe and the proxy request path on one implementation.
+    /// Attaches both credential forms: the one implementation behind the
+    /// forwarded request headers and every reqwest side call.
+    pub fn insert_into(&self, headers: &mut HeaderMap) {
+        headers.insert("x-api-key", self.api_key.clone());
+        headers.insert(header::AUTHORIZATION, self.authorization.clone());
+    }
+
     pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder
-            .header("x-api-key", self.api_key.clone())
-            .header(header::AUTHORIZATION, self.authorization.clone())
+        let mut headers = HeaderMap::new();
+        self.insert_into(&mut headers);
+        builder.headers(headers)
     }
 }
 
 /// The Claude Code headers `CLIProxyAPI` reads the prompt-cache identity
 /// (and reasoning-replay scope) from.
-pub const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
-pub const AGENT_ID_HEADER: &str = "x-claude-code-agent-id";
+const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
+const AGENT_ID_HEADER: &str = "x-claude-code-agent-id";
 
 /// A copy of `input` whose session header carries the shared-prefix
 /// prompt-cache key and whose agent header is removed — the pair
 /// `CLIProxyAPI` folds into the upstream `prompt_cache_key`
-/// ([`crate::prompt_cache`]). `None` when the key is not a valid header
-/// value.
+/// ([`crate::prompt_cache`]).
 #[must_use]
-pub fn with_cache_identity(input: &HeaderMap, key: &str) -> Option<HeaderMap> {
-    let value = axum::http::HeaderValue::from_str(key).ok()?;
+pub fn with_cache_identity(input: &HeaderMap, key: &str) -> HeaderMap {
+    let value = HeaderValue::from_str(key).expect("prefix keys are visible ASCII");
     let mut output = input.clone();
     output.insert(SESSION_ID_HEADER, value);
     output.remove(AGENT_ID_HEADER);
-    Some(output)
+    output
 }
 
 #[must_use]
@@ -95,8 +99,7 @@ pub fn request_headers(
                 && (is_credential_header(name.as_str()) || name == "anthropic-beta"))
     });
     if strip_credentials && let Some(credential) = gpt_credential {
-        output.insert("x-api-key", credential.api_key.clone());
-        output.insert(header::AUTHORIZATION, credential.authorization.clone());
+        credential.insert_into(&mut output);
     }
     output
 }
@@ -112,7 +115,7 @@ fn filter(input: &HeaderMap, additionally_remove: impl Fn(&HeaderName) -> bool) 
     let connection_tokens = connection_tokens(input);
     let mut output = HeaderMap::with_capacity(input.len());
     for (name, value) in input {
-        if is_hop_by_hop(name)
+        if HOP_BY_HOP.contains(&name.as_str())
             || connection_tokens.contains(name.as_str())
             || additionally_remove(name)
         {
@@ -132,10 +135,6 @@ fn connection_tokens(headers: &HeaderMap) -> HashSet<String> {
         .map(|token| token.trim().to_ascii_lowercase())
         .filter(|token| !token.is_empty())
         .collect()
-}
-
-fn is_hop_by_hop(name: &HeaderName) -> bool {
-    HOP_BY_HOP.contains(&name.as_str())
 }
 
 #[cfg(test)]
@@ -162,6 +161,8 @@ mod tests {
         headers.insert("x-remove", HeaderValue::from_static("yes"));
         headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
         headers.insert(header::COOKIE, HeaderValue::from_static("session=abc"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
         headers
     }
 
@@ -173,9 +174,28 @@ mod tests {
         assert_eq!(headers["x-api-key"], "secret-key");
         assert_eq!(headers["anthropic-beta"], "oauth-2025-04-20");
         assert_eq!(headers["anthropic-version"], "2023-06-01");
+        assert_eq!(headers[header::COOKIE], "session=abc");
         assert!(!headers.contains_key(header::HOST));
         assert!(!headers.contains_key(header::CONNECTION));
         assert!(!headers.contains_key("x-remove"));
+    }
+
+    #[test]
+    fn a_rewritten_body_drops_the_stale_length_and_encoding_headers() {
+        assert_eq!(
+            request_headers(&sample_headers(), false, false, None)[header::CONTENT_LENGTH],
+            "12"
+        );
+        assert!(
+            !request_headers(&sample_headers(), false, true, None)
+                .contains_key(header::CONTENT_LENGTH)
+        );
+        let untouched = response_headers(&sample_headers(), false);
+        assert_eq!(untouched[header::CONTENT_LENGTH], "12");
+        assert_eq!(untouched[header::CONTENT_ENCODING], "gzip");
+        let rewritten = response_headers(&sample_headers(), true);
+        assert!(!rewritten.contains_key(header::CONTENT_LENGTH));
+        assert!(!rewritten.contains_key(header::CONTENT_ENCODING));
     }
 
     #[test]
@@ -186,12 +206,6 @@ mod tests {
         assert!(!headers.contains_key("anthropic-beta"));
         assert!(!headers.contains_key(header::COOKIE));
         assert_eq!(headers["anthropic-version"], "2023-06-01");
-    }
-
-    #[test]
-    fn claude_branch_keeps_cookies() {
-        let headers = request_headers(&sample_headers(), false, false, None);
-        assert_eq!(headers[header::COOKIE], "session=abc");
     }
 
     #[test]

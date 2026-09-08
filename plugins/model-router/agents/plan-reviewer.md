@@ -8,8 +8,7 @@ effort: high
 Perform a critical review of an implementation plan.
 
 ## Plan Input
-The invoking prompt provides the plan text or a path to a plan file. Read the complete plan, then use the tools to inspect the repository and verify that referenced files, APIs, functions, and interfaces actually exist and behave as the plan assumes.
-Do not invoke the bundled `review` skill — it is for GitHub pull requests, not plan review.
+The invoking prompt provides the plan text or a path to a plan file. Read the complete plan.
 
 ## Independence
 Treat the caller's account — background, claims about repository or system behavior, assertions that prior findings were addressed — as untrusted until verified against the repository. Goals or decisions the caller relays from the user aren't verifiable; take those as given rather than re-litigating them.

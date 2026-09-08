@@ -35,19 +35,13 @@ fn needs_lookup(model: &ProviderModel) -> bool {
     model.context_window.is_none() || model.min_context_window.is_some()
 }
 
-/// The provider models the host has to be asked about.
-fn models_to_look_up(config: &Config) -> Vec<(String, String)> {
+/// Whether any provider model needs the host asked about it.
+fn needs_discovery(config: &Config) -> bool {
     config
         .openai_providers
         .iter()
-        .flat_map(|provider| {
-            provider
-                .models
-                .iter()
-                .filter(|model| needs_lookup(model))
-                .map(|model| (provider.name.clone(), model.name.clone()))
-        })
-        .collect()
+        .flat_map(|provider| &provider.models)
+        .any(needs_lookup)
 }
 
 /// The most a service start waits on discovery altogether. It runs before
@@ -65,7 +59,6 @@ pub(crate) struct Cached {
     /// the model's `min-context-window` at the time — or `None` when that
     /// lookup found no qualifying sub-provider (a tombstone that replaces an
     /// older selection) or the model asked for none.
-    #[serde(default)]
     pub(crate) pin: Option<Pin>,
 }
 
@@ -78,24 +71,37 @@ pub(crate) struct Pin {
     pub(crate) providers: Vec<String>,
 }
 
+/// The window a host guarantees for a model, from its `OpenRouter` endpoint
+/// list and the catalog aggregate (never more than that), with the
+/// sub-provider selection when `min` asks for one and some provider
+/// qualifies. Without a qualifying selection the window is the unpinned
+/// narrowest; `None` when that cannot be established. The one rule the
+/// service pins by and `verify-providers` reports.
+pub(crate) fn guaranteed_window(
+    endpoints: &[Endpoint],
+    min: Option<u64>,
+    aggregate: u64,
+) -> (Option<u64>, Option<Pin>) {
+    if let Some(min) = min
+        && let Some((providers, window)) = select_providers(endpoints, min)
+    {
+        return (Some(window.min(aggregate)), Some(Pin { min, providers }));
+    }
+    (narrowest(endpoints).map(|n| n.min(aggregate)), None)
+}
+
 /// Asks each host about its models and refreshes the cache in the state
 /// directory. Never fails the caller: an unreachable host leaves the cache
 /// as it was, and [`apply_cached_windows`] works from that. Service start
 /// only — `doctor` reads the cache this leaves behind.
 pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
-    let wanted = models_to_look_up(config);
-    if wanted.is_empty() {
+    if !needs_discovery(config) {
         return;
     }
 
     let cache_path = dirs.state_dir.join(CACHE_FILE);
     let mut cache = read_cache(&cache_path);
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
+    let client = match provider_client(std::time::Duration::from_secs(15)) {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(%error, "context-window discovery client unavailable");
@@ -105,7 +111,7 @@ pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
 
     let deadline = tokio::time::Instant::now() + DISCOVERY_DEADLINE;
     for provider in &config.openai_providers {
-        if !wanted.iter().any(|(name, _)| name == &provider.name) {
+        if !provider.models.iter().any(needs_lookup) {
             continue;
         }
         match tokio::time::timeout_at(deadline, discover_provider(&client, provider)).await {
@@ -136,27 +142,15 @@ pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
 /// Fills in each provider model's discovered window and pinned sub-providers
 /// from the cache [`fetch_context_windows`] maintains, then re-prepares the
 /// config so the generated routes and usage scales reflect them. A model
-/// with nothing cached is left as it was, which `doctor` reports.
-///
-/// Windows: an explicit `context-window` is never touched. A scaling route
-/// only takes a window larger than the client's: scaling cannot help below
-/// it, and a discovered number must never fail the config the way a
-/// hand-written one does — Claude traffic would stop with it. A route that
-/// does not scale takes the host's number as-is; it only informs.
-///
-/// Pins: a cached selection applies only when the model still asks for one
-/// and the selection was computed for at least the current
-/// `min-context-window`. A model that asks and gets none is not served
-/// ([`ProviderModel::is_served`]). A cached window that rests on a
-/// selection which no longer applies is not a window for the route as it is
-/// now, so it is left unknown too.
+/// with nothing cached is left as it was, which `doctor` reports. An
+/// explicit `context-window` is never touched.
 ///
 /// # Errors
 /// Returns the error of re-preparing the config, which the applied values
 /// themselves cannot cause (windows are positive, and only scaling routes
 /// are validated against the declaration).
 pub fn apply_cached_windows(config: &mut Config, dirs: &Dirs) -> anyhow::Result<()> {
-    if models_to_look_up(config).is_empty() {
+    if !needs_discovery(config) {
         return Ok(());
     }
     let cache = read_cache(&dirs.state_dir.join(CACHE_FILE));
@@ -195,6 +189,9 @@ pub fn apply_cached_windows(config: &mut Config, dirs: &Dirs) -> anyhow::Result<
                 .filter(|c| c.pin.is_none() || model.pinned_providers.is_some())
                 .map(|c| c.window)
                 .filter(|window| *window > 0);
+            // A scaling route never takes a window at or below the client's:
+            // scaling cannot help there, and a discovered number must never
+            // fail the config the way a hand-written one does.
             match window {
                 Some(window) if !model.context_window_scaling || window > believed => {
                     tracing::info!(model = model.name, window, "discovered context window");
@@ -219,8 +216,22 @@ pub fn apply_cached_windows(config: &mut Config, dirs: &Dirs) -> anyhow::Result<
     config.prepare()
 }
 
-fn cache_key(provider: &str, model: &str) -> String {
+pub(crate) fn cache_key(provider: &str, model: &str) -> String {
     format!("{provider}\u{1f}{model}")
+}
+
+/// The HTTP client the service and `verify-providers` talk to provider hosts
+/// with. No redirects: reqwest strips Authorization on cross-host hops
+/// anyway, which would surface as a baffling 401 — fail loudly instead.
+///
+/// # Errors
+/// Returns reqwest's error when the client cannot be built.
+pub(crate) fn provider_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout)
+        .build()
 }
 
 /// Every configured model's answer for one provider, keyed by the host's
@@ -235,29 +246,24 @@ async fn discover_provider(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("no api-key configured"))?;
     let base = provider.base_url.trim_end_matches('/');
-    let body = client
-        .get(format!("{base}/models"))
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .map_err(|error| anyhow::anyhow!("{}", crate::verify::scrub_key(&error, api_key)))?
-        .bytes()
-        .await?;
-    let catalog = crate::verify::parse_catalog(&body)
-        .ok_or_else(|| anyhow::anyhow!("provider /models response has no data[].id list"))?;
+    let catalog = crate::verify::fetch_catalog(client, provider, api_key).await?;
 
     // One lookup per model, side by side: on OpenRouter each is its own
     // request, and a stalled one must not serialise behind the others.
-    let lookups = provider.models.iter().filter_map(|model| {
-        let aggregate = catalog
-            .iter()
-            .find(|entry| entry.id == model.name)
-            .and_then(|entry| entry.context_length)?;
-        Some(async move {
-            let answer = look_up(client, base, api_key, model, aggregate).await;
-            (model.name.clone(), answer)
-        })
-    });
+    let lookups = provider
+        .models
+        .iter()
+        .filter(|model| needs_lookup(model))
+        .filter_map(|model| {
+            let aggregate = catalog
+                .iter()
+                .find(|entry| entry.id == model.name)
+                .and_then(|entry| entry.context_length)?;
+            Some(async move {
+                let answer = look_up(client, base, api_key, model, aggregate).await;
+                (model.name.clone(), answer)
+            })
+        });
     Ok(futures_util::future::join_all(lookups)
         .await
         .into_iter()
@@ -287,24 +293,23 @@ async fn look_up(
             pin: None,
         });
     }
-    let endpoints = openrouter_endpoints(client, base, api_key, &model.name).await?;
-    Some(match model.min_context_window {
-        Some(min) => match select_providers(&endpoints, min) {
-            Some((providers, window)) => Cached {
-                window: window.min(aggregate),
-                pin: Some(Pin { min, providers }),
-            },
-            // Looked, found nothing: the tombstone that retires an older
-            // selection. The window is what an unpinned route would get.
-            None => Cached {
-                window: narrowest(&endpoints)?.min(aggregate),
-                pin: None,
-            },
-        },
-        None => Cached {
-            window: narrowest(&endpoints)?.min(aggregate),
-            pin: None,
-        },
+    let endpoints = match openrouter_endpoints(client, base, api_key, &model.name).await {
+        Ok(endpoints) => endpoints,
+        Err(error) => {
+            tracing::warn!(
+                model = model.name,
+                %error,
+                "sub-provider lookup failed; this model keeps its cached answer, if any"
+            );
+            return None;
+        }
+    };
+    // Without a qualifying selection the answer is the tombstone that
+    // retires an older one: the window an unpinned route would get.
+    let (window, pin) = guaranteed_window(&endpoints, model.min_context_window, aggregate);
+    Some(Cached {
+        window: window?,
+        pin,
     })
 }
 
@@ -321,8 +326,10 @@ pub(crate) async fn host_window(
     if !is_openrouter(base) {
         return Some(aggregate);
     }
-    let endpoints = openrouter_endpoints(client, base, api_key, model_id).await?;
-    narrowest(&endpoints).map(|narrowest| narrowest.min(aggregate))
+    let endpoints = openrouter_endpoints(client, base, api_key, model_id)
+        .await
+        .ok()?;
+    guaranteed_window(&endpoints, None, aggregate).0
 }
 
 /// One `OpenRouter` endpoint: the sub-provider slug and the window it serves.
@@ -339,25 +346,39 @@ pub(crate) struct Endpoint {
 }
 
 /// The sub-providers `OpenRouter` may route `model` to, with their windows.
-/// `None` when the endpoints call fails or reports nothing — the caller then
-/// leaves everything unknown.
+///
+/// # Errors
+/// Returns an error, scrubbed of the key, when the endpoints call fails or
+/// reports nothing usable; the caller then leaves everything unknown.
 pub(crate) async fn openrouter_endpoints(
     client: &reqwest::Client,
     base: &str,
     api_key: &str,
     model: &str,
-) -> Option<Vec<Endpoint>> {
-    let body = client
+) -> anyhow::Result<Vec<Endpoint>> {
+    let response = client
         .get(format!("{base}/models/{model}/endpoints"))
         .bearer_auth(api_key)
         .send()
         .await
-        .ok()?
-        .bytes()
-        .await
-        .ok()?;
-    let endpoints = parse_endpoints(&body)?;
-    (!endpoints.is_empty()).then_some(endpoints)
+        .map_err(|error| {
+            anyhow::anyhow!("{}", crate::verify::scrub(&error.to_string(), api_key))
+        })?;
+    let status = response.status();
+    let body = response.bytes().await.map_err(|error| {
+        anyhow::anyhow!("{}", crate::verify::scrub(&error.to_string(), api_key))
+    })?;
+    anyhow::ensure!(status.is_success(), "endpoints call returned HTTP {status}");
+    let endpoints = parse_endpoints(&body).ok_or_else(|| {
+        anyhow::anyhow!(
+            "endpoints response has no data.endpoints list, or an endpoint without a tag"
+        )
+    })?;
+    anyhow::ensure!(
+        !endpoints.is_empty(),
+        "endpoints response lists no endpoints"
+    );
+    Ok(endpoints)
 }
 
 /// Every endpoint in the document, or `None` when one of them cannot be
@@ -386,11 +407,8 @@ pub(crate) fn parse_endpoints(body: &[u8]) -> Option<Vec<Endpoint>> {
 /// The smallest window across every endpoint — the only one an unpinned
 /// request is sure to get; `None` when any endpoint's window is unknown.
 pub(crate) fn narrowest(endpoints: &[Endpoint]) -> Option<u64> {
-    endpoints
-        .iter()
-        .map(|e| e.context_length)
-        .try_fold(u64::MAX, |narrowest, window| Some(narrowest.min(window?)))
-        .filter(|_| !endpoints.is_empty())
+    // `None` orders below every `Some`, so one unknown window wins the min.
+    endpoints.iter().map(|e| e.context_length).min().flatten()
 }
 
 /// Each sub-provider's narrowest endpoint window — the window a request
@@ -399,15 +417,10 @@ pub(crate) fn narrowest(endpoints: &[Endpoint]) -> Option<u64> {
 pub(crate) fn narrowest_by_provider(endpoints: &[Endpoint]) -> BTreeMap<String, Option<u64>> {
     let mut windows: BTreeMap<String, Option<u64>> = BTreeMap::new();
     for endpoint in endpoints {
-        windows
+        let window = windows
             .entry(endpoint.provider.clone())
-            .and_modify(|window| {
-                *window = match (*window, endpoint.context_length) {
-                    (Some(known), Some(this)) => Some(known.min(this)),
-                    _ => None,
-                }
-            })
-            .or_insert(endpoint.context_length);
+            .or_insert(Some(u64::MAX));
+        *window = (*window).min(endpoint.context_length);
     }
     windows
 }
@@ -432,34 +445,27 @@ pub(crate) fn select_providers(endpoints: &[Endpoint], min: u64) -> Option<(Vec<
     ))
 }
 
-/// The cache as written by older releases (a bare window) or this one.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CacheEntry {
-    Bare(u64),
-    Full(Cached),
-}
-
+/// The cache, or empty when there is none yet. A cache that cannot be read
+/// or parsed also reads as empty, with a warning: the service refetches, and
+/// until that succeeds every pinned model is unserved.
 fn read_cache(path: &Path) -> BTreeMap<String, Cached> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<BTreeMap<String, CacheEntry>>(&contents).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(key, entry)| {
-            let cached = match entry {
-                CacheEntry::Bare(window) => Cached { window, pin: None },
-                CacheEntry::Full(cached) => cached,
-            };
-            (key, cached)
-        })
-        .collect()
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "cannot read the context-window cache");
+            return BTreeMap::new();
+        }
+    };
+    serde_json::from_str(&contents).unwrap_or_else(|error| {
+        tracing::warn!(path = %path.display(), %error, "ignoring an unparseable context-window cache");
+        BTreeMap::new()
+    })
 }
 
-fn write_cache(path: &Path, cache: &BTreeMap<String, Cached>) {
-    if let Ok(contents) = serde_json::to_string_pretty(cache)
-        && let Err(error) = std::fs::write(path, contents)
-    {
+pub(crate) fn write_cache(path: &Path, cache: &BTreeMap<String, Cached>) {
+    let contents = serde_json::to_string_pretty(cache).expect("the cache is plain data");
+    if let Err(error) = crate::state::write_private_atomic(path, contents.as_bytes()) {
         tracing::warn!(%error, "failed to cache discovered context windows");
     }
 }
@@ -478,15 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_corrupt_cache_reads_as_empty_and_old_entries_still_read() {
+    fn a_missing_or_corrupt_cache_reads_as_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("context-windows.json");
         assert!(read_cache(&path).is_empty());
         std::fs::write(&path, "not json").unwrap();
         assert!(read_cache(&path).is_empty());
-        // The shape a 0.1.17 service wrote.
-        std::fs::write(&path, r#"{"k": 7}"#).unwrap();
-        assert_eq!(read_cache(&path).get("k"), Some(&window(7)));
         let pinned = Cached {
             window: 1_048_576,
             pin: Some(Pin {
@@ -613,16 +616,8 @@ mod tests {
         assert!(parse_endpoints(b"{}").is_none());
     }
 
-    fn dirs_in(dir: &Path) -> Dirs {
-        Dirs {
-            config_dir: dir.join("config"),
-            state_dir: dir.to_path_buf(),
-            cache_dir: dir.join("cache"),
-        }
-    }
-
     fn two_route_config() -> Config {
-        let mut config: Config = toml::from_str(
+        crate::config::parse_and_prepare(
             r#"
 declared-context-window = 250000
 [[openai-providers]]
@@ -639,9 +634,6 @@ routing-id = "glm-5.2"
 display-name = "GLM-5.2"
 "#,
         )
-        .unwrap();
-        config.prepare().unwrap();
-        config
     }
 
     fn route_window(config: &Config, routing_id: &str) -> Option<u64> {
@@ -655,7 +647,8 @@ display-name = "GLM-5.2"
     #[test]
     fn cached_windows_reach_every_undeclared_route_and_scale_only_above_the_client() {
         let dir = tempfile::tempdir().unwrap();
-        let dirs = dirs_in(dir.path());
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
         let mut config = two_route_config();
         // No cache yet: nothing changes and nothing fails.
         apply_cached_windows(&mut config, &dirs).unwrap();
@@ -663,7 +656,7 @@ display-name = "GLM-5.2"
         assert_eq!(route_window(&config, "glm-5.2"), None);
 
         write_cache(
-            &dir.path().join(CACHE_FILE),
+            &dirs.state_dir.join(CACHE_FILE),
             &BTreeMap::from([
                 (
                     cache_key("openrouter", "moonshotai/kimi-k3"),
@@ -687,7 +680,7 @@ display-name = "GLM-5.2"
         // A scaling route never takes a window at or below the client's: the
         // config would have refused it hand-written.
         write_cache(
-            &dir.path().join(CACHE_FILE),
+            &dirs.state_dir.join(CACHE_FILE),
             &BTreeMap::from([(
                 cache_key("openrouter", "moonshotai/kimi-k3"),
                 window(200_000),
@@ -703,7 +696,7 @@ display-name = "GLM-5.2"
         let window = explicit_window.map_or(String::new(), |window| {
             format!("context-window = {window}\n")
         });
-        let mut config: Config = toml::from_str(&format!(
+        crate::config::parse_and_prepare(&format!(
             r#"
 declared-context-window = 250000
 [[openai-providers]]
@@ -715,9 +708,6 @@ routing-id = "glm-5.2"
 display-name = "GLM-5.2"
 {min}{window}"#
         ))
-        .unwrap();
-        config.prepare().unwrap();
-        config
     }
 
     fn glm(config: &Config) -> &ProviderModel {
@@ -727,7 +717,8 @@ display-name = "GLM-5.2"
     #[test]
     fn a_cached_pin_applies_only_to_the_bar_it_was_computed_for_or_a_lower_one() {
         let dir = tempfile::tempdir().unwrap();
-        let dirs = dirs_in(dir.path());
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
         let selection = Cached {
             window: 1_048_576,
             pin: Some(Pin {
@@ -736,7 +727,7 @@ display-name = "GLM-5.2"
             }),
         };
         write_cache(
-            &dir.path().join(CACHE_FILE),
+            &dirs.state_dir.join(CACHE_FILE),
             &BTreeMap::from([(cache_key("openrouter", "z-ai/glm-5.2"), selection)]),
         );
 
@@ -785,7 +776,7 @@ display-name = "GLM-5.2"
 
         // Tombstone (a lookup that found nothing): not served.
         write_cache(
-            &dir.path().join(CACHE_FILE),
+            &dirs.state_dir.join(CACHE_FILE),
             &BTreeMap::from([(cache_key("openrouter", "z-ai/glm-5.2"), window(202_752))]),
         );
         let mut config = pinned_config(Some(1_000_000), None);
@@ -794,9 +785,69 @@ display-name = "GLM-5.2"
         assert_eq!(route_window(&config, "glm-5.2"), None);
 
         // Nothing cached at all: not served either.
-        std::fs::remove_file(dir.path().join(CACHE_FILE)).unwrap();
+        std::fs::remove_file(dirs.state_dir.join(CACHE_FILE)).unwrap();
         let mut config = pinned_config(Some(1_000_000), None);
         apply_cached_windows(&mut config, &dirs).unwrap();
         assert!(!glm(&config).is_served());
+    }
+
+    /// A fake OpenAI-compatible host: `/models` answers from `catalog` and
+    /// rejects any other key with 401.
+    async fn fake_host(catalog: &'static str) -> String {
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        async fn models(
+            State(catalog): State<&'static str>,
+            headers: HeaderMap,
+        ) -> (StatusCode, &'static str) {
+            let bearer = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if bearer == Some("Bearer good-key") {
+                (StatusCode::OK, catalog)
+            } else {
+                (StatusCode::UNAUTHORIZED, r#"{"error":"bad key"}"#)
+            }
+        }
+        let app = axum::Router::new()
+            .route("/v1/models", axum::routing::get(models))
+            .with_state(catalog);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}/v1")
+    }
+
+    #[tokio::test]
+    async fn discovery_writes_what_apply_reads_and_a_rejected_key_keeps_the_old_answer() {
+        let base_url =
+            fake_host(r#"{"data":[{"id":"vendor/model","context_length":131072}]}"#).await;
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
+        let provider = |api_key: &str| Config {
+            openai_providers: vec![OpenAiProvider {
+                name: "host".to_string(),
+                base_url: base_url.clone(),
+                models: vec![ProviderModel {
+                    name: "vendor/model".to_string(),
+                    routing_id: "model".to_string(),
+                    display_name: "Model".to_string(),
+                    ..ProviderModel::default()
+                }],
+                api_key: Some(api_key.to_string()),
+            }],
+            ..Config::default()
+        };
+        let cached = || read_cache(&dirs.state_dir.join(CACHE_FILE));
+        let key = cache_key("host", "vendor/model");
+
+        fetch_context_windows(&provider("good-key"), &dirs).await;
+        assert_eq!(cached().get(&key), Some(&window(131_072)));
+
+        // The host now rejects the key: the cached answer stands, and the
+        // failure is a warning rather than an empty cache.
+        fetch_context_windows(&provider("bad-key"), &dirs).await;
+        assert_eq!(cached().get(&key), Some(&window(131_072)));
     }
 }

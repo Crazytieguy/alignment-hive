@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::future::{Future, IntoFuture as _};
 use std::net::SocketAddr;
@@ -17,7 +16,7 @@ use crate::capture::{CaptureSink, RequestCapture, StreamingCapture, redact_heade
 use crate::config::{Config, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::overflow::OverflowRewrite;
-use crate::routing::{Branch, RoutingDecision, decide, substitute_model};
+use crate::routing::{RoutingDecision, decide, substitute_model};
 use crate::stub;
 use crate::usage::{GptPolicies, SseUsageTransformer, UsagePolicy, estimate_input_tokens};
 use crate::websearch;
@@ -108,7 +107,7 @@ impl AppState {
             // streams are fine while a blackholed upstream still times out.
             .read_timeout(std::time::Duration::from_mins(10))
             .build()?;
-        let xai_searches = Arc::new(XaiSearchTasks::new(config.xai_search));
+        let xai_searches = Arc::new(XaiSearchTasks::new());
         Ok(Self {
             config: Arc::new(config),
             client,
@@ -135,16 +134,22 @@ impl AppState {
             origin,
         })
     }
+
+    /// The recorded origin of a `WebSearch` sub-call, if its session's
+    /// `tool_use` was observed.
+    fn origin_of(&self, body: &[u8], subcall: &websearch::Subcall) -> Option<websearch::Origin> {
+        let session_id = websearch::session_id(body)?;
+        self.pending_searches
+            .consume(&websearch::PendingKey::for_subcall(session_id, subcall))
+    }
 }
 
 /// The unauthenticated introspection endpoint: exempt from the ingress gate
 /// and matched by the handler. One constant so the two can never drift.
 pub const HEALTH_PATH: &str = "/__model-router/health";
 
-/// The tokened path prefix the ingress gate accepts. Doctor's `base_url` and
-/// the startup log must build URLs through this same function.
-#[must_use]
-pub fn ingress_prefix(token: &str) -> String {
+/// The tokened path prefix the ingress gate accepts.
+fn ingress_prefix(token: &str) -> String {
     format!("/t/{token}")
 }
 
@@ -155,7 +160,7 @@ pub fn tokened_base_url(address: &SocketAddr, token: &str) -> String {
     format!("http://{address}{}", ingress_prefix(token))
 }
 
-/// Serves using an already-bound loopback listener (primarily for tests).
+/// Serves using an already-bound loopback listener.
 ///
 /// # Errors
 /// Returns an error for non-loopback listeners, invalid configuration, or
@@ -225,9 +230,8 @@ async fn serve_app(
             };
             // Search streams outlive their requests, so the already-admitted
             // ones are waited for here — with whatever budget the connection
-            // drain left, and before the caller tears the managed child down.
-            // Dropping one would disconnect it mid-response and quarantine
-            // the xAI auth.
+            // drain left, and before the caller tears the managed child down
+            // (see `XaiSearchTasks`).
             searches
                 .wait(drain_timeout.saturating_sub(started.elapsed()))
                 .await;
@@ -242,19 +246,7 @@ async fn serve_app(
 /// Returns an error for invalid configuration, capture-file failures, or HTTP
 /// client initialization failures.
 pub async fn app(config: Config) -> anyhow::Result<Router> {
-    app_with(config, None).await
-}
-
-/// Builds the gateway service with an optional managed-upstream handle.
-///
-/// # Errors
-/// Returns an error for invalid configuration, capture-file failures, or HTTP
-/// client initialization failures.
-pub async fn app_with(
-    config: Config,
-    managed: Option<crate::supervisor::ManagedHandle>,
-) -> anyhow::Result<Router> {
-    Ok(build(config, managed).await?.0)
+    Ok(build(config, None).await?.0)
 }
 
 /// The router plus the handle shutdown needs to wait for in-flight xAI search
@@ -274,29 +266,33 @@ async fn build(
 async fn handle(State(state): State<AppState>, request: Request) -> Response {
     let (mut parts, body) = request.into_parts();
 
-    if let Err(response) = apply_ingress_gate(&state.config, &mut parts) {
-        return response;
+    if !apply_ingress_gate(&state.config, &mut parts) {
+        // Generic: no token material.
+        return local_error_response(
+            &state,
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "not found",
+            None,
+        )
+        .await;
     }
 
     let body = match to_bytes(body, state.config.max_request_body_bytes).await {
         Ok(body) => body,
         Err(error) => {
-            let over_limit = std::error::Error::source(&error)
-                .is_some_and(<dyn std::error::Error + 'static>::is::<axum::http::Error>)
-                || error.to_string().contains("length limit exceeded");
+            let over_limit = error.to_string().contains("length limit exceeded");
             tracing::warn!(%error, over_limit, "failed to read inbound request body");
-            if over_limit {
-                return error_response(
+            let (status, message) = if over_limit {
+                (
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    "invalid_request_error",
                     "request body exceeds max-request-body-bytes",
-                );
-            }
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                "failed to read request body",
-            );
+                )
+            } else {
+                (StatusCode::BAD_REQUEST, "failed to read request body")
+            };
+            return local_error_response(&state, status, "invalid_request_error", message, None)
+                .await;
         }
     };
 
@@ -306,7 +302,11 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
 
     let decision = decide(&state.config, &body);
     let capture = state.capture.as_ref().map(|_| RequestCapture {
-        branch: decision.branch.as_str().to_string(),
+        branch: if decision.route.is_some() {
+            "gpt"
+        } else {
+            "claude"
+        },
         family: decision.family_label().to_string(),
         model: decision.model.clone(),
         method: parts.method.to_string(),
@@ -319,27 +319,14 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
     tracing::info!(
         method = %parts.method,
         path = %parts.uri.path(),
-        branch = decision.branch.as_str(),
         family = decision.family_label(),
         model = decision.model.as_deref().unwrap_or("<none>"),
         "routing request"
     );
 
-    if parts.method == Method::GET && parts.uri.path() == "/v1/models" {
-        return models_response(
-            &state,
-            &parts.headers,
-            &parts.method,
-            &parts.uri,
-            body,
-            capture,
-        )
-        .await;
-    }
-
     if parts.method == Method::POST
         && parts.uri.path() == "/v1/messages/count_tokens"
-        && decision.branch == Branch::Gpt
+        && decision.route.is_some()
     {
         return local_error_response(
             &state,
@@ -355,7 +342,7 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
     // not in the child config either; answering here keeps the reason
     // attached to the failure instead of the child's generic 400.
     if let Some(route) = decision.route
-        && let (Some(wanted), None) = (route.min_context_window, &route.pinned_providers)
+        && let Some(wanted) = route.unserved_min_window()
     {
         return local_error_response(
             &state,
@@ -372,9 +359,9 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
         .await;
     }
 
-    match decision.branch {
-        Branch::Claude => claude_response(&state, &parts, body, &decision, capture).await,
-        Branch::Gpt => gpt_response(&state, &parts, body, &decision, capture).await,
+    match decision.route {
+        None => claude_response(&state, &parts, body, &decision, capture).await,
+        Some(route) => gpt_response(&state, &parts, body, route, capture).await,
     }
 }
 
@@ -389,15 +376,7 @@ async fn claude_response(
     let mut tap = None;
     if state.config.web_search.mode != WebSearchMode::Off && is_messages_post {
         if let Some(subcall) = websearch::detect(&body) {
-            let origin = websearch::session_id(&body).and_then(|session_id| {
-                state.pending_searches.consume(&websearch::PendingKey::new(
-                    session_id,
-                    &subcall.query,
-                    subcall.allowed_domains.as_deref(),
-                    subcall.blocked_domains.as_deref(),
-                ))
-            });
-            if let Some(websearch::Origin::Gpt { routing_id }) = origin {
+            if let Some(websearch::Origin::Gpt { routing_id }) = state.origin_of(&body, &subcall) {
                 return gpt_origin_on_claude_branch(
                     state,
                     parts,
@@ -413,6 +392,17 @@ async fn claude_response(
             tap = state.websearch_tap(&body, websearch::Origin::Claude { model });
         }
     }
+    forward_to_anthropic(state, parts, body, capture, tap).await
+}
+
+/// Forwards a Claude-branch request byte-exact, credentials and all.
+async fn forward_to_anthropic(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: Bytes,
+    capture: Option<RequestCapture>,
+    tap: Option<SniffTap>,
+) -> Response {
     forward(
         state,
         &state.config.anthropic_upstream_base,
@@ -430,49 +420,6 @@ async fn claude_response(
     .await
 }
 
-/// Answers a sub-call on the origin's own route by forwarding it to that
-/// route's upstream and scraping links out of the response text.
-///
-/// Shared by the `scrape` mode arm and by `alpha` mode's failure path, so
-/// the two degrade identically — the sub-call stays with the vendor the
-/// user picked for the work. `Err` returns the capture so the caller can
-/// continue to the Anthropic passthrough.
-#[allow(clippy::too_many_arguments)] // mirrors websearch_response's shape
-#[allow(clippy::result_large_err)] // the Err returns the capture for the passthrough fallback
-async fn scrape_on_origin_route(
-    state: &AppState,
-    parts: &axum::http::request::Parts,
-    body: &Bytes,
-    route: &crate::config::ModelRoute,
-    subcall: &websearch::Subcall,
-    base_url: &str,
-    credential: Option<&headers::GptUpstreamCredential>,
-    capture: Option<RequestCapture>,
-) -> Result<Response, Option<RequestCapture>> {
-    let rewritten = match substitute_model(body, &route.upstream_model) {
-        Ok(rewritten) => Bytes::from(rewritten),
-        Err(error) => {
-            tracing::warn!(%error, "failed to rewrite sub-call model; passing through to Anthropic");
-            return Err(capture);
-        }
-    };
-    match legacy_websearch(state, parts, &rewritten, base_url, credential).await {
-        Ok(mut message) => {
-            let filled = websearch::fill_empty_web_search_results(&mut message);
-            tracing::info!(
-                filled,
-                origin = %route.routing_id,
-                "scraped links into the routed-origin web search response"
-            );
-            Ok(message_response(state, &message, subcall.stream, capture).await)
-        }
-        Err(error) => {
-            tracing::warn!(%error, "routed web search forward failed; passing the sub-call through to Anthropic");
-            Err(capture)
-        }
-    }
-}
-
 /// A sub-call arriving on the Claude branch whose `WebSearch` was invoked by
 /// a routed agent (GPT, Grok, or open-weights): answer from the matching
 /// backend. `alpha` mode asks the Codex search backend and, on failure,
@@ -486,9 +433,8 @@ async fn gpt_origin_on_claude_branch(
     body: Bytes,
     routing_id: &str,
     subcall: &websearch::Subcall,
-    capture: Option<RequestCapture>,
+    mut capture: Option<RequestCapture>,
 ) -> Response {
-    let mut capture = capture;
     let route = state
         .config
         .effective_models()
@@ -502,85 +448,42 @@ async fn gpt_origin_on_claude_branch(
     {
         return grok_native_websearch_response(state, &body, route, subcall, capture).await;
     }
-    let target = gpt_forward_target(&state.cliproxy_upstream);
-    if let (Some(route), Some((base_url, credential))) = (route, target) {
-        let mode = state.config.web_search.mode;
-        if mode == WebSearchMode::Alpha {
-            match alpha_search(
-                state,
-                &base_url,
-                credential.as_ref(),
-                &route.upstream_model,
-                subcall,
-            )
-            .await
-            {
-                Ok((links, output)) => {
-                    tracing::info!(
-                        links = links.len(),
-                        origin = routing_id,
-                        backend = "alpha-search",
-                        "answered routed-origin web search from alpha/search"
-                    );
-                    let message = websearch::synthesize_message(
-                        &route.routing_id,
-                        subcall,
-                        &links,
-                        &output,
-                        estimate_input_tokens(&body),
-                    );
-                    return message_response(state, &message, subcall.stream, capture).await;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "alpha web search failed; falling back to the origin route's scrape path");
+    match (route, gpt_forward_target(&state.cliproxy_upstream)) {
+        (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model) {
+            Ok(rewritten) => {
+                match gpt_backend_answer(
+                    state,
+                    parts,
+                    &Bytes::from(rewritten),
+                    route,
+                    subcall,
+                    &target,
+                    capture,
+                )
+                .await
+                {
+                    Ok(response) => return response,
+                    Err(returned) => capture = returned,
                 }
             }
-        }
-        if matches!(mode, WebSearchMode::Alpha | WebSearchMode::Scrape) {
-            match scrape_on_origin_route(
-                state,
-                parts,
-                &body,
-                route,
-                subcall,
-                &base_url,
-                credential.as_ref(),
-                capture,
-            )
-            .await
-            {
-                Ok(response) => return response,
-                Err(returned) => capture = returned,
-            }
-        }
+            Err(error) => tracing::warn!(%error, "failed to rewrite sub-call model"),
+        },
+        (Some(_), None) => tracing::warn!(
+            origin = routing_id,
+            "no GPT upstream to answer a routed-origin web search; answering from Anthropic"
+        ),
+        (None, _) => {}
     }
-    forward(
-        state,
-        &state.config.anthropic_upstream_base,
-        &parts.method,
-        &parts.uri,
-        &parts.headers,
-        body,
-        false,
-        false,
-        None,
-        None,
-        capture,
-        None,
-    )
-    .await
+    forward_to_anthropic(state, parts, body, capture, None).await
 }
 
 async fn gpt_response(
     state: &AppState,
     parts: &axum::http::request::Parts,
     body: Bytes,
-    decision: &RoutingDecision<'_>,
+    route: &crate::config::ModelRoute,
     capture: Option<RequestCapture>,
 ) -> Response {
-    let route = decision
-        .route
-        .expect("GPT decisions always contain an allowlist route");
     // Grok carries reasoning effort in the model ID: the `output_config`
     // field Claude Code sends never reaches xAI (see
     // `routing::effort_qualified_model`).
@@ -655,12 +558,13 @@ fn cache_identity_headers(
     forwarded_body: &Bytes,
 ) -> Option<HeaderMap> {
     let key = crate::prompt_cache::shared_prefix_key(forwarded_body)?;
-    headers::with_cache_identity(&parts.headers, &key)
+    Some(headers::with_cache_identity(&parts.headers, &key))
 }
 
 /// A `WebSearch` sub-call that arrived on the GPT branch: answered by the
-/// origin's own backend, else by the existing alpha/scrape/forward ladder.
-#[allow(clippy::too_many_arguments)] // mirrors websearch_response's shape
+/// origin's own backend, else through the alpha/scrape ladder, else
+/// forwarded to the GPT upstream.
+#[allow(clippy::too_many_arguments)]
 async fn gpt_branch_subcall(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -669,20 +573,11 @@ async fn gpt_branch_subcall(
     route: &crate::config::ModelRoute,
     subcall: &websearch::Subcall,
     policies: GptPolicies,
-    capture: Option<RequestCapture>,
+    mut capture: Option<RequestCapture>,
 ) -> Response {
-    let origin = websearch::session_id(&rewritten).and_then(|session_id| {
-        state.pending_searches.consume(&websearch::PendingKey::new(
-            session_id,
-            &subcall.query,
-            subcall.allowed_domains.as_deref(),
-            subcall.blocked_domains.as_deref(),
-        ))
-    });
-    let mut capture = capture;
+    let origin = state.origin_of(&rewritten, subcall);
     // Policy lives in `websearch::native_search_route` (unit-tested there);
-    // this only supplies the config lookup. `None` leaves every arm below
-    // exactly as it was, still using `route`.
+    // this only supplies the config lookup.
     let native_search_route =
         websearch::native_search_route(origin.as_ref(), route, |routing_id| {
             state
@@ -701,22 +596,12 @@ async fn gpt_branch_subcall(
     if let Some(grok) = native_search_route {
         return grok_native_websearch_response(state, &rewritten, grok, subcall, capture).await;
     }
-    if let Some((base_url, credential)) = gpt_forward_target(&state.cliproxy_upstream) {
-        return websearch_response(
-            state,
-            parts,
-            rewritten,
-            &route.routing_id,
-            &route.upstream_model,
-            subcall,
-            &base_url,
-            credential.as_ref(),
-            policies,
-            capture,
-        )
-        .await;
+    if let Some(target) = gpt_forward_target(&state.cliproxy_upstream) {
+        match gpt_backend_answer(state, parts, &rewritten, route, subcall, &target, capture).await {
+            Ok(response) => return response,
+            Err(returned) => capture = returned,
+        }
     }
-    // No GPT target (stub / unready managed): existing handling.
     forward_gpt(
         state,
         parts,
@@ -729,36 +614,30 @@ async fn gpt_branch_subcall(
     .await
 }
 
-/// How this request's usage is reported back.
+/// Everything the GPT branch rewrites in this request's response.
 ///
-/// The estimate only ever reaches the client through the streamed
+/// The input estimate only ever reaches the client through the streamed
 /// `message_start`, and counting it is the most expensive thing on this path
 /// (a full tiktoken encode of the body, tools included), so a non-streaming
-/// request skips it — the buffered web-search paths compute their own.
-fn usage_policy(rewritten: &Bytes, route: &crate::config::ModelRoute) -> UsagePolicy {
-    UsagePolicy {
-        estimate: if crate::routing::is_streaming(rewritten) {
+/// request skips it — the buffered web-search paths compute their own — and
+/// the overflow translation, armed only for routes with a verified backend
+/// dialect and a known real window, defers to the retained body instead
+/// (see [`crate::overflow::Estimate`]).
+fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPolicies {
+    let streaming = crate::routing::is_streaming(rewritten);
+    let usage = UsagePolicy {
+        estimate: if streaming {
             estimate_input_tokens(rewritten)
         } else {
             0
         },
         scale: route.usage_scale,
-    }
-}
-
-/// Everything the GPT branch rewrites in this request's response. Overflow
-/// translation is armed only for routes with a verified backend dialect and
-/// a known real window, and only ever matches that dialect's own phrase. A streaming request carries its already-computed estimate;
-/// a non-streaming one carries the body (a refcount, not a copy) for lazy
-/// estimation — never both, so a long-lived response stream does not pin
-/// its request's payload.
-fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPolicies {
-    let usage = usage_policy(rewritten, route);
+    };
     let overflow = route
         .context_window
         .zip(crate::config::overflow_dialect(route))
         .map(|(window, dialect)| {
-            let estimate = if crate::routing::is_streaming(rewritten) {
+            let estimate = if streaming {
                 crate::overflow::Estimate::Computed(usage.estimate)
             } else {
                 crate::overflow::Estimate::Deferred(rewritten.clone())
@@ -825,12 +704,7 @@ async fn anthropic_native_websearch(
         ));
     };
     let mut outgoing_headers = headers::request_headers(&parts.headers, false, true, None);
-    // The body is parsed here, and the reqwest client does no decompression;
-    // explicitly `identity` — an absent Accept-Encoding permits any coding.
-    outgoing_headers.insert(
-        header::ACCEPT_ENCODING,
-        axum::http::HeaderValue::from_static("identity"),
-    );
+    require_identity_encoding(&mut outgoing_headers);
     let result = state
         .client
         .request(
@@ -839,14 +713,14 @@ async fn anthropic_native_websearch(
         )
         .headers(outgoing_headers)
         .body(body)
-        .timeout(std::time::Duration::from_mins(4))
+        .timeout(SUBCALL_TIMEOUT)
         .send()
         .await;
     let response = match result {
         Ok(response) => response,
         Err(error) => return NativeOutcome::Fallback(error.into()),
     };
-    let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
+    let status = response.status();
     let response_headers = headers::response_headers(response.headers(), true);
     let fallback_eligible = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
     let bytes = match response.bytes().await {
@@ -894,158 +768,142 @@ async fn forward_gpt(
 ) -> Response {
     let cache_headers = cache_identity_headers(parts, &rewritten);
     let inbound_headers = cache_headers.as_ref().unwrap_or(&parts.headers);
-    match &state.cliproxy_upstream {
-        CliproxyUpstream::Stub => {
-            local_stub_response(state, upstream_model, &rewritten, capture).await
-        }
-        CliproxyUpstream::External {
-            base_url,
-            credential,
-        } => {
+    match gpt_target(&state.cliproxy_upstream) {
+        GptTarget::Forward(target) => {
             forward(
                 state,
-                base_url,
+                &target.base_url,
                 &parts.method,
                 &parts.uri,
                 inbound_headers,
                 rewritten,
                 true,
                 true,
-                credential.as_ref(),
+                target.credential.as_ref(),
                 Some(policies),
                 capture,
                 tap,
             )
             .await
         }
-        CliproxyUpstream::ManagedUnavailable => {
-            local_error_response(
-                state,
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                "the cliproxy upstream supervisor failed to start; Claude traffic is unaffected — \
-                 run `model-router doctor` to diagnose",
-                capture,
-            )
-            .await
-        }
-        CliproxyUpstream::Managed(handle) => {
-            if !handle.is_ready() {
-                return local_error_response(
-                    state,
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "the cliproxy upstream is not ready (starting up, unauthenticated, or crashed); \
-                     run `model-router doctor` to diagnose",
-                    capture,
-                )
-                .await;
-            }
-            forward(
-                state,
-                &handle.base_url,
-                &parts.method,
-                &parts.uri,
-                inbound_headers,
-                rewritten,
-                true,
-                true,
-                Some(&handle.credential),
-                Some(policies),
-                capture,
-                tap,
-            )
-            .await
+        GptTarget::Stub => local_stub_response(state, upstream_model, &rewritten, capture).await,
+        GptTarget::Unavailable(reason) => {
+            local_error_response(state, StatusCode::BAD_GATEWAY, "api_error", reason, capture).await
         }
     }
 }
 
-/// The (base URL, credential) pair GPT-branch requests are forwarded to, when
-/// one exists. Stub and not-yet-ready managed upstreams return `None` and
-/// keep their existing handling.
-fn gpt_forward_target(
-    upstream: &CliproxyUpstream,
-) -> Option<(String, Option<headers::GptUpstreamCredential>)> {
+/// Where a GPT-branch request can be forwarded.
+struct ForwardTarget {
+    base_url: String,
+    credential: Option<headers::GptUpstreamCredential>,
+}
+
+enum GptTarget {
+    Forward(ForwardTarget),
+    Stub,
+    /// No upstream to forward to, with the actionable reason.
+    Unavailable(&'static str),
+}
+
+/// The one rule for what a GPT-branch request reaches through the cliproxy
+/// upstream.
+fn gpt_target(upstream: &CliproxyUpstream) -> GptTarget {
     match upstream {
+        CliproxyUpstream::Stub => GptTarget::Stub,
         CliproxyUpstream::External {
             base_url,
             credential,
-        } => Some((base_url.clone(), credential.clone())),
+        } => GptTarget::Forward(ForwardTarget {
+            base_url: base_url.clone(),
+            credential: credential.clone(),
+        }),
+        CliproxyUpstream::ManagedUnavailable => GptTarget::Unavailable(
+            "the cliproxy upstream supervisor failed to start; Claude traffic is unaffected — \
+             run `model-router doctor` to diagnose",
+        ),
         CliproxyUpstream::Managed(handle) if handle.is_ready() => {
-            Some((handle.base_url.clone(), Some(handle.credential.clone())))
+            GptTarget::Forward(ForwardTarget {
+                base_url: handle.base_url.clone(),
+                credential: Some(handle.credential.clone()),
+            })
         }
-        CliproxyUpstream::Stub
-        | CliproxyUpstream::Managed(_)
-        | CliproxyUpstream::ManagedUnavailable => None,
+        CliproxyUpstream::Managed(_) => GptTarget::Unavailable(
+            "the cliproxy upstream is not ready (starting up, unauthenticated, or crashed); \
+             run `model-router doctor` to diagnose",
+        ),
     }
 }
 
-/// Answers a detected `WebSearch` sub-call: from the Codex search backend in
-/// `alpha` mode, else (or on failure) via the LLM upstream with links scraped
-/// into the empty result blocks, else plain forwarding as the last resort.
-#[allow(clippy::too_many_arguments)]
-async fn websearch_response(
+/// The upstream GPT-branch side calls are made against, when one exists.
+fn gpt_forward_target(upstream: &CliproxyUpstream) -> Option<ForwardTarget> {
+    match gpt_target(upstream) {
+        GptTarget::Forward(target) => Some(target),
+        GptTarget::Stub | GptTarget::Unavailable(_) => None,
+    }
+}
+
+/// Answers a `WebSearch` sub-call from the GPT backend behind `target`: the
+/// Codex search backend in `alpha` mode, else (or when that fails) the
+/// route's own LLM upstream with links scraped into the empty result blocks.
+/// Shared by both branches so the two degrade identically — the sub-call
+/// stays with the vendor the user picked for the work. `Err` returns the
+/// capture so the caller can continue to its own last resort.
+///
+/// Sub-call responses are conversation context for nobody, so they carry
+/// the input estimate but never the route's scale.
+#[allow(clippy::result_large_err)] // the Err returns the capture for the fallback
+async fn gpt_backend_answer(
     state: &AppState,
     parts: &axum::http::request::Parts,
-    rewritten: Bytes,
-    routing_id: &str,
-    upstream_model: &str,
+    rewritten: &Bytes,
+    route: &crate::config::ModelRoute,
     subcall: &websearch::Subcall,
-    base_url: &str,
-    credential: Option<&headers::GptUpstreamCredential>,
-    policies: GptPolicies,
+    target: &ForwardTarget,
     capture: Option<RequestCapture>,
-) -> Response {
+) -> Result<Response, Option<RequestCapture>> {
     if state.config.web_search.mode == WebSearchMode::Alpha {
-        match alpha_search(state, base_url, credential, upstream_model, subcall).await {
+        match alpha_search(state, target, &route.upstream_model, subcall).await {
             Ok((links, output)) => {
                 tracing::info!(
                     links = links.len(),
+                    origin = %route.routing_id,
                     backend = "alpha-search",
                     "answered web search from alpha/search"
                 );
                 let message = websearch::synthesize_message(
-                    routing_id,
+                    &route.routing_id,
                     subcall,
                     &links,
                     &output,
-                    // Sub-call responses are not conversation context, so they
-                    // are reported unscaled.
-                    estimate_input_tokens(&rewritten),
+                    estimate_input_tokens(rewritten),
                 );
-                return message_response(state, &message, subcall.stream, capture).await;
+                return Ok(message_response(state, &message, subcall.stream, capture).await);
             }
             Err(error) => {
                 tracing::warn!(%error, "alpha web search failed; falling back to the LLM web search path");
             }
         }
     }
-    match legacy_websearch(state, parts, &rewritten, base_url, credential).await {
+    match legacy_websearch(state, parts, rewritten, target).await {
         Ok(mut message) => {
             if let Some(usage) = message.get_mut("usage") {
-                // Sub-call responses are conversation context for nobody, so
-                // they get the estimate but never the route's scale.
                 crate::usage::inject_estimated_input_tokens(
                     usage,
-                    estimate_input_tokens(&rewritten),
+                    estimate_input_tokens(rewritten),
                 );
             }
             let filled = websearch::fill_empty_web_search_results(&mut message);
-            tracing::info!(filled, "scraped links into the LLM web search response");
-            message_response(state, &message, subcall.stream, capture).await
+            tracing::info!(
+                filled,
+                origin = %route.routing_id,
+                "scraped links into the LLM web search response"
+            );
+            Ok(message_response(state, &message, subcall.stream, capture).await)
         }
         Err(error) => {
             tracing::warn!(%error, "buffered web search forward failed; passing the sub-call through");
-            forward_gpt(
-                state,
-                parts,
-                rewritten,
-                upstream_model,
-                policies,
-                capture,
-                None,
-            )
-            .await
+            Err(capture)
         }
     }
 }
@@ -1119,24 +977,21 @@ impl SearchFailure {
 /// sweep should meet the limits the user's own xAI subscription imposes, not
 /// an invented one. Admission is a shutdown gate, nothing more.
 pub struct XaiSearchTasks {
-    limits: crate::config::XaiSearchLimits,
     closed: std::sync::atomic::AtomicBool,
     tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl XaiSearchTasks {
-    fn new(limits: crate::config::XaiSearchLimits) -> Self {
+    fn new() -> Self {
         Self {
             closed: std::sync::atomic::AtomicBool::new(false),
             tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
-            limits,
         }
     }
 
     /// Takes ownership of one search stream's task. `false` once shutdown has
     /// been signalled, in which case the caller must not open the stream at
-    /// all: an admitted-then-aborted stream is the disconnect that
-    /// quarantines the xAI auth.
+    /// all.
     async fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> bool {
         let mut tasks = self.tasks.lock().await;
         // Checked under the lock that `wait` also takes, so a search cannot be
@@ -1157,8 +1012,7 @@ impl XaiSearchTasks {
     }
 
     /// Waits for already-admitted search streams, bounded by `budget`. Runs
-    /// after handlers drain and BEFORE the managed child is torn down, so
-    /// in-flight streams end by themselves rather than by disconnection.
+    /// after handlers drain and BEFORE the managed child is torn down.
     async fn wait(&self, budget: std::time::Duration) {
         let drain = async {
             let mut tasks = self.tasks.lock().await;
@@ -1185,16 +1039,7 @@ async fn grok_native_websearch_response(
 ) -> Response {
     let started = std::time::Instant::now();
     let outcome = match gpt_forward_target(&state.cliproxy_upstream) {
-        Some((base_url, credential)) => {
-            xai_native_search(
-                state,
-                &base_url,
-                credential.as_ref(),
-                &route.upstream_model,
-                subcall,
-            )
-            .await
-        }
+        Some(target) => xai_native_search(state, &target, &route.upstream_model, subcall).await,
         None => Err(SearchFailure::GatewayUnavailable),
     };
     let input_tokens = estimate_input_tokens(body);
@@ -1232,19 +1077,12 @@ async fn grok_native_websearch_response(
 }
 
 /// One search against xAI's hosted `web_search` tool through the same
-/// `CLIProxyAPI` child, streamed.
-///
-/// The stream is read by a task that owns it and always reads to the end, so
-/// the connection is never closed early — a client disconnect makes the child
-/// quarantine the xAI auth entry for 30–60s
-/// (`auth_unavailable: no auth available (providers=xai)`), which would take
-/// the user's whole Grok family offline after every search. This function only
-/// waits for the sources (~3s), and giving up on that wait leaves the worker
-/// running. Draining is measured not to block concurrent Grok traffic.
+/// `CLIProxyAPI` child, streamed. This function only waits for the sources
+/// (~3s); the stream itself is owned by a task that reads it to the end
+/// whatever happens here (see [`XaiSearchTasks`]).
 async fn xai_native_search(
     state: &AppState,
-    base_url: &str,
-    credential: Option<&headers::GptUpstreamCredential>,
+    target: &ForwardTarget,
     upstream_model: &str,
     subcall: &websearch::Subcall,
 ) -> Result<Vec<websearch::Link>, SearchFailure> {
@@ -1255,16 +1093,17 @@ async fn xai_native_search(
         &policy,
         upstream_model,
     ))
-    .map_err(|error| SearchFailure::Transport(error.into()))?;
-    let limits = state.xai_searches.limits;
-    let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
+    .expect("JSON values always serialize");
+    let limits = state.config.xai_search;
+    let url = format!("{}/v1/responses", target.base_url.trim_end_matches('/'));
     let mut request = state
         .client
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "text/event-stream")
+        .header(header::ACCEPT_ENCODING, "identity")
         .body(body);
-    if let Some(credential) = credential {
+    if let Some(credential) = &target.credential {
         request = credential.apply(request);
     }
     let (harvested_tx, harvested_rx) = tokio::sync::oneshot::channel();
@@ -1341,7 +1180,11 @@ async fn xai_search_worker(
         .await
         .is_err()
     {
-        tracing::debug!("xAI search stream exceeded the drain budget");
+        tracing::warn!(
+            budget_seconds = limits.drain_timeout.as_secs(),
+            "xAI search stream exceeded the drain budget and was dropped; the child may \
+             quarantine the xAI auth"
+        );
     }
 }
 
@@ -1351,24 +1194,21 @@ async fn xai_search_worker(
 /// entirely empty response is.
 async fn alpha_search(
     state: &AppState,
-    base_url: &str,
-    credential: Option<&headers::GptUpstreamCredential>,
+    target: &ForwardTarget,
     upstream_model: &str,
     subcall: &websearch::Subcall,
 ) -> anyhow::Result<(Vec<websearch::Link>, String)> {
-    let url = format!("{}/v1/alpha/search", base_url.trim_end_matches('/'));
-    // Mapped here rather than at the call sites: this function is the only
-    // way to reach the Codex search backend, so a future caller cannot leak
-    // a foreign slug to it by forgetting the conversion.
-    let search_model = websearch::alpha_search_model(upstream_model);
-    let body = serde_json::to_vec(&websearch::alpha_request_body(subcall, search_model))?;
+    let url = format!("{}/v1/alpha/search", target.base_url.trim_end_matches('/'));
+    let body = serde_json::to_vec(&websearch::alpha_request_body(subcall, upstream_model))
+        .expect("JSON values always serialize");
     let mut request = state
         .client
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity")
         .body(body)
         .timeout(std::time::Duration::from_secs(30));
-    if let Some(credential) = credential {
+    if let Some(credential) = &target.credential {
         request = credential.apply(request);
     }
     let response = request.send().await?;
@@ -1401,8 +1241,7 @@ async fn legacy_websearch(
     state: &AppState,
     parts: &axum::http::request::Parts,
     rewritten: &Bytes,
-    base_url: &str,
-    credential: Option<&headers::GptUpstreamCredential>,
+    target: &ForwardTarget,
 ) -> anyhow::Result<serde_json::Value> {
     let mut document = serde_json::from_slice::<serde_json::Value>(rewritten)?;
     document["stream"] = serde_json::Value::Bool(false);
@@ -1411,20 +1250,18 @@ async fn legacy_websearch(
         cache_headers.as_ref().unwrap_or(&parts.headers),
         true,
         true,
-        credential,
+        target.credential.as_ref(),
     );
-    // The body is parsed here, and the reqwest client does no decompression;
-    // explicitly `identity` — an absent Accept-Encoding permits any coding.
-    outgoing_headers.insert(
-        header::ACCEPT_ENCODING,
-        axum::http::HeaderValue::from_static("identity"),
-    );
+    require_identity_encoding(&mut outgoing_headers);
     let response = state
         .client
-        .request(parts.method.clone(), upstream_url(base_url, &parts.uri))
+        .request(
+            parts.method.clone(),
+            upstream_url(&target.base_url, &parts.uri),
+        )
         .headers(outgoing_headers)
         .body(serde_json::to_vec(&document)?)
-        .timeout(std::time::Duration::from_mins(4))
+        .timeout(SUBCALL_TIMEOUT)
         .send()
         .await?;
     anyhow::ensure!(
@@ -1448,26 +1285,52 @@ async fn message_response(
     streaming: bool,
     capture: Option<RequestCapture>,
 ) -> Response {
-    let mut response_headers = HeaderMap::new();
-    let chunks = if streaming {
-        response_headers.insert(
-            header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("text/event-stream"),
-        );
-        response_headers.insert(
-            header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static("no-cache"),
-        );
-        websearch::message_to_sse(message)
+    let (response_headers, chunks) = if streaming {
+        (sse_headers(), websearch::message_to_sse(message))
     } else {
-        response_headers.insert(
-            header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json"),
-        );
-        vec![Bytes::from(message.to_string())]
+        (json_headers(), vec![Bytes::from(message.to_string())])
     };
     local_response(state, StatusCode::OK, response_headers, chunks, capture).await
 }
+
+/// Headers for a locally produced JSON body.
+pub(crate) fn json_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    headers
+}
+
+/// Headers for a locally produced SSE stream.
+pub(crate) fn sse_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    headers
+}
+
+/// Both the response sniffer and the overflow-error translator parse raw
+/// response bytes, and the reqwest client does no decompression, so every
+/// response the router reads must be identity-encoded. Explicitly `identity`,
+/// not merely absent — an absent Accept-Encoding permits the server to pick
+/// any coding. Loopback traffic; compression buys nothing here.
+fn require_identity_encoding(headers: &mut HeaderMap) {
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        axum::http::HeaderValue::from_static("identity"),
+    );
+}
+
+/// How long a buffered sub-call forward may take end to end.
+const SUBCALL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(4);
 
 async fn local_stub_response(
     state: &AppState,
@@ -1475,30 +1338,23 @@ async fn local_stub_response(
     request_body: &[u8],
     capture: Option<RequestCapture>,
 ) -> Response {
-    let streaming = serde_json::from_slice::<serde_json::Value>(request_body)
-        .ok()
-        .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false);
+    let streaming = crate::routing::is_streaming(request_body);
     let (headers, chunks) = stub::response(upstream_model, streaming);
     local_response(state, StatusCode::OK, headers, chunks, capture).await
 }
 
 /// Ingress gate: with a token configured, only `/t/<token>/`-prefixed
-/// requests are routed (the bare health endpoint stays reachable for the
-/// `SessionStart` hook); the prefix is stripped before routing. Rejections
-/// are generic 404s — no token material.
-#[allow(clippy::result_large_err)] // the Err IS the HTTP response we return
-fn apply_ingress_gate(
-    config: &Config,
-    parts: &mut axum::http::request::Parts,
-) -> Result<(), Response> {
+/// requests are admitted, with the prefix stripped before routing. The bare
+/// health endpoint stays reachable so `doctor` can tell a service that is
+/// not running from one that rejects its token.
+fn apply_ingress_gate(config: &Config, parts: &mut axum::http::request::Parts) -> bool {
     let Some(token) = &config.ingress_token else {
-        return Ok(());
+        return true;
     };
     let prefix = ingress_prefix(token);
     let path = parts.uri.path();
     if parts.method == Method::GET && path == HEALTH_PATH {
-        return Ok(());
+        return true;
     }
     let stripped = path.strip_prefix(&prefix).and_then(|rest| {
         if rest.is_empty() {
@@ -1510,68 +1366,41 @@ fn apply_ingress_gate(
         }
     });
     let Some(stripped) = stripped else {
-        return Err(error_response(
-            StatusCode::NOT_FOUND,
-            "not_found_error",
-            "not found",
-        ));
+        return false;
     };
     let rewritten = match parts.uri.query() {
         Some(query) => format!("{stripped}?{query}"),
         None => stripped,
     };
     let Ok(uri) = rewritten.parse::<Uri>() else {
-        return Err(error_response(
-            StatusCode::NOT_FOUND,
-            "not_found_error",
-            "not found",
-        ));
+        return false;
     };
     parts.uri = uri;
-    Ok(())
+    true
 }
 
 /// Local liveness/version endpoint for the `SessionStart` hook and doctor.
 fn health_response(state: &AppState) -> Response {
-    let upstream = match &state.cliproxy_upstream {
-        CliproxyUpstream::Stub => "stub",
-        CliproxyUpstream::External { .. } => "external",
-        CliproxyUpstream::ManagedUnavailable => "unavailable",
-        CliproxyUpstream::Managed(handle) => {
-            if handle.is_ready() {
-                "ready"
-            } else {
-                "not-ready"
-            }
-        }
-    };
-    let status = if matches!(upstream, "not-ready" | "unavailable") {
-        "degraded"
-    } else {
-        "ok"
+    let (upstream, healthy) = match &state.cliproxy_upstream {
+        CliproxyUpstream::Stub => ("stub", true),
+        CliproxyUpstream::External { .. } => ("external", true),
+        CliproxyUpstream::ManagedUnavailable => ("unavailable", false),
+        CliproxyUpstream::Managed(handle) if handle.is_ready() => ("ready", true),
+        CliproxyUpstream::Managed(_) => ("not-ready", false),
     };
     let bytes = Bytes::from(
         json!({
-            "status": status,
+            "status": if healthy { "ok" } else { "degraded" },
             "version": env!("CARGO_PKG_VERSION"),
             "cliproxy-upstream": upstream,
             // What this process resolved at startup. Doctor compares it with
             // a fresh read so a settings change that the running service has
             // not picked up is visible rather than silently mis-scaling.
             "declared-context-window": state.config.declared_context_window,
-            // Deprecated duplicate for the auto-update skew window: a pre-0.1.3
-            // doctor probing a newer service still reads the old key. Remove
-            // after one release.
-            "codex-upstream": upstream,
         })
         .to_string(),
     );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-    build_response(StatusCode::OK, headers, Body::from(bytes))
+    build_response(StatusCode::OK, json_headers(), Body::from(bytes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1597,18 +1426,10 @@ async fn forward(
         gpt_credential,
     );
     if tap.is_some() || policies.is_some() {
-        // The sniffer and the overflow-error translator parse raw response
-        // bytes and the reqwest client does no decompression, so GPT-branch
-        // and tapped responses must be identity-encoded. Explicitly
-        // `identity`, not merely absent — an absent Accept-Encoding permits
-        // the server to pick any coding. Loopback traffic; compression buys
-        // nothing here.
-        outgoing_headers.insert(
-            header::ACCEPT_ENCODING,
-            axum::http::HeaderValue::from_static("identity"),
-        );
+        require_identity_encoding(&mut outgoing_headers);
     }
-    if strip_credentials && let Some(request_capture) = &mut capture {
+    // A capture records what left the router.
+    if let Some(request_capture) = &mut capture {
         request_capture.headers = redact_headers(&outgoing_headers);
     }
     match state
@@ -1634,117 +1455,6 @@ async fn forward(
     }
 }
 
-async fn models_response(
-    state: &AppState,
-    inbound_headers: &HeaderMap,
-    method: &Method,
-    uri: &Uri,
-    body: Bytes,
-    capture: Option<RequestCapture>,
-) -> Response {
-    let url = upstream_url(&state.config.anthropic_upstream_base, uri);
-    let mut outgoing_headers = headers::request_headers(inbound_headers, false, false, None);
-    // This path parses the upstream body (to merge routed GPT models in),
-    // and the reqwest client does no decompression — request an identity
-    // response explicitly (absence would permit any coding).
-    outgoing_headers.insert(
-        header::ACCEPT_ENCODING,
-        axum::http::HeaderValue::from_static("identity"),
-    );
-    let response = match state
-        .client
-        .request(method.clone(), url)
-        .headers(outgoing_headers)
-        .body(body)
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!(%error, "Anthropic models request failed; returning routed models only");
-            return models_fallback_response(state, capture).await;
-        }
-    };
-
-    if response.status() != reqwest::StatusCode::OK {
-        tracing::warn!(
-            status = response.status().as_u16(),
-            "Anthropic models request was not successful; returning routed models only"
-        );
-        return models_fallback_response(state, capture).await;
-    }
-
-    let response_headers = headers::response_headers(response.headers(), true);
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(%error, "failed to read Anthropic models response; returning routed models only");
-            return models_fallback_response(state, capture).await;
-        }
-    };
-    let mut document = match serde_json::from_slice::<serde_json::Value>(&bytes) {
-        Ok(document) => document,
-        Err(error) => {
-            tracing::warn!(%error, "failed to parse Anthropic models response; returning routed models only");
-            return models_fallback_response(state, capture).await;
-        }
-    };
-    let Some(data) = document
-        .get_mut("data")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        tracing::warn!("Anthropic models response has no data array; returning routed models only");
-        return models_fallback_response(state, capture).await;
-    };
-    let mut model_ids = data
-        .iter()
-        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect::<HashSet<_>>();
-    for route in state.config.effective_models() {
-        if model_ids.insert(route.routing_id.clone()) {
-            data.push(json!({
-                "id": route.routing_id,
-                "display_name": route.display_name,
-                "type": "model"
-            }));
-        }
-    }
-    let merged = Bytes::from(serde_json::to_vec(&document).expect("JSON values always serialize"));
-    local_response(
-        state,
-        StatusCode::OK,
-        response_headers,
-        vec![merged],
-        capture,
-    )
-    .await
-}
-
-async fn models_fallback_response(state: &AppState, capture: Option<RequestCapture>) -> Response {
-    let document = json!({
-        "data": state.config.effective_models().map(|route| json!({
-            "id": route.routing_id,
-            "display_name": route.display_name,
-            "type": "model"
-        })).collect::<Vec<_>>()
-    });
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-    local_response(
-        state,
-        StatusCode::OK,
-        response_headers,
-        vec![Bytes::from(document.to_string())],
-        capture,
-    )
-    .await
-}
-
 async fn upstream_response(
     state: &AppState,
     response: reqwest::Response,
@@ -1752,7 +1462,7 @@ async fn upstream_response(
     policies: Option<GptPolicies>,
     tap: Option<SniffTap>,
 ) -> Response {
-    let status = StatusCode::from_u16(response.status().as_u16()).expect("valid HTTP status");
+    let status = response.status();
     let is_sse = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -1774,24 +1484,19 @@ async fn upstream_response(
     let response_headers = headers::response_headers(response.headers(), transform_usage);
     let stream = response.bytes_stream();
     let stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
-        if let Some(tap) = tap.filter(|_| status == StatusCode::OK) {
+        if let Some(tap) = tap.filter(|_| status == StatusCode::OK && is_sse) {
             // Passive tee: parse each chunk and commit any completed
             // WebSearch observations BEFORE yielding it, so the client can
             // never issue the follow-up sub-call ahead of the pending entry.
             // Bytes are forwarded unchanged whether or not parsing succeeds.
-            let mut sniffer = websearch::ToolUseSniffer::new(is_sse);
+            let mut sniffer = websearch::ToolUseSniffer::new();
             Box::pin(async_stream::stream! {
                 let mut inner = Box::pin(stream);
                 while let Some(item) = inner.next().await {
                     if let Ok(bytes) = &item {
                         for search in sniffer.push(bytes) {
                             tap.pending.insert(
-                                websearch::PendingKey::new(
-                                    tap.session_id.clone(),
-                                    &search.query,
-                                    search.allowed_domains.as_deref(),
-                                    search.blocked_domains.as_deref(),
-                                ),
+                                websearch::PendingKey::for_sniffed(tap.session_id.clone(), &search),
                                 tap.origin.clone(),
                             );
                         }
@@ -1803,9 +1508,10 @@ async fn upstream_response(
             Box::pin(stream)
         };
 
-    if let Some(policies) = policies.filter(|_| transform_usage) {
-        let transformed_stream = async_stream::stream! {
-            let mut stream = Box::pin(stream);
+    let stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
+        if let Some(policies) = policies.filter(|_| transform_usage) {
+            Box::pin(async_stream::stream! {
+            let mut stream = stream;
             let mut transformer = SseUsageTransformer::new(policies);
             while let Some(item) = stream.next().await {
                 match item {
@@ -1826,17 +1532,10 @@ async fn upstream_response(
             if let Some(buffered) = transformer.finish() {
                 yield Ok(buffered);
             }
+            })
+        } else {
+            stream
         };
-        let body = streaming_response_body(
-            state,
-            status,
-            &response_headers,
-            capture,
-            transformed_stream,
-        );
-        return build_response(status, response_headers, body);
-    }
-
     let body = streaming_response_body(state, status, &response_headers, capture, stream);
     build_response(status, response_headers, body)
 }
@@ -1956,24 +1655,7 @@ async fn local_error_response(
     let bytes = Bytes::from(
         json!({"type":"error","error":{"type":error_type,"message":message}}).to_string(),
     );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-    local_response(state, status, headers, vec![bytes], capture).await
-}
-
-fn error_response(status: StatusCode, error_type: &str, message: &str) -> Response {
-    let bytes = Bytes::from(
-        json!({"type":"error","error":{"type":error_type,"message":message}}).to_string(),
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-    build_response(status, headers, Body::from(bytes))
+    local_response(state, status, json_headers(), vec![bytes], capture).await
 }
 
 async fn local_response(
@@ -2026,7 +1708,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_admission_closes_at_shutdown_and_running_streams_are_awaited() {
-        let tasks = XaiSearchTasks::new(crate::config::XaiSearchLimits::default());
+        let tasks = XaiSearchTasks::new();
         let running = Arc::new(tokio::sync::Notify::new());
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -2069,15 +1751,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn upstream_url_preserves_encoded_path_and_query_text() {
-        let uri: Uri = "/v1/messages?beta=true&raw=%2F&empty=".parse().unwrap();
-        assert_eq!(
-            upstream_url("http://127.0.0.1:9000/", &uri),
-            "http://127.0.0.1:9000/v1/messages?beta=true&raw=%2F&empty="
-        );
-    }
-
     #[tokio::test]
     async fn managed_mode_without_supervisor_serves_degraded() {
         // Managed mode with no supervisor handle must still build the app
@@ -2098,9 +1771,6 @@ mod tests {
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "degraded");
         assert_eq!(health["cliproxy-upstream"], "unavailable");
-        // Deprecated duplicate key, kept for one release for update-skew
-        // tolerance (see health_response).
-        assert_eq!(health["codex-upstream"], "unavailable");
     }
 
     #[tokio::test]
@@ -2115,9 +1785,7 @@ mod tests {
         let server = tokio::spawn(serve_app(
             listener,
             app,
-            Arc::new(XaiSearchTasks::new(
-                crate::config::XaiSearchLimits::default(),
-            )),
+            Arc::new(XaiSearchTasks::new()),
             async move {
                 let _ = shutdown_rx.await;
             },
@@ -2143,7 +1811,7 @@ mod tests {
         let capture_file = directory.path().join("capture.jsonl");
         let config = Config {
             upstreams: std::collections::BTreeMap::from([(
-                "codex".to_string(),
+                "cliproxy".to_string(),
                 UpstreamConfig {
                     mode: UpstreamMode::Stub,
                     ..UpstreamConfig::default()
@@ -2151,7 +1819,7 @@ mod tests {
             )]),
             models: vec![ModelRoute {
                 routing_id: "claude-gpt-test".to_string(),
-                upstream: "codex".to_string(),
+                upstream: "cliproxy".to_string(),
                 upstream_model: "gpt-test".to_string(),
                 display_name: "GPT Test".to_string(),
                 ..Default::default()

@@ -19,10 +19,11 @@ pub struct CaptureSink {
 
 #[derive(Clone, Debug)]
 pub struct RequestCapture {
-    pub branch: String,
+    /// `claude` or `gpt`: which upstream the request went to. Kept for
+    /// readers of existing capture files; `family` says more.
+    pub branch: &'static str,
     /// Model family label from `RoutingDecision::family_label` — `claude`,
-    /// `gpt`, `grok`, or `openai-compat`. `branch` alone cannot say which,
-    /// because every routed family shares one branch.
+    /// `gpt`, `grok`, or `openai-compat`.
     pub family: String,
     pub model: Option<String>,
     pub method: String,
@@ -51,7 +52,7 @@ pub struct BoundedResponseBody {
 #[derive(Debug, Serialize)]
 struct CaptureRecord {
     timestamp: String,
-    branch: String,
+    branch: &'static str,
     family: String,
     model: Option<String>,
     method: String,
@@ -133,11 +134,8 @@ impl CaptureSink {
 async fn open_capture_file(path: &Path) -> anyhow::Result<tokio::fs::File> {
     let mut options = tokio::fs::OpenOptions::new();
     options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
+    options.mode(0o600);
+    options.custom_flags(libc::O_NOFOLLOW);
     options.open(path).await.map_err(|error| {
         anyhow::anyhow!(
             "failed to open capture file {} (symlinks are refused): {error}",
@@ -229,7 +227,7 @@ impl Drop for StreamingCapture {
 pub fn redact_headers(headers: &HeaderMap) -> BTreeMap<String, Vec<String>> {
     let mut output = BTreeMap::new();
     for name in headers.keys() {
-        let values = if is_sensitive(name.as_str()) {
+        let values = if crate::headers::is_credential_header(name.as_str()) {
             vec![REDACTED.to_string()]
         } else {
             headers
@@ -241,10 +239,6 @@ pub fn redact_headers(headers: &HeaderMap) -> BTreeMap<String, Vec<String>> {
         output.insert(name.as_str().to_string(), values);
     }
     output
-}
-
-fn is_sensitive(name: &str) -> bool {
-    crate::headers::is_credential_header(name)
 }
 
 #[cfg(test)]
@@ -304,7 +298,7 @@ mod tests {
         let credential = GptUpstreamCredential::new("injected-never-write-me").unwrap();
         let outgoing_headers = request_headers(&HeaderMap::new(), true, false, Some(&credential));
         let request = RequestCapture {
-            branch: "gpt".to_string(),
+            branch: "gpt",
             family: "gpt".to_string(),
             model: Some("claude-gpt-test".to_string()),
             method: "POST".to_string(),

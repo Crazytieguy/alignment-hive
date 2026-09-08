@@ -5,17 +5,18 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use model_router::config::{Config, UpstreamMode};
-use model_router::state::{Dirs, InstanceLock};
-use model_router::supervisor::Supervisor;
-use model_router::{acquire, doctor, proxy, service, supervisor};
+use model_router::{acquire, discovery, doctor, proxy, service, state, supervisor, verify};
+use state::{Dirs, InstanceLock};
+use supervisor::Supervisor;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "model-router",
     about = "Loopback Anthropic-format model routing gateway"
 )]
 struct Cli {
-    /// TOML configuration file (default: ~/.config/model-router/config.toml).
+    /// TOML configuration file (default: model-router/config.toml under the
+    /// XDG config dir, ~/.config).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -23,7 +24,7 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum Command {
     /// Run the routing gateway (the default command).
     Serve,
@@ -53,11 +54,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Exit successfully; `bootstrap.sh prefetch` normally stops before exec,
-    /// but an older bootstrap passes the argument through to the binary and
-    /// this keeps that combination a successful no-op.
-    #[command(hide = true)]
-    Prefetch,
     /// Install and manage the OS user service.
     Service {
         #[command(subcommand)]
@@ -76,9 +72,7 @@ enum LoginProvider {
 }
 
 /// Everything that differs between the OAuth flows. Adding a provider is one
-/// more descriptor — `CLIProxyAPI` 7.2.110 also ships `-claude-login`,
-/// `-kimi-login`, and `-antigravity-login` — never a second copy of the
-/// login routine.
+/// more descriptor, never a second copy of the login routine.
 struct LoginDescriptor {
     /// Human name used in the prompts.
     label: &'static str,
@@ -101,7 +95,7 @@ impl LoginProvider {
             Self::Codex => &LoginDescriptor {
                 label: "Codex",
                 flag: "-codex-login",
-                auth_prefix: model_router::state::CODEX_AUTH_PREFIX,
+                auth_prefix: state::CODEX_AUTH_PREFIX,
                 // Codex is the default family; nothing gates it.
                 is_enabled: |_| true,
                 start_notice: Some(
@@ -111,7 +105,7 @@ impl LoginProvider {
             Self::Grok => &LoginDescriptor {
                 label: "Grok",
                 flag: "-xai-login",
-                auth_prefix: model_router::state::GROK_AUTH_PREFIX,
+                auth_prefix: state::GROK_AUTH_PREFIX,
                 is_enabled: |config| config.grok.enabled,
                 // The xAI device flow prints its own verification URL and
                 // code; nothing to add.
@@ -121,14 +115,10 @@ impl LoginProvider {
     }
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum ServiceCommand {
     /// Populate the stable launcher, install the unit, and start the service.
-    Install {
-        /// Plugin root containing scripts/bootstrap.sh and binary-version.
-        #[arg(long)]
-        plugin_root: Option<PathBuf>,
-    },
+    Install,
     /// Stop the service and remove its unit, retaining all router data.
     Uninstall,
     /// Summarize service, unit-file, and launcher-version status.
@@ -136,11 +126,7 @@ enum ServiceCommand {
     /// Restart the installed service.
     Restart,
     /// Refresh the launcher from the plugin and restart the service.
-    Refresh {
-        /// Plugin root containing scripts/bootstrap.sh and binary-version.
-        #[arg(long)]
-        plugin_root: Option<PathBuf>,
-    },
+    Refresh,
 }
 
 #[tokio::main]
@@ -174,11 +160,10 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Command::Prefetch => Ok(()),
         Command::Login { provider } => login(&dirs, &config_path, provider).await,
         Command::VerifyProviders { name, json } => {
-            let reports = model_router::verify::run(&config_path, name.as_deref()).await?;
-            let (rendered, all_ok) = model_router::verify::render(&reports);
+            let reports = verify::run(&config_path, name.as_deref()).await?;
+            let (rendered, all_ok) = verify::render(&reports);
             if json {
                 println!("{}", serde_json::to_string_pretty(&reports)?);
             } else {
@@ -204,39 +189,30 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Service { command } => match command {
-            ServiceCommand::Install { plugin_root } => {
-                service::install(&dirs, plugin_root.as_deref())
-            }
+            ServiceCommand::Install => service::install(&dirs),
             ServiceCommand::Uninstall => service::uninstall(),
             ServiceCommand::Status => service::status(&dirs),
             ServiceCommand::Restart => service::restart(),
-            ServiceCommand::Refresh { plugin_root } => {
-                service::refresh(&dirs, plugin_root.as_deref())
-            }
+            ServiceCommand::Refresh => service::refresh(&dirs),
         },
     }
 }
 
 async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()> {
     let mut config = Config::load(config_path)?;
-    if config.ingress_token.is_none() {
-        config.ingress_token = Some(model_router::state::load_or_create_ingress_token(dirs)?);
-    }
+    let token = match config.ingress_token.take() {
+        Some(token) => token,
+        None => state::load_or_create_ingress_token(dirs)?,
+    };
     // The OS service runs with an arbitrary working directory (launchd: /),
     // so a relative capture path must not depend on cwd.
     if config.capture.enabled && config.capture.file.is_relative() {
         config.capture.file = dirs.state_dir.join(&config.capture.file);
     }
-    // Ask the hosts for the windows of the provider routes that did not name
-    // one. Best-effort: an unreachable host leaves the cached windows in
-    // place, and a route with none runs unscaled rather than blocking Claude
-    // traffic.
-    model_router::discovery::fetch_context_windows(&config, dirs).await;
-    model_router::discovery::apply_cached_windows(&mut config, dirs)?;
     let _lock = InstanceLock::acquire(dirs)?;
 
-    // Bind the router port BEFORE spawning the managed child so a taken port
-    // fails fast without leaving a child behind.
+    // Bind the router port BEFORE discovery and the managed child so a taken
+    // port fails fast, without a wait on the hosts or a child left behind.
     let address = std::net::SocketAddr::new(config.bind_address, config.port);
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -247,12 +223,18 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
             )
         })?;
     tracing::info!(%address, "model-router listening");
-    if let Some(token) = &config.ingress_token {
-        tracing::info!(
-            "gateway base URL (for ANTHROPIC_BASE_URL): {}",
-            proxy::tokened_base_url(&address, token)
-        );
-    }
+    tracing::info!(
+        "gateway base URL (for ANTHROPIC_BASE_URL): {}",
+        proxy::tokened_base_url(&address, &token)
+    );
+    config.ingress_token = Some(token);
+
+    // Ask the hosts for the windows of the provider routes that did not name
+    // one. Best-effort: an unreachable host leaves the cached windows in
+    // place, and a route with none runs unscaled rather than blocking Claude
+    // traffic. Requests arriving meanwhile wait in the accept backlog.
+    discovery::fetch_context_windows(&config, dirs).await;
+    discovery::apply_cached_windows(&mut config, dirs)?;
 
     let managed_config = Some(config.cliproxy_upstream().clone())
         .filter(|upstream| upstream.mode == UpstreamMode::Managed);
@@ -265,7 +247,7 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
                 dirs,
                 &upstream,
                 config.openai_providers.clone(),
-                model_router::supervisor::Tuning::default(),
+                supervisor::Tuning::default(),
             ) {
                 Ok(supervisor) => (Some(supervisor.handle()), Some(supervisor)),
                 Err(error) => {
@@ -295,17 +277,12 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler installs");
-        tokio::select! {
-            () = ctrl_c => {}
-            _ = sigterm.recv() => {}
-        }
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler installs");
+    tokio::select! {
+        () = ctrl_c => {}
+        _ = sigterm.recv() => {}
     }
-    #[cfg(not(unix))]
-    ctrl_c.await;
     tracing::info!("shutdown signal received");
 }
 
@@ -332,8 +309,8 @@ async fn login(
     );
     let binary = acquire::ensure_upstream(dirs).await?;
     let paths = supervisor::prepare_managed_state(dirs, &upstream, &config.openai_providers)?;
-    if let Some(existing) = model_router::state::find_auth(&paths.auth_dir, descriptor.auth_prefix)
-    {
+    let existing = state::auth_files(&paths.auth_dir, descriptor.auth_prefix)?;
+    if let Some(existing) = existing.first() {
         println!(
             "A {} login already exists at {}; continuing will add another.",
             descriptor.label,
@@ -355,10 +332,15 @@ async fn login(
         descriptor.label
     );
     // The child writes the xAI credential world-readable, so harden before
-    // reporting success. One enumeration serves both the check and the
-    // report.
-    model_router::state::harden_auth_files(&paths.auth_dir)?;
-    match model_router::state::auth_files(&paths.auth_dir, descriptor.auth_prefix)?.first() {
+    // reporting success. Report the file this login added; when the child
+    // rewrote an existing one, the first match is the best guess.
+    state::harden_auth_files(&paths.auth_dir)?;
+    let files = state::auth_files(&paths.auth_dir, descriptor.auth_prefix)?;
+    match files
+        .iter()
+        .find(|file| !existing.contains(file))
+        .or(files.first())
+    {
         Some(auth) => {
             println!("Login stored at {}", auth.display());
             Ok(())

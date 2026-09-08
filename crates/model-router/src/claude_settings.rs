@@ -10,6 +10,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// A settings file's JSON; unreadable or malformed files read as nothing.
+fn read_settings(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
 /// Claude Code's settings files in precedence order, highest first.
 fn settings_files(home: Option<&Path>, project: &Path) -> impl Iterator<Item = PathBuf> {
     [
@@ -30,8 +35,7 @@ pub(crate) fn winning_setting(
     key: &[&str],
 ) -> Option<(PathBuf, serde_json::Value)> {
     settings_files(home, project).find_map(|path| {
-        let contents = std::fs::read_to_string(&path).ok()?;
-        let settings: serde_json::Value = serde_json::from_str(&contents).ok()?;
+        let settings = read_settings(&path)?;
         let value = key.iter().try_fold(&settings, |node, key| node.get(key))?;
         Some((path, value.clone()))
     })
@@ -48,18 +52,9 @@ pub(crate) fn winning_setting(
 /// invisible, and so are the rows a running session loaded at its start.
 /// Callers must say so rather than report the user file as the truth.
 pub(crate) fn picker_behaves_as(home: Option<&Path>) -> BTreeMap<String, String> {
-    let Some(home) = home else {
-        return BTreeMap::new();
-    };
-    let path = home.join(".claude/settings.json");
-    let Some(settings) = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
-    else {
-        return BTreeMap::new();
-    };
-    settings
-        .get("modelPicker")
+    home.and_then(|home| read_settings(&home.join(".claude/settings.json")))
+        .as_ref()
+        .and_then(|settings| settings.get("modelPicker"))
         .and_then(|picker| picker.get("options"))
         .and_then(serde_json::Value::as_array)
         .into_iter()

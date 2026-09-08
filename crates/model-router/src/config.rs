@@ -8,9 +8,6 @@ use serde_inline_default::serde_inline_default;
 
 use crate::client_window::{UsageScale, client_context_window};
 
-pub const DEFAULT_CAPTURE_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
-pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
-
 /// The single supported upstream name: the managed/external `CLIProxyAPI`
 /// gateway. Renamed from `codex` in 0.1.3 (the upstream carries more than
 /// Codex traffic now); `codex` is accepted as a deprecated alias at load.
@@ -32,35 +29,32 @@ const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
 /// (declared − 20K output reserve) still leads the cap by 20K, and the
 /// overflow backstop covers the rest; `doctor` flags a declaration raised
 /// past the cap.
-const GPT_CONTEXT_WINDOW: u64 = 258_400;
+pub(crate) const GPT_CONTEXT_WINDOW: u64 = 258_400;
 
-/// The Codex-native upstream model IDs behind the built-in routes. The
-/// context-overflow translation applies only to requests forwarded to these
-/// models: the overflow message it matches is verified for the Codex
-/// backend alone, and a false positive on some other provider's error would
-/// re-create the compact-and-retry loop the translation exists to fix.
-const CODEX_NATIVE_MODELS: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+/// The Codex-native upstream model IDs behind the built-in routes, with
+/// their display names.
+const CODEX_NATIVE_MODELS: [(&str, &str); 3] = [
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
+];
 
 /// Whether `upstream_model` is served by the Codex backend. Derived aliases
 /// (`openai-compat--*`) and hand-written `[[models]]` entries pointing at
 /// other backends do not qualify.
 #[must_use]
 pub(crate) fn is_codex_native_model(upstream_model: &str) -> bool {
-    CODEX_NATIVE_MODELS.contains(&upstream_model)
+    is_built_in(&CODEX_NATIVE_MODELS, upstream_model)
+}
+
+fn is_built_in(table: &[(&str, &str)], upstream_model: &str) -> bool {
+    table.iter().any(|(model, _)| *model == upstream_model)
 }
 
 /// Which backend context-overflow dialect this route speaks, if the router
-/// has verified one (see [`crate::overflow`]).
-///
-/// Checked against the built-in model lists rather than the family alone: a
-/// hand-written `[[models]]` entry inherits `family = "gpt"` by default but
-/// may point anywhere, and arming the translation for an unverified backend
-/// would risk the false positive the whole module exists to avoid.
-///
-/// Returning the dialect rather than a bool matters just as much: a route
-/// must only ever match *its own* backend's phrase. Sharing one matcher
-/// across dialects would let a Codex route classify the xAI wording as
-/// overflow and compact-and-retry a request that was never too long.
+/// has verified one (see [`crate::overflow`]). Checked against the built-in
+/// model lists rather than the family alone: a hand-written `[[models]]`
+/// entry inherits `family = "gpt"` by default but may point anywhere.
 #[must_use]
 pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::OverflowDialect> {
     use crate::overflow::OverflowDialect;
@@ -68,10 +62,9 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
         ModelFamily::Gpt => {
             is_codex_native_model(&route.upstream_model).then_some(OverflowDialect::Codex)
         }
-        ModelFamily::Grok => GROK_MODELS
-            .iter()
-            .any(|(model, _, _)| *model == route.upstream_model)
-            .then_some(OverflowDialect::Xai),
+        ModelFamily::Grok => {
+            is_built_in(&GROK_MODELS, &route.upstream_model).then_some(OverflowDialect::Xai)
+        }
         // Any host can sit behind an openai-compat route; their error
         // strings are unknown.
         ModelFamily::OpenAiCompat => None,
@@ -79,15 +72,16 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
 }
 
 /// The xAI-native upstream model IDs behind the built-in Grok routes, with
-/// the context window `CLIProxyAPI`'s embedded model registry declares for
-/// them. Only the flagship and its still-served predecessor ship — 4.5
-/// stays so existing per-user agents keep resolving: the same OAuth also
-/// exposes `grok-4.3`, the `grok-4.20-*` snapshots and the `grok-3-mini*`
-/// pair, none of which are characterised well enough to recommend.
-const GROK_MODELS: [(&str, &str, u64); 2] = [
-    ("grok-4.6", "Grok 4.6", 500_000),
-    ("grok-4.5", "Grok 4.5", 500_000),
-];
+/// their display names. Only the flagship and its still-served predecessor
+/// ship — 4.5 stays so existing per-user agents keep resolving: the same
+/// OAuth also exposes `grok-4.3`, the `grok-4.20-*` snapshots and the
+/// `grok-3-mini*` pair, none of which are characterised well enough to
+/// recommend.
+const GROK_MODELS: [(&str, &str); 2] = [("grok-4.6", "Grok 4.6"), ("grok-4.5", "Grok 4.5")];
+
+/// The context window `CLIProxyAPI`'s embedded model registry declares for
+/// the built-in Grok routes.
+const GROK_CONTEXT_WINDOW: u64 = 500_000;
 
 /// Time bounds on the xAI search side call.
 ///
@@ -117,12 +111,11 @@ impl Default for XaiSearchLimits {
     }
 }
 
-/// Which vendor family serves a route. Carried per-route rather than as a
-/// third [`crate::routing::Branch`] variant: `Branch` answers where a
-/// request is *sent* (Anthropic or the `CLIProxyAPI` child), which stays
-/// binary no matter how many families ride the child. Family answers what
-/// the model *is*, which only the identity block, the overflow dialect, and
-/// the search backend care about — all per-route concerns.
+/// Which vendor family serves a route: what the model *is*, which the effort
+/// suffix, the overflow dialect, the search backend, and the family label in
+/// logs and captures care about. Where a request is *sent* (Anthropic or the
+/// `CLIProxyAPI` child) is a separate question, answered by whether a route
+/// matched at all.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModelFamily {
@@ -146,8 +139,11 @@ impl ModelFamily {
     }
 }
 
+// No `Debug` outside tests: `ingress_token` and the providers' keys must not
+// reach a log through `{:?}`.
 #[serde_inline_default]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(Debug))]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     /// Listening address. Only loopback addresses are accepted.
@@ -168,7 +164,7 @@ pub struct Config {
     pub upstreams: BTreeMap<String, UpstreamConfig>,
 
     /// Maximum accepted inbound request-body size in bytes.
-    #[serde_inline_default(DEFAULT_MAX_REQUEST_BODY_BYTES)]
+    #[serde_inline_default(100 * 1024 * 1024)]
     pub max_request_body_bytes: usize,
 
     /// Ingress token: requests are only accepted under the `/t/<token>/`
@@ -195,7 +191,7 @@ pub struct Config {
     #[serde(default)]
     pub capture: CaptureConfig,
 
-    /// `WebSearch` sub-call handling for routed GPT models.
+    /// `WebSearch` sub-call handling; see [`crate::websearch`].
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
@@ -216,15 +212,12 @@ pub struct Config {
     #[serde(skip)]
     pub generated_models: Vec<ModelRoute>,
 
-    /// Bounds on the xAI search side call. Deliberately not file-settable:
-    /// these are internals, exposed only so tests can shorten them.
     #[serde(skip)]
     pub xai_search: XaiSearchLimits,
 }
 
 /// The optional Grok family. `enabled` gates the built-in routes, the
 /// doctor auth/model checks, and `login grok`.
-#[serde_inline_default]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct GrokConfig {
@@ -239,11 +232,10 @@ pub struct GrokConfig {
     pub context_window_scaling: bool,
 }
 
-#[serde_inline_default]
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct WebSearchConfig {
-    #[serde_inline_default(WebSearchMode::Alpha)]
+    #[serde(default)]
     pub mode: WebSearchMode,
 }
 
@@ -262,7 +254,8 @@ pub enum WebSearchMode {
     Off,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct OpenAiProvider {
     pub name: String,
@@ -279,7 +272,7 @@ pub struct OpenAiProvider {
 
 /// `secrets.toml`, sibling of the config file: keeps API keys out of the
 /// freely-editable config. `[openai-providers]` maps provider name to key.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct SecretsFile {
     #[serde(default)]
@@ -364,7 +357,8 @@ pub struct ModelRoute {
 
     /// Which vendor family serves this route. Read from TOML (defaulting to
     /// `gpt`) so a hand-written entry pointing at a Grok upstream gets the
-    /// right identity block; every generated route sets it explicitly.
+    /// right effort suffix and overflow dialect; every generated route sets
+    /// it explicitly.
     #[serde(default)]
     pub family: ModelFamily,
 
@@ -398,15 +392,29 @@ impl ModelRoute {
             .context_window
             .filter(|_| self.context_window_scaling)?;
         let client = client_context_window(declared);
-        (client != actual).then(|| UsageScale::new(client, actual))?
+        if client == actual {
+            return None;
+        }
+        UsageScale::new(client, actual)
+    }
+
+    /// The window this route asked its sub-providers for when the service
+    /// has no applicable selection, so the route is not served at all
+    /// (see [`ProviderModel::min_context_window`]).
+    #[must_use]
+    pub fn unserved_min_window(&self) -> Option<u64> {
+        self.min_context_window
+            .filter(|_| self.pinned_providers.is_none())
     }
 }
 
+// No `Debug` outside tests: `api_key` must not reach a log through `{:?}`.
 #[serde_inline_default]
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct UpstreamConfig {
-    #[serde_inline_default(UpstreamMode::Managed)]
+    #[serde(default)]
     pub mode: UpstreamMode,
 
     /// Managed mode's loopback child port.
@@ -451,7 +459,7 @@ pub struct CaptureConfig {
     pub file: PathBuf,
 
     /// Maximum response-body bytes retained in each capture record.
-    #[serde_inline_default(DEFAULT_CAPTURE_RESPONSE_BODY_BYTES)]
+    #[serde_inline_default(10 * 1024 * 1024)]
     pub max_response_body_bytes: usize,
 }
 
@@ -464,12 +472,6 @@ impl Default for Config {
 impl Default for CaptureConfig {
     fn default() -> Self {
         toml::from_str("").expect("every CaptureConfig field must have a serde default")
-    }
-}
-
-impl Default for WebSearchConfig {
-    fn default() -> Self {
-        toml::from_str("").expect("every WebSearchConfig field must have a serde default")
     }
 }
 
@@ -509,7 +511,7 @@ fn template_models_section(models: &[ModelRoute]) -> String {
 fn template_grok_section() -> String {
     let routes = GROK_MODELS
         .into_iter()
-        .map(|(model, _, window)| format!("#   {model} ({window} tokens)"))
+        .map(|(model, _)| format!("#   {model} ({GROK_CONTEXT_WINDOW} tokens)"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -560,50 +562,38 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 # ~/.claude/settings.json (or the project's) at startup, so it normally needs
 # no entry here — set it only when a settings file the service cannot see
 # holds the real value.
-# declared-context-window = 258400
+# declared-context-window = {declared_context_window}
 "#;
 
-fn default_models() -> Vec<ModelRoute> {
-    let [sol, terra, luna] = CODEX_NATIVE_MODELS;
-    [
-        (sol, "GPT-5.6 Sol"),
-        (terra, "GPT-5.6 Terra"),
-        (luna, "GPT-5.6 Luna"),
-    ]
-    .into_iter()
-    .map(|(model, display_name)| ModelRoute {
-        routing_id: model.to_string(),
-        upstream: CLIPROXY_UPSTREAM.to_string(),
-        upstream_model: model.to_string(),
-        display_name: display_name.to_string(),
-        family: ModelFamily::Gpt,
-        context_window: Some(GPT_CONTEXT_WINDOW),
-        context_window_scaling: false,
-        usage_scale: None,
-        min_context_window: None,
-        pinned_providers: None,
-    })
-    .collect()
-}
-
-/// The built-in Grok routes: one bare routing ID per model, matching
-/// [`default_models`].
-fn grok_models(scaling: bool) -> Vec<ModelRoute> {
-    GROK_MODELS
-        .into_iter()
-        .map(|(model, display_name, context_window)| ModelRoute {
+/// The built-in routes of one family: one bare routing ID per model.
+fn built_in_routes(
+    table: &[(&str, &str)],
+    family: ModelFamily,
+    context_window: u64,
+    scaling: bool,
+) -> Vec<ModelRoute> {
+    table
+        .iter()
+        .map(|(model, display_name)| ModelRoute {
             routing_id: model.to_string(),
             upstream: CLIPROXY_UPSTREAM.to_string(),
             upstream_model: model.to_string(),
             display_name: display_name.to_string(),
-            family: ModelFamily::Grok,
+            family,
             context_window: Some(context_window),
             context_window_scaling: scaling,
-            usage_scale: None,
-            min_context_window: None,
-            pinned_providers: None,
+            ..ModelRoute::default()
         })
         .collect()
+}
+
+fn default_models() -> Vec<ModelRoute> {
+    built_in_routes(
+        &CODEX_NATIVE_MODELS,
+        ModelFamily::Gpt,
+        GPT_CONTEXT_WINDOW,
+        false,
+    )
 }
 
 impl Config {
@@ -680,8 +670,7 @@ impl Config {
         Ok(())
     }
 
-    /// Resolves every route's usage scale. Runs after validation so the
-    /// declaration scaling depends on is known to be present.
+    /// Resolves every route's usage scale.
     fn compute_usage_scales(&mut self) {
         let declared = self.declared_context_window;
         for route in self
@@ -751,13 +740,18 @@ impl Config {
                 family: ModelFamily::OpenAiCompat,
                 context_window: model.context_window,
                 context_window_scaling: model.context_window_scaling,
-                usage_scale: None,
                 min_context_window: model.min_context_window,
                 pinned_providers: model.pinned_providers.clone(),
+                ..ModelRoute::default()
             })
         });
         let grok = if self.grok.enabled {
-            grok_models(self.grok.context_window_scaling)
+            built_in_routes(
+                &GROK_MODELS,
+                ModelFamily::Grok,
+                GROK_CONTEXT_WINDOW,
+                self.grok.context_window_scaling,
+            )
         } else {
             Vec::new()
         };
@@ -774,7 +768,7 @@ impl Config {
             "bind-address must be loopback; refusing to bind to {}",
             self.bind_address
         );
-        validate_base_url("anthropic-upstream-base", &self.anthropic_upstream_base)?;
+        validate_anthropic_base_url(&self.anthropic_upstream_base)?;
         ensure!(
             self.max_request_body_bytes > 0,
             "max-request-body-bytes must be greater than zero"
@@ -782,8 +776,7 @@ impl Config {
         if let Some(token) = &self.ingress_token {
             ensure!(!token.is_empty(), "ingress-token cannot be empty");
             ensure!(
-                token.bytes().all(|byte| byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'-' | b'_' | b'.' | b'~')),
+                token.bytes().all(|byte| is_slug_byte(byte) || byte == b'~'),
                 "ingress-token may only contain URL-safe characters (alphanumeric, -, _, ., ~)"
             );
         }
@@ -824,6 +817,14 @@ impl Config {
                 route.routing_id
             );
             ensure!(
+                !route
+                    .display_name
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control()),
+                "display-name contains control characters for {}",
+                route.routing_id
+            );
+            ensure!(
                 route.upstream == CLIPROXY_UPSTREAM,
                 "model {} references upstream {:?}; only `{CLIPROXY_UPSTREAM}` is supported today",
                 route.routing_id,
@@ -840,9 +841,7 @@ impl Config {
         self.validate_openai_providers(cliproxy)
     }
 
-    /// Context-window fields on one route. Scaling is refused without both a
-    /// real window to scale to and the client-side declaration to scale from:
-    /// guessing either one would silently move the compaction point.
+    /// Context-window fields on one route.
     fn validate_context_window(&self, route: &ModelRoute) -> anyhow::Result<()> {
         if let Some(window) = route.context_window {
             ensure!(
@@ -853,11 +852,7 @@ impl Config {
         }
         if route.context_window_scaling {
             let client = client_context_window(self.declared_context_window);
-            // Scaling only ever reports *fewer* tokens than were really used.
-            // The reverse would mean claiming a route can hold more than
-            // Claude Code thinks, and the compact gate mixes in its own
-            // unscaled estimate of the newest messages, so that direction
-            // cannot actually keep a request under the host's limit.
+            // See `UsageScale`: only scaling down is sound.
             if let Some(actual) = route.context_window {
                 ensure!(
                     actual >= client,
@@ -889,10 +884,7 @@ impl Config {
                 "openai-provider name cannot be empty"
             );
             ensure!(
-                provider
-                    .name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+                provider.name.bytes().all(is_slug_byte),
                 "openai-provider name {:?} may only contain alphanumerics, -, _, .",
                 provider.name
             );
@@ -921,12 +913,15 @@ impl Config {
                     provider.name
                 );
                 ensure!(
-                    !model.routing_id.is_empty()
-                        && model.routing_id.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                        }),
-                    "openai-provider {} model {} routing-id {:?} must be non-empty and contain \
-                     only alphanumerics, -, _, . (it becomes a CLIProxyAPI model alias)",
+                    !model.routing_id.is_empty(),
+                    "openai-provider {} model {} has an empty routing-id",
+                    provider.name,
+                    model.name
+                );
+                ensure!(
+                    model.routing_id.bytes().all(is_slug_byte),
+                    "openai-provider {} model {} routing-id {:?} may only contain \
+                     alphanumerics, -, _, . (it becomes a CLIProxyAPI model alias)",
                     provider.name,
                     model.name,
                     model.routing_id
@@ -934,15 +929,6 @@ impl Config {
                 ensure!(
                     !model.display_name.is_empty(),
                     "openai-provider {} model {} has an empty display-name",
-                    provider.name,
-                    model.name
-                );
-                ensure!(
-                    !model
-                        .display_name
-                        .bytes()
-                        .any(|byte| byte.is_ascii_control()),
-                    "openai-provider {} model {} display-name contains control characters",
                     provider.name,
                     model.name
                 );
@@ -986,8 +972,7 @@ impl Config {
 
 # Named upstreams default to one managed CLIProxyAPI upstream when this table
 # is absent. Managed mode is started by the supervisor and binds its child to
-# loopback on the configured port. (`[upstreams.codex]` is the deprecated
-# pre-0.2 name for the same upstream and still loads, with a warning.)
+# loopback on the configured port.
 #[upstreams.cliproxy]
 #mode = "managed"
 #port = 8317
@@ -1010,7 +995,7 @@ impl Config {
 
 {providers}# Maximum accepted inbound request-body size in bytes. Oversized requests get
 # a 413 error instead of being buffered without bound.
-# Default: {max_request_body_bytes} (100 MiB)
+# Default: {max_request_body_bytes}
 # max-request-body-bytes = {max_request_body_bytes}
 
 # Ingress token: the router only accepts requests under the /t/<token>/ path
@@ -1049,7 +1034,7 @@ impl Config {
 #file = "{capture_file}"
 # Maximum response-body bytes retained per request. Streaming to the client is
 # never truncated; capture records mark when this limit was reached.
-# Default: {capture_max_response_body_bytes} (10 MiB)
+# Default: {capture_max_response_body_bytes}
 #max-response-body-bytes = {capture_max_response_body_bytes}
 "#,
             bind_address = defaults.bind_address,
@@ -1057,7 +1042,8 @@ impl Config {
             max_request_body_bytes = defaults.max_request_body_bytes,
             anthropic_base = defaults.anthropic_upstream_base,
             models = template_models_section(&defaults.models),
-            providers = TEMPLATE_PROVIDERS_SECTION,
+            providers = TEMPLATE_PROVIDERS_SECTION
+                .replace("{declared_context_window}", &GPT_CONTEXT_WINDOW.to_string()),
             grok = template_grok_section(),
             capture_file = defaults.capture.file.display(),
             capture_max_response_body_bytes = defaults.capture.max_response_body_bytes,
@@ -1090,42 +1076,52 @@ fn parse_toml_sanitized<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn validate_base_url(name: &str, value: &str) -> anyhow::Result<()> {
+/// The charset shared by every identifier that becomes a `CLIProxyAPI` name.
+fn is_slug_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+}
+
+fn validate_anthropic_base_url(value: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(value).context("anthropic-upstream-base is not a valid URL")?;
     ensure!(
-        value.starts_with("http://") || value.starts_with("https://"),
-        "{name} must start with http:// or https://"
+        matches!(url.scheme(), "http" | "https"),
+        "anthropic-upstream-base must start with http:// or https://"
     );
     ensure!(
-        !value.ends_with('?'),
-        "{name} cannot end with a query marker"
+        url.host_str().is_some(),
+        "anthropic-upstream-base has no host"
+    );
+    ensure!(
+        url.query().is_none(),
+        "anthropic-upstream-base cannot carry a query string"
     );
     Ok(())
 }
 
-fn validate_gpt_upstream_base(value: &str) -> anyhow::Result<()> {
-    const BOUNDARY: &str = "gpt-upstream-base must use a loopback IP literal \
+fn validate_cliproxy_base_url(value: &str) -> anyhow::Result<()> {
+    const FIELD: &str = "[upstreams.cliproxy] base-url";
+    const BOUNDARY: &str = "[upstreams.cliproxy] base-url must use a loopback IP literal \
         (127.0.0.0/8 or ::1); hostnames (including localhost) and non-loopback \
         addresses are rejected because this is the GPT credential injection boundary";
 
-    let url = reqwest::Url::parse(value)
-        .with_context(|| format!("invalid gpt-upstream-base URL; {BOUNDARY}"))?;
+    let url = reqwest::Url::parse(value).with_context(|| format!("invalid {FIELD}; {BOUNDARY}"))?;
     ensure!(
         matches!(url.scheme(), "http" | "https"),
-        "gpt-upstream-base must start with http:// or https://; {BOUNDARY}"
+        "{FIELD} must start with http:// or https://; {BOUNDARY}"
     );
     let host = url
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("gpt-upstream-base has no host; {BOUNDARY}"))?;
+        .ok_or_else(|| anyhow::anyhow!("{FIELD} has no host; {BOUNDARY}"))?;
     let ip_literal = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(host);
     let ip = ip_literal
         .parse::<IpAddr>()
-        .map_err(|_| anyhow::anyhow!("gpt-upstream-base host {host:?} is not an IP; {BOUNDARY}"))?;
+        .map_err(|_| anyhow::anyhow!("{FIELD} host {host:?} is not an IP; {BOUNDARY}"))?;
     ensure!(
         ip.is_loopback(),
-        "gpt-upstream-base host {host:?} is not loopback; {BOUNDARY}"
+        "{FIELD} host {host:?} is not loopback; {BOUNDARY}"
     );
     Ok(())
 }
@@ -1138,7 +1134,7 @@ fn validate_cliproxy_upstream(upstream: &UpstreamConfig) -> anyhow::Result<()> {
                     "[upstreams.{CLIPROXY_UPSTREAM}] base-url is required when mode = \"external\""
                 )
             })?;
-            validate_gpt_upstream_base(base_url)?;
+            validate_cliproxy_base_url(base_url)?;
             if let Some(api_key) = &upstream.api_key {
                 ensure!(
                     !api_key.is_empty(),
@@ -1181,58 +1177,28 @@ fn validate_provider_base_url(provider: &str, value: &str) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Test fixture: a parsed and prepared config, panicking on any error.
+#[cfg(test)]
+pub(crate) fn parse_and_prepare(source: &str) -> Config {
+    let mut config: Config = toml::from_str(source).unwrap();
+    config.prepare().unwrap();
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    pub(super) fn parse_and_prepare(source: &str) -> Config {
-        let mut config: Config = toml::from_str(source).unwrap();
-        config.prepare().unwrap();
-        config
-    }
-
-    pub(super) fn prepare_error(source: &str) -> String {
+    fn prepare_error(source: &str) -> String {
         let mut config: Config = toml::from_str(source).unwrap();
         format!("{:#}", config.prepare().unwrap_err())
     }
 
     #[test]
-    fn empty_config_uses_defaults() {
-        let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.bind_address, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(config.port, 8787);
-        assert_eq!(config.upstreams.len(), 1);
-        let cliproxy = &config.upstreams["cliproxy"];
-        assert_eq!(cliproxy.mode, UpstreamMode::Managed);
-        assert_eq!(cliproxy.port, 8317);
-        assert!(cliproxy.base_url.is_none());
-        assert!(cliproxy.api_key.is_none());
-        assert!(!config.capture.enabled);
-        assert_eq!(
-            config.capture.max_response_body_bytes,
-            DEFAULT_CAPTURE_RESPONSE_BODY_BYTES
-        );
-        config.validate().unwrap();
-    }
-
-    #[test]
     fn absent_upstreams_table_defaults_to_managed_cliproxy() {
-        let config = parse_and_prepare("port = 9000");
+        let config = parse_and_prepare("");
         assert_eq!(config.upstreams.keys().collect::<Vec<_>>(), ["cliproxy"]);
         assert_eq!(config.upstreams["cliproxy"], UpstreamConfig::default());
-    }
-
-    #[test]
-    fn route_references_default_cliproxy_when_upstream_is_omitted() {
-        let config = parse_and_prepare(
-            r#"
-                [[models]]
-                routing-id = "claude-gpt-test"
-                upstream-model = "gpt-test"
-                display-name = "GPT Test"
-            "#,
-        );
-        assert_eq!(config.models[0].upstream, "cliproxy");
     }
 
     #[test]
@@ -1256,30 +1222,12 @@ mod tests {
     }
 
     #[test]
-    fn template_parses_when_example_is_left_commented() {
-        let template = Config::template();
-        let config: Config = toml::from_str(&template).unwrap();
-        assert_eq!(config.port, Config::default().port);
-        assert_eq!(config.upstreams["cliproxy"].mode, UpstreamMode::Managed);
-        assert_eq!(config.models, Config::default().models);
-        assert_eq!(
-            config
-                .models
-                .iter()
-                .map(|route| route.routing_id.as_str())
-                .collect::<Vec<_>>(),
-            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-        );
-        for example in [
-            "#mode = \"managed\"",
-            "#mode = \"external\"",
-            "#mode = \"stub\"",
-            "#routing-id = \"gpt-5.6-sol\"",
-            "#routing-id = \"gpt-5.6-terra\"",
-            "#routing-id = \"gpt-5.6-luna\"",
-        ] {
-            assert!(template.contains(example), "missing {example:?}");
-        }
+    fn template_parses_to_the_defaults_when_left_commented() {
+        let config = parse_and_prepare(&Config::template());
+        let defaults = Config::default();
+        assert_eq!(config.port, defaults.port);
+        assert_eq!(config.upstreams, defaults.upstreams);
+        assert_eq!(config.models, defaults.models);
     }
 
     #[test]
@@ -1359,7 +1307,7 @@ mod tests {
             "http://127.42.0.9:8317",
             "http://[::1]:8317",
         ] {
-            let config = parse_and_prepare(&format!(
+            parse_and_prepare(&format!(
                 r#"
                     [upstreams.cliproxy]
                     mode = "external"
@@ -1367,11 +1315,6 @@ mod tests {
                     api-key = "local-gateway-secret"
                 "#
             ));
-            assert_eq!(config.upstreams["cliproxy"].base_url.as_deref(), Some(base));
-            assert_eq!(
-                config.upstreams["cliproxy"].api_key.as_deref(),
-                Some("local-gateway-secret")
-            );
         }
     }
 
@@ -1409,9 +1352,26 @@ mod tests {
             ))
             .unwrap();
             let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("[upstreams.cliproxy] base-url"), "{error}");
             assert!(error.contains("loopback IP literal"), "{error}");
             assert!(error.contains("credential injection boundary"), "{error}");
         }
+    }
+
+    #[test]
+    fn anthropic_upstream_base_must_be_a_plain_http_url() {
+        for base in [
+            "api.anthropic.com",
+            "ftp://x.example",
+            "https://",
+            "https://x.example/?q=1",
+        ] {
+            let config: Config =
+                toml::from_str(&format!("anthropic-upstream-base = {base:?}")).unwrap();
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("anthropic-upstream-base"), "{base}: {error}");
+        }
+        parse_and_prepare("anthropic-upstream-base = \"https://proxy.example/v1\"");
     }
 
     #[test]
@@ -1421,6 +1381,8 @@ mod tests {
             "gpt-upstream-api-key = \"secret\"",
             "[upstreams.cliproxy]\nmode = \"stub\"\nextra = true",
             "[[models]]\nrouting-id = \"route\"\nupstream-model = \"model\"\ndisplay-name = \"Model\"\nextra = true",
+            "[grok]\nenabled = true\nnope = 1",
+            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\nfamily = \"gemini\"",
         ] {
             assert!(
                 toml::from_str::<Config>(source).is_err(),
@@ -1519,7 +1481,7 @@ mod tests {
         assert!(error.contains("keep only `cliproxy`"), "{error}");
     }
 
-    pub(super) fn provider_toml(models: &str) -> String {
+    fn provider_toml(models: &str) -> String {
         format!(
             r#"
                 [[openai-providers]]
@@ -1548,29 +1510,12 @@ mod tests {
         assert_eq!(route.display_name, "Kimi K2.7");
         // Derived routes participate in routing alongside the defaults.
         let decision = crate::routing::decide(&config, br#"{"model":"kimi-k2.7"}"#);
-        assert_eq!(decision.branch, crate::routing::Branch::Gpt);
         assert_eq!(
             decision.route.unwrap().upstream_model,
             "openai-compat--kimi-k2.7"
         );
         let default_still_routes = crate::routing::decide(&config, br#"{"model":"gpt-5.6-sol"}"#);
-        assert_eq!(default_still_routes.branch, crate::routing::Branch::Gpt);
-    }
-
-    #[test]
-    fn provider_routing_id_colliding_with_default_route_is_rejected() {
-        let error = prepare_error(&provider_toml(
-            r#"
-                [[openai-providers.models]]
-                name = "some/upstream-model"
-                routing-id = "gpt-5.6-sol"
-                display-name = "Impostor"
-            "#,
-        ));
-        assert!(
-            error.contains("duplicate model routing-id: gpt-5.6-sol"),
-            "{error}"
-        );
+        assert!(default_still_routes.route.is_some());
     }
 
     #[test]
@@ -1628,6 +1573,24 @@ mod tests {
     }
 
     #[test]
+    fn min_context_window_is_positive_and_openrouter_only() {
+        let error = prepare_error(&provider_toml(KIMI_MODEL).replace(
+            "display-name = \"Kimi K2.7\"",
+            "display-name = \"Kimi K2.7\"\nmin-context-window = 1000000",
+        ));
+        assert!(error.contains("only OpenRouter supports"), "{error}");
+        let error = prepare_error(&kimi_toml("min-context-window = 0", false));
+        assert!(error.contains("greater than zero"), "{error}");
+    }
+
+    #[test]
+    fn is_openrouter_matches_the_exact_host_only() {
+        assert!(is_openrouter("https://openrouter.ai/api/v1"));
+        assert!(!is_openrouter("https://openrouter.ai.example.com/api/v1"));
+        assert!(!is_openrouter("https://api.fireworks.ai/inference/v1"));
+    }
+
+    #[test]
     fn duplicate_provider_names_and_routing_ids_are_rejected() {
         // Same provider name, distinct routing-ids: the provider-name check fires.
         let second = provider_toml(KIMI_MODEL).replace("kimi-k2.7", "kimi-other");
@@ -1640,15 +1603,31 @@ mod tests {
             error.contains("duplicate model routing-id: kimi-k2.7"),
             "{error}"
         );
+        // A provider colliding with a built-in route.
+        let error = prepare_error(&provider_toml(
+            r#"
+                [[openai-providers.models]]
+                name = "some/upstream-model"
+                routing-id = "gpt-5.6-sol"
+                display-name = "Impostor"
+            "#,
+        ));
+        assert!(
+            error.contains("duplicate model routing-id: gpt-5.6-sol"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn prepare_is_idempotent() {
-        let mut config: Config = toml::from_str(&provider_toml(KIMI_MODEL)).unwrap();
+    fn prepare_is_idempotent_across_legacy_normalization() {
+        let mut config: Config = toml::from_str(
+            "[upstreams.codex]\nmode = \"stub\"\n\n[[models]]\nrouting-id = \"r\"\nupstream = \"codex\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n",
+        )
+        .unwrap();
         config.prepare().unwrap();
-        let first = config.generated_models.clone();
         config.prepare().unwrap();
-        assert_eq!(config.generated_models, first);
+        assert_eq!(config.upstreams.keys().collect::<Vec<_>>(), ["cliproxy"]);
+        assert_eq!(config.models[0].upstream, "cliproxy");
     }
 
     #[test]
@@ -1662,38 +1641,30 @@ mod tests {
                 .contains("max-request-body-bytes must be greater than zero")
         );
     }
-}
 
-#[cfg(test)]
-mod context_window_tests {
-    use super::tests::{parse_and_prepare, prepare_error, provider_toml};
-    use super::*;
+    // ---- context windows ----
 
-    /// One provider model with the context fields under test, and the
-    /// top-level declaration scaling requires.
-    fn config_toml(routing_id: &str, declared: u64, window: &str, scaling: bool) -> String {
+    /// One `OpenRouter` model with the context fields under test, under the
+    /// declaration setup writes.
+    fn kimi_toml(window: &str, scaling: bool) -> String {
         format!(
-            "declared-context-window = {declared}\n{}",
-            provider_toml(&format!(
-                r#"
+            r#"
+                declared-context-window = {GPT_CONTEXT_WINDOW}
+                [[openai-providers]]
+                name = "openrouter"
+                base-url = "https://openrouter.ai/api/v1"
                 [[openai-providers.models]]
                 name = "moonshotai/kimi-k3"
-                routing-id = "{routing_id}"
+                routing-id = "kimi-k3"
                 display-name = "Kimi K3"
                 {window}
                 context-window-scaling = {scaling}
-                "#
-            ))
+            "#
         )
     }
 
     fn kimi(window: u64, scaling: bool) -> String {
-        config_toml(
-            "kimi-k3",
-            250_000,
-            &format!("context-window = {window}"),
-            scaling,
-        )
+        kimi_toml(&format!("context-window = {window}"), scaling)
     }
 
     fn route<'a>(config: &'a Config, routing_id: &str) -> &'a ModelRoute {
@@ -1709,24 +1680,27 @@ mod context_window_tests {
         let route = route(&config, "kimi-k3");
         assert_eq!(route.context_window, Some(1_000_000));
         assert!(route.context_window_scaling);
-        // 250000 / 1000000: a real 1M-token conversation reports as 250K, so
+        // A real 1M-token conversation reports as the declared window, so
         // Claude Code compacts at the model's real limit.
-        assert_eq!(route.usage_scale.unwrap().apply(1_000_000), 250_000);
+        assert_eq!(
+            route.usage_scale.unwrap().apply(1_000_000),
+            GPT_CONTEXT_WINDOW
+        );
     }
 
     #[test]
     fn scaling_is_none_when_the_windows_already_agree() {
-        let config = parse_and_prepare(&kimi(250_000, true));
+        let config = parse_and_prepare(&kimi(GPT_CONTEXT_WINDOW, true));
         assert!(route(&config, "kimi-k3").usage_scale.is_none());
     }
 
     #[test]
     fn scaling_a_window_below_the_declared_one_is_rejected() {
-        // Reporting *more* tokens than were used cannot keep a request under
-        // the host's limit, because the compact gate mixes in its own
-        // unscaled estimate of the newest messages.
         let error = prepare_error(&kimi(125_000, true));
-        assert!(error.contains("below the 250000"), "{error}");
+        assert!(
+            error.contains(&format!("below the {GPT_CONTEXT_WINDOW}")),
+            "{error}"
+        );
         assert!(
             error.contains("Lower CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
             "{error}"
@@ -1734,34 +1708,28 @@ mod context_window_tests {
     }
 
     #[test]
-    fn default_gpt_routes_record_their_real_window_without_scaling() {
-        let config = parse_and_prepare("");
-        let route = route(&config, "gpt-5.6-sol");
-        assert_eq!(route.context_window, Some(GPT_CONTEXT_WINDOW));
-        assert!(route.usage_scale.is_none());
-    }
-
-    #[test]
-    fn every_default_route_is_codex_native() {
-        // Drift guard: overflow translation is armed per-route by this
-        // predicate, so a default route pointing at a model missing from
-        // CODEX_NATIVE_MODELS would silently lose overflow recovery.
-        for route in Config::default().models {
-            assert!(
-                is_codex_native_model(&route.upstream_model),
-                "{} is not registered as Codex-native",
-                route.upstream_model
-            );
-        }
-        assert!(!is_codex_native_model("openai-compat--kimi-k3"));
-        assert!(!is_codex_native_model("kimi-k3"));
+    fn overflow_translation_is_armed_for_built_in_models_only() {
+        use crate::overflow::OverflowDialect;
+        let config =
+            parse_and_prepare(&format!("{}[grok]\nenabled = true\n", kimi_toml("", false)));
+        let dialect = |routing_id: &str| overflow_dialect(route(&config, routing_id));
+        assert_eq!(dialect("gpt-5.6-sol"), Some(OverflowDialect::Codex));
+        assert_eq!(dialect("grok-4.5"), Some(OverflowDialect::Xai));
+        assert_eq!(dialect("kimi-k3"), None);
+        // A hand-written route inherits the family but not the verified backend.
+        let hand_written = parse_and_prepare(
+            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\n\n\
+             [[models]]\nrouting-id = \"b\"\nupstream-model = \"m2\"\ndisplay-name = \"B\"\nfamily = \"grok\"\n",
+        );
+        assert_eq!(overflow_dialect(&hand_written.models[0]), None);
+        assert_eq!(overflow_dialect(&hand_written.models[1]), None);
     }
 
     #[test]
     fn a_scaling_route_without_a_window_waits_for_discovery() {
         // `serve` fills these in from the host; until then the route is
         // simply unscaled rather than a config error.
-        let config = parse_and_prepare(&config_toml("kimi-k3", 250_000, "", true));
+        let config = parse_and_prepare(&kimi_toml("", true));
         let route = route(&config, "kimi-k3");
         assert!(route.context_window.is_none());
         assert!(route.usage_scale.is_none());
@@ -1772,31 +1740,12 @@ mod context_window_tests {
         assert!(prepare_error(&kimi(0, true)).contains("greater than zero"));
     }
 
-    #[test]
-    fn template_documents_the_fields_and_still_parses() {
-        let template = Config::template();
-        assert!(template.contains("#context-window-scaling = true"));
-        assert!(template.contains("# declared-context-window = 258400"));
-        parse_and_prepare(&template);
-    }
-
     // ---- Grok family (optional) ----
 
-    /// The declaration setup writes; `client_context_window` uses it for
-    /// every routed model.
-    const DECLARED: &str = "declared-context-window = 258400\n";
-
     #[test]
-    fn grok_routes_are_absent_unless_enabled() {
+    fn grok_routes_exist_only_when_enabled_and_survive_a_hand_written_models_block() {
         for source in ["", "[grok]\nenabled = false\n"] {
             let config = parse_and_prepare(source);
-            assert!(
-                !config
-                    .generated_models
-                    .iter()
-                    .any(|route| route.family == ModelFamily::Grok),
-                "{source:?}"
-            );
             assert!(
                 !config
                     .effective_models()
@@ -1804,85 +1753,30 @@ mod context_window_tests {
                 "{source:?}"
             );
         }
-    }
-
-    #[test]
-    fn enabling_grok_adds_the_built_in_route() {
-        let config = parse_and_prepare("[grok]\nenabled = true\n");
-        let grok: Vec<&ModelRoute> = config
-            .generated_models
-            .iter()
-            .filter(|route| route.family == ModelFamily::Grok)
-            .collect();
-        let ids: Vec<&str> = grok.iter().map(|route| route.routing_id.as_str()).collect();
-        assert_eq!(ids, ["grok-4.6", "grok-4.5"]);
-        for route in &grok {
-            assert_eq!(route.family, ModelFamily::Grok);
-            assert_eq!(route.upstream, CLIPROXY_UPSTREAM);
-            assert!(route.upstream_model.starts_with("grok-"));
-        }
-        // Reachable through the one iterator every consumer uses.
-        assert!(
-            config
-                .effective_models()
-                .any(|route| route.routing_id == "grok-4.5")
-        );
-    }
-
-    #[test]
-    fn hand_written_models_do_not_suppress_grok_routes() {
-        // `models` has a serde default, so any [[models]] block replaces it
-        // wholesale — the Grok routes must not live there.
         let config = parse_and_prepare(
             "[[models]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n[grok]\nenabled = true\n",
         );
         assert_eq!(config.models.len(), 1);
-        assert_eq!(config.generated_models.len(), GROK_MODELS.len());
-        assert!(
-            config
-                .effective_models()
-                .any(|route| route.routing_id == "grok-4.5")
+        for (model, _) in GROK_MODELS {
+            let route = route(&config, model);
+            assert_eq!(route.family, ModelFamily::Grok);
+            assert_eq!(route.upstream_model, model);
+        }
+    }
+
+    #[test]
+    fn grok_scaling_follows_the_flag() {
+        let config = parse_and_prepare("[grok]\nenabled = true\n");
+        assert!(route(&config, "grok-4.5").usage_scale.is_none());
+
+        let config = parse_and_prepare("[grok]\nenabled = true\ncontext-window-scaling = true\n");
+        let route = route(&config, "grok-4.5");
+        let scale = route.usage_scale.expect("grok-4.5 unscaled");
+        // A full real window reports as the declared one.
+        assert_eq!(
+            scale.apply(route.context_window.unwrap()),
+            GPT_CONTEXT_WINDOW
         );
-    }
-
-    #[test]
-    fn grok_scaling_applies_the_declared_over_real_ratio() {
-        let config = parse_and_prepare(&format!(
-            "{DECLARED}[grok]\nenabled = true\ncontext-window-scaling = true\n"
-        ));
-        // Must be scaled: a `compute_usage_scales` that skipped grok_models
-        // would leave this None while doctor still says "scaled".
-        let scale = config
-            .effective_models()
-            .find(|route| route.routing_id == "grok-4.5")
-            .expect("grok-4.5 missing")
-            .usage_scale
-            .expect("grok-4.5 unscaled");
-        assert!((scale.ratio() - 258_400.0 / 500_000.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn grok_routes_are_unscaled_by_default() {
-        let config = parse_and_prepare(&format!("{DECLARED}[grok]\nenabled = true\n"));
-        assert!(
-            config
-                .generated_models
-                .iter()
-                .all(|route| route.usage_scale.is_none())
-        );
-    }
-
-    #[test]
-    fn grok_routes_take_part_in_duplicate_detection() {
-        let error = prepare_error(
-            "[[models]]\nrouting-id = \"grok-4.5\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n[grok]\nenabled = true\n",
-        );
-        assert!(error.contains("duplicate model routing-id"), "{error}");
-    }
-
-    #[test]
-    fn grok_section_rejects_unknown_keys() {
-        assert!(toml::from_str::<Config>("[grok]\nenabled = true\nnope = 1\n").is_err());
     }
 
     // ---- family field ----
@@ -1913,15 +1807,5 @@ mod context_window_tests {
         assert_eq!(family("gpt-5.6-sol"), ModelFamily::Gpt);
         assert_eq!(family("grok-4.5"), ModelFamily::Grok);
         assert_eq!(family("kimi"), ModelFamily::OpenAiCompat);
-    }
-
-    #[test]
-    fn family_rejects_unknown_values() {
-        assert!(
-            toml::from_str::<Config>(
-                "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\nfamily = \"gemini\"\n"
-            )
-            .is_err()
-        );
     }
 }

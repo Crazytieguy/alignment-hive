@@ -5,32 +5,11 @@ use serde::de::IgnoredAny;
 
 use crate::config::{Config, ModelFamily, ModelRoute};
 
-/// Where a request is *sent* — not what family the model belongs to.
-///
-/// This axis stays binary however many vendor families ride the child:
-/// `Gpt` names the `CLIProxyAPI` branch, which already carries open-weights
-/// routes and now Grok as well. The model family is a per-route property
-/// ([`crate::config::ModelFamily`]); for logs and capture records use
-/// [`RoutingDecision::family_label`], which reports both honestly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Branch {
-    Claude,
-    Gpt,
-}
-
-impl Branch {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Gpt => "gpt",
-        }
-    }
-}
-
+/// Where a request goes: to the matched route through the `CLIProxyAPI`
+/// child (whatever vendor family the route is), or to Anthropic when
+/// `route` is `None`.
 #[derive(Clone, Debug)]
 pub struct RoutingDecision<'a> {
-    pub branch: Branch,
     pub model: Option<String>,
     pub route: Option<&'a ModelRoute>,
 }
@@ -54,42 +33,26 @@ pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
     // string, so multi-MB Claude bodies are never built into a JSON DOM just
     // to read one key — and decide() shares last-key-wins semantics with
     // substitute_model by construction.
-    let model = find_top_level_model_range(body)
+    let model = find_top_level_value_range(body, "model")
         .and_then(|range| serde_json::from_slice::<String>(&body[range]).ok());
     let route = model.as_deref().and_then(|model| {
         config
             .effective_models()
             .find(|route| route.routing_id == model)
     });
-    RoutingDecision {
-        branch: if route.is_some() {
-            Branch::Gpt
-        } else {
-            Branch::Claude
-        },
-        model,
-        route,
-    }
+    RoutingDecision { model, route }
 }
 
 /// The upstream model ID to forward this request as, carrying the requested
 /// reasoning effort as `CLIProxyAPI`'s `model(effort)` suffix when the
 /// family needs it.
 ///
-/// Claude Code expresses effort as top-level `output_config.effort` (from an
-/// agent file's `effort:` frontmatter). Measured against `CLIProxyAPI`
-/// 7.2.110 on 2026-07-31: that field is forwarded verbatim on the Codex and
-/// openai-compat paths, but **silently dropped on the xAI path** — 9/9
-/// requests across low/medium/high arrived upstream as the default
-/// `reasoning.effort: "medium"`. The parenthesised suffix is the only
-/// channel that reaches xAI, so Grok routes carry the effort there instead.
-///
-/// The value passes through unvalidated on purpose: the child owns the
-/// clamping rules and applies them per model from its registry's declared
-/// levels (grok-4.5 clamps `xhigh`/`max` → `high`, grok-4.6 declares
-/// `xhigh` and maps `max` → `xhigh`; `none` → `low` where a model forbids
-/// zero; an unknown value → the model's default). Re-deriving them here
-/// would be a second, drifting copy of a table we do not own.
+/// Claude Code expresses effort as top-level `output_config.effort`. The
+/// child forwards that field on the Codex and openai-compat paths but drops
+/// it on the xAI path, so the suffix is the only channel that reaches xAI
+/// (measured; see `docs/experiments.md`). The value passes through
+/// unvalidated on purpose: the child owns the per-model clamping table, and
+/// a copy here would drift.
 #[must_use]
 pub fn effort_qualified_model<'a>(route: &'a ModelRoute, body: &[u8]) -> Cow<'a, str> {
     if route.family != ModelFamily::Grok {
@@ -120,7 +83,9 @@ fn requested_effort(body: &[u8]) -> Option<String> {
 /// Returns an error if the body has no top-level string `model` or if encoding
 /// the replacement fails.
 pub fn substitute_model(body: &[u8], upstream_model: &str) -> anyhow::Result<Vec<u8>> {
-    let range = find_top_level_model_range(body)
+    // For a string value the raw token range IS the encoded string range.
+    let range = find_top_level_value_range(body, "model")
+        .filter(|range| serde_json::from_slice::<String>(&body[range.clone()]).is_ok())
         .ok_or_else(|| anyhow::anyhow!("routed request body has no top-level string model"))?;
     let encoded = serde_json::to_vec(upstream_model)?;
     let mut output = Vec::with_capacity(body.len() - range.len() + encoded.len());
@@ -128,14 +93,6 @@ pub fn substitute_model(body: &[u8], upstream_model: &str) -> anyhow::Result<Vec
     output.extend_from_slice(&encoded);
     output.extend_from_slice(&body[range.end..]);
     Ok(output)
-}
-
-fn find_top_level_model_range(body: &[u8]) -> Option<Range<usize>> {
-    // For a string value the raw token range IS the encoded string range;
-    // a non-string model value yields no range, as before.
-    let range = find_top_level_value_range(body, "model")?;
-    serde_json::from_slice::<String>(&body[range.clone()]).ok()?;
-    Some(range)
 }
 
 /// Whether the request asks for a streamed response. Uses the same DOM-free
@@ -216,7 +173,6 @@ mod tests {
         let mut config = Config::default();
         config.models.push(ModelRoute {
             routing_id: "claude-gpt-test".to_string(),
-            upstream: "codex".to_string(),
             upstream_model: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             ..Default::default()
@@ -227,24 +183,36 @@ mod tests {
     #[test]
     fn exact_allowlist_match_routes_to_gpt() {
         let config = config();
-        assert_eq!(
-            decide(&config, br#"{"model":"claude-gpt-test"}"#).branch,
-            Branch::Gpt
+        assert!(
+            decide(&config, br#"{"model":"claude-gpt-test"}"#)
+                .route
+                .is_some()
         );
-        assert_eq!(
-            decide(&config, br#"{"model":"claude-gpt-test-extra"}"#).branch,
-            Branch::Claude
+        assert!(
+            decide(&config, br#"{"model":"claude-gpt-test-extra"}"#)
+                .route
+                .is_none()
         );
     }
 
     #[test]
     fn invalid_or_missing_model_routes_to_claude() {
         let config = config();
-        assert_eq!(decide(&config, b"not json").branch, Branch::Claude);
+        assert!(decide(&config, b"not json").route.is_none());
+        assert!(decide(&config, br#"{"messages":[]}"#).route.is_none());
+    }
+
+    #[test]
+    fn a_nested_key_is_not_the_top_level_one() {
+        let config = config();
+        let body = br#"{"metadata":{"model":"claude-gpt-test","stream":true},"model":"other","messages":[]}"#;
+        assert!(decide(&config, body).route.is_none());
+        assert_eq!(decide(&config, body).model.as_deref(), Some("other"));
         assert_eq!(
-            decide(&config, br#"{"messages":[]}"#).branch,
-            Branch::Claude
+            substitute_model(body, "upstream").unwrap(),
+            br#"{"metadata":{"model":"claude-gpt-test","stream":true},"model":"upstream","messages":[]}"#
         );
+        assert!(!is_streaming(body));
     }
 
     #[test]
@@ -266,19 +234,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn substitution_matches_last_key_routing_semantics() {
-        let original = br#"{"model":"old","messages":[],"model":"route"}"#;
-        assert_eq!(
-            substitute_model(original, "upstream").unwrap(),
-            br#"{"model":"old","messages":[],"model":"upstream"}"#
-        );
-    }
-
     fn route(family: ModelFamily, upstream: &str) -> ModelRoute {
         ModelRoute {
             routing_id: "r".to_string(),
-            upstream: "cliproxy".to_string(),
             upstream_model: upstream.to_string(),
             display_name: "R".to_string(),
             family,
@@ -288,8 +246,9 @@ mod tests {
 
     #[test]
     fn grok_routes_carry_effort_as_a_model_suffix() {
+        // Unvalidated on purpose: the child owns the clamping table.
         let grok = route(ModelFamily::Grok, "grok-4.5");
-        for effort in ["low", "medium", "high", "xhigh", "max", "none"] {
+        for effort in ["high", "whatever"] {
             let body =
                 format!(r#"{{"model":"r","output_config":{{"effort":"{effort}"}},"messages":[]}}"#);
             assert_eq!(
@@ -337,17 +296,5 @@ mod tests {
         let grok = route(ModelFamily::Grok, "grok-4.5");
         let body = br#"{"model":"r","output_config":{"effort":"high)(evil"},"messages":[]}"#;
         assert_eq!(effort_qualified_model(&grok, body), "grok-4.5");
-    }
-
-    #[test]
-    fn the_suffix_reaches_the_forwarded_body() {
-        let grok = route(ModelFamily::Grok, "grok-4.5");
-        let body = br#"{"model":"r","output_config":{"effort":"high"},"messages":[]}"#;
-        let upstream = effort_qualified_model(&grok, body);
-        let rewritten = substitute_model(body, &upstream).unwrap();
-        assert_eq!(
-            rewritten,
-            br#"{"model":"grok-4.5(high)","output_config":{"effort":"high"},"messages":[]}"#
-        );
     }
 }

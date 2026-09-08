@@ -1,23 +1,23 @@
 #![warn(clippy::pedantic)]
 
 pub mod acquire;
-pub mod capture;
+mod capture;
 mod claude_settings;
-pub mod client_window;
+mod client_window;
 pub mod config;
 mod context_check;
 pub mod discovery;
 pub mod doctor;
-pub mod headers;
-pub mod identity;
+mod headers;
+mod identity;
 mod overflow;
-pub mod prompt_cache;
+mod prompt_cache;
 pub mod proxy;
-pub mod routing;
+mod routing;
 pub mod service;
 pub mod state;
-pub mod stub;
+mod stub;
 pub mod supervisor;
 mod usage;
 pub mod verify;
-pub mod websearch;
+mod websearch;

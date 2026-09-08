@@ -14,12 +14,6 @@ set -euo pipefail
 # state dir (binary-version next to this script). `model-router service`
 # maintains the launcher copy; OS service units exec it so they never point
 # at ephemeral per-version plugin directories.
-#
-# The platform-specific marketplace entries ship the binary inside the plugin
-# zip, at bin/model-router-<target>.tar.xz. When it is there the binary comes
-# from the plugin itself, so plugin and binary are never out of step. The
-# plain (path-source) plugin has no bin/ and downloads as before. A bin/ that
-# holds some other platform's binary is an error, not a fallback.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/binary-version" ]; then
@@ -86,7 +80,7 @@ if [ "${1:-}" = "platform-check" ]; then
   exit 0
 fi
 
-CACHE_DIR="$HOME/.cache/model-router/v${VERSION}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/model-router/v${VERSION}"
 BINARY="$CACHE_DIR/model-router"
 if [ ! -x "$BINARY" ]; then
   # Download and extract into a private staging dir, then atomically rename
@@ -107,7 +101,7 @@ if [ ! -x "$BINARY" ]; then
     ARCHIVE="$STAGING/$ARCHIVE_NAME"
     DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/model-router-v${VERSION}/${ARCHIVE_NAME}"
     echo "Downloading model-router v${VERSION} for ${TARGET}..." >&2
-    if ! curl -fSL "$DOWNLOAD_URL" -o "$ARCHIVE" 2>/dev/null; then
+    if ! curl -fSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
       echo "Failed to download from: $DOWNLOAD_URL" >&2
       echo "If this version was just published, the release may still be building — retry in a few minutes." >&2
       echo "(For local development, point MODEL_ROUTER_DEV at a built binary.)" >&2

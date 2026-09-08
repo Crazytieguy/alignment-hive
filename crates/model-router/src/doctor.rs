@@ -1,5 +1,5 @@
 //! One-shot diagnosis used by humans, the setup skill, and the `SessionStart`
-//! hook. Read-only apart from the idempotent legacy-auth import.
+//! hook. Read-only: it creates no state.
 
 use serde::Serialize;
 
@@ -8,9 +8,7 @@ use crate::config::{Config, UpstreamMode};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::ModelFamily;
-use crate::state::{
-    Dirs, GROK_AUTH_PREFIX, find_auth, find_codex_auth, harden_auth_files, import_legacy_auth,
-};
+use crate::state::{Dirs, GROK_AUTH_PREFIX, find_auth, harden_auth_files};
 
 #[derive(Debug, Serialize)]
 pub struct Check {
@@ -73,10 +71,12 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         // SocketAddr's Display brackets IPv6 correctly (http://[::1]:8787).
         let address = std::net::SocketAddr::new(config.bind_address, config.port);
         router_address = Some(address);
+        // Read-only: doctor is a diagnosis, and a token that does not exist
+        // yet means the service has never run, which the router check says.
         let token = config
             .ingress_token
             .clone()
-            .or_else(|| crate::state::load_or_create_ingress_token(dirs).ok());
+            .or_else(|| crate::state::load_ingress_token(dirs));
         base_url = token.map(|token| crate::proxy::tokened_base_url(&address, &token));
         if let Some(upstream) = config.upstreams.get(crate::config::CLIPROXY_UPSTREAM) {
             upstream_checks(dirs, config, upstream, &mut checks);
@@ -196,7 +196,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                 }
                 // A healthy-but-stale service is otherwise invisible: the
                 // SessionStart hook retries `service refresh` silently.
-                if let Some(expected) = launcher_version(dirs)
+                if let Some(expected) = crate::service::launcher_version(dirs).ok().flatten()
                     && expected != version
                 {
                     checks.push(Check {
@@ -343,11 +343,11 @@ fn upstream_checks(
 ) {
     match upstream.mode {
         UpstreamMode::Managed => {
-            let binary = dirs.upstream_binary(UPSTREAM_VERSION);
+            let cached = crate::acquire::cached_upstream(dirs).is_some();
             checks.push(Check {
                 name: "upstream-binary",
-                ok: binary.is_file(),
-                detail: if binary.is_file() {
+                ok: cached,
+                detail: if cached {
                     format!("CLIProxyAPI v{UPSTREAM_VERSION} cached")
                 } else {
                     format!(
@@ -357,14 +357,8 @@ fn upstream_checks(
                 },
             });
 
-            let auth = import_legacy_auth(dirs)
-                .ok()
-                .flatten()
-                .map(|imported| format!("imported existing login {imported}"))
-                .or_else(|| {
-                    find_codex_auth(&dirs.auth_dir())
-                        .map(|path| format!("login present: {}", path.display()))
-                });
+            let auth = find_auth(&dirs.auth_dir(), crate::state::CODEX_AUTH_PREFIX)
+                .map(|path| format!("login present: {}", path.display()));
             checks.push(Check {
                 name: "codex-auth",
                 ok: auth.is_some(),
@@ -504,7 +498,10 @@ fn models_catalog_request(dirs: &Dirs, config: &Config) -> Option<(String, Optio
             // No secret means the service has never run; the binary and auth
             // checks already say so.
             let secret = crate::state::load_secret(dirs)?;
-            Some((format!("http://127.0.0.1:{}", upstream.port), Some(secret)))
+            Some((
+                crate::supervisor::managed_base_url(upstream.port),
+                Some(secret),
+            ))
         }
         UpstreamMode::External => Some((upstream.base_url.clone()?, upstream.api_key.clone())),
     }
@@ -549,14 +546,6 @@ async fn probe_ok(url: &str) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 
-/// The version the installed service launcher will run, when a launcher
-/// exists (`None` for foreground/dev setups without an installed service).
-fn launcher_version(dirs: &Dirs) -> Option<String> {
-    let raw = std::fs::read_to_string(dirs.launcher_dir().join("binary-version")).ok()?;
-    let version = raw.trim();
-    (!version.is_empty()).then(|| version.to_string())
-}
-
 async fn probe_health(
     address: std::net::SocketAddr,
 ) -> Option<(String, String, String, Option<u64>)> {
@@ -575,8 +564,6 @@ async fn probe_health(
         value.get("version")?.as_str()?.to_string(),
         value
             .get("cliproxy-upstream")
-            // Pre-0.2 services only emit the legacy key.
-            .or_else(|| value.get("codex-upstream"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown")
             .to_string(),
@@ -610,22 +597,11 @@ impl Report {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use crate::claude_settings::write_settings;
-
-    fn test_dirs(root: &std::path::Path) -> Dirs {
-        Dirs {
-            config_dir: root.join("config"),
-            state_dir: root.join("state"),
-            cache_dir: root.join("cache"),
-        }
-    }
-
-    fn config(source: &str) -> Config {
-        let mut config: Config = toml::from_str(source).unwrap();
-        config.prepare().unwrap();
-        config
-    }
+    use crate::config::parse_and_prepare as config;
 
     fn grok_enabled() -> Config {
         config("[grok]\nenabled = true\n")
@@ -747,7 +723,7 @@ mod tests {
     #[test]
     fn catalog_request_is_skipped_when_there_is_nothing_to_probe() {
         let dir = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(dir.path());
+        let dirs = Dirs::under(dir.path());
         // Managed mode but the service has never run: no secret, and doctor
         // must not create one.
         assert!(models_catalog_request(&dirs, &grok_enabled()).is_none());
@@ -811,13 +787,10 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let dirs = Dirs {
-            config_dir: state.path().join("config"),
-            state_dir: state.path().to_path_buf(),
-            cache_dir: state.path().join("cache"),
-        };
+        let dirs = Dirs::under(state.path());
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
         let load = || {
-            let mut config: Config = toml::from_str(
+            config(
                 r#"
 declared-context-window = 250000
 [[openai-providers]]
@@ -829,9 +802,6 @@ routing-id = "kimi-k3"
 display-name = "Kimi K3"
 "#,
             )
-            .unwrap();
-            config.prepare().unwrap();
-            config
         };
         write_settings(
             home.path(),
@@ -839,13 +809,13 @@ display-name = "Kimi K3"
             r#"{"modelPicker":{"options":[{"model":"kimi-k3","behavesAs":"claude-opus-4-8"}]}}"#,
         );
         let cache = |window: u64| {
-            std::fs::write(
-                state.path().join("context-windows.json"),
-                // The cache key is `<provider>\u{1f}<host model id>`, which
-                // JSON has to carry escaped.
-                format!("{{\"openrouter\\u001fmoonshotai/kimi-k3\": {window}}}"),
-            )
-            .unwrap();
+            crate::discovery::write_cache(
+                &dirs.state_dir.join("context-windows.json"),
+                &std::collections::BTreeMap::from([(
+                    crate::discovery::cache_key("openrouter", "moonshotai/kimi-k3"),
+                    crate::discovery::Cached { window, pin: None },
+                )]),
+            );
         };
         let run = || {
             let checks = context_window_checks(load(), &dirs, Some(home.path()), project.path());
@@ -885,52 +855,42 @@ display-name = "Kimi K3"
     #[test]
     fn auth_permissions_repairs_and_reports_every_credential() {
         let dir = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(dir.path());
+        let dirs = Dirs::under(dir.path());
         std::fs::create_dir_all(dirs.auth_dir()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // A prefix we have never heard of must be hardened too.
-            for name in [
-                "xai-a@example.com.json",
-                "codex-1-a@example.com-pro.json",
-                "kimi-a@example.com.json",
-            ] {
-                let path = dirs.auth_dir().join(name);
-                std::fs::write(&path, b"{}").unwrap();
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            }
+        // A prefix we have never heard of must be hardened too.
+        for name in [
+            "xai-a@example.com.json",
+            "codex-1-a@example.com-pro.json",
+            "kimi-a@example.com.json",
+        ] {
+            let path = dirs.auth_dir().join(name);
+            std::fs::write(&path, b"{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
         let mut checks = Vec::new();
         auth_permission_check(&dirs, &mut checks);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "auth-permissions");
         assert!(checks[0].ok, "{}", checks[0].detail);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert!(checks[0].detail.contains('3'), "{}", checks[0].detail);
-            for name in [
-                "xai-a@example.com.json",
-                "codex-1-a@example.com-pro.json",
-                "kimi-a@example.com.json",
-            ] {
-                let mode = std::fs::metadata(dirs.auth_dir().join(name))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777;
-                assert_eq!(mode, 0o600, "{name}");
-            }
+        assert!(checks[0].detail.contains('3'), "{}", checks[0].detail);
+        for name in [
+            "xai-a@example.com.json",
+            "codex-1-a@example.com-pro.json",
+            "kimi-a@example.com.json",
+        ] {
+            let mode = std::fs::metadata(dirs.auth_dir().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn auth_permissions_reports_failure_rather_than_certifying_an_uninspectable_dir() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(dir.path());
+        let dirs = Dirs::under(dir.path());
         std::fs::create_dir_all(dirs.auth_dir()).unwrap();
         std::fs::write(dirs.auth_dir().join("xai-a@example.com.json"), b"{}").unwrap();
         std::fs::set_permissions(dirs.auth_dir(), std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -953,7 +913,7 @@ display-name = "Kimi K3"
     #[tokio::test]
     async fn auth_permissions_runs_regardless_of_config_validity_or_upstream_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(dir.path());
+        let dirs = Dirs::under(dir.path());
         std::fs::create_dir_all(&dirs.config_dir).unwrap();
 
         // An invalid config, and a valid one in a non-managed mode: the

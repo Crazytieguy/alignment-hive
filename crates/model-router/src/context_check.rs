@@ -1,12 +1,8 @@
-//! Doctor's `context-windows` check.
-//!
-//! The router cannot see [`client_window::ENV_VAR`] at request time, so a
-//! config that declares or scales windows is coupled to Claude Code's
-//! settings by hand. This check catches the two ways that coupling goes
-//! wrong: a route whose real window sits *below* what the client believes
-//! (hard upstream failures), and a `declared-context-window` that no longer
-//! matches the client's actual value (every scaled route silently compacting
-//! at the wrong point).
+//! Doctor's `context-windows` check: how each route's real window compares
+//! with the one Claude Code believes it has, which the router only learns
+//! from [`client_window::ENV_VAR`] and the settings files, never from the
+//! request. Overruns, stale declarations, unpinned routes, and picker rows
+//! that fight the config are red; clipped and scaled routes are reported.
 
 use std::collections::BTreeMap;
 
@@ -139,7 +135,7 @@ impl RouteStatus<'_> {
 
 /// The status of a route a picker row sizes client-side.
 fn behaves_as_status<'a>(route: &ModelRoute, target: &'a str) -> RouteStatus<'a> {
-    if route.context_window_scaling || route.usage_scale.is_some() {
+    if route.context_window_scaling {
         return RouteStatus::ScaledBehavesAs { target };
     }
     match route.context_window {
@@ -182,15 +178,6 @@ pub fn check(
     let mut rows_seen = false;
     let believed = client_context_window(declared);
     for route in config.effective_models() {
-        if let (Some(wanted), None) = (route.min_context_window, &route.pinned_providers) {
-            ok = false;
-            notes.push(
-                RouteStatus::Unpinned { wanted }
-                    .describe(&route.routing_id)
-                    .expect("Unpinned always describes itself"),
-            );
-            continue;
-        }
         if let Some(providers) = &route.pinned_providers {
             notes.push(format!(
                 "{} pinned to {} sub-provider(s) from the service's last lookup",
@@ -198,26 +185,30 @@ pub fn check(
                 providers.len()
             ));
         }
-        let status = match (row_for(route), route.context_window, route.usage_scale) {
-            (Some(target), _, _) => {
-                rows_seen = true;
-                behaves_as_status(route, target)
+        let status = if let Some(wanted) = route.unserved_min_window() {
+            RouteStatus::Unpinned { wanted }
+        } else {
+            match (row_for(route), route.context_window, route.usage_scale) {
+                (Some(target), _, _) => {
+                    rows_seen = true;
+                    behaves_as_status(route, target)
+                }
+                (None, Some(actual), Some(scale)) => RouteStatus::Scaled {
+                    ratio: scale.ratio(),
+                    actual,
+                },
+                (None, Some(actual), None) if actual < believed => RouteStatus::Overrun {
+                    client: believed,
+                    actual,
+                },
+                (None, Some(actual), None) if actual > believed => RouteStatus::Clipped {
+                    client: believed,
+                    actual,
+                },
+                (None, Some(_), None) => RouteStatus::Matched,
+                (None, None, _) if route.context_window_scaling => RouteStatus::Undiscovered,
+                (None, None, _) => RouteStatus::Unknown,
             }
-            (None, Some(actual), Some(scale)) => RouteStatus::Scaled {
-                ratio: scale.ratio(),
-                actual,
-            },
-            (None, Some(actual), None) if actual < believed => RouteStatus::Overrun {
-                client: believed,
-                actual,
-            },
-            (None, Some(actual), None) if actual > believed => RouteStatus::Clipped {
-                client: believed,
-                actual,
-            },
-            (None, Some(_), None) => RouteStatus::Matched,
-            (None, None, _) if route.context_window_scaling => RouteStatus::Undiscovered,
-            (None, None, _) => RouteStatus::Unknown,
         };
         ok &= status.is_ok();
         match status.describe(&route.routing_id) {
@@ -244,18 +235,15 @@ pub fn check(
     let drift = scaling_in_use
         .then(|| drift_note(client, config.declared_context_window))
         .flatten();
-    // A declaration we could not check against anything is merely unverified.
-    ok &= drift.is_none() || client.value().is_none();
+    ok &= drift.is_none();
 
     let source = match (client, config.declared_context_window) {
         (ClientWindow::Unresolved, Some(_)) => "config, unverified",
         (ClientWindow::Unresolved, None) => "assumed",
-        (resolved, _) => resolved.source(),
+        (ClientWindow::Environment(_), _) => "environment",
+        (ClientWindow::Settings(_), _) => "settings",
     };
-    let head = format!(
-        "client window {} (from {source})",
-        declared.unwrap_or(client_window::DEFAULT_DECLARED_CONTEXT_WINDOW)
-    );
+    let head = format!("client window {believed} (from {source})");
     Some(Check {
         name: "context-windows",
         ok,
@@ -269,37 +257,24 @@ pub fn check(
     })
 }
 
-/// The note about the hand-maintained coupling between the config's
-/// declaration and the client's actual setting. `Some` for both a confirmed
-/// mismatch and an unverifiable one; the caller distinguishes them by whether
-/// the client value resolved.
+/// The note about a config declaration that disagrees with the client's
+/// actual setting; nothing when the two agree or the client's is unknown
+/// (the head line already says the declaration is unverified).
 fn drift_note(client: ClientWindow, declared: Option<u64>) -> Option<String> {
     let declared = declared?;
-    match client.value() {
-        Some(effective) if effective != declared => Some(format!(
-            "DRIFT: declared-context-window is {declared} but the {} in force is {effective}; \
-             every scaled route is compacting at the wrong point — change whichever of the two \
-             is stale",
-            client_window::ENV_VAR
-        )),
-        Some(_) => None,
-        None => Some(format!(
-            "assumes {}={declared} (unverified: not set in this environment or in the settings \
-             files checked)",
-            client_window::ENV_VAR
-        )),
-    }
+    let effective = client.value().filter(|effective| *effective != declared)?;
+    Some(format!(
+        "DRIFT: declared-context-window is {declared} but the {} in force is {effective}; \
+         every scaled route is compacting at the wrong point — change whichever of the two \
+         is stale",
+        client_window::ENV_VAR
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn config(source: &str) -> Config {
-        let mut config: Config = toml::from_str(source).unwrap();
-        config.prepare().unwrap();
-        config
-    }
+    use crate::config::parse_and_prepare as config;
 
     fn provider(window: u64, scaling: bool) -> String {
         format!(
@@ -534,10 +509,15 @@ context-window-scaling = {scaling}
     }
 
     #[test]
-    fn a_declaration_that_no_longer_matches_the_client_is_drift() {
+    fn a_declaration_that_no_longer_matches_the_client_is_drift_only_when_scaling_uses_it() {
         let check = checked(&provider(1_000_000, true), ClientWindow::Settings(400_000));
         assert!(!check.ok);
         assert!(check.detail.contains("DRIFT"), "{check:?}");
+
+        // Below every route's real window, so nothing else is red.
+        let check = checked(&provider(1_000_000, false), ClientWindow::Settings(200_000));
+        assert!(check.ok, "{check:?}");
+        assert!(!check.detail.contains("DRIFT"), "{check:?}");
     }
 
     #[test]

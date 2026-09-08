@@ -1,8 +1,8 @@
 //! Pinned, checksum-verified acquisition of the `CLIProxyAPI` upstream binary.
 //!
-//! `ensure_upstream` is the idempotent primitive the plan requires: called
-//! by managed start, `login`, `doctor --fix`-style repair, and the setup
-//! skill, in any order, on a clean or warm machine.
+//! `ensure_upstream` is idempotent: managed start, `login`, and the
+//! `ensure-upstream` subcommand call it in any order, on a clean or warm
+//! machine.
 
 use std::path::PathBuf;
 
@@ -10,42 +10,43 @@ use anyhow::Context;
 use sha2::Digest;
 
 use crate::state::{Dirs, create_private_dir};
+use std::os::unix::fs::PermissionsExt;
 
 /// The exact `CLIProxyAPI` version this router release is validated against.
 pub const UPSTREAM_VERSION: &str = "7.2.132";
 
-/// sha256 of each release archive, vendored so downloads are verified
-/// against the pin rather than trusting the network or the release page.
-const CHECKSUMS: &[(&str, &str)] = &[
-    (
-        "darwin_aarch64",
-        "360f410c7a30df1dc197949bfd2f272930a9420ce9357889c27b40d8ad9f17f9",
-    ),
-    (
-        "darwin_amd64",
-        "24c3f43ca36e45a1cd0f2bb91613208b3f155d6d8654c99dcda9ad8970f1fcd1",
-    ),
-    (
-        "linux_aarch64",
-        "36aaa1a40916933d43ffa93ebea917cc8cd3d68db30b19c2296fc44dd33c3208",
-    ),
-    (
-        "linux_amd64",
-        "3813ec363ee53bd2ec6c876f8a6adf794a82247ca41a0994de8514a408888639",
-    ),
-];
-
-fn current_target() -> anyhow::Result<&'static str> {
-    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin_aarch64",
-        ("macos", "x86_64") => "darwin_amd64",
-        ("linux", "aarch64") => "linux_aarch64",
-        ("linux", "x86_64") => "linux_amd64",
+/// The release archive name for this platform and its sha256, vendored so
+/// downloads are verified against the pin rather than trusting the network
+/// or the release page.
+fn current_target() -> anyhow::Result<(&'static str, &'static str)> {
+    Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => (
+            "darwin_aarch64",
+            "360f410c7a30df1dc197949bfd2f272930a9420ce9357889c27b40d8ad9f17f9",
+        ),
+        ("macos", "x86_64") => (
+            "darwin_amd64",
+            "24c3f43ca36e45a1cd0f2bb91613208b3f155d6d8654c99dcda9ad8970f1fcd1",
+        ),
+        ("linux", "aarch64") => (
+            "linux_aarch64",
+            "36aaa1a40916933d43ffa93ebea917cc8cd3d68db30b19c2296fc44dd33c3208",
+        ),
+        ("linux", "x86_64") => (
+            "linux_amd64",
+            "3813ec363ee53bd2ec6c876f8a6adf794a82247ca41a0994de8514a408888639",
+        ),
         (os, arch) => anyhow::bail!(
             "unsupported platform {os}/{arch}; model-router supports macOS and Linux on x86_64/aarch64"
         ),
-    };
-    Ok(target)
+    })
+}
+
+/// The pinned `CLIProxyAPI` binary's path when it is already cached.
+#[must_use]
+pub fn cached_upstream(dirs: &Dirs) -> Option<PathBuf> {
+    let binary = dirs.upstream_binary(UPSTREAM_VERSION);
+    binary.is_file().then_some(binary)
 }
 
 /// Ensures the pinned `CLIProxyAPI` binary is cached and executable, returning
@@ -55,17 +56,12 @@ fn current_target() -> anyhow::Result<&'static str> {
 /// Returns an error for unsupported platforms, download failures, checksum
 /// mismatches, or archives without the expected binary.
 pub async fn ensure_upstream(dirs: &Dirs) -> anyhow::Result<PathBuf> {
-    let binary = dirs.upstream_binary(UPSTREAM_VERSION);
-    if binary.is_file() {
+    if let Some(binary) = cached_upstream(dirs) {
         return Ok(binary);
     }
+    let binary = dirs.upstream_binary(UPSTREAM_VERSION);
 
-    let target = current_target()?;
-    let expected_checksum = CHECKSUMS
-        .iter()
-        .find(|(name, _)| *name == target)
-        .map(|(_, checksum)| *checksum)
-        .ok_or_else(|| anyhow::anyhow!("no vendored checksum for target {target}"))?;
+    let (target, expected_checksum) = current_target()?;
     let url = format!(
         "https://github.com/router-for-me/CLIProxyAPI/releases/download/v{UPSTREAM_VERSION}/CLIProxyAPI_{UPSTREAM_VERSION}_{target}.tar.gz"
     );
@@ -111,12 +107,8 @@ fn extract_binary(archive: &[u8], target: &std::path::Path) -> anyhow::Result<()
             entry
                 .unpack(&temp)
                 .with_context(|| format!("failed to extract to {}", temp.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
-                    .context("failed to mark binary executable")?;
-            }
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
+                .context("failed to mark binary executable")?;
             std::fs::rename(&temp, target)
                 .with_context(|| format!("failed to move binary to {}", target.display()))?;
             return Ok(());
@@ -129,34 +121,24 @@ fn extract_binary(archive: &[u8], target: &std::path::Path) -> anyhow::Result<()
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_supported_target_has_a_checksum() {
-        for target in [
-            "darwin_aarch64",
-            "darwin_amd64",
-            "linux_aarch64",
-            "linux_amd64",
-        ] {
-            assert!(CHECKSUMS.iter().any(|(name, _)| *name == target));
-        }
-    }
-
-    #[test]
-    fn extract_finds_flat_binary() {
+    /// A gzipped tar holding one flat entry.
+    fn archive_with(name: &str, payload: &[u8]) -> Vec<u8> {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
             Vec::new(),
             flate2::Compression::fast(),
         ));
-        let payload = b"#!/bin/sh\necho fake\n";
         let mut header = tar::Header::new_gnu();
         header.set_size(payload.len() as u64);
-        header.set_mode(0o755);
+        header.set_mode(0o644);
         header.set_cksum();
-        builder
-            .append_data(&mut header, "cli-proxy-api", payload.as_slice())
-            .unwrap();
-        let archive = builder.into_inner().unwrap().finish().unwrap();
+        builder.append_data(&mut header, name, payload).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
 
+    #[test]
+    fn extract_finds_flat_binary() {
+        let payload = b"#!/bin/sh\necho fake\n";
+        let archive = archive_with("cli-proxy-api", payload);
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("cli-proxy-api");
         extract_binary(&archive, &target).unwrap();
@@ -165,18 +147,7 @@ mod tests {
 
     #[test]
     fn extract_rejects_archive_without_binary() {
-        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-            Vec::new(),
-            flate2::Compression::fast(),
-        ));
-        let mut header = tar::Header::new_gnu();
-        header.set_size(0);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "README.md", [].as_slice())
-            .unwrap();
-        let archive = builder.into_inner().unwrap().finish().unwrap();
+        let archive = archive_with("README.md", b"");
         let dir = tempfile::tempdir().unwrap();
         let error = extract_binary(&archive, &dir.path().join("out")).unwrap_err();
         assert!(error.to_string().contains("does not contain"));

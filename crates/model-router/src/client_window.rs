@@ -15,13 +15,10 @@ use std::path::Path;
 /// The setting that overrides Claude Code's per-model context window.
 pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 
-/// The [`ENV_VAR`] value the setup skill writes: the Codex backend's real
-/// effective input cap, so the declaration and the built-in GPT routes'
-/// windows agree (the overflow-error backstop makes running the declaration
-/// at the cap safe — auto-compact still leads it by the 20K output reserve).
-/// Used only where the real value cannot be observed; scaling requires an
-/// explicit declaration.
-pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = 258_400;
+/// The [`ENV_VAR`] value the setup skill writes, assumed when the real value
+/// cannot be observed. It is the built-in GPT routes' window so the two
+/// agree; see [`crate::config::GPT_CONTEXT_WINDOW`] for why that is safe.
+pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = crate::config::GPT_CONTEXT_WINDOW;
 
 /// The context window Claude Code believes a routed model has: [`ENV_VAR`]
 /// applies to every routed model ID. This is the client-side coordinate
@@ -98,22 +95,16 @@ impl ClientWindow {
             Self::Unresolved => None,
         }
     }
-
-    #[must_use]
-    pub const fn source(self) -> &'static str {
-        match self {
-            Self::Environment(_) => "environment",
-            Self::Settings(_) => "settings",
-            Self::Unresolved => "unresolved",
-        }
-    }
 }
 
 /// Reads the effective [`ENV_VAR`].
 ///
-/// The environment wins when present. Otherwise settings files are resolved in
-/// Claude Code's precedence order and only the winner is used: a user-level
-/// value that a project file shadows must never vouch for the project's.
+/// The environment wins when present: it is the value Claude Code merged and
+/// runs with, so a malformed one is unresolved rather than a reason to
+/// consult the files. Otherwise settings files are resolved in Claude Code's
+/// precedence order and only the winner is used: a user-level value that a
+/// project file shadows must never vouch for the project's. Zero reads as
+/// unset, as it does to Claude Code.
 #[must_use]
 pub fn resolve(home: Option<&Path>, project: &Path) -> ClientWindow {
     resolve_with(std::env::var(ENV_VAR).ok().as_deref(), home, project)
@@ -122,8 +113,13 @@ pub fn resolve(home: Option<&Path>, project: &Path) -> ClientWindow {
 /// [`resolve`] with the environment injected, so the settings-precedence
 /// rules are testable without touching the process environment.
 fn resolve_with(env: Option<&str>, home: Option<&Path>, project: &Path) -> ClientWindow {
-    if let Some(value) = env.and_then(|raw| raw.parse().ok()) {
-        return ClientWindow::Environment(value);
+    let positive = |value: u64| (value > 0).then_some(value);
+    if let Some(raw) = env {
+        return raw
+            .parse()
+            .ok()
+            .and_then(positive)
+            .map_or(ClientWindow::Unresolved, ClientWindow::Environment);
     }
     crate::claude_settings::winning_setting(home, project, &["env", ENV_VAR])
         .and_then(|(_, raw)| {
@@ -131,6 +127,7 @@ fn resolve_with(env: Option<&str>, home: Option<&Path>, project: &Path) -> Clien
             // a bare number too rather than silently reporting "unresolved".
             raw.as_u64()
                 .or_else(|| raw.as_str().and_then(|value| value.parse().ok()))
+                .and_then(positive)
         })
         .map_or(ClientWindow::Unresolved, ClientWindow::Settings)
 }
@@ -139,12 +136,6 @@ fn resolve_with(env: Option<&str>, home: Option<&Path>, project: &Path) -> Clien
 mod tests {
     use super::*;
     use crate::claude_settings::write_settings;
-
-    #[test]
-    fn the_declaration_wins_and_the_default_backstops_it() {
-        assert_eq!(client_context_window(Some(1_000_000)), 1_000_000);
-        assert_eq!(client_context_window(None), DEFAULT_DECLARED_CONTEXT_WINDOW);
-    }
 
     #[test]
     fn scaling_rounds_half_away_from_zero_and_rejects_a_zero_window() {
@@ -165,45 +156,32 @@ mod tests {
         assert_eq!(UsageScale::new(2, 1).unwrap().apply(u64::MAX), u64::MAX);
     }
 
+    /// File precedence is `claude_settings`' to test; this covers what
+    /// `resolve_with` adds: value coercion, the zero-means-unset rule, and
+    /// the environment overriding the files.
     #[test]
-    fn settings_resolution_takes_the_winner_not_any_match() {
-        let home = tempfile::tempdir().unwrap();
+    fn settings_values_are_coerced_and_zero_or_garbage_reads_as_unset() {
         let project = tempfile::tempdir().unwrap();
-        write_settings(
-            home.path(),
-            "settings.json",
-            r#"{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"250000"}}"#,
-        );
+        let settings = |value: &str| {
+            write_settings(
+                project.path(),
+                "settings.json",
+                &format!(r#"{{"env":{{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":{value}}}}}"#),
+            );
+            resolve_with(None, None, project.path())
+        };
         assert_eq!(
-            resolve_with(None, Some(home.path()), project.path()),
-            ClientWindow::Settings(250_000)
+            resolve_with(None, None, project.path()),
+            ClientWindow::Unresolved
         );
-
-        // A project file shadows the user-level value entirely.
-        write_settings(
-            project.path(),
-            "settings.json",
-            r#"{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":1000000}}"#,
-        );
-        assert_eq!(
-            resolve_with(None, Some(home.path()), project.path()),
-            ClientWindow::Settings(1_000_000)
-        );
-
-        // ... and settings.local.json shadows that.
-        write_settings(
-            project.path(),
-            "settings.local.json",
-            r#"{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"400000"}}"#,
-        );
-        assert_eq!(
-            resolve_with(None, Some(home.path()), project.path()),
-            ClientWindow::Settings(400_000)
-        );
+        assert_eq!(settings(r#""250000""#), ClientWindow::Settings(250_000));
+        assert_eq!(settings("1000000"), ClientWindow::Settings(1_000_000));
+        assert_eq!(settings(r#""0""#), ClientWindow::Unresolved);
+        assert_eq!(settings(r#""banana""#), ClientWindow::Unresolved);
     }
 
     #[test]
-    fn the_environment_wins_over_every_settings_file() {
+    fn the_environment_wins_over_every_settings_file_even_when_malformed() {
         let project = tempfile::tempdir().unwrap();
         write_settings(
             project.path(),
@@ -214,28 +192,14 @@ mod tests {
             resolve_with(Some("999000"), None, project.path()),
             ClientWindow::Environment(999_000)
         );
-        // A malformed environment value falls through to the files.
+        // Claude Code ignores a zero or malformed value and runs at its own
+        // default, so the files must not vouch for it.
+        assert_eq!(
+            resolve_with(Some("0"), None, project.path()),
+            ClientWindow::Unresolved
+        );
         assert_eq!(
             resolve_with(Some("banana"), None, project.path()),
-            ClientWindow::Settings(250_000)
-        );
-    }
-
-    #[test]
-    fn unreadable_or_silent_settings_resolve_to_nothing() {
-        let project = tempfile::tempdir().unwrap();
-        assert_eq!(
-            resolve_with(None, None, project.path()),
-            ClientWindow::Unresolved
-        );
-        write_settings(project.path(), "settings.json", "{ not json");
-        assert_eq!(
-            resolve_with(None, None, project.path()),
-            ClientWindow::Unresolved
-        );
-        write_settings(project.path(), "settings.json", r#"{"env":{}}"#);
-        assert_eq!(
-            resolve_with(None, None, project.path()),
             ClientWindow::Unresolved
         );
     }

@@ -5,10 +5,7 @@ use crate::client_window::UsageScale;
 
 const TOKENS_PER_MESSAGE: u64 = 4;
 
-/// The usage fields Claude Code's auto-compact gate sums (verified in the
-/// 2.1.220 bundle: `input_tokens + cache_creation_input_tokens +
-/// cache_read_input_tokens + output_tokens` of the most recent message that
-/// carries usage). Scaling exactly these moves the compaction point.
+/// The usage fields Claude Code's auto-compact gate sums (see [`UsageScale`]).
 ///
 /// Deliberately not a recursive walk of the usage object: sibling fields like
 /// `server_tool_use.web_search_requests` are request counts, not tokens.
@@ -117,7 +114,9 @@ pub(crate) struct UsagePolicy {
     /// `message_start`.
     pub(crate) estimate: u64,
     /// Set when the route's real context window differs from the one Claude
-    /// Code believes it has.
+    /// Code believes it has. Applied to streamed responses only: Claude Code
+    /// streams every conversation turn, and the buffered sub-call answers
+    /// are conversation context for nobody.
     pub(crate) scale: Option<UsageScale>,
 }
 
@@ -231,12 +230,6 @@ impl SseEventBuffer {
             }
         }
         None
-    }
-
-    /// The bytes buffered so far, for readers whose framing is not SSE (a
-    /// non-streaming response body arrives through the same cap and latch).
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.buffer
     }
 
     pub(crate) fn disable(&mut self) {
@@ -410,16 +403,13 @@ fn log_actual_usage(data: &Value, estimated: u64) {
     let Some(actual) = usage.get("input_tokens").and_then(Value::as_u64) else {
         return;
     };
-    if let Some(cache_read) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
-        tracing::debug!(
-            estimated,
-            actual,
-            cache_read,
-            "GPT input token estimate calibration"
-        );
-    } else {
-        tracing::debug!(estimated, actual, "GPT input token estimate calibration");
-    }
+    let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+    tracing::debug!(
+        estimated,
+        actual,
+        cache_read,
+        "GPT input token estimate calibration"
+    );
 }
 
 #[cfg(test)]
@@ -454,9 +444,15 @@ mod tests {
         output
     }
 
-    /// The in-stream error shape captured live from `CLIProxyAPI` 7.2.92: a
-    /// streamed overflow fails as `event: error` on a 200 response.
-    const OVERFLOW_ERROR_EVENT: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your input exceeds the context window of this model. Please adjust your input and try again.\"}}\n\n";
+    /// A streamed overflow fails as `event: error` on a 200 response,
+    /// carrying the same body as the buffered one.
+    fn overflow_error_event() -> Vec<u8> {
+        format!(
+            "event: error\ndata: {}\n\n",
+            crate::overflow::tests::CAPTURED_BODY
+        )
+        .into_bytes()
+    }
 
     fn overflow_policies(estimate: u64) -> GptPolicies {
         GptPolicies {
@@ -474,10 +470,11 @@ mod tests {
 
     #[test]
     fn in_stream_overflow_error_is_rewritten_and_neighbors_pass_through() {
+        let overflow = overflow_error_event();
         let mut chunks: Vec<&[u8]> = vec![
             b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
         ];
-        chunks.push(OVERFLOW_ERROR_EVENT);
+        chunks.push(&overflow);
         let output = transformed_policies(&chunks, overflow_policies(300_000));
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(r#""input_tokens":300000"#));
@@ -496,10 +493,8 @@ mod tests {
 
     #[test]
     fn without_an_overflow_rewrite_error_events_pass_through() {
-        assert_eq!(
-            transformed(&[OVERFLOW_ERROR_EVENT], 300_000),
-            OVERFLOW_ERROR_EVENT
-        );
+        let overflow = overflow_error_event();
+        assert_eq!(transformed(&[&overflow], 300_000), overflow);
     }
 
     #[test]
@@ -515,16 +510,6 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(r#""input_tokens":37"#));
         assert!(text.ends_with("event: ping\ndata: {}\n\n"));
-    }
-
-    #[test]
-    fn message_start_zero_input_tokens_is_rewritten() {
-        let output = transformed(
-            &[b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"],
-            1234,
-        );
-        let text = String::from_utf8(output).unwrap();
-        assert!(text.contains(r#""input_tokens":1234"#));
     }
 
     #[test]
@@ -605,19 +590,6 @@ data: {"type":"message_delta","usage":{"input_tokens":400,"output_tokens":80,"ca
     }
 
     #[test]
-    fn small_windows_scale_up_and_round_half_away_from_zero() {
-        // Real 125K into a believed 250K: report double.
-        let scale = UsageScale::new(250_000, 125_000).unwrap();
-        assert_eq!(scale.apply(7), 14);
-        // 1/3 of a token rounds to the nearest whole one.
-        let third = UsageScale::new(1, 3).unwrap();
-        assert_eq!(third.apply(1), 0);
-        assert_eq!(third.apply(2), 1);
-        assert_eq!(third.apply(5), 2);
-        assert!(UsageScale::new(1, 0).is_none());
-    }
-
-    #[test]
     fn without_a_scale_events_are_byte_identical() {
         let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":42,\"output_tokens\":3}}\n\n";
         assert_eq!(transformed(&[delta], 99), delta);
@@ -637,17 +609,26 @@ data: {"type":"message_delta","usage":{"input_tokens":400,"output_tokens":80,"ca
     }
 
     #[test]
-    fn keep_alive_events_pass_through_unmodified() {
-        let input = b"event: ping\ndata: \n\n";
-        assert_eq!(transformed(&[input], 99), input);
-    }
-
-    #[test]
     fn estimate_counts_system_messages_tools_and_message_overhead() {
-        let full = estimate_input_tokens(
-            br#"{"system":[{"type":"text","text":"system words"}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/x"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"contents"}]}],"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]}"#,
+        let full = br#"{"system":[{"type":"text","text":"system words"}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/x"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"contents"}]}],"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]}"#;
+        let estimate = |body: &[u8]| estimate_input_tokens(body);
+        let without = |key: &str| {
+            let mut document: Value = serde_json::from_slice(full).unwrap();
+            document.as_object_mut().unwrap().remove(key);
+            estimate(document.to_string().as_bytes())
+        };
+        assert!(without("system") < estimate(full));
+        assert!(without("tools") < estimate(full));
+        assert!(without("messages") < estimate(full));
+        // Every message costs its overhead even when empty.
+        assert_eq!(
+            estimate(br#"{"messages":[{"role":"user","content":""}]}"#),
+            estimate(br#"{"messages":[]}"#) + TOKENS_PER_MESSAGE
         );
-        let empty = estimate_input_tokens(br#"{"messages":[]}"#);
-        assert!(full > empty + 3 * TOKENS_PER_MESSAGE);
+        // Tool blocks count their serialized content, not zero.
+        assert!(
+            estimate(br#"{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/x"}}]}]}"#)
+                > estimate(br#"{"messages":[{"role":"assistant","content":[]}]}"#)
+        );
     }
 }

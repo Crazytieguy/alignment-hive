@@ -8,11 +8,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-/// Filesystem layout for everything model-router owns outside the repo.
-///
-/// XDG-style on both macOS and Linux (deliberately not
-/// `~/Library/Application Support` — one layout to document and debug).
 /// The user's home directory, treating an empty `HOME` as unset. One
 /// implementation so every caller agrees on that edge case.
 #[must_use]
@@ -22,6 +20,18 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Filename prefix `CLIProxyAPI` writes for a Codex OAuth login
+/// (`codex-<uuid>-<email>-<plan>.json`).
+pub const CODEX_AUTH_PREFIX: &str = "codex-";
+
+/// Filename prefix `CLIProxyAPI` writes for an xAI OAuth login
+/// (`xai-<email>.json`). Note it is `xai-`, not `grok-`.
+pub const GROK_AUTH_PREFIX: &str = "xai-";
+
+/// Filesystem layout for everything model-router owns outside the repo.
+///
+/// XDG-style on both macOS and Linux (deliberately not
+/// `~/Library/Application Support` — one layout to document and debug).
 #[derive(Clone, Debug)]
 pub struct Dirs {
     pub config_dir: PathBuf,
@@ -81,6 +91,13 @@ impl Dirs {
         self.state_dir.join("gateway-secret")
     }
 
+    /// Create-once ingress token. `hooks/session-start.sh` reads this path
+    /// by hand; keep the two in step.
+    #[must_use]
+    pub fn ingress_token_file(&self) -> PathBuf {
+        self.state_dir.join("ingress-token")
+    }
+
     /// Single-instance lock for `serve`.
     #[must_use]
     pub fn lock_file(&self) -> PathBuf {
@@ -106,6 +123,12 @@ impl Dirs {
         self.state_dir.join("launcher")
     }
 
+    /// The version the stable launcher runs.
+    #[must_use]
+    pub fn launcher_version_file(&self) -> PathBuf {
+        self.launcher_dir().join("binary-version")
+    }
+
     /// Cached `CLIProxyAPI` binary for a pinned version.
     #[must_use]
     pub fn upstream_binary(&self, version: &str) -> PathBuf {
@@ -122,12 +145,8 @@ impl Dirs {
 /// Returns an error when creation or permission tightening fails.
 pub fn create_private_dir(path: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("failed to restrict permissions on {}", path.display()))?;
-    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to restrict permissions on {}", path.display()))?;
     Ok(())
 }
 
@@ -141,15 +160,17 @@ pub fn write_private_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
-    let mut temp = tempfile_in(parent)?;
-    temp.1
+    let (temp_path, mut file) = tempfile_in(parent)?;
+    let written = file
         .write_all(contents)
-        .with_context(|| format!("failed to write {}", temp.0.display()))?;
-    temp.1
-        .sync_all()
-        .with_context(|| format!("failed to sync {}", temp.0.display()))?;
-    drop(temp.1);
-    fs::rename(&temp.0, path)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write {}", temp_path.display()));
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    fs::rename(&temp_path, path)
         .with_context(|| format!("failed to move {} into place", path.display()))?;
     Ok(())
 }
@@ -159,11 +180,7 @@ fn tempfile_in(dir: &Path) -> anyhow::Result<(PathBuf, fs::File)> {
         let candidate = dir.join(format!(".tmp-{}-{attempt}", std::process::id()));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        options.mode(0o600);
         match options.open(&candidate) {
             Ok(file) => return Ok((candidate, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -206,8 +223,13 @@ pub fn load_or_create_secret(dirs: &Dirs) -> anyhow::Result<String> {
 /// Returns an error when the state directory or token file cannot be created
 /// or read.
 pub fn load_or_create_ingress_token(dirs: &Dirs) -> anyhow::Result<String> {
-    let path = dirs.state_dir.join("ingress-token");
-    load_or_create_hex_file(dirs, &path, 16)
+    load_or_create_hex_file(dirs, &dirs.ingress_token_file(), 16)
+}
+
+/// The ingress token `serve` created, if any; never creates one.
+#[must_use]
+pub fn load_ingress_token(dirs: &Dirs) -> Option<String> {
+    read_nonempty(&dirs.ingress_token_file()).ok().flatten()
 }
 
 fn load_or_create_hex_file(dirs: &Dirs, path: &Path, bytes: usize) -> anyhow::Result<String> {
@@ -225,11 +247,7 @@ fn load_or_create_hex_file(dirs: &Dirs, path: &Path, bytes: usize) -> anyhow::Re
     let value = hex_encode(&buffer);
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    options.mode(0o600);
     match options.open(path) {
         Ok(mut file) => {
             file.write_all(value.as_bytes())
@@ -256,30 +274,20 @@ fn load_or_create_hex_file(dirs: &Dirs, path: &Path, bytes: usize) -> anyhow::Re
 
 fn read_nonempty(path: &Path) -> anyhow::Result<Option<String>> {
     match fs::read_to_string(path) {
-        Ok(existing) => {
-            let value = existing.trim().to_string();
-            if value.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(value))
-            }
-        }
+        Ok(existing) => Ok(Some(existing.trim().to_string()).filter(|value| !value.is_empty())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
     }
 }
 
-/// Lowercase hex encoding (shared by secrets and checksum verification).
+/// Lowercase hex encoding.
 #[must_use]
 pub fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    bytes.iter().fold(
-        String::with_capacity(bytes.len() * 2),
-        |mut output, byte| {
-            let _ = write!(output, "{byte:02x}");
-            output
-        },
-    )
+    bytes.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
 }
 
 fn getrandom_fill(buffer: &mut [u8]) -> anyhow::Result<()> {
@@ -292,7 +300,6 @@ fn getrandom_fill(buffer: &mut [u8]) -> anyhow::Result<()> {
 /// guard. A second `serve` fails fast instead of fighting over the child.
 pub struct InstanceLock {
     _file: fs::File,
-    path: PathBuf,
 }
 
 impl InstanceLock {
@@ -308,85 +315,16 @@ impl InstanceLock {
             .write(true)
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // SAFETY: flock on an owned, open fd.
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                anyhow::bail!(
-                    "another model-router instance holds {} — is the service already running?",
-                    path.display()
-                );
-            }
+        // SAFETY: flock on an owned, open fd.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            anyhow::bail!(
+                "another model-router instance holds {} — is the service already running?",
+                path.display()
+            );
         }
-        Ok(Self { _file: file, path })
+        Ok(Self { _file: file })
     }
-}
-
-impl std::fmt::Debug for InstanceLock {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("InstanceLock")
-            .field("path", &self.path)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Copies a Codex login from a legacy `CLIProxyAPI` auth dir into the managed
-/// auth dir when the managed dir has none. Returns the imported file name.
-///
-/// # Errors
-/// Returns an error when directory creation or the copy fails.
-pub fn import_legacy_auth(dirs: &Dirs) -> anyhow::Result<Option<String>> {
-    let auth_dir = dirs.auth_dir();
-    create_private_dir(&auth_dir)?;
-    if find_codex_auth(&auth_dir).is_some() {
-        return Ok(None);
-    }
-    let legacy_dirs = home_dir()
-        .into_iter()
-        .flat_map(|home| {
-            [
-                home.join(".cli-proxy-api-model-router"),
-                home.join(".cli-proxy-api"),
-            ]
-        })
-        .collect::<Vec<_>>();
-    for legacy in legacy_dirs {
-        if let Some(source) = find_codex_auth(&legacy) {
-            let name = source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("codex-imported.json")
-                .to_string();
-            let contents = fs::read(&source)
-                .with_context(|| format!("failed to read {}", source.display()))?;
-            write_private_atomic(&auth_dir.join(&name), &contents)?;
-            tracing::info!(from = %source.display(), "imported existing Codex login");
-            return Ok(Some(name));
-        }
-    }
-    Ok(None)
-}
-
-/// Filename prefix `CLIProxyAPI` writes for a Codex OAuth login
-/// (`codex-<uuid>-<email>-<plan>.json`).
-pub const CODEX_AUTH_PREFIX: &str = "codex-";
-
-/// Filename prefix `CLIProxyAPI` writes for an xAI OAuth login
-/// (`xai-<email>.json`). Note it is `xai-`, not `grok-`.
-pub const GROK_AUTH_PREFIX: &str = "xai-";
-
-/// Every `*.json` file in a `CLIProxyAPI` auth dir, sorted so the result
-/// never depends on `read_dir` order.
-///
-/// See [`auth_files`] for why this is fallible.
-///
-/// # Errors
-/// Returns an error when the directory or any of its entries cannot be read.
-fn json_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    auth_files(dir, "")
 }
 
 /// Every `<prefix>*.json` login in a `CLIProxyAPI` auth dir, sorted so the
@@ -442,12 +380,6 @@ pub fn find_auth(dir: &Path, prefix: &str) -> Option<PathBuf> {
     auth_files(dir, prefix).ok()?.into_iter().next()
 }
 
-/// Finds a `codex-*.json` login in a `CLIProxyAPI` auth dir.
-#[must_use]
-pub fn find_codex_auth(dir: &Path) -> Option<PathBuf> {
-    find_auth(dir, CODEX_AUTH_PREFIX)
-}
-
 /// Tightens every `*.json` credential in a `CLIProxyAPI` auth dir to
 /// `0600`, returning the files that needed it.
 ///
@@ -461,63 +393,57 @@ pub fn find_codex_auth(dir: &Path) -> Option<PathBuf> {
 /// # Errors
 /// Returns an error when the directory or a file's permissions cannot be
 /// read or changed.
-#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn harden_auth_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut hardened = Vec::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for path in json_files(dir)? {
-            let metadata = fs::metadata(&path)
-                .with_context(|| format!("failed to stat {}", path.display()))?;
-            if metadata.permissions().mode() & 0o777 == 0o600 {
-                continue;
-            }
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("failed to restrict permissions on {}", path.display()))?;
-            hardened.push(path);
+    for path in auth_files(dir, "")? {
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("failed to stat {}", path.display()))?;
+        if metadata.permissions().mode() & 0o777 == 0o600 {
+            continue;
         }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to restrict permissions on {}", path.display()))?;
+        hardened.push(path);
     }
     Ok(hardened)
+}
+
+/// Test fixture: a `Dirs` under `root`; nothing is created.
+#[cfg(test)]
+impl Dirs {
+    pub(crate) fn under(root: &Path) -> Self {
+        Self {
+            config_dir: root.join("config"),
+            state_dir: root.join("state"),
+            cache_dir: root.join("cache"),
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
-    fn test_dirs(root: &Path) -> Dirs {
-        Dirs {
-            config_dir: root.join("config"),
-            state_dir: root.join("state"),
-            cache_dir: root.join("cache"),
-        }
-    }
-
     #[test]
     fn secret_is_created_once_and_stable() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let first = load_or_create_secret(&dirs).unwrap();
         let second = load_or_create_secret(&dirs).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.len(), 64);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(dirs.secret_file())
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-            let dir_mode = fs::metadata(&dirs.state_dir).unwrap().permissions().mode();
-            assert_eq!(dir_mode & 0o777, 0o700);
-        }
+        let mode = fs::metadata(dirs.secret_file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let dir_mode = fs::metadata(&dirs.state_dir).unwrap().permissions().mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
     }
 
     #[test]
     fn instance_lock_excludes_second_holder() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let _held = InstanceLock::acquire(&dirs).unwrap();
         // Same-process flock re-acquisition on a NEW fd still succeeds on
         // some platforms, so exercise exclusion via a child process instead.
@@ -537,7 +463,7 @@ pub(crate) mod tests {
     #[test]
     fn concurrent_secret_creation_yields_single_value() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 let dirs = dirs.clone();
@@ -556,31 +482,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn atomic_write_replaces_content() {
+    fn atomic_write_is_private_leaves_no_temp_file_and_replaces_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         create_private_dir(&dirs.state_dir).unwrap();
+        let elsewhere = dirs.state_dir.join("elsewhere");
+        fs::write(&elsewhere, b"untouched").unwrap();
         let path = dirs.state_dir.join("file");
-        write_private_atomic(&path, b"one").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+
         write_private_atomic(&path, b"two").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"two");
-    }
-
-    #[test]
-    fn legacy_auth_import_copies_codex_json() {
-        let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
-        let legacy = root.path().join(".cli-proxy-api-model-router");
-        fs::create_dir_all(&legacy).unwrap();
-        fs::write(legacy.join("codex-test-user.json"), b"{}").unwrap();
-        // Point HOME at the temp root so the legacy scan finds it.
-        // (Env mutation is process-global; keep this the only test doing it.)
-        unsafe { std::env::set_var("HOME", root.path()) };
-        let imported = import_legacy_auth(&dirs).unwrap();
-        assert_eq!(imported.as_deref(), Some("codex-test-user.json"));
-        assert!(dirs.auth_dir().join("codex-test-user.json").exists());
-        // Second call: already present, no re-import.
-        assert_eq!(import_legacy_auth(&dirs).unwrap(), None);
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&path).unwrap().is_file());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let leftovers: Vec<_> = fs::read_dir(&dirs.state_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
@@ -599,7 +524,10 @@ pub(crate) mod tests {
         }
         // Sorted, so the choice never depends on readdir order.
         assert_eq!(
-            find_codex_auth(root).unwrap().file_name().unwrap(),
+            find_auth(root, CODEX_AUTH_PREFIX)
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "codex-1-a@example.com-pro.json"
         );
         assert_eq!(
@@ -619,15 +547,13 @@ pub(crate) mod tests {
         // non-error case, and the one every fresh install hits.
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("nope");
-        assert!(find_codex_auth(&absent).is_none());
+        assert!(find_auth(&absent, CODEX_AUTH_PREFIX).is_none());
         assert!(find_auth(&absent, GROK_AUTH_PREFIX).is_none());
         assert!(harden_auth_files(&absent).unwrap().is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn hardening_covers_every_match_and_is_idempotent() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let loose_a = root.join("xai-a@example.com.json");
@@ -659,7 +585,6 @@ pub(crate) mod tests {
         assert!(harden_auth_files(root).unwrap().is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn hardening_surfaces_failure_rather_than_swallowing_it() {
         // A dangling symlink matches by name but cannot be stat'd, so the
@@ -672,10 +597,8 @@ pub(crate) mod tests {
         assert!(format!("{error:#}").contains("failed to stat"), "{error:#}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn unreadable_auth_dir_surfaces_an_error_rather_than_reading_as_empty() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("auth");
         fs::create_dir(&root).unwrap();
@@ -700,14 +623,8 @@ pub(crate) mod tests {
 
     /// Shared by the doctor tests: permission bits do not apply to root, so
     /// permission-dependent assertions must no-op there.
-    #[cfg(unix)]
     pub(crate) fn running_as_root() -> bool {
-        // `id -u` avoids taking a libc dependency just for this guard.
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .is_some_and(|uid| uid.trim() == "0")
+        // SAFETY: `geteuid` has no preconditions and no failure mode.
+        unsafe { libc::geteuid() == 0 }
     }
 }

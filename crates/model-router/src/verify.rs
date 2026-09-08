@@ -1,6 +1,8 @@
 //! `model-router verify-providers`: checks each configured
 //! `[[openai-providers]]` entry against the provider's authenticated
-//! `GET /models` endpoint, reporting which configured model IDs exist.
+//! `GET /models` endpoint, reporting which configured model IDs exist, the
+//! window the host guarantees for each against the catalog headline and the
+//! configured one, and the sub-provider pin a `min-context-window` would get.
 //!
 //! Exists so setup flows never have to put the API key in a command line or
 //! read the populated config file: the key stays inside this process and is
@@ -28,8 +30,8 @@ pub struct ModelCheck {
     /// The window this host actually guarantees, when it reports one. Hosts
     /// vary: many OpenAI-compatible catalogs omit the field entirely.
     pub host_context_length: Option<u64>,
-    /// The catalog's headline number, when it is larger than the guaranteed
-    /// one — i.e. when sub-providers disagree.
+    /// The catalog's headline number, when it differs from the guaranteed
+    /// one (sub-providers disagree) or the guaranteed one is unknown.
     pub advertised_context_length: Option<u64>,
     /// The `context-window` configured for this model, when set.
     pub configured_context_window: Option<u64>,
@@ -103,13 +105,7 @@ pub async fn run(
         }
         None => config.openai_providers.iter().collect(),
     };
-    // No redirects: reqwest strips Authorization on cross-host hops anyway,
-    // which would surface as a baffling 401 — fail loudly instead.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::discovery::provider_client(std::time::Duration::from_secs(30))?;
     let mut reports = Vec::new();
     for provider in selected {
         reports.push(verify_one(&client, provider).await);
@@ -118,7 +114,6 @@ pub async fn run(
 }
 
 async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> ProviderReport {
-    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
     let mut report = ProviderReport {
         provider: provider.name.clone(),
         base_url: provider.base_url.clone(),
@@ -134,44 +129,20 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
         );
         return report;
     };
-    let response = match client.get(&url).bearer_auth(api_key).send().await {
-        Ok(response) => response,
+    let catalog = match fetch_catalog(client, provider, api_key).await {
+        Ok(catalog) => catalog,
         Err(error) => {
-            // reqwest errors never echo request headers, but scrub anyway:
-            // this string is the only place a mistake could leak the key.
-            report.detail = scrub(&format!("request failed: {error:#}"), api_key);
+            report.detail = error.to_string();
             return report;
         }
     };
-    let status = response.status();
-    if status.is_redirection() {
-        let location = response
-            .headers()
-            .get("location")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<none>");
-        report.detail = scrub(
-            &format!("endpoint redirected ({status}) to {location}; use the final base-url"),
-            api_key,
-        );
-        return report;
-    }
-    let body = response.bytes().await.unwrap_or_default();
-    if !status.is_success() {
-        let snippet: String = String::from_utf8_lossy(&body).chars().take(300).collect();
-        report.detail = scrub(&format!("HTTP {status}: {snippet}"), api_key);
-        return report;
-    }
-    let Some(catalog) = parse_catalog(&body) else {
-        report.detail = "HTTP 200 but the response has no data[].id list".to_string();
-        return report;
-    };
     let base = provider.base_url.trim_end_matches('/');
+    let mut models = Vec::new();
     for model in &provider.models {
         let entry = catalog.iter().find(|entry| entry.id == model.name);
         let advertised = entry.and_then(|entry| entry.context_length);
         let (guaranteed, pin) = window_and_pin(client, base, api_key, model, advertised).await;
-        report.models.push(ModelCheck {
+        models.push(ModelCheck {
             found: entry.is_some(),
             host_context_length: guaranteed,
             advertised_context_length: advertised
@@ -182,6 +153,14 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
             routing_id: model.routing_id.clone(),
         });
     }
+    report.models = models;
+    judge(&mut report);
+    report
+}
+
+/// The provider's verdict from its model checks: every configured model
+/// found, no configured window above the host's, and every pin satisfied.
+fn judge(report: &mut ProviderReport) {
     let missing = report.models.iter().filter(|check| !check.found).count();
     let oversized = report
         .models
@@ -214,7 +193,6 @@ async fn verify_one(client: &reqwest::Client, provider: &OpenAiProvider) -> Prov
     } else {
         format!("all {} configured models found", report.models.len())
     };
-    report
 }
 
 /// The host's guaranteed window for one model and, when the model asks for
@@ -236,20 +214,11 @@ async fn window_and_pin(
         // endpoint list exists to ask for.
         (Some(advertised), Some(wanted)) => {
             match crate::discovery::openrouter_endpoints(client, base, api_key, &model.name).await {
-                // With a satisfied pin the route only ever reaches the
-                // selected providers, so their guarantee is the host's;
-                // without one it is the unpinned narrowest, as for any
-                // other model.
-                Some(endpoints) => {
-                    let pin = pin_check(&endpoints, wanted);
-                    let host = match pin.guaranteed {
-                        Some(guaranteed) => Some(guaranteed.min(advertised)),
-                        None => crate::discovery::narrowest(&endpoints)
-                            .map(|narrowest| narrowest.min(advertised)),
-                    };
-                    (host, Some(pin))
-                }
-                None => (None, Some(failed_pin(wanted))),
+                Ok(endpoints) => (
+                    crate::discovery::guaranteed_window(&endpoints, Some(wanted), advertised).0,
+                    Some(pin_check(&endpoints, wanted)),
+                ),
+                Err(_) => (None, Some(failed_pin(wanted))),
             }
         }
     }
@@ -284,6 +253,51 @@ fn failed_pin(wanted: u64) -> PinCheck {
     }
 }
 
+/// A provider's authenticated `/models` catalog. Every failure is worded
+/// for the user and scrubbed of the key: reqwest errors never echo request
+/// headers, but this string is the one place a mistake could leak it.
+///
+/// # Errors
+/// Returns an error for transport failures, redirects, non-2xx statuses,
+/// and bodies without a `data[].id` list.
+pub(crate) async fn fetch_catalog(
+    client: &reqwest::Client,
+    provider: &OpenAiProvider,
+    api_key: &str,
+) -> anyhow::Result<Vec<CatalogEntry>> {
+    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("{}", scrub(&format!("request failed: {error:#}"), api_key))
+        })?;
+    let status = response.status();
+    if status.is_redirection() {
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("<none>");
+        anyhow::bail!(
+            "{}",
+            scrub(
+                &format!("endpoint redirected ({status}) to {location}; use the final base-url"),
+                api_key
+            )
+        );
+    }
+    let body = response.bytes().await.unwrap_or_default();
+    if !status.is_success() {
+        let snippet: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+        anyhow::bail!("{}", scrub(&format!("HTTP {status}: {snippet}"), api_key));
+    }
+    parse_catalog(&body)
+        .ok_or_else(|| anyhow::anyhow!("HTTP 200 but the response has no data[].id list"))
+}
+
 /// One entry of a provider's `/models` catalog.
 pub(crate) struct CatalogEntry {
     pub(crate) id: String,
@@ -313,14 +327,10 @@ pub(crate) fn parse_catalog(body: &[u8]) -> Option<Vec<CatalogEntry>> {
     )
 }
 
-fn scrub(text: &str, api_key: &str) -> String {
-    text.replace(api_key, "[redacted]")
-}
-
-/// Renders an error without echoing the key. reqwest never includes request
+/// Removes the key from text that may echo it. reqwest never includes request
 /// headers in its Display, but this is the one place a mistake would leak.
-pub(crate) fn scrub_key(error: &impl std::fmt::Display, api_key: &str) -> String {
-    scrub(&format!("{error}"), api_key)
+pub(crate) fn scrub(text: &str, api_key: &str) -> String {
+    text.replace(api_key, "[redacted]")
 }
 
 /// Renders human-readable output; returns whether every provider verified.
@@ -346,7 +356,8 @@ pub fn render(reports: &[ProviderReport]) -> (String, bool) {
                     // The catalog headline is only reachable once the account
                     // restricts routing to the sub-providers that serve it.
                     Some(advertised) => format!(
-                        "  (host context {host} guaranteed, {advertised} advertised — varies by                          sub-provider)"
+                        "  (host context {host} guaranteed, {advertised} advertised — varies by \
+                         sub-provider)"
                     ),
                     None => format!("  (host context {host})"),
                 },
@@ -417,11 +428,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scrub_removes_the_key() {
-        assert_eq!(
-            scrub("bad key fw-123 rejected", "fw-123"),
-            "bad key [redacted] rejected"
+    fn an_unsatisfied_pin_fails_the_provider() {
+        let mut report = ProviderReport {
+            provider: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            ok: false,
+            detail: String::new(),
+            models: vec![check(Some(202_752), None)],
+        };
+        judge(&mut report);
+        assert!(report.ok, "{}", report.detail);
+        report.models[0].pin = Some(failed_pin(1_000_000));
+        judge(&mut report);
+        assert!(!report.ok);
+        assert!(
+            report.detail.contains("would not be served"),
+            "{}",
+            report.detail
         );
+        let (rendered, all_ok) = render(&[report]);
+        assert!(!all_ok);
+        assert!(rendered.contains("NOT SERVED"), "{rendered}");
     }
 
     #[test]
@@ -462,11 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_window_is_judged_against_the_pinned_guarantee_not_the_unpinned_floor() {
-        // What verify_one derives for `min-context-window = 1000000` plus
-        // `context-window = 1000000` on a model whose unpinned floor is
-        // 202752: the host window is the pin's guarantee, so the explicit
-        // window is not oversized.
+    fn the_host_window_is_the_pinned_guarantee_not_the_unpinned_floor() {
         let endpoints = crate::discovery::parse_endpoints(
             br#"{"data":{"endpoints":[
                 {"tag":"wide/fp8","context_length":1048576},
@@ -474,14 +497,10 @@ mod tests {
             ]}}"#,
         )
         .unwrap();
-        let pin = pin_check(&endpoints, 1_000_000);
-        let host = pin.guaranteed.map(|g| g.min(1_048_576));
-        let mut model = check(host, Some(1_000_000));
-        model.pin = Some(pin);
-        assert!(model.oversized().is_none(), "{model:?}");
-        // Above the guarantee it is oversized again.
-        model.configured_context_window = Some(1_048_577);
-        assert!(model.oversized().is_some());
+        let window = |min| crate::discovery::guaranteed_window(&endpoints, min, 1_048_576).0;
+        assert_eq!(window(Some(1_000_000)), Some(1_048_576));
+        assert_eq!(window(Some(2_000_000)), Some(202_752));
+        assert_eq!(window(None), Some(202_752));
     }
 
     #[test]
@@ -527,20 +546,6 @@ mod tests {
             describe_pin(&checked)
         );
         assert!(describe_pin(&failed_pin(1)).contains("lookup failed"));
-
-        let mut report = ProviderReport {
-            provider: "openrouter".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            ok: true,
-            detail: String::new(),
-            models: vec![check(Some(202_752), None)],
-        };
-        report.models[0].pin = Some(unsatisfied);
-        let (rendered, all_ok) = render(&[report]);
-        assert!(rendered.contains("NOT SERVED"), "{rendered}");
-        // `ok` is the provider's verdict as computed by verify_one; render
-        // only echoes it, so the exit status follows what verify_one set.
-        assert!(all_ok);
     }
 
     #[test]

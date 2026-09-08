@@ -1,54 +1,30 @@
-# model-router: measured findings (2026-07-20, Claude Code 2.1.216)
+# model-router: measured dependency behavior
+
+Each section records its own date, the version of the dependency it was
+measured against, and the method.
+
+## Agent tool, Workflow, and effort (Claude Code 2.1.216)
 
 Method: real Claude Code driver sessions (sonnet main) pointed at the router
-(`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`) with capture mode on, in two
-phases: first with the GPT branch set to the built-in stub (sections that say
-"stub boundary"), then against a real local CLIProxyAPI 7.2.90 + Codex OAuth
-upstream (the Workflow measurements and "Live e2e results"). "Emitted" below =
-observed in captured request bodies/headers.
+(`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`) with capture mode on. "Emitted"
+below = observed in captured request bodies/headers.
 
-## Standing decisions
-
-Choices the setup rests on, with the measurement that would reopen them.
-Re-check on Claude Code releases that touch the named area.
-
-- **Gateway model discovery stays off; picker rows come from `modelPicker`.**
-  Discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) is skipped
-  outright while `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is set — the
-  binary logs `[gatewayDiscovery] skipped: _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL
-  is set` — and the flag is what keeps Claude models at 1M behind the router
-  (200000 without it, re-measured on 2.1.258). Even with the flag off,
-  discovery filters the gateway's list to IDs matching
-  `/(claude|anthropic)/i` (2.1.258 binary), so no `gpt-*`/`grok-*` route can
-  appear through it, and it fires only in interactive sessions. Reopens if:
-  bare Claude IDs get 1M behind a non-first-party base URL without the flag
-  (step 6 window check), or the discovery filter admits arbitrary IDs.
-  History: 2.1.216 notes below, `modelPicker` section (2026-08-25).
-
-## Answers to the design doc's open questions
-
-### Dynamic general-purpose delegation (central workflow) — BLOCKED as specced
+### Agent tool `model` parameter
 - The Agent tool's `model` parameter is a closed, harness-enforced enum
   (`sonnet | opus | haiku | fable`). Passing a GPT routing ID fails with
   `InputValidationError` before dispatch.
 - `ANTHROPIC_CUSTOM_MODEL_OPTION` does not extend the enum.
 - Neither does the 2.1.243 `modelPicker` setting (re-verified on 2.1.246 —
-  see the `modelPicker` section at the end).
+  see the `modelPicker` section).
 - Gateway model discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`)
   never fired in `-p` sessions (zero `GET /v1/models` hits, no
-  `~/.claude/cache/gateway-models.json`); untested interactively, but the enum
-  is validated harness-side so extension is unlikely.
+  `~/.claude/cache/gateway-models.json`).
 - The Agent tool has no `effort` parameter.
 - Binary inspection (2.1.216 bundle): the enum is a hard-coded Zod literal at
   the Agent tool schema site with no env/flag/gateway conditional anywhere
   near it; the error is Zod's generic invalid_value formatter. Docs are
   silent on the per-invocation parameter's accepted values (the documented
   "full model ID" allowance is the *frontmatter/SDK* field, which works).
-  The only documented override is `CLAUDE_CODE_SUBAGENT_MODEL` — session-wide,
-  so unsuitable for mixed Claude+GPT sessions. Update (2.1.251 changelog, not
-  re-measured): it now sets the *default* subagent model, and an agent
-  definition's `model:` or an explicit per-spawn model takes precedence over
-  it, so the mixed-session objection no longer applies.
 
 ### Workflow tool — per-invocation model AND effort work (measured live)
 Workflow scripts' `agent()` types `opts.model` as a plain string and skips
@@ -58,37 +34,11 @@ the Agent tool's enum validation entirely. Measured on 2.1.216:
 - `agent(prompt, {model: 'claude-gpt-5.6-sol', effort: 'low'})` emitted
   `output_config.effort: low` on the worker's requests.
 - `agent(prompt, {agentType: 'gpt'})` resolves a project agent definition and
-  inherits its GPT model — the stable alternative if the string-typed
-  `opts.model` ever gains validation.
-So the design doc's full success criterion — dynamic per-invocation model +
-effort without fixed agent files — is achievable today via Workflow
-orchestration; only the bare Agent tool path is enum-blocked.
+  inherits its GPT model.
+The Workflow `opts.model` string-typing is an implementation detail, not a
+documented contract — retest on Claude Code upgrades.
 
-### Named-agent fallback — routing works through the router stub (adopted for MVP)
-This section's runs used the stub boundary: they prove Claude Code's side
-(agent spawn, model routing, effort emission, reply handoff). Tool-turn
-continuation, tool search, and resume were subsequently verified against the
-real upstream — see "Live e2e results"; long sessions and stop-reason edge
-cases remain open (see "Still open").
-A project agent definition with GPT model + effort frontmatter:
-
-```yaml
----
-name: gpt
-model: claude-gpt-5.6-sol
-effort: low
----
-```
-
-- Main session (sonnet) spawns `subagent_type: gpt`; every worker request
-  carries the GPT routing ID through the router; the stub reply flows back
-  normally. Parallel stub-GPT + real-Claude workers in one session work.
-- Claude still *dynamically decides when* to delegate; on the Agent tool
-  path the model-per-invocation knob is missing, so multiple agent files
-  (e.g. `gpt`, `gpt-terra`) stand in for model choice there. The Workflow
-  path (above) has no such limitation.
-
-### Dynamic effort — SUPPORTED (better than the doc feared)
+### Dynamic effort
 - `output_config.effort` IS emitted for unrecognized (GPT) model IDs, without
   `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` (docs imply otherwise — measured on
   2.1.216: session default "high" was sent).
@@ -96,110 +46,27 @@ effort: low
 - `CLAUDE_CODE_EFFORT_LEVEL=medium` → emitted `effort: medium`.
 - CLIProxyAPI (v7.2.92, code-verified) maps `output_config.effort` →
   Codex `reasoning.effort`; gpt-5.6-sol/terra support low..xhigh+max+ultra.
-- Effort control by API surface: Agent tool — per-agent (frontmatter) and
-  per-session (env, `/effort`) only, no per-invocation parameter; Workflow
-  `agent()` — full per-invocation `effort` (measured, see the Workflow
-  section).
 
-## Other measured facts
-- Model-ID validation was not applied to the IDs we tested behind
-  `ANTHROPIC_BASE_URL`: both `claude --model claude-gpt-5.6-sol` and the
-  non-Claude-prefixed `claude --model gpt-5.6-sol` work with no
-  custom-model env var. Not tested: malformed/arbitrary strings; setup
-  should stick to the tested routing-ID patterns.
+## Other measured facts (Claude Code 2.1.216)
 - `thinking: {type: adaptive}` is sent unconditionally to unrecognized model
   IDs (matches docs). With effort also emitted, CLIProxyAPI maps
   adaptive+effort → same-named `reasoning.effort`; adaptive WITHOUT effort
-  would default to xhigh — effort emission (above) makes this a non-issue,
-  but the router's GPT branch could add a guard later.
-- OAuth capability beta string (must-measure item): `oauth-2025-04-20`, in an
+  would default to xhigh.
+- OAuth capability beta string: `oauth-2025-04-20`, in an
   `anthropic-beta` list alongside `claude-code-20250219`,
   `interleaved-thinking-2025-05-14`, `effort-2025-11-24`,
-  `context-management-2025-06-27`, etc. Router forwards the list verbatim on
-  the Claude branch (E1: subscription OAuth session through router returned
-  200 and billed to the subscription login), strips it on the GPT branch.
+  `context-management-2025-06-27`, etc. (E1: subscription OAuth session
+  through router returned 200 and billed to the subscription login.)
 - Subagent system prompts are the agent-definition body only (plus a small
-  billing-header block: `cc_is_subagent=true`); an honest GPT identity is
-  trivially set in the agent file.
-- Capture-mode nuance: on the stub path, records hold *incoming* headers
-  (useful for measuring Claude Code); on real GPT forwarding, records hold
-  the outbound (stripped/injected, redacted) set.
+  billing-header block: `cc_is_subagent=true`).
 
 ## CLIProxyAPI facts (codex research, v7.2.92, code-verified)
 - Needs its own Codex OAuth (`cliproxyapi -codex-login`, browser +
   loopback:1455); no supported import of `~/.codex/auth.json`.
-- `disable-claude-cloak-mode: true`; dedicated `auth-dir`; local `api-keys`
-  secret → router's `gpt-upstream-api-key`.
 - Translation is selective: tools/tool_choice/images/thinking translated;
   `cache_control`, `stop_sequences`, `metadata`, `max_tokens`, `defer_loading`
   stripped/dropped; SSE synthesized. Valid Codex slugs: `gpt-5.6-sol`,
   `gpt-5.6-terra`, `gpt-5.6-luna` (bare `gpt-5.6` is not a slug).
-
-## Recommended settings (draft for setup skill)
-```
-ANTHROPIC_BASE_URL=http://127.0.0.1:<router-port>   # only this; no credential vars
-ENABLE_TOOL_SEARCH=true   # tool search silently turns OFF behind a gateway otherwise
-```
-Leave unset: `CLAUDE_CODE_SUBAGENT_MODEL`, `ANTHROPIC_CUSTOM_MODEL_OPTION(_SUPPORTED_CAPABILITIES)`
-(the latter is a documented no-op behind a gateway; the custom option is
-unneeded because the tested routing IDs are accepted without it), `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` (effort
-already emitted).
-
-## Live e2e results (CLIProxyAPI 7.2.90 via Homebrew, Codex OAuth, gpt-5.6-sol)
-- Direct completion through router → CLIProxyAPI → Codex: correct
-  Anthropic-format response, model substitution and effort applied.
-- Tool-turn continuation: GPT worker called Bash, consumed the result,
-  finished the turn correctly.
-- Tool search: with `ENABLE_TOOL_SEARCH=true` and genuinely deferred MCP
-  tools (verified in capture: 2 deferred + ToolSearch present), the GPT
-  worker used ToolSearch to load a deferred tool's schema and then called it
-  successfully (single sample; agent prompt included a one-line ToolSearch
-  explanation).
-- Parallel GPT + Claude workers; Workflow orchestration with GPT
-  participants; `-p --resume` multi-turn continuity — all worked.
-- Cosmetic: the model self-reports as the routing ID ("Claude GPT-5.6 Sol");
-  set identity in the agent definition if it matters.
-
-## Production e2e (2026-07-20, v0.1.0 stack: managed CLIProxyAPI 7.2.92)
-
-Measured against the production binary (managed mode, supervised child,
-XDG-redirected root; real Codex OAuth reused from the earlier auth dir):
-
-- Fresh-path flow: `doctor` → `ensure-upstream` (pinned download,
-  vendored-checksum verify) → managed `serve` (port-free check, spawn,
-  authenticated `/v1/models` readiness probe) all green; existing Codex login
-  auto-imported from the legacy auth dir, no browser needed.
-- Live sol completion through the managed stack: model substitution, response
-  OK. Router-injected identity works: sol self-reports "GPT-5.6 Sol (Codex)",
-  terra "GPT-5.6 Terra" (per-route display names).
-- SSE streaming intact end-to-end.
-- `count_tokens` on the GPT branch: kept as local 404 `not_found_error`
-  (Claude Code falls back to local estimation; driver sessions unaffected).
-- Crash recovery: SIGKILL on the child → detected, 1s backoff, respawned and
-  ready again in ~1.3s.
-- Claude-branch regression: subscription-OAuth `claude -p` session through
-  the router works (billing to the login, as before).
-- GPT agent tool-turn (Bash call + result consumption) works with the
-  production agent body (no identity text, no ToolSearch hint).
-- ToolSearch WITHOUT any prompt hint: gpt worker loaded a deferred MCP tool's
-  schema via ToolSearch and called it successfully (second positive sample,
-  first hint-free one). No patch needed yet; keep observing.
-- Workflow `agent()` with `model: claude-gpt-5.6-terra` / `-luna` +
-  `effort: 'low'` and a parallel Claude worker: all three returned correctly
-  — every configured route verified live.
-- Two defects found and fixed by this pass: a stale router process holding
-  the port (better bind error now), and a supervisor hot-loop when the
-  Supervisor was dropped without shutdown (watch-sender drop now treated as
-  shutdown).
-- Adversarial-review hardening, all re-verified live: ingress token (bare
-  `/v1/messages` → 404; the `/t/<token>/` base URL from `doctor --json`
-  completes against real Codex, and a `claude -p` driver session works
-  through the tokened `ANTHROPIC_BASE_URL` on both branches); managed-mode
-  startup failures serve degraded instead of exiting (Claude traffic
-  unaffected); a live-but-unready child is terminated and respawned;
-  graceful shutdown on SIGTERM reaps the child process group (observed on a
-  real stop); the SessionStart hook's JSON validated with jq on every
-  branch.
 
 ## Usage + caching SSE measurements (2026-07-20, follow-up session)
 
@@ -221,28 +88,13 @@ raw SSE inspected.
   counts sit at 0 mid-run and completion notifications report
   `subagent_tokens: 0`. Root cause is structural: OpenAI streaming only
   reports usage in the final chunk, so a translator cannot know exact input
-  tokens at `message_start` time. Fix directions: router GPT-branch SSE
-  rewrite (estimated `input_tokens` in `message_start`, corrected in the
-  final delta) or an upstream CLIProxyAPI patch; needs a harness-side test of
-  which events Claude Code actually accumulates from.
+  tokens at `message_start` time.
 - Context length (binary-verified, 2.1.216): the default context window for
   unknown model IDs is exactly 200000 (constant `EYt` in the window-sizing
   function). Undocumented override: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applies
   to any model whose normalized ID does NOT start with `claude-` (Claude
-  models keep their built-in windows). Our `claude-gpt-5.6-*` routing IDs are
-  excluded by the prefix check; bare `gpt-5.6-*` routing IDs (measured
-  working earlier) would accept it. Tension: gateway model discovery silently
-  drops IDs that don't start with `claude`/`anthropic`, so one routing ID
-  can't have both the context override and a discovery picker entry —
-  dual-route aliases (both prefixes → same upstream) would give each flow the
-  right ID. Untested what happens if a conversation exceeds the real
-  upstream limit. *Stale as of 0.1.12: the `claude-` alias routes were
-  removed — the recommended setup disables gateway discovery
-  (`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`) and uses the custom-model env
-  pair for the picker (0.1.22: `modelPicker` rows), so only the bare routing
-  IDs ship. The Claude Code facts recorded here (200K unknown-model default,
-  `claude-` prefix exclusion) still hold; `claude-gpt-5.6-*` IDs elsewhere
-  in this file are historical.*
+  models keep their built-in windows). Gateway model discovery silently
+  drops IDs that don't start with `claude`/`anthropic`.
 - Claude context windows behind the gateway (measured 2026-07-28, Claude Code
   2.1.220). Claude Code grants a natively-1M Claude model its 1M window only
   when `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`; behind the
@@ -260,7 +112,7 @@ raw SSE inspected.
   the alias form (`fable[1m]`) breaks, sending a literal `model: "fable"`
   upstream; (c) `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, which satisfies
   the base-URL check itself and fixes bare IDs everywhere, including agent
-  definitions the user does not control — chosen for setup step 5.
+  definitions the user does not control.
   `ANTHROPIC_BETAS=context-1m-2025-08-07` is a no-op: it reaches the wire but
   never the window calculation. The `/model` picker is unaffected either way —
   the server ships its Fable entry as `claude-fable-5[1m]` already
@@ -268,11 +120,8 @@ raw SSE inspected.
   `model` inherit the parent's suffixed string. The gap the flag closes is
   subagents with an explicit model: an agent defined `model: fable` measured
   200000 while its parent ran at 1000000 in the same session.
-- GPT-branch safety of `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` (verified
-  2026-07-28). Structural: the GPT branch calls `request_headers(...,
-  strip_credentials = true, ...)`, which drops every credential header and
-  `anthropic-beta` wholesale, so no beta the flag adds can reach the GPT
-  upstream. Per behaviour: the 1M window is registry-gated and GPT IDs have no
+- `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` on GPT IDs (verified
+  2026-07-28). The 1M window is registry-gated and GPT IDs have no
   registry entry (measured: `gpt-5.6-sol` still reports 250000 with the flag
   on); refusal fallback is gated on the `refusal_fallback` model capability,
   which only `claude-opus-5`/`claude-fable-5` carry, and is not a wire
@@ -280,7 +129,7 @@ raw SSE inspected.
   classifier queries, which run on a Claude model; the prompt-cache-scope beta
   was already being sent (`DH()` is true regardless of the flag) and the
   `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` sentinel does not leak into the GPT
-  system prompt (asked the model directly). Not structurally blocked: non-beta
+  system prompt (asked the model directly). Non-beta
   headers (`traceparent`, first-party billing `cch=00000;`) do reach the GPT
   upstream, and two behaviours behind their own experiment flags
   (fine-grained tool streaming `tengu_fgts`, image limits
@@ -291,30 +140,12 @@ raw SSE inspected.
   advertises 1.05M for sol/terra (128K max output), but the Codex/ChatGPT
   backend — our upstream — serves a reduced catalog: 272K input + 128K output
   with a 95% multiplier, ~258.4K effective input (openai/codex#32806,
-  InfoWorld 2026-07). Chosen `CLAUDE_CODE_MAX_CONTEXT_TOKENS=250000` to stay
-  under that with margin. Revisit if Codex restores a larger window.
-  (Superseded in 0.1.7: the declaration moved to the cap itself, 258400 —
-  see the context-overflow translation section.)
-- Display names (cosmetic UI question): two documented candidates behind a
-  gateway — `ANTHROPIC_CUSTOM_MODEL_OPTION` + `_NAME`/`_DESCRIPTION` (single
-  entry only), and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` with a
-  `/v1/models` endpoint returning `display_name` (picker labels entries
-  "From gateway"). Binary-verified (2.1.216): discovery consumes ONLY
-  `id` + `display_name` — mapped to `{value, label, description: "From
-  gateway"}` for the /model picker; there is no context-length or
-  capabilities field, so discovery cannot declare a model's context window.
-  Discovery is gated on first-party auth + `ANTHROPIC_BASE_URL` + the env
-  flag, and skipped when nonessential traffic is disabled; it never fired in
-  `-p` sessions, consistent with an interactive-init-only fetch. Natural
-  experiment: implement router `/v1/models` (forward + append GPT routes'
-  id/display_name) and check the picker in one interactive session.
+  InfoWorld 2026-07).
 
 ## Auto-compact accounting (binary-verified, 2026-07-27, Claude Code 2.1.220)
 
 Method: symbol search and disassembly-adjacent string extraction from the
-installed 2.1.220 binary. Motivated by the previous section's open question —
-"needs a harness-side test of which events Claude Code actually accumulates
-from" — because per-model context sizing depends on the answer.
+installed 2.1.220 binary.
 
 - The auto-compact gate computes its token total as
   `YA(messages, model) = dIe(usage of the most recent message carrying usage)
@@ -328,10 +159,8 @@ from" — because per-model context sizing depends on the answer.
   the `/context` display and the system-prompt / CLAUDE.md size analysis, and
   is **not** on the compact path. So the router's `count_tokens` 404 does not
   affect compaction.
-- Consequence: rescaling the four reported usage fields moves the compaction
-  trigger point, which is what `context-window-scaling` does. The unscaled
-  post-anchor tail is in real tokens while the anchor is scaled, so a
-  scaled-down route over-counts its tail slightly and compacts marginally
+- The unscaled post-anchor tail is in real tokens while the anchor is scaled,
+  so a scaled-down route over-counts its tail slightly and compacts marginally
   early — the safe direction.
 - Prefix rule re-verified on this version:
   `if (n !== undefined && n > 0 && !normalized.startsWith("claude-")) return n;
@@ -340,11 +169,10 @@ from" — because per-model context sizing depends on the answer.
   an `autoCompactWindow` setting can *lower* the compaction window but never
   raise it above the model's max; both are global, so neither gives per-model
   sizing.
-- Not verified: end-to-end behavior on a live scaled route against a real
-  open-weights host (no provider key available). This is undocumented,
-  reverse-engineered behavior — a Claude Code version that starts sizing
-  context differently would turn scaling into silent overruns. *(Re-verified
-  against 2.1.223 — see the context-window changes section below.)*
+- This is undocumented, reverse-engineered behavior — a Claude Code version
+  that starts sizing context differently would turn scaling into silent
+  overruns. *(Re-verified against 2.1.223 — see the context-window changes
+  section below.)*
 
 Externally sourced catalog facts (not measured here, 2026-07-27): GLM-5.2
 advertises a 1M-token window under the separate `glm-5.2[1m]` model ID
@@ -355,13 +183,13 @@ OpenRouter's `context_length` is the maximum across its sub-providers.
 
 ## Context-window changes in Claude Code 2.1.223 (binary-verified, 2026-08-06)
 
-Method: string extraction from the installed 2.1.223 binary, same approach as
-the 2.1.220 dig above, which this satisfies the retest trigger of. Changelog
+Method: string extraction from the installed 2.1.223 binary, as for 2.1.220
+above (whose retest trigger this satisfies). Changelog
 context: 2.1.223 changes `CLAUDE_CODE_DISABLE_1M_CONTEXT` behavior, enforces
 assumed context limits on unrecognized model IDs, and adds a startup warning
 around both.
 
-Core assumptions re-verified byte-for-byte equivalent — scaling remains valid:
+Core assumptions re-verified byte-for-byte equivalent:
 
 - Prefix rule unchanged: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applies exactly when
   the resolved model ID does not start with `claude-`; otherwise the 200K
@@ -371,127 +199,60 @@ Core assumptions re-verified byte-for-byte equivalent — scaling remains valid:
   cache_read_input_tokens + output_tokens` (`yHe`); client-estimated unscaled
   tail after the anchor; 20K output reserve; 13K compact margin.
 
-New in 2.1.223, and how it interacts with the router:
+New in 2.1.223:
 
 - Window resolution (`v9`) now tags a source. Unrecognized model IDs — every
   routed ID — resolve as source `"unknown-model"` (window still the
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value); previously they fell through to
   `"auto"`. The auto-compact gate (`hky`) short-circuits to *disabled* when
   the source is `"auto"`, so this change is what makes the tokens gate firmly
-  cover routed models. Net effect for the router: auto-compact on routed
-  models is now guaranteed by an explicit code path rather than incidental.
-- **Footgun:** `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`
+  cover routed models.
+- `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`
   ("restores the previous wait-for-the-API behavior") reverts routed models
-  to source `"auto"` — the tokens gate never fires, sessions grow until the
-  router's context-overflow translation backstop trips at the Codex cap.
-  Works, but degraded UX. Do not set it alongside the router.
+  to source `"auto"` — the tokens gate never fires.
 - The new unrecognized-model startup notice ("X is not a model this version
   of Claude Code recognizes…") is suppressed exactly when the model is
-  non-`claude-` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` > 0 — the setup skill's
-  declaration keeps router sessions notice-free. Without the declaration the
-  notice appears and the assumed window is 200K.
+  non-`claude-` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` > 0. Without the
+  declaration the notice appears and the assumed window is 200K.
 - `CLAUDE_CODE_DISABLE_1M_CONTEXT` now clamps native-1M Claude models to 200K
   via auto-compact, and emits a startup warning for any model whose window
   exceeds 200K with source ≠ `"auto"` — which includes every routed model
   (258400 > 200K). A user setting that var sees "the 200K limit isn't
   enforced for gpt-5.6-sol…" suggesting `CLAUDE_CODE_AUTO_COMPACT_WINDOW=
-  200000`. Cosmetic (the routed window is intentionally above 200K), but the
-  copy reads as a misconfiguration.
+  200000`.
 - `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / `autoCompactWindow` semantics unchanged
   (lower-only, clamped to [100K, 1M], global). On a scaled route the
   real-token trigger shrinks proportionally: `configured × actual/declared`.
-  Compacts early — the safe direction.
 - Account state `longContext1mCreditsBlocked` (set when the API refuses 1M
   for credit reasons) clamps *any* model with a resolved window above 200K to
-  200K — routed models included. The router's 258400 declaration is then
-  optimistic; scaled usage over-reports against the clamped window and
-  compaction fires early. Safe direction, no action.
+  200K — routed models included.
 - `modelOverrides` (the notice's suggested remedy) is a model *aliasing* map,
-  not per-model windows — no use to the router. Alias resolution runs before
+  not per-model windows. Alias resolution runs before
   the `claude-` prefix check, so mapping a routed ID to a `claude-*` name
-  would strip the env-var window. Also retroactively validates 0.1.15's
-  removal of the `claude-` alias routes: those IDs ignore the declaration
-  entirely.
+  would strip the env-var window.
 
-## GPT tool-usage audits (2026-07-20, 5 transcripts, Sonnet auditors)
+## Harness facts from the GPT tool-usage audits (2026-07-20/21, Claude Code 2.1.217)
 
-Five probe tasks (sol x3, terra, luna) audited from raw transcripts. Task
-completion was 5/5 and output accuracy verified; recurring frictions:
+- Subagent Writes of report/findings `.md` files
+  are hard-blocked by Claude Code ("return findings as text").
+- The bundled claude-api skill's
+  imperative trigger fires on any "Claude Code" mention in a prompt, costing
+  a turn each time (once 784KB of context).
 
-- Bash `timeout` parameter hits a `timeout:*` permission-deny rule (3/5
-  transcripts); always recovered in one retry. Decide: allow the parameter
-  or leave as-is.
-- Bash `rg`/`find` instead of Grep/Glob (sol once — caused two
-  output-overflow truncations on `.git/`; terra heavily; luna mildly).
-  Countermeasure: built-in-tools nudge added to all GPT agent bodies.
-- Final-message semantics (terra): produced a complete, sound review as a
-  mid-run text block, then let a late event push it to a stub final message —
-  the caller only receives the final message, so the review was lost.
-  Countermeasure: final-message nudge added to all GPT agent bodies.
-- Terra also self-forked a duplicate investigator on the same task (2x
-  compute, ignored the tool result's do-not-duplicate warning) and misparsed
-  its own Skill args ("Review …") as a PR branch name, then fetched local
-  files via `gh api` instead of `git show`/Read. Single sample; observe.
-- Luna is strictly serial: 27 calls, one per turn, no parallel batches on an
-  8-way-parallel task (sol batches well). Accuracy was still 100%.
-- Harness note for callers: subagent Writes of report/findings `.md` files
-  are hard-blocked by Claude Code ("return findings as text"); ask GPT (and
-  any) subagents for inline findings, not report files.
-
-Round 2 (2026-07-21, 20 probes: 5 tasks x {sol-med, sol-low, terra-high,
-luna-high}, Sonnet auditors + blind comparer): 20/20 task success, 20/20
-complete final messages, 0 self-forks, 0 hallucinated constraints — round
-1's terra final-message loss did not reproduce. Effort did not predict
-fumbles (sol-low was the cleanest and leanest: 54 tool calls vs sol-med 82,
-luna 112). n=1 incidents, tracking model family not effort: terra operated
-on its worktree cwd instead of the prompt-named path; luna wrote a file
-outside its assigned directory via a path bug and did not disclose it;
-sol-med satisfied a no-file-writes task via a disk-caching fetch tool.
-All-config artifact, not a model signal: the bundled claude-api skill's
-imperative trigger fires on any "Claude Code" mention in a prompt, costing
-a turn each time (once 784KB of context) — our probes were meta-tasks about
-Claude Code itself; typical research prompts won't mention it. Decision:
-keep sol, terra, and luna all recommended; no choosing-models copy changes
-(the observed failure modes are too incidental to teach from).
-
-Review-quality bake-off (2026-07-21, blind: sol-med/sol-high/terra-high each
-reviewed commits 9fad035 and f14896e; Sonnet judge with repo access verified
-claims before ranking). Result: sol-high 1st on both (found the one real,
-judge-verified bug in each commit with the tightest grounding, no padding);
-sol-med 2nd (same bugs, some speculative filler); terra-high 3rd — approved
-both commits with ~400-char reviews, missing the real bug both times.
-Transcript check: terra's tiny reviews were its entire written output (one
-text block each), not a lost-final-message artifact, despite heavy
-investigation activity. Steinberger's terra-for-review recommendation does
-not replicate through this integration. Action: reviewer agents switched to
-sol at high effort. Bonus: the bake-off surfaced two real repo bugs — the
-starfield docH self-pinning feedback loop (9fad035) and the hive fork-hook
-registration skip for first-seen directories (f14896e).
-
-### Correction: Grep/Glob did not exist in the audited sessions (2026-07-28)
+### Grep/Glob and shell search (2026-07-28)
 
 Claude Code 2.1.117 removed the standalone Grep/Glob tools on native
 macOS/Linux builds — search moved to embedded `bfs`/`ugrep` via Bash
 (2.1.162 restores the tools only when `--tools` names them explicitly).
-The audits above ran on 2.1.217, so "Bash `rg`/`find` instead of
-Grep/Glob" was the models using the only search path available, and the
-`bash_over_dedicated` rubric penalized tools absent from the request.
-The router-side nudge shipped as countermeasure pointed GPT models at
-Grep/Glob; 0.1.6 cuts the whole "prefer the dedicated tools … over
-shell equivalents" clause — the cat/sed-vs-Read half of the audit
-finding is already stated verbatim in the Bash tool description every
-request carries — keeping only the trained-harness-differs /
-read-descriptions-closely warning. Last transcript on this machine
-with a real Grep/Glob call: 2026-04-27, v2.1.119.
+Last transcript on this machine with a real Grep/Glob call: 2026-04-27,
+v2.1.119.
 
 Verified in a live Bash session (2.1.220): plain `find`/`grep` are
 shadowed by shell-snapshot functions re-execing the `claude` multicall
 binary as bfs/ugrep, the `grep` shim defaulting to `--ignore-files
---hidden -I --exclude-dir=.git` (+ .svn/.hg/.bzr/.jj/.sl) — which would
-have prevented the audit's `rg --hidden` overflow on `.git/`. `rg`
+--hidden -I --exclude-dir=.git` (+ .svn/.hg/.bzr/.jj/.sl). `rg`
 resolves to the user's real ripgrep when installed, so `--hidden`
-sweeping `.git/` remains possible there. Shell search is the sanctioned
-path; there is nothing to nudge GPT models away from.
+sweeping `.git/` remains possible there.
 
 ## Effort and windows on openai-compatibility upstreams (2026-07-28, CLIProxyAPI 7.2.92)
 
@@ -501,8 +262,7 @@ OpenAI-compatible host that logs the exact body it receives, with one
 
 - `output_config.effort` **is** forwarded, as OpenAI's top-level
   `reasoning_effort`, verbatim: low/medium/high/xhigh/max each arrived
-  unchanged. The previous skill claim that open-weights routes ignore effort
-  was wrong (and had never been measured).
+  unchanged.
 - With `thinking: {type: adaptive}` and **no** effort, the forwarded body
   carries `reasoning_effort: "xhigh"` — the same adaptive-defaults-to-xhigh
   behavior noted for the Codex path, and it reaches openai-compat hosts too.
@@ -530,20 +290,8 @@ endpoints: BaseTen, DigitalOcean, Fireworks x2, Together, Moonshot AI all at
 reports 1,048,576. OpenRouter's provider-routing docs describe filtering on
 `max_tokens` and on supported parameters, but say nothing about routing by
 prompt size, so a long conversation can be handed to the 8K endpoint. Every
-endpoint lists `reasoning_effort` in `supported_parameters`.
-
-Provider pinning is only available two ways, both outside the request the
-router controls: the per-request `provider.only`/`order` fields (CLIProxyAPI
-builds that body, so the router cannot inject them) and account-wide
-allowed/ignored providers at `https://openrouter.ai/settings/privacy`, which
-merge with the per-request lists and apply to every API call. There is no
-model-slug pin — `:nitro` and `:floor` only change sorting.
-
-Consequence: discovery takes the narrowest endpoint on OpenRouter, which for
-this model means it declines to scale rather than promising 1M. Pinning
-account-side (then setting `context-window` by hand, since the catalog the
-router reads is unaware of account settings), or using a direct host, is what
-makes the advertised window real.
+endpoint lists `reasoning_effort` in `supported_parameters`. There is no
+model-slug pin; `:nitro` and `:floor` only change sorting.
 
 ## Per-session WebSearch budget (2026-07-29, Claude Code 2.1.220)
 
@@ -554,35 +302,20 @@ WebSearch calls return a budget-exhausted notice ("200 of 200 WebSearch
 calls") and agents silently degrade to WebFetch-only — this invalidated a
 36-agent judging round mid-run before it was noticed; the only in-band
 signal is the notice in each affected agent's transcript. Fresh `claude
--p` sessions each get their own budget, so search-heavy multi-agent
-evaluations should run searchers as independent `-p` sessions (the
-bake-off's rescue scripts follow this pattern). Undocumented harness
+-p` sessions each get their own budget. Undocumented harness
 behavior — recheck the cap and its scope on Claude Code upgrades.
 
-## Still open
-- Long sessions and heavy tool loops against real Codex; more ToolSearch
-  samples (single positive so far).
-- Gateway model discovery in interactive sessions (cosmetic: /model picker
-  entries; not needed for the agent-file or Workflow flows).
-  (Picker rendering is now measurable through a pty-driven session — see the
-  `modelPicker` section; `modelPicker` rows make discovery moot for us.)
-- Compliance: user reviewed the subscription-OAuth consideration and accepted
-  the risk (2026-07-20); revisit before any public release of the plugin.
-- The Workflow `opts.model` string-typing is an implementation detail, not a
-  documented contract — retest on Claude Code upgrades.
-
-## WebSearch on GPT main-loop sessions (2026-07-21, Claude Code 2.1.217, v0.1.4)
+## WebSearch on GPT main-loop sessions (2026-07-21, Claude Code 2.1.217)
 
 - Mechanism (2.1.217 bundle): the WebSearch tool issues a side `/v1/messages`
-  call on the session's **main-loop model** whose only tool is the
+  call on the session's **main-loop model** (on 2.1.220: a Claude
+  small-fast model — see the phase-5 measurement) whose only tool is the
   server-side `web_search_20250305` tool, then parses links out of
   `web_search_tool_result` blocks; a result block with empty `content`
   renders as "No links found." (A statsig gate, `tengu_plum_vx3`, would
   switch the side call to the small-fast model; observed off.) The bundle
   source sets `tool_choice: {type: tool, name: web_search}`, but the live
-  captured request carries `tool_choice: auto` — detection accepts both,
-  keying on the prefixed "Perform a web search for the query: " user message
-  and the tools list containing only the server tool.
+  captured request carries `tool_choice: auto`.
 - Through CLIProxyAPI 7.2.92, Codex runs the search but returns links only as
   inline text citations; CLIProxyAPI (PR #3868) maps the `web_search_call`
   into the Anthropic block pair with `content: []`. Upstream declined to go
@@ -595,48 +328,24 @@ behavior — recheck the cap and its scope on Claude Code upgrades.
   with 2–4 scraped-able inline links; `alpha/search` 0.9–2.6s with 32–35
   structured results. One UA quirk: the backend 403s `Python-urllib/*`
   user agents (curl and no-UA pass).
-- v0.1.4 therefore intercepts the recognized sub-call shape on the GPT
-  branch and answers it from `/v1/alpha/search` via the same CLIProxyAPI
-  child; on failure it falls back to the buffered LLM call with links
-  scraped from the text into the empty result block. `[web-search]
-  mode = "alpha" | "scrape" | "off"` in the config.
 - Live e2e (2026-07-21): `claude -p --model gpt-5.6-sol` WebSearch through
   the intercepting router returned a fully populated Links array in
   ~2s; identical query on the passthrough router returned "No links found."
   after 20–70s. `/v1/alpha/search` is an undocumented endpoint — retest on
   Codex/CLIProxyAPI upgrades.
 
-## Origin-matched WebSearch backend (2026-07-22, follow-up on the above)
+## WebSearch sub-call attribution (2026-07-22, follow-up on the above)
 
 - The sub-call always runs on the session's **main-loop model** even when a
   subagent invoked WebSearch (verified by capture: gpt-5.6-sol subagent under
-  a haiku main produced a Claude-branch sub-call on haiku). The sub-call
+  a haiku main produced a Claude-branch sub-call on haiku; on 2.1.220: a
+  Claude small-fast model regardless of the main). The sub-call
   carries `cc_is_subagent=true` in its billing-header block but nothing
   identifying the requesting agent's model.
-- The router therefore correlates: it passively taps `/v1/messages` responses
-  of requests that declare the client `WebSearch` tool, watches for the
-  `WebSearch` tool_use (SSE `input_json_delta` accumulation), and records
-  `(session_id, query, domains) → origin model` before the completing event
-  reaches the client. The follow-up sub-call consumes the entry and routes to
-  the origin-matched backend: GPT origin → `alpha/search` (or the LLM+scrape
-  path in `scrape` mode), Claude origin → Anthropic native.
-- Claude-origin sub-calls arriving on the GPT branch are re-issued to
-  Anthropic as a **normalized** request (allowlisted fields, origin model,
-  `max_tokens` clamped, main-model tuning fields like `output_config`
-  dropped, inbound OAuth + `anthropic-beta` preserved, no identity block),
-  buffered non-streaming and re-framed. 400/401/403/404 from Anthropic are
-  surfaced unchanged; transport/5xx failures fall back to the GPT path.
-- Correlation is heuristic: identical concurrent queries in one session
-  consume FIFO; a miss (TTL 120s, restart, main-loop search) degrades to the
-  previous main-model-matched behavior.
-- Live e2e (2026-07-22): haiku main + gpt-5.6-sol subagent → subagent's
-  search answered from `alpha/search`; gpt-5.6-sol main + haiku subagent →
-  subagent's search answered by Anthropic native with a populated Links
-  array. Both verified in router logs and session transcripts.
 
-## Context-overflow translation (2026-07-29, Claude Code 2.1.220 + codex-rs HEAD 6493417150 + CLIProxyAPI 7.2.92)
+## Context overflow (2026-07-29, Claude Code 2.1.220 + codex-rs HEAD 6493417150 + CLIProxyAPI 7.2.92)
 
-Motivated by a live failure: a workflow-heavy session on `gpt-5.6-sol` hit
+Observed live: a workflow-heavy session on `gpt-5.6-sol` hit
 the Codex backend's input limit and retried the identical oversized request
 14 times over ~14 minutes with no recovery.
 
@@ -702,36 +411,7 @@ Neither shape matches any of Claude Code's `prompt_too_long` patterns (right
 phrase for the 413 rule but wrong status; wrong phrase for the 400 rules),
 so no recovery ran — the observed retry loop.
 
-### Router fix (0.1.7): translate to Anthropic's canonical error
-
-`crate::overflow` rewrites the message to `prompt is too long: N tokens >
-M maximum` on both wire shapes — emulating Anthropic's public error surface,
-not any client's internals. `M` = the route's real window
-(`GPT_CONTEXT_WINDOW` raised 250000 → 258400, now load-bearing); `N` = the
-router's o200k input estimate (computed lazily for non-streaming requests),
-clamped to `max(N, M+1)` because the estimator ignores non-text content and
-a false `N ≤ M` would starve gap-guided compaction. Scope: Codex-native
-upstream models only (`gpt-5.6-sol/terra/luna`) — the matched phrase is
-verified for that backend alone, and a false positive elsewhere would
-re-create the retry loop this removes. Detection requires
-`invalid_request_error` plus whitespace-normalized, case-insensitive
-`input exceeds the context window` (subject-bearing: a `max_tokens ...`
-variant must not match). GPT-branch forwards now always request identity
-encoding (loopback traffic; response bytes must be parseable).
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` moves to the cap itself, 258400 (setup
-skill, `DEFAULT_DECLARED_CONTEXT_WINDOW`, config template): with recovery
-restored the declaration is an efficiency dial, and the 238.4K gate under
-the 258.4K cap keeps 20K of preventive slack — Claude Code's own output
-reserve, and still more headroom than Codex's 13.6K. Existing scaled
-open-weights routes with windows in [250000, 258400) would fail validation
-under the raised declaration; setup must check configured provider windows
-before rewriting the value (open-weights.md documents the thresholds).
-
-Live e2e (2026-07-29, patched router in external mode against the running
-CLIProxyAPI child): oversized requests on `gpt-5.6-sol` and
-`claude-gpt-5.6-sol`, streaming and non-streaming, all four returned
-`prompt is too long: 1680090 tokens > 258400 maximum` (real lazy estimate on
-the non-streaming path). **Retest triggers:** any
+**Retest triggers:** any
 CLIProxyAPI upgrade (its error translation may change shape — if it starts
 preserving `context_length_exceeded`, detection can tighten to the code),
 and Codex backend window changes (272K/95% → update `GPT_CONTEXT_WINDOW`).
@@ -768,11 +448,7 @@ Separate finding, same evening: the backend's enforcement boundary **moved**.
 Morning sessions and recon 400'd at ~260K, but by evening uncached probes
 passed at 300K/340K and failed at 380K+ — enforcement now sits somewhere in
 (340K, 380K), well above the advertised 272K×95% = 258.4K. Looks like a
-rollout in progress (openai/codex#32806 anticipated a restore).
-`GPT_CONTEXT_WINDOW` stays 258400 deliberately: it is the *documented*
-served limit, the translated `M` only guides compaction sizing (a
-conservative M over-compacts slightly, the safe direction), and chasing an
-in-flight rollout would bake in a number measured on one evening. Retest
+rollout in progress (openai/codex#32806 anticipated a restore). Retest
 when the backend's `GET /models` catalog (via codex-rs) stabilizes on a new
 window.
 
@@ -800,9 +476,9 @@ CLI works), the injected `image_generation` tool
 temp-dir cliproxy instances refreshing the same account (killing them
 changed nothing), and OpenAI-wide incidents (status pages green).
 
-Fix (0.1.8): the GPT branch sets `Originator: codex_cli_rs` in
-`headers::request_headers`, overriding any inbound value. Watch for the
-backend tightening the fingerprint check (e.g. requiring a matching
+`CLIProxyAPI` 7.2.110's codex identity cloaking replaces the override
+(router 0.1.9 no longer sets the header). Watch for
+the backend tightening the fingerprint check (e.g. requiring a matching
 `codex_cli_rs/<version>` User-Agent or minimum client version — sol's
 catalog entry declares `minimal_client_version: 0.144.0`); if sol-only
 "overloaded" errors return, re-run the A/B probes with a current CLI
@@ -817,7 +493,7 @@ external mode against a private CLIProxyAPI child (port 8399) started with
 re-verified healthy afterwards. Evidence:
 `~/.claude/jobs/13cfa33f/tmp/phase4/evidence/`.
 
-### Reasoning effort does NOT survive on the xAI path (decides D12)
+### Reasoning effort does NOT survive on the xAI path
 
 `output_config.effort` — the field an agent file's `effort:` frontmatter
 produces — is forwarded verbatim on the Codex and openai-compat paths, but
@@ -844,29 +520,9 @@ top-level `reasoning_effort`. The parenthesised model-id suffix
 | `grok-4.3(none)` | `grok-4.3` | `none` (4.3 allows zero) |
 | `grok-4.5(bogus)` | `grok-4.5` | `medium` (default; no error) |
 
-The child owns the clamping table and never errors on an out-of-range value,
-so the router forwards the requested effort unvalidated.
+The child owns the clamping table and never errors on an out-of-range value.
 
-**Router fix:** `routing::effort_qualified_model` appends the suffix for
-Grok-family routes only. Verified end-to-end through the dev router:
-low/medium/high each arrive as the matching `reasoning.effort`. Bare routes
-and the existing agent-frontmatter channel are preserved — no suffixed
-routes, no new agent files, no user-visible concept.
-
-### Alpha-search model pin, live (D7.1)
-
-> Still true for GPT and open-weights origins. Grok origins no longer reach
-> `/v1/alpha/search` at all (2026-08-04, see "Grok-native WebSearch").
-
-A `WebSearch` sub-call on a `grok-4.5` route reached `/v1/alpha/search` and
-returned **33 structured links**. The payload carried the pinned Codex slug,
-not the Grok one:
-
-```
-{"model":"gpt-5.6-sol","q":"rust axum graceful shutdown"}
-```
-
-### Context-overflow error (GT-8): translatable
+### Context-overflow error (GT-8)
 
 697K tokens to `grok-4.5` (500K window) — HTTP 400:
 
@@ -875,23 +531,12 @@ not the Grok one:
  "{\"code\":\"invalid-argument\",\"error\":\"This model's maximum prompt length is 500000 but the request contains 620215 tokens.\"}"}}
 ```
 
-Subject-bearing and unambiguous, so `OverflowRewrite` is now armed for the
-built-in Grok models via a second dialect phrase (`maximum prompt length
-is`). The Codex arming rule is unchanged.
-
 ### `max_tokens` has no ceiling to hit
 
 `max_tokens` is **dropped in translation** — the upstream body carries
 `max_output_tokens: null`. 65536, 65537 and 100000 all succeeded on both
 `grok-4.5` and `grok-4.3`. The registry's 65,536 `max_completion_tokens` is
-never exercised by an Anthropic-protocol request, so no clamp is needed.
-
-### Identity block reaches xAI (gate 6)
-
-The injected block arrives as a `developer` message in `input[0]`:
-
-> You are Grok 4.5, a Grok model working inside Claude Code's agent
-> harness alongside Claude models. Do not present yourself as Claude. ...
+never exercised by an Anthropic-protocol request.
 
 ### Family-switch: a foreign thinking signature hard-fails
 
@@ -913,13 +558,8 @@ picked in turn 1):
 | thinking block with `signature` removed | recalled correctly |
 | thinking blocks dropped, text kept | recalled correctly |
 
-So a mitigation exists (drop the signature) and costs nothing measurable on
-a short session. **Not implemented**: whether Claude Code actually replays
-another family's thinking blocks on a mid-session `/model` switch is a
-harness question, not a wire question, and shipping a body rewrite for an
-unconfirmed trigger would be speculative. Phase 5 must answer it — see the
-verification suite. Also note the 400 quarantined the sandbox child's xAI
-credential (`auth_unavailable` on the next call) until restart, which is how
+The 400 quarantined the sandbox child's xAI credential
+(`auth_unavailable` on the next call) until restart, which is how
 a single bad request can look like an auth outage.
 
 ### Incidental
@@ -938,17 +578,12 @@ gateway untouched and re-verified healthy after.
 ### Driving Claude Code at a non-default gateway needs `--settings`
 
 `~/.claude/settings.json`'s `env` block **silently overrides shell-provided**
-`ANTHROPIC_BASE_URL` (the setup skill already warns about this for smoke
-tests). Runs launched with a shell `ANTHROPIC_BASE_URL` went to the *live*
-gateway instead, which reads as "the sandbox works" while measuring nothing.
-`claude --settings <file>` with its own `env` block is the reliable override;
-`ANTHROPIC_CUSTOM_MODEL_OPTION` in that block is also what makes `--model
-<routing-id>` accepted (an unregistered ID is rejected with "issue with the
-selected model", regardless of `/v1/models` discovery).
-(Superseded on 2.1.246: acceptance no longer depends on the var — see
-"`modelPicker` vs the custom-model env pair" below.)
+`ANTHROPIC_BASE_URL`. Runs launched with a shell `ANTHROPIC_BASE_URL` went to
+the *live* gateway instead, which reads as "the sandbox works" while
+measuring nothing. `claude --settings <file>` with its own `env` block is the
+reliable override.
 
-### GATE 5 — foreign thinking signatures are NOT reachable (no mitigation needed)
+### GATE 5 — foreign thinking signatures are NOT reachable
 
 Phase 4 measured a hard 400 when a non-xAI thinking signature reaches Grok.
 Driving the real harness shows Claude Code never sends one.
@@ -965,32 +600,15 @@ and its 12-message history contains **zero thinking blocks** — the harness
 strips them from replayed history itself. The reverse switch (Grok turn
 first, then `--resume --model claude-sonnet-4-5`) also succeeded.
 
-**Verdict: the phase-4 wire failure is unreachable through Claude Code. No
-router-side signature stripping is warranted** — it would be a body rewrite
-for a trigger the harness prevents.
-
-### WebSearch: the 2x2 collapses to a 1x2, and cell 4 does NOT land on Grok
-
-> **Superseded for Grok origins (2026-08-04).** Both rows below describe the
-> pre-0.1.11 behaviour. Grok-origin searches no longer reach `alpha/search`
-> and no longer fall back to Anthropic; they run on xAI's own hosted
-> `web_search` and fail visibly when they cannot. The recommendation this
-> section ends with is resolved: D7.5 was funded, via `web_search` rather than
-> `x_search`. See "Grok-native WebSearch" below. The measurements stay as the
-> record of what the alpha path did.
+### WebSearch side call runs on a Claude small-fast model
 
 The `WebSearch` side call runs on a **Claude small-fast model**
 (`claude-haiku-4-5`) even in a Grok-main session, so it always arrives on the
-**Claude branch** and is matched to its origin by the correlation tap. The
-"Grok main" and "Grok subagent under Claude main" rows therefore exercise the
-same code path — the topology axis is not independent.
+**Claude branch**. The "Grok main" and "Grok subagent under Claude main"
+topologies therefore exercise the same code path — the topology axis is not
+independent.
 
-| alpha | observed |
-|---|---|
-| up | `answered routed-origin web search from alpha/search links=12..40 origin="grok-4.5"`, payload `{"model":"gpt-5.6-sol"}` (the D7.1 pin) |
-| down (codex auth removed) | alpha 503 → **falls back to the origin route's scrape path** (the D7.2 fix fires) → that forward **422s** → passes through to Anthropic |
-
-The 422 body:
+Forwarding that sub-call to xAI **422s**:
 
 ```
 Failed to deserialize the JSON body into the target type:
@@ -998,19 +616,7 @@ data did not match any variant of untagged enum ModelToolChoice
 ```
 
 The sub-call carries Anthropic's server-side `web_search_20250305` tool and
-its `tool_choice`; xAI cannot deserialize them. So **the required cell-4
-behaviour (land on Grok `legacy_websearch`) is not achievable as-is**, and
-the plan's assumption that the scrape path is a usable Grok fallback is
-wrong.
-
-Stripping the tool to stop the 422 is **not** an improvement worth making:
-without the tool the request is a plain completion and Grok has no web
-access, so it would answer a search query from training data — the suite's
-own T7 fail signal is a fabricated URL. Anthropic answering correctly is
-strictly better for the user than Grok guessing. The principled fix is xAI's
-native `x_search` (plan D7.5), still out of scope. **Recommendation for
-Fable/the user:** either accept and document the Anthropic fallback for
-Grok-origin searches when alpha is unavailable, or fund D7.5. [copy: Fable]
+its `tool_choice`; xAI cannot deserialize them.
 
 ### Effort is effective end-to-end (preliminary)
 
@@ -1023,10 +629,8 @@ model-ID suffix mapping is in play), n=2 per level:
 | medium | 62s, 191s | 4932, 14148 | 2761, 7952 |
 | high | 184s | 13656 | 7657 |
 
-Reasoning volume and latency scale with the requested effort, confirming the
-phase-4 fix works in practice and that effort is worth exposing. Sample is
-too small for pass-rate or per-tier guidance; the full suite matrix is still
-outstanding (see below).
+Reasoning volume and latency scale with the requested effort. Sample is
+too small for pass-rate or per-tier guidance.
 
 ### Operational notes
 
@@ -1038,7 +642,7 @@ outstanding (see below).
 - Neither the live nor the copied auth file was modified at any point
   (mtimes unchanged, same `expired` timestamp).
 
-## Grok verification suite T1–T8, full matrix (2026-07-31, Claude Code 2.1.220)
+## Grok verification suite T1–T8 (2026-07-31, Claude Code 2.1.220)
 
 Sandbox: third router (8899) + its own `CLIProxyAPI` 7.2.110 child (8399),
 isolated `XDG_*` under `~/.claude/jobs/13cfa33f/tmp/suite/`, auth **copied**
@@ -1049,15 +653,11 @@ same mtimes). Live gateway untouched and re-verified healthy after.
 `grok-4.5` @ medium; the four diagnostic tasks (T1, T4, T5, T6) also @ low
 and @ high; the same four @ medium on `grok-4.3` and on a **sandbox-only
 hand-written `[[models]]` probe route** for `grok-4.20-0309-reasoning`.
-`grok-3-mini-fast` was dropped (phase 4 saw it answered by another model).
-Every cell was scored by fresh Claude auditors against the suite rubric,
-independent of the executor.
 
 ### Driving effort from the CLI: `--effort` is the session-level control
 
 `claude --effort <low|medium|high|xhigh|max>` sets effort for a `-p` session;
-the capture tap confirms it arrives as top-level `output_config.effort` and
-the router rewrites it to the `model(effort)` suffix on the xAI path. An
+the capture tap confirms it arrives as top-level `output_config.effort`. An
 `--agents` JSON block carrying `"effort"` did **not** take effect (the body
 still carried Claude Code's default `medium`) — the flag is the reliable
 channel. Claude Code sends `output_config.effort: medium` even when no
@@ -1066,58 +666,11 @@ effort is requested, so "no effort" is not observable from the wire.
 ### Served models
 
 `grok-4.5` is answered by **`grok-4.5-build`** in every response body
-(annotate accordingly; the `-build` suffix is the only served-vs-named
+(the `-build` suffix is the only served-vs-named
 divergence seen). `grok-4.3` and the `grok-4.20-0309-reasoning` probe are
 each answered by their own name. The undocumented 4.20 snapshot is reachable
 through a hand-written route with `family = "grok"` and needs no other
 plumbing.
-
-### Results (round 2 — isolated scratch dirs; auditor verdicts)
-
-| Task | grok-4.5 low | grok-4.5 medium | grok-4.5 high | grok-4.3 med | grok-4.20 med |
-|---|---|---|---|---|---|
-| T1 exact-match edit | PASS | PASS | PASS | PASS (demerit) | PASS |
-| T2 bash output | — | PASS | — | — | — |
-| T3 grep/glob | — | PASS | — | — | — |
-| T4 multi-step fix | PASS | PASS | PASS | PASS (demerits) | PASS (demerits) |
-| T5 identity/format | PASS | PASS | PASS | PASS | PASS |
-| T6 degeneracy | SOFT | PASS (contaminated) | SOFT | SOFT | **FAIL** |
-| T7 WebSearch | — | PASS | — | — | — |
-| T8 long context | — | SOFT | — | — | — |
-
-Round 1 (same cells, before the scratch-isolation fix) agreed everywhere
-except T6, where 4.5-low was SOFT, 4.5-medium and 4.5-high PASS, 4.3 SOFT,
-4.20 FAIL — i.e. only the low/high T6 verdicts moved, and the 4.20 fabrication
-reproduced in both rounds.
-
-- **T1** — every cell fixed the single line, `tests`-style byte-compare clean,
-  no full-file `Write`, zero failed Edits, tab-indented function preserved.
-  `grok-4.3` needed 5 extra calls recovering from a path it mangled (below).
-- **T2** — reported mean/exit/skip exactly matched the real Bash result block
-  (59.50 / 3 / 2) and `results.txt` carried them.
-- **T3** — `rg -n -w` word-boundary search; ground-truth file/line map matched
-  exactly, plural decoys excluded, comment-only reference identified.
-- **T4** — all five cells ran pytest before their first edit, left `tests/`
-  byte-identical, ended on a real `6 passed` result block, and summarized both
-  seeded bugs correctly; exactly one edit/test cycle each.
-- **T5** — identity held everywhere: "I am Grok 4.5 … created by xAI",
-  "Grok 4.3 … created by xAI", "Grok 4.20 … created by xAI". No cell claimed
-  to be Claude or GPT; one thinking block framed itself as "working inside
-  Claude Code's agent harness", which is the allowed framing. Zero tool calls
-  in all five, lists alphabetized. The *contents* of the tool list vary by
-  cell (11 vs 25 vs 70 entries) — it reflects what the prompt exposed, not the
-  harness roster.
-- **T7** — three `WebSearch` calls, 11.7–14.0 s each (pass bar 30 s), answered
-  by the Codex alpha backend with `origin="grok-4.5"` and 12–40 links; the
-  reported URL appears verbatim in a result block. Per phase 5 this measures
-  the user-visible search experience inside a Grok session, not a
-  Grok-executed search.
-- **T8** — correct file, line, and code (`log-f.txt`, `08773f4b`), no
-  overflow or truncation error; `Read`'s token cap truncated four reads and
-  the model resumed by offset rather than assuming coverage. Downgraded to
-  SOFT because it delegated four of the eight files to `Agent` subagents that
-  ran on `claude-haiku-4-5` — the probe therefore measures Grok on about half
-  the corpus. Round 1's cell read all files itself and passed clean.
 
 ### Effort-effectiveness (grok-4.5, round 2, n=1 per cell)
 
@@ -1132,50 +685,10 @@ reproduced in both rounds.
 Per task on `grok-4.5` (low → medium → high): T1 588/609/609 thinking chars,
 T4 303/458/535, T5 57/142/139, T6 1606/1093/1038. **Effort produced no
 monotonic effect on outcome, latency, or reasoning volume on these tasks** —
-the only verdict spread (T6) does not order by effort, and the one T6
-"medium PASS" depended on reading the suite's own answer key. This is a
+the only verdict spread (T6) does not order by effort. This is a
 different regime from the phase-5 word problem, where reasoning volume and
 latency scaled cleanly with effort: these tasks are agentic and easy, so
 they do not separate the tiers. Any per-tier guidance needs harder tasks.
-
-### Failure catalogue
-
-- **Whitespace-fidelity `Edit` failure (4.20, T4).** `old_string` prefixed
-  with a literal tab against a 4-space file → `String to replace not found`.
-  Recovered via `cat -e` after `cat -A` failed (GNU flag, unsupported on
-  macOS). The failure mode T1 was designed to catch showed up in T4 instead.
-- **Path mangling with perseveration (4.3, T1 and T4).** Rewrote the temp
-  path segment `/T/` as `-T`, then re-issued the corrupted path 5 times
-  (2 byte-identical) — in T1 even after a `find` result block printed the
-  correct path — before running `pwd` and recovering. Costs ~15 s per
-  occurrence. Under the ≥4-identical-retry loop bar, but the same wrong
-  hypothesis survived contradicting evidence.
-- **Fabricated file contents (4.20, T6 — reproduced in both rounds).** After
-  confirming `config.yaml` does not exist, it wrote an invented file
-  (`timeout: 60` + `other: value`), edited 60 → 30, read it back, and
-  reported "**Change completed and verified** … The file is now updated as
-  requested". Round 1 invented a `service:` block instead. This is the
-  rubric's explicit fail signal, dressed as a workflow.
-- **Unbounded search radius (4.5 low/medium, T6).** A `find /Users/yoav`
-  whole-home scan (24–26 s of the cell's wall time) for a file the first `ls`
-  had already shown absent. One cell went further and called
-  `mcp__claude_ai_Google_Drive__search_files` and
-  `mcp__claude_ai_Gmail__search_threads {"query":"config.yaml timeout"}`
-  against the user's real connected accounts. Sessions were run with
-  `--permission-mode bypassPermissions`, so nothing gated it.
-- **`count_tokens` 404s.** `POST /v1/messages/count_tokens` returns the
-  router's `token counting is not available for routed GPT models` 404; only
-  T8 triggers it (8 times), and it did not disturb the run.
-
-### Suite methodology: the answer key must be off the filesystem
-
-Round 1 put each cell's `ground-truth.json` beside its scratch dir; two T6
-cells read it (and one read a sibling cell's leftover `config.yaml`) before
-answering. Round 2 moved fixtures into isolated `mktemp -d` parents and the
-ground truth out of the tree — and cells *still* found the suite by scanning
-`/Users/yoav`. **Filesystem distance is not isolation for an agent with
-`bypassPermissions`**; a future run needs the answer key on a different
-machine or behind a deny rule, and MCP tools disabled for the cells.
 
 ### Operational notes
 
@@ -1183,31 +696,12 @@ machine or behind a deny rule, and MCP tools disabled for the cells.
   Phase 5's `auth_not_found` came from back-to-back requests; a short gap is
   enough to avoid it.
 - Every routed request returned 200 (plus the known `count_tokens` 404s).
-- `claude --settings <file>` with its own `env` block remains mandatory (see
-  phase 5); `ANTHROPIC_CUSTOM_MODEL_OPTION` must name the routing ID under
-  test, so each model needs its own settings file. (Superseded on 2.1.246:
-  the var no longer gates `--model`; see the `modelPicker` section.)
 
 ## Grok-native WebSearch (2026-08-04, CLIProxyAPI 7.2.110, model-router 0.1.11)
 
-Grok-origin `WebSearch` sub-calls now run on xAI's hosted `web_search` tool
-instead of Codex's `alpha/search`. Measured on a sandbox child generated from
+xAI's hosted `web_search` tool, measured on a sandbox child generated from
 the router's own `upstream_config_yaml` (isolated dirs, copied auth, live
 gateway untouched).
-
-### Two earlier evidence sets are compromised — do not re-derive from them
-
-- **`inject-x-search: true`.** The `sol-search` probe child ran with that flag
-  hand-added to its config. Its `response.created` therefore advertised both
-  `web_search` and `x_search`, so `tool_choice: "required"` there only forced
-  *some* hosted tool — a model picking `x_search` emits a `custom_tool_call`
-  and no `web_search_call`. Every tool-forcing and tool-set conclusion from
-  that environment was re-established on a clean child before use. The router
-  never emits an `xai:` section, so a shipped install cannot be in that state.
-- **The `*-raw.sse` files are recorder logs, not wire captures**: no blank-line
-  event framing at all (the recorder wrote selected lines), so they cannot
-  stand in for a stream. The unit-test fixture is a fresh byte-faithful
-  capture (`curl --no-buffer`).
 
 ### The wire shape (clean child, verified)
 
@@ -1220,8 +714,7 @@ gateway untouched).
   `[{"type":"web_search"}]` — no `x_search`. `tool_choice`, `temperature`,
   `top_p`, `store` and `max_output_tokens` are all accepted and echoed.
 - `tools[0].filters.allowed_domains` works (5/5 harvested URLs on the
-  requested domain). Excluded/blocked domains were never accepted upstream and
-  are not sent; the router filters harvested URLs by host itself.
+  requested domain). Excluded/blocked domains were never accepted upstream.
 - Sources arrive on `response.output_item.done` where `item.type ==
   "web_search_call"`, in `item.action.sources[]` as `{"type":"url","url":…}` —
   **no titles**, so links render with the URL as their label.
@@ -1230,7 +723,7 @@ gateway untouched).
   source-bearing items repeat the first item's URL set exactly (0 unique URLs
   added), so waiting past the first item buys nothing.
 
-### Closing the stream early quarantines the xAI auth (the design constraint)
+### Closing the stream early quarantines the xAI auth
 
 | action | next Grok request |
 |---|---|
@@ -1241,53 +734,29 @@ gateway untouched).
 | probe issued *while* a stream is still being drained | 200 |
 
 So a client disconnect — not request volume — is what takes the xAI auth
-offline, for 30–60s. Abandoning after the harvest would therefore have made
-every Grok search break the user's next Grok turn. The router instead answers
-the sub-call at the harvest and lets a task that owns the stream read it to the
-end, which is measured not to block concurrent Grok traffic.
-
-Because *any* early close has this effect, nothing in the router is allowed to
-drop a live search stream: the request deadline stops the handler waiting
-without cancelling the read, every stream is owned by a registry, and shutdown
-stops admitting searches at the signal (one arriving mid-drain fails visibly
-rather than opening a stream nothing will finish) and then waits for the
-in-flight ones before the managed child is torn down. How many searches may run
-at once is deliberately not capped: a parallel sweep should meet the limits of
-the user's own xAI subscription — surfaced as `too_many_requests` when it does
-— rather than an invented local one. Verified live: with a search answered at 3.2s, `SIGTERM` immediately
-after took **6.8s** to exit and the child logged the search as
-`200 | 9.999s` — the stream ended by itself. Two searches back to back, each
-followed immediately by another Grok request, produced no `auth_unavailable`
-at all. Phase
-4's `auth_not_found` note and the "early close is clean" reading of the
-`sol-search` abort probe are both superseded: the child *process* survived,
-but its auth entry did not.
+offline, for 30–60s. Reading a stream to the end is measured not to block
+concurrent Grok traffic. Verified live: with a search answered at 3.2s,
+`SIGTERM` immediately after took **6.8s** to exit and the child logged the
+search as `200 | 9.999s` — the stream ended by itself. Two searches back to
+back, each followed immediately by another Grok request, produced no
+`auth_unavailable` at all. Phase 4's `auth_not_found` note is superseded:
+the child *process* survived, but its auth entry did not.
 
 ### Failed searches are visible (binary-verified, Claude Code 2.1.222)
 
 The harness renders a `web_search_tool_result` whose `content` is not an array
 as `` `Web search error: ${a.content.error_code}` ``, logged at error level and
-pushed into what the model reads. A search that cannot run is therefore
-reported with `{"type":"web_search_tool_result_error","error_code":
-"unavailable"}` plus a one-line detail — no cross-vendor fallback. xAI's own
-`grok-build` client emits the same shape on failure, and likewise does not
-count a failed search toward `web_search_requests`; the router follows suit,
-so a failure does not spend the session's ~200-call WebSearch budget.
+pushed into what the model reads. xAI's own `grok-build` client emits the
+same shape on failure (`{"type":"web_search_tool_result_error","error_code":
+"unavailable"}`), and does not count a failed search toward
+`web_search_requests`.
 
 ### Live end-to-end (sandbox router + real xAI)
-
-| arm | result |
-|---|---|
-| Grok agent's search correlated to a Claude-branch sub-call (the real topology) | 10 links / 3.2s, 15 links / 8.9s |
-| sub-call carried by a Grok route with no correlation | 10 links / 4.2s, 10 links / 3.1s |
-| GPT origin, same config | unchanged: `alpha/search`, 33 titled links |
-| routed upstream configured but unreachable | `error_code: unavailable`, detail rendered, nothing sent to Anthropic, no search counted — in both streaming and non-streaming framings |
 
 One correlated run out of three came back with no `web_search_call` at all
 despite `tool_choice: "required"`, and was reported as a failed search. It
 overlapped an in-flight Grok turn; whether concurrency is the cause is not
-established. Occasional spurious failures are the known cost of the strict
-rule — worth rechecking if users report them.
+established. Worth rechecking if users report spurious failures.
 
 ### Driving Claude Code at a non-default gateway no longer works (2.1.222)
 
@@ -1296,132 +765,52 @@ project-level `settings.local.json`, `CLAUDE_CONFIG_DIR`, and an explicit
 `ANTHROPIC_BASE_URL` in the environment were **all** ignored — every headless
 run went to the user-level settings' gateway. `CLAUDE_CONFIG_DIR` does move
 credential lookup (an isolated dir reports "Not logged in"), so it is read for
-auth but not for the base URL. Harness-level sandboxing needs a new approach;
-the rendering question above was settled from the bundle instead.
+auth but not for the base URL.
 
-## Grok 4.6 + CLIProxyAPI 7.2.132 pin bump (2026-08-14, model-router 0.1.14)
+## Grok 4.6 + CLIProxyAPI 7.2.132 (2026-08-14)
 
 xAI released grok-4.6 on 2026-08-12 (500K window, effort low/medium/high/
 xhigh, image input, a real model card). CLIProxyAPI's embedded registry
-gained the ID in v7.2.131; our 7.2.110 pin predates it, so shipping the
-route required a pin bump to v7.2.132 (latest at the time). All four
-vendored archive sha256s were computed from downloaded artifacts AND
-cross-checked against the release's official `checksums.txt` — exact match
-on every platform, closing the only-host-platform-is-exercised gap.
+gained the ID in v7.2.131. The v7.2.132 release's official `checksums.txt`
+matched sha256s computed from the downloaded artifacts on every platform.
 
-Pin-bump risk audit. Full local tree diff between the tags: **423 files,
-215 production Go** (an earlier GitHub-Compare-based count of 300 was that
-API's file-list cap, not the real total). Scope of what was actually
-audited, and how:
+CLIProxyAPI 7.2.110 → 7.2.132 tree diff (423 files, 215 production Go),
+full-file diffs read for:
 
-- **Full-file diffs read**: codex identity (`codex_executor_request.go`
-  Originator pass-through + `codex-tui` default semantically identical —
-  the de8ed8a pin rationale holds), the four xAI executor files
-  (auth-error normalization only: 403 bad-credentials remapped to 401 for
-  refresh-retry; overflow error bodies pass through untouched), the
-  thinking mapper (`internal/thinking/apply.go` — per-model level
+- codex identity (`codex_executor_request.go`: Originator pass-through +
+  `codex-tui` default semantically identical to 7.2.110);
+- the four xAI executor files (auth-error normalization only: 403
+  bad-credentials remapped to 401 for refresh-retry; overflow error bodies
+  pass through untouched);
+- the thinking mapper (`internal/thinking/apply.go` — per-model level
   clamping from registry-declared levels: 4.6 declares `xhigh`, so
   `xhigh` stays and `max` → `xhigh` there, while 4.5 still clamps both to
-  `high`; `routing.rs`'s comment now says so).
-- **Skimmed at diffstat/area level**: `sdk/cliproxy/auth` (multi-credential
-  selection, cooldown, session affinity, Home-OAuth 401 recovery — for a
-  one-credential-per-provider install every request selects the sole
-  credential, a path each live run below exercises), `sdk/api/handlers`,
-  and the translators. Changes gated behind new config options we don't
-  set (codex alpha-search API keys, `support-prompt-cache-key`, Kimi
-  thinking-replay cache) are inert here.
-- **Not audited**: the child's Claude/Gemini/Antigravity native paths
-  (model-router's Claude branch goes straight to Anthropic and never
-  rides the child) and the remaining ~190 production files. Coverage for
-  what we ship rests on the live exercise below of every serving path we
-  use (claude-protocol ingress translation, codex executor, xAI executor,
-  streaming and non-streaming, tool use, error translation, search), plus
-  the standing containment: `routed-models` doctor check, service-refresh
-  prefetch, and byte-deterministic rollback by reverting the commit.
-  **The OpenAI-compat inference path is unverified under 7.2.132**: no
-  provider is configured on this install (no key to test with), and
-  `verify-providers` only checks the provider's own `/models` catalog —
-  it never sends inference through the child, so it would NOT catch an
-  executor/translator regression there. First signal for installs with
-  `[[openai-providers]]` routes would be a failing user turn; rollback is
-  the remedy.
+  `high`).
 
-Live verification, sandboxed instance (worktree debug build v0.1.14,
-scratch XDG dirs under the job tmp, gateway :8790, child :8318, auth-file
-copies deleted after; the live 0.1.13/7.2.110 service was never touched and
-answered normally afterward):
+Live verification, sandboxed instance (child :8318, auth-file copies):
 
 | check | result |
 |---|---|
-| doctor | all green; `routed-models`: every routed model served (child catalog has grok-4.6 and grok-4.5); `context-windows`: both Grok routes clipped 500000→258400 |
 | grok-4.6 smoke | answers as `grok-4.6-build` (the `-build` served-name convention carries over from 4.5) |
-| grok-4.5 smoke | still answers (`grok-4.5-build`) |
-| gpt-5.6-sol smoke + tool use | `ok`; clean `tool_use` block for a client tool; thinking block streams at high effort; `end_turn` |
 | grok-4.6 effort | `output_config.effort: xhigh` end-to-end success (suffix channel; per-model mapping verified in child source, not on the wire) |
-| grok-4.6 overflow | 540087-token prompt → canonical `prompt is too long: 540087 tokens > 500000 maximum` — the xAI overflow phrase and dialect-exact translation hold for 4.6 |
-| Grok-origin WebSearch | main turn on grok-4.6 emitted `WebSearch` tool_use; correlated sub-call answered from the xAI backend in 4.1s with real links (bun.sh results). The 2026-08-13 review-agent claim that Grok-native search feeds gzip to the harvester did **not** reproduce on 7.2.132 |
+| grok-4.6 overflow | 540087-token prompt → canonical `prompt is too long: 540087 tokens > 500000 maximum` — the xAI overflow phrase holds for 4.6 |
+| Grok-origin WebSearch | sub-call answered from the xAI backend in 4.1s with real links (bun.sh results). The 2026-08-13 review-agent claim that Grok-native search feeds gzip to the harvester did **not** reproduce on 7.2.132 |
 
-Methodology trap re-confirmed the cheap way: a sub-call whose
-`metadata.user_id` is not the JSON-object string carrying `session_id`
-never correlates — it silently passes through to Anthropic and returns an
-auth error under a sandbox with no API key. First attempt failed exactly
-so; fixing the metadata shape made correlation immediate. (Driving Claude
-Code itself at the sandbox is still not possible per the 2.1.222 finding
-above; direct-curl replication of the two-request shape is the method.)
+## Bundled `claude-api` skill and headless `--settings` (2026-08-18, Claude Code 2.1.235)
 
-Route decision: grok-4.6 ships alongside grok-4.5 (flagship-first in
-`GROK_MODELS`) rather than replacing it — existing per-user `grok-4.5(*)`
-agents keep resolving; docs now recommend 4.6.
-
-## Subagent skill-suppression sentence (2026-08-18, Claude Code 2.1.235, router 0.1.15)
-
-Context: GPT subagents follow skill trigger wording literally; the bundled
-`claude-api` skill triggers on any mention of Claude/Anthropic and its payload
-killed 17 subagents in one week ("Prompt is too long"), which 0.1.19 patched
-around by having setup turn the skill off globally. The general fix tested
-here: extend the subagent identity sentence to also forbid proactive skill
-invocation, so main agents decide skill use and relay it.
-
-Method: A/B against a second router instance on :8790 built from the patched
-tree (`[upstreams.cliproxy] mode = "external"` pointed at the production
-managed CLIProxyAPI on :8317, own `XDG_STATE_HOME` for the serve lock). The
-`claude-api` skillOverride was removed for the test. Drivers: headless sonnet
-sessions in a scratch dir, each instructed to spawn exactly one
-`model-router:gpt-5.6-sol(high)` subagent. Tasks: T1 = summarize a Claude Code
-SessionStart hook script (Claude-adjacent, the observed death mode); T2 =
-write a TypeScript snippet calling the Claude API via `@anthropic-ai/sdk`
-(squarely inside the skill's trigger). Outcome read from the driver's
-transcript jsonl: any sidechain `Skill` tool_use with `claude-api`.
-
-| arm | T1 invoked | T2 invoked |
-|---|---|---|
-| baseline (0.1.13 sentence, no skill clause) | 3/3 | 3/3 |
-| v1: "use a skill only when your task names it" | 0/3 | 3/3 |
-| v2: "Never invoke a skill on your own initiative … only when your task explicitly instructs you to use that skill" | 0/1 | 0/3 |
-
-- v1's "names it" failed on T2 because the task text "the Claude API" reads
-  as naming the `claude-api` skill; v2's explicit-instruction wording closed
-  that.
-- No trial hit "Prompt is too long" at a fresh subagent's context; the
-  historical deaths came from fuller contexts. Invocation rate is the metric.
-- v2 T2 subagents produced correct SDK streaming code without the skill, so
-  suppression did not degrade the deliverable.
+- GPT subagents follow skill trigger wording literally; the bundled
+  `claude-api` skill triggers on any mention of Claude/Anthropic and its payload
+  killed 17 subagents in one week ("Prompt is too long").
 - Contradicting the 2.1.222 finding above: on 2.1.235 a `--settings` file
   with its own `env` block **does** override the user-level
   `ANTHROPIC_BASE_URL` for headless runs (verified by echoing the env and by
-  the request landing in the :8790 instance's capture file). Harness-level
-  sandboxing by settings file works again.
-- Capture records inbound request bodies (pre-injection), so the injected
-  identity text never appears in `capture.jsonl`; `cc_is_subagent=true` in
-  the captured attribution block is the marker that the subagent path was
-  exercised.
+  the request landing in a second router instance's capture file).
 
 ## `modelPicker` vs the custom-model env pair (2026-08-25, Claude Code 2.1.246, router 0.1.15)
 
 Context: 2.1.243 added a `modelPicker` setting ("curate the `/model` picker
 with an ordered, labeled list of models … appended to or replacing the
-built-in lineup"). Question: should setup step 5 drop the single-slot
-`ANTHROPIC_CUSTOM_MODEL_OPTION(_NAME)` pair for it.
+built-in lineup").
 
 Method: headless `claude -p 'say ok' --output-format json` runs from a scratch
 dir (`--strict-mcp-config`, default auto mode, live gateway on :8787), each
@@ -1433,9 +822,8 @@ empty value, rc=0). Arms: pair only / neither / `modelPicker` only (sol with a
 label, terra, luna, and `grok-4.6`, which this install does not serve) / both
 / `replaceBuiltInOptions: true`. Picker rendering was measured in real
 interactive sessions driven through a pty (`pty.fork`, `TIOCSWINSZ` 140x45,
-alt+p to open the picker, ANSI stripped from the captured bytes) — the
-"interactive-only" gap in the 2.1.216 gateway-discovery notes is closeable
-this way. Consumption sites were read out of the 2.1.246 binary as before.
+alt+p to open the picker, ANSI stripped from the captured bytes).
+Consumption sites were read out of the 2.1.246 binary as before.
 
 ### (a) `--model <routing-id>` acceptance does not depend on either mechanism
 
@@ -1452,8 +840,7 @@ this way. Consumption sites were read out of the 2.1.246 binary as before.
 
 In `-p`, what decides is whether the gateway answers the first request; the
 "issue with the selected model" text is the 404 `model_not_found` formatter,
-not a registration check. **This supersedes the 2.1.220 phase-5 note that the
-custom-model var "is also what makes `--model <routing-id>` accepted".**
+not a registration check.
 Every non-catalog id (the registered one included) now logs
 `[claude-code:unrecognized_model] {"model":…,"query_source":"sdk"}` to stderr;
 cosmetic. Interactive typed `/model <id>` (no pair, no picker): a served id is
@@ -1479,8 +866,7 @@ Binary (2.1.246): the Agent tool schema is still
 literal, no reference to the picker. Measured under the picker arm: a Sonnet
 main asked to call Agent with `model: "gpt-5.6-terra"` got
 `InputValidationError … Invalid option: expected one of
-"sonnet"|"opus"|"haiku"|"fable"`. The dynamic-delegation item stays blocked;
-Workflow `agent()` remains the per-invocation path.
+"sonnet"|"opus"|"haiku"|"fable"`.
 
 ### (d) Setting shape, sources, interaction with the pair
 
@@ -1516,8 +902,7 @@ Workflow `agent()` remains the per-invocation path.
 - `replaceBuiltInOptions: true` (measured): only "Default (recommended)", the
   curated rows, and a raw row for the session's current model ("sonnet ·
   Custom model"); built-ins, gateway-discovered rows and the env-pair row are
-  hidden (the last two per binary/docs). Not what we want — Claude models
-  must stay in the lineup.
+  hidden (the last two per binary/docs).
 - Labels are used beyond the picker: after selecting the Terra row for the
   session, the header read "GPT-5.6 Terra with xhigh effort · Claude Max" and
   the status line "GPT-5.6 Terra (xhigh)"; the toast still says "Model set to
@@ -1529,7 +914,7 @@ Workflow `agent()` remains the per-invocation path.
   why the unserved `grok-4.6` row rendered.
 - Managed-tier detail: when several admin tiers merge, `modelPicker` and
   `modelPicker.replaceBuiltInOptions` are stripped from every tier but the
-  top one. Irrelevant here.
+  top one.
 
 ### (e) Rendering, measured
 
@@ -1545,32 +930,12 @@ behaviour on Claude Code < 2.1.242 (unknown-key handling); whether a picker
 label affects anything on the wire (nothing in the binary suggests it — the
 model string is sent verbatim).
 
-### Recommendation: switch, for user-level wiring (adopted in setup 0.1.22)
-
-Replace the env pair in step 5 with a `modelPicker` block in the **user**
-settings file listing every route the install serves — gpt-5.6-sol/terra/
-luna with labels, plus `grok-4.6` when Grok is enabled and any open-weights
-routes — `replaceBuiltInOptions` left off. Gains: terra and luna become
-main-model selectable with the declared 258400 window (they were off
-the picker), Grok no longer competes for a slot (grok.md step 5 becomes
-"add a row"), labels show in the header/status line, and nothing is lost —
-the pair was never needed for `-p --model` acceptance on current versions.
-Costs: requires 2.1.242+ (setup should check `claude --version`); rows are
-not validated against the router, so the list must track the routes (a
-future `doctor` check could compare picker rows to `routed-models`); and
-**project-scoped wiring keeps the env pair** — `modelPicker` is ignored in
-`.claude/settings*.json`, and putting the rows in `~/.claude/settings.json`
-would show them in every project, including ones whose sessions do not go
-through the gateway (selecting one there fails with the 404 message against
-api.anthropic.com). Uninstall gains one line: remove the `modelPicker` key.
-
 ## Subagent model-404 fallback (2026-08-29, Claude Code 2.1.251, router 0.1.15)
 
 Context: the 2.1.247 changelog says "Fixed sub-agents dying on a first-call
 model 404: they now use the session's fallback model chain, and the error
 returned to the parent includes the error type, status, request id, and
-model." Question: can a GPT/Grok subagent whose route the gateway does not
-serve now silently run on a Claude model.
+model."
 
 Method: headless `claude -p --output-format json --strict-mcp-config` runs
 from a scratch dir (default auto mode, live gateway on :8787, the user-level
@@ -1627,23 +992,12 @@ Findings:
   whole" (no array union), so a managed/policy `fallbackModel` overrides a
   user one, not the other way round.
 - `CLAUDE_CODE_NO_MODEL_FALLBACK=1` disables every model substitution
-  (`T6()`), with a tripwire that throws if a pivot is attempted. Too blunt
-  for setup: it also blocks the Fable-consent swap and compaction's
+  (`T6()`), with a tripwire that throws if a pivot is attempted. It also
+  blocks the Fable-consent swap and compaction's
   substitution ("Compaction unavailable: CLAUDE_CODE_NO_MODEL_FALLBACK is
   set").
 
-Exposure for model-router users: none by default — setup never writes
-`fallbackModel`, and none of this fires without a chain. It becomes a
-cross-provider spend surprise the moment a user (or a managed-settings
-admin) sets `fallbackModel`, or a script passes `--fallback-model`: every
-GPT/Grok subagent then degrades to Claude on any 404/5xx from the gateway,
-without a word in the result.
-
-Adopted (router 0.1.16): `doctor` reads the winning settings file for
-`fallbackModel` and fails the `fallback-model` check when a chain is in
-effect. Not adopted: a `choosing-models` note that `modelUsage` / the agents
-view, not the agent's self-report, shows which model served a subagent —
-skill space on a rare edge case. Retest triggers:
+Retest triggers:
 a changelog entry touching `fallbackModel`, `--fallback-model`,
 `CLAUDE_CODE_NO_MODEL_FALLBACK`, or subagent model errors.
 
@@ -1666,10 +1020,8 @@ pointing one arm's `env.ANTHROPIC_BASE_URL` at a local stub that records
   (`CLAUDE_CODE_USE_GATEWAY`), not for `ANTHROPIC_BASE_URL` proxies.
 - Catalog: Fable 5.1 is `tier_10_50_cache_read_0_25` (cache read $0.25/Mtok
   vs $1 on Fable 5); API pricing only — subscription billing already
-  discounted cache reads, so the choosing-models cost paragraph stands.
+  discounted cache reads.
   New capability `fable_5_1_prompt_bundle`; `fallback_3p` is Fable 5.
-- Router: nothing to change. The Claude branch is byte-exact and names no
-  model.
 
 ### `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`
 
@@ -1678,17 +1030,25 @@ pointing one arm's `env.ANTHROPIC_BASE_URL` at a local stub that records
   set, `claude-sonnet-5` only — the agent ran on the subagent default, the
   request never reached the GPT branch, and nothing said so. Workflow logs
   `Workflow agent model "…" ignored: CLAUDE_CODE_SUBAGENT_MODEL_FORCE is
-  set`; the Agent tool path has no equivalent. Not acted on: no reason to
-  expect a router user to set it.
+  set`; the Agent tool path has no equivalent.
 
-### Gateway discovery changes
+### Gateway discovery (2.1.258 binary)
 
+- Discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) is skipped
+  outright while `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is set — the
+  binary logs `[gatewayDiscovery] skipped: _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL
+  is set` — and the flag is what keeps Claude models at 1M behind the router
+  (200000 without it, re-measured on 2.1.258). Even with the flag off,
+  discovery filters the gateway's list to IDs matching
+  `/(claude|anthropic)/i`, so no `gpt-*`/`grok-*` route can
+  appear through it, it reads only `id` + `display_name` (so it could never
+  declare a window), and it fires only in interactive sessions. Retest if:
+  bare Claude IDs get 1M behind a non-first-party base URL without the flag,
+  or the discovery filter admits arbitrary IDs.
 - The new `description` on discovered entries and the nonessential-traffic
-  change are moot under the standing decision above (the nonessential
-  change lands in the enterprise-gateway bootstrap path). `modelPicker` rows
+  change land in the enterprise-gateway bootstrap path. `modelPicker` rows
   take `{ model, label?, description?, behavesAs? }`; `description` is the
-  row subtitle, default "Custom model (<id>)", which already carries the
-  routing ID — left alone.
+  row subtitle, default "Custom model (<id>)".
 
 ### `behavesAs` on `modelPicker` rows (undocumented)
 
@@ -1737,11 +1097,6 @@ the `effort` capability drop it and send budgeted thinking.
   and older sonnets pull in the 27 KB non-lean prompt, and pre-effort
   models drop `output_config.effort` and switch to budgeted thinking.
   `max_tokens` rises to 64000 for every 1M target.
-- Hazard: a row with `behavesAs` and `context-window-scaling = true` on the
-  same route would scale usage against a client that already believes 1M
-  (compaction at 4× the real window). Doctor's `context-windows` check
-  reads only `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and would call such a route
-  "clipped".
 
 ### `behavesAs` on real open-weights routes (OpenRouter, same day)
 
@@ -1764,21 +1119,6 @@ flags GLM's as 202752 guaranteed across sub-providers). Row under test:
   happened to land on a wide sub-provider. The window that matters is the
   one the host guarantees across every eligible sub-provider (Kimi K3
   1048576, GLM-5.2 202752 on an unpinned account).
-- Router 0.1.17 (this branch): discovery now fetches every provider
-  model's guaranteed window at service start (not only scaling routes) and
-  doctor applies the cached result before its `context-windows` check,
-  which also reads `behavesAs` rows from `~/.claude/settings.json`.
-  End-to-end with a temp state dir and a temp HOME whose picker maps both
-  routes to `claude-opus-4-8`: the service wrote the two windows above to
-  `context-windows.json`; doctor then reported `kimi-k3 sized by Claude
-  Code's claude-opus-4-8 entry (… real 1048576)` green and `glm-5.2
-  OVERRUN RISK: behavesAs claude-opus-4-8 gives it a 1000000 window but the
-  host guarantees 202752; pin the host's providers or drop the row` red.
-  Before 0.1.17 doctor never saw discovered windows at all (discovery ran
-  in `serve` only), so a scaling route relying on discovery read as
-  "wants scaling but no context window was discovered" — fixed by the
-  same change.
-- Provider block and key removed after the run.
 
 ### OpenRouter provider pinning: what the gateway can and cannot do (same day)
 
@@ -1810,36 +1150,4 @@ flags GLM's as 202752 guaranteed across sub-providers). Row under test:
 - Standalone child pinned to `provider.only = ["fireworks","decart"]`:
   the `/v1/messages` response `id` is OpenRouter's generation id
   (`gen-…`), and `GET /api/v1/generation?id=` (after ~10 s) reports
-  `provider_name: "Fireworks"` — the observation the end-to-end test below
-  rests on.
-
-### Router-side pinning, end to end (router 0.1.18, same day)
-
-`min-context-window = N` on an `[[openai-providers.models]]` entry
-(OpenRouter only). Temp config/state/HOME, child on its own port, real
-OpenRouter with the user's key; production router untouched.
-
-- `min-context-window = 1000000` on glm-5.2: the service cached
-  `{window: 1000000, pin: {min: 1000000, providers: [19 slugs]}}`,
-  excluding ambient (202752), cloudflare, digitalocean, parasail, reka
-  (262144) and together (512000); the generated child config carried one
-  `payload.override-raw` rule scoped by the alias `openai-compat--glm-5.2`
-  with `provider.only` = those 19 slugs. Doctor: `glm-5.2 pinned to 19
-  sub-provider(s) from the service's last lookup; glm-5.2 clipped to 258400
-  (real 1000000)`. `verify-providers`: `pinned 19 of 25 sub-providers
-  serving at least 1000000: guaranteed 1000000; excluded ambient 202752,
-  …`, exit 0. Five requests through the router all answered; their
-  generation records named CoreWeave, Crusoe, StreamLake ×3 — every one in
-  the pinned set.
-- `min-context-window = 2000000`: the cache entry became
-  `{window: 202752, pin: null}` (tombstone), the child config listed only
-  kimi-k3 and no payload section, a glm-5.2 request was refused by the
-  router with 404 `not_found_error` "glm-5.2 is not served: it wants
-  sub-providers serving at least 2000000 tokens …" (before this change
-  the child answered 400 "unknown provider for model
-  openai-compat--glm-5.2"), a kimi-k3 request through the same child
-  answered, doctor was red with the NOT SERVED note, and
-  `verify-providers` exited 1 listing every provider's window.
-- Cache/threshold unit tests cover raising and lowering the bar over a
-  cached selection, removing the field, the tombstone, and an explicit
-  `context-window` alongside the pin.
+  `provider_name: "Fireworks"`.

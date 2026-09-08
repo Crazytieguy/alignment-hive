@@ -8,6 +8,7 @@ use std::process::Command;
 use anyhow::Context as _;
 
 use crate::state::{Dirs, create_private_dir, write_private_atomic};
+use std::os::unix::fs::PermissionsExt as _;
 
 const LAUNCHD_LABEL: &str = "com.alignment-hive.model-router";
 const SYSTEMD_UNIT: &str = "model-router.service";
@@ -37,13 +38,7 @@ struct LauncherSources {
 }
 
 impl LauncherSources {
-    fn from_plugin_root(root: &Path) -> Self {
-        Self {
-            bootstrap: root.join("scripts/bootstrap.sh"),
-            version: root.join("binary-version"),
-        }
-    }
-
+    /// The files `bootstrap.sh` exports before exec'ing the binary.
     fn from_environment() -> anyhow::Result<Option<Self>> {
         let bootstrap = std::env::var_os("MODEL_ROUTER_BOOTSTRAP_SCRIPT");
         let version = std::env::var_os("MODEL_ROUTER_VERSION_FILE");
@@ -55,7 +50,7 @@ impl LauncherSources {
             (None, None) => Ok(None),
             _ => anyhow::bail!(
                 "launcher sources are incomplete: set both MODEL_ROUTER_BOOTSTRAP_SCRIPT and \
-                 MODEL_ROUTER_VERSION_FILE, or pass --plugin-root <dir>"
+                 MODEL_ROUTER_VERSION_FILE (bootstrap.sh exports them)"
             ),
         }
     }
@@ -90,17 +85,16 @@ impl CommandRunner for SystemCommandRunner {
 
 /// Installs and starts the current platform's user service.
 ///
-/// When `plugin_root` is absent, launcher sources come from the environment
-/// exported by `bootstrap.sh`. An already-complete stable launcher may be
-/// reused if neither source is available.
+/// Launcher sources come from the environment exported by `bootstrap.sh`;
+/// an already-complete stable launcher is reused when they are absent.
 ///
 /// # Errors
 /// Returns an actionable error for unsupported platforms, missing launcher
 /// sources, filesystem failures, or service-manager failures.
-pub fn install(dirs: &Dirs, plugin_root: Option<&Path>) -> anyhow::Result<()> {
+pub fn install(dirs: &Dirs) -> anyhow::Result<()> {
     let platform = Platform::current()?;
     let unit_path = unit_path(platform)?;
-    let sources = resolve_sources(plugin_root)?;
+    let sources = LauncherSources::from_environment()?;
     install_at(
         dirs,
         platform,
@@ -121,22 +115,17 @@ pub fn install(dirs: &Dirs, plugin_root: Option<&Path>) -> anyhow::Result<()> {
 /// # Errors
 /// Returns an actionable error when sources are unavailable, copying fails,
 /// the platform is unsupported, or the service manager cannot restart.
-pub fn refresh(dirs: &Dirs, plugin_root: Option<&Path>) -> anyhow::Result<()> {
+pub fn refresh(dirs: &Dirs) -> anyhow::Result<()> {
     let platform = Platform::current()?;
-    let sources = resolve_sources(plugin_root)?.ok_or_else(|| {
+    let sources = LauncherSources::from_environment()?.ok_or_else(|| {
         anyhow::anyhow!(
-            "service refresh requires launcher sources; pass --plugin-root <dir> or set \
-             MODEL_ROUTER_BOOTSTRAP_SCRIPT and MODEL_ROUTER_VERSION_FILE"
+            "service refresh requires launcher sources: run it through bootstrap.sh, which \
+             exports MODEL_ROUTER_BOOTSTRAP_SCRIPT and MODEL_ROUTER_VERSION_FILE"
         )
     })?;
     let unit_path = unit_path(platform)?;
-    refresh_at(dirs, platform, &unit_path, &sources, &SystemCommandRunner)?;
-    println!(
-        "Refreshed launcher to {} and restarted model-router service.",
-        launcher_version(dirs)?
-            .as_deref()
-            .unwrap_or("unknown version")
-    );
+    let version = refresh_at(dirs, platform, &unit_path, &sources, &SystemCommandRunner)?;
+    println!("Refreshed launcher to {version} and restarted model-router service.");
     Ok(())
 }
 
@@ -194,12 +183,6 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_sources(plugin_root: Option<&Path>) -> anyhow::Result<Option<LauncherSources>> {
-    plugin_root.map_or_else(LauncherSources::from_environment, |root| {
-        Ok(Some(LauncherSources::from_plugin_root(root)))
-    })
-}
-
 fn unit_path(platform: Platform) -> anyhow::Result<PathBuf> {
     let home = crate::state::home_dir()
         .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot locate the user service unit"))?;
@@ -218,62 +201,67 @@ fn install_at(
     sources: Option<&LauncherSources>,
     runner: &dyn CommandRunner,
 ) -> anyhow::Result<()> {
-    populate_launcher(dirs, sources, false)?;
+    populate_launcher(dirs, sources)?;
     create_private_dir(&dirs.log_dir())?;
-    write_unit(dirs, platform, unit_path)?;
-
-    match platform {
-        Platform::MacOs => {
-            let domain = launchd_domain();
-            let service = format!("{domain}/{LAUNCHD_LABEL}");
-            let _ = run_command(runner, "launchctl", &os_args(["bootout", &service]));
-            require_success(
-                &run_command(
-                    runner,
-                    "launchctl",
-                    &[
-                        OsString::from("bootstrap"),
-                        OsString::from(domain),
-                        unit_path.as_os_str().to_owned(),
-                    ],
-                )?,
-                "launchctl bootstrap",
-            )?;
-        }
-        Platform::Linux => {
-            require_success(
-                &run_command(runner, "systemctl", &os_args(["--user", "daemon-reload"]))?,
-                "systemctl --user daemon-reload",
-            )?;
-            require_success(
-                &run_command(
-                    runner,
-                    "systemctl",
-                    &os_args(["--user", "enable", "--now", SYSTEMD_UNIT]),
-                )?,
-                "systemctl --user enable --now",
-            )?;
-        }
+    write_unit_contents(unit_path, unit_contents(dirs, platform).as_bytes())?;
+    load_unit(platform, unit_path, runner)?;
+    if platform == Platform::Linux {
+        require_success(
+            &runner.output(
+                "systemctl",
+                &os_args(["--user", "enable", "--now", SYSTEMD_UNIT]),
+            )?,
+            "systemctl --user enable --now",
+        )?;
     }
     Ok(())
 }
 
-fn populate_launcher(
-    dirs: &Dirs,
-    sources: Option<&LauncherSources>,
-    require_sources: bool,
+/// Makes the service manager read the unit at `unit_path`: launchd has to
+/// unload and reload it, systemd only reloads its unit files.
+fn load_unit(
+    platform: Platform,
+    unit_path: &Path,
+    runner: &dyn CommandRunner,
 ) -> anyhow::Result<()> {
+    match platform {
+        Platform::MacOs => {
+            let _ = runner.output("launchctl", &os_args(["bootout", &launchd_service()]));
+            require_success(
+                &runner.output(
+                    "launchctl",
+                    &[
+                        OsString::from("bootstrap"),
+                        OsString::from(launchd_domain()),
+                        unit_path.as_os_str().to_owned(),
+                    ],
+                )?,
+                "launchctl bootstrap",
+            )
+        }
+        Platform::Linux => require_success(
+            &runner.output("systemctl", &os_args(["--user", "daemon-reload"]))?,
+            "systemctl --user daemon-reload",
+        ),
+    }
+}
+
+/// Copies the launcher pair into the stable launcher dir and returns the
+/// version written. Without sources, an already-complete launcher is kept.
+fn populate_launcher(dirs: &Dirs, sources: Option<&LauncherSources>) -> anyhow::Result<String> {
     let launcher_dir = dirs.launcher_dir();
     let destination_bootstrap = launcher_dir.join("bootstrap.sh");
-    let destination_version = launcher_dir.join("binary-version");
+    let destination_version = dirs.launcher_version_file();
 
     let Some(sources) = sources else {
-        if !require_sources && destination_bootstrap.is_file() && destination_version.is_file() {
-            return Ok(());
+        if destination_bootstrap.is_file()
+            && let Some(version) = launcher_version(dirs)?
+        {
+            return Ok(version);
         }
         anyhow::bail!(
-            "stable launcher is not populated at {}; pass --plugin-root <dir> or set \
-             MODEL_ROUTER_BOOTSTRAP_SCRIPT and MODEL_ROUTER_VERSION_FILE",
+            "stable launcher is not populated at {}; run this through bootstrap.sh, which \
+             exports MODEL_ROUTER_BOOTSTRAP_SCRIPT and MODEL_ROUTER_VERSION_FILE",
             launcher_dir.display()
         );
     };
@@ -285,42 +273,41 @@ fn populate_launcher(
             sources.bootstrap.display()
         )
     })?;
-    let version = fs::read(&sources.version)
+    let version = fs::read_to_string(&sources.version)
         .with_context(|| format!("failed to read version file {}", sources.version.display()))?;
     anyhow::ensure!(
-        !version.iter().all(u8::is_ascii_whitespace),
+        !version.trim().is_empty(),
         "version file {} is empty",
         sources.version.display()
     );
 
     create_private_dir(&launcher_dir)?;
     write_private_atomic(&destination_bootstrap, &bootstrap)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&destination_bootstrap, fs::Permissions::from_mode(0o755))
-            .with_context(|| {
-                format!(
-                    "failed to make launcher executable {}",
-                    destination_bootstrap.display()
-                )
-            })?;
-    }
-    write_private_atomic(&destination_version, &version)?;
-    Ok(())
+    fs::set_permissions(&destination_bootstrap, fs::Permissions::from_mode(0o755)).with_context(
+        || {
+            format!(
+                "failed to make launcher executable {}",
+                destination_bootstrap.display()
+            )
+        },
+    )?;
+    write_private_atomic(&destination_version, version.as_bytes())?;
+    Ok(version.trim().to_string())
 }
 
+/// Returns the version the launcher now runs.
 fn refresh_at(
     dirs: &Dirs,
     platform: Platform,
     unit_path: &Path,
     sources: &LauncherSources,
     runner: &dyn CommandRunner,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     prefetch_binary(sources, runner)?;
-    populate_launcher(dirs, Some(sources), true)?;
+    let version = populate_launcher(dirs, Some(sources))?;
     refresh_unit_if_stale(dirs, platform, unit_path, runner)?;
-    restart_with(platform, runner)
+    restart_with(platform, runner)?;
+    Ok(version)
 }
 
 /// Downloads the new version's binary via the source bootstrap's `prefetch`
@@ -330,8 +317,7 @@ fn refresh_at(
 /// service keeps serving.
 fn prefetch_binary(sources: &LauncherSources, runner: &dyn CommandRunner) -> anyhow::Result<()> {
     require_success(
-        &run_command(
-            runner,
+        &runner.output(
             "bash",
             &[
                 sources.bootstrap.as_os_str().to_owned(),
@@ -362,47 +348,23 @@ fn refresh_unit_if_stale(
     }
 
     write_unit_contents(path, contents.as_bytes())?;
-    match platform {
-        Platform::MacOs => {
-            let domain = launchd_domain();
-            let service = format!("{domain}/{LAUNCHD_LABEL}");
-            let _ = run_command(runner, "launchctl", &os_args(["bootout", &service]));
-            require_success(
-                &run_command(
-                    runner,
-                    "launchctl",
-                    &[
-                        OsString::from("bootstrap"),
-                        OsString::from(domain),
-                        path.as_os_str().to_owned(),
-                    ],
-                )?,
-                "launchctl bootstrap",
-            )
-        }
-        Platform::Linux => require_success(
-            &run_command(runner, "systemctl", &os_args(["--user", "daemon-reload"]))?,
-            "systemctl --user daemon-reload",
-        ),
-    }
+    load_unit(platform, path, runner)
 }
 
 fn unit_contents(dirs: &Dirs, platform: Platform) -> String {
     match platform {
-        Platform::MacOs => launchd_plist(&dirs.launcher_dir(), &dirs.log_dir(), dirs),
-        Platform::Linux => systemd_user_unit(&dirs.launcher_dir(), &dirs.log_dir(), dirs),
+        Platform::MacOs => launchd_plist(dirs),
+        Platform::Linux => systemd_user_unit(dirs),
     }
 }
 
-fn write_unit(dirs: &Dirs, platform: Platform, path: &Path) -> anyhow::Result<()> {
-    write_unit_contents(path, unit_contents(dirs, platform).as_bytes())
-}
-
+/// The unit's parent (`~/Library/LaunchAgents`, `~/.config/systemd/user`)
+/// is shared with other tools' units, so it is created but never chmod'd.
 fn write_unit_contents(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("unit path {} has no parent", path.display()))?;
-    create_private_dir(parent)?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     write_private_atomic(path, contents)
         .with_context(|| format!("failed to write service unit {}", path.display()))
 }
@@ -410,45 +372,33 @@ fn write_unit_contents(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
 fn restart_with(platform: Platform, runner: &dyn CommandRunner) -> anyhow::Result<()> {
     match platform {
         Platform::MacOs => require_success(
-            &run_command(
-                runner,
+            &runner.output(
                 "launchctl",
-                &os_args([
-                    "kickstart",
-                    "-k",
-                    &format!("{}/{LAUNCHD_LABEL}", launchd_domain()),
-                ]),
+                &os_args(["kickstart", "-k", &launchd_service()]),
             )?,
             "launchctl kickstart",
         ),
         Platform::Linux => require_success(
-            &run_command(
-                runner,
-                "systemctl",
-                &os_args(["--user", "restart", SYSTEMD_UNIT]),
-            )?,
+            &runner.output("systemctl", &os_args(["--user", "restart", SYSTEMD_UNIT]))?,
             "systemctl --user restart",
         ),
     }
 }
 
 fn status_with(platform: Platform, runner: &dyn CommandRunner) -> anyhow::Result<String> {
-    let output = match platform {
-        Platform::MacOs => run_command(
-            runner,
-            "launchctl",
-            &os_args(["print", &format!("{}/{LAUNCHD_LABEL}", launchd_domain())]),
-        )?,
-        Platform::Linux => run_command(
-            runner,
-            "systemctl",
-            &os_args(["--user", "is-active", SYSTEMD_UNIT]),
-        )?,
-    };
     Ok(match platform {
-        Platform::MacOs if output.success => "loaded".to_string(),
-        Platform::MacOs => "not loaded".to_string(),
+        Platform::MacOs => {
+            let output = runner.output("launchctl", &os_args(["print", &launchd_service()]))?;
+            if output.success {
+                "loaded"
+            } else {
+                "not loaded"
+            }
+            .to_string()
+        }
         Platform::Linux => {
+            let output =
+                runner.output("systemctl", &os_args(["--user", "is-active", SYSTEMD_UNIT]))?;
             let state = output.stdout.trim();
             if state.is_empty() {
                 if output.success { "active" } else { "inactive" }.to_string()
@@ -466,16 +416,11 @@ fn uninstall_at(
 ) -> anyhow::Result<()> {
     match platform {
         Platform::MacOs => {
-            let _ = run_command(
-                runner,
-                "launchctl",
-                &os_args(["bootout", &format!("{}/{LAUNCHD_LABEL}", launchd_domain())]),
-            );
+            let _ = runner.output("launchctl", &os_args(["bootout", &launchd_service()]));
             remove_unit(unit_path)?;
         }
         Platform::Linux => {
-            let disable = run_command(
-                runner,
+            let disable = runner.output(
                 "systemctl",
                 &os_args(["--user", "disable", "--now", SYSTEMD_UNIT]),
             )?;
@@ -484,7 +429,7 @@ fn uninstall_at(
             }
             remove_unit(unit_path)?;
             require_success(
-                &run_command(runner, "systemctl", &os_args(["--user", "daemon-reload"]))?,
+                &runner.output("systemctl", &os_args(["--user", "daemon-reload"]))?,
                 "systemctl --user daemon-reload",
             )?;
         }
@@ -500,21 +445,18 @@ fn remove_unit(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn launcher_version(dirs: &Dirs) -> anyhow::Result<Option<String>> {
-    let path = dirs.launcher_dir().join("binary-version");
+/// The version the installed service launcher runs; `None` without an
+/// installed launcher (foreground/dev setups) or with an empty version file.
+///
+/// # Errors
+/// Returns an error when the version file exists but cannot be read.
+pub(crate) fn launcher_version(dirs: &Dirs) -> anyhow::Result<Option<String>> {
+    let path = dirs.launcher_version_file();
     match fs::read_to_string(&path) {
-        Ok(version) => Ok(Some(version.trim().to_string())),
+        Ok(version) => Ok(Some(version.trim().to_string()).filter(|version| !version.is_empty())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
     }
-}
-
-fn run_command(
-    runner: &dyn CommandRunner,
-    program: &str,
-    args: &[OsString],
-) -> anyhow::Result<CommandOutput> {
-    runner.output(program, args)
 }
 
 fn require_success(output: &CommandOutput, description: &str) -> anyhow::Result<()> {
@@ -532,24 +474,22 @@ fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
     args.into_iter().map(OsString::from).collect()
 }
 
-#[cfg(unix)]
 fn launchd_domain() -> String {
     // SAFETY: `geteuid` has no preconditions and no failure mode.
     let uid = unsafe { libc::geteuid() };
     format!("gui/{uid}")
 }
 
-#[cfg(not(unix))]
-fn launchd_domain() -> String {
-    unreachable!("launchd is only available on Unix")
+/// The launchd service target: `gui/<uid>/<label>`.
+fn launchd_service() -> String {
+    format!("{}/{LAUNCHD_LABEL}", launchd_domain())
 }
 
-/// Generates the launchd agent plist for the given stable launcher and log
-/// directories.
-#[must_use]
-pub fn launchd_plist(launcher_dir: &Path, log_dir: &Path, dirs: &Dirs) -> String {
-    let bootstrap = xml_escape(&launcher_dir.join("bootstrap.sh").to_string_lossy());
-    let log = xml_escape(&log_dir.join("router.log").to_string_lossy());
+/// The launchd agent plist: the stable launcher, the log file, and the XDG
+/// bases pinned.
+fn launchd_plist(dirs: &Dirs) -> String {
+    let bootstrap = xml_escape(&dirs.launcher_dir().join("bootstrap.sh").to_string_lossy());
+    let log = xml_escape(&dirs.log_dir().join("router.log").to_string_lossy());
     let env_entries = xdg_env(dirs)
         .into_iter()
         .fold(String::new(), |mut entries, (key, value)| {
@@ -611,12 +551,11 @@ fn xdg_env(dirs: &Dirs) -> Vec<(&'static str, String)> {
     .collect()
 }
 
-/// Generates the systemd user unit for the given stable launcher and log
-/// directories.
-#[must_use]
-pub fn systemd_user_unit(launcher_dir: &Path, log_dir: &Path, dirs: &Dirs) -> String {
-    let bootstrap = systemd_escape(&launcher_dir.join("bootstrap.sh").to_string_lossy());
-    let log = systemd_escape(&log_dir.join("router.log").to_string_lossy());
+/// The systemd user unit: the stable launcher, the log file, and the XDG
+/// bases pinned.
+fn systemd_user_unit(dirs: &Dirs) -> String {
+    let bootstrap = systemd_escape(&dirs.launcher_dir().join("bootstrap.sh").to_string_lossy());
+    let log = systemd_escape(&dirs.log_dir().join("router.log").to_string_lossy());
     let env_lines = xdg_env(dirs)
         .into_iter()
         .fold(String::new(), |mut lines, (key, value)| {
@@ -671,8 +610,16 @@ fn systemd_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::os::unix::fs::MetadataExt as _;
 
     use super::*;
+
+    fn plugin_sources(root: &Path) -> LauncherSources {
+        LauncherSources {
+            bootstrap: root.join("scripts/bootstrap.sh"),
+            version: root.join("binary-version"),
+        }
+    }
 
     #[derive(Default)]
     struct FakeRunner {
@@ -692,22 +639,9 @@ mod tests {
         }
     }
 
-    fn test_dirs(root: &Path) -> Dirs {
-        Dirs {
-            config_dir: root.join("config"),
-            state_dir: root.join("state"),
-            cache_dir: root.join("cache"),
-        }
-    }
-
     #[test]
     fn launchd_plist_has_exact_launcher_policy_and_logs() {
-        let dirs = test_dirs(Path::new("/root"));
-        let plist = launchd_plist(
-            Path::new("/state/launcher"),
-            Path::new("/state/logs"),
-            &dirs,
-        );
+        let plist = launchd_plist(&Dirs::under(Path::new("/root")));
         assert_eq!(
             plist,
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -719,7 +653,7 @@ mod tests {
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/state/launcher/bootstrap.sh</string>
+    <string>/root/state/launcher/bootstrap.sh</string>
     <string>serve</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -741,9 +675,9 @@ mod tests {
   <key>ExitTimeOut</key>
   <integer>60</integer>
   <key>StandardOutPath</key>
-  <string>/state/logs/router.log</string>
+  <string>/root/state/logs/router.log</string>
   <key>StandardErrorPath</key>
-  <string>/state/logs/router.log</string>
+  <string>/root/state/logs/router.log</string>
 </dict>
 </plist>
 "#
@@ -752,12 +686,7 @@ mod tests {
 
     #[test]
     fn systemd_unit_has_exact_launcher_policy_and_logs() {
-        let dirs = test_dirs(Path::new("/root"));
-        let unit = systemd_user_unit(
-            Path::new("/state/launcher"),
-            Path::new("/state/logs"),
-            &dirs,
-        );
+        let unit = systemd_user_unit(&Dirs::under(Path::new("/root")));
         assert_eq!(
             unit,
             "[Unit]\n\
@@ -766,15 +695,15 @@ After=network-online.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
-ExecStart=/bin/bash /state/launcher/bootstrap.sh serve\n\
+ExecStart=/bin/bash /root/state/launcher/bootstrap.sh serve\n\
 Environment=XDG_CONFIG_HOME=/root\n\
 Environment=XDG_STATE_HOME=/root\n\
 Environment=XDG_CACHE_HOME=/root\n\
 Restart=on-failure\n\
 RestartSec=2\n\
 TimeoutStopSec=60\n\
-StandardOutput=append:/state/logs/router.log\n\
-StandardError=append:/state/logs/router.log\n\
+StandardOutput=append:/root/state/logs/router.log\n\
+StandardError=append:/root/state/logs/router.log\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n"
@@ -783,27 +712,24 @@ WantedBy=default.target\n"
 
     #[test]
     fn generators_escape_paths() {
-        let dirs = test_dirs(Path::new("/root"));
-        let plist = launchd_plist(Path::new("/A & B"), Path::new("/logs"), &dirs);
-        assert!(plist.contains("/A &amp; B/bootstrap.sh"));
-        let unit = systemd_user_unit(Path::new("/A B"), Path::new("/logs"), &dirs);
-        assert!(unit.contains("ExecStart=/bin/bash \"/A B/bootstrap.sh\" serve"));
+        let plist = launchd_plist(&Dirs::under(Path::new("/A & B")));
+        assert!(plist.contains("/A &amp; B/state/launcher/bootstrap.sh"));
+        let unit = systemd_user_unit(&Dirs::under(Path::new("/A B")));
+        assert!(unit.contains("ExecStart=/bin/bash \"/A B/state/launcher/bootstrap.sh\" serve"));
     }
 
     #[test]
     fn systemd_escape_doubles_percent_specifiers() {
-        let unit = systemd_user_unit(
-            Path::new("/dir%20name/launcher"),
-            Path::new("/logs"),
-            &test_dirs(Path::new("/root")),
+        let unit = systemd_user_unit(&Dirs::under(Path::new("/dir%20name")));
+        assert!(
+            unit.contains("ExecStart=/bin/bash /dir%%20name/state/launcher/bootstrap.sh serve")
         );
-        assert!(unit.contains("ExecStart=/bin/bash /dir%%20name/launcher/bootstrap.sh serve"));
     }
 
     #[test]
     fn macos_install_uses_injected_dirs_and_unit_path() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let plugin = root.path().join("plugin");
         fs::create_dir_all(plugin.join("scripts")).unwrap();
         fs::write(plugin.join("scripts/bootstrap.sh"), b"#!/bin/bash\n").unwrap();
@@ -815,7 +741,7 @@ WantedBy=default.target\n"
             &dirs,
             Platform::MacOs,
             &unit,
-            Some(&LauncherSources::from_plugin_root(&plugin)),
+            Some(&plugin_sources(&plugin)),
             &runner,
         )
         .unwrap();
@@ -828,15 +754,11 @@ WantedBy=default.target\n"
             fs::read_to_string(dirs.launcher_dir().join("binary-version")).unwrap(),
             "1.2.3\n"
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = fs::metadata(dirs.launcher_dir().join("bootstrap.sh"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o755);
-        }
+        let mode = fs::metadata(dirs.launcher_dir().join("bootstrap.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
         assert!(
             fs::read_to_string(&unit)
                 .unwrap()
@@ -852,36 +774,41 @@ WantedBy=default.target\n"
     #[test]
     fn install_reuses_an_existing_launcher_without_sources() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         create_private_dir(&dirs.launcher_dir()).unwrap();
         fs::write(dirs.launcher_dir().join("bootstrap.sh"), "old script").unwrap();
         fs::write(dirs.launcher_dir().join("binary-version"), "old version").unwrap();
         let unit = root.path().join("systemd/model-router.service");
+        let runner = FakeRunner::default();
 
-        install_at(&dirs, Platform::Linux, &unit, None, &FakeRunner::default()).unwrap();
+        install_at(&dirs, Platform::Linux, &unit, None, &runner).unwrap();
 
         assert_eq!(
             fs::read_to_string(dirs.launcher_dir().join("bootstrap.sh")).unwrap(),
             "old script"
         );
-    }
-
-    #[test]
-    fn refresh_requires_sources_even_when_launcher_exists() {
-        let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
-        create_private_dir(&dirs.launcher_dir()).unwrap();
-        fs::write(dirs.launcher_dir().join("bootstrap.sh"), "old script").unwrap();
-        fs::write(dirs.launcher_dir().join("binary-version"), "old version").unwrap();
-
-        let error = populate_launcher(&dirs, None, true).unwrap_err();
-        assert!(error.to_string().contains("--plugin-root"));
+        // Reload, then enable and start: without the second the unit never runs.
+        let calls = runner.calls.borrow();
+        let commands: Vec<String> = calls
+            .iter()
+            .map(|(program, args)| {
+                let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+                format!("{program} {}", args.join(" "))
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "systemctl --user daemon-reload",
+                "systemctl --user enable --now model-router.service",
+            ]
+        );
     }
 
     #[test]
     fn refresh_moves_launcher_to_a_new_plugin_root() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let old_plugin = root.path().join("plugin-v1");
         let new_plugin = root.path().join("plugin-v2");
         for (plugin, script, version) in [
@@ -900,21 +827,16 @@ WantedBy=default.target\n"
             fs::write(plugin.join("scripts/bootstrap.sh"), script).unwrap();
             fs::write(plugin.join("binary-version"), version).unwrap();
         }
-        populate_launcher(
-            &dirs,
-            Some(&LauncherSources::from_plugin_root(&old_plugin)),
-            true,
-        )
-        .unwrap();
+        populate_launcher(&dirs, Some(&plugin_sources(&old_plugin))).unwrap();
         let runner = FakeRunner::default();
         let unit = root.path().join("home/Library/LaunchAgents/router.plist");
-        write_unit(&dirs, Platform::MacOs, &unit).unwrap();
+        write_unit_contents(&unit, unit_contents(&dirs, Platform::MacOs).as_bytes()).unwrap();
 
         refresh_at(
             &dirs,
             Platform::MacOs,
             &unit,
-            &LauncherSources::from_plugin_root(&new_plugin),
+            &plugin_sources(&new_plugin),
             &runner,
         )
         .unwrap();
@@ -956,7 +878,7 @@ WantedBy=default.target\n"
         }
 
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let plugin = root.path().join("plugin");
         fs::create_dir_all(plugin.join("scripts")).unwrap();
         fs::write(plugin.join("scripts/bootstrap.sh"), b"new script\n").unwrap();
@@ -970,7 +892,7 @@ WantedBy=default.target\n"
             &dirs,
             Platform::Linux,
             &unit,
-            &LauncherSources::from_plugin_root(&plugin),
+            &plugin_sources(&plugin),
             &FailingPrefetchRunner,
         )
         .unwrap_err();
@@ -987,7 +909,7 @@ WantedBy=default.target\n"
     #[test]
     fn refresh_rewrites_a_stale_unit_and_reloads_before_restart() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let plugin = root.path().join("plugin");
         fs::create_dir_all(plugin.join("scripts")).unwrap();
         fs::write(plugin.join("scripts/bootstrap.sh"), b"new script\n").unwrap();
@@ -1001,15 +923,12 @@ WantedBy=default.target\n"
             &dirs,
             Platform::Linux,
             &unit,
-            &LauncherSources::from_plugin_root(&plugin),
+            &plugin_sources(&plugin),
             &runner,
         )
         .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(&unit).unwrap(),
-            systemd_user_unit(&dirs.launcher_dir(), &dirs.log_dir(), &dirs)
-        );
+        assert_eq!(fs::read_to_string(&unit).unwrap(), systemd_user_unit(&dirs));
         let calls = runner.calls.borrow();
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0].0, "bash");
@@ -1020,7 +939,7 @@ WantedBy=default.target\n"
     #[test]
     fn refresh_leaves_a_current_unit_untouched() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         let plugin = root.path().join("plugin");
         fs::create_dir_all(plugin.join("scripts")).unwrap();
         fs::write(plugin.join("scripts/bootstrap.sh"), b"new script\n").unwrap();
@@ -1028,27 +947,19 @@ WantedBy=default.target\n"
         let unit = root.path().join("systemd/model-router.service");
         fs::create_dir_all(unit.parent().unwrap()).unwrap();
         fs::write(&unit, unit_contents(&dirs, Platform::Linux)).unwrap();
-        #[cfg(unix)]
-        let inode_before = {
-            use std::os::unix::fs::MetadataExt as _;
-            fs::metadata(&unit).unwrap().ino()
-        };
+        let inode_before = { fs::metadata(&unit).unwrap().ino() };
         let runner = FakeRunner::default();
 
         refresh_at(
             &dirs,
             Platform::Linux,
             &unit,
-            &LauncherSources::from_plugin_root(&plugin),
+            &plugin_sources(&plugin),
             &runner,
         )
         .unwrap();
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            assert_eq!(fs::metadata(&unit).unwrap().ino(), inode_before);
-        }
+        assert_eq!(fs::metadata(&unit).unwrap().ino(), inode_before);
         let calls = runner.calls.borrow();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].0, "bash");
@@ -1058,7 +969,7 @@ WantedBy=default.target\n"
     #[test]
     fn uninstall_removes_only_the_injected_unit() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = test_dirs(root.path());
+        let dirs = Dirs::under(root.path());
         create_private_dir(&dirs.config_dir).unwrap();
         create_private_dir(&dirs.state_dir).unwrap();
         create_private_dir(&dirs.cache_dir).unwrap();

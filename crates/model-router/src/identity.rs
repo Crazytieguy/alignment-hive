@@ -32,11 +32,20 @@ const SUBAGENT_TEXT: &str = "You are running as a subagent: complete the \
      skill only when your task explicitly instructs you to use that \
      skill.";
 
+/// Whether a system block is Claude Code's per-conversation
+/// billing-attribution block. Volatile per conversation (it carries a
+/// content hash) and stripped by `CLIProxyAPI` before the upstream sees the
+/// prompt, so it must not take part in the prompt-cache identity either
+/// ([`crate::prompt_cache`]).
+pub(crate) fn is_attribution_block(text: &str) -> bool {
+    text.trim_start().starts_with("x-anthropic-billing-header:")
+}
+
 /// Whether the request is a subagent conversation, per the
-/// `cc_is_subagent=true` flag Claude Code stamps into the
-/// billing-attribution system block. The flag is constant across a
-/// conversation's requests, so the derived identity text — and with it the
-/// shared-prefix cache identity — is too.
+/// `cc_is_subagent=true` flag Claude Code stamps into the attribution
+/// block. The flag is constant across a conversation's requests, so the
+/// derived identity text — and with it the shared-prefix cache identity —
+/// is too.
 fn is_subagent(system: Option<&Value>) -> bool {
     let Some(Value::Array(blocks)) = system else {
         return false;
@@ -45,10 +54,7 @@ fn is_subagent(system: Option<&Value>) -> bool {
         block
             .get("text")
             .and_then(Value::as_str)
-            .is_some_and(|text| {
-                text.trim_start().starts_with("x-anthropic-billing-header:")
-                    && text.contains("cc_is_subagent=true")
-            })
+            .is_some_and(|text| is_attribution_block(text) && text.contains("cc_is_subagent=true"))
     })
 }
 
@@ -56,11 +62,9 @@ fn is_subagent(system: Option<&Value>) -> bool {
 ///
 /// The block leads the system prompt because its copy frames everything
 /// after it ("the rest of this system prompt is Claude Code's standard
-/// one"). The injection is deterministic, so leading with it is exactly as
-/// prompt-cache-stable as appending it was.
+/// one").
 ///
-/// Normalization rules (uniform for `/v1/messages` and, if ever forwarded,
-/// `count_tokens` — parity is required):
+/// Normalization rules:
 /// - `system` absent → one-element content-block array with the identity block
 /// - `system` string → `[<identity block>, {type:text, text:<original>}]`
 /// - `system` array → identity block inserted first (existing blocks,
@@ -70,8 +74,6 @@ fn is_subagent(system: Option<&Value>) -> bool {
 ///
 /// On subagent conversations (detected via [`is_subagent`]) the block also
 /// carries the do-your-own-work sentence in [`SUBAGENT_TEXT`].
-///
-/// The identity block never carries `cache_control`.
 ///
 /// # Errors
 /// Returns an error when the body is not a JSON object or `system` has an
@@ -98,26 +100,10 @@ pub fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8
             blocks.insert(0, identity_block);
             Value::Array(blocks)
         }
-        Some(other) => {
-            anyhow::bail!(
-                "unsupported system shape {}; expected absent, string, or array",
-                type_name(&other)
-            );
-        }
+        Some(_) => anyhow::bail!("unsupported system shape; expected absent, string, or array"),
     };
     object.insert("system".to_string(), system);
     Ok(serde_json::to_vec(&document)?)
-}
-
-const fn type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 #[cfg(test)]
@@ -135,13 +121,7 @@ mod tests {
         let system = result["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["type"], "text");
-        let text = system[0]["text"].as_str().unwrap();
-        assert!(text.contains("GPT Test"));
-        assert!(text.contains("Claude Code's standard system prompt"));
-        assert!(text.contains(
-            "Claude Code's built-in tools likely differ from the tool harness you were trained \
-             with. Read tool descriptions closely."
-        ));
+        assert_eq!(system[0]["text"], identity_text("GPT Test"));
     }
 
     #[test]
@@ -187,10 +167,10 @@ mod tests {
     fn subagent_attribution_flag_appends_the_subagent_sentence() {
         let body = br#"{"model":"gpt-test","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.222; cch=6e11f; cc_is_subagent=true;"},{"type":"text","text":"Complete the task you are given."}],"messages":[]}"#;
         let result = parsed(&inject_identity(body, "GPT Test").unwrap());
-        let text = result["system"][0]["text"].as_str().unwrap();
-        assert!(text.contains("running as a subagent"));
-        assert!(text.contains("do not launch further agents"));
-        assert!(text.contains("Never invoke a skill on your own initiative"));
+        assert_eq!(
+            result["system"][0]["text"],
+            format!("{} {SUBAGENT_TEXT}", identity_text("GPT Test"))
+        );
     }
 
     #[test]
