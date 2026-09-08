@@ -1151,3 +1151,277 @@ flags GLM's as 202752 guaranteed across sub-providers). Row under test:
   the `/v1/messages` response `id` is OpenRouter's generation id
   (`gen-…`), and `GET /api/v1/generation?id=` (after ~10 s) reports
   `provider_name: "Fireworks"`.
+
+## GPT-6 Astra route (2026-09-07, Claude Code 2.1.263, CLIProxyAPI 7.2.154, router 0.1.19)
+
+Astra (released 2026-09-03, slug `gpt-6-astra`) is a fourth Codex-native
+route. Sandbox: worktree binary with private XDG dirs, router on 8797,
+child on 8327, the Codex Pro login copied in, Claude Code driven with
+`--settings` carrying its own `env` block (works again on 2.1.263: a dead
+base URL in the file produced "Connection refused", so the 2.1.222 note
+above is superseded). Live service untouched.
+
+### Upstream and window
+
+- Codex client catalog (`codex_client_models.json` at CLIProxyAPI main):
+  `context_window: 272000`, `max_context_window: 872000` for Astra and for
+  every gpt-5.6 model, so the 258400 declaration and the overflow
+  translation carry over unchanged. `minimal_client_version: 0.153.0`,
+  default reasoning level medium (sol's is low), levels low..max plus a
+  Codex-only `ultra` ("maximum reasoning with automatic task delegation");
+  CLIProxyAPI rejects `ultra` (PR #5532 open). `none` is rejected upstream.
+- The "not supported when using Codex with a ChatGPT account" 400 reported
+  in CLIProxyAPI #5521 on 2026-09-05 was OpenAI rollout gating, not a
+  proxy bug: it stopped reproducing on 2026-09-06 with no proxy change.
+  7.2.152 raised the global Codex client identity to 0.153.3 anyway.
+- Pin 7.2.132 -> 7.2.154. Release notes since the pin are Codex tool-schema
+  and auth-cooldown fixes plus the identity bump; no change to Originator
+  cloaking semantics observed in the sandbox (sol/terra/luna answer as
+  before; doctor: every routed model served).
+- Smoke: `claude -p --model gpt-6-astra` answered "ok GPT-6 Astra" in
+  3.4 s; a three-file tool-use task at high effort completed in 5 turns,
+  25 s, correct.
+
+### Search-subcall pin
+
+`ALPHA_SEARCH_DEFAULT_MODEL` moves from `gpt-5.6-sol` to `gpt-6-astra`
+(0.1.19). It only names the Codex slug the `/v1/alpha/search` payload
+carries for searches from non-Codex origins (open-weights routes);
+Codex-native origins already send their own slug. No measured effect on
+results or cost either way; the D7.1 capture above predates the move.
+
+### Reasoning is retained across tool calls
+
+The worry: OpenAI's own harness gains (ARC-AGI-3 tripled, tokens cut 6x)
+come from retained reasoning, which a translated harness could drop.
+Measured on the wire:
+
+- CLIProxyAPI's Claude->Codex translator sets
+  `include: ["reasoning.encrypted_content"]` and turns replayed assistant
+  `thinking` blocks with a signature into `{"type":"reasoning",
+  "encrypted_content": <signature>}` input items.
+- Direct probes (streaming and not, `thinking.display` absent, `omitted`,
+  or `summarized`): every response carried a `thinking` block with an empty
+  text and a ~1.3 KB signature (the encrypted reasoning); `summarized`
+  additionally streams summary text.
+- Claude Code sessions (`display: omitted`, its default): later requests
+  replay those blocks — e.g. a 10-message request carried two assistant
+  thinking blocks with 1380- and 1676-byte signatures. Turns with no
+  thinking block are turns where Astra emitted no reasoning item at all
+  (easy steps), not translator drops.
+- Consequence: `thinkingTokens` in Claude Code's usage reads 0 for Astra
+  (no summary text), so cost lines under-report reasoning.
+
+### Images
+
+Claude Code's Read sends images as Anthropic image blocks; the translator
+forwards them as `input_image` with no `detail` field, which for Astra
+defaults to original resolution up to Claude Code's own 2000 px cap.
+Dense-ledger read test (48 rows, 15 exact cell/header values, screenshot
+served at 2000/1568/1000 px wide): Astra (medium) and Fable 5.1 both
+15/15 at every size; Astra wrote en dashes for four hyphenated values at
+1568 and 2000 px. A first attempt with the table occupying a corner of a
+4K frame was unreadable to both, and both answered "?" for every cell
+rather than guess. Pushing the scale down until the models separate:
+800 and 600 px, both still 15/15 (Astra took 6 turns at 600); at 400 px
+(about 2 px x-height) Fable 5.1 read 12/15 over 26 Read calls (misread
+B661 as 8661, B478 as 8478, one hex digit) and Astra 9/15 over 8 turns
+(three "?", three misreads). One run each.
+
+### Hidden-rule grid game (world-modeling from sparse feedback)
+
+Three-level CLI game (`step <dir>` prints a frame; hidden key/door and a
+control-rotation tile), no instructions. Optimal 43 steps.
+
+| model (effort) | steps | turns | wall | notes |
+|---|---|---|---|---|
+| gpt-6-astra (medium) | 46 | 14 | 105 s | bypassed the level-2 door instead of fetching the key; rules stated correctly |
+| claude-fable-5-1 (medium) | 57 | 11 | 75 s | took the key; rules stated correctly |
+
+### Reviewer effort, medium vs high (one data point)
+
+The adversarial-code-reviewer body, run as a `-p` prompt on Astra against
+this change set (read-only tools), medium vs high:
+
+| effort | verdict | turns | wall | output tokens | notable |
+|---|---|---|---|---|---|
+| medium | approve, no material findings | 32 | 186 s | 2782 | ran `cargo fmt --check` and caught three formatting diffs; did not run tests |
+| high | approve, no material findings | 35 | 240 s | 4087 | checked version/lockfile agreement and checksums; did not run tests |
+
+Same verdict, medium found the one actionable nit, 22% faster, 30% fewer
+output tokens, no superfluous re-verification at either level. One run per
+level settles nothing on its own; the reviewers ship at medium on the
+broader picture (OpenAI's own medium default for agentic coding, the thin
+reported gains above high, and this run not contradicting either). Both runs spawned one Explore subagent, which Claude Code
+ran on Opus 5 — as a main agent Astra delegates; as a subagent the
+router's identity line tells it not to.
+
+### Codex plan allowances
+
+Astra draws from the same Work/Codex allowance as sol; Plus and Business
+Standard get "limited Astra usage", Pro and Business Premium the full
+allowance. Work/Codex credit rates: 250 in, 25 cached, 1250 out per M
+(2.5x sol). The exhausted-allowance error through the router is
+unmeasured (CLIProxyAPI #5529/#5530 describe a 429 the proxy's account
+fallback mishandled before 7.2.152).
+
+### Computer use through Claude Code (headless Playwright, same day)
+
+The question: Astra's computer-use strength (OSWorld 2.0 72.6%) is reported
+from Codex, whose computer use is a code-execution REPL (`cua_repl`, a
+desktop-app-hosted MCP server) driving Playwright/PyAutoGUI code that
+returns screenshots at `detail: original`; there is no hosted computer
+tool in codex-rs, and OpenAI's API guide recommends the same
+code-execution pattern for Astra. So the capability is not tied to a
+Codex-only tool, and a Bash + playwright-cli loop is the closest
+in-Claude-Code equivalent. Measured on a local single-page app (login,
+three modal edits with validation, an HTML5 drag-and-drop reorder, a
+settings form, a close-out that issues a code only when every requirement
+holds), 1440x900, headless, `-p` with `--allowedTools Read,Bash(playwright-cli:*)`:
+
+| model (medium) | condition | result | turns | wall | actions / screenshots |
+|---|---|---|---|---|---|
+| gpt-6-astra | screen only (screenshot + mousemove/mousedown/mouseup/type/press) | correct code | 29 | 249 s | 14 / 14 |
+| claude-fable-5-1 | screen only | correct code | 37 | 213 s | 17 / 18 |
+| gpt-6-astra | DOM allowed (snapshot/click/fill/drag/eval) | correct code | 19 | 188 s | 15 / 3 |
+
+Astra batches several playwright commands per Bash call, so its action
+count under-reads relative to Fable's. Coordinate drag-and-drop worked for
+both. The task is too easy to separate the models; what it shows is that
+the loop works end to end (screenshots reach Astra at usable fidelity,
+coordinates land) and that nothing about it needs Codex's tools.
+
+Temperament note from a first attempt whose app had a CSS bug (the edit
+modal stayed painted): screen-only Astra completed the three edits, then
+stopped and reported "an app UI issue" accurately; with DOM tools it
+injected `.modal.hidden{display:none !important}` into the page under test
+and finished. One data point each way on the ask-vs-work-around question.
+
+Not measured: the `claude --chrome` (Claude in Chrome) path, whose
+extension screenshots are resized to a 1568 px target; dropped, since
+playwright-cli covers browser work without taking over the user's
+browser. Lean formalization was dropped too (no way to judge the output
+here). Desktop computer use follows.
+
+### Desktop computer use: Blender through Claude Code's `computer-use` server (same evening)
+
+Claude Code's built-in `computer-use` MCP server (macOS, Pro/Max,
+interactive sessions only, per-app approval at first use, screenshots
+downscaled to ~1372x887) driven by a routed Astra main session works: the
+server does not care which model is answering. Task: build a mid-century
+lounge chair in Blender 5.2's GUI (no Python console, no scripting), with
+materials, camera, light, a 1280x720 render and a saved .blend. Each run in
+its own directory, Blender quit and its recent-files list cleared between
+runs, both at medium effort. Verified headlessly by opening the .blend
+with `blender -b`.
+
+| model | wall | computer-use calls | screenshots | output tokens | scene |
+|---|---|---|---|---|---|
+| gpt-6-astra | 10 min | 41 (34 batches) | 37 | 11.5K | 12 objects: two beveled mustard cushions, backrest reclined 15 degrees, four tapered legs via a geometry-nodes modifier, splayed 6 degrees, two curved armrests joined to the front legs, seat foundation, floor, sun, camera; three named materials; EEVEE 1280x720 |
+| claude-fable-5-1 | 10.5 min | 53 batches | 52 | 50.6K | 13 objects: two beveled cushions (backrest upright, not reclined), four box legs splayed 5 degrees, armrests on separate posts, floor, light, camera; three named materials; EEVEE 1280x720 |
+
+Both renders read as the requested chair; Astra's is the closer match to
+the brief (reclined backrest, visibly tapered legs, armrests on the front
+legs) at a fifth of the output tokens. Astra obeyed the no-scripting rule
+(transcript checked). One run each.
+
+### Astra in Codex on the same task (degradation baseline, later that night)
+
+The question was whether Claude Code degrades Astra's computer use
+relative to Codex, whose numbers OpenAI reports. Same task file (the
+out-path and the tool's name adjusted), same isolation, driven by the user
+in the interactive `codex` TUI (0.153.4) with the built-in
+`computer-use` MCP server. Two runs: one at high by accident (the user's
+default), then one at medium to match the Claude Code runs. Numbers from
+the rollout log under `~/.codex/sessions`; "calls" counts the
+`mcp__computer_use__*` call sites inside the code-mode batches (a loop
+over keys counts once, so it under-reads).
+
+| model | effort | wall | computer-use calls | screenshots | output tokens | scene |
+|---|---|---|---|---|---|---|
+| gpt-6-astra in Codex | medium | 12 min | 167 (51 batches) | 33 | 7.4K | 12 objects: two beveled mustard cushions, backrest reclined 15 degrees, four straight box legs splayed 7 degrees (not tapered), two box armrests on the front legs, floor, sun plus the default light, camera; three materials, two of them unnamed; EEVEE 1280x720 |
+| gpt-6-astra in Codex | high | 15.5 min | 270 (53 batches) | 45 | 11.9K | 7 objects: two beveled cushions, backrest reclined 15 degrees, one geometry-nodes frame object holding four tapered legs and two rounded armrests on the front legs, floor, sun and area light, camera; three named materials; EEVEE 1280x720 |
+
+No degradation from Claude Code at matched effort, on this one task. Astra
+through Claude Code was faster (10 vs 12 min), used fewer batches, and
+produced the closer match to the brief: its legs are tapered, the Codex
+medium run's are straight boxes. Output tokens went the other way (11.5K
+vs 7.4K). The high run in Codex produced the best-looking chair of the
+four (tapered round legs, rounded armrests, the most sofa-like render) at
+a third more wall time and 1.6x the output tokens of the medium run.
+Neither Codex run drove Blender from the shell (rollouts checked: the
+shell was used only to read the task and instruction files and to check
+the output). Input tokens for the three Astra runs were dominated by cache
+reads (Claude Code 3.46M cached + 248K uncached; Codex medium 2.48M +
+61K; Codex high 2.16M + 132K). One run per cell; the medium-vs-high
+comparison is one data point.
+
+What differs is the harness, not the model. Codex's `computer-use` tools
+take an `app` argument: `get_app_state` returns that app's key window as
+a screenshot plus an accessibility tree, clicks target an element index
+or window coordinates, and `set_value` and `perform_secondary_action`
+work through accessibility. The user keeps the mouse and keyboard and can
+work in other apps while it runs. Claude Code's `computer-use` server
+posts real input events and needs the target frontmost, so the machine is
+unusable for the duration. That is the reason to shell out to `codex` for
+a long desktop task; the model itself does not need it.
+
+Why `codex exec` had failed earlier that evening: `~/.codex/config.toml`
+pointed the code-mode host (`node_repl`) at
+`/Applications/Codex.app/Contents/Resources/cua_node`, which does not exist
+on this machine; the same tree ships inside `/Applications/ChatGPT.app`.
+With the path corrected, the same `codex exec -s read-only` probe runs
+its shell tool and answers. The "timed out negotiating with the code-mode
+host" error is the host binary failing to start, not a sandbox or TTY
+issue.
+
+### Astra in the Codex desktop app (same night)
+
+The desktop app's `cua_repl` is the same runtime the CLI used: the
+`cua_node` tree inside ChatGPT.app, whose `@oai/sky` module (0.4.20) is
+the SkyComputerUseClient helper. Sky documents three targets: a
+full-desktop API (whole-screen screenshots, desktop coordinates, real
+pointer), a window API (per-app screenshot plus accessibility tree,
+element-index or coordinate clicks), and a multi-window variant. The
+CLI's ten `mcp__computer_use__*` tools are the window API's ten methods,
+name for name, and the CLI's REPL is sealed: `require` is undefined and
+`import()` fails even for `node:fs`, so it is a batching layer over those
+ten tools and nothing else. The desktop app's REPL binds the same window
+API on a `cua` global (`cua.getApp`, then `getScreenshot`, `getAXState`,
+`click`, `pressKey`, `typeText`, `scroll`, `drag`); the tree also ships
+sharp, tesseract.js, pixelmatch and Playwright, and this run imported
+none of them. Screenshots were the same 1224x768 window captures as the
+CLI's. Neither Codex surface takes the mouse or keyboard; the desktop app
+adds a small floating window showing what the model is doing.
+
+Same task, medium, driven by the user in the app:
+
+| model | effort | wall | REPL batches | screenshots | output tokens | scene |
+|---|---|---|---|---|---|---|
+| gpt-6-astra in the Codex desktop app | medium | 8.5 min | 39 | 33 | 5.4K | 7 objects: two beveled cushions, backrest reclined 15 degrees, one frame object with tapered splayed legs and armrests on the front legs, floor, sun and point light, camera; EEVEE 1280x720 |
+
+The fastest and cheapest of the three Astra computer-use runs, with a
+chair as good as the Claude Code one. Same tools as the CLI, so the gap
+to the CLI run is within one-run variance. Guidance: Astra in Claude Code
+is fine for computer use; when the machine has to stay usable during a
+long desktop task, the Codex desktop app is the convenient surface.
+
+### Blender MCP instead of computer use (same night)
+
+For scale: the same task through the blender-mcp addon (1.6, socket on
+9876) and its `uvx blender-mcp` server, Claude Code `-p` with only the
+five relevant tools allowed (`get_scene_info`, `get_object_info`,
+`execute_blender_code`, `get_viewport_screenshot`, `get_addon_status`),
+`DISABLE_TELEMETRY=1`, `--strict-mcp-config`, sandbox router settings,
+fresh GUI Blender per run with the server started from `--python-expr`.
+No screen involved beyond an idle Blender window.
+
+| model | wall | tool calls | output tokens | scene |
+|---|---|---|---|---|
+| claude-fable-5-1 | 1.7 min | 9 (4 code executions, 1 viewport screenshot) | 7.8K | 16 objects at real scale (0.6 m seat), backrest reclined in the mesh, thin tapered legs splayed 18 degrees, armrests on separate posts, bevel modifiers, sun and area light |
+| gpt-6-astra | 1.9 min | 5 (2 code executions) | 3.1K | 20 objects: reclined cushion plus a walnut backrest shell, tapered round legs, sculpted armrests on the front legs, bevel and weighted-normal modifiers, a grained wood material, three area lights; the default cube, camera and light left as unlinked data blocks |
+
+Five to six times faster than any GUI run, and Astra's is the best chair
+of the seven. Fable repeated its GUI-run deviation (armrests on posts).
+Claude Code `-p` logs `[claude-code:unrecognized_model]` for
+`gpt-6-astra` to stderr and proceeds; harmless. One run each.
