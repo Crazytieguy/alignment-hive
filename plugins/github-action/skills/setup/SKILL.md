@@ -47,7 +47,7 @@ Read the matching snippet from `references/cache-steps.md`. If no match or multi
 
 ### Write files
 
-Create the destination directories (`.github/workflows`, `.github/scripts`, `.github/prompts`) then copy asset files directly using `cp`. For the two workflow files, after copying, replace the `# CACHE_STEP` and `# INSTALL_STEP` comments with the detected snippets from the reference file. The other three files are copied as-is.
+Create the destination directories (`.github/workflows`, `.github/scripts`, `.github/prompts`) then copy asset files directly using `cp`. For the two workflow files, after copying, replace the `# CACHE_STEP` comment with the detected snippet from the reference file (or leave it when no ecosystem matched). The other three files are copied as-is.
 
 | Asset | Destination |
 |---|---|
@@ -63,9 +63,9 @@ The GitHub Action supports installing plugins from marketplaces. Detect the user
 
 ### Detect installed plugins
 
-Read `.claude/settings.json` and `.claude/settings.local.json` looking for:
+Read `.claude/settings.json`, `.claude/settings.local.json` and `~/.claude/settings.json` looking for:
 - `enabledPlugins` — all enabled plugins (from any marketplace)
-- `pluginMarketplaces` — all registered marketplaces
+- `extraKnownMarketplaces` — all registered marketplaces
 
 ### Present findings
 
@@ -100,29 +100,16 @@ If no plugins need secrets, remove the `# PLUGIN_ENV` comment line from both wor
 
 ## Step 4: Check Permissions
 
-Read `.claude/settings.json` and `.claude/settings.local.json`. Claude in the GitHub Action uses these for bash permissions. Check if permissions are properly configured:
-- At least 15 allow rules total
-- At least 3 deny rules
-- Has project-specific commands
-
-Note the result for the summary — do not message the user yet.
+Read `.claude/settings.json` and `.claude/settings.local.json`. Claude in the GitHub Action uses these for bash permissions, so check whether they contain `Bash(...)` allow rules for the project's build and test commands. Note the result for the summary — do not message the user yet.
 
 ## Step 5: Summary
 
-List all files created and summarize:
-
-- `.github/workflows/claude-issue.yml` — triggers on `@claude` in issues
-- `.github/workflows/claude-pr.yml` — triggers on PR reviews and `@claude` in PR comments
-- `.github/scripts/update-comment.sh` — tracking comment wrapper with mid-session feedback
-- `.github/prompts/issue.md` — issue prompt template
-- `.github/prompts/pr-review.md` — PR review prompt template
+List the files created (the Step 2 table) with a one-line purpose each.
 
 **If plugins were configured** (from Step 3), list which plugins will be available in CI. Note which secrets were set and remind about any that still need to be added manually.
 
-**If permissions are unconfigured** (from Step 4), include a warning:
-> Claude in the GitHub Action uses your project's `.claude/settings.json` for bash permissions. Without proper permissions, Claude won't be able to run build/test commands autonomously.
-
-Recommend installing the autopilot plugin (`autopilot@alignment-hive`) if not already installed — it includes a permissions setup flow.
+**If Step 4 found no build/test permissions**, include a warning:
+> Claude in the GitHub Action uses your project's `.claude/settings.json` for bash permissions. Without allow rules for your build/test commands, Claude can't run them autonomously.
 
 Tell the user the following:
 

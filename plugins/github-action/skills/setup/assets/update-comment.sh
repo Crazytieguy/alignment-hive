@@ -33,9 +33,12 @@ else
 fi
 
 # Check for new human comments
-comments=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" 2>/dev/null) || exit 0
+comments=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" 2>/dev/null) || {
+  echo "warning: could not fetch comments, feedback check skipped" >&2
+  exit 0
+}
 
-last_seen=$(cat "$STATE_FILE" 2>/dev/null || echo "0")
+last_seen=$(cat "$STATE_FILE" 2>/dev/null || :)
 last_seen=${last_seen:-0}
 
 # Update state with latest comment ID

@@ -1,10 +1,8 @@
 # Dependency Setup Steps for GitHub Actions
 
-YAML snippets to insert into Claude Code GitHub Action workflows between the checkout step and the main job steps. Each snippet handles toolchain setup, dependency caching, and dependency installation. Indented for direct insertion into the workflow YAML (6 spaces, matching the `steps:` block).
+Per-ecosystem snippets that replace the `# CACHE_STEP` line in both workflows. Each one installs the toolchain, caches dependencies, and installs them; the indentation (6 spaces) already matches the `steps:` block.
 
 ## Python + uv
-
-Detect: `uv.lock` or `pyproject.toml` with no other lockfile
 
 ```yaml
       - name: Set up uv
@@ -17,8 +15,6 @@ Detect: `uv.lock` or `pyproject.toml` with no other lockfile
 ```
 
 ## Python + pip
-
-Detect: `requirements.txt` with no `uv.lock`
 
 ```yaml
       - name: Set up Python
@@ -33,16 +29,12 @@ Detect: `requirements.txt` with no `uv.lock`
 
 ## Rust
 
-Detect: `Cargo.toml`
-
 ```yaml
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 ```
 
 ## Node.js + npm
-
-Detect: `package.json` + `package-lock.json`
 
 ```yaml
       - name: Set up Node.js
@@ -57,8 +49,6 @@ Detect: `package.json` + `package-lock.json`
 
 ## Node.js + bun
 
-Detect: `package.json` + `bun.lock` or `bun.lockb`
-
 ```yaml
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -67,7 +57,7 @@ Detect: `package.json` + `bun.lock` or `bun.lockb`
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
           restore-keys: |
             bun-${{ runner.os }}-
 
@@ -75,6 +65,3 @@ Detect: `package.json` + `bun.lock` or `bun.lockb`
         run: bun install --frozen-lockfile
 ```
 
-## No match / multiple ecosystems
-
-If no ecosystem is detected or multiple are present, leave the `# CACHE_STEP` comment as-is and tell the user to add a cache step manually.

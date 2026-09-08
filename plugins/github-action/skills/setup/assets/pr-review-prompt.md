@@ -7,7 +7,7 @@ Read the PR with its reviews and comments:
   gh pr view {{NUMBER}} --json title,body,comments,reviews,labels
 
 Read inline review comments (these are not included in gh pr view):
-  gh api repos/{{REPOSITORY}}/pulls/{{NUMBER}}/comments --jq '.[] | {path, line, original_line, side, body, user: .user.login, in_reply_to_id}'
+  gh api repos/{{REPOSITORY}}/pulls/{{NUMBER}}/comments?per_page=100 --jq '.[] | {path, line, original_line, side, body, user: .user.login, in_reply_to_id}'
 
 Use git to understand what the PR changed (e.g. git diff, git log).
 
