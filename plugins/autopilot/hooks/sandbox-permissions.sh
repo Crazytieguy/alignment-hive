@@ -14,6 +14,10 @@ input=$(cat)
 # shellcheck source=../scripts/find-jq.sh
 source "${CLAUDE_PLUGIN_ROOT}/scripts/find-jq.sh" || exit 0
 
+if ! "$JQ" -e '.deno_sandbox == true' "$CLAUDE_PROJECT_DIR/.claude/autopilot/state.json" >/dev/null 2>&1; then
+  exit 0
+fi
+
 eval "$( echo "$input" | "$JQ" -r '
   "tool_name=" + (.tool_name // "" | @sh),
   "target_path=" + (.tool_input.file_path // .tool_input.path // "" | @sh),
@@ -22,6 +26,9 @@ eval "$( echo "$input" | "$JQ" -r '
 ')"
 
 sandbox_dir="${CLAUDE_PROJECT_DIR}/.claude/deno-sandbox"
+# Without a session id nothing below can match, and the grants path would degenerate.
+[ -n "$session_id" ] || exit 0
+sessions_dir="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions"
 
 # --- Helpers ---
 
@@ -31,35 +38,6 @@ emit_allow() {
 
 emit_deny() {
   "$JQ" -n --arg msg "$1" '{ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: $msg } } }'
-}
-
-# Load allowed script basenames (session ID + registered agent IDs).
-# Called lazily — only when we actually need to check sandbox scripts.
-_basenames_loaded=false
-allowed_basenames=()
-load_allowed_basenames() {
-  if [ "$_basenames_loaded" = true ]; then return; fi
-  _basenames_loaded=true
-  if [ -n "$session_id" ]; then
-    allowed_basenames+=("${session_id}.ts")
-    local registry="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions/${session_id}.agents"
-    if [ -f "$registry" ]; then
-      while IFS= read -r agent_id; do
-        [ -n "$agent_id" ] && allowed_basenames+=("${agent_id}.ts")
-      done < "$registry"
-    fi
-  fi
-}
-
-is_allowed_script() {
-  load_allowed_basenames
-  local path="$1"
-  for allowed in "${allowed_basenames[@]}"; do
-    if [ "$path" = "$sandbox_dir/$allowed" ]; then
-      return 0
-    fi
-  done
-  return 1
 }
 
 # --- Bash tool ---
@@ -91,15 +69,21 @@ if [[ "$target_path" == *..* ]]; then
   exit 0
 fi
 
-# Auto-allow Read/Write/Edit to registered sandbox script files
-if is_allowed_script "$target_path"; then
-  emit_allow
-  exit 0
+# Auto-allow Read/Write/Edit to this session's and its registered agents' sandbox scripts
+ids=("$session_id")
+if [ -f "$sessions_dir/$session_id.agents" ]; then
+  while IFS= read -r id; do [ -n "$id" ] && ids+=("$id"); done < "$sessions_dir/$session_id.agents"
 fi
+for id in "${ids[@]}"; do
+  if [ "$target_path" = "$sandbox_dir/$id.ts" ]; then
+    emit_allow
+    exit 0
+  fi
+done
 
 # Deny writes to unregistered .ts files in the sandbox dir
 if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
-  if [[ "$target_path" == "$sandbox_dir"/* ]] || [[ "$target_path" == */.claude/deno-sandbox/* ]]; then
+  if [[ "$target_path" == */.claude/deno-sandbox/* ]]; then
     # Only block writes to script files (.ts), not config/declaration files (.d.ts, .json, etc.)
     case "$target_path" in
       *.d.ts) ;;
@@ -110,7 +94,7 @@ if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
 fi
 
 # Load granted read paths from session state
-STATE_FILE="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions/${session_id}"
+STATE_FILE="$sessions_dir/$session_id"
 if [ ! -f "$STATE_FILE" ]; then
   exit 0
 fi
@@ -134,22 +118,7 @@ fi
 # Check if target falls under any granted read path (already absolute from deno-sandbox-grant)
 for granted in "${read_paths[@]}"; do
   if [[ "$target_path" == "$granted" || "$target_path" == "$granted/"* ]]; then
-    "$JQ" -n --arg tool "$tool_name" --arg path "$granted" '{
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: {
-          behavior: "allow",
-          updatedPermissions: [
-            {
-              type: "addRules",
-              rules: [{ toolName: $tool, ruleContent: ($path + "/**") }],
-              behavior: "allow",
-              destination: "session"
-            }
-          ]
-        }
-      }
-    }'
+    emit_allow
     exit 0
   fi
 done

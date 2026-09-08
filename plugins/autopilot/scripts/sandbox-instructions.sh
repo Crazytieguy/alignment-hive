@@ -1,18 +1,16 @@
 #!/bin/bash
 # Outputs the deno-sandbox additionalContext string.
 # Usage: bash sandbox-instructions.sh <script-path> <sandbox-dir> [grants-file]
-# Both session-start.sh and subagent-start.sh call this.
 
 SCRIPT_PATH="$1"
 SANDBOX_DIR="$2"
 GRANTS_FILE="${3:-}"
 
-# Detect deno version (best-effort, callers already verified deno is available)
+# Detect deno version (best-effort)
 DENO_VERSION=""
-if command -v deno >/dev/null 2>&1; then
-  DENO_VERSION=$(deno --version 2>/dev/null | head -1 | awk '{print $2}') || true
-elif [ -x "$HOME/.deno/bin/deno" ]; then
-  DENO_VERSION=$("$HOME/.deno/bin/deno" --version 2>/dev/null | head -1 | awk '{print $2}') || true
+# shellcheck source=find-deno.sh
+if source "$(dirname "${BASH_SOURCE[0]}")/find-deno.sh"; then
+  DENO_VERSION=$("$DENO" --version 2>/dev/null | head -1 | awk '{print $2}') || true
 fi
 
 cat <<INSTRUCTIONS
@@ -30,7 +28,7 @@ Your sandbox script file is $SCRIPT_PATH (use this exact path for the entire ses
 
 ### Granting permissions
 
-Each grant requires user approval and only applies to deno-sandbox scripts. \`--allow-read=.\` is included by default.
+Each grant requires user approval and applies to deno-sandbox scripts; a read grant also lets you read that path directly with Read, Grep and Glob. \`--allow-read=.\` is included by default.
 
 \`\`\`
 deno-sandbox-grant --allow-write=. --allow-net=api.example.com

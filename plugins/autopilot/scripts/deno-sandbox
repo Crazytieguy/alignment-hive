@@ -25,6 +25,15 @@ HELP
   exit 0
 fi
 
+# The session-start hook exports all three together via CLAUDE_ENV_FILE.
+PROJECT_DIR="${DENO_SANDBOX_PROJECT_DIR:-}"
+sid="${DENO_SANDBOX_SESSION_ID:-}"
+DATA_DIR="${AUTOPILOT_DATA_DIR:-}"
+if [ -z "$PROJECT_DIR" ] || [ -z "$sid" ] || [ -z "$DATA_DIR" ]; then
+  echo "error: sandbox is not configured for this session." >&2
+  exit 1
+fi
+
 if ! command -v deno >/dev/null 2>&1; then
   echo "error: deno not found. It will be installed automatically on next session start." >&2
   exit 1
@@ -37,12 +46,8 @@ if [ $# -eq 0 ]; then
   exit 1
 fi
 
-PROJECT_DIR="${DENO_SANDBOX_PROJECT_DIR:-}"
-if [ -z "$PROJECT_DIR" ]; then
-  echo "error: sandbox is not configured for this session." >&2
-  exit 1
-fi
-SANDBOX_DIR="$PROJECT_DIR/.claude/deno-sandbox"
+# Resolved like the script path below, so symlinked project dirs (/tmp on macOS) compare equal
+SANDBOX_DIR="$(realpath "$PROJECT_DIR")/.claude/deno-sandbox"
 
 # Resolve the script path (realpath also confirms the file exists)
 SCRIPT_FILE=$(realpath "$1" 2>/dev/null) || {
@@ -60,31 +65,24 @@ if [[ "$SCRIPT_FILE" != *.ts ]]; then
   exit 1
 fi
 
-# Read session ID for grant state file
-sid="${DENO_SANDBOX_SESSION_ID:-}"
-if [ -z "$sid" ]; then
-  echo "error: sandbox is not available for this session." >&2
-  exit 1
-fi
 if [[ "$sid" =~ [/\\] ]]; then
   echo "error: invalid session ID" >&2
   exit 1
 fi
 
-FLAGS=(--allow-read=.)
-# Deny writes to sensitive directories at three levels:
-#   1. Relative (protects cwd)
-#   2. DENO_SANDBOX_PROJECT_DIR (protects the directory the session was started in)
-#   3. git toplevel (protects the repo root for the current cwd, if in a git repo)
-DENY_WRITE=(.claude .git "$PROJECT_DIR/.claude" "$PROJECT_DIR/.git" "$HOME/.claude" "$HOME/.deno" "${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}")
+FLAGS=()
+# Never writable, even when write is granted: .claude and .git under cwd, the
+# project dir, the git toplevel and every granted dir, plus Claude's and Deno's
+# home dirs and the grant state dir.
+DENY_WRITE=(.claude .git "$PROJECT_DIR/.claude" "$PROJECT_DIR/.git" "$HOME/.claude" "$HOME/.deno" "$DATA_DIR")
 git_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [ -n "$git_toplevel" ] && [ "$git_toplevel" != "$PROJECT_DIR" ]; then
   DENY_WRITE+=("$git_toplevel/.claude" "$git_toplevel/.git")
 fi
 
-# Merge same-type grants (Deno rejects duplicate flag types)
-grant_read="" grant_write="" grant_run="" grant_net="" grant_env="" grant_import=""
-STATE_FILE="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions/$sid"
+# One flag per permission type; the default cwd read is the first read entry.
+grant_read="." grant_write="" grant_run="" grant_net="" grant_env="" grant_import=""
+STATE_FILE="$DATA_DIR/sessions/$sid"
 if [ -f "$STATE_FILE" ]; then
   while IFS= read -r flag; do
     if [[ "$flag" =~ ^--allow-(read|write|run|net|env|import)=(.+)$ ]]; then

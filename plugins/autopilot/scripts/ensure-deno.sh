@@ -1,27 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
-# If deno is available globally, nothing to do
-if command -v deno >/dev/null 2>&1; then
+# Runs on every session start regardless of sandbox state, so deno is already
+# there in the first session after the sandbox is enabled.
+# shellcheck source=find-deno.sh
+if source "$(dirname "${BASH_SOURCE[0]}")/find-deno.sh"; then
   exit 0
 fi
-
-# Check if we already have it in the standard location
 DENO_BIN="$HOME/.deno/bin/deno"
-if [ -x "$DENO_BIN" ]; then
-  exit 0
-fi
 
 # ANSI via JSON unicode escapes
 B='\u001b[1;32m'
 R='\u001b[0m'
 
-# Detect platform
+# Release assets are named by full target triple (deno-x86_64-unknown-linux-gnu.zip)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
 case "$OS" in
-  linux)  OS_NAME="linux" ;;
+  linux)  OS_NAME="unknown-linux-gnu" ;;
   darwin) OS_NAME="apple-darwin" ;;
   *)      echo "{\"systemMessage\": \"${B}autopilot:${R} cannot bootstrap deno, unsupported OS: $OS, install deno manually\"}"
           exit 0 ;;
@@ -34,7 +31,6 @@ case "$ARCH" in
                  exit 0 ;;
 esac
 
-# Get latest version
 DENO_VERSION=$(curl -fSs https://dl.deno.land/release-latest.txt 2>/dev/null || echo "")
 if [ -z "$DENO_VERSION" ]; then
   echo "{\"systemMessage\": \"${B}autopilot:${R} failed to fetch deno version, install deno manually\"}"
@@ -53,19 +49,18 @@ TMPDIR_EXTRACT=$(mktemp -d "$HOME/.deno/extract-XXXXXXXX")
 trap 'rm -rf "$TMPDIR_EXTRACT"' EXIT
 TMPFILE="$TMPDIR_EXTRACT/deno.zip"
 
-if curl -fSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
-  if unzip -o "$TMPFILE" -d "$TMPDIR_EXTRACT" >/dev/null 2>&1; then
-    chmod +x "$TMPDIR_EXTRACT/deno"
-    if "$TMPDIR_EXTRACT/deno" --version >/dev/null 2>&1; then
-      mv -f "$TMPDIR_EXTRACT/deno" "$DENO_BIN"
-      echo "{\"systemMessage\": \"${B}autopilot:${R} deno bootstrapped, sandboxed scripting is now available\"}"
-    else
-      echo "{\"systemMessage\": \"${B}autopilot:${R} downloaded deno binary is corrupt, install deno manually\"}"
-    fi
-  else
-    echo "{\"systemMessage\": \"${B}autopilot:${R} failed to extract deno, ensure unzip is installed\"}"
-  fi
-else
+if ! curl -fSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
   echo "{\"systemMessage\": \"${B}autopilot:${R} failed to download deno, install deno manually\"}"
   exit 0
 fi
+if ! unzip -o "$TMPFILE" -d "$TMPDIR_EXTRACT" >/dev/null 2>&1; then
+  echo "{\"systemMessage\": \"${B}autopilot:${R} failed to extract deno, ensure unzip is installed\"}"
+  exit 0
+fi
+chmod +x "$TMPDIR_EXTRACT/deno"
+if ! "$TMPDIR_EXTRACT/deno" --version >/dev/null 2>&1; then
+  echo "{\"systemMessage\": \"${B}autopilot:${R} downloaded deno binary is corrupt, install deno manually\"}"
+  exit 0
+fi
+mv -f "$TMPDIR_EXTRACT/deno" "$DENO_BIN"
+echo "{\"systemMessage\": \"${B}autopilot:${R} deno bootstrapped, sandboxed scripting is now available\"}"

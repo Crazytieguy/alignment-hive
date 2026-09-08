@@ -5,8 +5,9 @@ input=$(cat)
 LOG_FILE="$HOME/.cache/autopilot/auto-deny-error.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# On any error, log it and tell the user
-trap 'echo "$0: line $LINENO: unexpected error" >> "$LOG_FILE" 2>/dev/null; echo "{\"systemMessage\":\"\u001b[1;32mautopilot:\u001b[0m hook error, autonomous mode disabled, see '$LOG_FILE'\"}"' ERR
+# On any error, log it and tell the user; exit 0 so the message, not a hook-error
+# notice, is what the user sees.
+trap 'echo "$0: line $LINENO: unexpected error" >> "$LOG_FILE" 2>/dev/null; echo "{\"systemMessage\":\"\u001b[1;32mautopilot:\u001b[0m auto-deny hook failed, this request was not auto-denied, see $LOG_FILE\"}"; exit 0' ERR
 set -euo pipefail
 
 # shellcheck source=../scripts/find-jq.sh
@@ -39,10 +40,12 @@ if [ "$has_session_dest" -gt 0 ] && [ "$session_in_cwd" != "true" ]; then
   exit 0
 fi
 
-# Let deno-sandbox and deno-sandbox-grant through (allowed via settings, validated at runtime)
-if [[ "${rule_content%% *}" == "deno-sandbox-grant" ]] || [[ "${rule_content%% *}" == "deno-sandbox" ]]; then
-  exit 0
-fi
+# Never auto-deny these: deno-sandbox is allowed via settings and validated at
+# runtime, and deno-sandbox-grant is deliberately not in the allow list, so it must
+# reach the user as a real prompt for grants to work in autonomous mode.
+case "$rule_content" in
+  deno-sandbox|deno-sandbox\ *|deno-sandbox:*|deno-sandbox-grant|deno-sandbox-grant\ *|deno-sandbox-grant:*) exit 0 ;;
+esac
 
 # Build context-aware deny message
 if [ -n "$rule_content" ]; then

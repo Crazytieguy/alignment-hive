@@ -1,24 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-# If jq is available globally, nothing to do
-if command -v jq >/dev/null 2>&1; then
+# shellcheck source=find-jq.sh
+if source "$(dirname "${BASH_SOURCE[0]}")/find-jq.sh"; then
   exit 0
 fi
 
-# Check if we already bootstrapped it
 CACHE_DIR="$HOME/.cache/autopilot"
 BINARY="$CACHE_DIR/jq"
-
-if [ -x "$BINARY" ]; then
-  exit 0
-fi
 
 # ANSI via JSON unicode escapes
 B='\u001b[1;32m'
 R='\u001b[0m'
 
-# Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
@@ -55,8 +49,7 @@ if curl -fSL "$DOWNLOAD_URL" -o "$TMP_BINARY"; then
     exit 0
   fi
   mv -f "$TMP_BINARY" "$BINARY"
-  echo "{\"systemMessage\": \"${B}autopilot:${R} jq bootstrapped, auto-deny is now active\"}"
+  echo "{\"systemMessage\": \"${B}autopilot:${R} jq bootstrapped, autopilot hooks are now active\"}"
 else
-  echo "{\"systemMessage\": \"${B}autopilot:${R} failed to download jq, auto-deny disabled until jq is installed\"}"
-  exit 0
+  echo "{\"systemMessage\": \"${B}autopilot:${R} failed to download jq, autopilot hooks are disabled until jq is installed\"}"
 fi

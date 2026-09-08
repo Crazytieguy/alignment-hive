@@ -14,12 +14,13 @@ B=$'\033[1;32m'  # bold green
 M=$'\033[1;35m'  # bold magenta
 R=$'\033[0m'     # reset
 
-# On any error, log and inform user
-trap 'echo "$0: line $LINENO: unexpected error" >&2; echo "{\"systemMessage\":\"\u001b[1;32mautopilot:\u001b[0m error in session-start hook, see $LOG_FILE\"}"' ERR
+# On any error, log and inform user; exit 0 so the message, not a hook-error
+# notice, is what the user sees.
+trap 'echo "$0: line $LINENO: unexpected error" >&2; echo "{\"systemMessage\":\"\u001b[1;32mautopilot:\u001b[0m error in session-start hook, see $LOG_FILE\"}"; exit 0' ERR
 
 # shellcheck source=../scripts/find-jq.sh
 source "${CLAUDE_PLUGIN_ROOT}/scripts/find-jq.sh" || {
-  echo "{\"systemMessage\": \"\u001b[1;32mautopilot:\u001b[0m bootstrapping jq, auto-deny will activate once ready\"}"
+  echo "{\"systemMessage\": \"\u001b[1;32mautopilot:\u001b[0m bootstrapping jq, autopilot hooks will activate once ready\"}"
   exit 0
 }
 
@@ -50,7 +51,7 @@ else
   read -r autonomous sandbox <<< "$state_pair"
 fi
 
-# --- Build status message (9 states: autonomous × sandbox, each true/false/absent) ---
+# --- Build status message ---
 setup="${M}/autopilot:setup${R}"
 if [ "$autonomous" = "absent" ] && [ "$sandbox" = "absent" ]; then
   status_msg="${B}autopilot:${R} run ${setup} to configure"
@@ -68,15 +69,14 @@ fi
 
 # --- Deno sandbox setup (only when enabled) ---
 additional_context=""
+DATA_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}"
 if [ "$sandbox" = "true" ]; then
   # Environment setup
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     echo "export DENO_SANDBOX_SESSION_ID=\"$session_id\"" >> "$CLAUDE_ENV_FILE"
     echo "export DENO_SANDBOX_PROJECT_DIR=\"$CLAUDE_PROJECT_DIR\"" >> "$CLAUDE_ENV_FILE"
-    # Export the plugin data dir so scripts (deno-sandbox, deno-sandbox-grant) use the
-    # same path as hooks. Without this, scripts fall back to ~/.cache/autopilot while
-    # hooks use the Claude Code-provided CLAUDE_PLUGIN_DATA, causing path mismatches.
-    echo "export AUTOPILOT_DATA_DIR=\"${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}\"" >> "$CLAUDE_ENV_FILE"
+    # Scripts run from the Bash tool, where CLAUDE_PLUGIN_DATA is not set; pin the hooks' data dir for them.
+    echo "export AUTOPILOT_DATA_DIR=\"$DATA_DIR\"" >> "$CLAUDE_ENV_FILE"
     echo "export PATH=\"\$HOME/.deno/bin:${CLAUDE_PLUGIN_ROOT}/scripts:\$PATH\"" >> "$CLAUDE_ENV_FILE"
   fi
 
@@ -104,12 +104,11 @@ if [ "$sandbox" = "true" ]; then
 }
 TSCONFIG
   fi
-  if [ ! -f "$SANDBOX_DIR/deno.d.ts" ]; then
-    _tmp="$SANDBOX_DIR/deno.d.ts.tmp"
-    if command -v deno >/dev/null 2>&1; then
-      deno types > "$_tmp" 2>/dev/null && mv "$_tmp" "$SANDBOX_DIR/deno.d.ts" || rm -f "$_tmp"
-    elif [ -x "$HOME/.deno/bin/deno" ]; then
-      "$HOME/.deno/bin/deno" types > "$_tmp" 2>/dev/null && mv "$_tmp" "$SANDBOX_DIR/deno.d.ts" || rm -f "$_tmp"
+  # shellcheck source=../scripts/find-deno.sh
+  if source "${CLAUDE_PLUGIN_ROOT}/scripts/find-deno.sh"; then
+    if [ ! -f "$SANDBOX_DIR/deno.d.ts" ]; then
+      _tmp="$SANDBOX_DIR/deno.d.ts.tmp"
+      "$DENO" types > "$_tmp" 2>/dev/null && mv "$_tmp" "$SANDBOX_DIR/deno.d.ts" || rm -f "$_tmp"
     fi
   fi
   if [ ! -f "$SANDBOX_DIR/globals.d.ts" ]; then
@@ -119,23 +118,13 @@ declare module "jsr:*";
 DTS
   fi
 
-  # Emit additionalContext if deno is available
-  if command -v deno >/dev/null 2>&1 || [ -x "$HOME/.deno/bin/deno" ]; then
-    sandbox_script="$SANDBOX_DIR/$session_id.ts"
-    # shellcheck source=../scripts/sandbox-instructions.sh
-    additional_context=$(source "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-instructions.sh" "$sandbox_script" "$SANDBOX_DIR")
+  # Emit additionalContext if deno is available. The grants file matters on
+  # source=compact: the model has lost its earlier grants from context.
+  if [ -n "${DENO:-}" ]; then
+    additional_context=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-instructions.sh" "$SANDBOX_DIR/$session_id.ts" "$SANDBOX_DIR" "$DATA_DIR/sessions/$session_id")
   fi
 fi
 
-# Emit output
-if [ -n "$additional_context" ]; then
-  "$JQ" -n --arg msg "$status_msg" --arg ctx "$additional_context" '{
-    systemMessage: $msg,
-    hookSpecificOutput: {
-      hookEventName: "SessionStart",
-      additionalContext: $ctx
-    }
-  }'
-else
-  "$JQ" -n --arg msg "$status_msg" '{ systemMessage: $msg }'
-fi
+"$JQ" -n --arg msg "$status_msg" --arg ctx "$additional_context" '
+  {systemMessage: $msg}
+  + (if $ctx == "" then {} else {hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}} end)'

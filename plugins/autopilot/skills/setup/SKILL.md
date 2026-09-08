@@ -23,7 +23,7 @@ Settings files are hot-reloaded (no restart needed) and `settings.local.json` is
 
 If existing permissions are already configured (settings files exist with non-trivial content), treat this as a re-run. For each step, check whether the existing configuration already matches one of the options (or a close variation). If it does, skip the step silently. Only ask about things that don't seem set up yet.
 
-This means a user running `:setup` for the second time will only see questions for newly added features or unconfigured areas, not a repeat of everything they already decided.
+This means a user running `/autopilot:setup` for the second time will only see questions for newly added features or unconfigured areas, not a repeat of everything they already decided.
 
 Exception: if the user explicitly asks to reconfigure from scratch or change previous choices, ask all steps regardless of existing configuration.
 
@@ -44,7 +44,7 @@ Detect the project type and audit existing permissions automatically before aski
 
 ### What to Detect
 
-**Package manager:** Check for lock files (bun.lockb, pnpm-lock.yaml, yarn.lock, package-lock.json, uv.lock, Cargo.lock). If ambiguous, ask the user.
+**Package manager:** Check for lock files (bun.lock, bun.lockb, pnpm-lock.yaml, yarn.lock, package-lock.json, uv.lock, Cargo.lock). If ambiguous, ask the user.
 
 **Scripts:** Look for project scripts that might be needed mid-session (linting, testing, building, data processing). Extract from `package.json` scripts, `pyproject.toml` scripts, or similar config. Also look for standalone scripts in the project (e.g., `scripts/train.py`, `tools/analyze.sh`, `bin/setup`). These will be allowed individually as "project scripts". For monorepos, scripts may only exist in specific workspaces - identify the correct invocation pattern (e.g., `bun run --filter <workspace> <script>`).
 
@@ -314,7 +314,7 @@ Use AskUserQuestion to ask both questions in a single batch.
 
 - **WebFetch + WebSearch (Recommended)** - All domains via built-in tools. Built-in prompt injection protections.
 
-- **Specific domains only** - Only documentation sites relevant to the project. For when prompt injection protection must be absolute.
+- **Specific domains only** - Only documentation sites relevant to the project (WebSearch stays on).
 
 ### Project Scripts Question
 
@@ -662,7 +662,7 @@ Output the following explanation, then ask the question:
 
 **Explanation:**
 
-The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the project directory — network, writes, env, and subprocess execution are all blocked.
+The deno sandbox gives Claude a secure way to run JavaScript/TypeScript code. By default, scripts can only read files in the current directory — network, writes, env, and subprocess execution are all blocked.
 
 When Claude needs additional capabilities, it will run `deno-sandbox-grant` to request a scoped permission. Each grant requires your approval and looks like this:
 

@@ -22,6 +22,16 @@ HELP
   exit 0
 fi
 
+# Same checks and wording as deno-sandbox, before any work is done.
+if [ -z "${DENO_SANDBOX_SESSION_ID:-}" ] || [ -z "${AUTOPILOT_DATA_DIR:-}" ]; then
+  echo "error: sandbox is not configured for this session." >&2
+  exit 1
+fi
+if ! command -v deno >/dev/null 2>&1; then
+  echo "error: deno not found. It will be installed automatically on next session start." >&2
+  exit 1
+fi
+
 # Validate all flags before writing any (no partial state on error)
 validated=()
 for flag in "$@"; do
@@ -42,6 +52,14 @@ for flag in "$@"; do
         exit 1
       fi
       flag="--allow-$kind=$resolved"
+      # deno-sandbox puts these under --deny-write, which beats any allow, so the grant would be a no-op.
+      if [ "$kind" = "write" ]; then
+        case "$resolved" in
+          */.claude|*/.claude/*|*/.git|*/.git/*)
+            echo "error: '$value' is under .claude/ or .git/, which deno-sandbox never allows writing to." >&2
+            exit 1 ;;
+        esac
+      fi
     fi
 
     validated+=("$flag")
@@ -60,11 +78,7 @@ deno_err=$(echo '' | deno run --no-config "${validated[@]}" - 2>&1) || {
 }
 
 # Write validated flags to state file
-if [ -z "${DENO_SANDBOX_SESSION_ID:-}" ]; then
-  echo "error: sandbox is not available for this session." >&2
-  exit 1
-fi
-STATE_DIR="${AUTOPILOT_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.cache/autopilot}}/sessions"
+STATE_DIR="$AUTOPILOT_DATA_DIR/sessions"
 STATE_FILE="$STATE_DIR/$DENO_SANDBOX_SESSION_ID"
 mkdir -p "$STATE_DIR"
 
@@ -75,12 +89,4 @@ for flag in "${validated[@]}"; do
 done
 
 echo "Granted for this session:"
-for g in "${validated[@]}"; do
-  echo "  $g"
-  if [[ "$g" == --allow-write=* ]]; then
-    case "$g" in
-      */.claude|*/.claude/*|*/.git|*/.git/*)
-        echo "  Warning: .claude/ and .git/ are protected by --deny-write at runtime and will not be writable." ;;
-    esac
-  fi
-done
+printf '  %s\n' "${validated[@]}"

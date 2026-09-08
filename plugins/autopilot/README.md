@@ -1,10 +1,8 @@
 # autopilot
 
+> **Deprecated — superseded by Claude Code's built-in auto mode.** It still works, but it is no longer recommended by `/hive:align`. The deno sandbox has no built-in replacement and is the reason to keep it.
+
 Configure Claude Code permissions and autonomous operation so Claude can work without constant approval prompts.
-
-## Motivation
-
-Out of the box, Claude Code prompts for permission on nearly every shell command. This is safe but disruptive — especially for longer tasks or when you step away. The alternative (`--dangerously-skip-permissions`) removes all guardrails.
 
 ## What This Plugin Does
 
