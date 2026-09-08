@@ -78,7 +78,7 @@ Every routed ID shares that one number. Kimi K3 and GLM-5.2 have 1M-token
 windows, so a 258400 declaration clips them to a quarter of their capacity.
 
 **Raising the global value is not an option**, so don't offer it: the shipped
-GPT agents and the `choosing-models` skill name the `gpt-5.6-*` IDs, which
+GPT agents and the `choosing-models` skill name the `gpt-*` IDs, which
 would inherit the larger number and start sending the Codex backend
 requests past its limit.
 

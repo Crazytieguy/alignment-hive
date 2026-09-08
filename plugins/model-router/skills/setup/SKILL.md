@@ -61,8 +61,8 @@ here works until the binary resolves.
    in the prompt. Verify with `$ROUTER doctor` afterwards.
 4. **Service**: `$ROUTER service install` (installs and starts the
    launchd/systemd user service), then `$ROUTER doctor` until healthy.
-   The defaults need no config file — all three GPT routes (sol, terra,
-   luna), port 8787. Only if 8787 is taken, write `port = <other>` to
+   The defaults need no config file — all four GPT routes (astra, sol,
+   terra, luna), port 8787. Only if 8787 is taken, write `port = <other>` to
    `~/.config/model-router/config.toml` (`$ROUTER config-template` prints
    the annotated template) and `$ROUTER service restart`.
 5. **Wire Claude Code (ask first)**: find where the plugin is installed by
@@ -79,7 +79,7 @@ here works until the binary resolves.
    ```
    `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude models' native 1M
    context windows. Claude Code grants those only when the base URL is
-   `api.anthropic.com`, so behind the gateway Fable 5, Opus 5 and Sonnet 5
+   `api.anthropic.com`, so behind the gateway Fable 5.1, Opus 5 and Sonnet 5
    silently fall back to 200K wherever the model string carries no `[1m]`
    suffix — including agent definitions the user did not write. The flag is
    undocumented (Claude Code names it in its own copy, for proxies that front
@@ -92,14 +92,14 @@ here works until the binary resolves.
    `ENABLE_TOOL_SEARCH` matters: tool search silently disables itself behind
    a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
    context window — it only applies to model IDs that don't start with
-   `claude-` (the `gpt-5.6-*` routes), so Claude models keep their
+   `claude-` (the `gpt-*` routes), so Claude models keep their
    built-in windows; 258400 is the Codex backend's effective input limit.
    On an existing install with configured open-weights routes, run
    `$ROUTER doctor` after raising the value — it fails with the fix
    spelled out if a route's window no longer fits under the new
    declaration.
    Then list the routes in the `/model` picker: one row per routing ID that
-   `$ROUTER doctor` lists under `routed-models` (the three GPT routes on a
+   `$ROUTER doctor` lists under `routed-models` (the four GPT routes on a
    default install, plus any Grok or open-weights routes already
    configured). Claude Code reads `modelPicker` only from
    `~/.claude/settings.json` (project and local files are ignored) and only
@@ -109,6 +109,7 @@ here works until the binary resolves.
    ```json
    "modelPicker": {
      "options": [
+       { "model": "gpt-6-astra", "label": "GPT-6 Astra" },
        { "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol" },
        { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra" },
        { "model": "gpt-5.6-luna", "label": "GPT-5.6 Luna" }
@@ -126,8 +127,8 @@ here works until the binary resolves.
    Claude Code below 2.1.242 (`claude --version`), where the key is
    unmeasured.
    ```json
-   "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-sol",
-   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol"
+   "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-6-astra",
+   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-6 Astra"
    ```
 6. Tell the user to restart Claude Code sessions (settings are read at
    startup), and that the GPT agents and `choosing-models` skill are now
@@ -140,7 +141,7 @@ here works until the binary resolves.
    routing test is instead required, and the window check is meaningless —
    against the direct Anthropic API it prints 1000000 regardless of the
    flag.)
-   Routing: `claude -p 'reply with ok' --model gpt-5.6-sol`.
+   Routing: `claude -p 'reply with ok' --model gpt-6-astra`.
    Picker rows: `/model` in a fresh interactive session lists them after
    the Claude models.
    1M windows, to confirm they survive the current Claude Code version:

@@ -12,7 +12,7 @@ Anthropic-format gateway on your machine:
   `api.anthropic.com`, with your existing claude.ai OAuth login and
   subscription billing untouched.
 - Requests for an explicit allowlist of GPT routing IDs (e.g.
-  `gpt-5.6-sol`) are stripped of all Anthropic credentials and
+  `gpt-6-astra`) are stripped of all Anthropic credentials and
   forwarded to a supervised local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
   instance, which translates them to the Codex protocol under your separate
   Codex subscription OAuth. No API keys required on either side.
@@ -22,10 +22,10 @@ present themselves as Claude.
 
 ## What you get
 
-- GPT subagents — `gpt-5.6-sol(medium)`, `gpt-5.6-sol(high)`,
-  `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` — usable from any project,
-  plus dynamic per-invocation model + effort choice in Workflow
-  orchestration.
+- GPT subagents — `gpt-6-astra(low)`, `gpt-6-astra(medium)`,
+  `gpt-6-astra(high)`, `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` —
+  usable from any project, plus dynamic per-invocation model + effort
+  choice in Workflow orchestration.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
 - Optional Grok family — grok-4.6 under your own xAI subscription OAuth

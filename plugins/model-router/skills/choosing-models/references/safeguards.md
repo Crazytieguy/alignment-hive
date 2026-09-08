@@ -4,18 +4,23 @@ Bio/cyber deployment safeguards differ sharply per model and can be a
 deciding factor (e.g. legitimate bio/cyber research that frontier-lab
 classifiers refuse). Anthropic tiers per model under
 [RSP v3.4, eff. 2026-07-08](https://www.anthropic.com/rsp); OpenAI under the
-[Preparedness Framework v2](https://deploymentsafety.openai.com/gpt-5-6);
+[Preparedness Framework v2](https://deploymentsafety.openai.com/gpt-6-astra);
 xAI publishes a framework without quantitative thresholds; Kimi and GLM
 publish no vendor safety framework.
 
-- **Fable 5 / Mythos 5** — ASL-3 plus a Mythos-class classifier layer that
-  reroutes cyber, bio/chem, and distillation queries (<5% of sessions,
-  user notified), tuned deliberately over-cautious. Since Opus 5's launch,
-  blocked biology/chem requests route to Opus 5; cyber and other flagged
-  categories still route to Opus 4.8.
-  [Anthropic, 2026-06-09](https://www.anthropic.com/news/claude-fable-5-mythos-5);
-  [redeploy update, 2026-07-01](https://www.anthropic.com/news/redeploying-fable-5);
-  [Opus 5 announcement, 2026-07-24](https://www.anthropic.com/news/claude-opus-5).
+- **Fable 5.1 / Mythos 5.1** — the same model at two safeguard levels:
+  Fable 5.1 is generally available, Mythos 5.1 only through trusted-access
+  programs for cyber and life-sciences work. Fable 5.1 runs a classifier
+  layer that reroutes cyber, bio/chem, and distillation queries (the user
+  is notified): blocked cyber tasks complete on Opus 4.8, blocked biology
+  tasks on Opus 5. The classifiers are tuned to stay out of ordinary work,
+  security-adjacent coding included; heavy safeguards remain on biology.
+  Zero data retention is available to eligible customers.
+  [Anthropic, 2026-09-01](https://www.anthropic.com/claude-fable-and-mythos-5-1);
+  [system card, 2026-09-01](https://www-cdn.anthropic.com/0339e6a7c5c7b87f5c07798616dc32c215d14235/Claude%20Fable%205.1%20&%20Claude%20Mythos%205.1%20System%20Card.pdf).
+  Fable 5 (still routable) has the earlier, deliberately over-cautious
+  classifiers.
+  [Anthropic, 2026-06-09](https://www.anthropic.com/news/claude-fable-5-mythos-5).
 - **Opus 5** — defensive security work allowed (source-code vulnerability
   scanning, triage, secure coding); classifiers block exploit generation,
   binary vulnerability scanning, and penetration testing — ~85% less
@@ -31,6 +36,16 @@ publish no vendor safety framework.
   [Sonnet card, 2026-06-30](https://www.anthropic.com/claude-sonnet-5-system-card).
 - **Haiku 4.5** — ASL-2; lightest safeguards of the family.
   [Card, 2025-10](https://assets.anthropic.com/m/99128ddd009bdcb/original/Claude-Haiku-4-5-System-Card.pdf).
+- **GPT-6 Astra (via Codex)** — the first model at "Critical" cyber
+  capability under the Preparedness Framework, and the strictest GPT
+  deployment: the released model refuses proof-of-concept exploit
+  writing (secure code review and patching are allowed), refuses cyber
+  jailbreak prompts far more often than sol (91.5% vs 59%), and
+  tool-using traffic is monitored for misalignment with account-level
+  enforcement. Elevated cyber access runs through the Daybreak
+  trusted-access program for verified defenders.
+  [System card, 2026-09-03](https://deploymentsafety.openai.com/gpt-6-astra);
+  [Path to Astra](https://openai.com/index/path-to-astra/).
 - **GPT-5.6 (sol/terra/luna, via Codex)** — "High" (not Critical) in both
   bio/chem and cyber: real-time monitors plus account-level enforcement.
   [System card, Jul 2026](https://deploymentsafety.openai.com/gpt-5-6).
@@ -59,11 +74,17 @@ publish no vendor safety framework.
   no host-side classifier stack — only trained-in behavior applies.
 
 User reports (practitioner anecdote, not official): Fable 5's classifiers
-run over-strict for legitimate work — benign DevOps sessions silently
+ran over-strict for legitimate work — benign DevOps sessions silently
 downgraded to Opus, security-work refusals
 ([claude-code#74734](https://github.com/anthropics/claude-code/issues/74734);
 [The Register, 2026-06-10](https://www.theregister.com/ai-and-ml/2026/06/10/anthropic-claude-fable-5-refuses-innocuous-prompts/5253754)).
+First-week reports on Fable 5.1: the classifiers stay out of ordinary
+work unless you are pushing it, occasional downgrades to Opus 4.8 still
+happen, and they are less strict than Astra's
+([Zvi's roundup, 2026-09-05](https://thezvi.substack.com/p/claude-mythos-51-and-fable-51-capabilities)).
 GPT-5.6/Codex is reported less strict in practice, though not refusal-free:
 in [one comparison](https://www.techtimes.com/articles/319808/20260707/gpt-56-sol-review-faster-coding-half-fable-5-cost-benchmark-problem.htm)
 both Codex and Fable refused exploit-adjacent security fixes that Kimi K3
-completed.
+completed. Astra refuses more of this than sol by design; the gpt-5.6-sol
+route stays served for such work (no shipped agent — see the setup skill's
+`custom-agents.md`, or Workflow's `model: 'gpt-5.6-sol'`).
