@@ -10,16 +10,15 @@ Usage:
     uv run search_google_scholar.py --queries queries.json --output results.json [--limit 50]
 """
 
-import argparse
 import asyncio
-import json
 import random
 import re
 import sys
-from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
+
+from search_common import run_cli
 
 GOOGLE_SCHOLAR_URL = "https://scholar.google.com/scholar"
 DEFAULT_LIMIT_PER_QUERY = 50
@@ -30,6 +29,22 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
 ]
+HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+class Blocked(Exception):
+    """Google Scholar answered with a CAPTCHA or 503; later queries would be blocked too.
+    Carries the results already collected for the current query."""
+
+    def __init__(self, message: str, results: list[dict]):
+        super().__init__(message)
+        self.results = results
 
 
 def parse_citation_count(citation_text: str) -> int | None:
@@ -41,9 +56,9 @@ def parse_citation_count(citation_text: str) -> int | None:
 
 
 async def search_query(
-    client: httpx.AsyncClient, query: str, limit: int = DEFAULT_LIMIT_PER_QUERY
-) -> list[dict]:
-    """Search Google Scholar for a single query."""
+    client: httpx.AsyncClient, query: str, limit: int
+) -> tuple[list[dict], bool]:
+    """Search Google Scholar for a single query. Returns (results, ok); raises Blocked."""
     results = []
     start = 0
 
@@ -53,20 +68,10 @@ async def search_query(
 
         for attempt in range(3):
             try:
-                headers = {
-                    "User-Agent": random.choice(USER_AGENTS),
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate",
-                    "DNT": "1",
-                    "Connection": "keep-alive",
-                    "Upgrade-Insecure-Requests": "1",
-                }
-
                 resp = await client.get(
                     GOOGLE_SCHOLAR_URL,
                     params={"q": query, "start": start, "hl": "en"},
-                    headers=headers,
+                    headers={"User-Agent": random.choice(USER_AGENTS), **HEADERS},
                     timeout=30.0,
                     follow_redirects=True,
                 )
@@ -81,29 +86,20 @@ async def search_query(
                     continue
 
                 if resp.status_code == 503:
-                    print(
-                        "  Google Scholar returned 503 (possibly CAPTCHA). Stopping.",
-                        file=sys.stderr,
-                    )
-                    return results
+                    raise Blocked("Google Scholar returned 503 (possibly CAPTCHA)", results)
 
                 resp.raise_for_status()
 
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Check for CAPTCHA
                 if soup.find("form", {"id": "gs_captcha_f"}):
-                    print(
-                        "  CAPTCHA detected. Google Scholar scraping blocked.",
-                        file=sys.stderr,
-                    )
-                    return results
+                    raise Blocked("CAPTCHA detected", results)
 
                 articles = soup.select(".gs_ri")
 
                 if not articles:
                     # No more results
-                    return results
+                    return results, True
 
                 for article in articles:
                     title_elem = article.select_one(".gs_rt a")
@@ -150,33 +146,36 @@ async def search_query(
                 start += 10
                 break
 
-            except httpx.HTTPStatusError as e:
-                if attempt == 2:
-                    print(
-                        f"  HTTP error after 3 attempts: {e}",
-                        file=sys.stderr,
-                    )
-                    return results
-                await asyncio.sleep(10 * (attempt + 1))
+            except Blocked:
+                raise
             except Exception as e:
                 if attempt == 2:
-                    print(f"  Error: {e}", file=sys.stderr)
-                    return results
-                await asyncio.sleep(5 * (attempt + 1))
+                    print(f"  Error after 3 attempts: {e}", file=sys.stderr)
+                    return results, False
+                await asyncio.sleep(10 * (attempt + 1))
+        else:
+            # Three 429s in a row: give up on this query instead of retrying the same page forever.
+            print("  Giving up after 3 rate-limited attempts", file=sys.stderr)
+            return results, False
 
-    return results
+    return results, True
 
 
-async def search_all_queries(
-    queries: list[str], limit_per_query: int = DEFAULT_LIMIT_PER_QUERY
-) -> list[dict]:
-    """Search all queries and combine results."""
+async def search_all_queries_async(queries: list[str], limit_per_query: int) -> tuple[list[dict], int]:
     all_results = []
+    failed = 0
 
     async with httpx.AsyncClient() as client:
         for i, query in enumerate(queries):
             print(f"Searching ({i+1}/{len(queries)}): {query}", file=sys.stderr)
-            results = await search_query(client, query, limit_per_query)
+            try:
+                results, ok = await search_query(client, query, limit_per_query)
+            except Blocked as e:
+                print(f"  {e}. Stopping; {len(queries) - i} queries not searched.", file=sys.stderr)
+                all_results.extend(e.results)
+                failed += len(queries) - i
+                break
+            failed += not ok
             print(f"  Found {len(results)} results", file=sys.stderr)
             all_results.extend(results)
 
@@ -186,55 +185,18 @@ async def search_all_queries(
                 print(f"  Waiting {delay:.1f}s before next query...", file=sys.stderr)
                 await asyncio.sleep(delay)
 
-    return all_results
+    return all_results, failed
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Search Google Scholar for papers (web scraping)"
-    )
-    parser.add_argument(
-        "--queries",
-        type=Path,
-        required=True,
-        help="JSON file containing list of search queries",
-    )
-    parser.add_argument(
-        "--output", type=Path, required=True, help="Output JSON file for results"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=DEFAULT_LIMIT_PER_QUERY,
-        help="Max results per query",
-    )
-    args = parser.parse_args()
-
-    # Load queries
-    with open(args.queries) as f:
-        queries = json.load(f)
-
-    if not isinstance(queries, list):
-        print("Error: queries file must contain a JSON array of strings", file=sys.stderr)
-        sys.exit(1)
-
+def search_all_queries(queries: list[str], limit_per_query: int) -> tuple[list[dict], int]:
     print(
         "WARNING: Google Scholar scraping is fragile and may be blocked.",
         file=sys.stderr,
     )
     print("This source is 'best effort' - results may be incomplete.", file=sys.stderr)
     print("", file=sys.stderr)
-
-    # Run search
-    results = asyncio.run(search_all_queries(queries, args.limit))
-
-    # Save results
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w") as f:
-        json.dump(results, f, indent=2)
-
-    print(f"Saved {len(results)} results to {args.output}", file=sys.stderr)
+    return asyncio.run(search_all_queries_async(queries, limit_per_query))
 
 
 if __name__ == "__main__":
-    main()
+    run_cli("Search Google Scholar for papers (web scraping)", DEFAULT_LIMIT_PER_QUERY, search_all_queries)

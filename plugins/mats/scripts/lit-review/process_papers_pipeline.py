@@ -8,19 +8,12 @@ Pipeline: download PDFs, convert to markdown, and process LW/AF posts incrementa
 As each PDF downloads, it's immediately queued for markdown conversion.
 LW/AF posts with HTML content are converted in parallel.
 Completed markdown file paths are printed to stdout as they finish.
-
-Usage:
-    uv run process_papers_pipeline.py \
-        --input deduplicated.json \
-        --output-dir papers/ \
-        [--max-downloads 5] [--max-converters 4]
 """
 
 import argparse
 import asyncio
 import json
 import os
-import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -30,48 +23,20 @@ import httpx
 import pymupdf4llm
 from markdownify import markdownify as md
 
+from paper_ids import get_paper_id, legacy_forum_stem
+
 MAX_CONCURRENT_DOWNLOADS = 5
 MAX_CONVERTER_WORKERS = 4
 MAX_RETRIES = 5
 TIMEOUT_SECONDS = 120
-
-
-# --- Filename/ID helpers ---
-
-
-def sanitize_filename(name: str) -> str:
-    name = re.sub(r'[<>:"/\\|?*]', "", name)
-    name = re.sub(r"\s+", "_", name)
-    return name[:100]
-
-
-def get_paper_id(paper: dict) -> str:
-    if paper.get("doi"):
-        return sanitize_filename(paper["doi"].replace("/", "_"))
-    if paper.get("arxiv_id"):
-        arxiv_id = paper["arxiv_id"]
-        if "arxiv.org" in arxiv_id:
-            arxiv_id = arxiv_id.split("/")[-1]
-        return sanitize_filename(f"arxiv_{arxiv_id}")
-    if paper.get("post_id"):
-        return sanitize_filename(f"lw_{paper['post_id']}")
-    if paper.get("id"):
-        return sanitize_filename(paper["id"])
-    if paper.get("paperId"):
-        return sanitize_filename(f"s2_{paper['paperId']}")
-    title = paper.get("title", "unknown")
-    return sanitize_filename(title[:50])
+# fetch_lesswrong.py's detect_source values; these records are converted from html_content
+FORUM_SOURCES = ("lesswrong", "alignment_forum")
 
 
 def get_pdf_url(paper: dict) -> str | None:
     if paper.get("pdf_url"):
         return paper["pdf_url"]
-    if paper.get("openAccessPdf"):
-        oa = paper["openAccessPdf"]
-        if isinstance(oa, dict):
-            return oa.get("url")
-        return oa
-    return None
+    return (paper.get("openAccessPdf") or {}).get("url")
 
 
 # --- Atomic writes ---
@@ -103,18 +68,11 @@ def convert_pdf_to_markdown(pdf_path: Path, md_output_path: Path) -> bool:
 # --- LW/AF HTML conversion ---
 
 
-def slugify(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[-\s]+", "-", text).strip("-")
-    return text[:80]
-
-
 def format_comment(comment: dict, indent_level: int = 0) -> str:
     prefix = "#" * (3 + indent_level)
     author = comment.get("author", "Anonymous")
     score = comment.get("score", "?")
-    content = comment.get("html_content") or comment.get("content", "")
+    content = comment.get("html_content") or ""
     if content.startswith("<"):
         content = md(content, strip=["script", "style"])
     lines = [f"{prefix} {author} (score: {score})", "", content, ""]
@@ -125,8 +83,8 @@ def format_comment(comment: dict, indent_level: int = 0) -> str:
 
 def convert_lw_post(post: dict) -> str:
     title = post.get("title", "Untitled")
-    author = post.get("author", "Unknown")
-    date = post.get("date", post.get("published_date", "Unknown"))
+    author = post.get("author") or "Unknown"
+    date = post.get("posted_at") or "Unknown"
     score = post.get("score", "?")
     url = post.get("url", "")
     html_content = post.get("html_content", "")
@@ -157,31 +115,27 @@ def convert_lw_post(post: dict) -> str:
 
 async def download_pdf(
     client: httpx.AsyncClient, url: str, output_path: Path, paper_id: str
-) -> bool:
+) -> str | None:
+    """Download to output_path; returns None on success, else a one-line reason."""
     for attempt in range(MAX_RETRIES):
         try:
             resp = await client.get(url, follow_redirects=True, timeout=TIMEOUT_SECONDS)
             resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "")
-            if "pdf" not in content_type.lower() and not url.endswith(".pdf"):
-                if "html" in content_type.lower():
-                    return False
+            # Check the bytes, not the headers: publisher landing pages are served for
+            # .pdf URLs, and a saved HTML file would only fail later in pymupdf.
+            if not resp.content.startswith(b"%PDF-"):
+                return f"not a PDF ({resp.headers.get('content-type', 'unknown type')})"
             tmp_path = output_path.with_name(f"{output_path.name}.{os.getpid()}.part")
             async with aiofiles.open(tmp_path, "wb") as f:
                 await f.write(resp.content)
             tmp_path.replace(output_path)
-            return True
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (403, 404, 451):
-                return False
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(2**attempt)
+            return None
         except Exception as e:
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(2**attempt)
-            else:
-                print(f"    Failed to download {paper_id}: {e}", file=sys.stderr)
-    return False
+            permanent = isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (403, 404, 451)
+            if permanent or attempt == MAX_RETRIES - 1:
+                return str(e).splitlines()[0]
+            await asyncio.sleep(2**attempt)
+    return "unreachable"
 
 
 async def run_pipeline(
@@ -203,19 +157,20 @@ async def run_pipeline(
         "convert_failed": 0,
         "convert_skipped": 0,
         "ready_files": [],
+        "failed": [],
     }
+
+    def record_failure(paper: dict, paper_id: str, stage: str, reason: str) -> None:
+        print(f"  {stage} failed for {paper_id}: {reason}", file=sys.stderr)
+        stats["failed"].append(
+            {"id": paper_id, "title": paper.get("title"), "stage": stage, "reason": reason}
+        )
 
     # Separate LW/AF posts (HTML conversion) from PDF papers
     lw_posts = []
     pdf_papers = []
     for paper in papers:
-        source = paper.get("source", "").lower()
-        if source in (
-            "lesswrong",
-            "alignment_forum",
-            "alignmentforum",
-            "ea_forum",
-        ) and paper.get("html_content"):
+        if paper.get("source", "").lower() in FORUM_SOURCES and paper.get("html_content"):
             lw_posts.append(paper)
         else:
             pdf_papers.append(paper)
@@ -228,6 +183,8 @@ async def run_pipeline(
     loop = asyncio.get_event_loop()
 
     download_semaphore = asyncio.Semaphore(max_downloads)
+    http_client = httpx.AsyncClient()
+    pdf_by_path: dict[Path, dict] = {}
 
     async def download_and_enqueue(paper: dict) -> None:
         paper_id = get_paper_id(paper)
@@ -239,6 +196,7 @@ async def run_pipeline(
 
         pdf_path = output_dir / f"{paper_id}.pdf"
         md_path = output_dir / f"{paper_id}.md"
+        pdf_by_path[pdf_path] = paper
 
         # Skip if markdown already exists
         if md_path.exists():
@@ -247,21 +205,23 @@ async def run_pipeline(
             print(str(md_path), flush=True)
             return
 
-        if pdf_path.exists():
+        # An existing file that is not a PDF (a landing page saved by an older run)
+        # is re-downloaded rather than re-failing conversion forever.
+        if pdf_path.exists() and pdf_path.read_bytes()[:5] == b"%PDF-":
             stats["download_skipped_exists"] += 1
             await convert_queue.put(pdf_path)
             return
 
         async with download_semaphore:
-            async with httpx.AsyncClient() as client:
-                success = await download_pdf(client, pdf_url, pdf_path, paper_id)
+            error = await download_pdf(http_client, pdf_url, pdf_path, paper_id)
 
-        if success:
+        if error is None:
             stats["downloaded"] += 1
             print(f"  Downloaded: {paper_id}", file=sys.stderr)
             await convert_queue.put(pdf_path)
         else:
             stats["download_failed"] += 1
+            record_failure(paper, paper_id, "download", error)
 
     async def converter_worker() -> None:
         """Pull PDFs from the queue and convert to markdown.
@@ -297,14 +257,18 @@ async def run_pipeline(
                 )
             else:
                 stats["convert_failed"] += 1
+                record_failure(pdf_by_path.get(pdf_path, {}), pdf_path.stem, "convert", "see error above")
 
             convert_queue.task_done()
 
     def process_lw_posts() -> None:
         for post in lw_posts:
-            title = post.get("title", "untitled")
-            paper_id = post.get("id", slugify(title))
+            title = post.get("title") or "untitled"
+            paper_id = get_paper_id(post)
             md_path = output_dir / f"{paper_id}.md"
+            legacy_path = output_dir / f"{legacy_forum_stem(post)}.md"
+            if legacy_path.exists() and not md_path.exists():
+                md_path = legacy_path  # converted by an older run under the title slug
 
             if md_path.exists():
                 stats["convert_skipped"] += 1
@@ -348,6 +312,7 @@ async def run_pipeline(
     # Wait for LW/AF processing
     await lw_future
 
+    await http_client.aclose()
     executor.shutdown(wait=False)
     return stats
 
@@ -372,13 +337,13 @@ def main():
         "--max-downloads",
         type=int,
         default=MAX_CONCURRENT_DOWNLOADS,
-        help="Max concurrent downloads (default: 5)",
+        help="Max concurrent downloads (default: %(default)s)",
     )
     parser.add_argument(
         "--max-converters",
         type=int,
         default=MAX_CONVERTER_WORKERS,
-        help="Max converter threads (default: 4)",
+        help="Max converter threads (default: %(default)s)",
     )
     args = parser.parse_args()
 
@@ -408,6 +373,8 @@ def main():
     print(f"  Conversion failed: {stats['convert_failed']}", file=sys.stderr)
     print(f"  Already had markdown: {stats['convert_skipped']}", file=sys.stderr)
     print(f"  Total ready files: {len(stats['ready_files'])}", file=sys.stderr)
+    for failure in stats["failed"]:
+        print(f"  Failed ({failure['stage']}): {failure['id']} - {failure['reason']}", file=sys.stderr)
 
     # Save stats
     stats_path = args.output_dir / "pipeline_stats.json"

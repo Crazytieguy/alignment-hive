@@ -35,3 +35,4 @@ target/
 
 # Local working notes
 notes/
+__pycache__/

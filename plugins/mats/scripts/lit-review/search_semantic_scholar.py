@@ -9,13 +9,12 @@ Usage:
     uv run search_semantic_scholar.py --queries queries.json --output results.json [--limit 100]
 """
 
-import argparse
 import asyncio
-import json
 import sys
-from pathlib import Path
 
 import httpx
+
+from search_common import run_cli
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 FIELDS = "paperId,externalIds,title,abstract,authors,year,citationCount,openAccessPdf,url"
@@ -23,9 +22,9 @@ DEFAULT_LIMIT_PER_QUERY = 100
 
 
 async def search_query(
-    client: httpx.AsyncClient, query: str, limit: int = DEFAULT_LIMIT_PER_QUERY
-) -> list[dict]:
-    """Search Semantic Scholar for a single query with retry logic."""
+    client: httpx.AsyncClient, query: str, limit: int
+) -> tuple[list[dict], bool]:
+    """Search Semantic Scholar for a single query with retry logic. Returns (results, ok)."""
     results = []
     offset = 0
 
@@ -61,82 +60,43 @@ async def search_query(
                 results.extend(batch)
 
                 if not data.get("next"):
-                    return results
+                    return results, True
                 offset = data["next"]
                 break
-            except httpx.HTTPStatusError as e:
-                if attempt == 4:
-                    print(
-                        f"  Failed after 5 attempts: {e}",
-                        file=sys.stderr,
-                    )
-                    return results
-                await asyncio.sleep(2**attempt)
             except Exception as e:
                 if attempt == 4:
-                    print(f"  Error: {e}", file=sys.stderr)
-                    return results
+                    print(f"  Failed after 5 attempts: {e}", file=sys.stderr)
+                    return results, False
                 await asyncio.sleep(2**attempt)
+        else:
+            # Five 429s in a row: give up on this query instead of retrying the same offset forever.
+            print("  Giving up after 5 rate-limited attempts", file=sys.stderr)
+            return results, False
 
-    return results
+    return results, True
 
 
-async def search_all_queries(
-    queries: list[str], limit_per_query: int = DEFAULT_LIMIT_PER_QUERY
-) -> list[dict]:
-    """Search all queries and combine results."""
+async def search_all_queries_async(queries: list[str], limit_per_query: int) -> tuple[list[dict], int]:
     all_results = []
+    failed = 0
 
     async with httpx.AsyncClient() as client:
         for i, query in enumerate(queries):
             print(f"Searching ({i+1}/{len(queries)}): {query}", file=sys.stderr)
-            results = await search_query(client, query, limit_per_query)
+            results, ok = await search_query(client, query, limit_per_query)
+            failed += not ok
             print(f"  Found {len(results)} results", file=sys.stderr)
             all_results.extend(results)
             # Small delay between queries to be respectful
             if i < len(queries) - 1:
                 await asyncio.sleep(1)
 
-    return all_results
+    return all_results, failed
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Search Semantic Scholar for papers")
-    parser.add_argument(
-        "--queries",
-        type=Path,
-        required=True,
-        help="JSON file containing list of search queries",
-    )
-    parser.add_argument(
-        "--output", type=Path, required=True, help="Output JSON file for results"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=DEFAULT_LIMIT_PER_QUERY,
-        help="Max results per query",
-    )
-    args = parser.parse_args()
-
-    # Load queries
-    with open(args.queries) as f:
-        queries = json.load(f)
-
-    if not isinstance(queries, list):
-        print("Error: queries file must contain a JSON array of strings", file=sys.stderr)
-        sys.exit(1)
-
-    # Run search
-    results = asyncio.run(search_all_queries(queries, args.limit))
-
-    # Save results
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w") as f:
-        json.dump(results, f, indent=2)
-
-    print(f"Saved {len(results)} results to {args.output}", file=sys.stderr)
+def search_all_queries(queries: list[str], limit_per_query: int) -> tuple[list[dict], int]:
+    return asyncio.run(search_all_queries_async(queries, limit_per_query))
 
 
 if __name__ == "__main__":
-    main()
+    run_cli("Search Semantic Scholar for papers", DEFAULT_LIMIT_PER_QUERY, search_all_queries)

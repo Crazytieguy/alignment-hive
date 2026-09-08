@@ -35,11 +35,9 @@ query GetPost($id: String!) {
     result {
       _id
       title
-      slug
       pageUrl
       postedAt
       baseScore
-      voteCount
       commentCount
       contents {
         html
@@ -47,9 +45,6 @@ query GetPost($id: String!) {
       user {
         username
         displayName
-      }
-      tags {
-        name
       }
     }
   }
@@ -84,8 +79,9 @@ def extract_post_id_from_url(url: str) -> str | None:
     URL formats:
         /posts/{post_id}/{slug}
         /posts/{post_id}
+        /s/{sequence_id}/p/{post_id}
     """
-    match = re.search(r"/posts/([A-Za-z0-9]+)", url)
+    match = re.search(r"/(?:posts|p)/([A-Za-z0-9]+)", url)
     return match.group(1) if match else None
 
 
@@ -93,133 +89,105 @@ def detect_source(url: str) -> str:
     """Detect whether a URL is from LessWrong or Alignment Forum."""
     if "alignmentforum.org" in url:
         return "alignment_forum"
-    if "effectivealtruism.org" in url:
-        return "ea_forum"
     return "lesswrong"
+
+
+async def graphql(client: httpx.AsyncClient, query: str, variables: dict) -> dict | None:
+    """One GraphQL call with three attempts; returns the `data` object or None."""
+    for attempt in range(3):
+        try:
+            resp = await client.post(
+                GRAPHQL_URL, json={"query": query, "variables": variables}, timeout=30.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "errors" in data:
+                msg = data["errors"][0].get("message", "unknown error")
+                print(f"  GraphQL error: {msg}", file=sys.stderr)
+                return None
+            return data.get("data") or {}
+        except Exception as e:
+            fatal = isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 400
+            if fatal or attempt == 2:
+                print(f"  GraphQL request failed: {e}", file=sys.stderr)
+                return None
+            await asyncio.sleep(2**attempt)
+    return None
+
+
+async def fetch_post_graphql(client: httpx.AsyncClient, post_id: str) -> dict | None:
+    data = await graphql(client, POST_QUERY, {"id": post_id})
+    return ((data or {}).get("post") or {}).get("result")
 
 
 async def fetch_comments(
     client: httpx.AsyncClient, post_id: str, max_comments: int = 500
 ) -> list[dict]:
-    """Fetch all comments for a post with pagination."""
-    comments = []
-    offset = 0
-    batch_size = 100
-
+    """Fetch comments for a post in pages of 100; keeps what it has on failure."""
+    comments: list[dict] = []
     while len(comments) < max_comments:
-        for attempt in range(3):
-            try:
-                resp = await client.post(
-                    GRAPHQL_URL,
-                    json={
-                        "query": COMMENTS_QUERY,
-                        "variables": {
-                            "postId": post_id,
-                            "limit": batch_size,
-                            "offset": offset,
-                        },
-                    },
-                    timeout=30.0,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                if "errors" in data:
-                    print(f"  GraphQL error fetching comments: {data['errors'][0].get('message', '')}", file=sys.stderr)
-                    return comments
-
-                batch = data.get("data", {}).get("comments", {}).get("results", [])
-                comments.extend(batch)
-
-                if len(batch) < batch_size:
-                    return comments
-                offset += batch_size
-                break
-            except Exception as e:
-                if attempt == 2:
-                    print(f"  Failed to fetch comments after 3 attempts: {e}", file=sys.stderr)
-                    return comments
-                await asyncio.sleep(2**attempt)
-
+        data = await graphql(
+            client, COMMENTS_QUERY, {"postId": post_id, "limit": 100, "offset": len(comments)}
+        )
+        if data is None:
+            break
+        batch = (data.get("comments") or {}).get("results", [])
+        comments.extend(batch)
+        if len(batch) < 100:
+            break
     return comments
 
 
-async def fetch_post_graphql(client: httpx.AsyncClient, post_id: str) -> dict | None:
-    """Fetch post content via GraphQL API."""
-    for attempt in range(3):
-        try:
-            resp = await client.post(
-                GRAPHQL_URL,
-                json={"query": POST_QUERY, "variables": {"id": post_id}},
-                timeout=30.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            if "errors" in data:
-                msg = data["errors"][0].get("message", "unknown error")
-                print(f"  GraphQL error: {msg}", file=sys.stderr)
-                return None
-
-            return data.get("data", {}).get("post", {}).get("result")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400:
-                print(f"  GraphQL 400 Bad Request for post {post_id}", file=sys.stderr)
-                return None
-            if attempt == 2:
-                print(f"  GraphQL request failed after 3 attempts: {e}", file=sys.stderr)
-                return None
-            await asyncio.sleep(2**attempt)
-        except Exception as e:
-            if attempt == 2:
-                print(f"  GraphQL request failed after 3 attempts: {e}", file=sys.stderr)
-                return None
-            await asyncio.sleep(2**attempt)
-
-    return None
-
-
 def format_post_result(post: dict, source: str, url: str, comments: list[dict]) -> dict:
-    """Format a post result into the standard output format."""
+    """Format a post result into the standard output format, with comments nested
+    under their parents' `replies` so the converter can render threads."""
+    by_id = {
+        c["_id"]: {
+            "comment_id": c["_id"],
+            "html_content": (c.get("contents") or {}).get("html"),
+            "score": c.get("baseScore"),
+            "posted_at": c.get("postedAt"),
+            "author": (c.get("user") or {}).get("displayName")
+                or (c.get("user") or {}).get("username"),
+            "replies": [],
+        }
+        for c in comments
+    }
+    roots = []
+    for c in comments:
+        parent = by_id.get(c.get("parentCommentId"))
+        (parent["replies"] if parent else roots).append(by_id[c["_id"]])
+
+    posted_at = post.get("postedAt")
+    author = (post.get("user") or {}).get("displayName") or (post.get("user") or {}).get("username")
     return {
         "source": source,
         "post_id": post.get("_id"),
         "title": post.get("title"),
-        "slug": post.get("slug"),
         "url": post.get("pageUrl") or url,
-        "posted_at": post.get("postedAt"),
+        "posted_at": posted_at,
+        "year": int(posted_at[:4]) if posted_at else None,
         "score": post.get("baseScore"),
-        "vote_count": post.get("voteCount"),
         "comment_count": post.get("commentCount"),
         "html_content": (post.get("contents") or {}).get("html"),
-        "author": (post.get("user") or {}).get("displayName")
-            or (post.get("user") or {}).get("username"),
-        "tags": [t.get("name") for t in (post.get("tags") or []) if t],
-        "comments": [
-            {
-                "comment_id": c.get("_id"),
-                "parent_comment_id": c.get("parentCommentId"),
-                "html_content": (c.get("contents") or {}).get("html"),
-                "score": c.get("baseScore"),
-                "posted_at": c.get("postedAt"),
-                "author": (c.get("user") or {}).get("displayName")
-                    or (c.get("user") or {}).get("username"),
-            }
-            for c in comments
-        ],
-        "fetched_via": "graphql",
+        "author": author,
+        "authors": [author] if author else [],
+        "comments": roots,
     }
 
 
 async def fetch_all_posts(urls: list[dict]) -> list[dict]:
-    """Fetch full content for all URLs."""
+    """Fetch full content for all URLs; each post id is fetched once."""
     results = []
+    seen: set[str] = set()
 
     headers = {"User-Agent": USER_AGENT}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         for i, url_info in enumerate(urls):
-            url = url_info.get("url", url_info) if isinstance(url_info, dict) else url_info
-            title = url_info.get("title", "") if isinstance(url_info, dict) else ""
+            if isinstance(url_info, str):
+                url_info = {"url": url_info}
+            url = url_info["url"]
+            title = url_info.get("title", "")
 
             print(f"Fetching ({i+1}/{len(urls)}): {title[:60] or url[:60]}...", file=sys.stderr)
 
@@ -229,16 +197,19 @@ async def fetch_all_posts(urls: list[dict]) -> list[dict]:
             if not post_id:
                 print(f"  Skipping - can't extract post ID from URL: {url}", file=sys.stderr)
                 continue
+            if post_id in seen:
+                print(f"  Skipping - already fetched post {post_id}", file=sys.stderr)
+                continue
+            seen.add(post_id)
 
-            # Try GraphQL first (returns structured data with metadata)
             post = await fetch_post_graphql(client, post_id)
 
             if not post:
-                print(f"  GraphQL failed for {url}", file=sys.stderr)
+                print(f"  Post not found: {url}", file=sys.stderr)
                 continue
 
             comments = []
-            comment_count = post.get("commentCount", 0)
+            comment_count = post.get("commentCount") or 0
             if comment_count > 0:
                 print(f"  Fetching {comment_count} comments...", file=sys.stderr)
                 comments = await fetch_comments(client, post["_id"])
@@ -276,6 +247,8 @@ def main():
     print(f"Fetching content for {len(urls)} URLs...", file=sys.stderr)
 
     results = asyncio.run(fetch_all_posts(urls))
+    if urls and not results:
+        sys.exit("Error: no posts could be fetched")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w") as f:

@@ -2,12 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""
-Run all search scripts in parallel and collect results.
-
-This script orchestrates the parallel execution of search scripts and
-aggregates their exit codes and outputs.
-"""
+"""Run the academic search scripts in parallel; exit non-zero only if all of them fail."""
 
 import argparse
 import subprocess
@@ -38,7 +33,6 @@ def main():
     parser = argparse.ArgumentParser(description="Run all searches in parallel")
     parser.add_argument("--queries", required=True, help="Path to search_terms.json")
     parser.add_argument("--output-dir", required=True, help="Directory for raw results")
-    parser.add_argument("--scripts-dir", required=True, help="Directory containing search scripts")
     parser.add_argument("--arxiv-limit", type=int, default=100)
     parser.add_argument("--semantic-scholar-limit", type=int, default=100)
     parser.add_argument("--google-scholar-limit", type=int, default=50)
@@ -48,7 +42,7 @@ def main():
 
     queries_file = Path(args.queries)
     output_dir = Path(args.output_dir)
-    scripts_dir = Path(args.scripts_dir)
+    scripts_dir = Path(__file__).parent
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -59,7 +53,7 @@ def main():
         (scripts_dir / "search_google_scholar.py", output_dir / "google_scholar.json", args.google_scholar_limit),
     ]
 
-    results = []
+    success_count = 0
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(run_search, script, queries_file, output, limit, args.timeout): script.stem
@@ -67,15 +61,16 @@ def main():
         }
         for future in as_completed(futures):
             name, exit_code, stderr = future.result()
-            results.append((name, exit_code, stderr))
             if exit_code == 0:
+                success_count += 1
                 print(f"✓ {name} completed successfully")
             else:
                 print(f"✗ {name} failed (exit code {exit_code})")
                 if stderr:
-                    print(f"  Error: {stderr[:200]}")
+                    # Progress lines come first; the error is at the end.
+                    tail = "\n".join(stderr.strip().splitlines()[-5:])
+                    print(f"  Error (last lines):\n{tail}")
 
-    success_count = sum(1 for _, code, _ in results if code == 0)
     print(f"\nCompleted: {success_count}/{len(searches)} searches succeeded")
 
     # Exit with error only if ALL searches failed

@@ -8,89 +8,70 @@ Deduplicate papers from multiple sources using DOI and fuzzy title matching.
 Usage:
     uv run dedup_papers.py --input-dir raw_results/ --output deduplicated.json [--threshold 0.85]
 
-For two-stage lit review (merge multiple directories):
-    uv run dedup_papers.py --input-dir raw_results/ --input-dir raw_results_stage2/ \
-        --output deduplicated_merged.json --threshold 0.85
+To merge several stages, pass --input-dir once per directory.
 """
 
 import argparse
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 from rapidfuzz import fuzz
 
+ID_KEYS = ("doi", "arxiv_id", "post_id", "paperId", "title")
+
 
 def normalize_title(title: str) -> str:
-    """Normalize title for comparison."""
-    if not title:
-        return ""
-    # Lowercase, remove extra whitespace, remove punctuation
-    title = title.lower()
-    title = re.sub(r"[^\w\s]", " ", title)
-    title = " ".join(title.split())
-    return title
-
-
-def get_doi(paper: dict) -> str | None:
-    """Extract DOI from paper metadata."""
-    # Try various fields where DOI might be stored
-    if paper.get("doi"):
-        return paper["doi"].lower()
-    if paper.get("externalIds") and paper["externalIds"].get("DOI"):
-        return paper["externalIds"]["DOI"].lower()
-    return None
-
-
-def get_title(paper: dict) -> str:
-    """Extract title from paper metadata."""
-    return paper.get("title", "")
+    """Lowercase, drop punctuation, collapse whitespace."""
+    title = re.sub(r"[^\w\s]", " ", title.lower())
+    return " ".join(title.split())
 
 
 def deduplicate_papers(papers: list[dict], threshold: float = 0.85) -> list[dict]:
-    """
-    Deduplicate papers using DOI matching and fuzzy title matching.
-
-    Strategy:
-    1. First pass: exact DOI matching
-    2. Second pass: fuzzy title matching for papers without DOI or unmatched DOIs
-    """
-    # Map dedup keys to their index in `deduplicated` so that when a
-    # duplicate is found, we can keep whichever record is richer (more
-    # fields) — e.g. a full lesswrong.json entry with html_content beats
-    # the bare {url, title} stub from lesswrong_urls.json.
+    """Deduplicate in one pass: a record is a duplicate if its DOI was seen, else if its
+    normalized title fuzzy-matches a seen title at >= threshold. Duplicates are merged
+    into the first record (existing non-empty values win, new keys fill gaps, id keys
+    are left alone), so a paper found by both arXiv and Semantic Scholar keeps pdf_url
+    and citationCount under its arXiv file stem."""
     seen_dois: dict[str, int] = {}
     seen_titles: list[tuple[str, int]] = []  # (normalized title, index)
     deduplicated: list[dict] = []
     duplicates_removed = 0
 
-    def keep_richer(existing_idx: int, paper: dict) -> None:
-        if len(paper) > len(deduplicated[existing_idx]):
-            deduplicated[existing_idx] = paper
+    def merge_into(existing_idx: int, paper: dict, doi: str | None, normalized: str) -> None:
+        existing = deduplicated[existing_idx]
+        for k, v in paper.items():
+            # Never fill in the keys that paper_ids.get_paper_id reads: the file stem
+            # must stay what the first record alone would have produced.
+            if k not in ID_KEYS and existing.get(k) in (None, "", []):
+                existing[k] = v
+        # Register the duplicate's own keys too, so a third record carrying its DOI or
+        # title (arXiv preprint title vs. published title) folds into the same entry.
+        if doi and doi not in seen_dois:
+            seen_dois[doi] = existing_idx
+        if normalized:
+            seen_titles.append((normalized, existing_idx))
 
     for paper in papers:
-        # Check DOI (exact match)
-        doi = get_doi(paper)
+        doi = (paper.get("doi") or "").lower() or None
+        normalized = normalize_title(paper.get("title") or "")
+
         if doi and doi in seen_dois:
-            keep_richer(seen_dois[doi], paper)
+            merge_into(seen_dois[doi], paper, doi, normalized)
             duplicates_removed += 1
             continue
 
-        # Check title (fuzzy match)
-        title = get_title(paper)
-        normalized = normalize_title(title) if title else ""
         if normalized:
             duplicate_idx = None
             for seen_title, idx in seen_titles:
-                # Use token_sort_ratio for better matching of reordered words
-                similarity = fuzz.token_sort_ratio(normalized, seen_title) / 100
-                if similarity >= threshold:
+                # token_sort_ratio also matches reordered words
+                if fuzz.token_sort_ratio(normalized, seen_title) / 100 >= threshold:
                     duplicate_idx = idx
                     break
-
             if duplicate_idx is not None:
-                keep_richer(duplicate_idx, paper)
+                merge_into(duplicate_idx, paper, doi, normalized)
                 duplicates_removed += 1
                 continue
 
@@ -106,21 +87,19 @@ def deduplicate_papers(papers: list[dict], threshold: float = 0.85) -> list[dict
 
 
 def load_results_from_dir(input_dir: Path) -> list[dict]:
-    """Load all JSON result files from a directory."""
+    """Load every result file in a directory. A malformed file is an error, not a skip."""
     all_papers = []
 
-    for json_file in input_dir.glob("*.json"):
+    for json_file in sorted(input_dir.glob("*.json")):
+        if json_file.name.endswith("_urls.json"):
+            continue  # URL lists are inputs to fetch_lesswrong.py, not results
         print(f"  Loading: {json_file.name}", file=sys.stderr)
-        try:
-            with open(json_file) as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    all_papers.extend(data)
-                    print(f"    Found {len(data)} papers", file=sys.stderr)
-                else:
-                    print(f"    Skipped (not a list)", file=sys.stderr)
-        except Exception as e:
-            print(f"    Error loading: {e}", file=sys.stderr)
+        with open(json_file) as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            sys.exit(f"Error: {json_file}: expected a JSON array of papers")
+        all_papers.extend(data)
+        print(f"    Found {len(data)} papers", file=sys.stderr)
 
     return all_papers
 
@@ -144,47 +123,34 @@ def main():
         "--threshold",
         type=float,
         default=0.85,
-        help="Fuzzy matching threshold (0-1, default: 0.85)",
+        help="Fuzzy matching threshold (0-1, default: %(default)s)",
     )
     args = parser.parse_args()
 
-    # Verify all input directories exist
     for input_dir in args.input_dirs:
         if not input_dir.exists():
-            print(f"Error: Input directory does not exist: {input_dir}", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(f"Error: Input directory does not exist: {input_dir}")
 
-    # Load all results from all directories
     print("Loading results...", file=sys.stderr)
     all_papers = []
     for input_dir in args.input_dirs:
         print(f"From {input_dir}:", file=sys.stderr)
-        papers = load_results_from_dir(input_dir)
-        all_papers.extend(papers)
+        all_papers.extend(load_results_from_dir(input_dir))
     print(f"Total papers loaded: {len(all_papers)}", file=sys.stderr)
 
-    # Deduplicate
     print(f"Deduplicating with threshold {args.threshold}...", file=sys.stderr)
     deduplicated = deduplicate_papers(all_papers, args.threshold)
 
-    # Count by source
-    sources = {}
-    for paper in deduplicated:
-        source = paper.get("source", "unknown")
-        sources[source] = sources.get(source, 0) + 1
-
-    print("", file=sys.stderr)
-    print("Results by source:", file=sys.stderr)
+    sources = Counter(p.get("source", "unknown") for p in deduplicated)
+    print("\nResults by source:", file=sys.stderr)
     for source, count in sorted(sources.items()):
         print(f"  {source}: {count}", file=sys.stderr)
 
-    # Save output
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(deduplicated, f, indent=2)
 
-    print("", file=sys.stderr)
-    print(f"Saved {len(deduplicated)} unique papers to {args.output}", file=sys.stderr)
+    print(f"\nSaved {len(deduplicated)} unique papers to {args.output}", file=sys.stderr)
 
 
 if __name__ == "__main__":
