@@ -1,11 +1,18 @@
 #!/bin/bash
-# Shared focus-state protocol, sourced by both hooks: how /focus state is
-# detected and how "the user saw a TL;DR requested while /focus was on" is
-# recorded. The policy decision of WHEN to mark lives with the callers
-# (the Stop hook only, at the moment it requests a TL;DR).
+# /focus-state helpers shared by both hooks. Only the Stop hook writes the
+# seen-focus sentinel, at the moment it requests a TL;DR while /focus is on.
+
+# CLAUDE_CONFIG_DIR relocates both .claude.json and the user settings.json.
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  CLAUDE_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
+  USER_SETTINGS="$CLAUDE_CONFIG_DIR/settings.json"
+else
+  CLAUDE_JSON="$HOME/.claude.json"
+  USER_SETTINGS="$HOME/.claude/settings.json"
+fi
 
 focus_is_on() {
-  grep -q '"briefTranscript"[[:space:]]*:[[:space:]]*true' "$HOME/.claude.json" 2>/dev/null
+  grep -q '"briefTranscript"[[:space:]]*:[[:space:]]*true' "$CLAUDE_JSON" 2>/dev/null
 }
 
 focus_seen() {

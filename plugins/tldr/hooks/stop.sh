@@ -6,11 +6,6 @@
 # Fail open: any parse trouble means exit 0 — never a wrong block, never a
 # non-zero exit. Requires only bash 3.2 (macOS default), no jq/python.
 #
-# The stdin JSON is scanned linearly: one IFS split on backslashes (C speed),
-# then a state machine over the parts. Word and non-blank-line counts
-# accumulate incrementally, so no decoded copy of the message is ever built
-# and escape-dense messages stay far under the hook timeout.
-#
 # Background-session markers: Claude Code's job classifier reads
 # "needs input:", "result:" and "failed:" at the start of a line. It
 # classifies the TL;DR on its own, after the message, so a TL;DR without the
@@ -67,6 +62,12 @@ prev_join=0 # last counted character was non-space (a word may continue)
 line_head="" # first characters of the current line (decoded), for marker checks
 marker=""    # last marker line seen: "needs input", "result" or "failed"
 
+# head_add <text>: keep the first characters of the current line for marker checks.
+head_add() {
+  [ ${#line_head} -lt 24 ] && line_head="$line_head$1"
+  return 0
+}
+
 # count_literal <chunk>: fold a run of plain characters (no newlines, no
 # backslashes) into the word/line tallies. One word-split via positional
 # params does double duty — zero fields means an all-whitespace chunk — with
@@ -75,7 +76,7 @@ marker=""    # last marker line seen: "needs input", "result" or "failed"
 count_literal() {
   local chunk=$1 n
   [ -n "$chunk" ] || return 0
-  [ ${#line_head} -lt 24 ] && line_head="$line_head${chunk:0:24}"
+  head_add "${chunk:0:24}"
   # shellcheck disable=SC2086
   set -- $chunk
   n=$#
@@ -99,25 +100,14 @@ count_literal() {
 # one of the classifier's markers followed by a colon, remember it. The last
 # such line wins, matching the classifier's own tie-break.
 check_marker() {
-  local h=$line_head kind
-  while :; do
-    case $h in
-      [[:space:]]*) h=${h#?} ;;
-      *) break ;;
-    esac
-  done
+  local h=${line_head#"${line_head%%[![:space:]]*}"} kind
   case $h in
     [Nn][Ee][Ee][Dd][Ss]\ [Ii][Nn][Pp][Uu][Tt]*) kind="needs input" h=${h:11} ;;
     [Rr][Ee][Ss][Uu][Ll][Tt]*) kind=result h=${h:6} ;;
     [Ff][Aa][Ii][Ll][Ee][Dd]*) kind=failed h=${h:6} ;;
     *) return 0 ;;
   esac
-  while :; do
-    case $h in
-      [[:space:]]*) h=${h#?} ;;
-      *) break ;;
-    esac
-  done
+  h=${h#"${h%%[![:space:]]*}"}
   case $h in
     :*) marker=$kind ;;
   esac
@@ -135,7 +125,7 @@ count_nonspace_char() {
   line_has=1
   [ "$prev_join" = 1 ] || words=$((words + 1))
   prev_join=1
-  [ ${#line_head} -lt 24 ] && line_head="$line_head#" # an escaped char never continues a marker
+  head_add '#' # an escaped char never continues a marker
 }
 
 # Indexed access into a bash 3.2 array walks a linked list, so iterate with
@@ -162,14 +152,14 @@ for part in "${parts[@]}"; do
       lit=${part:1}
       case $esc in
         n | r | f) count_newline ;; # line boundaries for splitlines()
-        t) prev_join=0; [ ${#line_head} -lt 24 ] && line_head="$line_head " ;;
+        t) prev_join=0; head_add ' ' ;;
         b) count_nonspace_char ;;
         u)
           hex=${lit:0:4}
           lit=${lit:4}
           [[ $hex =~ ^[0-9a-fA-F]{4}$ ]] || exit 0 # invalid escape: fail open
           case $hex in
-            0009 | 0020) prev_join=0; [ ${#line_head} -lt 24 ] && line_head="$line_head " ;;
+            0009 | 0020) prev_join=0; head_add ' ' ;;
             000[aAbBcCdD] | 2028 | 2029) count_newline ;;
             *) count_nonspace_char ;; # other code point: one non-space char
           esac
@@ -192,8 +182,7 @@ for part in "${parts[@]}"; do
 done
 set +f
 [ -n "$closed" ] || exit 0 # no terminating quote: malformed, fail open
-[ "$line_has" = 1 ] && nonblank=$((nonblank + 1))
-check_marker
+count_newline # close the final line
 
 if [ "$words" -gt 100 ] && [ "$nonblank" -gt 1 ]; then
   # A TL;DR is being requested while /focus is on: the user is seeing the
@@ -201,10 +190,8 @@ if [ "$words" -gt 100 ] && [ "$nonblank" -gt 1 ]; then
   if ! focus_seen && focus_is_on; then
     mark_focus_seen
   fi
-  if [ -n "$marker" ]; then
-    printf '{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence that starts with \\"%s:\\", no \\"TL;DR:\\" prefix."}\n' "$marker"
-  else
-    printf '%s\n' '{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence, no \"TL;DR:\" prefix."}'
-  fi
+  clause=""
+  [ -n "$marker" ] && clause=" that starts with \\\"$marker:\\\""
+  printf '{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence%s, no \\"TL;DR:\\" prefix."}\n' "$clause"
 fi
 exit 0

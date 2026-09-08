@@ -19,15 +19,13 @@ RESET="${U}[0m"
 CONTEXT="When the Stop hook asks you to TL;DR your last message, reply with one plain sentence and no \\\"TL;DR:\\\" prefix. Don't shorten or pre-summarize messages to preempt the hook — the separate TL;DR message is what lets /focus toggle between the summary and the full message. If the user asks for more detail — especially detail you've already given — they may be seeing only the TL;DRs; tell them to turn /focus off."
 
 nudge=""
-if focus_seen; then
-  : # user already knows /focus
-elif focus_is_on; then
-  : # /focus is on right now — nothing to point at (the Stop hook records the sentinel)
-elif grep -q '"tui"[[:space:]]*:[[:space:]]*"fullscreen"' "$HOME/.claude/settings.json" 2>/dev/null; then
-  nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
-else
-  # /focus only exists in the fullscreen renderer; best-effort detection.
-  nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/tui fullscreen${RESET}, then ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
+if ! focus_seen && ! focus_is_on; then
+  # /focus only exists in the fullscreen renderer; tui may be set in any of the four settings files.
+  if grep -qs '"tui"[[:space:]]*:[[:space:]]*"fullscreen"' "$USER_SETTINGS" "${USER_SETTINGS%.json}.local.json" "${CLAUDE_PROJECT_DIR:-.}/.claude/settings.json" "${CLAUDE_PROJECT_DIR:-.}/.claude/settings.local.json"; then
+    nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
+  else
+    nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/tui fullscreen${RESET}, then ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
+  fi
 fi
 
 if [ -n "$nudge" ]; then

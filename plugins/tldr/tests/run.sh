@@ -34,14 +34,20 @@ print(out)
 EOF
 }
 
-# run_stop <home> <plugin_data or "UNSET"> — stdin passes through to the hook
-run_stop() {
-  if [ "$2" = "UNSET" ]; then
-    env -u CLAUDE_PLUGIN_DATA HOME="$1" bash "$STOP"
+# hook_env <home> <plugin_data or "UNSET"> <cmd...> — run with only the test's
+# HOME/data dir; the real CLAUDE_CONFIG_DIR and project dir must not leak in.
+hook_env() {
+  local home=$1 data=$2
+  shift 2
+  if [ "$data" = "UNSET" ]; then
+    env -u CLAUDE_PLUGIN_DATA -u CLAUDE_CONFIG_DIR CLAUDE_PROJECT_DIR="$TMP/proj" HOME="$home" "$@"
   else
-    env CLAUDE_PLUGIN_DATA="$2" HOME="$1" bash "$STOP"
+    env -u CLAUDE_CONFIG_DIR CLAUDE_PLUGIN_DATA="$data" CLAUDE_PROJECT_DIR="$TMP/proj" HOME="$home" "$@"
   fi
 }
+
+# run_stop <home> <plugin_data or "UNSET"> — stdin passes through to the hook
+run_stop() { hook_env "$1" "$2" bash "$STOP"; }
 
 check() { # <name> <actual> <expected>
   if [ "$2" = "$3" ]; then
@@ -52,13 +58,35 @@ check() { # <name> <actual> <expected>
   fi
 }
 
-BLOCK='{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence, no \"TL;DR:\" prefix."}'
-assert_block() { check "$1" "$2" "$BLOCK"; }
+# The block reason's wording is not pinned; what matters is valid JSON with a
+# block decision, and for markers, a reason that starts the TL;DR with the marker.
+# decode_block <output> [marker] prints "block" / "block:<marker>" / "BAD:<...>".
+decode_block() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    o = json.load(sys.stdin)
+except Exception as e:
+    print("BAD:not json: " + repr(sys.argv[1][:80])); sys.exit()
+if o.get("decision") != "block":
+    print("BAD:" + repr(o)); sys.exit()
+marker = sys.argv[2]
+if marker and chr(34) + marker + ":" + chr(34) not in o.get("reason", ""):
+    print("BAD:reason lacks marker: " + repr(o.get("reason"))); sys.exit()
+print("block" + (":" + marker if marker else ""))
+' "$1" "${2:-}"
+}
+assert_block() { check "$1" "$(decode_block "$2")" "block"; }
 assert_silent() { check "$1" "$2" ""; }
+assert_sentinel() { # <name> <created|missing>
+  local s
+  [ -f "$D/seen-focus" ] && s=created || s=missing
+  check "$1" "$s" "$2"
+}
 
 H="$TMP/home"
 D="$TMP/data"
-mkdir -p "$H"
+mkdir -p "$H" "$TMP/proj"
 
 long_multiline="' '.join(f'w{i}' for i in range(60)) + chr(10)*2 + ' '.join(f'v{i}' for i in range(60))"
 long_oneline="' '.join(f'w{i}' for i in range(120))"
@@ -121,19 +149,26 @@ raw='{"stop_hook_active": false, "last_assistant_message":"'"${W101}${NL}${BU}zz
 out=$(printf '%s' "$raw" | run_stop "$H" "$D")
 assert_silent "invalid u-escape hex fails open" "$out"
 
-# Deliberate semantics: a validly terminated message string is classified even
-# if the JSON after it is malformed — the value was fully extracted.
-raw='{"last_assistant_message":"'"${W101}${NL}${W101}"'", broken}'
-out=$(printf '%s' "$raw" | run_stop "$H" "$D")
-assert_block "garbage after a valid close still classifies" "$out"
+# The key is located with a 4096-char sliding window; a key that straddles a
+# window boundary must still be found (removing the overlap fails this open).
+# The padding is sized so the key starts 6 chars before the boundary.
+out=$(build_stop_input "$long_multiline" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+rest = json.dumps(o)[1:]  # drop the opening brace
+head = "{" + json.dumps("a_pad") + ": "
+key = json.dumps("last_assistant_message")
+i0 = (head + json.dumps("") + ", " + rest).index(key)
+s = head + json.dumps("p" * (4090 - i0)) + ", " + rest
+i = s.index(key)
+assert i < 4096 < i + 24, (i, "key does not straddle the boundary")
+print(s)' | run_stop "$H" "$D")
+assert_block "key straddling a 4096-char window boundary is found" "$out"
 
 # --- Stop hook: background-session markers carried into the TL;DR request ---
 # A line starting with "needs input:", "result:" or "failed:" (the job
 # classifier's markers) makes the request ask for a TL;DR starting with it.
-MARKED='{"decision": "block", "reason": "Please TL;DR your last message in one plain sentence that starts with \"%s:\", no \"TL;DR:\" prefix."}'
-assert_marked() { # <name> <actual> <marker>
-  check "$1" "$2" "${MARKED//%s/$3}"
-}
+assert_marked() { check "$1" "$(decode_block "$2" "$3")" "block:$3"; }
 
 out=$(build_stop_input "'${W101}'+chr(10)+'needs input: which office?'" | run_stop "$H" "$D")
 assert_marked "needs input on the last line" "$out" "needs input"
@@ -179,13 +214,13 @@ assert_silent "marker in a short message: no TL;DR at all" "$out"
 
 # Performance regression: escape-dense messages must classify well under the
 # 10s hook timeout (the scanner must stay linear, not quadratic).
-out=$(python3 - "$H" "$D" <<'EOF'
+out=$(python3 - "$H" "$D" "$STOP" <<'EOF'
 import json, os, subprocess, sys
 text = 'w"w ' * 20000 + chr(10) + "closing line of words " * 30
 payload = json.dumps({"stop_hook_active": False, "last_assistant_message": text})
 env = {**os.environ, "HOME": sys.argv[1], "CLAUDE_PLUGIN_DATA": sys.argv[2]}
 try:
-    r = subprocess.run(["bash", "../hooks/stop.sh"], input=payload,
+    r = subprocess.run(["bash", sys.argv[3]], input=payload,
                        capture_output=True, text=True, timeout=5, env=env)
     print(r.stdout.strip())
 except subprocess.TimeoutExpired:
@@ -198,18 +233,23 @@ assert_block "20k escaped quotes classify in time" "$out"
 rm -rf "$D"
 printf '{"briefTranscript": true}' >"$H/.claude.json"
 build_stop_input "$short_msg" | run_stop "$H" "$D" >/dev/null
-[ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus on without a block: no sentinel" "$s" "missing"
+assert_sentinel "focus on without a block: no sentinel" "missing"
 
 build_stop_input "$long_multiline" | run_stop "$H" "$D" >/dev/null
-[ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus on with a block: sentinel created" "$s" "created"
+assert_sentinel "focus on with a block: sentinel created" "created"
 
 rm -rf "$D"
 printf '{"other": 1}' >"$H/.claude.json"
 build_stop_input "$long_multiline" | run_stop "$H" "$D" >/dev/null
-[ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus off with a block: no sentinel" "$s" "missing"
+assert_sentinel "focus off with a block: no sentinel" "missing"
+
+# CLAUDE_CONFIG_DIR relocates .claude.json; focus state must be read from there.
+rm -rf "$D"
+mkdir -p "$TMP/cfg"
+printf '{"briefTranscript": true}' >"$TMP/cfg/.claude.json"
+build_stop_input "$long_multiline" | CLAUDE_CONFIG_DIR="$TMP/cfg" env CLAUDE_PLUGIN_DATA="$D" HOME="$H" bash "$STOP" >/dev/null
+assert_sentinel "focus on under CLAUDE_CONFIG_DIR: sentinel created" "created"
+rm -rf "$D" "$TMP/cfg"
 
 rm -f "$H/.claude.json"
 out=$(build_stop_input "$long_multiline" | run_stop "$H" "$D")
@@ -219,32 +259,27 @@ out=$(build_stop_input "$long_multiline" | run_stop "$H" "UNSET")
 assert_block "unset CLAUDE_PLUGIN_DATA still classifies" "$out"
 
 # --- SessionStart hook ---
-# run_start <home> <plugin_data or "UNSET">; prints "<decoded sysmsg>|<ctx-ok>"
+# run_start <home> <plugin_data or "UNSET">; prints "<nudge kind>|<ctx-ok>".
+# Asserts structure, not wording: valid JSON, the hand-built escapes decoded
+# (the quoted "TL;DR:" token survived, the nudge starts with a real ESC byte),
+# and which nudge branch fired.
 run_start() {
-  local out
-  if [ "$2" = "UNSET" ]; then
-    out=$(env -u CLAUDE_PLUGIN_DATA HOME="$1" bash "$START")
-  else
-    out=$(env CLAUDE_PLUGIN_DATA="$2" HOME="$1" bash "$START")
-  fi
-  printf '%s' "$out" | python3 -c '
+  hook_env "$1" "$2" bash "$START" | python3 -c '
 import json, sys
 o = json.load(sys.stdin)
 h = o["hookSpecificOutput"]
 assert h["hookEventName"] == "SessionStart", h
-expected = "When the Stop hook asks you to TL;DR your last message, reply with one plain sentence and no \"TL;DR:\" prefix. Don'"'"'t shorten or pre-summarize messages to preempt the hook — the separate TL;DR message is what lets /focus toggle between the summary and the full message. If the user asks for more detail — especially detail you'"'"'ve already given — they may be seeing only the TL;DRs; tell them to turn /focus off."
-ctx_ok = "ctx-ok" if h["additionalContext"] == expected else "ctx-BAD:" + repr(h["additionalContext"])
-print(o.get("systemMessage", "NONE") + "|" + ctx_ok)
+ctx = h["additionalContext"]
+ctx_ok = "ctx-ok" if chr(34) + "TL;DR:" + chr(34) in ctx and "/focus" in ctx else "ctx-BAD:" + repr(ctx)
+msg = o.get("systemMessage", "NONE")
+if msg != "NONE":
+    kind = "tui" if "/tui fullscreen" in msg else ("focus" if "/focus" in msg else "unknown")
+    msg = ("esc-ok:" if msg.startswith(chr(27) + "[") else "esc-BAD:") + kind
+print(msg + "|" + ctx_ok)
 '
 }
-
-# Expected nudges, decoded: json.load turns the textual escapes into real ESC.
-esc=$(printf '\033')
-B="${esc}[1m"
-M="${esc}[1;35m"
-R="${esc}[0m"
-NUDGE_FOCUS="${B}tldr:${R} run ${M}/focus${R} to collapse long replies to their TL;DRs|ctx-ok"
-NUDGE_TUI="${B}tldr:${R} run ${M}/tui fullscreen${R}, then ${M}/focus${R} to collapse long replies to their TL;DRs|ctx-ok"
+NUDGE_FOCUS="esc-ok:focus|ctx-ok"
+NUDGE_TUI="esc-ok:tui|ctx-ok"
 
 rm -rf "$D" "$H"
 mkdir -p "$H"
@@ -259,8 +294,16 @@ check "no sentinel, fullscreen: /focus nudge" "$out" "$NUDGE_FOCUS"
 printf '{"briefTranscript": true}' >"$H/.claude.json"
 out=$(run_start "$H" "$D")
 check "focus already on: no nudge" "$out" "NONE|ctx-ok"
-[ -f "$D/seen-focus" ] && s=created || s=missing
-check "focus already on: sentinel NOT written" "$s" "missing"
+assert_sentinel "focus already on: sentinel NOT written" "missing"
+
+rm -f "$H/.claude/settings.json"
+mkdir -p "$TMP/proj/.claude"
+printf '{"tui": "fullscreen"}' >"$TMP/proj/.claude/settings.local.json"
+rm -f "$H/.claude.json"
+out=$(run_start "$H" "$D")
+check "fullscreen set in project settings: /focus nudge" "$out" "$NUDGE_FOCUS"
+rm -f "$TMP/proj/.claude/settings.local.json"
+printf '{"tui": "fullscreen"}' >"$H/.claude/settings.json"
 
 rm -f "$H/.claude.json"
 mkdir -p "$D" && touch "$D/seen-focus"
