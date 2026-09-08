@@ -49,6 +49,8 @@ const COMMANDS = new Map<string, () => Promise<number>>([
   ],
   ['heartbeat', async () => (await import('./commands/hive-heartbeat')).hiveHeartbeat()],
   ['checkout-ping', async () => (await import('./commands/checkout-ping')).checkoutPing()],
+  // Internal, spawned by getAuthData; deliberately absent from the usage line.
+  ['auth-refresh', async () => (await import('./commands/auth-refresh')).authRefresh()],
   ['login', async () => (await import('./commands/login')).login(process.argv.slice(3))],
   ['local', async () => (await import('./commands/local')).local()],
   [

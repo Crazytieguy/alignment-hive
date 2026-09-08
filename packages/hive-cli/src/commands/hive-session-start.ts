@@ -1,7 +1,7 @@
-import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { formatRemaining } from '@alignment-hive/session-data';
+import { getAuthData } from '../lib/auth';
 import {
   ensureStateDir,
   getStateDir,
@@ -17,6 +17,7 @@ import { hive } from '../lib/messages';
 import { colors } from '../lib/output';
 import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
+import { spawnBackgroundCommand } from '../lib/spawn';
 import { loadSessionStateWithMigrations } from '../lib/upload-session';
 import type { HookInput } from '../lib/hook-input';
 
@@ -26,26 +27,6 @@ const UPLOAD_DELAY_MINUTES = 10;
 async function checkUploadScheduled(stateDir: string): Promise<boolean> {
   const scheduledAt = await readTimestamp(statePaths(stateDir).uploadScheduled);
   return scheduledAt !== null && Date.now() - scheduledAt < UPLOAD_SCHEDULE_COOLDOWN_MS;
-}
-
-/** Spawn a detached `hive <args>` with stderr appended to the state dir's error log. */
-function spawnBackgroundCommand(args: Array<string>, stateDir: string): boolean {
-  // Compiled bun binaries set argv[1] to a virtual /$bunfs/root/... path.
-  // Spawning with that path causes "Module not found". Use execPath instead.
-  const isCompiled = process.argv[1]?.startsWith('/$bunfs/');
-  try {
-    const stderrFd = openSync(statePaths(stateDir).errorLog, 'a');
-    const child = spawn(
-      isCompiled ? process.execPath : process.argv[0],
-      isCompiled ? args : [process.argv[1], ...args],
-      { detached: true, stdio: ['ignore', 'ignore', stderrFd] },
-    );
-    child.unref();
-    closeSync(stderrFd);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function emitHookMessages(messages: Array<string>, hookInput: HookInput): void {
@@ -83,7 +64,7 @@ export async function hiveSessionStart(): Promise<number> {
   // Detached so startup never waits on the network; an in-process request would either block
   // the hook or be cut off by process.exit. Before the sharing opt-out on purpose: the ping
   // counts installs, sharing or not.
-  spawnBackgroundCommand(['checkout-ping'], stateDir);
+  spawnBackgroundCommand(['checkout-ping'], statePaths(stateDir).errorLog);
 
   const flush = (): number => {
     emitHookMessages(messages, hookInput);
@@ -92,12 +73,21 @@ export async function hiveSessionStart(): Promise<number> {
 
   if (isSharingDisabledLocally(stateDir)) return flush();
 
+  try {
+    // Not logged in: /hive:align owns the setup flow, so the hook stays quiet rather than nagging.
+    if (!(await getAuthData())) return flush();
+  } catch {
+    // A login that can no longer be refreshed fails silently everywhere else (heartbeats and
+    // uploads just stop), so this is where the user finds out.
+    messages.push(hive.sessionStart.loginExpired);
+    return flush();
+  }
+
   let consentMtime: number;
   try {
     ({ consentMtime } = await resolveProjectConsent(cwd));
   } catch {
-    // Not logged in, no consent, or the backend is unreachable: /hive:align owns the setup
-    // flow, so the hook stays quiet rather than nagging.
+    // No consent or the backend is unreachable: /hive:align owns the setup flow.
     return flush();
   }
 
@@ -137,7 +127,7 @@ export async function hiveSessionStart(): Promise<number> {
   } else if (eligibleIds.length > 0 && !(await checkUploadScheduled(stateDir))) {
     spawned = spawnBackgroundCommand(
       ['upload', 'send', '--delay', String(UPLOAD_DELAY_MINUTES * 60), '--sessions', eligibleIds.join(',')],
-      stateDir,
+      statePaths(stateDir).errorLog,
     );
     if (spawned) {
       // Written only after a successful spawn: the child sleeps --delay first, so this cannot race it.
@@ -151,7 +141,7 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   if (allSessions.length > 0) {
-    spawnBackgroundCommand(['heartbeat'], stateDir);
+    spawnBackgroundCommand(['heartbeat'], statePaths(stateDir).errorLog);
   }
 
   return flush();

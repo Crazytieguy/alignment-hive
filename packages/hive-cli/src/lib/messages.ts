@@ -11,6 +11,7 @@ export function consentUrl(): string {
 export const errors = {
   authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
   refreshFailed: (status: number): string => `Token refresh failed (${status}). Run \`hive login\` to re-login.`,
+  refreshIncomplete: 'Token refresh did not complete. Run `hive login` to re-login.',
   noSessions: 'No sessions found.',
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
   multipleSessions: (prefix: string): string => `Multiple sessions match "${prefix}":`,
@@ -275,6 +276,7 @@ export const hive = {
   sessionStart: {
     alignNudgeNew: `run ${boldMagenta('/hive:align')} for setup recommendations`,
     alignNudgeUpdate: `run ${boldMagenta('/hive:align')} for new recommendations`,
+    loginExpired: `login expired, run ${boldMagenta('hive login')} to reconnect`,
     pending: (count: number, timeStr: string): string =>
       `${count} session${count === 1 ? '' : 's'} pending ${dim('·')} ${count === 1 ? 'uploads' : 'first uploads'} in ${timeStr}`,
     eligibleSnoozed: (count: number): string =>
