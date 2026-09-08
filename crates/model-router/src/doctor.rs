@@ -229,6 +229,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     }
 
     if let Some(config) = config {
+        checks.push(shipped_agent_routes_check(&config));
         checks.extend(context_window_checks(
             config,
             dirs,
@@ -413,6 +414,45 @@ fn upstream_checks(
 /// change.
 ///
 /// Split from the transport so every outcome is unit-testable.
+/// Routing IDs the plugin's shipped agents name in their `model:` line
+/// (`gpt-6-astra(low|medium|high)`, the two reviewers, `gpt-5.6-terra(high)`,
+/// `gpt-5.6-luna(high)`). Keep in step with `plugins/model-router/agents/`.
+const SHIPPED_AGENT_ROUTES: [&str; 3] = ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"];
+
+/// A hand-written `[[models]]` block replaces the built-in routes wholesale,
+/// so a list written before a route existed keeps the shipped agents that
+/// name it from routing at all — they fail on their first turn with
+/// model-not-found. Config-only: no network needed, and doctor is what the
+/// setup skill and the session-start nudge send the user to.
+fn shipped_agent_routes_check(config: &Config) -> Check {
+    let served: BTreeSet<&str> = config
+        .effective_models()
+        .map(|route| route.routing_id.as_str())
+        .collect();
+    let missing: Vec<&str> = SHIPPED_AGENT_ROUTES
+        .into_iter()
+        .filter(|route| !served.contains(route))
+        .collect();
+    if missing.is_empty() {
+        return Check {
+            name: "shipped-agent-routes",
+            ok: true,
+            detail: SHIPPED_AGENT_ROUTES.join(", "),
+        };
+    }
+    Check {
+        name: "shipped-agent-routes",
+        ok: false,
+        detail: format!(
+            "the [[models]] list in the config lacks {}, which the shipped agents need — add \
+             a [[models]] entry per missing route (`model-router config-template` shows the \
+             built-in ones) or delete the whole block to get the built-in routes back, then \
+             `model-router service restart`",
+            missing.join(", ")
+        ),
+    }
+}
+
 fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
     // Several routes can share one upstream ID; report each ID once, grouped
     // by family.
@@ -607,8 +647,13 @@ mod tests {
         config("[grok]\nenabled = true\n")
     }
 
-    /// The three Codex slugs every default config routes to.
-    const GPT_MODELS: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+    /// The four Codex slugs every default config routes to.
+    const GPT_MODELS: [&str; 4] = [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ];
 
     fn models_body(ids: &[&str]) -> Vec<u8> {
         let data: Vec<_> = ids
@@ -650,7 +695,7 @@ mod tests {
     fn a_renamed_gpt_slug_is_caught_too() {
         // The check is family-agnostic on purpose: a vanished Codex slug is
         // exactly as broken as a vanished Grok one.
-        let body = models_body(&["gpt-5.6-sol", "gpt-5.6-terra"]);
+        let body = models_body(&["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"]);
         let check = routed_models_check(&config(""), Ok(&body));
         assert!(!check.ok);
         assert!(
@@ -658,6 +703,47 @@ mod tests {
             "{}",
             check.detail
         );
+    }
+
+    /// A hand-written `[[models]]` block naming each ID as its own upstream.
+    fn models_toml(ids: &[&str]) -> String {
+        let mut out = String::new();
+        for id in ids {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                out,
+                "[[models]]\nrouting-id = \"{id}\"\nupstream-model = \"{id}\"\ndisplay-name = \"{id}\"\n"
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn default_routes_serve_every_shipped_agent() {
+        let check = shipped_agent_routes_check(&config(""));
+        assert!(check.ok, "{}", check.detail);
+    }
+
+    #[test]
+    fn a_models_list_written_before_astra_is_named_with_the_fix() {
+        // The three-route list a pre-0.1.19 install could have written by hand.
+        let source = models_toml(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+        let check = shipped_agent_routes_check(&config(&source));
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("lacks gpt-6-astra,"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("terra"), "{}", check.detail);
+        assert!(check.detail.contains("config-template"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_custom_list_that_keeps_the_shipped_routes_passes() {
+        let source = models_toml(&["mine", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"]);
+        let check = shipped_agent_routes_check(&config(&source));
+        assert!(check.ok, "{}", check.detail);
     }
 
     #[test]

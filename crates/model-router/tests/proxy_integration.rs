@@ -829,7 +829,7 @@ async fn websearch_subcall_is_answered_from_alpha_search() {
     // The alpha backend is ChatGPT's Codex search endpoint, reached under the
     // Codex credential, so it is addressed with a Codex slug — not with the
     // requesting route's upstream model (here the non-Codex `gpt-test`).
-    assert_eq!(document["model"], "gpt-5.6-sol");
+    assert_eq!(document["model"], "gpt-6-astra");
     assert_eq!(
         document["commands"]["search_query"][0]["q"],
         "rust axum shutdown"
@@ -1870,7 +1870,7 @@ async fn gpt_origin_still_uses_alpha_search_when_grok_routes_exist() {
             "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
             "/v1/alpha/search" => {
                 let document: serde_json::Value = serde_json::from_slice(body).unwrap();
-                assert_eq!(document["model"], "gpt-5.6-sol");
+                assert_eq!(document["model"], "gpt-6-astra");
                 alpha_results_response()
             }
             path => panic!("unexpected CPA path {path} (xAI search is Grok-only)"),

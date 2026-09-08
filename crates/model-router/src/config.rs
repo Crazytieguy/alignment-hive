@@ -33,7 +33,8 @@ pub(crate) const GPT_CONTEXT_WINDOW: u64 = 258_400;
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
 /// their display names.
-const CODEX_NATIVE_MODELS: [(&str, &str); 3] = [
+const CODEX_NATIVE_MODELS: [(&str, &str); 4] = [
+    ("gpt-6-astra", "GPT-6 Astra"),
     ("gpt-5.6-sol", "GPT-5.6 Sol"),
     ("gpt-5.6-terra", "GPT-5.6 Terra"),
     ("gpt-5.6-luna", "GPT-5.6 Luna"),
@@ -1006,7 +1007,7 @@ impl Config {
 # ingress-token = "replace-with-a-random-token"
 
 # GPT routing is exact-match only. Requests for every other model go to
-# Anthropic. By default the three GPT-5.6 routes below are enabled; writing
+# Anthropic. By default the four GPT routes below are enabled; writing
 # any [[models]] entry replaces the whole default list.
 {models}
 # Claude Code implements its WebSearch tool as a side call that runs the

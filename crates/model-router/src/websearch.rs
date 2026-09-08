@@ -160,7 +160,7 @@ pub fn native_search_route<'a>(
 
 /// The Codex slug the alpha-search backend is addressed with when the
 /// requesting route is not itself Codex-native.
-const ALPHA_SEARCH_DEFAULT_MODEL: &str = "gpt-5.6-sol";
+const ALPHA_SEARCH_DEFAULT_MODEL: &str = "gpt-6-astra";
 
 /// The model id an `alpha/search` payload is addressed with for a request
 /// from `upstream_model`: `/v1/alpha/search` is served by `ChatGPT`'s Codex
@@ -1307,11 +1307,11 @@ mod tests {
         // The backend is Codex: a non-Codex slug is replaced, a Codex one kept.
         assert_eq!(
             alpha_request_body(&subcall, "gpt-test")["model"],
-            "gpt-5.6-sol"
+            "gpt-6-astra"
         );
         assert_eq!(
             alpha_request_body(&subcall, "openai-compat--kimi-k3")["model"],
-            "gpt-5.6-sol"
+            "gpt-6-astra"
         );
         let body = alpha_request_body(&subcall, "gpt-5.6-terra");
         assert_eq!(body["model"], "gpt-5.6-terra");

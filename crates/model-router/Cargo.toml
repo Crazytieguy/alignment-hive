@@ -1,6 +1,6 @@
 [package]
 name = "model-router"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 description = "Loopback Anthropic-format model routing gateway"
 license = "MIT"
