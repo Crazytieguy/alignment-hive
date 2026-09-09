@@ -1425,3 +1425,43 @@ Five to six times faster than any GUI run, and Astra's is the best chair
 of the seven. Fable repeated its GUI-run deviation (armrests on posts).
 Claude Code `-p` logs `[claude-code:unrecognized_model]` for
 `gpt-6-astra` to stderr and proceeds; harmless. One run each.
+
+## Tool-schema `pattern` validation on the Codex path (2026-09-08, Claude Code 2.1.266, CLIProxyAPI 7.2.154, router 0.1.20)
+
+Context: from Claude Code 2.1.265 every GPT-routed turn failed on its first
+request with `400 Invalid schema for function 'Artifact': '^(?!__.*__$)[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}"\\./[\]]{1,200}$' is not a 'regex'.`
+The string is absent from the 2.1.263 binary and present byte-identical in
+2.1.265 and 2.1.266 (the Artifact tool's `field` parameter for `write_db`
+`str_replace`). Upstream reports: CLIProxyAPI
+[#5644](https://github.com/router-for-me/CLIProxyAPI/issues/5644) (open, no
+PR; the pinned 7.2.154 `normalizeToolParameters` passes `pattern` through),
+Claude Code [#92969](https://github.com/anthropics/claude-code/issues/92969)
+(duplicate of #92964, open).
+
+Method: four otherwise-identical `/v1/messages` requests sent straight to the
+managed CLIProxyAPI child (`gpt-6-astra`, one tool, one string property),
+differing only in that property's `pattern`.
+
+| `pattern` | upstream |
+|---|---|
+| the shipped Artifact `field` pattern | **400** `is not a 'regex'` |
+| the same with `\p{…}` expanded to explicit `\xHH`/`\uHHHH`/`\UHHHHHHHH` ranges (lookahead kept) | 200 |
+| the sibling `doc_id` pattern: negative lookahead, no `\p` | 200 |
+| no `pattern` | 200 |
+
+So Unicode property escapes are the sole offender and lookaheads are
+accepted — consistent with a Python-`re` validator (the error wording is
+Python jsonschema's `format: regex` phrase; the engine itself is inferred,
+not observed). #5644's claim that lookaheads are rejected too did not
+reproduce, and it matters: a fix that validates with Go's RE2 (which rejects
+`(?!`) would drop every Artifact identifier pattern. Anthropic accepts the
+shipped pattern (Claude turns with the same tools succeed). Expanding the
+escapes was rejected for the router fix
+because `Cf` has astral ranges with no escape form shared by Python `re`
+and ECMAScript (`\U0001d173` vs `\u{1d173}`); the router removes the
+offending `pattern` keyword and leaves the tool declared
+(`crates/model-router/src/tool_schema.rs`).
+
+Retest triggers: a Claude Code release that changes the Artifact schema
+(the router rewrite becomes a no-op; keep it), or a CLIProxyAPI release that
+closes #5644 (then the router rewrite is redundant but harmless).

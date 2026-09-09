@@ -448,8 +448,14 @@ async fn gpt_origin_on_claude_branch(
     {
         return grok_native_websearch_response(state, &body, route, subcall, capture).await;
     }
+    // A forced search may carry the caller's full tool set alongside
+    // `web_search` (see `websearch::detect`), and `legacy_websearch` forwards
+    // it, so this GPT-bound body needs the schema rewrite too — identity it
+    // does not: the side call's own system prompt is not a conversation.
     match (route, gpt_forward_target(&state.cliproxy_upstream)) {
-        (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model) {
+        (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model)
+            .and_then(|body| crate::tool_schema::drop_unportable_patterns_in_body(&body))
+        {
             Ok(rewritten) => {
                 match gpt_backend_answer(
                     state,
@@ -477,6 +483,23 @@ async fn gpt_origin_on_claude_branch(
     forward_to_anthropic(state, parts, body, capture, None).await
 }
 
+/// The DOM-level rewrites every GPT-branch turn gets, in one parse: the
+/// identity system block ([`crate::identity`]) and the removal of tool-schema
+/// patterns the Codex validator cannot compile ([`crate::tool_schema`]).
+fn rewrite_gpt_body(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8>> {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
+    crate::identity::inject_identity_into(&mut document, display_name)?;
+    let affected = crate::tool_schema::drop_unportable_patterns(&mut document);
+    if !affected.is_empty() {
+        tracing::debug!(
+            tools = ?affected,
+            "dropped tool-schema patterns with Unicode property escapes"
+        );
+    }
+    Ok(serde_json::to_vec(&document)?)
+}
+
 async fn gpt_response(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -502,10 +525,10 @@ async fn gpt_response(
             .await;
         }
     };
-    let rewritten = match crate::identity::inject_identity(&rewritten, &route.display_name) {
+    let rewritten = match rewrite_gpt_body(&rewritten, &route.display_name) {
         Ok(body) => Bytes::from(body),
         Err(error) => {
-            tracing::warn!(%error, "failed to inject identity block");
+            tracing::warn!(%error, "failed to rewrite routed request body");
             return local_error_response(
                 state,
                 StatusCode::BAD_REQUEST,

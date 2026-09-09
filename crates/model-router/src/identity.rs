@@ -58,7 +58,9 @@ fn is_subagent(system: Option<&Value>) -> bool {
     })
 }
 
-/// Prepends the identity system block to an Anthropic Messages request body.
+/// Prepends the identity system block to a parsed Anthropic Messages request
+/// body. Operates on the DOM so the GPT branch can batch it with its other
+/// rewrites in one parse ([`crate::proxy`]).
 ///
 /// The block leads the system prompt because its copy frames everything
 /// after it ("the rest of this system prompt is Claude Code's standard
@@ -78,9 +80,7 @@ fn is_subagent(system: Option<&Value>) -> bool {
 /// # Errors
 /// Returns an error when the body is not a JSON object or `system` has an
 /// unsupported shape.
-pub fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8>> {
-    let mut document: Value =
-        serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
+pub(crate) fn inject_identity_into(document: &mut Value, display_name: &str) -> anyhow::Result<()> {
     let object = document
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("request body is not a JSON object"))?;
@@ -103,12 +103,19 @@ pub fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8
         Some(_) => anyhow::bail!("unsupported system shape; expected absent, string, or array"),
     };
     object.insert("system".to_string(), system);
-    Ok(serde_json::to_vec(&document)?)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Byte-level convenience over [`inject_identity_into`].
+    fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8>> {
+        let mut document: Value = serde_json::from_slice(body)?;
+        inject_identity_into(&mut document, display_name)?;
+        Ok(serde_json::to_vec(&document)?)
+    }
 
     fn parsed(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()

@@ -2287,3 +2287,210 @@ async fn an_unpinned_route_is_refused_with_the_reason() {
     assert!(body.contains("glm-5.2 is not served"), "{body}");
     assert!(body.contains("at least 2000000 tokens"), "{body}");
 }
+
+/// The `field` pattern Claude Code 2.1.265+ ships on the Artifact tool; the
+/// Codex validator rejects the whole request over its `\p{…}` escapes.
+const ARTIFACT_FIELD_PATTERN: &str = r#"^(?!__.*__$)[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}"\\./[\]]{1,200}$"#;
+/// Its sibling identifier pattern: lookahead only, accepted upstream.
+const ARTIFACT_DOC_ID_PATTERN: &str = r"^(?!\.\.?(?:\/|$))[A-Za-z0-9_\-.~:@+]{1,200}$";
+
+fn artifact_tools() -> serde_json::Value {
+    serde_json::json!([
+        {"name": "Glob", "description": "Find files",
+         "input_schema": {"type": "object",
+             "properties": {"pattern": {"type": "string", "description": "glob"}}}},
+        {"name": "Artifact", "description": "Publish",
+         "input_schema": {"type": "object",
+             "properties": {
+                 "field": {"type": "string", "pattern": ARTIFACT_FIELD_PATTERN},
+                 "doc_id": {"type": "string", "pattern": ARTIFACT_DOC_ID_PATTERN}},
+             "required": ["field"]}},
+    ])
+}
+
+fn plain_message_response() -> Response {
+    Response::new(Body::from(
+        serde_json::json!({
+            "id": "msg_upstream", "type": "message", "role": "assistant",
+            "model": "gpt-test", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "pong"}],
+            "usage": {"input_tokens": 10, "output_tokens": 1},
+        })
+        .to_string(),
+    ))
+}
+
+/// A GPT turn reaches the upstream with the Artifact tool still declared and
+/// only its unportable `pattern` removed, alongside the identity block; the
+/// same tools on a Claude turn pass through byte-exact.
+#[tokio::test]
+async fn gpt_turn_drops_tool_schema_patterns_the_codex_validator_rejects() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(handler).await;
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    // Non-canonical spelling (whitespace, key order, a `\u` escape) so a
+    // parse-and-reserialize of a Claude turn would show up in the byte check.
+    let body_for = |model: &str| {
+        format!(
+            "{{ \"tools\" : {},\n  \"messages\":[{{\"role\":\"user\",\"content\":\"Reply with exactly: p\\u006fng\"}}],\
+             \"max_tokens\": 16, \"model\":\"{model}\" }}",
+            artifact_tools()
+        )
+    };
+
+    let gpt_body = body_for("claude-gpt-test");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(gpt_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let forwarded = cpa_observed.lock().await;
+    assert_eq!(forwarded.len(), 1);
+    let document: serde_json::Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+    assert_eq!(document["model"], "gpt-test");
+    assert!(
+        document["system"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("GPT Test")
+    );
+    let tools = document["tools"].as_array().unwrap();
+    assert_eq!(
+        tools[0],
+        artifact_tools()[0],
+        "Glob's `pattern` property is data"
+    );
+    assert_eq!(tools[1]["name"], "Artifact");
+    let properties = &tools[1]["input_schema"]["properties"];
+    assert!(properties["field"].get("pattern").is_none());
+    assert_eq!(properties["field"]["type"], "string");
+    assert_eq!(properties["doc_id"]["pattern"], ARTIFACT_DOC_ID_PATTERN);
+    assert_eq!(
+        tools[1]["input_schema"]["required"],
+        serde_json::json!(["field"])
+    );
+    drop(forwarded);
+
+    let claude_body = body_for("claude-sonnet-4-5");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(claude_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let forwarded = anthropic_observed.lock().await;
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].body, claude_body.as_bytes());
+}
+
+/// A forced WebSearch sub-call from a GPT-origin agent, arriving on the
+/// Claude branch with the caller's full tool set, is forwarded to the GPT
+/// upstream by the legacy path when alpha search fails — with the same
+/// schema rewrite, and without an identity block.
+#[tokio::test]
+async fn gpt_origin_forced_subcall_fallback_drops_patterns_without_identity() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/alpha/search" => {
+                let mut response = Response::new(Body::from("search backend down"));
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            }
+            "/v1/messages" if body.windows(20).any(|w| w == b"web_search_20250305\"") => {
+                plain_message_response()
+            }
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+
+    let gpt_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gpt_turn.status(), StatusCode::OK);
+    let mut gpt_stream = gpt_turn.into_body().into_data_stream();
+    read_until(&mut gpt_stream, "content_block_stop").await;
+
+    let mut subcall_body: serde_json::Value =
+        serde_json::from_str(&origin_subcall_body("claude-sonnet-4-5")).unwrap();
+    subcall_body["tool_choice"] = serde_json::json!({"type": "tool", "name": "web_search"});
+    let tools = subcall_body["tools"].as_array_mut().unwrap();
+    tools.extend(artifact_tools().as_array().unwrap().iter().cloned());
+    let subcall = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(subcall_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subcall.status(), StatusCode::OK);
+    let body = to_bytes(subcall.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("event: message_stop"));
+
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+    let cpa_requests = cpa_observed.lock().await;
+    assert_eq!(
+        cpa_requests
+            .iter()
+            .map(|request| request.uri.as_str())
+            .collect::<Vec<_>>(),
+        ["/v1/messages", "/v1/alpha/search", "/v1/messages"]
+    );
+    let document: serde_json::Value = serde_json::from_slice(&cpa_requests[2].body).unwrap();
+    assert_eq!(document["model"], "gpt-test");
+    assert_eq!(document["stream"], false);
+    assert_eq!(
+        document["system"][0]["text"], "You are an assistant for performing a web search tool use",
+        "no identity block on a side call"
+    );
+    let tools = document["tools"].as_array().unwrap();
+    assert_eq!(tools[0]["name"], "web_search");
+    assert_eq!(tools[2]["name"], "Artifact");
+    let properties = &tools[2]["input_schema"]["properties"];
+    assert!(properties["field"].get("pattern").is_none());
+    assert_eq!(properties["doc_id"]["pattern"], ARTIFACT_DOC_ID_PATTERN);
+}
