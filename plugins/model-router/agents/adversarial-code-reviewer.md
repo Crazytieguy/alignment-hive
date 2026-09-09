@@ -3,6 +3,7 @@ name: adversarial-code-reviewer
 description: Adversarial code review by GPT-6 Astra. State the scope (uncommitted changes, a commit, or a base ref) and the repo or worktree path, plus brief background the diff can't show. The reviewer derives its own attack angles and has its materiality bar, output format, and read-only rules built in — don't restate procedure or steer the review. Supply focus areas only when splitting angles across parallel reviewers.
 model: gpt-6-astra
 effort: medium
+disallowedTools: Artifact
 ---
 ## Role
 Perform an adversarial software review of the target stated in the invoking prompt.

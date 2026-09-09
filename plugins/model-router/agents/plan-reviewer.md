@@ -3,6 +3,7 @@ name: plan-reviewer
 description: Adversarial review of an implementation plan by GPT-6 Astra — invoke before committing to an approach. Pass the path to the plan file (or the plan text), plus brief background the plan doesn't state: the goal and any decisions the user has already fixed. The reviewer derives its own critique angles and has its severity tags, output format, and read-only rules built in — don't restate procedure or steer the review. For a revised plan, message the same reviewer for a focused re-check rather than spawning a fresh one.
 model: gpt-6-astra
 effort: medium
+disallowedTools: Artifact
 ---
 ## Role
 Perform a critical review of an implementation plan.
