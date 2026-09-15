@@ -441,16 +441,68 @@ fn enter_finalizing_is_fenced_after_generation_rotation() {
 }
 
 #[test]
-fn acquire_refuses_a_finalizing_lease() {
-    let Some(harness) = Harness::new("acquire_refuses_a_finalizing_lease") else {
+fn acquire_refuses_a_finalizing_lease_while_its_finalizer_is_alive() {
+    let Some(harness) =
+        Harness::new("acquire_refuses_a_finalizing_lease_while_its_finalizer_is_alive")
+    else {
         return;
     };
     harness.lease_ok(&["acquire", "owner-a"]);
     harness.lease_ok(&["arm", "1", "disconnect"]);
     harness.lease_ok(&["enter-finalizing", "1", "op-a", "stop"]);
+    // A stand-in for the detached watchdog: a live process whose command
+    // line names rk-watchdog, recorded in watchdog.pid as the real one is.
+    let mut finalizer = Command::new("/bin/bash")
+        .args(["-c", "exec -a rk-watchdog-stand-in sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn stand-in finalizer");
+    fs::write(
+        harness.state_dir().join("watchdog.pid"),
+        format!("{}\n", finalizer.id()),
+    )
+    .expect("write watchdog.pid");
     let output = harness.lease(&["acquire", "owner-b"]);
+    let _ = finalizer.kill();
+    let _ = finalizer.wait();
     assert_eq!(output.status.code(), Some(REFUSED));
     assert_eq!(harness.read_lease()["state"], "finalizing");
+}
+
+#[test]
+fn acquire_reclaims_a_finalizing_lease_whose_finalizer_is_gone() {
+    // The state directory can outlive the machine (a RunPod network volume
+    // mounted at the workdir): a pod that died mid-finalize must not wedge
+    // every later pod as "running its automatic cleanup".
+    let Some(harness) = Harness::new("acquire_reclaims_a_finalizing_lease_whose_finalizer_is_gone")
+    else {
+        return;
+    };
+    harness.lease_ok(&["acquire", "owner-a"]);
+    harness.lease_ok(&["arm", "1", "disconnect"]);
+    harness.lease_ok(&["enter-finalizing", "1", "op-a", "stop"]);
+    fs::write(harness.state_dir().join("outcome.json"), "{}").expect("stale outcome");
+    // No watchdog.pid at all (fresh container) ...
+    let lease = harness.lease_json(&["acquire", "owner-b"]);
+    assert_eq!(lease["state"], "active");
+    assert_eq!(lease["owner_uuid"], "owner-b");
+    assert_eq!(lease["generation"], 2);
+    assert!(!harness.state_dir().join("outcome.json").exists());
+    // ... and a pid file naming a process that no longer exists.
+    harness.lease_ok(&["arm", "2", "disconnect"]);
+    harness.lease_ok(&["enter-finalizing", "2", "op-b", "terminate"]);
+    let mut dead = Command::new("/bin/true").spawn().expect("spawn");
+    let _ = dead.wait();
+    fs::write(
+        harness.state_dir().join("watchdog.pid"),
+        format!("{}\n", dead.id()),
+    )
+    .expect("write watchdog.pid");
+    let lease = harness.lease_json(&["acquire", "owner-c"]);
+    assert_eq!(lease["state"], "active");
+    assert_eq!(lease["owner_uuid"], "owner-c");
 }
 
 #[test]

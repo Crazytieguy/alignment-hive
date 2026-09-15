@@ -25,6 +25,13 @@ use crate::runtime::{
 use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
 
 const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
+/// How long `start()`/`attach()` wait after Jupyter is up for the on-machine
+/// watchdog to be confirmed before a budgeted machine is given up as
+/// unenforceable and terminated. The wait covers SSH reachability, the lease
+/// acquire and the watchdog install on the machine; 15 s (before 0.3.1) lost
+/// that race on ordinary secure `RunPod` hosts with nothing slow configured.
+const WATCHDOG_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+
 const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
 
 #[derive(Debug, thiserror::Error)]
@@ -4469,7 +4476,7 @@ impl RemoteKernelsServer {
             // Both the user-visible caveat and the budget enforceability gate
             // consume the same definitive heartbeat event. The timeout is only
             // a backstop for genuinely slow or unreachable transports.
-            let resolved = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let resolved = tokio::time::timeout(WATCHDOG_CONFIRM_TIMEOUT, async {
                 while *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
                     if supervision.changed().await.is_err() {
                         break;
@@ -4485,15 +4492,33 @@ impl RemoteKernelsServer {
                 // actionable cause available (e.g. a rejected key file).
                 let cause = match setup_diagnostics.latest() {
                     Some(last) => format!(
-                        "the automatic-shutdown watchdog could not be confirmed within 15 seconds; last error: {last}"
+                        "the automatic-shutdown watchdog could not be confirmed within {} seconds; last error: {last}",
+                        WATCHDOG_CONFIRM_TIMEOUT.as_secs()
                     ),
                     None => {
-                        "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
-                            .to_string()
+                        format!(
+                            "the automatic-shutdown watchdog could not be confirmed within {} seconds",
+                            WATCHDOG_CONFIRM_TIMEOUT.as_secs()
+                        )
                     }
                 };
                 return Err(BudgetUnenforceable(cause).into());
             }
+        }
+        // The watchdog is confirmed; startup commands (bounded to 5 min on
+        // the machine) still have to finish before the machine is handed
+        // over, so that a cell never races an install.
+        if *supervision.borrow() == crate::heartbeat::SupervisionStatus::Supervised
+            && !self.config.startup_commands.is_empty()
+        {
+            let _ = tokio::time::timeout(std::time::Duration::from_mins(6), async {
+                while *supervision.borrow() == crate::heartbeat::SupervisionStatus::Supervised {
+                    if supervision.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
         }
         let supervision_status = supervision.borrow().clone();
         match supervision_status {
@@ -4508,7 +4533,8 @@ impl RemoteKernelsServer {
                     );
                 }
             }
-            crate::heartbeat::SupervisionStatus::Active => {}
+            crate::heartbeat::SupervisionStatus::Supervised
+            | crate::heartbeat::SupervisionStatus::Active => {}
             crate::heartbeat::SupervisionStatus::Unsupervisable(caveat) => {
                 let waiver = self.budget_source == Some(crate::config::BudgetSource::Toml)
                     && self.config.allow_unenforced_budget_for(&runtime_name);

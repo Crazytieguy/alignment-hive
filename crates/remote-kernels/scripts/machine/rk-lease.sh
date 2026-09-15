@@ -43,6 +43,22 @@ json_uint() {
     sed -n "s/.*\"${key}\":\([0-9][0-9]*\).*/\1/p" "$lease_file"
 }
 
+# A finalizing lease binds only while the process that entered it can still
+# finish it: the watchdog recorded in watchdog.pid on THIS machine. The state
+# directory may live on a persistent volume (RunPod network volumes are
+# mounted at the workdir), so a pod that died mid-finalize leaves a finalizing
+# lease that every later pod mounting the volume would otherwise inherit as
+# "running its automatic cleanup" -- with no process anywhere able to clear
+# it. No live finalizer here means the lease is a fossil, not an operation.
+finalizer_alive() {
+    local pid_file="$state_dir/watchdog.pid" pid=""
+    [ -f "$pid_file" ] || return 1
+    pid=$(tr -cd "0-9" < "$pid_file")
+    is_uint "$pid" || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null | grep -q "rk-watchdog"
+}
+
 load_lease() {
     if [ ! -f "$lease_file" ]; then
         generation=0
@@ -134,7 +150,13 @@ load_lease
 case "$op" in
     acquire)
         [ "$#" -eq 1 ] && is_atom "$1" || fail_invalid "usage: acquire <owner_uuid>"
-        [ "$state" != "finalizing" ] || exit "$EXIT_REFUSED"
+        if [ "$state" = "finalizing" ]; then
+            finalizer_alive && exit "$EXIT_REFUSED"
+            # Stale finalize from a machine that no longer exists: its
+            # outcome marker would block the finalize of this machine.
+            rm -f "$state_dir/outcome.json" "$state_dir/watchdog.pid"
+            printf "%s\n" "reclaimed a finalizing lease with no live finalizer (op ${op_id:-?}, action ${action:-?})" >&2
+        fi
         pause_after_read_for_test
         generation=$((generation + 1))
         owner_uuid="$1"

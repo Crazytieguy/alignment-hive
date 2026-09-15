@@ -509,17 +509,19 @@ impl RunPodRuntime {
     fn ssh_expectation_unmet(&self, ctx: &ConnectionContext) -> anyhow::Error {
         if ctx.fresh {
             anyhow::anyhow!(
-                "No direct SSH endpoint appeared for this pod within {SSH_WAIT_MINUTES} \
-                 minutes. Retry start(). If it keeps happening on community cloud, set \
-                 [runpod] cloud-type = \"SECURE\" in {}.",
+                "No direct SSH endpoint appeared for this pod within {} minutes \
+                 ([runpod] provision-timeout-mins). Retry start(). If it keeps happening \
+                 on community cloud, set [runpod] cloud-type = \"SECURE\" in {}.",
+                self.ssh_wait_minutes(),
                 self.config_path
             )
         } else {
             anyhow::anyhow!(
-                "No direct SSH endpoint appeared for machine {} within {SSH_WAIT_MINUTES} \
-                 minutes. Retry attach(\"{}\"). If it keeps happening, stop() the machine (it \
-                 keeps its data) and tell the user.",
+                "No direct SSH endpoint appeared for machine {} within {} minutes \
+                 ([runpod] provision-timeout-mins). Retry attach(\"{}\"). If it keeps \
+                 happening, stop() the machine (it keeps its data) and tell the user.",
                 ctx.machine_id,
+                self.ssh_wait_minutes(),
                 ctx.machine_id
             )
         }
@@ -701,7 +703,8 @@ impl RunPodRuntime {
     /// `ssh.direct` appears only once the published `22/tcp` mapping has a
     /// public port, which can lag RUNNING by a few seconds.
     async fn wait_for_ssh_info(&self, pod_id: &str) -> anyhow::Result<(String, u16)> {
-        for attempt in 1..=SSH_WAIT_ATTEMPTS {
+        let attempts = self.ssh_wait_minutes() * 60 / SSH_WAIT_INTERVAL.as_secs();
+        for attempt in 1..=attempts {
             match self.client.get_pod(pod_id).await {
                 Ok(pod) => {
                     if let Some((ip, port)) = pod.direct_ssh() {
@@ -714,15 +717,24 @@ impl RunPodRuntime {
             }
             tokio::time::sleep(SSH_WAIT_INTERVAL).await;
         }
-        anyhow::bail!("no direct SSH endpoint after {SSH_WAIT_MINUTES} minutes")
+        anyhow::bail!(
+            "no direct SSH endpoint after {} minutes",
+            self.ssh_wait_minutes()
+        )
+    }
+
+    /// How long `open()` waits for the pod to publish its direct SSH
+    /// endpoint: the configured `provision-timeout-mins`. `RunPod` reports
+    /// RUNNING while the image is still pulling, and a cold pull of a
+    /// 12-16 GB CUDA image takes 2-3 minutes, so a fixed 2-minute wait
+    /// (the value before 0.3.1) failed every cold start of such an image.
+    fn ssh_wait_minutes(&self) -> u64 {
+        self.runpod.provision_timeout_mins.max(1)
     }
 }
 
-/// How long `open()` waits for the pod to publish its direct SSH endpoint,
-/// and the same window in whole minutes for the message that reports it.
-const SSH_WAIT_ATTEMPTS: u64 = 40;
+/// Poll interval for the direct SSH endpoint.
 const SSH_WAIT_INTERVAL: Duration = Duration::from_secs(3);
-const SSH_WAIT_MINUTES: u64 = SSH_WAIT_ATTEMPTS * SSH_WAIT_INTERVAL.as_secs() / 60;
 
 /// Runtime capabilities, exposed credential-free so config validation can
 /// consult them at load time (see [`super::validate_config`]).
@@ -2728,7 +2740,10 @@ mod tests {
 
         let message = secure.ssh_expectation_unmet(&ssh_context(true)).to_string();
         assert!(message.contains("No direct SSH endpoint"), "{message}");
-        assert!(message.contains("2 minutes"), "the window: {message}");
+        assert!(
+            message.contains("20 minutes"),
+            "the window (default provision-timeout-mins): {message}"
+        );
         assert!(message.contains("Retry start()"), "{message}");
         assert!(message.contains("cloud-type = \"SECURE\""), "{message}");
         assert!(message.contains("remote-kernels.toml"), "{message}");
