@@ -343,6 +343,26 @@ async fn login(
     {
         Some(auth) => {
             println!("Login stored at {}", auth.display());
+            // The managed child fetches its model catalog at start. A login
+            // added to a running child is honoured for requests, but the
+            // child keeps serving the offline fallback catalog it started
+            // with, so the new family's models read as unserved: `doctor`
+            // fails `routed-models` and the routes answer "unknown provider".
+            // Restart so the catalog is refetched with the credential present.
+            // The login itself succeeded, so a failed restart is reported,
+            // not fatal.
+            match service::restart_if_installed() {
+                Ok(true) => {
+                    println!(
+                        "Restarted model-router service so the upstream refetches its catalog."
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => println!(
+                    "Could not restart the service ({error}); run `model-router service restart` \
+                     so the upstream refetches its catalog."
+                ),
+            }
             Ok(())
         }
         None => anyhow::bail!(

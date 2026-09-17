@@ -140,6 +140,21 @@ pub fn restart() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Restarts the installed service, or does nothing when no unit is installed.
+///
+/// For state the managed child reads only at start — the model catalog it
+/// fetches once its auth files are loaded — a change made while the child
+/// runs needs this restart to take effect. `login` calls it so a fresh OAuth
+/// credential is followed by a catalog that includes that family's models.
+///
+/// # Errors
+/// Returns an actionable error for unsupported platforms or service-manager
+/// failures. A missing unit is not an error: `Ok(false)`.
+pub fn restart_if_installed() -> anyhow::Result<bool> {
+    let platform = Platform::current()?;
+    restart_if_installed_at(platform, &unit_path(platform)?, &SystemCommandRunner)
+}
+
 /// Prints a concise service, unit-file, and launcher-version summary.
 ///
 /// A stopped or unloaded service is reported normally rather than treated as
@@ -383,6 +398,18 @@ fn restart_with(platform: Platform, runner: &dyn CommandRunner) -> anyhow::Resul
             "systemctl --user restart",
         ),
     }
+}
+
+fn restart_if_installed_at(
+    platform: Platform,
+    unit_path: &Path,
+    runner: &dyn CommandRunner,
+) -> anyhow::Result<bool> {
+    if !unit_path.exists() {
+        return Ok(false);
+    }
+    restart_with(platform, runner)?;
+    Ok(true)
 }
 
 fn status_with(platform: Platform, runner: &dyn CommandRunner) -> anyhow::Result<String> {
@@ -964,6 +991,38 @@ WantedBy=default.target\n"
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].0, "bash");
         assert_eq!(calls[1].1, os_args(["--user", "restart", SYSTEMD_UNIT]));
+    }
+
+    #[test]
+    fn restart_if_installed_is_a_no_op_without_a_unit() {
+        let root = tempfile::tempdir().unwrap();
+        let unit = root.path().join("systemd/model-router.service");
+        let runner = FakeRunner::default();
+
+        let restarted = restart_if_installed_at(Platform::Linux, &unit, &runner).unwrap();
+
+        assert!(!restarted);
+        assert!(
+            runner.calls.borrow().is_empty(),
+            "no service manager call may run when nothing is installed"
+        );
+    }
+
+    #[test]
+    fn restart_if_installed_restarts_an_installed_unit() {
+        let root = tempfile::tempdir().unwrap();
+        let unit = root.path().join("home/Library/LaunchAgents/router.plist");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(&unit, "unit").unwrap();
+        let runner = FakeRunner::default();
+
+        let restarted = restart_if_installed_at(Platform::MacOs, &unit, &runner).unwrap();
+
+        assert!(restarted);
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "launchctl");
+        assert_eq!(calls[0].1[0], "kickstart");
     }
 
     #[test]

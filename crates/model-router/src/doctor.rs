@@ -413,6 +413,12 @@ fn upstream_checks(
 /// catalog remotely, so an ID can disappear or be renamed with no binary
 /// change.
 ///
+/// Absence has a second, benign cause that the detail names first: the
+/// child fetches the catalog at start, so a login added while it ran leaves
+/// it serving the offline fallback list it started with (the same version
+/// lists the model on a host whose child started after the login). A restart
+/// settles which cause it is.
+///
 /// Split from the transport so every outcome is unit-testable.
 /// Routing IDs the plugin's shipped agents name in their `model:` line
 /// (`gpt-6-astra(low|medium|high)`, the two reviewers, `gpt-5.6-terra(high)`,
@@ -510,7 +516,10 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
             "every routed model is served".to_string()
         } else {
             format!(
-                "no longer served by the upstream catalog — {}",
+                "missing from the upstream catalog — {}. A login added after the service \
+                 started leaves the child on its offline fallback catalog: run `model-router \
+                 service restart`; an ID still missing afterwards has been dropped or renamed \
+                 upstream",
                 missing.join("; ")
             )
         },
@@ -800,10 +809,28 @@ mod tests {
         assert!(!check.ok);
         assert!(check.detail.contains("could not read"), "{}", check.detail);
         assert!(
-            !check.detail.contains("no longer served"),
+            !check.detail.contains("missing from the upstream catalog"),
             "a down child must not read as a renamed model: {}",
             check.detail
         );
+    }
+
+    #[test]
+    fn a_missing_model_names_the_restart_before_blaming_upstream() {
+        // Observed 2026-09-06: a Codex login added to a running child left
+        // gpt-6-astra absent from /v1/models on one host while the same
+        // router, upstream version and login listed it on another; a
+        // service restart fixed it. The detail must send the user there
+        // first, since a rename is the rarer cause.
+        let config = config(
+            "[[models]]\nrouting-id = \"astra\"\nupstream-model = \"gpt-6-astra\"\ndisplay-name = \"A\"\n",
+        );
+        // The fallback list that child served: the 5.6 routes without astra.
+        let body = models_body(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+        let check = routed_models_check(&config, Ok(&body));
+        assert!(!check.ok);
+        assert!(check.detail.contains("gpt-6-astra"), "{}", check.detail);
+        assert!(check.detail.contains("service restart"), "{}", check.detail);
     }
 
     #[test]

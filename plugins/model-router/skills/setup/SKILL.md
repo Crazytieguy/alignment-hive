@@ -58,7 +58,12 @@ here works until the binary resolves.
    for Codex OAuth), either way works: paste the full expanded
    `.../scripts/bootstrap.sh login` command for them to run in a separate
    terminal, or have them type `! $ROUTER login` (expanded to the real path)
-   in the prompt. Verify with `$ROUTER doctor` afterwards.
+   in the prompt. When the service is already installed, `login` restarts it
+   once the credential is stored: the managed child fetches its model
+   catalog at start, so a child that predates the login keeps serving its
+   offline fallback list and `doctor` reports the family's routes under
+   `routed-models` as missing. If `login` prints that it could not restart,
+   run `$ROUTER service restart`. Verify with `$ROUTER doctor` afterwards.
 4. **Service**: `$ROUTER service install` (installs and starts the
    launchd/systemd user service), then `$ROUTER doctor` until healthy.
    The defaults need no config file — all four GPT routes (astra, sol,
