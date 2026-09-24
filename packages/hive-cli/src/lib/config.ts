@@ -225,6 +225,7 @@ export function statePaths(stateDir: string) {
     sharingDisabled: join(stateDir, 'sharing-disabled'),
     repoLinkingDeclined: join(stateDir, 'repo-linking-declined'),
     checkoutId: join(stateDir, 'checkout-id'),
+    registryBackfillDone: join(stateDir, 'registry-backfill-done'),
     commitHash: (sessionId: string) => join(stateDir, `${sessionId}-commit.txt`),
   } as const;
 }
@@ -245,7 +246,8 @@ export async function loadTranscriptsDirs(stateDir: string): Promise<Array<strin
 /**
  * Register transcripts directories. The file is add-only and loadTranscriptsDirs dedupes on
  * read, so writers append (O_APPEND) rather than rewrite and concurrent writers cannot clobber
- * each other; the pre-check is best-effort dedup.
+ * each other; the pre-check is best-effort dedup. The hooks' writer of the same file is
+ * register_transcript_dir in plugins/hive/scripts/common.sh; keep the two formats in step.
  */
 export async function addTranscriptsDirs(stateDir: string, dirs: Array<string>): Promise<void> {
   await ensureStateDir(stateDir);

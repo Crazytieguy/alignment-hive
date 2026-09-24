@@ -52,6 +52,8 @@ const COMMANDS = new Map<string, () => Promise<number>>([
   ['checkout-ping', async () => (await import('./commands/checkout-ping')).checkoutPing()],
   // Internal, spawned by getAuthData; deliberately absent from the usage line.
   ['auth-refresh', async () => (await import('./commands/auth-refresh')).authRefresh()],
+  // Internal, spawned by session-start once per project; deliberately absent from the usage line.
+  ['registry-backfill', async () => (await import('./commands/registry-backfill')).registryBackfill()],
   ['login', async () => (await import('./commands/login')).login(process.argv.slice(3))],
   ['local', async () => (await import('./commands/local')).local()],
   ['debrief', async () => (await import('./commands/debrief')).reviewCommand(process.argv.slice(3))],

@@ -14,6 +14,7 @@ import {
 import { resolveProjectConsent } from '../lib/convex';
 import { readHookInput } from '../lib/hook-input';
 import { hive } from '../lib/messages';
+import { isRegistryBackfillDone } from '../lib/registry-backfill';
 import { colors } from '../lib/output';
 import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
@@ -65,6 +66,13 @@ export async function hiveSessionStart(): Promise<number> {
   // the hook or be cut off by process.exit. Before the sharing opt-out on purpose: the ping
   // counts installs, sharing or not.
   spawnBackgroundCommand(['checkout-ping'], statePaths(stateDir).errorLog);
+
+  // One-time scan for transcript dirs the hooks never registered (see registry-backfill.ts).
+  // Detached: it reads a line from every dir under ~/.claude/projects. Before the sharing and
+  // login gates on purpose: `hive local` retrieval reads the registry without either.
+  if (!isRegistryBackfillDone(stateDir)) {
+    spawnBackgroundCommand(['registry-backfill'], statePaths(stateDir).errorLog);
+  }
 
   const flush = (): number => {
     emitHookMessages(messages, hookInput);

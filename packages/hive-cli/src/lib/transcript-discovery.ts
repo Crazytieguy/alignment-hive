@@ -75,17 +75,38 @@ export function extractCwdFromFile(filePath: string): string | null {
   return findInFileHead(filePath, parseCwdFromLine);
 }
 
-/** The cwd from the first session file in a project directory that has one. */
+/**
+ * The cwd from the first session file in a project directory that has one, else from an agent
+ * transcript under `<session>/subagents/`. ExitWorktree moves the parent transcript back to its
+ * old project dir but leaves the agents spawned meanwhile behind, so a worktree's project dir
+ * can hold only agent transcripts; their cwd still says which worktree the dir belongs to.
+ */
 export function extractCwd(projectDir: string): string | null {
+  let entries: Array<string>;
   try {
-    const entries = readdirSync(projectDir);
-    for (const entry of entries) {
-      if (!entry.endsWith('.jsonl')) continue;
-      const cwd = extractCwdFromFile(join(projectDir, entry));
+    entries = readdirSync(projectDir);
+  } catch {
+    return null; // unreadable directory
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.jsonl')) continue;
+    const cwd = extractCwdFromFile(join(projectDir, entry));
+    if (cwd) return cwd;
+  }
+  for (const entry of entries) {
+    if (entry.includes('.')) continue;
+    const subagentsDir = join(projectDir, entry, 'subagents');
+    let agentFiles: Array<string>;
+    try {
+      agentFiles = readdirSync(subagentsDir);
+    } catch {
+      continue; // a plain file, or a session dir without agents
+    }
+    for (const agentFile of agentFiles) {
+      if (!agentFile.endsWith('.jsonl')) continue;
+      const cwd = extractCwdFromFile(join(subagentsDir, agentFile));
       if (cwd) return cwd;
     }
-  } catch {
-    // skip unreadable directories
   }
   return null;
 }
@@ -172,10 +193,11 @@ function scanCwds(root: string, keep: (name: string) => boolean = () => true): M
 /**
  * Scan ~/.claude/projects/ once, extracting cwds and resolving main worktree paths.
  * Returns both a main-path map (for Strategy 2) and a cwd cache (for Strategies 3-4).
+ * Tests pass `root` to scan a temp dir (Bun resolves os.homedir() from the OS, not $HOME).
  */
-export function buildTranscriptScanData(): TranscriptScanData {
+export function buildTranscriptScanData(root: string = claudeProjectsRoot()): TranscriptScanData {
   const mainPathMap = new Map<string, Array<string>>();
-  const cwdMap = scanCwds(claudeProjectsRoot());
+  const cwdMap = scanCwds(root);
   for (const [transcriptDir, cwd] of cwdMap) {
     if (!existsSync(cwd)) continue;
     const mainPath = getMainWorktreePath(cwd);
@@ -292,8 +314,9 @@ export async function discoverWorktreeTranscriptDirs(
 export async function discoverWorktreeTranscriptDirsForAll(
   projects: Array<{ projectDir: string; stateDir: string }>,
   log?: (msg: string) => void,
+  projectsBase?: string,
 ): Promise<DiscoverResult> {
-  const scanData = buildTranscriptScanData();
+  const scanData = buildTranscriptScanData(projectsBase);
 
   // Build commit hash candidates: for dirs with deleted cwds, extract git log hashes once
   const commitHashCandidates = new Map<string, Array<string>>();

@@ -8,6 +8,6 @@ Core plugin for alignment-hive. Installed automatically by the [install script](
 
 **Session sharing** — Opt-in system for sharing Claude Code session transcripts with AI safety research organizations. See [alignment-hive.com/policy](https://alignment-hive.com/policy) for what gets shared, who has access, and how to manage preferences.
 
-**Session retrieval** — Search past Claude Code sessions from your local machine. An agent automatically searches session history when past context might be relevant, or you can search manually.
+**Session retrieval** — Search past Claude Code sessions from your local machine. An agent automatically searches session history when past context might be relevant, or you can search manually. A PostToolUse hook on EnterWorktree/ExitWorktree registers the session's new transcript dir, so moved sessions stay searchable.
 
 **CLI auto-updates** — Keeps the `hive` CLI binary up to date automatically at session start.

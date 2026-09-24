@@ -38,19 +38,11 @@ fi
 # --- Register transcript directory for local retrieval ---
 # Also runs before the early-exit: a fork/resume in a directory that never had
 # a plain startup (e.g. `claude --resume <id> --fork-session` from a fresh
-# checkout) still needs its transcript dir registered.
-# Derived from transcript_path rather than recomputing Claude Code's
-# project-dir naming (which sanitizes and truncates; see toClaudeProjectDirName).
+# checkout) still needs its transcript dir registered. Mid-session moves
+# (EnterWorktree/ExitWorktree) fire no SessionStart; the PostToolUse hook
+# register-transcript-dir.sh covers those with the same function.
 
-if [ -n "$TRANSCRIPT_PATH" ]; then
-  TRANSCRIPT_DIR=$(dirname "$TRANSCRIPT_PATH")
-  if [ -d "$TRANSCRIPT_DIR" ]; then
-    TRANSCRIPTS_FILE="$STATE_DIR/transcripts-dirs"
-    if ! grep -qxF "$TRANSCRIPT_DIR" "$TRANSCRIPTS_FILE" 2>/dev/null; then
-      echo "$TRANSCRIPT_DIR" >> "$TRANSCRIPTS_FILE"
-    fi
-  fi
-fi
+register_transcript_dir "$STATE_DIR" "$TRANSCRIPT_PATH"
 
 # --- Skip for resume/compact/fork (continuations don't need fresh state) ---
 
