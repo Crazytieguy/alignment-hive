@@ -909,8 +909,10 @@ impl Config {
 #              (e.g. on resume).
 #   "tunnel" — strict: always tunnel; the pod is created WITHOUT the public
 #              8888 mapping, so Jupyter is never internet-reachable — but a
-#              resume whose SSH never returns keeps retrying until the
-#              provision timeout terminates it, instead of falling back.
+#              resume whose SSH never returns cannot fall back. Attachment may
+#              retry in the background until its timeout, then report failure
+#              and keep the machine; it can still be billing. Check status()
+#              and explicitly stop/terminate it if no longer needed.
 #              Requires cloud-type = "SECURE".
 #   "proxy"  — always {{pod}}-8888.proxy.runpod.net (token-protected, public).
 # The port mapping is fixed at pod creation and reconnects follow the POD,

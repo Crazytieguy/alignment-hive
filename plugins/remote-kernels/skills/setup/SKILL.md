@@ -1,6 +1,6 @@
 ---
 name: setup
-description: This skill should be used when the user asks to "set up remote-kernels", "configure remote kernels", "set up GPU", "configure GPU access", "set up RunPod", "set up vast.ai", "set up Kubernetes GPU pods", "configure cloud GPU", or wants to run code on cloud GPUs for the first time.
+description: Set up or reconfigure remote-kernels cloud GPU access on RunPod, vast.ai, or Kubernetes, including first-time GPU use and platform/plugin configuration repairs.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh:*)
 ---
 
@@ -117,12 +117,15 @@ The most consequential conversation — have it explicitly. Two linked
 decisions: **where remotely-generated data (checkpoints, results, logs)
 lives**, and **what a machine may do to itself when the session ends** (the
 per-runtime `cleanup` key). They must be decided together: `terminate`, the
-default, deletes everything still on the machine — on every runtime — and
-the plugin itself backs up nothing.
+default, deletes machine-local data; separately managed network volumes and
+Kubernetes PVCs survive. The plugin does not automatically back up result files.
 
-When a session ends or disconnects, the machine finishes running work, runs
-the matching finalize command, and only then applies the cleanup mode. So
-data can reach safety along three routes:
+On supervised RunPod and vast machines with cleanup enabled, disconnect
+cleanup waits for work, runs the matching finalize command, then acts, subject
+to configured idle-wait and budget-grace limits. Vast machines halt themselves;
+a later server completes provider-side termination. Kubernetes pods survive
+disconnects: their finalize command runs on explicit termination, not when a
+pod lifetime limit fires. Data can reach safety along three routes:
 
 - **Continuous push (strongest)** — long-running jobs write checkpoints and
   results to storage that outlives the machine *as they run* (wandb, S3 via

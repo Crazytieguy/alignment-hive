@@ -57,13 +57,12 @@ session's machines get a grace window to save their work before being
 stopped or terminated — enforced on the machine itself, so it holds even if
 your laptop dies.
 
-**Automatic cleanup that never races your work** — Disconnects (background
-sessions, closed laptops, crashes) never destroy a machine mid-work: it
-finishes what it's running, runs your configured command to push results
-out, and only then cleans itself up the way you chose — stop, terminate, or
-leave alone. If saving fails, the machine is preserved rather than deleted.
-A later session reattaches and picks up everything that happened while you
-were away.
+**Automatic cleanup** — When a session disconnects (background sessions,
+closed laptops, crashes), the machine waits for its running work, runs your
+configured command to save results, and then cleans itself up the way you
+chose: stop, terminate, or leave it running. If saving fails, the machine is
+kept rather than deleted. A later session reattaches and picks up where you
+left off.
 
 ## Requirements
 

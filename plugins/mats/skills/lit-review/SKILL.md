@@ -265,7 +265,7 @@ Read the catalog and summaries. Create `<output_dir>/stage1_report.md` with:
 2. Top 10 most relevant papers/posts (by relevance score), each with:
    - Full title and authors
    - Source and URL
-   - Why it's relevant to the proposal (2-3 sentences)
+   - Why it's relevant to the proposal, identifying the specific connections
    - Key takeaways for the research
    - How it might influence the proposed work
 3. Gaps identified—what important topics weren't well covered

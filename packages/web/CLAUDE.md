@@ -18,16 +18,14 @@ Make one query per frontend use case, not composable queries. Convex queries are
 
 Session data is privacy-sensitive. Access is enforced at three layers — all three MUST agree before data is exposed:
 
-1. **CLI upload** (`packages/hive-cli/src/commands/hive-upload.ts`): Checks consent windows before uploading. Prevents sessions from revocation gaps from being uploaded.
-2. **Backend mutations** (`convex/sessions.ts` → `verifyConsent()`): Checks both current consent state AND consent windows (when `lastModified` is provided). Rejects writes outside consent windows.
-3. **Backend read queries** (`convex/authorized.ts` → `buildConsentFilter()` from `convex/lib/consentVisibility.ts`): Filters sessions based on consent windows.
+1. **CLI upload**: Checks consent windows before uploading. Prevents sessions from revocation gaps from being uploaded.
+2. **Backend mutations**: Check both current consent state AND consent windows (when `lastModified` is provided). Reject writes outside consent windows.
+3. **Backend read queries**: Filter sessions based on consent windows.
 
 ### Authorization model
 
 - **Data accessor** (`hasDataAccess: true` on users table + signed current data accessor agreement): Access only to sessions within consent windows.
 - **Regular user**: No cross-user session access.
-
-All queries in `convex/authorized.ts` MUST call `requireAuthorized()` (from `convex/lib/auth.ts`) and apply `buildConsentFilter()`.
 
 ### Data accessor agreement
 

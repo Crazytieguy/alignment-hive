@@ -170,9 +170,11 @@ pub struct StartParams {
     pub label: Option<String>,
     /// Runtime to start the machine on (default: the configured default-runtime).
     pub runtime: Option<String>,
-    /// Override GPU type for this machine.
+    /// Override GPU type for `RunPod` or vast.ai, using that provider's GPU names.
+    /// Kubernetes rejects this override; set GPU resources in its pod template.
     pub gpu_type: Option<String>,
-    /// Override image for this machine.
+    /// Override image for `RunPod` or vast.ai. Kubernetes rejects this override;
+    /// set the image in its pod template.
     pub image: Option<String>,
     /// Ranked shortlist of vast.ai offer ids from `search_vast_offers()`,
     /// tried in order (vast runtime only; not combinable with `gpu_type`).
@@ -184,9 +186,11 @@ pub struct StartParams {
     /// label (Kueue workload priority by default) so the machine is scheduled
     /// sooner. Ignored by runtimes without a queue.
     pub priority: Option<String>,
-    /// If false, return as soon as the machine is allocated and finish setup in
-    /// the background — poll `status()` for readiness. Useful when starting
-    /// several machines at once. Default: true (wait until ready).
+    /// If false, return after allocation and finish setup in the background.
+    /// Default: true (attempt to wait for readiness). A queued machine or one
+    /// still waiting for capacity/connectivity can return before it is ready
+    /// even with true; the response says setup continues in the background.
+    /// `status()` reports readiness and background failures.
     pub wait: Option<bool>,
 }
 
@@ -1314,12 +1318,12 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// Search vast.ai marketplace offers: returns a comparison table of hosts plus
-    /// picking advice. Free, read-only, creates nothing. Use it to choose hosts by
-    /// judgment instead of the automatic cheapest-first pick: rank the best 2-3
-    /// offers and pass their ids to `start(vast_offers=[...])` (offers churn, so
-    /// include runners-up). All parameters are optional overrides layered on the
-    /// configured search (e.g. `num_gpus=2` for a task needing two GPUs).
+    /// Search vast.ai marketplace offers for manual host selection rather than
+    /// automatic cheapest-first selection. Returns a comparison table and picking
+    /// advice; free, read-only, and creates nothing. Parameters override the
+    /// configured search for this call only. Returned offer ids can be supplied
+    /// in preference order to `start` through `vast_offers`; availability can change
+    /// before rental, and the configured rental price and VM constraints still apply.
     #[tool(name = "search_vast_offers")]
     pub async fn search_vast_offers(
         &self,
@@ -1339,8 +1343,12 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(report)]))
     }
 
-    /// Stop a machine. It is preserved and can be resumed with `attach()`, but storage
-    /// costs may still apply. Use `terminate()` to delete it entirely.
+    /// Stop a machine without waiting for running kernels to finish. Runs the
+    /// configured pre-stop command when connected unless explicitly skipped, and
+    /// cancels any queued finish plan. Use `finish()` to drain work before stopping.
+    /// `RunPod` supports resume via `attach()`; vast.ai resume is unreliable, and
+    /// Kubernetes does not support stop. Retained storage may continue billing;
+    /// `terminate()` deletes the machine.
     #[tool(name = "stop")]
     pub async fn stop(&self, params: Parameters<StopParams>) -> Result<CallToolResult, McpError> {
         let skip_finalize = params.0.skip_pre_stop_command.unwrap_or(false);
@@ -1426,7 +1434,13 @@ impl RemoteKernelsServer {
         ))]))
     }
 
-    /// Terminate (delete) a machine. All data on it is lost. Network volumes are preserved.
+    /// Delete a machine without waiting for running kernels to finish, cancelling
+    /// any queued finish plan. Machine-local data is lost; separately managed
+    /// network volumes and Kubernetes PVCs are not deleted by this tool.
+    /// Runs the configured pre-terminate command when connected unless skipped.
+    /// If that command fails, attempts stop instead; Kubernetes cannot stop, so
+    /// that fallback returns an error without deleting the pod. Use `finish()`
+    /// to drain work and download results before the final action.
     #[tool(name = "terminate")]
     pub async fn terminate(
         &self,
@@ -1508,12 +1522,15 @@ impl RemoteKernelsServer {
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
-    /// Queue end-of-run operations for a machine: wait for pending executions to
-    /// finish, download listed files into the project, then stop, terminate, or
-    /// keep it. Returns immediately; progress failures surface in `status()`. The
-    /// plan is also saved on the machine, so on supervised machines it completes
-    /// even if this server disappears (a terminate waits as a stop until the
-    /// downloads are collected).
+    /// Queue end-of-run operations: drain running work, download listed files into
+    /// the project, then stop, terminate, or keep the machine. A configured
+    /// finalize-wait-secs limit can end the drain before executions finish.
+    /// Returns after recording the plan; failures surface in `status()`.
+    /// A new plan replaces the previous one, and pending plans block new executions.
+    /// Downloads require a connected server. With supervision, cleanup enabled,
+    /// and a successfully saved remote marker, disconnect cleanup honors the plan
+    /// but preserves the machine while downloads remain; `attach()` resumes them.
+    /// Without those conditions, the plan needs a connected server to proceed.
     #[tool(name = "finish")]
     pub async fn finish(
         &self,
@@ -1971,8 +1988,11 @@ impl RemoteKernelsServer {
         Ok(Some(outcome))
     }
 
-    /// Get the status of all machines (or one, via `instance`): phase, GPU, cost,
-    /// uptime, kernels, and session spend.
+    /// Report durable machines (or one, via `instance`): phase, GPU, cost, uptime,
+    /// kernels, session spend, and background start/finish failures. Safe to call
+    /// at any time. It also reconciles with the provider, which occasionally
+    /// completes a stop or termination that was already requested, briefly
+    /// resuming a stopped machine to read its cleanup outcome.
     #[tool(name = "status")]
     pub async fn status(
         &self,
@@ -3005,8 +3025,11 @@ impl RemoteKernelsServer {
         }
     }
 
-    /// Check on or wait for a previously started execution. The `cell_number` is
-    /// returned by `execute()` when it times out or when background=true is used.
+    /// Collect a pending execution's output or check whether it is still running.
+    /// The `cell_number` comes from a timed-out or background `execute()` call.
+    /// Completed output is consumed when returned; this is not a notebook-history
+    /// lookup. A concurrent `wait`/`get_output` call can temporarily hold the result.
+    /// For output already collected, read the saved local notebook.
     #[tool(name = "get_output")]
     pub async fn get_output_tool(
         &self,

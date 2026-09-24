@@ -45,9 +45,10 @@ single source.
 replaces the release assets.
 
 **Binary change:** bump the crate's `Cargo.toml`, `binary-version` and
-`plugin.json` together, commit, land — one push. The binary release workflow
-calls the plugin-archives workflow after it has cut the binary, which then
-publishes the zips around it.
+`plugin.json` together, commit, land. For model-router that push releases the
+binary; remote-kernels also needs its tag pushed (see above). The binary release
+workflow calls the plugin-archives workflow after it has cut the binary, which
+then publishes the zips around it.
 
 **Rollback:** revert the commit and land. The build is byte-deterministic, so
 CI reproduces the previous zips exactly and puts them back; machines on the
