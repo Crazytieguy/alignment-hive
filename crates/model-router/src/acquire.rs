@@ -13,7 +13,7 @@ use crate::state::{Dirs, create_private_dir};
 use std::os::unix::fs::PermissionsExt;
 
 /// The exact `CLIProxyAPI` version this router release is validated against.
-pub const UPSTREAM_VERSION: &str = "7.2.154";
+pub const UPSTREAM_VERSION: &str = "7.3.16";
 
 /// The release archive name for this platform and its sha256, vendored so
 /// downloads are verified against the pin rather than trusting the network
@@ -22,19 +22,19 @@ fn current_target() -> anyhow::Result<(&'static str, &'static str)> {
     Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => (
             "darwin_aarch64",
-            "90645a2d71bf7247e06b517757b498d0d0306afa9c48173aae7e2a230df2d546",
+            "b6d478cc16c608abfec9343ee97d3a850403604f12e237952bcfdbad2a03e234",
         ),
         ("macos", "x86_64") => (
             "darwin_amd64",
-            "62171996db7a9a2aa4ff00c68ba8255d7721790e34c6260f915631a9d44576e2",
+            "f5dd942200a05687d2132d572ff63c635f3d7b154f34a5d737dadeddd718b828",
         ),
         ("linux", "aarch64") => (
             "linux_aarch64",
-            "3a0cd18d64e3b9990ca72136dbb1da97eedddade00ee6768e8b49fab1de6925e",
+            "5af23cdc4c5fc61d260ed6f7cd207fdeee893e174f6866bc5ac6d7d1dddae111",
         ),
         ("linux", "x86_64") => (
             "linux_amd64",
-            "2a2256ceff048d5fa813aa54e8daa43e870b40e698d5cd21efad46e25aa5a1f9",
+            "64f84d7a08570f8e5310707857bc9edfb032292a9753b5f840da6c8caa325a72",
         ),
         (os, arch) => anyhow::bail!(
             "unsupported platform {os}/{arch}; model-router supports macOS and Linux on x86_64/aarch64"

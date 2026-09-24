@@ -1465,3 +1465,55 @@ offending `pattern` keyword and leaves the tool declared
 Retest triggers: a Claude Code release that changes the Artifact schema
 (the router rewrite becomes a no-op; keep it), or a CLIProxyAPI release that
 closes #5644 (then the router rewrite is redundant but harmless).
+
+## GPT-6 Sol/Luna, Grok 4.7 and CLIProxyAPI 7.3.16 (2026-09-23, router 0.1.21)
+
+OpenAI released `gpt-6-sol` and `gpt-6-luna` on 2026-09-22 (no GPT-6
+Terra; the Codex catalog points gpt-5.6-terra's upgrade prompt at Sol); xAI
+released `grok-4.7` on 2026-09-21. CLIProxyAPI's embedded registry gained
+grok-4.7 in v7.3.12 and Sol/Luna in v7.3.13; the pin moves 7.2.154 →
+7.3.16, whose four archive sha256s were computed from downloads and matched
+the release's `checksums.txt`.
+
+### Pin audit (source, 643 changed files)
+
+- Codex identity unchanged in effect: `Originator: codex-tui` cloaking
+  still on for our generated config (7.3.13 adds a per-credential opt-out
+  we don't set); client UA 0.154.0.
+- Claude→Codex translator: encrypted reasoning replay and
+  `output_config.effort` mapping unchanged; upstream now also strips
+  octal-NUL and Unicode-property `pattern`s from tool schemas, overlapping
+  the router's own `tool_schema.rs` rewrite (kept: redundant, harmless).
+- `service_tier`: sent only when the request carries `service_tier:
+  fast|priority` or `speed: "fast"` (both pins); nothing applies the Codex
+  catalog's tier default, and the embedded Sol/Luna entries declare none.
+- v7.3.1's per-model native-search flag is catalog metadata, not a request
+  gate; xAI's `web_search` aliasing applies to function tools, not the
+  router's hosted `{"type":"web_search"}` sub-call.
+- `/v1/models` without `client_version` keeps its shape (doctor unaffected);
+  child config fields all still accepted; `model_not_found` now cools the
+  credential/model for 12h.
+
+### Live verification
+
+Sandbox: worktree binary on 8897 in external mode against a private 7.3.16
+child on 8397 (`request-log: true`, copied auth files, both deleted after),
+private XDG dirs, curl only — no Claude Code session touched it, so no
+SessionStart hook could manage the real service. Live service PID, health
+version, and plist mtime identical before and after. Evidence is the
+child's provider-bound request log.
+
+| check | result |
+|---|---|
+| smoke | gpt-6-sol, gpt-6-luna answer as themselves; grok-4.7 as `grok-4.7-build` via `cli-chat-proxy.grok.com` (subscription OAuth works); astra, gpt-5.6-sol, grok-4.6 unchanged |
+| effort (with `thinking: adaptive`, as Claude Code sends) | upstream `reasoning.effort` = requested for Sol medium/high/max and Luna high/max; grok-4.7 high/xhigh, `max` → `xhigh`. Without a `thinking` block the Codex path sends `medium` regardless — a probe artifact, not a Claude Code path |
+| service tier | no `service_tier` sent; Codex reports `default` for Sol and Luna |
+| tool use | two-turn round trip correct on Sol, Luna, grok-4.7 |
+| Grok WebSearch | grok-4.7: 15 titled links in 2.6s; grok-4.5 still served natively after v7.3.1 (10 links, 3.6s) |
+| GPT WebSearch | Codex `/alpha/search` hangs past the router's 30s budget for every GPT origin (Sol, Luna, Astra, gpt-5.6-sol); the LLM fallback answers in 35–46s with 1–3 links. The live 7.2.154 service shows the same today (60/60 alpha failures on 2026-09-24 UTC, last success 2026-09-02), so upstream, not the pin |
+| xAI overflow | reworded upstream for every Grok route: `Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (541372 tokens > 500000 tokens)` — unmatched by the 0.1.20 phrase, so the live router currently passes it through untranslated. 0.1.21 accepts both phrasings; re-probe returns `prompt is too long: 540087 tokens > 500000 maximum` |
+| Codex window | the backend now accepts far more than 272K on subscription: 521K accepted on Sol, Luna and gpt-5.6-luna, ~912K on Luna; ~1.09M → the usual overflow error, still translated. Codex 0.156.1's catalog (`codex debug models`) still defaults every GPT-6 and GPT-5.6 model to 272000 × 95% = 258400, with an opt-in `max_context_window` of 872000. From router 0.1.21 the GPT routes' real window is 828400 (872K × 95%) and setup keeps declaring 258400 — Codex's default — as an optional, recommended cap; doctor reports the routes as clipped and flags a declaration past 828400 |
+| doctor | all green, incl. `shipped-agent-routes gpt-6-astra, gpt-6-sol, gpt-6-luna` |
+
+Opus 5.5 passthrough needs no router change: the session that made this
+change ran on it through the live 0.1.20 router (Claude Code 2.1.281).

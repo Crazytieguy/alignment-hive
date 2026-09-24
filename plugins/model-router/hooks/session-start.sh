@@ -66,12 +66,12 @@ if [ -n "$HEALTH" ]; then
     # `model-router doctor`.
     (nohup bash "$BOOTSTRAP" service refresh >/dev/null 2>&1 &) 2>/dev/null
   fi
-  # Settings written before the gpt-6-astra route existed: the picker (or
-  # the older single-slot pair) names GPT-5.6 routes and nothing newer.
-  # Setup is idempotent and adds the row; until then, one line per session.
+  # Settings written before the gpt-6-sol route existed: the picker (or the
+  # older single-slot pair) names GPT-5.6 routes and no gpt-6-sol. Setup is
+  # idempotent and swaps the rows; until then, one line per session.
   SETTINGS="$HOME/.claude/settings.json"
-  if [ -f "$SETTINGS" ] && grep -q '"gpt-5\.6-' "$SETTINGS" 2>/dev/null && ! grep -q '"gpt-6-astra"' "$SETTINGS" 2>/dev/null; then
-    msg "run ${MAGENTA}/model-router:setup${RESET} to add GPT-6 Astra to /model"
+  if [ -f "$SETTINGS" ] && grep -q '"gpt-5\.6-' "$SETTINGS" 2>/dev/null && ! grep -q '"gpt-6-sol"' "$SETTINGS" 2>/dev/null; then
+    msg "run ${MAGENTA}/model-router:setup${RESET} to add GPT-6 Sol and Luna to /model"
   fi
   exit 0
 fi

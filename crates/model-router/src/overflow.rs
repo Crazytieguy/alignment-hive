@@ -27,7 +27,7 @@ use serde_json::Value;
 
 /// Which backend's overflow dialect a route speaks.
 ///
-/// Each variant owns exactly one verified phrase, and a rewrite only ever
+/// Each variant owns its own verified phrases, and a rewrite only ever
 /// tests its own. Matching the union would let a Codex route classify the
 /// xAI phrase (and vice versa) as overflow — reintroducing, across
 /// backends, the false positive the narrow gating exists to prevent.
@@ -37,12 +37,15 @@ pub(crate) enum OverflowDialect {
     Codex,
     /// xAI backend, verified against `CLIProxyAPI` 7.2.110 (2026-07-31):
     /// `This model's maximum prompt length is 500000 but the request
-    /// contains 620215 tokens.`
+    /// contains 620215 tokens.` Reworded upstream by 2026-09-23 (every Grok
+    /// route, `CLIProxyAPI` 7.3.16): `Failed to start sampling:
+    /// [input_too_large] The prompt is too long for this model's context
+    /// window (541372 tokens > 500000 tokens)`. Both are accepted.
     Xai,
 }
 
 impl OverflowDialect {
-    /// The phrase identifying this backend's overflow message, compared with
+    /// The phrases identifying this backend's overflow message, compared with
     /// normalized whitespace and case so a rewording of the surrounding
     /// sentences or an embedded newline (observed in Codex's own test
     /// fixtures) does not break detection.
@@ -51,10 +54,13 @@ impl OverflowDialect {
     /// the context window" must NOT match, because compaction cannot fix an
     /// output-limit error and a false positive would re-create the very
     /// retry loop this module removes.
-    const fn phrase(self) -> &'static str {
+    const fn phrases(self) -> &'static [&'static str] {
         match self {
-            Self::Codex => "input exceeds the context window",
-            Self::Xai => "maximum prompt length is",
+            Self::Codex => &["input exceeds the context window"],
+            Self::Xai => &[
+                "maximum prompt length is",
+                "prompt is too long for this model's context window",
+            ],
         }
     }
 }
@@ -152,7 +158,10 @@ fn is_overflow_message(message: &str, dialect: OverflowDialect) -> bool {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
-    normalized.contains(dialect.phrase())
+    dialect
+        .phrases()
+        .iter()
+        .any(|phrase| normalized.contains(phrase))
 }
 
 #[cfg(test)]
@@ -278,6 +287,32 @@ pub(crate) mod tests {
         assert_eq!(
             value["error"]["message"],
             "prompt is too long: 620215 tokens > 500000 maximum"
+        );
+    }
+
+    /// The reworded xAI body captured live from `CLIProxyAPI` 7.3.16
+    /// (2026-09-23): 541K tokens sent to grok-4.7's 500K window; grok-4.6
+    /// answered the same way.
+    const CAPTURED_XAI_BODY_2026_09: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"{\"code\":\"invalid-argument\",\"error\":\"Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (541372 tokens \u003e 500000 tokens)\"}"}}"#;
+
+    #[test]
+    fn reworded_xai_overflow_body_is_translated() {
+        let rewrite =
+            OverflowRewrite::new(500_000, Estimate::Computed(541_372), OverflowDialect::Xai);
+        let rewritten = rewrite
+            .rewrite_body(&Bytes::from(CAPTURED_XAI_BODY_2026_09))
+            .expect("reworded xai overflow body is rewritten");
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            value["error"]["message"],
+            "prompt is too long: 541372 tokens > 500000 maximum"
+        );
+        let codex =
+            OverflowRewrite::new(258_400, Estimate::Computed(541_372), OverflowDialect::Codex);
+        assert!(
+            codex
+                .rewrite_body(&Bytes::from(CAPTURED_XAI_BODY_2026_09))
+                .is_none()
         );
     }
 

@@ -415,9 +415,9 @@ fn upstream_checks(
 ///
 /// Split from the transport so every outcome is unit-testable.
 /// Routing IDs the plugin's shipped agents name in their `model:` line
-/// (`gpt-6-astra(low|medium|high)`, the two reviewers, `gpt-5.6-terra(high)`,
-/// `gpt-5.6-luna(high)`). Keep in step with `plugins/model-router/agents/`.
-const SHIPPED_AGENT_ROUTES: [&str; 3] = ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"];
+/// (`gpt-6-astra(low|medium|high)`, the two reviewers, `gpt-6-sol(medium|high)`,
+/// `gpt-6-luna(high)`). Keep in step with `plugins/model-router/agents/`.
+const SHIPPED_AGENT_ROUTES: [&str; 3] = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"];
 
 /// A hand-written `[[models]]` block replaces the built-in routes wholesale,
 /// so a list written before a route existed keeps the shipped agents that
@@ -647,9 +647,11 @@ mod tests {
         config("[grok]\nenabled = true\n")
     }
 
-    /// The four Codex slugs every default config routes to.
-    const GPT_MODELS: [&str; 4] = [
+    /// The Codex slugs every default config routes to.
+    const GPT_MODELS: [&str; 6] = [
         "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -671,7 +673,7 @@ mod tests {
 
     #[test]
     fn present_when_every_routed_model_is_served() {
-        let body = body_with(&["grok-4.6", "grok-4.5", "grok-imagine-image"]);
+        let body = body_with(&["grok-4.7", "grok-4.6", "grok-4.5", "grok-imagine-image"]);
         let check = routed_models_check(&grok_enabled(), Ok(&body));
         assert!(check.ok, "{}", check.detail);
     }
@@ -683,7 +685,7 @@ mod tests {
         let check = routed_models_check(&grok_enabled(), Ok(&body));
         assert!(!check.ok);
         assert!(
-            check.detail.contains("grok: grok-4.5, grok-4.6"),
+            check.detail.contains("grok: grok-4.5, grok-4.6, grok-4.7"),
             "{}",
             check.detail
         );
@@ -695,7 +697,13 @@ mod tests {
     fn a_renamed_gpt_slug_is_caught_too() {
         // The check is family-agnostic on purpose: a vanished Codex slug is
         // exactly as broken as a vanished Grok one.
-        let body = models_body(&["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"]);
+        let body = models_body(&[
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+        ]);
         let check = routed_models_check(&config(""), Ok(&body));
         assert!(!check.ok);
         assert!(
@@ -740,8 +748,26 @@ mod tests {
     }
 
     #[test]
+    fn a_models_list_written_before_gpt_6_sol_is_named_with_the_fix() {
+        // A 0.1.19-era list: Astra plus the three GPT-5.6 routes.
+        let source = models_toml(&[
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ]);
+        let check = shipped_agent_routes_check(&config(&source));
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("lacks gpt-6-sol, gpt-6-luna,"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
     fn a_custom_list_that_keeps_the_shipped_routes_passes() {
-        let source = models_toml(&["mine", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"]);
+        let source = models_toml(&["mine", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
         let check = shipped_agent_routes_check(&config(&source));
         assert!(check.ok, "{}", check.detail);
     }

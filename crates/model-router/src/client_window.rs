@@ -16,9 +16,9 @@ use std::path::Path;
 pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 
 /// The [`ENV_VAR`] value the setup skill writes, assumed when the real value
-/// cannot be observed. It is the built-in GPT routes' window so the two
-/// agree; see [`crate::config::GPT_CONTEXT_WINDOW`] for why that is safe.
-pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = crate::config::GPT_CONTEXT_WINDOW;
+/// cannot be observed: Codex's own default window for the GPT routes (see
+/// [`crate::config::CODEX_DEFAULT_CONTEXT_WINDOW`]).
+pub const DEFAULT_DECLARED_CONTEXT_WINDOW: u64 = crate::config::CODEX_DEFAULT_CONTEXT_WINDOW;
 
 /// The context window Claude Code believes a routed model has: [`ENV_VAR`]
 /// applies to every routed model ID. This is the client-side coordinate

@@ -20,21 +20,26 @@ const LEGACY_UPSTREAM: &str = "codex";
 /// character has provider-prefix semantics in `CLIProxyAPI` model IDs.
 const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
 
-/// The Codex backend's effective input limit for the built-in GPT routes:
-/// 272K served with a 95% usable multiplier (backend-advertised
-/// `effective_context_window_percent`, verified in the codex-rs client).
-/// Load-bearing as the `M` in the translated `prompt is too long` overflow
-/// error (see [`crate::overflow`]). Setup declares
-/// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` at this same value: auto-compaction
-/// (declared − 20K output reserve) still leads the cap by 20K, and the
-/// overflow backstop covers the rest; `doctor` flags a declaration raised
-/// past the cap.
-pub(crate) const GPT_CONTEXT_WINDOW: u64 = 258_400;
+/// The largest usable window of the built-in GPT routes: Codex's opt-in
+/// `max_context_window` (872K) with its 95% usable multiplier
+/// (`effective_context_window_percent`, verified in the codex-rs client).
+/// The backend itself accepted ~912K on 2026-09-23. Load-bearing as the `M`
+/// in the translated `prompt is too long` overflow error (see
+/// [`crate::overflow`]); `doctor` flags a declaration raised past it.
+pub(crate) const GPT_CONTEXT_WINDOW: u64 = 828_400;
+
+/// Codex's default window for the same models: 272K at the same 95%. Setup
+/// declares `CLAUDE_CODE_MAX_CONTEXT_TOKENS` at this value to match Codex;
+/// raising it toward [`GPT_CONTEXT_WINDOW`] is the user's opt-in, as in
+/// Codex (input past 272K is billed at a higher rate).
+pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
 /// their display names.
-const CODEX_NATIVE_MODELS: [(&str, &str); 4] = [
+const CODEX_NATIVE_MODELS: [(&str, &str); 6] = [
     ("gpt-6-astra", "GPT-6 Astra"),
+    ("gpt-6-sol", "GPT-6 Sol"),
+    ("gpt-6-luna", "GPT-6 Luna"),
     ("gpt-5.6-sol", "GPT-5.6 Sol"),
     ("gpt-5.6-terra", "GPT-5.6 Terra"),
     ("gpt-5.6-luna", "GPT-5.6 Luna"),
@@ -73,12 +78,16 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
 }
 
 /// The xAI-native upstream model IDs behind the built-in Grok routes, with
-/// their display names. Only the flagship and its still-served predecessor
-/// ship — 4.5 stays so existing per-user agents keep resolving: the same
-/// OAuth also exposes `grok-4.3`, the `grok-4.20-*` snapshots and the
-/// `grok-3-mini*` pair, none of which are characterised well enough to
-/// recommend.
-const GROK_MODELS: [(&str, &str); 2] = [("grok-4.6", "Grok 4.6"), ("grok-4.5", "Grok 4.5")];
+/// their display names. Only the flagship and its still-served predecessors
+/// ship — 4.6 and 4.5 stay so existing per-user agents keep resolving: the
+/// same OAuth also exposes `grok-4.3`, the `grok-4.20-*` snapshots, the
+/// `grok-3-mini*` pair and `grok-4.7-build-fast`, none of which are
+/// characterised well enough to recommend.
+const GROK_MODELS: [(&str, &str); 3] = [
+    ("grok-4.7", "Grok 4.7"),
+    ("grok-4.6", "Grok 4.6"),
+    ("grok-4.5", "Grok 4.5"),
+];
 
 /// The context window `CLIProxyAPI`'s embedded model registry declares for
 /// the built-in Grok routes.
@@ -1043,8 +1052,10 @@ impl Config {
             max_request_body_bytes = defaults.max_request_body_bytes,
             anthropic_base = defaults.anthropic_upstream_base,
             models = template_models_section(&defaults.models),
-            providers = TEMPLATE_PROVIDERS_SECTION
-                .replace("{declared_context_window}", &GPT_CONTEXT_WINDOW.to_string()),
+            providers = TEMPLATE_PROVIDERS_SECTION.replace(
+                "{declared_context_window}",
+                &CODEX_DEFAULT_CONTEXT_WINDOW.to_string(),
+            ),
             grok = template_grok_section(),
             capture_file = defaults.capture.file.display(),
             capture_max_response_body_bytes = defaults.capture.max_response_body_bytes,
@@ -1650,7 +1661,7 @@ mod tests {
     fn kimi_toml(window: &str, scaling: bool) -> String {
         format!(
             r#"
-                declared-context-window = {GPT_CONTEXT_WINDOW}
+                declared-context-window = {CODEX_DEFAULT_CONTEXT_WINDOW}
                 [[openai-providers]]
                 name = "openrouter"
                 base-url = "https://openrouter.ai/api/v1"
@@ -1685,13 +1696,13 @@ mod tests {
         // Claude Code compacts at the model's real limit.
         assert_eq!(
             route.usage_scale.unwrap().apply(1_000_000),
-            GPT_CONTEXT_WINDOW
+            CODEX_DEFAULT_CONTEXT_WINDOW
         );
     }
 
     #[test]
     fn scaling_is_none_when_the_windows_already_agree() {
-        let config = parse_and_prepare(&kimi(GPT_CONTEXT_WINDOW, true));
+        let config = parse_and_prepare(&kimi(CODEX_DEFAULT_CONTEXT_WINDOW, true));
         assert!(route(&config, "kimi-k3").usage_scale.is_none());
     }
 
@@ -1699,7 +1710,7 @@ mod tests {
     fn scaling_a_window_below_the_declared_one_is_rejected() {
         let error = prepare_error(&kimi(125_000, true));
         assert!(
-            error.contains(&format!("below the {GPT_CONTEXT_WINDOW}")),
+            error.contains(&format!("below the {CODEX_DEFAULT_CONTEXT_WINDOW}")),
             "{error}"
         );
         assert!(
@@ -1776,7 +1787,7 @@ mod tests {
         // A full real window reports as the declared one.
         assert_eq!(
             scale.apply(route.context_window.unwrap()),
-            GPT_CONTEXT_WINDOW
+            CODEX_DEFAULT_CONTEXT_WINDOW
         );
     }
 

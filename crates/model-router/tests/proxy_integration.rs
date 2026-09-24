@@ -546,7 +546,7 @@ async fn gpt_overflow_400_is_translated_to_the_canonical_anthropic_error() {
     let (fake_address, observed) = spawn_fake(handler).await;
 
     // Default config: the built-in `gpt-5.6-sol` route is Codex-native with
-    // the measured 258400 window.
+    // the Codex 828400 maximum window.
     let config = Config {
         upstreams: external_upstreams(format!("http://{fake_address}")),
         ..Config::default()
@@ -576,7 +576,7 @@ async fn gpt_overflow_400_is_translated_to_the_canonical_anthropic_error() {
     // The tiny request body estimates under the window, so N is the clamp.
     assert_eq!(
         message,
-        "prompt is too long: 258401 tokens > 258400 maximum"
+        "prompt is too long: 828401 tokens > 828400 maximum"
     );
 
     // The overflow translator parses raw response bytes, so the GPT branch
@@ -642,7 +642,7 @@ async fn gpt_overflow_sse_error_event_is_translated() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("event: message_start"), "{text}");
     assert!(
-        text.contains("prompt is too long: 258401 tokens > 258400 maximum"),
+        text.contains("prompt is too long: 828401 tokens > 828400 maximum"),
         "{text}"
     );
     assert!(!text.contains("exceeds the context window"), "{text}");
