@@ -1,4 +1,3 @@
-import { SEARCH_DEFAULT_FIELDS } from './field-filter';
 import { colors } from './output';
 
 const { boldMagenta, dim } = colors;
@@ -12,135 +11,11 @@ export const errors = {
   authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
   refreshFailed: (status: number): string => `Token refresh failed (${status}). Run \`hive login\` to re-login.`,
   refreshIncomplete: 'Token refresh did not complete. Run `hive login` to re-login.',
-  noSessions: 'No sessions found.',
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
   multipleSessions: (prefix: string): string => `Multiple sessions match "${prefix}":`,
   andMore: (count: number): string => `  ... and ${count} more`,
-  invalidNumber: (flag: string, value: string): string =>
-    `Invalid ${flag} value: "${value}" (expected a positive number)`,
-  invalidNonNegative: (flag: string, value: string): string =>
-    `Invalid ${flag} value: "${value}" (expected a non-negative number)`,
-  missingFlagValue: (flag: string): string => `Missing value for ${flag}`,
-  entryNotFound: (requested: number, max: number): string =>
-    `Entry ${requested} not found (session has ${max} entries)`,
-  rangeNotFound: (start: number, end: number, max: number): string =>
-    `No entries found in range ${start}-${end} (session has ${max} entries)`,
-  invalidEntry: (value: string): string => `Invalid entry number: "${value}"`,
-  invalidRange: (value: string): string => `Invalid range: "${value}"`,
-  emptySession: 'Session has no entries',
-  noPattern: 'No pattern specified',
-  invalidRegex: (error: string): string => `Invalid regex: ${error}`,
-  invalidTimeSpec: (flag: string, value: string): string =>
-    `Invalid ${flag} value: "${value}" (expected relative time like "2h", "7d" or date like "2025-01-10")`,
   unknownCommand: (cmd: string): string => `Unknown command: ${cmd}`,
-  unknownFlag: (flag: string): string => `Unknown flag: ${flag}`,
   unexpectedResponse: 'Unexpected response from server',
-};
-
-export const usage = {
-  read: [
-    'Usage: read <session-id> [N | N-M] [options]',
-    '',
-    'Read session entries. Session ID supports prefix matching.',
-    '',
-    'Options:',
-    '  N               Entry number to read (untruncated; collapsed tool fields still need --expand)',
-    '  N-M             Entry range to read',
-    '  --target N      Target total words (default 2000)',
-    '  --skip N        Skip first N words per field (for pagination)',
-    '  --select FIELDS Only show matching block types (comma-separated)',
-    '  --expand FIELDS Show full content for fields (comma-separated)',
-    '  --redact FIELDS Collapse fields to word counts (comma-separated)',
-    '',
-    'Field specifiers:',
-    '  user, assistant, thinking, system, summary',
-    '  tool, tool:input, tool:result, tool:<name>, tool:<name>:input, tool:<name>:result',
-    '',
-    'Truncation:',
-    '  Text is adaptively truncated to fit within the target word count.',
-    "  Output shows: '[Limited to N words per field. Use --skip N for more.]'",
-    '  Use --skip with the shown N value to continue reading.',
-    '',
-    'Examples:',
-    '  read 02ed                            # all entries (~2000 words)',
-    '  read 02ed --target 500               # tighter truncation',
-    '  read 02ed --skip 50                  # skip first 50 words per field',
-    '  read 02ed 5                          # entry 5 (untruncated)',
-    '  read 02ed 10-20                      # entries 10 through 20',
-    '  read 02ed --select user,assistant    # only user and assistant blocks',
-    '  read 02ed --expand thinking          # show full thinking content',
-    '  read 02ed --expand tool:Bash:result  # show Bash command results',
-    '  read 02ed --redact user              # collapse user messages to word counts',
-  ].join('\n'),
-
-  search: [
-    'Usage: search <pattern> [-i] [-c] [-l] [-m N] [-C N] [-s <session>] [--in <fields>]',
-    '                        [--after <time>] [--before <time>] [--agents]',
-    '',
-    'Search sessions for a pattern (JavaScript regex).',
-    'Use -- to separate options from pattern if needed.',
-    '',
-    'Options:',
-    '  -i              Case insensitive search',
-    '  -c              Count matches per session only',
-    '  -l              List matching session IDs only',
-    '  -m N            Stop after N total matches',
-    '  -C N            Show N words of context around match (default: 10)',
-    '  -s <session>    Search only in specified session (prefix match)',
-    '  --in <fields>   Search only specified fields (comma-separated)',
-    '  --after <time>  Include only results after this time',
-    '  --before <time> Include only results before this time',
-    '  --agents        Also search agent transcripts (Task + workflow subagents),',
-    '                  labelling each hit with its agent type, workflow run, and parent',
-    '',
-    'Time formats:',
-    '  Relative: 30m (30 min ago), 2h (2 hours), 7d (7 days), 1w (1 week)',
-    '  Absolute: 2025-01-10, 2025-01-10T14:00, 2025-01-10T14:00:00Z',
-    '',
-    'Field specifiers:',
-    '  user, assistant, thinking, system, summary',
-    '  tool:input, tool:result, tool:<name>:input, tool:<name>:result',
-    '',
-    `Default fields: ${[...SEARCH_DEFAULT_FIELDS].join(', ')}`,
-    '',
-    'Examples:',
-    '  search "TODO"                    # find TODO in sessions',
-    '  search -i "error" -C 20          # case insensitive, 20 words context',
-    '  search -c "function"             # count matches per session',
-    '  search -l "#2597"                # list sessions mentioning issue',
-    '  search -s 02ed "bug"             # search only in session 02ed...',
-    '  search "error|warning|bug"       # find any of these terms (OR)',
-    '  search "TODO|FIXME|XXX"          # find code comments',
-    '  search --in tool:result "error"  # search only in tool results',
-    '  search --in user,assistant "fix" # search only user and assistant',
-    '  search --after 2d "error"        # errors in last 2 days',
-    '  search --after 2025-01-01 "fix"  # fixes since Jan 1',
-  ].join('\n'),
-
-  index: [
-    'Usage: index [--escape-file-refs]',
-    '',
-    'List extracted sessions with statistics and summaries.',
-    'Agent sessions are excluded (explore via Task tool calls in parent sessions).',
-    '',
-    'Options:',
-    '  --escape-file-refs    Escape @ in the output (for embedding in skill files)',
-    '',
-    'Output columns:',
-    '  ID                    Session ID prefix',
-    '  DATETIME              Session modification time (UTC)',
-    '  MSGS                  Total message count',
-    '  USER_MESSAGES         User message count',
-    '  BASH_CALLS            Bash commands executed',
-    '  WEB_FETCHES           Web fetches',
-    '  WEB_SEARCHES          Web searches',
-    '  LINES_ADDED           Lines added',
-    '  LINES_REMOVED         Lines removed',
-    '  FILES_TOUCHED         Files modified',
-    '  SIGNIFICANT_LOCATIONS Paths where >30% of work happened',
-    '  SUMMARY               Session summary or first prompt',
-    '  COMMITS               Git commits from the session',
-  ].join('\n'),
 };
 
 export const setup = {
@@ -168,18 +43,146 @@ export const setup = {
   loginStatusNo: 'logged in: no',
 };
 
-export const localCmd = {
-  usage: [
-    'Usage: hive local <search|read|index>',
-    '',
-    'Search and read raw Claude Code session files.',
-    '',
-    'Commands:',
-    '  search    Search sessions for a pattern',
-    '  read      Read a session by ID prefix',
-    '  index     List sessions with statistics',
-  ].join('\n'),
-  unknownCommand: (cmd: string): string => `Unknown local command: ${cmd}`,
+export const locatorErrors = {
+  badLocator: (text: string): string =>
+    `bad locator "${text}": use SESSION, SESSION:N, SESSION/agent-ID:N or SESSION/wf_RUN/agent-ID:N`,
+  unknownRun: (run: string, agent: string, session?: string): string =>
+    `no Workflow run matching "${run}" has an agent matching "${agent}"${session ? ` in session ${session.slice(0, 8)}` : ''}`,
+  badRange: (text: string): string => `bad range "${text}": use N, N-M or N- (entries start at 1)`,
+  unknownSession: (prefix: string): string => `no session matches "${prefix}"`,
+  unknownAgent: (prefix: string, session?: string): string =>
+    session ? `no agent of session ${session.slice(0, 8)} matches "${prefix}"` : `no agent matches "${prefix}"`,
+  unknownId: (prefix: string): string => `no session or agent matches "${prefix}"`,
+  ambiguous: (text: string, candidates: Array<string>): string =>
+    `"${text}" matches ${candidates.length} transcripts: ${candidates.slice(0, 10).join(', ')}${candidates.length > 10 ? `, and ${candidates.length - 10} more` : ''}`,
+};
+
+/** The usage lines of `hive local`: the top of its help page, and what a malformed call prints. */
+export const localUsage = `  hive local sessions                   sessions, latest activity first (20; -n N for more)
+  hive local outline SESSION            the human's messages, compactions, and calls that started or messaged agents
+  hive local show SESSION [RANGE...]    entries, each field clipped to 1000 chars; no RANGE = the whole session
+  hive local grep PATTERN [SESSION...]  entries whose text, tool input or result matches a JavaScript regex`;
+
+/** The one help page of `hive local` and each of its verbs. The retrieval skill injects it whole. */
+export const localHelp = `hive local: read the Claude Code transcripts of this project and its worktrees.
+
+${localUsage}
+
+Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left out.
+  {"loc":"a4eff20e:148","time":"2026-09-07T17:31:08-07:00","kind":"tool","tool":"Bash","input":{"command":"bun test"},"result":"12 pass"}
+  kind     user, assistant, thinking, tool (a call and its result), system, fork-context-ref, continued-in,
+           other (an unknown block; type says which)
+  text     the text of a user, assistant, thinking or system entry; a tool entry has tool, input and result instead
+  loc      SESSION:N. SESSION is an id prefix, or SESSION/agent-ID for an agent's transcript
+           (a4eff20e/agent-a6ee7bb6:21), or SESSION/wf_RUN/agent-ID when a Workflow run's agent shares its id
+           with another transcript. N counts every entry of that transcript, hidden or not, and never changes.
+  time     local time on this machine, to the second, with its offset from UTC
+  origin   on a user entry the human did not type: peer or coordinator (another agent or session); with
+           --all-entries, also task-notification
+  error    true when the tool call failed or was denied
+  agents   locs of the agent transcripts a tool call started or messaged; outline prints the first 5 and
+           [+N items] for the rest, show prints them all
+  target   on fork-context-ref and continued-in: the session this transcript was forked from, or continues in
+  subtype  of a system entry; compact_boundary marks a compaction
+  rewound  true when the user rewound or edited the conversation to before this entry: it is not part of
+           the final conversation, but its tool calls did run
+  hidden   with --all-entries: the rule that normally hides the entry
+  In an agent's transcript, user entries are messages from the session that started it.
+  A user entry "[Request interrupted by user]" marks where the human stopped Claude; it is not typed text.
+  sessions rows: loc, start and end (times of its first and last entries; a fork starts at its own first
+  entry, not the context it copied), branch, title (Claude Code's session title, if any), first (the first
+  human message, or slash command if none, clipped to its first line), and project with --all-projects.
+  Sessions overlap in time. A session with no human message and no reply is not listed.
+  jq selects rows: hive local show S | jq -c 'select(.tool=="Write")' lists a session's Write calls, and
+  hive local show S | jq -r '.agents[]?' lists its agent transcripts.
+
+RANGE: N, N-M or N- (to the end); give several to print several. SESSION:N also works as one argument, and can be
+  repeated; a bare RANGE is of the transcript named last.
+Hidden unless --all-entries: empty thinking, routine system entries (timings, hook summaries, API retries,
+  local command output, status notes), Claude Code's meta messages (skill text, hook feedback), task
+  notifications, user entries that are only system reminders, slash commands with no arguments or that change
+  settings (/model, /effort), slash command output, ! shell markup, the summary (and the /compact it replays)
+  written after a compaction, and subagent records that older Claude Code versions wrote inline. Nothing else
+  is hidden: tool calls and assistant replies always print. stderr says how many were hidden.
+Clipping: sessions and outline show first lines; show clips each field to 1000 chars; grep shows 200 chars
+  around the match and the first line of other fields. Cuts are marked [+N chars]. A tool input in show or
+  outline keeps its leading items up to about 3 times the clip; [+N items] counts the rest. --clip N sets
+  the size; --clip 0 turns clipping off.
+grep: -i ignore case, -F fixed string, -c count per transcript (rows {"loc":...,"count":N}), -l list
+  matching transcripts, -m N at most N entries per transcript, --agents also search the sessions' agent
+  transcripts; put -- before a PATTERN that starts with -. With --agents, compaction agents
+  (agent-acompact-...) repeat their session and are searched only when it is named. No match: exit 1.
+Scope for sessions and grep: this project and its worktrees by default; --project DIR; --all-projects.
+  A folder outside git is that folder only: the sessions started in it.
+  --since T and --until T filter by entry time. T is 2h, 7d, or a local date such as 2026-09-12;
+  --until DATE includes that whole day. show, outline and grep SESSION find the session in any project.
+Output is never capped. Size a broad grep with -c or -l first; read a session's shape with outline, its end with | tail.
+Notes and counts go to stderr. Errors exit 2 and name the cause.`;
+
+export const localErrors = {
+  prefix: (message: string): string => `hive local: ${message}`,
+  usage: (lines: string): string => `usage:\n${lines}\nhive local --help for the whole page`,
+  unknownCommand: (verb: string): string => `unknown command ${verb}`,
+  unknownFlag: (flag: string, verb: string): string => `unknown flag ${flag} for ${verb}`,
+  noValue: (flag: string): string => `${flag} takes no value`,
+  needsValue: (flag: string): string => `${flag} needs a value`,
+  badNumber: (flag: string, value: string): string => `bad value for ${flag}: "${value}" (a whole number)`,
+  badTime: (flag: string, value: string): string =>
+    `bad time "${value}" for ${flag}: use 2h, 7d, or a local date such as 2026-09-12`,
+  scopeConflict: '--project and --all-projects cannot be used together',
+  noProject: (path: string, current: boolean): string =>
+    `no Claude Code transcripts for project ${path}${current ? ' (the current project)' : ''}; use --project DIR or --all-projects`,
+  sessionsTakesNoSession: (arg: string): string => `sessions takes no SESSION ("${arg}"); use outline or show`,
+  needsSession: (verb: string): string => `${verb} needs a SESSION`,
+  outlineTakesOne: (given: string): string =>
+    `outline takes one SESSION and no range ("${given}"); show SESSION RANGE prints entries`,
+  rangeAfterSession: (message: string): string =>
+    `${message} (after SESSION, show takes ranges of the transcript named last, or SESSION:N of any transcript)`,
+  needsPattern: 'grep needs a PATTERN',
+  countOrList: '-c and -l cannot be used together',
+  notADirectory: (path: string): string => `--project ${path} is not a directory`,
+  scopeWithSession: '--project and --all-projects apply only to grep without SESSION arguments',
+  badRegex: (pattern: string, message: string): string => `bad regex "${pattern}": ${message}`,
+  outOfRange: (range: string, loc: string, total: number): string =>
+    total ? `entry ${range} is out of range: ${loc} has entries 1-${total}` : `${loc} has no entries`,
+  cannotRead: (path: string, message: string): string => `cannot read ${path}: ${message}`,
+};
+
+/** Notes and counts on stderr. */
+export const localNotes = {
+  ruleCount: (rule: string, n: number): string => `${rule} ${n}`,
+  malformed: (loc: string, lines: Array<number>): string =>
+    `warning: ${loc}: ${lines.length} malformed line${lines.length > 1 ? 's' : ''} skipped (line ${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ', ...' : ''})`,
+  unreadable: (message: string): string => `warning: ${message}`,
+  sessions: (shown: number, total: number, all: boolean, windowed: boolean): string => {
+    const where = `${all ? ' in all projects' : ''}${windowed ? ' active in the --since/--until window' : ''}`;
+    return shown < total
+      ? `${shown} of ${total} sessions${where}; -n N for more`
+      : `${total} session${total === 1 ? '' : 's'}${where}`;
+  },
+  printed: (loc: string, total: number, printed: number, hidden: number, rules: string): string =>
+    `${loc}: entries 1-${total}; printed ${printed}${hidden ? `; ${hidden} hidden by noise rules (${rules}); --all-entries shows ${hidden === 1 ? 'it' : 'them'}` : ''}`,
+  continues: (loc: string, from: string): string =>
+    `${loc}: continues ${from}, the same agent's transcript in its Workflow run`,
+  continuedIn: (loc: string, next: string): string =>
+    `${loc}: the same agent continued after its Workflow run in ${next}`,
+  /** agents is undefined when grep left agent transcripts out. */
+  searched: (sessions: number, agents: number | undefined, scope: string): string => {
+    const s = `${sessions} session${sessions === 1 ? '' : 's'}`;
+    const a = agents === undefined ? '' : `${agents} agent transcript${agents === 1 ? '' : 's'}`;
+    return `${sessions === 0 && a ? a : a ? `${s} and ${a}` : s}${scope}`;
+  },
+  agentsSkipped: '; --agents also searches their agent transcripts',
+  scopeLabel: (label: string): string => ` of ${label}`,
+  projectLabel: (path: string): string => `${path} and its worktrees`,
+  folderLabel: (path: string): string => `${path} (not a git repository: that folder only)`,
+  allProjects: 'all projects',
+  scanCap: (cap: number, total: number): string =>
+    `searching the newest ${cap.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} sessions (the --all-projects cap); narrow with --since or --project`,
+  hiddenHits: (n: number): string => `; ${n} more in hidden entries (--all-entries includes them)`,
+  noMatch: (searched: string, hidden: string): string => `no match in ${searched}${hidden}`,
+  matches: (entries: number, transcripts: number, searched: string, hidden: string): string =>
+    `${entries} matching entr${entries === 1 ? 'y' : 'ies'} in ${transcripts} transcript${transcripts === 1 ? '' : 's'}; searched ${searched}${hidden}`,
 };
 
 export const reviewCmd = {

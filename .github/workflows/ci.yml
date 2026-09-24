@@ -36,3 +36,9 @@ jobs:
 
       - name: Test
         run: bun run --filter '@alignment-hive/hive-cli' test
+
+      - name: Lint session-data
+        run: bun run --filter '@alignment-hive/session-data' lint
+
+      - name: Test session-data
+        run: bun run --filter '@alignment-hive/session-data' test

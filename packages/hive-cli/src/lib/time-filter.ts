@@ -8,38 +8,29 @@ export function parseDuration(value: string): number | null {
 
 function parseRelativeTime(value: string): Date | null {
   const ms = parseDuration(value);
-  return ms === null ? null : new Date(Date.now() - ms);
+  if (ms === null) return null;
+  // A duration reaching before 1970 is a typo, and one past Date's range would be an invalid Date.
+  const t = Date.now() - ms;
+  return t >= 0 ? new Date(t) : null;
 }
 
 function parseAbsoluteTime(value: string): Date | null {
+  const day = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!day) return null;
+  const [y, m, d] = day.slice(1).map(Number);
+  // 2026-02-30 or month 13 is an error, not a roll-over into the next month or year.
+  const probe = new Date(Date.UTC(y, m - 1, d));
+  if (probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) return null;
+
   // Date-only (YYYY-MM-DD) is local midnight; new Date('YYYY-MM-DD') would be UTC.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [y, m, d] = value.split('-').map(Number);
-    return new Date(y, m - 1, d);
-  }
+  if (value.length === 10) return new Date(y, m - 1, d);
 
+  // A date and time; anything else (`7`, `2025`) is an error, not a guess.
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(value)) return null;
   const date = new Date(value);
-  if (!isNaN(date.getTime())) return date;
-
-  return null;
+  return isNaN(date.getTime()) ? null : date;
 }
 
 export function parseTimeSpec(value: string): Date | null {
   return parseRelativeTime(value) ?? parseAbsoluteTime(value);
-}
-
-/** Returns false if the timestamp is missing or invalid. */
-export function isInTimeRange(
-  timestamp: string | undefined,
-  range: { after: Date | null; before: Date | null },
-): boolean {
-  if (!timestamp) return false;
-
-  const date = new Date(timestamp);
-  if (isNaN(date.getTime())) return false;
-
-  if (range.after && date < range.after) return false;
-  if (range.before && date > range.before) return false;
-
-  return true;
 }

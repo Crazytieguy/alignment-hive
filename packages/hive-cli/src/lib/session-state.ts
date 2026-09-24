@@ -5,7 +5,6 @@ import { createInterface } from 'node:readline';
 import { canExclude } from '@alignment-hive/session-data';
 import { getClaudeProjectDir, getMainWorktreePath, readStateFile, readTimestamp, statePaths } from './config';
 import { extractCwdFromFile } from './transcript-discovery';
-import { parseJsonl } from './session-format';
 import { findRawSessions, scanSubagentDir, toDiscoveredSession } from './session-io';
 import type { SessionStatus } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-io';
@@ -59,7 +58,7 @@ async function hasAssistantContent(path: string): Promise<boolean> {
  * main worktree — sessions with no readable cwd, or whose cwd is deleted or not a git
  * repo, are kept, so worktree and deleted-worktree discovery behave as before.
  */
-function makeProjectSessionFilter(projectCwd: string): (filePath: string) => boolean {
+export function makeProjectSessionFilter(projectCwd: string): (filePath: string) => boolean {
   const projectMain = getMainWorktreePath(projectCwd) ?? projectCwd;
   const mainCache = new Map<string, string | null>();
   return (filePath) => {
@@ -81,10 +80,10 @@ function makeProjectSessionFilter(projectCwd: string): (filePath: string) => boo
  */
 export async function discoverSessions(
   transcriptsDirs: Array<string>,
-  projectCwd: string,
+  projectCwd?: string,
 ): Promise<Array<DiscoveredSession>> {
   const dirResults = await Promise.all(transcriptsDirs.map((dir) => findRawSessions(dir).catch(() => [])));
-  const belongsToProject = makeProjectSessionFilter(projectCwd);
+  const belongsToProject = projectCwd === undefined ? () => true : makeProjectSessionFilter(projectCwd);
 
   const results = await Promise.all(
     dirResults.flat().map(async (ref) => {
@@ -100,10 +99,22 @@ export async function discoverSessions(
   return results.filter((r): r is DiscoveredSession => r !== null);
 }
 
+/** The JSON values of a state file's lines; a line torn by an interrupted append is skipped. */
+function* stateLines(content: string): Generator<unknown> {
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      yield JSON.parse(line) as unknown;
+    } catch {
+      // torn append
+    }
+  }
+}
+
 export async function loadUploadedSessions(stateDir: string): Promise<Map<string, UploadedEntry>> {
   const content = (await readStateFile(statePaths(stateDir).uploadedSessions)) ?? '';
   const map = new Map<string, UploadedEntry>();
-  for (const raw of parseJsonl(content)) {
+  for (const raw of stateLines(content)) {
     const entry = raw as UploadedEntry;
     map.set(entry.sessionId, entry);
   }
@@ -142,7 +153,7 @@ export async function recordUploadStarted(stateDir: string, sessionId: string): 
 async function loadStartedUploads(stateDir: string): Promise<Map<string, number>> {
   const content = (await readStateFile(statePaths(stateDir).startedUploads)) ?? '';
   const map = new Map<string, number>();
-  for (const raw of parseJsonl(content)) {
+  for (const raw of stateLines(content)) {
     const entry = raw as StartedEntry;
     const ts = Date.parse(entry.startedAt);
     if (isNaN(ts)) continue;

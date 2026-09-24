@@ -1,0 +1,11 @@
+{"type":"user","isMeta":true,"message":{"content":"context","role":"user"},"uuid":"uuid-0","parentUuid":null,"timestamp":"2026-01-01T00:00:00Z"}
+
+not json
+{"type":"user","message":{"content":[{"type":"text","text":"first\nquestion\there"},{"type":"text","text":"second"}],"role":"user"},"uuid":"uuid-3","parentUuid":null,"timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"consider"},{"type":"tool_use","id":"call-1","name":"Agent","input":{"prompt":"inspect","description":"review"}}],"role":"assistant"},"uuid":"uuid-4","parentUuid":null,"timestamp":"2026-01-01T00:00:00Z"}
+{"type":"user","toolUseResult":{"status":"completed","agentId":"abc","prompt":"inspect","description":"review"},"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"report"}],"role":"user"},"uuid":"uuid-5","parentUuid":null,"timestamp":"2026-01-01T00:00:00Z"}
+{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":123,"messagesSummarized":4}}
+{"type":"user","isCompactSummary":true,"message":{"content":"summary","role":"user"},"uuid":"uuid-7","parentUuid":null,"timestamp":"2026-01-01T00:00:00Z"}
+{"type":"fork-context-ref","parentSessionId":"parent","parentLastUuid":"last"}
+{"type":"continued-in","sessionId":"next"}
+{"type":"future","newField":true}

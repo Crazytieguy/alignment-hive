@@ -4,15 +4,20 @@ import { basename, dirname, join } from 'node:path';
 import {
   WorkflowRunBlobSchema,
   computeConsentWindows,
-  extractSessionSummary,
+  countsAsLine,
   extractWorkflowRunRow,
   formatSessionStatus,
   isInConsentWindow,
+  parseTranscript,
+  readRecords,
+  readTranscript,
+  sessionSummary,
+  uploadRecord,
 } from '@alignment-hive/session-data';
 import { getClaudeProjectDir, isSharingDisabledLocally, readStateFile, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { hive } from './messages';
-import { buildSessionMeta, parseEntries } from './session-format';
+import { buildSessionMeta } from './session-format';
 import { sanitizeDeep, sanitizeString } from './sanitize';
 import {
   computeSessionStatus,
@@ -53,13 +58,17 @@ export async function mapBatched<T, TResult>(
   return out;
 }
 
-/** Read, parse, and sanitize a session file. Also extracts cwds for worktree agent discovery. */
+/** Read a session file into its sanitized upload records. Also extracts cwds for worktree agent discovery. */
 export async function readAndSanitizeSession(sessionPath: string) {
   const rawContent = await readFile(sessionPath, 'utf-8');
-  const entries = parseEntries(rawContent);
-  const rawSummary = extractSessionSummary(entries);
+  const { records } = readRecords(rawContent);
+  const rawSummary = sessionSummary(readTranscript(records));
   return {
-    sanitizedEntries: entries.map((e) => sanitizeDeep(e)),
+    sanitizedEntries: records
+      .map(uploadRecord)
+      .filter((e) => e !== undefined)
+      .map((e) => sanitizeDeep(e)),
+    lineCount: records.filter(countsAsLine).length,
     summary: rawSummary ? sanitizeString(rawSummary) : undefined,
     cwds: extractCwds(rawContent),
   };
@@ -68,7 +77,7 @@ export async function readAndSanitizeSession(sessionPath: string) {
 export type SessionReadResult = Awaited<ReturnType<typeof readAndSanitizeSession>>;
 
 export async function readSessionSummary(sessionPath: string): Promise<string> {
-  const summary = extractSessionSummary(parseEntries(await readFile(sessionPath, 'utf-8')));
+  const summary = sessionSummary(parseTranscript(await readFile(sessionPath, 'utf-8')));
   return summary ? sanitizeString(summary) : '';
 }
 
@@ -379,7 +388,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
       sessionId: parent.sessionId,
       storageId: parentStorageId,
       summary: parentRead.summary,
-      lineCount: parentRead.sanitizedEntries.length,
+      lineCount: parentRead.lineCount,
     },
   ]);
 
@@ -411,7 +420,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
           sessionId: agent.sessionId,
           storageId: await send(url, content),
           summary: agentRead.summary,
-          lineCount: agentRead.sanitizedEntries.length,
+          lineCount: agentRead.lineCount,
           parentSessionId: parent.sessionId,
           ...(agent.agentType && { agentType: agent.agentType }),
           ...(agent.workflowRunId && { workflowRunId: agent.workflowRunId }),

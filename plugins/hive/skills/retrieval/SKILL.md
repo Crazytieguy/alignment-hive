@@ -1,93 +1,41 @@
 ---
 name: retrieval
 description: Retrieval instructions for searching session history. Auto-loaded by the hive:retrieval agent - prefer spawning that agent rather than invoking this skill directly.
-allowed-tools: Bash(hive local search:*), Bash(hive local read:*), Bash(hive local index:*), Bash(printf:*), Bash(git log:*)
+allowed-tools: Bash(hive local:*)
 ---
 
-Approach this as memory archaeology: excavate layers of project history to uncover relevant artifacts.
+## Goal
 
-**Retrieval, not interpretation.** Bring back direct quotes with timestamps; the caller does the analysis.
+Information from past sessions that bears on the caller's topic, whether or not they knew to ask for it: the reasoning that led to implementation decisions, user preferences about the domain, user preferences about process, failed approaches and why, and open issues that touch the work. User messages are the richest source; prioritize quoting them.
 
-Try multiple query variants, check multiple candidate sessions, and cross-reference with git history. The session index below is worth scanning even when keyword search doesn't match — relevant context often uses different words.
+## Contract
 
-## What to Look For
-
-**User messages are the richest source.** They contain preferences, insights, decisions, and context—and tend to be concise. Prioritize searching and quoting user messages over other content.
-
-Think broadly about what might be relevant:
-
-- **Explicit decisions** - Discussions where choices were made
-- **Implicit decisions** - Thinking blocks, brief comments, or code changes that reveal a choice without discussion
-- **User preferences** - How they like to work, communicate, approach problems
-- **Debugging sessions** - Past issues, error patterns, workarounds, things that were tried
-- **Failed approaches** - What didn't work and why (often more valuable than what did)
-- **Outstanding issues** - Known problems, limitations, tech debt that might affect current work
-- **Dependencies** - Related decisions that inform or constrain the current question
-- **Temporary work** - One-off scripts, exploratory analysis, or workarounds that solved similar problems (even if later removed)
-
-A question about evaluation prompts might lead to finding: past iterations and results, discussions about the model being evaluated, user preferences about methodology, and even unrelated experiments that revealed something about the target behavior.
-
-Also look for indirect mentions of the topic and decisions that would affect it even when the topic isn't named.
+Quote verbatim; do not interpret or summarize. Label each quote `[user]`, `[assistant]`, `[thinking]`, or `[tool]` with its `loc` and date. One short context line per quote is fine (what was being worked on, what the quote answers); the quote itself stays exact. When an ask has no hit, say so under Gaps.
 
 ## Tools
 
-Use Bash to run CLI commands and git. Cross-reference between them—commits and sessions often illuminate each other.
-
-### CLI Commands
-
-Run commands via `hive local <command>`. Add `--agents` to `search` when the relevant work was delegated to a subagent; by default only top-level sessions are searched.
-
-`search --help`:
-```
-!`hive local search --help 2>&1 || echo "(command failed — see error above)"`
-```
-
-`read --help`:
-```
-!`hive local read --help 2>&1 || echo "(command failed — see error above)"`
-```
-
-## Project History
-
-`git log --oneline -n 200` (run `git log` yourself for older history):
-```
-!`git log --oneline -n 200 2>/dev/null || echo "(no git history available)"`
-```
-
-Session index:
-```
-!`hive local index --escape-file-refs 2>&1 || echo "(command failed — see error above)"`
-```
-
-## Output Format
-
-**Return direct quotes, not analysis.** Output should be mostly blockquotes from session history. Do not interpret, explain, or summarize what the quotes mean—the caller will do that.
-
-**Label the source.** Always indicate where a quote comes from: user message, assistant response, thinking block, tool input, etc. This helps the caller understand the context and weight of each quote.
+`hive local` reads Claude Code transcripts by session and entry: list sessions, outline one, grep across them, show entries.
 
 ```
+!`hive local --help 2>/dev/null || echo "(hive local --help unavailable)"`
+```
+
+To find the latest entries across sessions, merge by time and stop at a session whose end is older than what you need.
+
+Use git commands if they help, but past sessions are the primary source.
+
+## Output
+
+```markdown
 ## Findings
 
-**[Topic]** (session 02ed, around Jan 3; commits abc1234, def5678)
-
-> [user] "Direct quote from the session that captures the key point..."
-
-> [assistant] "Another relevant quote, possibly from a different part of the discussion..."
-
-> [thinking] "Internal reasoning that reveals the decision process..."
-
-[One sentence connecting the quotes if needed]
-
-**[Related context]** (session ec4d, Dec 30)
-
-> [user] "Earlier quote that provides background..."
+<Context line, optional>
+> [<source>] <verbatim quote> (<loc>, <date>)
 
 ## User Preferences Noted
 
-> [user] "I prefer X over Y because..." (session 6e85, Jan 2)
+> [user] <verbatim quote> (<loc>, <date>)
 
 ## Gaps
-- [What was looked for but not found]
+- <Ask without a hit>
 ```
-
-Note uncertainty when findings are related but not exact. If the requested information was not found, say so clearly—absence of evidence is also useful information.

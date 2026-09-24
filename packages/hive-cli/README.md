@@ -10,16 +10,15 @@ Before committing, `bun run --filter '@alignment-hive/hive-cli' test` and `bun r
 
 User-facing strings (CLI output, errors, help) live in `src/lib/messages.ts`.
 
-## Regenerating Snapshot Tests
+## Local Transcript Inspection
 
-The format tests use custom snapshot logic. To update snapshots:
-```bash
-UPDATE_SNAPSHOTS=1 bun run --filter '@alignment-hive/hive-cli' test
-```
+`hive local` (`sessions`, `outline`, `show`, `grep`) reads local Claude Code transcripts without changing sharing settings or the transcript-directory registry. Its one help page, `localHelp` in `src/lib/messages.ts`, is the reference.
+
+It reads transcripts only through `@alignment-hive/session-data` (`parseTranscript`; hiding and selection in `noise.ts`) and resolves locators only through `src/lib/locators.ts`, which `hive review render` shares, so both print and accept the same entry numbers.
 
 ## Version Sync
 
-Bump `plugins/hive/cli-version` together with `package.json` (`bootstrap.sh` downloads the binary for that version), then bump the plugin version so the marketplace ships the new file. The retrieval skill embeds `hive local search --help` and `read --help` at load, so keep `usage` in `src/lib/messages.ts` current when flags change.
+For a release, bump `plugins/hive/cli-version` together with `package.json` (`bootstrap.sh` downloads the binary for that version), then bump the plugin version so the marketplace ships the new file. The retrieval skill injects `hive local --help` whole, so a change to that page is a change to the skill.
 
 ## Dev Binary
 

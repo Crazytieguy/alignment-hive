@@ -1,9 +1,10 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   addTranscriptsDirs,
+  claudeProjectsRoot,
   getOrCreateCheckoutId,
   loadTranscriptsDirs,
   statePaths,
@@ -40,6 +41,23 @@ describe('toClaudeProjectDirName', () => {
     // this path's hash is negative before Math.abs.
     const path = `/Users/yoav/.claude/jobs/a68fc070/tmp/neg2/${'y'.repeat(180)}/n0`;
     expect(toClaudeProjectDirName(path)).toBe(`-Users-yoav--claude-jobs-a68fc070-tmp-neg2-${'y'.repeat(157)}-4qn7dy`);
+  });
+});
+
+describe('claudeProjectsRoot', () => {
+  test('follows CLAUDE_CONFIG_DIR, as Claude Code does', () => {
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      delete process.env.CLAUDE_CONFIG_DIR;
+      expect(claudeProjectsRoot()).toBe(join(homedir(), '.claude', 'projects'));
+      process.env.CLAUDE_CONFIG_DIR = '/tmp/alt-claude';
+      expect(claudeProjectsRoot()).toBe('/tmp/alt-claude/projects');
+      process.env.CLAUDE_CONFIG_DIR = '~/alt';
+      expect(claudeProjectsRoot()).toBe(join(homedir(), 'alt', 'projects'));
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = saved;
+    }
   });
 });
 

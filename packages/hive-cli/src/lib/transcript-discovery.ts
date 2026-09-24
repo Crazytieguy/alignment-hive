@@ -1,10 +1,11 @@
 import { execSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { getToolResultText, isKnownContentBlock, parseKnownEntry } from '@alignment-hive/session-data';
+import { parseTranscript } from '@alignment-hive/session-data';
 import {
   addTranscriptsDirs,
+  claudeProjectDirPrefix,
+  claudeProjectsRoot,
   getClaudeProjectDir,
   getMainWorktreePath,
   listWorktreePaths,
@@ -92,8 +93,8 @@ export function extractCwd(projectDir: string): string | null {
 const GIT_LOG_HASH_PATTERN = /\b([a-f0-9]{7,12})\b/g;
 
 /**
- * Commit hashes from the first `git log` Bash result in the file. Lines are only JSON-parsed
- * when they could hold a git log tool_use or a pending tool_result.
+ * Commit hashes from the first `git log` Bash result in the file. Only lines that could hold a
+ * git log call or a tool result are parsed.
  */
 function extractGitLogHashes(filePath: string): Array<string> {
   let content: string;
@@ -102,64 +103,15 @@ function extractGitLogHashes(filePath: string): Array<string> {
   } catch {
     return [];
   }
-
   if (!content.includes('git log')) return [];
-
-  const lines = content.split('\n');
-  const pendingToolIds = new Set<string>();
-
-  for (const line of lines) {
-    if (!line) continue;
-
-    const hasGitLog = line.includes('git log');
-    const hasToolResult = pendingToolIds.size > 0 && line.includes('tool_result');
-    if (!hasGitLog && !hasToolResult) continue;
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
-    const entry = parseKnownEntry(parsed);
-    if (!entry) continue;
-
-    if (entry.type === 'assistant' && hasGitLog) {
-      const contentArr = entry.message.content;
-      if (!Array.isArray(contentArr)) continue;
-
-      for (const block of contentArr) {
-        if (!isKnownContentBlock(block)) continue;
-        if (
-          block.type === 'tool_use' &&
-          block.name === 'Bash' &&
-          typeof block.input.command === 'string' &&
-          block.input.command.includes('git log')
-        ) {
-          pendingToolIds.add(block.id);
-        }
-      }
-    } else if (entry.type === 'user' && hasToolResult) {
-      const contentArr = entry.message.content;
-      if (!Array.isArray(contentArr)) continue;
-
-      for (const block of contentArr) {
-        if (!isKnownContentBlock(block)) continue;
-        if (block.type === 'tool_result' && pendingToolIds.has(block.tool_use_id)) {
-          pendingToolIds.delete(block.tool_use_id);
-
-          const text = getToolResultText(block.content);
-          const hashes: Array<string> = [];
-          for (const match of text.matchAll(GIT_LOG_HASH_PATTERN)) {
-            hashes.push(match[1]);
-          }
-          if (hashes.length > 0) return hashes;
-        }
-      }
-    }
+  const lines = content.split('\n').filter((line) => line.includes('git log') || line.includes('tool_result'));
+  for (const e of parseTranscript(lines.join('\n')).entries) {
+    if (e.kind !== 'tool' || e.tool !== 'Bash' || e.result === undefined) continue;
+    const command = e.input.command;
+    if (typeof command !== 'string' || !command.includes('git log')) continue;
+    const hashes = [...e.result.matchAll(GIT_LOG_HASH_PATTERN)].map((m) => m[1]);
+    if (hashes.length > 0) return hashes;
   }
-
   return [];
 }
 
@@ -201,42 +153,56 @@ export interface TranscriptScanData {
   cwdMap: Map<string, string>;
 }
 
-/**
- * Scan ~/.claude/projects/ once, extracting cwds and resolving main worktree paths.
- * Returns both a main-path map (for Strategy 2) and a cwd cache (for Strategies 3-4).
- */
-function buildTranscriptScanData(): TranscriptScanData {
-  const projectsBase = join(homedir(), '.claude', 'projects');
-  const mainPathMap = new Map<string, Array<string>>();
+/** The recorded cwd of each project dir under `root` whose name `keep` accepts. No git calls. */
+function scanCwds(root: string, keep: (name: string) => boolean = () => true): Map<string, string> {
   const cwdMap = new Map<string, string>();
-
   try {
-    const entries = readdirSync(projectsBase, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const transcriptDir = join(projectsBase, entry.name);
-
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !keep(entry.name)) continue;
+      const transcriptDir = join(root, entry.name);
       const cwd = extractCwd(transcriptDir);
-      if (!cwd) continue;
-      cwdMap.set(transcriptDir, cwd);
-
-      if (!existsSync(cwd)) continue;
-
-      const mainPath = getMainWorktreePath(cwd);
-      if (!mainPath) continue;
-
-      let dirs = mainPathMap.get(mainPath);
-      if (!dirs) {
-        dirs = [];
-        mainPathMap.set(mainPath, dirs);
-      }
-      dirs.push(transcriptDir);
+      if (cwd) cwdMap.set(transcriptDir, cwd);
     }
   } catch {
     // missing or unreadable projects dir
   }
+  return cwdMap;
+}
 
+/**
+ * Scan ~/.claude/projects/ once, extracting cwds and resolving main worktree paths.
+ * Returns both a main-path map (for Strategy 2) and a cwd cache (for Strategies 3-4).
+ */
+export function buildTranscriptScanData(): TranscriptScanData {
+  const mainPathMap = new Map<string, Array<string>>();
+  const cwdMap = scanCwds(claudeProjectsRoot());
+  for (const [transcriptDir, cwd] of cwdMap) {
+    if (!existsSync(cwd)) continue;
+    const mainPath = getMainWorktreePath(cwd);
+    if (!mainPath) continue;
+    let dirs = mainPathMap.get(mainPath);
+    if (!dirs) {
+      dirs = [];
+      mainPathMap.set(mainPath, dirs);
+    }
+    dirs.push(transcriptDir);
+  }
   return { mainPathMap, cwdMap };
+}
+
+/**
+ * Scan data for one project, for read-only inspection: a dir is the project's when its recorded
+ * cwd is one of `worktrees` (the project's `git worktree list`) or under one. Only dirs named like
+ * such a path are read, and no git call is made per dir. Consent keeps the repo check of
+ * buildTranscriptScanData (see Strategy 3 on nested repos); `hive local` drops another repo's
+ * sessions with makeProjectSessionFilter.
+ */
+export function projectScanData(root: string, main: string, worktrees: Array<string>): TranscriptScanData {
+  const prefixes = worktrees.map(claudeProjectDirPrefix);
+  const cwdMap = scanCwds(root, (name) => prefixes.some((p) => name.startsWith(p)));
+  const under = (cwd: string) => worktrees.some((w) => cwd === w || cwd.startsWith(`${w}/`));
+  const dirs = [...cwdMap].filter(([, cwd]) => under(cwd)).map(([dir]) => dir);
+  return { mainPathMap: new Map([[main, dirs]]), cwdMap };
 }
 
 export interface DiscoverResult {
@@ -244,15 +210,14 @@ export interface DiscoverResult {
   discovered: number;
 }
 
-/** Find transcript dirs belonging to this project (the numbered strategies below) and register them. */
-export async function discoverWorktreeTranscriptDirs(
+/** Read-only resolver shared by inspection and consent. Hash verification is opt-in. */
+export function resolveTranscriptDirs(
   projectDir: string,
-  stateDir: string,
   scanData: TranscriptScanData,
+  registry: Array<string>,
   commitHashCandidates: Map<string, Array<string>> = new Map(),
-): Promise<DiscoverResult> {
-  const existing = await loadTranscriptsDirs(stateDir);
-  const existingSet = new Set(existing);
+): Array<string> {
+  const existingSet = new Set(registry);
   const discovered: Array<string> = [];
 
   function addIfNew(dir: string): void {
@@ -301,8 +266,20 @@ export async function discoverWorktreeTranscriptDirs(
     }
   }
 
-  await addTranscriptsDirs(stateDir, discovered);
+  return [...registry, ...discovered];
+}
 
+/** Consent-time persistence wrapper; local inspection never calls it. */
+export async function discoverWorktreeTranscriptDirs(
+  projectDir: string,
+  stateDir: string,
+  scanData: TranscriptScanData,
+  commitHashCandidates: Map<string, Array<string>> = new Map(),
+): Promise<DiscoverResult> {
+  const existing = await loadTranscriptsDirs(stateDir);
+  const resolved = resolveTranscriptDirs(projectDir, scanData, existing, commitHashCandidates);
+  const discovered = resolved.filter((dir) => !existing.includes(dir));
+  await addTranscriptsDirs(stateDir, discovered);
   return { existing: existing.length, discovered: discovered.length };
 }
 

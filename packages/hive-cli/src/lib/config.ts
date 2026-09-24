@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { findGroupForIdentifiers } from '@alignment-hive/session-data';
 
 // Env is read inside these functions, not at module load: cli.ts loads the dev .env files
@@ -24,6 +24,11 @@ export function getStateDir(cwd: string): string {
   return join(getMainWorktreePath(cwd) ?? cwd, '.claude', 'hive');
 }
 
+/** The state dir the plugin kept before its rename (hive-mind); only read, for what it registered. */
+export function legacyStateDir(cwd: string): string {
+  return join(getMainWorktreePath(cwd) ?? cwd, '.claude', 'hive-mind');
+}
+
 // Claude Code's own project-dir hash (Java-style string hash over the original path).
 function claudeProjectDirHash(path: string): number {
   let hash = 0;
@@ -41,6 +46,11 @@ const CLAUDE_PROJECT_DIR_MAX_LENGTH = 200;
  * /Users/foo/x.y → -Users-foo-x-y), and names over 200 chars are truncated to 200 plus
  * '-<base36 hash of the original path>' to keep long paths from colliding.
  */
+/** The start of the transcript dir name of this path and of every path under it. */
+export function claudeProjectDirPrefix(absolutePath: string): string {
+  return toClaudeProjectDirName(absolutePath).slice(0, CLAUDE_PROJECT_DIR_MAX_LENGTH);
+}
+
 export function toClaudeProjectDirName(absolutePath: string): string {
   const sanitized = absolutePath.replace(/[^a-zA-Z0-9]/g, '-');
   if (sanitized.length <= CLAUDE_PROJECT_DIR_MAX_LENGTH) return sanitized;
@@ -48,9 +58,16 @@ export function toClaudeProjectDirName(absolutePath: string): string {
   return `${sanitized.slice(0, CLAUDE_PROJECT_DIR_MAX_LENGTH)}-${suffix}`;
 }
 
+/** Where Claude Code keeps every project's transcript directory: under CLAUDE_CONFIG_DIR when set, else ~/.claude. */
+export function claudeProjectsRoot(): string {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  const config = dir ? (dir.startsWith('~/') ? join(homedir(), dir.slice(2)) : resolve(dir)) : join(homedir(), '.claude');
+  return join(config, 'projects');
+}
+
 /** Get the full Claude project directory path for a given cwd. */
 export function getClaudeProjectDir(cwd: string): string {
-  return join(homedir(), '.claude', 'projects', toClaudeProjectDirName(cwd));
+  return join(claudeProjectsRoot(), toClaudeProjectDirName(cwd));
 }
 
 export async function ensureStateDir(stateDir: string): Promise<void> {

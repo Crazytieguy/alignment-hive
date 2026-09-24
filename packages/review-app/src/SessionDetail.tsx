@@ -2,21 +2,16 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc";
 import { Alert, SessionViewer, Button, formatSessionId } from "@alignment-hive/ui";
 import {
-  parseSession,
-  parseKnownEntry,
+  readTranscript,
+  toRecord,
   // Shared status rules — the exclusion veto is privacy-critical and must match the CLI exactly.
   canExclude,
   canUpload,
-  type KnownEntry,
 } from "@alignment-hive/session-data";
 
-function parseAndBuildBlocks(rawEntries: Array<unknown>) {
-  const entries: KnownEntry[] = [];
-  for (const rawEntry of rawEntries) {
-    const entry = parseKnownEntry(rawEntry);
-    if (entry) entries.push(entry);
-  }
-  return parseSession(entries);
+/** The upload records the review server sends, parsed as the web viewer will parse the upload. */
+function parseEntries(uploadRecords: Array<unknown>) {
+  return readTranscript(uploadRecords.flatMap((r) => toRecord(r) ?? [])).entries;
 }
 
 interface SessionDetailProps {
@@ -113,7 +108,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
     );
   }
 
-  const blocks = parseAndBuildBlocks(viewingAgent ? viewingAgent.entries : data.entries);
+  const entries = parseEntries(viewingAgent ? viewingAgent.entries : data.entries);
 
   const displayId = viewingAgent ? viewingAgent.sessionId : sessionId;
   const hasSidebar = data.agents.length > 0 || (data.workflowRuns?.length ?? 0) > 0 || viewingAgent;
@@ -165,7 +160,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
 
       <div className={`grid gap-4 ${hasSidebar ? "lg:grid-cols-[1fr_300px]" : ""}`}>
         <div>
-          <SessionViewer blocks={blocks} />
+          <SessionViewer entries={entries} />
         </div>
 
         {hasSidebar && (

@@ -1,21 +1,16 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import {
-  parseSession,
-  parseKnownEntry,
-  type LogicalBlock,
-  type KnownEntry,
-} from "@alignment-hive/session-data";
+import { parseTranscript, type Entry } from "@alignment-hive/session-data";
 import { formatSessionId } from "../lib/format";
 
 interface SessionViewerProps {
-  blocks?: LogicalBlock[];
+  entries?: Entry[];
   /** Optional render function for agent links (router-agnostic) */
   renderAgentLink?: (agentId: string) => ReactNode;
 }
 
-/** Session viewer that takes pre-parsed blocks directly */
-export function SessionViewer({ blocks, renderAgentLink }: SessionViewerProps) {
+/** Session viewer that takes parsed entries directly */
+export function SessionViewer({ entries, renderAgentLink }: SessionViewerProps) {
   const [expandedBlocks, setExpandedBlocks] = useState<Set<number>>(new Set());
 
   const toggleExpand = useCallback((index: number) => {
@@ -30,17 +25,17 @@ export function SessionViewer({ blocks, renderAgentLink }: SessionViewerProps) {
     });
   }, []);
 
-  if (!blocks) {
+  if (!entries) {
     return null;
   }
 
   return (
     <div className="rounded-lg border border-border bg-card">
       <div className="border-b border-border px-4 py-2 text-sm text-muted-foreground">
-        {blocks.length} blocks
+        {entries.length} entries
       </div>
       <VirtualizedBlockList
-        blocks={blocks}
+        entries={entries}
         expandedBlocks={expandedBlocks}
         onToggleExpand={toggleExpand}
         renderAgentLink={renderAgentLink}
@@ -58,7 +53,7 @@ interface SessionViewerFromUrlProps {
 
 /** Session viewer that fetches and parses session data from a URL */
 export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFromUrlProps) {
-  const [blocks, setBlocks] = useState<LogicalBlock[] | null>(null);
+  const [entries, setEntries] = useState<Entry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -72,24 +67,13 @@ export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFrom
           throw new Error(`Failed to fetch: ${response.status}`);
         }
 
-        const text = await response.text();
-        const lines = text.split("\n").filter((line) => line.trim());
-
-        if (lines.length < 2) {
+        const { entries } = parseTranscript(await response.text());
+        if (entries.length === 0) {
           throw new Error("Empty session file");
         }
 
-        const entries: KnownEntry[] = [];
-        for (let i = 1; i < lines.length; i++) {
-          try {
-            const raw = JSON.parse(lines[i]);
-            const entry = parseKnownEntry(raw);
-            if (entry) entries.push(entry);
-          } catch {}
-        }
-
         if (!cancelled) {
-          setBlocks(parseSession(entries));
+          setEntries(entries);
           setLoading(false);
         }
       } catch (err) {
@@ -122,18 +106,18 @@ export function SessionViewerFromUrl({ url, renderAgentLink }: SessionViewerFrom
     );
   }
 
-  return <SessionViewer blocks={blocks ?? undefined} renderAgentLink={renderAgentLink} />;
+  return <SessionViewer entries={entries ?? undefined} renderAgentLink={renderAgentLink} />;
 }
 
 interface VirtualizedBlockListProps {
-  blocks: LogicalBlock[];
+  entries: Entry[];
   expandedBlocks: Set<number>;
   onToggleExpand: (index: number) => void;
   renderAgentLink?: (agentId: string) => ReactNode;
 }
 
 function VirtualizedBlockList({
-  blocks,
+  entries,
   expandedBlocks,
   onToggleExpand,
   renderAgentLink,
@@ -141,7 +125,7 @@ function VirtualizedBlockList({
   const parentRef = useRef<HTMLDivElement>(null);
 
   const virtualizer = useVirtualizer({
-    count: blocks.length,
+    count: entries.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => (expandedBlocks.has(index) ? 320 : 28),
     overscan: 10,
@@ -182,7 +166,7 @@ function VirtualizedBlockList({
             }}
           >
             <BlockRow
-              block={blocks[virtualItem.index]}
+              entry={entries[virtualItem.index]}
               isExpanded={expandedBlocks.has(virtualItem.index)}
               onToggle={() => onToggleExpand(virtualItem.index)}
               renderAgentLink={renderAgentLink}
@@ -195,20 +179,17 @@ function VirtualizedBlockList({
 }
 
 interface BlockRowProps {
-  block: LogicalBlock;
+  entry: Entry;
   isExpanded: boolean;
   onToggle: () => void;
   renderAgentLink?: (agentId: string) => ReactNode;
 }
 
-function BlockRow({ block, isExpanded, onToggle, renderAgentLink }: BlockRowProps) {
-  const summary = getBlockSummary(block);
-  const typeLabel = getTypeLabel(block);
-  const typeColor = getTypeColor(block);
-
-  const isTaskBlock =
-    block.type === "tool" && "toolName" in block && block.toolName === "Task";
-  const agentId = isTaskBlock && "agentId" in block ? block.agentId : null;
+function BlockRow({ entry, isExpanded, onToggle, renderAgentLink }: BlockRowProps) {
+  const summary = getBlockSummary(entry);
+  const typeLabel = getTypeLabel(entry);
+  const typeColor = getTypeColor(entry);
+  const agentId = entry.kind === "tool" ? entry.agentId : undefined;
 
   if (!isExpanded) {
     return (
@@ -217,7 +198,7 @@ function BlockRow({ block, isExpanded, onToggle, renderAgentLink }: BlockRowProp
         className="flex h-7 w-full cursor-pointer items-center gap-2 px-4 text-left text-sm hover:bg-muted/50"
       >
         <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">
-          {block.lineNumber}
+          {entry.n}
         </span>
         <span
           className={`w-16 shrink-0 font-mono text-xs font-medium ${typeColor}`}
@@ -227,12 +208,12 @@ function BlockRow({ block, isExpanded, onToggle, renderAgentLink }: BlockRowProp
         <span className="truncate text-muted-foreground">{summary}</span>
         {agentId && renderAgentLink && (
           <span className="ml-auto shrink-0" onClick={(e) => e.stopPropagation()}>
-            {renderAgentLink(agentId as string)}
+            {renderAgentLink(agentId)}
           </span>
         )}
         {agentId && !renderAgentLink && (
           <span className="ml-auto shrink-0 font-mono text-xs text-primary">
-            {formatSessionId(agentId as string)}
+            {formatSessionId(agentId)}
           </span>
         )}
       </div>
@@ -246,7 +227,7 @@ function BlockRow({ block, isExpanded, onToggle, renderAgentLink }: BlockRowProp
         className="flex h-7 w-full items-center gap-2 bg-muted/50 px-4 text-left text-sm"
       >
         <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">
-          {block.lineNumber}
+          {entry.n}
         </span>
         <span
           className={`w-16 shrink-0 font-mono text-xs font-medium ${typeColor}`}
@@ -259,27 +240,27 @@ function BlockRow({ block, isExpanded, onToggle, renderAgentLink }: BlockRowProp
         className="overflow-auto bg-muted/25 p-4"
         style={{ maxHeight: "50vh" }}
       >
-        <BlockContent block={block} />
+        <BlockContent entry={entry} />
       </div>
     </div>
   );
 }
 
-function BlockContent({ block }: { block: LogicalBlock }) {
-  if (block.type === "tool" && "toolInput" in block) {
+function BlockContent({ entry }: { entry: Entry }) {
+  if (entry.kind === "tool") {
     return (
       <div className="space-y-2 font-mono text-xs">
         <div>
           <div className="mb-1 text-muted-foreground">Input:</div>
           <pre className="whitespace-pre-wrap break-all text-foreground">
-            {JSON.stringify(block.toolInput, null, 2)}
+            {JSON.stringify(entry.input, null, 2)}
           </pre>
         </div>
-        {block.toolResult && (
+        {entry.result !== undefined && (
           <div>
             <div className="mb-1 text-muted-foreground">Result:</div>
             <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-foreground">
-              {block.toolResult}
+              {entry.result}
             </pre>
           </div>
         )}
@@ -287,69 +268,55 @@ function BlockContent({ block }: { block: LogicalBlock }) {
     );
   }
 
-  if ("content" in block) {
-    return (
-      <pre className="whitespace-pre-wrap break-words font-mono text-xs text-foreground">
-        {block.content}
-      </pre>
-    );
-  }
-
-  return null;
+  return (
+    <pre className="whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+      {entryText(entry)}
+    </pre>
+  );
 }
 
-function getBlockSummary(block: LogicalBlock): string {
-  if (block.type === "tool" && "toolName" in block) {
-    if ((block.toolName === "Edit" || block.toolName === "Read" || block.toolName === "Write") && "toolInput" in block) {
-      const input = block.toolInput as { file_path?: string };
-      return input.file_path ?? block.toolName;
-    }
-    if (block.toolName === "Bash" && "toolInput" in block) {
-      const input = block.toolInput as { command?: string };
-      return input.command?.slice(0, 80) ?? block.toolName;
-    }
-    if (block.toolName === "Task" && "toolInput" in block) {
-      const input = block.toolInput as {
-        subagent_type?: string;
-        description?: string;
-      };
-      return `${input.subagent_type ?? "Task"}: ${input.description ?? ""}`;
-    }
-    return block.toolName;
+function entryText(entry: Exclude<Entry, { kind: "tool" }>): string {
+  if (entry.kind === "other") return entry.type;
+  return "target" in entry ? entry.target : entry.text;
+}
+
+function getBlockSummary(entry: Entry): string {
+  if (entry.kind === "tool") {
+    const input = entry.input as { file_path?: string; command?: string; subagent_type?: string; description?: string };
+    if (entry.tool === "Edit" || entry.tool === "Read" || entry.tool === "Write") return input.file_path ?? entry.tool;
+    if (entry.tool === "Bash") return input.command?.slice(0, 80) ?? entry.tool;
+    if (entry.tool === "Task" || entry.tool === "Agent")
+      return `${input.subagent_type ?? entry.tool}: ${input.description ?? ""}`;
+    return entry.tool;
   }
 
-  if (block.type === "thinking" && "content" in block) {
-    const wordCount = block.content.split(/\s+/).length;
+  if (entry.kind === "thinking") {
+    const wordCount = entry.text.split(/\s+/).length;
     return `${wordCount} words`;
   }
 
-  if ("content" in block) {
-    return truncate(block.content, 100);
-  }
-
-  return "";
+  return truncate(entryText(entry), 100);
 }
 
-function getTypeLabel(block: LogicalBlock): string {
-  if (block.type === "tool" && "toolName" in block) {
+function getTypeLabel(entry: Entry): string {
+  if (entry.kind === "tool") {
     const toolAbbrevs: Record<string, string> = {
       WebFetch: "FETCH",
       TodoWrite: "TODO",
     };
-    return (
-      toolAbbrevs[block.toolName] ?? block.toolName.toUpperCase().slice(0, 6)
-    );
+    return toolAbbrevs[entry.tool] ?? entry.tool.toUpperCase().slice(0, 6);
   }
+  if (entry.kind === "user" && entry.isCompactSummary) return "SUMM";
   const typeAbbrevs: Record<string, string> = {
     thinking: "THINK",
     assistant: "ASST",
-    summary: "SUMM",
   };
-  return typeAbbrevs[block.type] ?? block.type.toUpperCase();
+  return typeAbbrevs[entry.kind] ?? entry.kind.toUpperCase();
 }
 
-function getTypeColor(block: LogicalBlock): string {
-  switch (block.type) {
+function getTypeColor(entry: Entry): string {
+  if (entry.kind === "user" && entry.isCompactSummary) return "text-cyan-600 dark:text-cyan-400";
+  switch (entry.kind) {
     case "user":
       return "text-blue-600 dark:text-blue-400";
     case "assistant":
@@ -360,8 +327,6 @@ function getTypeColor(block: LogicalBlock): string {
       return "text-orange-600 dark:text-orange-400";
     case "system":
       return "text-gray-600 dark:text-gray-400";
-    case "summary":
-      return "text-cyan-600 dark:text-cyan-400";
     default:
       return "text-muted-foreground";
   }

@@ -2,6 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { SessionMetaSchema, parseTranscript } from '@alignment-hive/session-data';
+import { buildSessionMeta } from '../lib/session-format';
 import { statePaths } from '../lib/config';
 import { hive } from '../lib/messages';
 import {
@@ -142,6 +144,79 @@ describe('readParseableRunBlobs', () => {
 });
 
 describe('readAndSanitizeSession', () => {
+  test('upload records keep titles, queued messages and chain stubs, redact secrets, and number like the local file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-fields-'));
+    try {
+      const token = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
+      const path = join(dir, 's.jsonl');
+      await writeFile(
+        path,
+        [
+          {
+            type: 'user',
+            uuid: 'u',
+            parentUuid: null,
+            timestamp: 't',
+            message: { role: 'user', content: 'report' },
+            toolUseResult: { status: 'completed', agentId: 'a', description: 'review', prompt: `inspect ${token}` },
+          },
+          {
+            type: 'system',
+            subtype: 'compact_boundary',
+            compactMetadata: { trigger: 'auto', preTokens: 42, messagesSummarized: 3 },
+            isCompactSummary: false,
+          },
+          { type: 'fork-context-ref', parentSessionId: 'parent', parentLastUuid: 'last', context: token },
+          { type: 'continued-in', sessionId: 'next', context: token },
+          { type: 'custom-title', customTitle: 'kept since titles name sessions' },
+          { type: 'attachment', uuid: 'q', attachment: { type: 'queued_command', prompt: `also ${token}`, cwd: '/x' } },
+          { type: 'attachment', uuid: 'h', attachment: { type: 'hook_success', stdout: 'local only' } },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join('\n'),
+      );
+      const { sanitizedEntries, lineCount } = await readAndSanitizeSession(path);
+      const meta = buildSessionMeta({
+        sessionId: 's',
+        checkoutId: 'c',
+        rawMtime: 't',
+        messageCount: sanitizedEntries.length,
+      });
+      expect(SessionMetaSchema.safeParse(meta).success).toBe(true);
+      expect(sanitizedEntries.map((entry) => entry.type)).toEqual([
+        'user',
+        'system',
+        'fork-context-ref',
+        'continued-in',
+        'custom-title',
+        'attachment',
+        'attachment',
+      ]);
+      expect(sanitizedEntries[0]).toMatchObject({
+        toolUseResult: { status: 'completed', agentId: 'a', description: 'review' },
+      });
+      expect(sanitizedEntries[5]).toEqual({
+        type: 'attachment',
+        uuid: 'q',
+        attachment: { type: 'queued_command', prompt: expect.stringContaining('also [REDACTED:') },
+      });
+      expect(sanitizedEntries[6]).toEqual({ type: 'attachment', uuid: 'h' });
+      // The web's Lines column: every record but the title and the hook's id-only stub.
+      expect(lineCount).toBe(5);
+      const uploaded = parseTranscript(sanitizedEntries.map((entry) => JSON.stringify(entry)).join('\n'));
+      const local = parseTranscript(await Bun.file(path).text());
+      expect(uploaded.entries.map((e) => [e.n, e.kind, e.uuid])).toEqual(
+        local.entries.map((e) => [e.n, e.kind, e.uuid]),
+      );
+      const text = JSON.stringify(sanitizedEntries);
+      expect(text).not.toContain(token);
+      expect(text).toContain('[REDACTED:');
+      expect(JSON.stringify(sanitizedEntries[0])).toContain('inspect [REDACTED:');
+      for (const entry of sanitizedEntries.slice(2, 4)) expect(JSON.stringify(entry)).toContain('[REDACTED:');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   test('redacts entries and summary and collects cwds', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'hive-read-'));
     const path = join(dir, 's.jsonl');

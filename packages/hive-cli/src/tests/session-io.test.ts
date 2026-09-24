@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { findRawSessions, readRawSession, scanSubagentDir } from '../lib/session-io';
+import { findRawSessions, scanSubagentDir } from '../lib/session-io';
 import { discoverSessions, loadSessionState } from '../lib/session-state';
 
 const PARENT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -30,10 +30,13 @@ const assistantLine = (sessionId: string): string =>
   });
 
 /** Write an agent transcript, optionally with a sibling .meta.json. */
-async function writeAgent(dir: string, name: string, agentType?: string): Promise<void> {
+async function writeAgent(dir: string, name: string, agentType?: string, toolUseId?: string): Promise<void> {
   await writeFile(join(dir, `${name}.jsonl`), `${userLine(PARENT_ID)}\n${assistantLine(PARENT_ID)}\n`);
   if (agentType !== undefined) {
-    await writeFile(join(dir, `${name}.meta.json`), JSON.stringify({ agentType }));
+    await writeFile(
+      join(dir, `${name}.meta.json`),
+      JSON.stringify({ agentType, spawnDepth: 1, model: 'gpt-6-astra', toolUseId }),
+    );
   }
 }
 
@@ -47,7 +50,7 @@ beforeAll(async () => {
   await mkdir(subagentsDir, { recursive: true });
 
   // Direct Task subagent with a .meta.json, plus one WITHOUT a .meta.json (the common case).
-  await writeAgent(subagentsDir, 'agent-task01', 'general-purpose');
+  await writeAgent(subagentsDir, 'agent-task01', 'general-purpose', 'task-call');
   await writeAgent(subagentsDir, 'agent-nometa');
 
   // Workflow run 1: agent + .meta.json + a journal.jsonl that must be excluded.
@@ -81,6 +84,7 @@ describe('scanSubagentDir — shared subagent scanner', () => {
       agentId: 'task01',
       parentSessionId: PARENT_ID,
       agentType: 'general-purpose',
+      toolUseId: 'task-call',
     });
     // No sibling .meta.json → agentType stays undefined.
     expect(byBase.get('agent-nometa.jsonl')!.agentType).toBeUndefined();
@@ -92,6 +96,8 @@ describe('scanSubagentDir — shared subagent scanner', () => {
       workflowRunId: 'wf_run1',
     });
     expect(byBase.get('agent-wf002.jsonl')!.workflowRunId).toBe('wf_run2');
+    expect(byBase.get('agent-wf001.jsonl')!.toolUseId).toBeUndefined();
+    expect(byBase.get('agent-wf002.jsonl')!.toolUseId).toBeUndefined();
   });
 
   test('returns empty for a missing subagents dir', async () => {
@@ -133,19 +139,6 @@ describe('discoverSessions — agents classified under their parent', () => {
     expect(wf!.sessionId).toBe('agent-wf001');
     expect(wf!.agentType).toBe('workflow-subagent');
     expect(wf!.parentSessionId).toBe(PARENT_ID);
-  });
-
-  test('readRawSession stamps the discovered agent metadata onto the session meta', async () => {
-    const wf = (await discoverSessions([root], root)).find((a) => a.workflowRunId === 'wf_run1')!;
-    const result = await readRawSession(wf);
-    expect(result && 'meta' in result ? result.meta : null).toMatchObject({
-      sessionId: 'agent-wf001',
-      agentId: 'wf001',
-      parentSessionId: PARENT_ID,
-      agentType: 'workflow-subagent',
-      workflowRunId: 'wf_run1',
-      messageCount: 2,
-    });
   });
 });
 

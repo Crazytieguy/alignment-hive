@@ -8,11 +8,7 @@
  */
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import {
-  parseKnownEntry,
-  extractSessionSummary,
-  type KnownEntry,
-} from "@alignment-hive/session-data";
+import { parseTranscript, sessionSummary } from "@alignment-hive/session-data";
 import type { Id } from "./_generated/dataModel";
 import {
   query,
@@ -171,21 +167,7 @@ export const backfillSummaries = internalAction({
       }
 
       const response = await fetch(url);
-      const text = await response.text();
-      const entries: KnownEntry[] = [];
-
-      for (const line of text.split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line);
-          const entry = parseKnownEntry(parsed);
-          if (entry) entries.push(entry);
-        } catch {
-          // skip unparseable lines
-        }
-      }
-
-      const summary = extractSessionSummary(entries);
+      const summary = sessionSummary(parseTranscript(await response.text()));
       if (summary) {
         await ctx.runMutation(internal.authorized.updateSessionSummary, {
           sessionId: session._id,

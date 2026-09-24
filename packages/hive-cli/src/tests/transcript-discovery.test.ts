@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { loadTranscriptsDirs } from '../lib/config';
-import { discoverWorktreeTranscriptDirs } from '../lib/transcript-discovery';
+import { listWorktreePaths, loadTranscriptsDirs, toClaudeProjectDirName } from '../lib/config';
+import { discoverWorktreeTranscriptDirs, projectScanData, resolveTranscriptDirs } from '../lib/transcript-discovery';
+import { discoverSessions } from '../lib/session-state';
+import { projectDirs, sessionFiles } from '../lib/locators';
 import type { TranscriptScanData } from '../lib/transcript-discovery';
 
 /**
@@ -50,6 +52,52 @@ describe('attaching transcript dirs of deleted worktrees', () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  test('read-only resolver finds an unregistered worktree and preserves collision filtering', async () => {
+    git(projectDir, 'commit -q --allow-empty -m initial');
+    const worktree = join(root, 'worktree');
+    git(projectDir, `worktree add -q -b feature ${worktree}`);
+    const fresh = await transcriptDirFor('fresh');
+    const foreign = join(root, 'foreign');
+    await mkdir(foreign);
+    git(foreign, 'init -q');
+    const row = (cwd: string) => JSON.stringify({ type: 'assistant', cwd, message: { content: 'text' } });
+    await Bun.write(join(fresh, 'ours.jsonl'), row(worktree));
+    await Bun.write(join(fresh, 'foreign.jsonl'), row(foreign));
+    const data = { mainPathMap: new Map([[projectDir, [fresh]]]), cwdMap: new Map([[fresh, worktree]]) };
+    const registry: Array<string> = [];
+    const dirs = resolveTranscriptDirs(projectDir, data, registry);
+    expect(dirs).toContain(fresh);
+    expect(registry).toEqual([]);
+    expect(await loadTranscriptsDirs(stateDir)).toEqual([]);
+    expect((await discoverSessions(dirs, projectDir)).map((session) => session.sessionId)).toEqual(['ours']);
+    const all = await sessionFiles(await projectDirs(transcriptDirs));
+    expect(all.map((ref) => ref.session).sort()).toEqual(['foreign', 'ours']);
+  });
+
+  test("hive local's scan: dirs whose recorded cwd is a worktree of the project or under one", async () => {
+    git(projectDir, 'commit -q --allow-empty -m initial');
+    const outside = join(root, 'outside-worktree');
+    git(projectDir, `worktree add -q -b outside ${outside}`);
+    const row = (cwd: string) => JSON.stringify({ type: 'user', cwd, message: { content: 'hi' } }) + '\n';
+    const dirFor = async (cwd: string) => {
+      const dir = join(transcriptDirs, toClaudeProjectDirName(cwd));
+      await mkdir(dir, { recursive: true });
+      await Bun.write(join(dir, 'a.jsonl'), row(cwd));
+      return dir;
+    };
+    const main = await dirFor(projectDir);
+    const sub = await dirFor(join(projectDir, 'packages', 'web'));
+    const deleted = await dirFor(join(projectDir, '.claude', 'worktrees', 'gone'));
+    const worktree = await dirFor(outside);
+    // Named like the project, but another directory: `project-old`.
+    await dirFor(`${projectDir}-old`);
+    await dirFor(join(root, 'elsewhere'));
+    const data = projectScanData(transcriptDirs, projectDir, listWorktreePaths(projectDir));
+    expect(data.mainPathMap.get(projectDir)?.sort()).toEqual([main, sub, deleted, worktree].sort());
+    // Only dirs named like a worktree path are read.
+    expect(data.cwdMap.has(join(transcriptDirs, toClaudeProjectDirName(join(root, 'elsewhere'))))).toBe(false);
   });
 
   test('a live cwd under the project is never attached by subpath (repo or plain dir)', async () => {

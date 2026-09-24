@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isInTimeRange, parseDuration, parseTimeSpec } from '../lib/time-filter';
+import { parseDuration, parseTimeSpec } from '../lib/time-filter';
 
 describe('parseDuration', () => {
   test.each([
@@ -29,19 +29,20 @@ describe('parseTimeSpec', () => {
 
   test('ISO date-times parse with and without an offset', () => {
     expect(parseTimeSpec('2025-01-15T14:30:00Z')!.toISOString()).toBe('2025-01-15T14:30:00.000Z');
-    const local = parseTimeSpec('2025-01-15T14:30')!;
-    expect([local.getHours(), local.getMinutes()]).toEqual([14, 30]);
+    for (const spec of ['2025-01-15T14:30', '2025-01-15 14:30']) {
+      const local = parseTimeSpec(spec)!;
+      expect([local.getHours(), local.getMinutes()]).toEqual([14, 30]);
+    }
   });
 
   test('returns null for unparseable specs', () => {
-    for (const spec of ['30x', 'abc', 'm30', 'not-a-date', 'yesterday']) expect(parseTimeSpec(spec)).toBeNull();
+    for (const spec of ['30x', 'abc', 'm30', 'not-a-date', 'yesterday', '7', '2025', 'Sep 12'])
+      expect(parseTimeSpec(spec)).toBeNull();
   });
-});
 
-describe('isInTimeRange', () => {
-  test('missing or invalid timestamps are excluded once a bound is set', () => {
-    const range = { after: new Date('2025-01-01T00:00:00Z'), before: null };
-    expect(isInTimeRange(undefined, range)).toBe(false);
-    expect(isInTimeRange('not-a-date', range)).toBe(false);
+  test('impossible dates and durations reaching before 1970 are errors, not roll-overs', () => {
+    for (const spec of ['2026-02-30', '2026-13-45', '2026-00-10', '2026-02-30T10:00', '2026-09-12T25:00', '1000000000d'])
+      expect(parseTimeSpec(spec)).toBeNull();
+    expect(parseTimeSpec('2024-02-29')).not.toBeNull();
   });
 });
