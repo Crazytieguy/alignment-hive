@@ -24,7 +24,7 @@ pub fn server_instructions(project_dir: &Path) -> String {
          another session took over; stop using that machine here (attach(force=true) is \
          the deliberate way to move control).\n\
          Everything executed is auto-saved to a local .ipynb notebook (path shown at kernel \
-         creation) — read it to recover context after conversation compaction.\n\
+         creation) — inspect it to recover context after conversation compaction.\n\
          For long cells, prefer wait() over polling — holding the call open keeps a background \
          session alive; with no kernel_id, wait() covers every pending execution. Polling with \
          get_output() is fine when there is other work to do meanwhile.\n\
