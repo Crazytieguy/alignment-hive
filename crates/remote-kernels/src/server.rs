@@ -1412,7 +1412,7 @@ impl RemoteKernelsServer {
         let machine_id = target.machine_id.clone();
 
         tracing::info!(instance = %machine_id, external_id = %target.external_id, "Stopping machine...");
-        self.cancel_finish_intent(&machine_id).await;
+        self.cancel_finish_intent(&target).await;
         let actual = self
             .explicit_cleanup_instance(&target, CleanupAction::Stop, skip_finalize)
             .await
@@ -1485,7 +1485,7 @@ impl RemoteKernelsServer {
         };
 
         tracing::info!(instance = %target.machine_id, external_id = %target.external_id, "Terminating machine...");
-        self.cancel_finish_intent(&target.machine_id).await;
+        self.cancel_finish_intent(&target).await;
         let actual = self
             .explicit_cleanup_instance(&target, CleanupAction::Terminate, skip_finalize)
             .await
@@ -1537,7 +1537,7 @@ impl RemoteKernelsServer {
             }
         }
 
-        let (machine_id, project_dir, conn, supervised, cleanup) = {
+        let (machine_id, external_id, project_dir, conn, supervised, cleanup) = {
             let state = self.state.lock().await;
             let machine_id = match state.resolve_instance(params.instance.as_deref()) {
                 Ok(machine_id) => machine_id,
@@ -1570,11 +1570,20 @@ impl RemoteKernelsServer {
             };
             (
                 machine_id,
+                inst.external_id.clone(),
                 state.project_dir.clone(),
                 conn,
                 inst.supervision_note.is_none(),
                 inst.cleanup,
             )
+        };
+        // The marker below steers the machine's own finalizer, so it is a
+        // machine mutation like any other: prove this generation still owns
+        // the lease first — a session that lost control during a connection
+        // outage must not plant a plan the successor's watchdog would follow.
+        let mutation_guard = match self.mutation_guard(&machine_id, &external_id).await {
+            Ok(guard) => guard,
+            Err(message) => return err_text(message),
         };
 
         // Local intent first — it is the recovery source a later attach or
@@ -1608,6 +1617,7 @@ impl RemoteKernelsServer {
         let marker = crate::machine_scripts::write_intent(&*conn, downloads_pending, then)
             .await
             .map_err(|error| format!("{error:#}"));
+        drop(mutation_guard);
 
         self.spawn_finish_drain(&machine_id);
 
@@ -1901,15 +1911,15 @@ impl RemoteKernelsServer {
         // Downloads are safe; the marker's protective role (downgrading a
         // terminate while data is uncollected) is over. Clear it before the
         // action so a stale intent can't confuse a later finalize.
-        if let Some(conn) = {
-            let state = self.state.lock().await;
-            state
-                .instances
-                .get(machine_id)
-                .and_then(|inst| inst.connection.clone())
-        } && let Err(error) = crate::machine_scripts::clear_intent(&*conn).await
-        {
-            tracing::warn!(instance = %machine_id, "Could not clear finish marker: {error:#}");
+        let external_id = self
+            .state
+            .lock()
+            .await
+            .instances
+            .get(machine_id)
+            .map(|inst| inst.external_id.clone());
+        if let Some(external_id) = external_id {
+            self.clear_finish_marker(machine_id, &external_id).await;
         }
 
         let outcome = match intent.then {
@@ -4103,7 +4113,7 @@ impl RemoteKernelsServer {
                 "machine {machine_id}{label} is running its automatic cleanup and will stop or delete itself; wait and call status() to see the result"
             ),
             FenceReason::AuthorityUnknown => format!(
-                "could not confirm this session still controls machine {machine_id}{label} (connection problem); its state-changing tools are disabled to avoid conflicting with another controller — attach(\"{machine_id}\") re-establishes control; the machine was not touched"
+                "could not confirm this session still controls machine {machine_id}{label} (its control state could not be read); its state-changing tools are disabled to avoid conflicting with another controller — attach(\"{machine_id}\") re-establishes control; the machine was not touched"
             ),
         }
     }
@@ -4143,26 +4153,28 @@ impl RemoteKernelsServer {
         let Some((generation, connection)) = lease else {
             return Ok(());
         };
-        match crate::machine_scripts::refresh(&connection, generation, &self.lease_owner).await {
-            Ok(()) => Ok(()),
-            Err(crate::machine_scripts::LeaseError::Fenced) => {
-                anyhow::bail!(
-                    self.fence_and_message(machine_id, FenceReason::TakenOver)
-                        .await
-                )
-            }
-            Err(crate::machine_scripts::LeaseError::Finalizing) => {
-                anyhow::bail!(
-                    self.fence_and_message(machine_id, FenceReason::Finalizing)
-                        .await
-                )
-            }
-            Err(error) => {
+        let Err(error) =
+            crate::machine_scripts::refresh(&connection, generation, &self.lease_owner).await
+        else {
+            return Ok(());
+        };
+        match crate::heartbeat::classify_refresh_failure(&error) {
+            // A connection blip refuses THIS call but must not fence: fencing
+            // drops every kernel connection and in-flight execution, and the
+            // next successful refresh re-proves (or disproves) ownership.
+            crate::heartbeat::LeaseAuthority::Unconfirmed => anyhow::bail!(
+                "could not confirm this session still controls machine {machine_id} \
+                 (connection problem: {error}); nothing was changed — retry shortly"
+            ),
+            crate::heartbeat::LeaseAuthority::Lost(FenceReason::AuthorityUnknown) => {
                 anyhow::bail!(
                     "{} ({error})",
                     self.fence_and_message(machine_id, FenceReason::AuthorityUnknown)
                         .await
                 )
+            }
+            crate::heartbeat::LeaseAuthority::Lost(reason) => {
+                anyhow::bail!(self.fence_and_message(machine_id, reason).await)
             }
         }
     }
@@ -5035,8 +5047,21 @@ impl RemoteKernelsServer {
     /// An explicit `stop()`/`terminate()` supersedes any queued `finish()` plan —
     /// without this, the stale plan would resume on the next attach and
     /// could stop or terminate the machine again unexpectedly.
-    async fn cancel_finish_intent(&self, machine_id: &str) {
-        let conn = {
+    ///
+    /// The local plan lives in the project dir, shared with any other server
+    /// driving this machine, so it is as much the lease holder's as the
+    /// machine-side marker: a session that lost control (possibly during a
+    /// connection outage it did not fence on) must not cancel the successor's
+    /// plan, and its stop/terminate is refused anyway.
+    async fn cancel_finish_intent(&self, target: &CleanupTarget) {
+        let machine_id = target.machine_id.as_str();
+        let Some(_mutation_guard) = self
+            .finish_plan_guard(machine_id, &target.external_id)
+            .await
+        else {
+            return;
+        };
+        {
             let state = self.state.lock().await;
             let mut lifecycle = crate::state::load_lifecycle_record(&state.project_dir, machine_id);
             if lifecycle.finish_intent.is_some() {
@@ -5050,11 +5075,7 @@ impl RemoteKernelsServer {
                     );
                 }
             }
-            state
-                .instances
-                .get(machine_id)
-                .and_then(|inst| inst.connection.clone())
-        };
+        }
         // The machine-side marker outlives the local record: the drain sees
         // the local plan gone and exits without touching it, so a stopped
         // machine that is attached again would apply the cancelled plan at
@@ -5064,6 +5085,48 @@ impl RemoteKernelsServer {
         // and the marker cannot bite regardless: only a watchdog consumes it,
         // and no attach installs one before reconciling the marker first (see
         // `heartbeat::reconcile_finish_marker`).
+        self.clear_intent_on_machine(machine_id, &target.external_id)
+            .await;
+    }
+
+    /// Remove the machine-side finish marker, only with proven lease
+    /// authority: the marker steers whichever watchdog runs on the machine,
+    /// so a session that lost control must never erase the successor's plan.
+    async fn clear_finish_marker(&self, machine_id: &str, external_id: &str) {
+        if let Some(_mutation_guard) = self.finish_plan_guard(machine_id, external_id).await {
+            self.clear_intent_on_machine(machine_id, external_id).await;
+        }
+    }
+
+    /// The mutation guard for touching a finish plan. Every failure only
+    /// logs — no caller may block on the plan.
+    async fn finish_plan_guard(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+    ) -> Option<std::fs::File> {
+        match self.mutation_guard(machine_id, external_id).await {
+            Ok(guard) => Some(guard),
+            Err(message) => {
+                tracing::warn!(
+                    instance = machine_id,
+                    "Finish plan left untouched: {message}"
+                );
+                None
+            }
+        }
+    }
+
+    /// The marker clear itself; callers hold [`Self::finish_plan_guard`].
+    async fn clear_intent_on_machine(&self, machine_id: &str, external_id: &str) {
+        let conn = self
+            .state
+            .lock()
+            .await
+            .instances
+            .get(machine_id)
+            .filter(|inst| inst.external_id == external_id)
+            .and_then(|inst| inst.connection.clone());
         if let Some(conn) = conn
             && let Err(error) = crate::machine_scripts::clear_intent(&*conn).await
         {
@@ -8364,6 +8427,312 @@ mod fencing_tests {
                 .instances
                 .contains_key(&machine_id)
         );
+    }
+    /// A command-transport blip must never cost this session its machine,
+    /// while every authoritative loss of control still fences.
+    mod transport_outage {
+        use std::sync::Arc;
+
+        use rmcp::handler::server::wrapper::Parameters;
+
+        use super::{AnyConnection, FakeConnection, instance, result_text, server_in};
+        use crate::config::Cleanup;
+        use crate::server::{FinishParams, RemoteKernelsServer, StopParams};
+        use crate::state::FenceReason;
+
+        struct Leased {
+            _dir: tempfile::TempDir,
+            machine_dir: tempfile::TempDir,
+            server: RemoteKernelsServer,
+            conn: Arc<AnyConnection>,
+            machine_id: String,
+            external_id: String,
+            generation: u64,
+        }
+
+        impl Leased {
+            fn fake(&self) -> &FakeConnection {
+                let AnyConnection::Fake(fake) = &*self.conn else {
+                    unreachable!()
+                };
+                fake
+            }
+
+            fn marker(&self) -> std::path::PathBuf {
+                self.machine_dir.path().join(".remote-kernels/intent.json")
+            }
+
+            async fn fenced(&self) -> Option<FenceReason> {
+                self.server.state.lock().await.instances[&self.machine_id].fenced
+            }
+
+            async fn tick(&self) -> std::ops::ControlFlow<()> {
+                let policy = crate::runtime::WatchdogPolicy {
+                    cleanup: Cleanup::Terminate,
+                    initial_budget_secs: None,
+                    stale_secs: 300,
+                    budget_grace_secs: 900,
+                    finalize_wait_secs: None,
+                    finalize_timeout_secs: 600,
+                    finalize_command: None,
+                    storage_rate_per_hr: None,
+                };
+                crate::heartbeat::Beat {
+                    conn: &self.conn,
+                    machine_id: &self.machine_id,
+                    external_id: &self.external_id,
+                    lease_generation: self.generation,
+                    lease_owner: &self.server.lease_owner,
+                    state: &self.server.state,
+                    watchdog_policy: &policy,
+                    budget: None,
+                    watchdog_installed: true,
+                    last_refresh_ok: std::time::Instant::now(),
+                    host_key_alarm_raised: false,
+                }
+                .tick()
+                .await
+            }
+
+            async fn finish(&self) -> rmcp::model::CallToolResult {
+                self.server
+                    .finish(Parameters(FinishParams {
+                        instance: Some(self.machine_id.clone()),
+                        download: None,
+                        then: "keep".to_string(),
+                    }))
+                    .await
+                    .unwrap()
+            }
+        }
+
+        /// A running, lease-holding instance on a fake machine.
+        async fn leased() -> Leased {
+            let dir = tempfile::tempdir().unwrap();
+            let machine_dir = tempfile::tempdir().unwrap();
+            let conn = Arc::new(AnyConnection::Fake(
+                FakeConnection::for_test(machine_dir.path(), false).unwrap(),
+            ));
+            let server = server_in(dir.path());
+            let lease = crate::machine_scripts::acquire(&conn, &server.lease_owner)
+                .await
+                .unwrap();
+            let machine_id = crate::ulid::new();
+            let external_id = "provider-transport".to_string();
+            {
+                let mut state = server.state.lock().await;
+                let mut inst = instance(&machine_id, &external_id, Arc::clone(&conn));
+                inst.lease_generation = Some(lease.generation);
+                inst.supervision_note = None;
+                state.save_record(&machine_id, &inst.record()).unwrap();
+                state.instances.insert(machine_id.clone(), inst);
+            }
+            Leased {
+                _dir: dir,
+                machine_dir,
+                server,
+                conn,
+                machine_id,
+                external_id,
+                generation: lease.generation,
+            }
+        }
+
+        #[tokio::test]
+        async fn heartbeat_transport_failure_retries_instead_of_fencing() {
+            let leased = leased().await;
+            leased.fake().set_fail_exec(true);
+            assert!(leased.tick().await.is_continue());
+            assert_eq!(leased.fenced().await, None, "a blip must not fence");
+
+            leased.fake().set_fail_exec(false);
+            assert!(leased.tick().await.is_continue());
+            assert_eq!(leased.fenced().await, None);
+        }
+
+        /// The outage cannot hide a takeover: the successor's plan is safe
+        /// from a `finish()` issued before the next beat, and the first beat
+        /// that reaches the machine fences.
+        #[tokio::test]
+        async fn takeover_during_an_outage_blocks_marker_writes_and_fences() {
+            let leased = leased().await;
+            leased.fake().set_fail_exec(true);
+            assert!(leased.tick().await.is_continue());
+            leased.fake().set_fail_exec(false);
+            crate::machine_scripts::acquire(&leased.conn, "successor")
+                .await
+                .unwrap();
+
+            let refused = leased.finish().await;
+            assert!(refused.is_error.unwrap_or(false));
+            assert!(
+                result_text(&refused).contains("another session took control"),
+                "{}",
+                result_text(&refused)
+            );
+            assert!(!leased.marker().exists(), "no marker for a lost lease");
+
+            // The successor's marker is not ours to clear either.
+            crate::machine_scripts::write_intent(
+                &*leased.conn,
+                false,
+                crate::state::FinishThen::Terminate,
+            )
+            .await
+            .unwrap();
+            leased
+                .server
+                .clear_finish_marker(&leased.machine_id, &leased.external_id)
+                .await;
+            assert!(leased.marker().exists());
+
+            // finish() already fenced on the Fenced answer; the beat agrees.
+            assert!(leased.tick().await.is_break());
+            assert_eq!(leased.fenced().await, Some(FenceReason::TakenOver));
+        }
+
+        /// Without an intervening mutation, the first beat that reaches the
+        /// machine after a takeover is what fences.
+        #[tokio::test]
+        async fn predecessor_stop_leaves_the_successors_plan_alone() {
+            let leased = leased().await;
+            let project_dir = leased.server.state.lock().await.project_dir.clone();
+            let queued_plan = || {
+                crate::state::load_lifecycle_record(&project_dir, &leased.machine_id)
+                    .finish_intent
+                    .map(|intent| intent.uuid)
+            };
+            // Another server in this project took the machine over and
+            // queued its own plan.
+            crate::machine_scripts::acquire(&leased.conn, "successor")
+                .await
+                .unwrap();
+            let mut lifecycle =
+                crate::state::load_lifecycle_record(&project_dir, &leased.machine_id);
+            lifecycle.finish_intent = Some(crate::state::FinishIntent {
+                uuid: "successor-plan".to_string(),
+                downloads: vec!["results".to_string()],
+                then: crate::state::FinishThen::Stop,
+            });
+            crate::state::save_lifecycle_record(&project_dir, &leased.machine_id, &lifecycle)
+                .unwrap();
+
+            // Mid-outage: nothing can be confirmed, so nothing is touched.
+            leased.fake().set_fail_exec(true);
+            let stop = || {
+                leased.server.stop(Parameters(StopParams {
+                    instance: Some(leased.machine_id.clone()),
+                    skip_pre_stop_command: Some(true),
+                }))
+            };
+            assert!(stop().await.is_err());
+            assert_eq!(queued_plan().as_deref(), Some("successor-plan"));
+            assert_eq!(leased.fenced().await, None);
+
+            // Outage over: the refresh proves the takeover.
+            leased.fake().set_fail_exec(false);
+            assert!(stop().await.is_err());
+            assert_eq!(queued_plan().as_deref(), Some("successor-plan"));
+            assert_eq!(leased.fenced().await, Some(FenceReason::TakenOver));
+        }
+
+        #[tokio::test]
+        async fn first_beat_after_an_outage_detects_takeover() {
+            let leased = leased().await;
+            leased.fake().set_fail_exec(true);
+            assert!(leased.tick().await.is_continue());
+            leased.fake().set_fail_exec(false);
+            crate::machine_scripts::acquire(&leased.conn, "successor")
+                .await
+                .unwrap();
+            assert!(leased.tick().await.is_break());
+            assert_eq!(leased.fenced().await, Some(FenceReason::TakenOver));
+        }
+
+        #[tokio::test]
+        async fn unreadable_lease_state_still_fences() {
+            let leased = leased().await;
+            std::fs::write(
+                leased.machine_dir.path().join(".remote-kernels/lease.json"),
+                "{garbage",
+            )
+            .unwrap();
+            assert!(leased.tick().await.is_break());
+            assert_eq!(leased.fenced().await, Some(FenceReason::AuthorityUnknown));
+        }
+
+        /// A blip during a user call refuses that call — retryably — and
+        /// leaves every kernel connection and execution in place.
+        #[tokio::test]
+        async fn transport_failure_refuses_a_mutation_without_fencing() {
+            let leased = leased().await;
+            leased.fake().set_fail_exec(true);
+            let refused = leased.finish().await;
+            assert!(refused.is_error.unwrap_or(false));
+            let text = result_text(&refused);
+            assert!(text.contains("nothing was changed"), "{text}");
+            assert_eq!(leased.fenced().await, None);
+            let project_dir = leased.server.state.lock().await.project_dir.clone();
+            assert!(
+                crate::state::load_lifecycle_record(&project_dir, &leased.machine_id)
+                    .finish_intent
+                    .is_none(),
+                "a refused finish() must not queue a plan"
+            );
+
+            leased.fake().set_fail_exec(false);
+            let queued = leased.finish().await;
+            assert!(
+                !queued.is_error.unwrap_or(false),
+                "{}",
+                result_text(&queued)
+            );
+            assert!(leased.marker().exists());
+        }
+
+        /// Startup commands can outlast the watchdog's stale window, and on
+        /// attach a watchdog is already counting — the lease must stay fresh.
+        #[tokio::test]
+        async fn startup_commands_keep_the_lease_fresh() {
+            let leased = leased().await;
+            let before = crate::machine_scripts::read(&leased.conn).await.unwrap().ts;
+            crate::heartbeat::run_startup_commands(
+                &leased.conn,
+                &leased.machine_id,
+                &["sleep 3".to_string()],
+                leased.generation,
+                &leased.server.lease_owner,
+                std::time::Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+            let after = crate::machine_scripts::read(&leased.conn).await.unwrap().ts;
+            assert!(after > before, "lease ts {before} never advanced ({after})");
+        }
+
+        #[tokio::test]
+        async fn takeover_during_startup_commands_stops_waiting_and_fences() {
+            let leased = leased().await;
+            let conn = Arc::clone(&leased.conn);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                crate::machine_scripts::acquire(&conn, "successor")
+                    .await
+                    .unwrap();
+            });
+            let started = std::time::Instant::now();
+            let result = crate::heartbeat::run_startup_commands(
+                &leased.conn,
+                &leased.machine_id,
+                &["sleep 20".to_string()],
+                leased.generation,
+                &leased.server.lease_owner,
+                std::time::Duration::from_millis(500),
+            )
+            .await;
+            assert!(matches!(result, Err((FenceReason::TakenOver, _))));
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        }
     }
 }
 

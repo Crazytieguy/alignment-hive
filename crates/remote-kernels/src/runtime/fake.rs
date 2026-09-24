@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
@@ -390,6 +390,7 @@ impl Runtime for FakeRuntime {
             bin_dir: inst.workdir.path().join(".remote-kernels/fake-bin"),
             last_budget_deadline: Arc::clone(&inst.last_budget_deadline),
             lease_no_flock: inst.lease_no_flock,
+            fail_exec: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -401,6 +402,9 @@ pub struct FakeConnection {
     bin_dir: std::path::PathBuf,
     last_budget_deadline: Arc<AtomicU64>,
     lease_no_flock: bool,
+    /// When set, every `exec` fails like a dropped SSH connection — lets
+    /// tests drive transport outages through the production error path.
+    fail_exec: Arc<AtomicBool>,
 }
 
 impl FakeConnection {
@@ -427,7 +431,14 @@ impl FakeConnection {
             bin_dir,
             last_budget_deadline: Arc::new(AtomicU64::new(u64::MAX)),
             lease_no_flock,
+            fail_exec: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// For tests: simulate (or end) a command-transport outage.
+    #[cfg(test)]
+    pub(crate) fn set_fail_exec(&self, fail: bool) {
+        self.fail_exec.store(fail, Ordering::Relaxed);
     }
 }
 
@@ -453,6 +464,9 @@ impl Connection for FakeConnection {
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
+        if self.fail_exec.load(Ordering::Relaxed) {
+            anyhow::bail!("simulated transport failure");
+        }
         if self.lease_no_flock && command.contains("flock is required") {
             return Ok("flock is required\n__RK_LEASE_EXIT__=11\n".to_string());
         }
@@ -469,6 +483,9 @@ impl Connection for FakeConnection {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                // An abandoned exec must not leave stray local processes
+                // behind the test suite.
+                .kill_on_drop(true)
                 .output(),
         )
         .await
