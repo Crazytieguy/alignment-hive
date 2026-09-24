@@ -2,6 +2,10 @@
 members = ["crates/model-router", "crates/remote-kernels"]
 resolver = "2"
 
+# Backtraces keep file:line; debuggers lose local variables. Cuts target/ ~25%.
+[profile.dev]
+debug = "line-tables-only"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
