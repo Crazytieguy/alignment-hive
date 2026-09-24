@@ -3,6 +3,15 @@ import { closeSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildProcess, StdioOptions } from 'node:child_process';
 
+/** Execute argv directly and drain both streams before returning their exact bytes. */
+export async function runCommand(command: Array<string>, options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ stdout: Buffer; stderr: Buffer; exit: number }> {
+  const child = Bun.spawn(command, { ...options, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(child.stdout).arrayBuffer(), new Response(child.stderr).arrayBuffer(), child.exited,
+  ]);
+  return { stdout: Buffer.from(stdout), stderr: Buffer.from(stderr), exit };
+}
+
 /**
  * How to re-invoke this CLI. A compiled bun binary sets argv[1] to a virtual /$bunfs/root/...
  * path that cannot be spawned, so it is invoked by its execPath alone; under `bun` (dev, tests)

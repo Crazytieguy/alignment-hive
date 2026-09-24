@@ -70,6 +70,17 @@ export function getClaudeProjectDir(cwd: string): string {
   return join(claudeProjectsRoot(), toClaudeProjectDirName(cwd));
 }
 
+/**
+ * A debrief round's directory, outside every repository: `<data>/<project>/<session>/round-<N>`, where `<data>` is the
+ * debrief plugin's data directory when given, else `$XDG_DATA_HOME/hive/debrief` (default `~/.local/share`). `<project>`
+ * is Claude Code's project-dir name of the main checkout, so every worktree of a repository shares it and a deleted
+ * worktree loses nothing.
+ */
+export function debriefRoundDir(cwd: string, session: string, round: number, data?: string): string {
+  const root = data ?? join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'hive', 'debrief');
+  return join(root, toClaudeProjectDirName(getMainWorktreePath(cwd) ?? cwd), session, `round-${round}`);
+}
+
 export async function ensureStateDir(stateDir: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   const gitignorePath = join(stateDir, '.gitignore'); // Not in statePaths — infrastructure, not data

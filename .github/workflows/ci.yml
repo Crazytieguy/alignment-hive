@@ -8,6 +8,7 @@ on:
       - 'packages/session-data/**'
       - 'packages/ui/**'
       - 'packages/review-app/**'
+      - 'plugins/debrief/**'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - 'packages/session-data/**'
       - 'packages/ui/**'
       - 'packages/review-app/**'
+      - 'plugins/debrief/**'
 
 jobs:
   check:
@@ -42,3 +44,6 @@ jobs:
 
       - name: Test session-data
         run: bun run --filter '@alignment-hive/session-data' test
+
+      - name: Test plugin hooks
+        run: bun test plugins/debrief

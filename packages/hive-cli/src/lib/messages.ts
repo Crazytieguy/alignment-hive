@@ -1,4 +1,6 @@
 import { colors } from './output';
+import type { GitUpstream } from '../debrief/git';
+import type { FIXED_SECTIONS } from '../debrief/parse';
 
 const { boldMagenta, dim } = colors;
 
@@ -6,6 +8,188 @@ const { boldMagenta, dim } = colors;
 export function consentUrl(): string {
   return `${process.env.ALIGNMENT_HIVE_URL ?? 'https://alignment-hive.com'}/consent`;
 }
+
+export const review = {
+  error: (item: string, line: number, detail: string) => `debrief: ${item}, line ${line}: ${detail}`,
+  frontmatter: 'Expected YAML frontmatter delimited by ---',
+  noItems: 'Expected at least one level-2 item heading',
+  preamble: 'Content before the first item is not allowed; use story in frontmatter',
+  metadata: 'Expected a yaml metadata fence for this item',
+  duplicate: (id: string) => `Duplicate item id: ${id}`,
+  quoting: 'Multiline strings require |; double-quote strings containing " #", which YAML reads as a comment',
+  aliases: 'YAML aliases, anchors and tags are not supported',
+  invalidLocator: 'Expected a transcript locator <session or subagent id prefix>:<entry>',
+  invalidEntry: 'Expected a transcript locator <session or subagent id prefix>:<entry>, or capture:<name>',
+  summaryCount: (count: number) => count === 1 ? 'Expected summary: one line for the entry' : `Expected summary: a list of ${count} lines, one per locator`,
+  writtenAndAt: 'Use written or at, not both',
+  refKind: 'A ref needs exactly one of diff, file, transcript, git, image',
+  duplicateSection: (id: string) => `Duplicate or reserved section id: ${id}`,
+  unknownSection: (id: string, known: Array<string>) => `Unknown section ${id}; expected one of ${known.join(', ')}`,
+  unknownStatItem: (id: string) => `Stat links to unknown item: ${id}`,
+  alternativesNeedJudgement: 'alternatives require judgement-call: true',
+  sideEffectAlternatives: 'Side-effect items carry no alternatives; say how to undo them in the body',
+  judgementNeedsAlternatives: 'A judgement call outside side-effects and unverified lists its alternatives',
+  lowerPriorityJudgement: 'lower-priority cannot be combined with judgement-call or alternatives',
+  /** Role labels; user entries the human did not type say what they are (at most 11 characters). */
+  transcriptLabels: { you: 'YOU', prompt: 'PROMPT', claude: 'CLAUDE', agent: 'AGENT', interrupt: 'INTERRUPT', notice: 'NOTICE', command: 'COMMAND', summary: 'SUMMARY', claudeCode: 'CLAUDE CODE' },
+  invalidRange: 'Expected a 1-based inclusive range L1-L2 with start <= end',
+  gitFailed: (detail: string) => `Git read failed: ${detail}`,
+  missingStamp: (session: string) => `No session-start commit for ${session}; supply base in frontmatter`,
+  uncovered: (files: Array<string>, total: number) => `No item shows ${total} changed file${total === 1 ? '' : 's'}: ${files.join(', ')}${total > files.length ? `, and ${total - files.length} more` : ''}; give each a diff ref, in a brief lower-priority item when it needs no attention`,
+  needsGit: (what: string) => `${what} needs a git repository, and there is none here; leave it out, or render from the repository the work was done in`,
+  invalidPath: (path: string) => `Expected a repository-relative file path: ${path}`,
+  nonFile: (path: string) => `Not a regular text file: ${path}`,
+  invalidText: (path: string) => `File is not UTF-8 text: ${path}`,
+  evidenceMissing: (path: string) => `Evidence not found: ${path}`,
+  rangeOutside: (range: string, total: number) => `Range ${range} exceeds ${total} lines`,
+  otherSession: (locator: string) => `${locator} is not in this debrief's session or one of its agents`,
+  entryNotFound: (locator: string) => `Transcript entry not found: ${locator}`,
+  notPrompt: (locator: string) => `asks: ${locator} is not a message the user or another session sent in this debrief's session`,
+  duplicateAsk: (locator: string) => `asks: ${locator} is listed twice`,
+  unsureBranch: (n: number, all: number) => `asks: ${n} of the user's ${all} messages may have been undone by a rewind; "All ${all}" counts them; nothing to change in the debrief file`,
+  rewoundAsk: (locator: string) => `asks: ${locator} was undone by a rewind; it is not on the final conversation`,
+  elideNotFound: (locator: string, key: 'from' | 'until') => `asks: ${locator}: elide.${key} text not found in the message`,
+  notWrite: (locator: string) => `written: ${locator} has no Write call`,
+  writtenContent: (locator: string) => `written: ${locator} has a Write call without file_path or content`,
+  writtenPath: (locator: string, written: string, file: string) => `written: ${locator} wrote ${written}, not ${file}`,
+  unsupportedImage: (path: string) => `Unsupported image format: ${path}`,
+  oversized: (size: number, contributors: string) => `Page is ${size} bytes; limit is 14 MB. Largest contributors: ${contributors}`,
+  secretInPage: (kind: string) => `The page would show ${kind}; remove it from the debrief file`,
+  secretInEvidence: (kind: string) => `The page would show ${kind} that redaction missed; it comes from evidence, not the debrief file: leave that evidence out and report the shape`,
+  secretKinds: { link: 'a link token', query: 'a secret URL parameter', cookie: 'a cookie', bearer: 'a bearer token', jwt: 'a JWT', key: 'an API key', privateKey: 'a private key', value: 'a secret value' },
+};
+
+/** Copy the rendered debrief page shows. */
+export const reviewPageMessages = {
+  leftForYou: 'Left for you',
+  leftForYouAsOf: 'Left for you, as of',
+  /** The sections the renderer adds after the author's, in this order. */
+  sections: {
+    checked: { title: 'How it was checked' },
+    unverified: { title: 'Not verified', sub: "Checks that weren't run but would raise confidence in conclusions above. Ask for any of them to be run." },
+    landing: { title: 'Landing' },
+    'side-effects': { title: 'Side effects', sub: "Ask me to undo any that can be undone, or flag any you'd rather I not do again." },
+  } satisfies Record<(typeof FIXED_SECTIONS)[number], { title: string; sub?: string }>,
+  judgementCall: 'judgement call',
+  alternative: 'Alternative',
+  seen: 'seen',
+  /** The tray of a section's lower-priority items; the page styles it upper case. */
+  lowerPriority: 'Lower priority',
+  /** Templates the page fills: `{k}` seen of `{n}` items. */
+  restSeen: '{k} of {n} seen',
+  restNav: '+ {n} lower priority',
+  contents: 'Contents',
+  theme: 'Theme',
+  themes: { auto: 'Auto', light: 'Light', dark: 'Dark' },
+  showAll: (lines: number) => `Show all ${lines} lines`,
+  asksAll: (n: number) => `All ${n} of your messages`,
+  asksKey: 'Only the ones that set direction',
+  showLess: 'Show less',
+  /** Tool views' labels and one-line results. */
+  sendTo: (recipient: string) => `to ${recipient}`,
+  anotherSession: (process: string) => `another session (${process})`,
+  sent: 'sent',
+  queued: 'queued',
+  fromLine: (line: number) => `from L${line}`,
+  everyOccurrence: 'every occurrence',
+  replaced: 'replaced',
+  replacedWith: 'with',
+  asked: 'asked',
+  todo: { done: 'done', doing: 'in progress', open: 'to do' },
+  loaded: (tools: string) => `loaded ${tools}`,
+  result: 'result',
+  noOutput: '(no output)',
+  newFile: 'new',
+  deletedFile: 'deleted',
+  lineRange: (start: number, end: number) => `L${start}–L${end}`,
+  viewSource: 'View source',
+  viewRendered: 'View rendered',
+  /** Long replies and Agent prompts; "Show less" is shared with outputs. */
+  showAllProse: 'Show all',
+  denied: 'denied',
+  /** The kind word on an image fold (a screenshot, plot or diagram). */
+  imageKind: 'Image',
+  /** An Agent call with neither a type nor a description. */
+  agentPrompt: 'agent prompt',
+  commitMessage: 'Commit message',
+  files: (count: number) => `${count} file${count === 1 ? '' : 's'}`,
+  treeState: (counts: Array<string>) => counts.length ? `The working tree has ${counts.join(', ')}.` : 'The working tree is clean.',
+  treeCounts: { modified: 'modified', staged: 'staged', untracked: 'untracked', deleted: 'deleted' },
+  upstream: (upstream: GitUpstream | null) => upstream === null ? 'The branch has no upstream.' : upstream.unpushed ? `${upstream.unpushed} of the commits ${upstream.unpushed === 1 ? 'is' : 'are'} not on ${upstream.name}.` : `The commits are on ${upstream.name}.`,
+};
+
+/** Copy the diff engine shows, handed to review-diff.js as JSON: `{name}` placeholders; `{ one, other }` pairs pick by `{n}`. */
+export const reviewDiffMessages = {
+  tabs: { label: 'Lines shown', relevant: 'Relevant', all: 'All changes' },
+  showDiff: 'Show this diff',
+  collapseDiff: 'Collapse this diff',
+  viewSource: reviewPageMessages.viewSource,
+  viewRendered: reviewPageMessages.viewRendered,
+  noChanges: 'No changes in this file.',
+  noNewline: '\\ No newline at end of file',
+  status: { added: 'added', deleted: 'deleted' },
+  unchangedLines: { one: '{n} unchanged line', other: '{n} unchanged lines' },
+  linesLeftOut: { one: '{n} line left out', other: '{n} lines left out' },
+  countsSeparator: ' · ',
+  stepDown: '↓ {n}',
+  stepDownTitle: 'Show {n} more lines from the top',
+  stepUp: '↑ {n}',
+  stepUpTitle: 'Show {n} more lines from the bottom',
+  blocksLeftOut: { one: '{n} block left out', other: '{n} blocks left out' },
+  unchangedBlocks: { one: '{n} unchanged block', other: '{n} unchanged blocks' },
+  stepDownBlocksTitle: 'Show {n} more blocks from the top',
+  stepUpBlocksTitle: 'Show {n} more blocks from the bottom',
+  relevant: 'relevant',
+  relevantStart: 'Relevant lines',
+  relevantEnd: 'End of relevant lines',
+  unmappedFocus: 'Some focused lines have no rendered Markdown block; use View source to inspect them.',
+  cards: { source: 'markdown source', table: 'table', code: 'code block' },
+  blocks: { added: 'added', removed: 'removed', moved: 'moved, text unchanged', formatting: 'formatting only', changed: 'changed', edited: 'edited · {pct} of the words', before: 'before', after: 'after' },
+};
+
+export const reviewCliMessages = {
+  version: (value: string) => `hive ${value}`,
+  mainUsage: 'Usage: hive <session-start|upload|heartbeat|checkout-ping|login|local|consent|debrief>',
+  usage: 'Usage: hive debrief <dir|render|capture|preflight> [--help]',
+  dirUsage: 'Usage: hive debrief dir --session FULL_SESSION_ID --round N [--data DIR]',
+  coverage: (c: { lines: number; changedLines: number; files: number; changedFiles: number }) => `debrief: ${c.lines} of ${c.changedLines} changed lines (${c.files} of ${c.changedFiles} files) are in files some item shows`,
+  renderUsage: 'Usage: hive debrief render --session FULL_SESSION_ID --round N [--data DIR], or hive debrief render DEBRIEF.md --out DIR [--prev MANIFEST.json]',
+  captureUsage: 'Usage: hive debrief capture --name NAME (--session FULL_SESSION_ID --round N [--data DIR] | --out DIR) -- COMMAND [ARGS...]',
+  invalidSession: 'debrief: --session takes the full session id',
+  invalidData: 'debrief: --data takes an absolute path, the debrief plugin\'s data directory',
+  invalidRound: 'debrief: --round takes a whole number from 1',
+  preflightUsage: 'Usage: hive debrief preflight --min VERSION --session FULL_SESSION_ID',
+  preflightOk: 'debrief: preflight passed',
+  preflightNoGit: 'debrief: no git repository here, so diff and git evidence are unavailable',
+  binaryMissing: 'debrief: hive binary missing from PATH; install the hive CLI before rendering',
+  invalidVersion: (value: string) => `debrief: expected a version X.Y.Z, got ${JSON.stringify(value.trim())}`,
+  versionFailed: (detail: string) => `debrief: hive --version failed; update the hive CLI. ${detail}`,
+  binaryOld: (actual: string, minimum: string) => `debrief: ${actual} is older than ${minimum}; update the hive CLI`,
+};
+
+export const reviewRoundMessages = {
+  previousRequired: 'Round N requires the manifest from round N-1 via --prev',
+  unexpectedPrevious: 'Round 1 must not use --prev, was, or dispositions',
+  wrongPrevious: 'Previous manifest must have the same session and immediately preceding round',
+  invalidManifest: (path: string, detail: string) => `Invalid debrief manifest ${path}: ${detail}`,
+  invalidHistory: 'Manifest history must contain exactly every prior round',
+  duplicateIds: 'Manifest item ids must be unique',
+  invalidRename: (id: string) => `was must identify one previous item that is no longer present: ${id}`,
+  invalidDisposition: (id: string) => `Disposition must name a dropped previous item: ${id}`,
+  invalidSuccessor: (id: string) => `Superseded item must link to a current item: ${id}`,
+  undisposed: (heading: string) => `No disposition: ${heading}`,
+  disposed: (heading: string, state: string) => `${heading}: ${state}`,
+  superseded: (heading: string, successor: string) => `${heading}: superseded by ${successor}`,
+  outputConflict: 'Output manifest belongs to another session, round, or debrief; choose another directory',
+  overwritePrevious: 'Output must not overwrite the previous-round manifest',
+  unseen: 'changed',
+  unseenTitle: 'Changed since you last opened this page',
+  unseenNew: 'new',
+  unseenNewTitle: 'Not on the page when you last opened it',
+  /** On an item marked seen that changed since. */
+  stale: 'updated',
+  staleTitle: 'Changed since you marked it seen',
+};
 
 export const errors = {
   authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
@@ -291,4 +475,32 @@ export const hive = {
   checkoutPing: {
     timedOut: (seconds: number): string => `checkout ping gave up after ${seconds}s`,
   },
+};
+
+export const reviewCaptureMessages = {
+  invalidName: 'Capture name must be a lowercase hyphenated slug, at most 128 characters.',
+  invalidCommand: 'Capture command must contain an executable and NUL-free arguments.',
+  invalidDirectory: 'Capture directories must be nonempty, NUL-free paths.',
+  exists: (name: string): string => `Capture "${name}" already exists. Choose another name.`,
+  invalidEncoding: (stream: string): string => `Capture ${stream} is not valid UTF-8; no capture was saved.`,
+  invalidCapture: (path: string): string => `Invalid capture: ${path}`,
+};
+
+export const reviewHtmlMessages = {
+  error: (itemId: string, line: number, detail: string): string => `Item "${itemId}", line ${line}: ${detail}`,
+  forbiddenTag: (tag: string): string => `Raw HTML cannot contain <${tag}>.`,
+  forbiddenSrcset: 'Raw HTML cannot contain srcset; use a data: src instead.',
+  forbiddenUrl: (attribute: string): string => `Raw HTML ${attribute} must use data:, a local fragment, or an exact pinned script URL on script src.`,
+  unclosedScript: 'Raw HTML script must have an explicit closing tag.',
+  closingScript: 'Inline script source contains a closing script tag.',
+  invalidScript: 'Inline scripts must be ASCII; use Unicode escapes for non-ASCII characters.',
+  unsupportedScript: 'Non-ASCII inert script data must use a JSON script type.',
+  unclosedStyle: 'Raw HTML style must have an explicit closing tag.',
+  invalidCss: 'Raw HTML CSS could not be validated.',
+  cssImport: 'Raw HTML CSS cannot contain @import.',
+  cssResource: 'Raw HTML CSS resources must use data: or local fragments.',
+  markdownImage: 'Markdown images must use data: URLs; use an image evidence reference for local files.',
+  invalidName: 'Raw HTML element and attribute names must be ASCII.',
+  invalidJson: 'A JSON value for the page is not serializable.',
+  redGreen: 'Raw HTML uses red/green literals without detected labels or patterns; add a non-color cue.',
 };

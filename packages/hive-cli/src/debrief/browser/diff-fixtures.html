@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diff Disclosure Tests</title>
+<link rel="icon" href="data:,">
+<!-- The review page's four pinned libraries, served offline from node_modules by harness.ts. -->
+<script src="/vendor/diff.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script>var module = { exports: {} };</script>
+<script src="/vendor/diff-match-patch.js"></script>
+<script src="/vendor/markdown-it.min.js"></script>
+<link rel="stylesheet" href="/assets/review-diff.css">
+<script src="/assets/review-diff.js"></script>
+<style>
+body { margin: 0; background: var(--dv-ground); color: var(--dv-text); font: 15px/1.6 var(--dv-sans); }
+main { padding: 24px 16px; max-width: 1200px; margin: auto; }
+h1 { font-size: 24px; } h2 { font-size: 17px; margin-top: 32px; }
+</style>
+</head>
+<body>
+<main><h1>Diff disclosure regression fixtures</h1><div id="fixtures"></div></main>
+<script>
+(function () {
+  function lines(n) { return Array.from({ length: n }, function (_, i) { return 'const line' + (i + 1) + ' = ' + (i + 1) + ';'; }); }
+  function joined(a) { return a.join('\n') + '\n'; }
+  function edit(id, n, positions, extra) {
+    var old = lines(n), next = old.slice();
+    positions.forEach(function (line) { next[line - 1] = 'const line' + line + ' = "updated";'; });
+    return Object.assign({ id: id, path: 'synthetic/' + id + '.js', old: joined(old), new: joined(next) }, extra);
+  }
+  var specs = [
+    edit('focus-both-sides', 110, [10, 11, 12, 50, 51, 52, 90, 91, 92], { title: 'the caller side', focus: [51, 51] }),
+    edit('label-outside', 100, [10, 50, 90], { focus: [50, 50], labels: [{ line: 10, where: 'in the SessionStart hook output' }, { line: 90, where: 'CLI error after waiting 30s' }, { line: 75, where: 'unchanged guidance' }] }),
+    edit('no-focus', 90, [10, 45, 80]),
+    edit('old-focus', 80, [10, 40, 41, 42, 70], { oldFocus: [41, 41] }),
+    edit('gap-1', 15, [4, 12], { focus: [4, 4], oldFocus: [12, 12] }),
+    edit('gap-3', 17, [4, 14], { focus: [4, 4], oldFocus: [14, 14] }),
+    edit('gap-4', 18, [4, 15], { focus: [4, 4], oldFocus: [15, 15] }),
+    edit('unfocused-gap-1', 15, [4, 12]),
+    edit('unfocused-gap-3', 17, [4, 14]),
+    edit('unfocused-gap-4', 18, [4, 15]),
+    { id: 'added-file', path: 'synthetic/new.js', status: 'added', old: '', new: joined(lines(24)) },
+    { id: 'deleted-file', path: 'synthetic/deleted.js', status: 'deleted', old: joined(lines(24)), new: '', oldFocus: [12, 12] },
+    { id: 'two-added-labels', path: 'synthetic/copy.js', old: joined(lines(60)), new: joined(['const first = "hello";'].concat(lines(60), ['const second = "goodbye";'])), focus: [1, 1], labels: [{ line: 1, where: 'in the login prompt' }, { line: 62, where: 'CLI error on timeout' }] },
+    { id: 'removed-neighbor', path: 'synthetic/deletion.js', old: joined(lines(30)), new: joined(lines(30).filter(function (_, i) { return i !== 14; })), focus: [15, 15] },
+    edit('invalid-focus', 35, [10, 20], { focus: [999, 999] }),
+    edit('multi-focus', 130, [10, 40, 70, 100, 120], { focus: [[10, 10], [100, 100]], oldFocus: [[40, 40]] }),
+    edit('state-key', 90, [10, 50, 80], { focus: [50, 50], scope: 'browser-suite', stateKey: 'fixture/state', collapsed: true }),
+    { id: 'empty-file', path: 'synthetic/empty.js', old: '', new: '' },
+    { id: 'frontmatter', path: 'synthetic/frontmatter.md', old: '---\nname: Reader\ndescription: Read useful evidence carefully\nremoved: Old field\n---\n\n# The review\n\nThis is a long paragraph with `inline code` and many unchanged words to preserve a small useful change.\n\nBefore the change, the service waits patiently and checks the result carefully.\n', new: '---\nname: Reader\ndescription: Read useful evidence closely\nadded: New field\n---\n\n# The review\n\nThis is a long paragraph with `inline code` and many unchanged words to preserve a tiny useful change.\n\nAfter the change, the service retries promptly and reports the failure clearly.\n' },
+    { id: 'frontmatter-added', path: 'synthetic/added.md', status: 'added', old: '', new: '---\nname: Reader\ndescription: Useful evidence\n---\n\n# Read me\n\nA paragraph with **bold** and `code`.' },
+    { id: 'frontmatter-removed', path: 'synthetic/removed.md', status: 'deleted', old: '---\nname: Reader\ndescription: Useful evidence\n---\n\n# Read me\n\nA paragraph with **bold** and `code`.', new: '' },
+    { id: 'md-added-newline', path: 'synthetic/added-newline.md', status: 'added', old: '', new: '# Read me\n\nA paragraph with **bold** and `code`.\n' },
+    { id: 'md-deleted-newline', path: 'synthetic/deleted-newline.md', status: 'deleted', old: '# Read me\n\nA paragraph with **bold** and `code`.\n', new: '' }
+  ];
+  var paras = Array.from({ length: 24 }, function (_, i) { return 'Paragraph ' + (i + 1) + ' holds several stable words describing the evidence for this particular section.'; });
+  var nextParas = paras.slice();
+  [1, 11, 21].forEach(function (i) { nextParas[i] += ' New useful detail.'; });
+  specs.push({ id: 'prose-focus', path: 'synthetic/focus.md', old: paras.join('\n\n') + '\n', new: nextParas.join('\n\n') + '\n', focus: [23, 23], labels: [{ line: 43, where: 'in the final report' }] });
+  var fenceOld = '# Code and prose\n\nA useful unchanged paragraph.\n\n```js\n' + joined(lines(60)) + '```\n\nOld ending.\n';
+  var fenceNew = fenceOld.replace('const line10 = 10;', 'const line10 = "ten";').replace('const line50 = 50;', 'const line50 = "fifty";').replace('Old ending.', 'New ending.');
+  specs.push({ id: 'nested-code', path: 'synthetic/fence.md', old: fenceOld, new: fenceNew, focus: [15, 15], labels: [{ line: 55, where: 'inside the nested example' }] });
+  var syntax = '#!/usr/bin/env node\n// A comment that retains its own colour.\nconst readableIdentifier = "a highlighted string";\n';
+  specs.push({ id: 'syntax-add', path: 'synthetic/syntax-add.js', status: 'added', old: '', new: syntax });
+  specs.push({ id: 'syntax-del', path: 'synthetic/syntax-del.js', status: 'deleted', old: syntax, new: '' });
+  specs.push({ id: 'long-identifiers', path: 'synthetic/long.js', status: 'added', old: '', new: 'const access_token_with_a_long_unbroken_identifier = refreshDetached().finally(() => publishReadableResultWithoutBreakingIdentifiers(access_token_with_a_long_unbroken_identifier));\n' });
+  window.fixtureSpecs = specs;
+  window.fixtureHandles = [];
+  specs.forEach(function (spec) {
+    var heading = document.createElement('h2'); heading.textContent = spec.id;
+    var target = document.createElement('section'); target.dataset.fixture = spec.id;
+    document.getElementById('fixtures').append(heading, target);
+    /* Panels start folded; the fixtures open all but those marked collapsed. */
+    var handle = DiffView.render(target, spec);
+    handle.element.id = spec.id;
+    if (!spec.collapsed) handle.element.querySelector('.dv-collapse').click();
+    window.fixtureHandles.push(handle);
+  });
+  window.testReady = true;
+})();
+</script>
+</body>
+</html>

@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 import { config as loadDotenv } from 'dotenv';
-import { errors } from './lib/messages';
+import { version } from '../package.json';
+import { errors, reviewCliMessages } from './lib/messages';
 import { printError } from './lib/output';
 
 // Dev binary only: ALIGNMENT_HIVE_DEV is baked in by --define at build time, so a production
@@ -53,6 +54,7 @@ const COMMANDS = new Map<string, () => Promise<number>>([
   ['auth-refresh', async () => (await import('./commands/auth-refresh')).authRefresh()],
   ['login', async () => (await import('./commands/login')).login(process.argv.slice(3))],
   ['local', async () => (await import('./commands/local')).local()],
+  ['debrief', async () => (await import('./commands/debrief')).reviewCommand(process.argv.slice(3))],
   [
     'consent',
     async () => {
@@ -77,8 +79,13 @@ const COMMANDS = new Map<string, () => Promise<number>>([
 async function main(): Promise<void> {
   const command = process.argv[2];
 
+  if (command === '--version') {
+    console.log(reviewCliMessages.version(version));
+    process.exit(0);
+  }
+
   if (!command || isHelp(command)) {
-    console.log('Usage: hive <session-start|upload|heartbeat|checkout-ping|login|local|consent>');
+    console.log(reviewCliMessages.mainUsage);
     process.exit(command ? 0 : 1);
   }
 

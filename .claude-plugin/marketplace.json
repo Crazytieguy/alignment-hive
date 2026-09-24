@@ -60,6 +60,11 @@
       "description": "Tooling recommendations and session sharing for alignment researchers"
     },
     {
+      "name": "debrief",
+      "source": "./plugins/debrief",
+      "description": "Debriefs of completed agent work"
+    },
+    {
       "name": "autopilot",
       "source": "./plugins/autopilot",
       "description": "Deprecated: superseded by Claude Code's built-in auto mode. Autonomous operation with permission management."

@@ -60,6 +60,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 | Plugin | Description | `enabledPlugins` key |
 |--------|-------------|----------------------|
 | [hive](plugins/hive) | Tooling recommendations, session memory + sharing | Included in install script |
+| [debrief](plugins/debrief) | Debriefs of finished sessions: what was done, what needs your call, how it was checked (beta; needs the hive CLI) | `debrief@alignment-hive` |
 | [llms-fetch-mcp](plugins/llms-fetch-mcp) | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `llms-fetch-mcp@alignment-hive` |
 | [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `remote-kernels@alignment-hive` |
 | [model-router](plugins/model-router) | GPT models as native Claude Code subagents via a local gateway (experimental) | `model-router@alignment-hive` |

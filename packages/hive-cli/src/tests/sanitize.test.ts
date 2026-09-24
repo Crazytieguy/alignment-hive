@@ -32,6 +32,28 @@ describe('sanitizeString', () => {
   });
 });
 
+describe('the review page\'s shapes apply to uploads too (one rule set)', () => {
+  // Low-entropy values, so only the shapes (not the entropy net) can catch them.
+  const sid = 'aaaa1111bbbb2222cccc';
+  const cases: Array<[string, string]> = [
+    ['Bearer', `Authorization: Bearer ${sid}`],
+    ['cookie line', `Cookie: locale=en; sid=${sid}`],
+    ['cookie JSON', `{"Cookie":"locale=en; sid=${sid}"}`],
+    ['query token', `GET /cb?a=1&token=${sid} HTTP/1.1`],
+    ['named value', `client_secret = "${sid}"`],
+  ];
+  test.each(cases)('%s is redacted in upload output', (_name, text) => {
+    expect(sanitizeString(text)).not.toContain(sid);
+  });
+
+  test('structured headers and secret-holding names are redacted in upload output', () => {
+    const entry = { input: { headers: { Cookie: `locale=en; sid=${sid}`, Authorization: `Basic ${sid}` }, env: { client_secret: sid }, note: 'fine' } };
+    const out = JSON.stringify(sanitizeDeep(entry));
+    expect(out).not.toContain(sid);
+    expect(out).toContain('"note":"fine"');
+  });
+});
+
 describe('sanitizeDeep', () => {
   test('handles mixed nested structures', () => {
     const input = {

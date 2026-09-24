@@ -1,0 +1,746 @@
+/* ============================================================
+   DiffView v8 \2014 the component stylesheet.
+
+   Everything the engine renders is under a `.dv-*` class and every
+   colour comes from a `--dv-*` token declared on bare :root first,
+   so an authored review page can drop this block in unchanged.
+
+   Change axis: GitHub default green = added, red = removed.
+   Anchored on Primer default diff scales, with separated lightness.
+   Contrast and Vi\e9not checks: _v4-palette.py; round-3 lessons.
+   ============================================================ */
+
+:root {
+  /* neutral surfaces */
+  --dv-ground:      var(--dv-page-bg, #f1f3f7);
+  --dv-surface:     var(--dv-page-bg, #ffffff);
+  --dv-surface-2:   var(--dv-page-bg-2, #ecf0f5);
+  --dv-surface-3:   var(--dv-page-bg-2, #dfe5ec);
+  --dv-border:      var(--dv-page-rule, #d3dae3);
+  --dv-border-soft: var(--dv-page-rule, #e5e9ef);
+  --dv-text:        var(--dv-page-ink, #14181f);
+  --dv-text-2:      var(--dv-page-ink, #3c4551);
+  --dv-muted:       var(--dv-page-muted, #5c6573);
+  --dv-faint:       var(--dv-page-muted, #8a93a1);
+
+  --dv-accent:      var(--dv-page-accent, #1b5e9e);
+  --dv-accent-soft: var(--dv-page-bg-2, #dfe9f6);
+  --dv-focus:       var(--dv-page-accent, #0969da);
+
+  /* added - green */
+  --dv-add-bg:   #dafbe1;
+  --dv-add-hi:   #aceebb;
+  --dv-add-rule: #1a7f37;
+  --dv-add-ink:  #116329;
+
+  /* removed - red */
+  --dv-del-bg:   #ffdedb;
+  --dv-del-hi:   #ffb1af;
+  --dv-del-rule: #cf222e;
+  --dv-del-ink:  #82071e;
+
+  --dv-fold-bg:  var(--dv-page-bg-2, #eaeef4);
+  --dv-quiet:    var(--dv-page-muted, #4d5665);
+  --dv-quiet-bg: var(--dv-page-bg-2, #eceff4);
+
+  --dv-shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .04);
+
+  --dv-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --dv-sans: "IBM Plex Sans", ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+  --dv-serif: "Source Serif 4", Iowan Old Style, Georgia, "Times New Roman", serif;
+
+  --dv-code-size: 12.5px;
+  --dv-code-lh: 1.6;
+  --dv-radius: 7px;
+  --dv-num: 3.3rem;      /* one line-number column */
+  --dv-sign: 1.6rem;
+  --dv-topbar-h: 0px;
+
+  --dv-hl-comment: #4d5563;
+  --dv-hl-keyword: #844cae;
+  --dv-hl-string:  #106a53;
+  --dv-hl-number:  #5a681b;
+  --dv-hl-title:   #0c686d;
+  --dv-hl-meta:    #565e6b;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --dv-ground:      var(--dv-page-bg, #0e1116);
+    --dv-surface:     var(--dv-page-bg, #141920);
+    --dv-surface-2:   var(--dv-page-bg-2, #1b212a);
+    --dv-surface-3:   var(--dv-page-bg-2, #242c37);
+    --dv-border:      var(--dv-page-rule, #2a323d);
+    --dv-border-soft: var(--dv-page-rule, #212832);
+    --dv-text:        var(--dv-page-ink, #e4e9f0);
+    --dv-text-2:      var(--dv-page-ink, #c2cad6);
+    --dv-muted:       var(--dv-page-muted, #8e98a7);
+    --dv-faint:       var(--dv-page-muted, #6b7482);
+
+    --dv-accent:      var(--dv-page-accent, #7db5ec);
+    --dv-accent-soft: var(--dv-page-bg-2, #16283a);
+    --dv-focus:       var(--dv-page-accent, #6aa9e6);
+
+    --dv-add-bg:   #142b20;
+    --dv-add-hi:   #19442a;
+    --dv-add-rule: #3fb950;
+    --dv-add-ink:  #7ee787;
+
+    --dv-del-bg:   #4a2d32;
+    --dv-del-hi:   #803e47;
+    --dv-del-rule: #f85149;
+    --dv-del-ink:  #ffa198;
+
+    --dv-fold-bg:  var(--dv-page-bg-2, #171d25);
+    --dv-quiet:    var(--dv-page-muted, #9aa4b3);
+    --dv-quiet-bg: var(--dv-page-bg-2, #1a212a);
+
+    --dv-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+
+    --dv-hl-comment: #aeb9c8;
+    --dv-hl-keyword: #c8a3e4;
+    --dv-hl-string:  #74c6a5;
+    --dv-hl-number:  #bac979;
+    --dv-hl-title:   #74c5cb;
+    --dv-hl-meta:    #b9c2cf;
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --dv-ground:      var(--dv-page-bg, #0e1116);
+  --dv-surface:     var(--dv-page-bg, #141920);
+  --dv-surface-2:   var(--dv-page-bg-2, #1b212a);
+  --dv-surface-3:   var(--dv-page-bg-2, #242c37);
+  --dv-border:      var(--dv-page-rule, #2a323d);
+  --dv-border-soft: var(--dv-page-rule, #212832);
+  --dv-text:        var(--dv-page-ink, #e4e9f0);
+  --dv-text-2:      var(--dv-page-ink, #c2cad6);
+  --dv-muted:       var(--dv-page-muted, #8e98a7);
+  --dv-faint:       var(--dv-page-muted, #6b7482);
+
+  --dv-accent:      var(--dv-page-accent, #7db5ec);
+  --dv-accent-soft: var(--dv-page-bg-2, #16283a);
+  --dv-focus:       var(--dv-page-accent, #6aa9e6);
+
+  --dv-add-bg:   #142b20;
+  --dv-add-hi:   #19442a;
+  --dv-add-rule: #3fb950;
+  --dv-add-ink:  #7ee787;
+
+  --dv-del-bg:   #4a2d32;
+  --dv-del-hi:   #803e47;
+  --dv-del-rule: #f85149;
+  --dv-del-ink:  #ffa198;
+
+  --dv-fold-bg:  var(--dv-page-bg-2, #171d25);
+  --dv-quiet:    var(--dv-page-muted, #9aa4b3);
+  --dv-quiet-bg: var(--dv-page-bg-2, #1a212a);
+
+  --dv-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+
+  --dv-hl-comment: #aeb9c8;
+  --dv-hl-keyword: #c8a3e4;
+  --dv-hl-string:  #74c6a5;
+  --dv-hl-number:  #bac979;
+  --dv-hl-title:   #74c5cb;
+  --dv-hl-meta:    #b9c2cf;
+
+  color-scheme: dark;
+}
+
+/* ---------------- syntax theme ----------------
+   Tokens keep their syntax colours on changed rows as well as context. */
+
+.dv-file .hljs-comment, .dv-file .hljs-quote { color: var(--dv-hl-comment); font-style: italic; }
+.dv-file .hljs-keyword, .dv-file .hljs-selector-tag, .dv-file .hljs-built_in,
+.dv-file .hljs-name, .dv-file .hljs-type, .dv-file .hljs-literal { color: var(--dv-hl-keyword); }
+.dv-file .hljs-string, .dv-file .hljs-regexp, .dv-file .hljs-symbol,
+.dv-file .hljs-template-variable, .dv-file .hljs-addition { color: var(--dv-hl-string); }
+.dv-file .hljs-number, .dv-file .hljs-variable, .dv-file .hljs-attr,
+.dv-file .hljs-attribute, .dv-file .hljs-selector-attr,
+.dv-file .hljs-selector-pseudo { color: var(--dv-hl-number); }
+.dv-file .hljs-title, .dv-file .hljs-title_, .dv-file .hljs-section,
+.dv-file .hljs-selector-id, .dv-file .hljs-selector-class { color: var(--dv-hl-title); }
+.dv-file .hljs-meta, .dv-file .hljs-doctag, .dv-file .hljs-punctuation,
+.dv-file .hljs-operator, .dv-file .hljs-params,
+.dv-file .hljs-property { color: var(--dv-hl-meta); }
+.dv-file .hljs-emphasis { font-style: italic; }
+.dv-file .hljs-strong { font-weight: 600; }
+.dv-file .hljs-bullet, .dv-file .hljs-link, .dv-file .hljs-code { color: var(--dv-hl-title); }
+
+/* ---------------- file panel ---------------- */
+
+.dv-file {
+  background: var(--dv-surface);
+  color: var(--dv-text);
+  border: 1px solid var(--dv-border);
+  border-radius: var(--dv-radius);
+  box-shadow: var(--dv-shadow);
+  margin-bottom: 18px;
+  scroll-margin-top: calc(var(--dv-topbar-h) + 14px);
+}
+
+/* the rounded corners are clipped on the head and the body separately:
+   an overflow on the panel itself would turn it into a scrollport and
+   strand the sticky header partway down the file */
+.dv-body {
+  overflow: hidden;
+  border-radius: 0 0 calc(var(--dv-radius) - 1px) calc(var(--dv-radius) - 1px);
+}
+
+.dv-head {
+  border-radius: calc(var(--dv-radius) - 1px) calc(var(--dv-radius) - 1px) 0 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  background: var(--dv-surface-2);
+  border-bottom: 1px solid var(--dv-border);
+  position: sticky;
+  top: var(--dv-topbar-h);
+  z-index: 3;
+}
+/* A title leads the header (what this diff shows); the path follows it,
+   muted, as where it lives. */
+.dv-title {
+  font: 600 13px/1.35 var(--dv-sans);
+  color: var(--dv-text);
+  /* the path gives way first; only a very long title wraps */
+  flex: 0 0 auto;
+  max-width: 50%;
+  overflow-wrap: break-word;
+}
+.dv-head.dv-has-title .dv-path {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--dv-muted);
+}
+.dv-path {
+  font-family: var(--dv-mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dv-path .dv-dir { color: var(--dv-muted); font-weight: 400; }
+
+.dv-chip {
+  font-size: 10px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--dv-border);
+  color: var(--dv-muted);
+  background: var(--dv-surface);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.dv-chip.dv-added { color: var(--dv-add-ink); border-color: var(--dv-add-rule); }
+.dv-chip.dv-deleted { color: var(--dv-del-ink); border-color: var(--dv-del-rule); }
+
+.dv-totals {
+  display: inline-flex;
+  gap: 10px;
+  font-family: var(--dv-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.dv-totals .dv-plus { color: var(--dv-add-ink); }
+.dv-totals .dv-minus { color: var(--dv-del-ink); }
+.dv-totals .dv-zero { color: var(--dv-muted); }
+
+.dv-collapse {
+  flex: 0 0 auto;
+  font: 15px/1 var(--dv-sans);
+  color: var(--dv-muted);
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  margin: -2px -6px -2px -6px;
+  cursor: pointer;
+  transition: transform .15s;
+}
+.dv-collapse:hover { color: var(--dv-text); }
+/* The glyph draws ~6px wide at any font size; a drawn chevron reads at 14px. */
+.dv-collapse { width: 20px; height: 20px; padding: 0; margin: -3px -4px -3px -6px; font-size: 0; display: inline-grid; place-items: center; border-radius: 4px; }
+.dv-collapse::before { content: ""; width: 8px; height: 8px; border: solid currentColor; border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); }
+.dv-head:hover .dv-collapse { color: var(--dv-text); }
+.dv-collapse:focus-visible { outline: 2px solid var(--dv-focus); outline-offset: 2px; }
+.dv-file.dv-is-collapsed .dv-collapse { transform: rotate(-90deg); }
+.dv-file.dv-is-collapsed .dv-body { display: none; }
+.dv-head { cursor: pointer; }
+.dv-file.dv-is-collapsed .dv-head {
+  border-radius: calc(var(--dv-radius) - 1px);
+  border-bottom-color: transparent;
+  position: static;
+}
+
+/* Rendered Markdown's source view is a small header toggle, styled like the
+   file view's "View source" (.fv-toggle). The border mixes muted into the rule
+   to match the page's stronger rule. */
+.dv-src-toggle {
+  flex: 0 0 auto;
+  font: 11px/1.6 var(--dv-mono);
+  color: var(--dv-muted);
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--dv-muted) 25%, var(--dv-border));
+  border-radius: 4px;
+  padding: 1px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dv-src-toggle:hover { color: var(--dv-text); }
+.dv-src-toggle:focus-visible { outline: 2px solid var(--dv-focus); outline-offset: 2px; }
+/* Folded, the toggle keeps its box: it is taller than the tab row, so appearing on open would move the header. */
+.dv-file.dv-is-collapsed .dv-src-toggle { visibility: hidden; }
+/* Both labels share one grid column, so switching views never changes the toggle's width. */
+.dv-src-toggle { display: inline-grid; }
+.dv-src-toggle::after { content: attr(data-alt); visibility: hidden; height: 0; overflow: hidden; }
+
+/* ---------------- code rows ---------------- */
+
+.dv-rows {
+  font-family: var(--dv-mono);
+  font-size: var(--dv-code-size);
+  line-height: var(--dv-code-lh);
+  font-variant-ligatures: none;
+}
+
+.dv-row {
+  display: grid;
+  grid-template-columns: calc(var(--dv-num) - 3px) var(--dv-num) var(--dv-sign) minmax(0, 1fr);
+  align-items: start;
+  border-left: 3px solid transparent;
+  font: var(--dv-code-size)/var(--dv-code-lh) var(--dv-mono);
+}
+.dv-row > .dv-n, .dv-row > .dv-sign, .dv-row > .dv-code {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-left: 0;
+  box-shadow: none;
+}
+.dv-rows.dv-nonum .dv-row {
+  grid-template-columns: calc(var(--dv-sign) - 3px) minmax(0, 1fr);
+}
+.dv-rows.dv-nonum .dv-n { display: none; }
+
+.dv-n {
+  color: var(--dv-faint);
+  text-align: right;
+  padding: 0 11px 0 5px;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  font-size: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  background: var(--dv-surface);
+}
+.dv-n.dv-n-new {
+  border-right: 1px solid var(--dv-border-soft);
+  padding-right: 13px;
+}
+
+.dv-sign {
+  text-align: center;
+  user-select: none;
+  color: var(--dv-faint);
+  font-weight: 600;
+  background: var(--dv-surface);
+}
+
+.dv-code {
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  padding: 0 14px 0 4px;
+  tab-size: 4;
+}
+
+.dv-row.dv-eq { background: var(--dv-surface); }
+
+.dv-row.dv-del { background: var(--dv-del-bg); }
+.dv-row.dv-del .dv-n, .dv-row.dv-del .dv-sign {
+  color: var(--dv-del-ink);
+  background: var(--dv-del-bg);
+}
+.dv-row.dv-add { background: var(--dv-add-bg); }
+.dv-row.dv-add .dv-n, .dv-row.dv-add .dv-sign {
+  color: var(--dv-add-ink);
+  background: var(--dv-add-bg);
+}
+
+/* One rule on the outer row, never a second stripe in its gutters.
+   Unchanged rows reserve the same width so all content columns align. */
+.dv-row.dv-del { border-left-color: var(--dv-del-rule); }
+.dv-row.dv-add { border-left-color: var(--dv-add-rule); }
+
+/* ---------------- word / character marks ----------------
+   Default is background only: no underline, no strikethrough, and the
+   text keeps its own colour so an addition can never read as a link. */
+
+.dv-ins, .dv-del-mark {
+  border-radius: 0;
+  padding: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.dv-ins { background: var(--dv-add-hi); }
+.dv-del-mark { background: var(--dv-del-hi); }
+
+
+/* ---------------- Relevant | All changes ----------------
+   A focused panel's two views are tabs in its header row, hanging from the
+   header's bottom rule so the chosen one opens onto the code. The header is
+   sticky, so the tabs stay in reach down a long All changes view. */
+
+/* Folded and open share one geometry: the tabs hang from 5px above the row to the
+   header's bottom edge, their labels centred on the row, so opening a panel moves nothing. */
+.dv-tabs {
+  display: inline-flex;
+  align-self: stretch;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 0 auto;
+  margin: -5px -6px -10px 0;
+}
+.dv-tab {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: baseline;
+  gap: 7px;
+  font: 500 11.5px/1.5 var(--dv-sans);
+  color: var(--dv-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  padding: 5px 10px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+/* Each label reserves its bold width, so choosing a tab never moves the header. */
+.dv-tab-name { display: inline-grid; }
+.dv-tab-name::after { content: attr(data-label); font-weight: 600; visibility: hidden; height: 0; overflow: hidden; }
+.dv-tab .dv-totals { gap: 5px; font-size: 11.5px; }
+.dv-tab:hover:not([aria-selected="true"]) { color: var(--dv-text); background: var(--dv-surface-3); }
+.dv-tab[aria-selected="true"] {
+  position: relative;
+  background: var(--dv-surface);
+  color: var(--dv-text);
+  font-weight: 600;
+  border-color: var(--dv-border);
+  cursor: default;
+}
+/* the chosen tab covers the header rule beneath it */
+.dv-tab[aria-selected="true"]::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--dv-surface);
+}
+.dv-tab:focus-visible { outline: 2px solid var(--dv-focus); outline-offset: -2px; }
+/* folded, the tabs read as one summary line: Relevant +a -b, a dot, All changes +c -d;
+   only the chrome goes, the boxes stay where they are */
+.dv-file.dv-is-collapsed .dv-tab { border-color: transparent; background: transparent; font-weight: 500; color: var(--dv-muted); }
+.dv-file.dv-is-collapsed .dv-tab::after { content: none; }
+.dv-file.dv-is-collapsed .dv-tab + .dv-tab::before { content: "\00b7"; content: "\00b7" / ""; color: var(--dv-faint); position: absolute; left: -1px; top: calc(50% - 2.5px); transform: translate(-50%, -50%); }
+.dv-file.dv-is-collapsed .dv-tab:hover { background: transparent; color: var(--dv-text); }
+
+/* a stretch the Relevant view leaves out */
+.dv-gap { position: relative; height: 15px; display: grid; place-items: center; background: var(--dv-surface); }
+.dv-gap::before { content: ""; position: absolute; left: 0; right: 0; top: 7px; border-top: 1px solid var(--dv-border); }
+.dv-gap span { position: relative; font: 10.5px/13px var(--dv-sans); color: var(--dv-muted); background: var(--dv-surface); padding: 0 8px; font-variant-numeric: tabular-nums; }
+/* a fold is the same hairline, a little taller, with its step buttons inside the label */
+.dv-fold-line { height: 22px; }
+.dv-fold-line::before { top: 11px; }
+.dv-gap-label { display: inline-flex; align-items: center; gap: 6px; }
+.dv-gap-label .dv-plus { color: var(--dv-add-ink); padding: 0; background: none; }
+.dv-gap-label .dv-minus { color: var(--dv-del-ink); padding: 0; background: none; }
+.dv-gap-btn { font: 500 10.5px/16px var(--dv-sans); color: var(--dv-muted); background: var(--dv-surface); border: 1px solid var(--dv-border); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.dv-gap-btn:hover { color: var(--dv-text); border-color: var(--dv-muted); }
+.dv-gap-btn:focus-visible { outline: 2px solid var(--dv-focus); outline-offset: 1px; }
+
+/* All changes brackets each relevant stretch: the same hairline, labelled
+   "relevant" above the stretch and plain below it. */
+.dv-bracket { position: relative; height: 15px; display: grid; place-items: center; background: var(--dv-surface); }
+.dv-bracket::before { content: ""; position: absolute; left: 0; right: 0; top: 7px; border-top: 1px solid var(--dv-border); }
+.dv-bracket span { position: relative; font: 500 10.5px/13px var(--dv-sans); color: var(--dv-text-2); background: var(--dv-surface); padding: 0 8px; }
+
+/* ...plus one subtle cue: other changes keep their colours at a lighter
+   strength; text, signs and line numbers keep full contrast. */
+:root {
+  --dv-add-bg-quiet:   color-mix(in srgb, var(--dv-add-bg) 45%, var(--dv-surface));
+  --dv-add-hi-quiet:   color-mix(in srgb, var(--dv-add-hi) 45%, var(--dv-surface));
+  --dv-add-rule-quiet: color-mix(in srgb, var(--dv-add-rule) 40%, var(--dv-surface));
+  --dv-del-bg-quiet:   color-mix(in srgb, var(--dv-del-bg) 45%, var(--dv-surface));
+  --dv-del-hi-quiet:   color-mix(in srgb, var(--dv-del-hi) 45%, var(--dv-surface));
+  --dv-del-rule-quiet: color-mix(in srgb, var(--dv-del-rule) 40%, var(--dv-surface));
+}
+.dv-file .dv-other {
+  --dv-add-bg: var(--dv-add-bg-quiet);
+  --dv-add-hi: var(--dv-add-hi-quiet);
+  --dv-add-rule: var(--dv-add-rule-quiet);
+  --dv-del-bg: var(--dv-del-bg-quiet);
+  --dv-del-hi: var(--dv-del-hi-quiet);
+  --dv-del-rule: var(--dv-del-rule-quiet);
+}
+
+/* ---------------- rendered prose ---------------- */
+
+.dv-prose {
+  font-family: var(--dv-serif);
+  font-size: 15px;
+  line-height: 1.62;
+  color: var(--dv-text);
+  max-width: 70ch;
+}
+.dv-prose > :first-child { margin-top: 0; }
+.dv-prose > :last-child { margin-bottom: 0; }
+.dv-prose h1, .dv-prose h2, .dv-prose h3, .dv-prose h4, .dv-prose h5, .dv-prose h6 {
+  font-family: var(--dv-sans);
+  font-weight: 600;
+  letter-spacing: -.01em;
+  line-height: 1.25;
+  margin: 0 0 .35em;
+  text-wrap: balance;
+}
+.dv-prose h1 { font-size: 1.32em; }
+.dv-prose h2 { font-size: 1.16em; }
+.dv-prose h3 { font-size: 1.04em; }
+.dv-prose h4, .dv-prose h5, .dv-prose h6 { font-size: .95em; }
+.dv-prose p, .dv-prose ul, .dv-prose ol, .dv-prose blockquote { margin: 0 0 .7em; }
+.dv-prose ul, .dv-prose ol { padding-left: 1.4em; }
+.dv-prose li { margin-bottom: .2em; }
+.dv-prose blockquote {
+  border-left: 2px solid var(--dv-border);
+  padding-left: .9em;
+  color: var(--dv-text-2);
+}
+.dv-prose code {
+  font-family: var(--dv-mono);
+  font-size: .82em;
+  background: var(--dv-surface-2);
+  border-radius: 3px;
+  padding: .1em .35em;
+  overflow-wrap: anywhere;
+}
+.dv-prose pre {
+  font-family: var(--dv-mono);
+  font-size: 12px;
+  background: var(--dv-surface-2);
+  border: 1px solid var(--dv-border-soft);
+  border-radius: 4px;
+  padding: 9px 11px;
+  overflow-x: auto;
+  margin: 0 0 .7em;
+}
+.dv-prose pre code { background: none; padding: 0; font-size: inherit; }
+.dv-prose table {
+  border-collapse: collapse;
+  font-size: .9em;
+  margin: 0 0 .7em;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.dv-prose th, .dv-prose td { border: 1px solid var(--dv-border); padding: 4px 8px; text-align: left; }
+.dv-prose th { background: var(--dv-surface-2); font-family: var(--dv-sans); font-size: .95em; }
+.dv-prose hr { border: 0; border-top: 1px solid var(--dv-border); margin: 1em 0; }
+.dv-prose a { color: var(--dv-accent); overflow-wrap: anywhere; }
+
+/* ---------------- prose blocks ---------------- */
+
+.dv-pb {
+  padding: 12px 16px;
+  background: var(--dv-surface);
+}
+.dv-pb + .dv-pb { border-top: 1px solid var(--dv-border-soft); }
+
+.dv-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--dv-sans);
+  font-size: 9.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--dv-muted);
+  margin-bottom: 6px;
+}
+.dv-label .dv-mk { font-family: var(--dv-mono); font-size: 11px; letter-spacing: 0; }
+.dv-label.dv-l-add { color: var(--dv-add-ink); }
+.dv-label.dv-l-del { color: var(--dv-del-ink); }
+
+.dv-side {
+  padding: 10px 16px 10px 15px;
+  background: var(--dv-surface);
+}
+.dv-side.dv-s-old {
+  background: var(--dv-del-bg);
+  box-shadow: inset 3px 0 0 0 var(--dv-del-rule), inset 4px 0 0 0 var(--dv-del-bg),
+              inset 6px 0 0 0 var(--dv-del-rule);
+}
+.dv-side.dv-s-new {
+  background: var(--dv-add-bg);
+  box-shadow: inset 3px 0 0 0 var(--dv-add-rule);
+}
+.dv-side.dv-s-old + .dv-side.dv-s-new { border-top: 1px solid var(--dv-border-soft); }
+
+.dv-pb.dv-p-add { background: var(--dv-add-bg); box-shadow: inset 3px 0 0 0 var(--dv-add-rule); }
+.dv-pb.dv-p-del {
+  background: var(--dv-del-bg);
+  box-shadow: inset 3px 0 0 0 var(--dv-del-rule), inset 4px 0 0 0 var(--dv-del-bg),
+              inset 6px 0 0 0 var(--dv-del-rule);
+}
+.dv-pb.dv-p-moved { background: var(--dv-quiet-bg); box-shadow: inset 3px 0 0 0 var(--dv-quiet); }
+.dv-pb.dv-p-fmt .dv-prose {
+  text-decoration: underline dotted var(--dv-muted);
+  text-underline-offset: 3px;
+}
+
+/* a small structured block (YAML front matter, a fenced code block, a
+   table) inside a prose file: a card, not a line-numbered source diff */
+.dv-card {
+  border: 1px solid var(--dv-border);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--dv-surface-2);
+  max-width: 100%;
+}
+.dv-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--dv-surface-2);
+  border-bottom: 1px solid var(--dv-border-soft);
+  font-family: var(--dv-sans);
+  font-size: 9.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--dv-muted);
+}
+.dv-card .dv-rows { background: var(--dv-surface); }
+
+/* ---------------- notes ---------------- */
+
+.dv-note {
+  padding: 10px 14px;
+  color: var(--dv-muted);
+  font-family: var(--dv-sans);
+  font-size: 12.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-file * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+@media (max-width: 760px) {
+  .dv-body { overflow-x: auto; }
+  .dv-row { width: max-content; min-width: 100%; box-sizing: border-box; }
+  .dv-code { white-space: pre; overflow-wrap: normal; }
+}
+
+@media (max-width: 640px) {
+  :root { --dv-num: 2.5rem; --dv-sign: 1.2rem; --dv-code-size: 12px; }
+  .dv-head { position: static; flex-wrap: wrap; gap: 8px; }
+  .dv-title { flex-shrink: 1; max-width: calc(100% - 30px); }
+  .dv-pb, .dv-side { padding-left: 12px; padding-right: 12px; }
+  .dv-code { padding-right: 8px; }
+}
+
+/* Unmarked tokens retain syntax colour; only stronger word-mark backgrounds
+   use body ink, scoped to code so settled prose mark rendering is untouched. */
+.dv-file .dv-row.dv-add .dv-code,
+.dv-file .dv-row.dv-del .dv-code,
+.dv-file .dv-row .dv-code .dv-ins, .dv-file .dv-row .dv-code .dv-ins span,
+.dv-file .dv-row .dv-code .dv-del-mark, .dv-file .dv-row .dv-code .dv-del-mark span {
+  color: var(--dv-text);
+}
+/* Full inline elements inherit the run's opaque tint rather than painting
+   a neutral code pill over it. The outer span keeps prose-height coverage. */
+.dv-side .dv-prose code, .dv-p-add .dv-prose code, .dv-p-del .dv-prose code { background: transparent; }
+.dv-prose .dv-ins code, .dv-prose .dv-del-mark code {
+  background: transparent;
+  border-radius: 0;
+  padding-block: 0;
+}
+.dv-prose .dv-ins a, .dv-prose .dv-del-mark a,
+.dv-prose a:has(.dv-ins), .dv-prose a:has(.dv-del-mark) { color: var(--dv-text); }
+.dv-prose .dv-ins .dv-ins, .dv-prose .dv-del-mark .dv-del-mark { background: transparent; }
+
+/* Paragraph-like metadata, not a source block: keys stay visually quiet. */
+.dv-meta-list { margin: 0; padding-left: 12px; }
+.dv-meta-entry { display: grid; grid-template-columns: 12ch minmax(0, 1fr); gap: 10px; margin: 0 0 6px; }
+.dv-meta-entry:last-child { margin-bottom: 0; }
+.dv-meta dt { font: 12px/1.9 var(--dv-mono); color: var(--dv-muted); overflow-wrap: anywhere; }
+.dv-meta dd { margin: 0; min-width: 0; }
+.dv-meta .dv-prose { margin: 0; }
+.dv-meta-add, .dv-meta-del { position: relative; padding: 2px 8px 2px 24px; }
+.dv-meta-add { background: var(--dv-add-bg); box-shadow: inset 2px 0 var(--dv-add-rule); }
+.dv-meta-del { background: var(--dv-del-bg); box-shadow: inset 2px 0 var(--dv-del-rule); }
+.dv-meta-sign { position: absolute; left: 8px; font-family: var(--dv-mono); }
+.dv-meta-add .dv-meta-sign { color: var(--dv-add-ink); }
+.dv-meta-del .dv-meta-sign { color: var(--dv-del-ink); }
+@media (max-width: 640px) {
+  .dv-meta-entry { grid-template-columns: minmax(0, 1fr); gap: 0; margin-bottom: 10px; }
+}
+.dv-source-block { padding: 0; }
+
+/* Whole-block changes share the prose tint/rule, without inner neutral panels. */
+.dv-meta.dv-p-add .dv-meta-list, .dv-meta.dv-p-del .dv-meta-list { border-left: 0; padding-left: 0; }
+.dv-p-add .dv-prose pre, .dv-p-del .dv-prose pre,
+.dv-p-add .dv-prose th, .dv-p-del .dv-prose th { background: transparent; }
+
+/* Keep field columns fixed; extend one-sided tint and rules into the margin. */
+.dv-meta-entry.dv-pb {
+  position: relative;
+  margin-left: -28px;
+  margin-right: -16px;
+  padding: 6px 16px 6px 28px;
+}
+@media (max-width: 640px) {
+  .dv-meta-entry.dv-pb { margin-left: -24px; margin-right: -12px; padding-inline: 24px 12px; }
+}
+.dv-meta-entry.dv-p-add .dv-meta-sign { color: var(--dv-add-ink); }
+.dv-meta-entry.dv-p-del .dv-meta-sign { color: var(--dv-del-ink); }
+
+/* Full-width review annotations are separate from source text. */
+.dv-review-label.dv-label-row {
+  display: block;
+  font: 12px/1.6 var(--dv-sans);
+  color: var(--dv-muted);
+  background: var(--dv-accent-soft);
+  border: 0;
+  border-radius: 0;
+  padding: 6px 14px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dv-rows > .dv-label-row {
+  margin-left: calc(var(--dv-num) + var(--dv-num) + var(--dv-sign));
+  padding-left: 4px;
+}
+.dv-rows.dv-nonum > .dv-label-row { margin-left: var(--dv-sign); }
+
+/* The header wraps at every width, so a long title and path never squeeze the
+   path to a character per line between phone and desktop widths. */
+.dv-head { flex-wrap: wrap; row-gap: 4px; }
+.dv-path { flex: 1 1 auto; min-width: 0; overflow-wrap: normal; word-break: normal; }
+.dv-fname { white-space: nowrap; }
+.dv-tabs { margin-left: auto; }
+/* Code on tinted prose blocks has no pill, so no pill padding either. */
+.dv-p-add code, .dv-p-del code, .dv-side code { padding-left: 0; padding-right: 0; }
