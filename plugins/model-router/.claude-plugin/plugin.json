@@ -1,5 +1,5 @@
 {
   "name": "model-router",
-  "version": "0.1.27",
-  "description": "Experimental local model routing gateway for Claude Code"
+  "version": "0.1.28",
+  "description": "Experimental: non-Claude models (GPT, Grok) as native Claude Code subagents via a local routing gateway"
 }

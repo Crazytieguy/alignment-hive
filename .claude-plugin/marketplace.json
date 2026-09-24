@@ -72,7 +72,7 @@
     {
       "name": "model-router",
       "source": "./plugins/model-router",
-      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway"
+      "description": "Experimental: non-Claude models (GPT, Grok) as native Claude Code subagents via a local routing gateway"
     },
     {
       "name": "model-router-aarch64-apple-darwin",
@@ -80,7 +80,7 @@
         "source": "archive",
         "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-aarch64-apple-darwin.zip"
       },
-      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (macOS, Apple Silicon)"
+      "description": "Experimental: non-Claude models (GPT, Grok) as native Claude Code subagents via a local routing gateway (macOS, Apple Silicon)"
     },
     {
       "name": "model-router-aarch64-unknown-linux-gnu",
@@ -88,7 +88,7 @@
         "source": "archive",
         "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-aarch64-unknown-linux-gnu.zip"
       },
-      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (Linux, arm64)"
+      "description": "Experimental: non-Claude models (GPT, Grok) as native Claude Code subagents via a local routing gateway (Linux, arm64)"
     },
     {
       "name": "model-router-x86_64-apple-darwin",
@@ -96,7 +96,7 @@
         "source": "archive",
         "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-x86_64-apple-darwin.zip"
       },
-      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (macOS, Intel)"
+      "description": "Experimental: non-Claude models (GPT, Grok) as native Claude Code subagents via a local routing gateway (macOS, Intel)"
     },
     {
       "name": "model-router-x86_64-unknown-linux-gnu",
@@ -104,7 +104,7 @@
         "source": "archive",
         "url": "https://github.com/Crazytieguy/alignment-hive/releases/download/plugin-archives/model-router-x86_64-unknown-linux-gnu.zip"
       },
-      "description": "Experimental: GPT models as native Claude Code subagents via a local routing gateway (Linux, x86_64)"
+      "description": "Experimental: non-Claude models (GPT, Grok) as native Claude Code subagents via a local routing gateway (Linux, x86_64)"
     },
     {
       "name": "tldr",
