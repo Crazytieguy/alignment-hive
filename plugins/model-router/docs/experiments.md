@@ -1517,3 +1517,30 @@ child's provider-bound request log.
 
 Opus 5.5 passthrough needs no router change: the session that made this
 change ran on it through the live 0.1.20 router (Claude Code 2.1.281).
+
+## alpha/search hang: the shared session id (2026-09-23, CLIProxyAPI 7.2.154, codex-rs HEAD f5f08c54cb)
+
+Symptom: every GPT-origin WebSearch hit the 30 s budget on
+`/v1/alpha/search` and fell back to the LLM path. Last success in the live
+log 2026-09-02; 60/60 failures 2026-09-24 UTC.
+
+Cause: the router sent the constant `"id": "model-router-websearch"`. The
+backend keeps a browsing session per `id` (repeated calls on one id come back
+as `turn0…`, `turn1…`, `turn2…` citations), and codex-rs sends its thread
+id, not a constant. Every search the router ever made (at least 528 in the
+current log alone) went into one session, which is now wedged for this
+account. Sandbox child, same body, only `id` varied:
+
+| id | result |
+|---|---|
+| `model-router-websearch` (x4, incl. with `input` as message items, no `input`) | hang, 0 bytes by 35–40 s |
+| fresh UUID / fresh `model-router-websearch-probe-N` | 200 in 1.1–2.4 s, 37–40 results |
+| one fresh id, 5 concurrent | all 200 in 1.2–2.4 s |
+| one fresh id, 25 sequential | all 200, 1.0–4.6 s, no latency trend |
+
+Payload shape, headers and endpoint path are unchanged in current codex-rs
+(`ext/web-search/src/tool.rs`: `id` = session id, `input` = conversation
+tail as items, `reasoning: None`, originator + turn-metadata headers). No
+related CLIProxyAPI issue is open. Why this particular session wedged (turn
+cap, state size, a stuck in-flight turn) is unknown: 25 turns showed no
+growth. Fix: a fresh id per search (0.1.30, binary 0.1.22).

@@ -174,6 +174,20 @@ fn alpha_search_model(upstream_model: &str) -> &str {
     }
 }
 
+/// A fresh `alpha/search` session id. The backend keeps browsing state per
+/// `id` (each call on an id is the next `turnN`), and Codex sends its thread
+/// id; one constant id shared by every search wedged that session for good
+/// (every call hung, 2026-09). Searches here are one-shot, so each gets its
+/// own id.
+fn alpha_search_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("model-router-websearch-{nanos:x}-{seq}")
+}
+
 /// Builds the `alpha/search` request body (the shape the Codex CLI's
 /// `web.run` tool sends; see `codex-rs/codex-api/src/search.rs`).
 #[must_use]
@@ -197,7 +211,7 @@ pub fn alpha_request_body(subcall: &Subcall, upstream_model: &str) -> Value {
         search_query["domains"] = json!(allowed);
     }
     json!({
-        "id": "model-router-websearch",
+        "id": alpha_search_id(),
         "model": alpha_search_model(upstream_model),
         "input": subcall.user_text,
         "commands": {"search_query": [search_query]},
@@ -1321,6 +1335,11 @@ mod tests {
         assert_eq!(
             body["input"],
             "Perform a web search for the query: rust axum"
+        );
+        // A shared id accumulates backend session state; each search is fresh.
+        assert_ne!(
+            alpha_request_body(&subcall, "gpt-5.6-terra")["id"],
+            body["id"]
         );
     }
 
