@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde_json::{Value, json};
 
-use crate::jupyter::messages::ExecutionOutput;
+use crate::jupyter::messages::{ExecutionOutput, Output};
 
 /// Manages a notebook file (.ipynb) for a single kernel.
 pub struct Notebook {
@@ -361,44 +361,30 @@ fn cell_execution_count(cell: &Value) -> Option<u32> {
 
 /// Build notebook output cells from execution output.
 fn build_outputs(output: &ExecutionOutput, execution_count: Option<u32>) -> Vec<serde_json::Value> {
-    let mut outputs = Vec::new();
-
-    if !output.stdout.is_empty() {
-        outputs.push(json!({
-            "output_type": "stream",
-            "name": "stdout",
-            "text": split_source(&output.stdout)
-        }));
-    }
-
-    if !output.stderr.is_empty() {
-        outputs.push(json!({
-            "output_type": "stream",
-            "name": "stderr",
-            "text": split_source(&output.stderr)
-        }));
-    }
-
-    if let Some(ref result) = output.result {
-        outputs.push(json!({
-            "output_type": "execute_result",
-            "execution_count": execution_count,
-            "data": {
-                "text/plain": split_source(result)
-            },
-            "metadata": {}
-        }));
-    }
-
-    for data in &output.display_data {
-        outputs.push(json!({
-            "output_type": "display_data",
-            "data": {
-                "text/plain": split_source(data)
-            },
-            "metadata": {}
-        }));
-    }
+    // Rich outputs keep the kernel's whole mime bundle, images included, as
+    // Jupyter itself saves them.
+    let mut outputs: Vec<Value> = output
+        .outputs
+        .iter()
+        .map(|item| match item {
+            Output::Stream { stderr, text } => json!({
+                "output_type": "stream",
+                "name": if *stderr { "stderr" } else { "stdout" },
+                "text": split_source(text)
+            }),
+            Output::Result(result) => json!({
+                "output_type": "execute_result",
+                "execution_count": execution_count,
+                "data": result.data,
+                "metadata": result.metadata
+            }),
+            Output::Display(data) => json!({
+                "output_type": "display_data",
+                "data": data.data,
+                "metadata": data.metadata
+            }),
+        })
+        .collect();
 
     if let Some(ref err) = output.error {
         outputs.push(json!({
@@ -415,13 +401,17 @@ fn build_outputs(output: &ExecutionOutput, execution_count: Option<u32>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jupyter::messages::DisplayOutput;
 
     fn output_with(stdout: &str, result: Option<&str>) -> ExecutionOutput {
-        ExecutionOutput {
-            stdout: stdout.to_string(),
-            result: result.map(String::from),
-            ..Default::default()
+        let mut output = ExecutionOutput::default();
+        output.push_stream(false, stdout);
+        if let Some(result) = result {
+            output
+                .outputs
+                .push(Output::Result(DisplayOutput::text_only(result)));
         }
+        output
     }
 
     fn read_notebook(nb: &Notebook) -> serde_json::Value {
@@ -479,7 +469,7 @@ mod tests {
         let json = read_notebook(&nb);
         let outputs = &json["cells"][0]["outputs"];
         assert_eq!(outputs[0]["output_type"], "execute_result");
-        assert_eq!(outputs[0]["data"]["text/plain"][0], "2");
+        assert_eq!(outputs[0]["data"]["text/plain"], "2");
     }
 
     #[test]
@@ -545,7 +535,7 @@ mod tests {
         assert!(json["cells"][1].get("outputs").is_none());
         let outputs = &json["cells"][2]["outputs"];
         assert_eq!(outputs[0]["output_type"], "execute_result");
-        assert_eq!(outputs[0]["data"]["text/plain"][0], "2");
+        assert_eq!(outputs[0]["data"]["text/plain"], "2");
         // The result is stamped with the cell's execution count, not its position.
         assert_eq!(outputs[0]["execution_count"], 2);
         assert_eq!(

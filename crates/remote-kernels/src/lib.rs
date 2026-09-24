@@ -125,6 +125,7 @@ where
 pub mod config;
 pub mod descriptions;
 pub mod heartbeat;
+pub mod images;
 pub mod jupyter;
 pub mod ledger;
 pub mod machine_scripts;

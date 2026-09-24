@@ -153,11 +153,14 @@ impl KernelConnection {
         match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(_)) => anyhow::bail!("Kernel connection dropped before execution completed"),
-            Err(_) => Ok(ExecutionOutput {
-                stderr: "Execution timed out. The code may still be running on the kernel."
-                    .to_string(),
-                ..Default::default()
-            }),
+            Err(_) => {
+                let mut output = ExecutionOutput::default();
+                output.push_stream(
+                    true,
+                    "Execution timed out. The code may still be running on the kernel.",
+                );
+                Ok(output)
+            }
         }
     }
 
@@ -193,14 +196,14 @@ impl KernelConnection {
                         Ok(j) => j,
                         Err(e) => {
                             tracing::error!("Failed to serialize execute_request: {e}");
-                            let _ = cmd.result_tx.send(ExecutionOutput::error(format!("Internal error: {e}")));
+                            let _ = cmd.result_tx.send(ExecutionOutput::error(&format!("Internal error: {e}")));
                             continue;
                         }
                     };
 
                     if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
                         tracing::error!("Failed to send WebSocket message: {e}");
-                        let _ = cmd.result_tx.send(ExecutionOutput::error(format!("WebSocket send error: {e}")));
+                        let _ = cmd.result_tx.send(ExecutionOutput::error(&format!("WebSocket send error: {e}")));
                         continue;
                     }
 
@@ -321,14 +324,13 @@ impl KernelConnection {
                 pending.output.status = ExecutionStatus::Errored;
                 pending
                     .output
-                    .stderr
-                    .push_str("\nWebSocket connection closed unexpectedly.");
+                    .push_stream(true, "\nWebSocket connection closed unexpectedly.");
             }
             let _ = pending.result_tx.send(pending.output);
         }
         while let Ok(cmd) = request_rx.try_recv() {
             let _ = cmd.result_tx.send(ExecutionOutput::error(
-                "WebSocket connection closed before execution started.".to_string(),
+                "WebSocket connection closed before execution started.",
             ));
         }
     }
@@ -474,7 +476,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(output.stderr.contains("WebSocket send error"));
+        assert!(output.stream_text(true).contains("WebSocket send error"));
         tokio::task::yield_now().await;
         assert!(!connection.has_pending_work());
     }
@@ -503,14 +505,14 @@ mod tests {
         let first_output = first.result_rx.await.unwrap();
         assert!(
             first_output
-                .stderr
+                .stream_text(true)
                 .contains("connection closed unexpectedly")
         );
         for queued in [second, third] {
             let output = queued.result_rx.await.unwrap();
             assert!(
                 output
-                    .stderr
+                    .stream_text(true)
                     .contains("connection closed before execution started")
             );
         }

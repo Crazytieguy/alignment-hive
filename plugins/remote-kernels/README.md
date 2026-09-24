@@ -44,8 +44,9 @@ parallel, each with its own kernels, and kernel calls route automatically —
 no instance bookkeeping.
 
 **Jupyter kernel execution** — Run code on remote GPUs through persistent
-Jupyter kernels. Claude can execute cells, inspect outputs, and iterate — all
-within the conversation. Kernel activity is saved as `.ipynb` files.
+Jupyter kernels. Claude can execute cells, inspect outputs (plots included, as
+images), and iterate — all within the conversation. Kernel activity is saved
+as `.ipynb` files.
 
 **File sync** — Sync local project files to a machine (`.gitignore`-aware)
 and download results back, both rooted at the project directory.

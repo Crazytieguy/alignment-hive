@@ -1,6 +1,6 @@
 [package]
 name = "remote-kernels"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "MCP server for spinning up cloud GPU instances and interacting with persistent Jupyter kernels"
 license = "MIT"
@@ -46,6 +46,8 @@ ulid = "1.2.1"
 hex = "0.4.3"
 shlex = "2.0.1"
 sha2 = "0.11.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22.1"
 
 [dev-dependencies]
 dotenvy = "0.15.7"

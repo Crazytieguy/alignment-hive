@@ -16,6 +16,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::config::{Cleanup, Config};
+use crate::images::ImageCollector;
 use crate::jupyter::messages::ExecutionOutput;
 use crate::jupyter::rest::JupyterClient;
 use crate::runtime::{
@@ -24,7 +25,11 @@ use crate::runtime::{
 };
 use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, KernelRecord, Phase};
 
-const RECORDER_TAIL_BYTES: usize = 1024 * 1024;
+/// How much of the recorder log a reattach replays. Sized for image outputs:
+/// dozens of figures, or one high-dpi image, fit.
+const RECORDER_TAIL_BYTES: usize = 16 * 1024 * 1024;
+/// Room to transfer the full tail over a slow link.
+const RECORDER_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +67,41 @@ enum WaitOutcome {
     StillRunning,
     Fenced(String),
     ConnectionLost,
+}
+
+/// Render an output's reply text, adding its images to `images`. Image
+/// decoding and downscaling run on the blocking pool.
+async fn render_output(
+    output: ExecutionOutput,
+    mut images: ImageCollector,
+) -> (String, ImageCollector) {
+    tokio::task::spawn_blocking(move || {
+        let text = output.render(&mut images);
+        (text, images)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        (
+            "[output could not be rendered]".to_string(),
+            ImageCollector::default(),
+        )
+    })
+}
+
+/// An execution result: the text, then its images in marker order.
+fn execution_reply(body: String, images: ImageCollector, is_error: bool) -> CallToolResult {
+    let mut content = vec![Content::text(body)];
+    content.extend(
+        images
+            .images
+            .into_iter()
+            .map(|image| Content::image(image.base64, image.mime)),
+    );
+    if is_error {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    }
 }
 
 #[derive(Clone)]
@@ -2360,11 +2400,11 @@ impl RemoteKernelsServer {
     }
 
     /// Execute Python code in a kernel. Returns the output (stdout, stderr, result,
-    /// errors). If the timeout elapses, the execution keeps running and the response
-    /// includes a cell number — pass it to `get_output()` to collect the result. Holding
-    /// the call open keeps a background session alive; prefer timeout=0 (no cap) or a
-    /// follow-up wait() over polling for long cells, unless there is other work to do
-    /// meanwhile.
+    /// displayed outputs, errors); plots come back as images. If the timeout elapses,
+    /// the execution keeps running and the response includes a cell number — pass it
+    /// to `get_output()` to collect the result. Holding the call open keeps a
+    /// background session alive; prefer timeout=0 (no cap) or a follow-up wait() over
+    /// polling for long cells, unless there is other work to do meanwhile.
     #[tool(name = "execute")]
     #[allow(clippy::doc_markdown, clippy::collapsible_if)]
     pub async fn execute_tool(
@@ -2580,7 +2620,8 @@ impl RemoteKernelsServer {
         }
 
         let is_error = output.error.is_some();
-        self.finish_execution_reply(output.format(), cleanup == Cleanup::Disabled, is_error)
+        let (body, images) = render_output(output, ImageCollector::default()).await;
+        self.finish_execution_reply(body, images, cleanup == Cleanup::Disabled, is_error)
             .await
     }
 
@@ -2664,6 +2705,8 @@ impl RemoteKernelsServer {
             tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
         });
         let mut sections: Vec<String> = Vec::new();
+        // One image cap for the whole batch: it is one reply.
+        let mut images = ImageCollector::default();
         let mut any_error = false;
         // Executions on already-fenced machines stay in place, exactly like
         // the single-kernel wait, which refuses before consuming a receiver.
@@ -2744,7 +2787,9 @@ impl RemoteKernelsServer {
                                     .await;
                                 }
                                 any_error |= output.error.is_some();
-                                sections.push(format!("[{label}]\n{}", output.format()));
+                                let (text, collected) = render_output(output, images).await;
+                                images = collected;
+                                sections.push(format!("[{label}]\n{text}"));
                             }
                             Err(message) => {
                                 any_error = true;
@@ -2860,18 +2905,24 @@ impl RemoteKernelsServer {
             tick.tick().await;
         }
 
-        self.finish_execution_reply(sections.join("\n\n"), disabled_cleanup, any_error)
+        self.finish_execution_reply(sections.join("\n\n"), images, disabled_cleanup, any_error)
             .await
     }
 
-    /// Shared footer for execution results: spend/budget line,
-    /// cleanup-disabled nudge, and error-vs-success wrapping.
+    /// Shared footer for execution results: images-not-shown note,
+    /// spend/budget line, cleanup-disabled nudge, and error-vs-success
+    /// wrapping. The images follow the text, in marker order.
     async fn finish_execution_reply(
         &self,
         mut body: String,
+        images: ImageCollector,
         cleanup_disabled: bool,
         is_error: bool,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(footer) = images.footer() {
+            body.push('\n');
+            body.push_str(&footer);
+        }
         let spend = self.state.lock().await.session_spend();
         if let Some(spend_line) = self.format_spend_line(spend) {
             body.push_str(&spend_line);
@@ -2881,11 +2932,7 @@ impl RemoteKernelsServer {
                 "\nNote: automatic cleanup is disabled. Remember to stop/terminate the machine when done.",
             );
         }
-        if is_error {
-            Ok(CallToolResult::error(vec![Content::text(body)]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(body)]))
-        }
+        Ok(execution_reply(body, images, is_error))
     }
 
     /// Post-completion fence gate shared by the wait paths: a fenced machine
@@ -2922,7 +2969,8 @@ impl RemoteKernelsServer {
         match self.wait_execution(held, deadline, progress.as_ref()).await {
             WaitOutcome::Completed(output) => {
                 let is_error = output.error.is_some();
-                self.finish_execution_reply(output.format(), cleanup == Cleanup::Disabled, is_error)
+                let (body, images) = render_output(output, ImageCollector::default()).await;
+                self.finish_execution_reply(body, images, cleanup == Cleanup::Disabled, is_error)
                     .await
             }
             WaitOutcome::StillRunning => Ok(CallToolResult::success(vec![Content::text(format!(
@@ -3071,12 +3119,10 @@ impl RemoteKernelsServer {
 
             let key = (params.kernel_id.clone(), params.cell_number);
             if let Some(output) = inst.recovered_executions.remove(&key) {
-                let formatted = output.format();
-                return if output.error.is_some() {
-                    Ok(CallToolResult::error(vec![Content::text(formatted)]))
-                } else {
-                    Ok(CallToolResult::success(vec![Content::text(formatted)]))
-                };
+                drop(state);
+                let is_error = output.error.is_some();
+                let (body, images) = render_output(output, ImageCollector::default()).await;
+                return Ok(execution_reply(body, images, is_error));
             }
             let Some(rx) = inst.pending_executions.remove(&key) else {
                 return err_text(format!(
@@ -3107,8 +3153,10 @@ impl RemoteKernelsServer {
                     // Same footer as execute()/wait(): spend line and
                     // cleanup-disabled reminder apply to results however
                     // they are collected.
+                    let (body, images) = render_output(output, ImageCollector::default()).await;
                     self.finish_execution_reply(
-                        output.format(),
+                        body,
+                        images,
                         cleanup == Cleanup::Disabled,
                         is_error,
                     )
@@ -3131,8 +3179,10 @@ impl RemoteKernelsServer {
                     self.update_notebook_cell(&params.kernel_id, params.cell_number, &output)
                         .await;
                     let is_error = output.error.is_some();
+                    let (body, images) = render_output(output, ImageCollector::default()).await;
                     self.finish_execution_reply(
-                        output.format(),
+                        body,
+                        images,
                         cleanup == Cleanup::Disabled,
                         is_error,
                     )
@@ -3549,9 +3599,7 @@ impl RemoteKernelsServer {
             path = crate::machine_scripts::shell_quote(&path),
             predecessor = crate::machine_scripts::shell_quote(&predecessor),
         );
-        let raw = connection
-            .exec(&command, std::time::Duration::from_secs(10))
-            .await?;
+        let raw = connection.exec(&command, RECORDER_TAIL_TIMEOUT).await?;
         Ok(Self::parse_recorder_tail(&raw))
     }
 
@@ -7236,10 +7284,7 @@ mod tests {
             .update_notebook_cell(
                 "kernel-1",
                 1,
-                &ExecutionOutput {
-                    stdout: "late predecessor output".to_string(),
-                    ..Default::default()
-                },
+                &ExecutionOutput::error("late predecessor output"),
             )
             .await;
         assert_eq!(std::fs::read(path).unwrap(), before);

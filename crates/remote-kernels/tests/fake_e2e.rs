@@ -589,7 +589,9 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
     let result = first
         .execute(Parameters(remote_kernels::server::ExecuteParams {
             kernel_id: old_kernel.clone(),
-            code: "import time; time.sleep(0.5); print('recovered-output')".to_string(),
+            code: format!(
+                "{PNG_HELPER}\nimport time; time.sleep(0.5); print('recovered-output'); display(Image(png(30, 10))); display(Image(png(800, 800, noise=True)))"
+            ),
             timeout: None,
             background: Some(true),
             queue: None,
@@ -636,6 +638,16 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
         recovered_text.contains("recovered-output"),
         "{recovered_text}"
     );
+    assert!(
+        recovered_text.contains("[image 1: 30x10 PNG]"),
+        "{recovered_text}"
+    );
+    // Larger than the old 1 MiB replay window on its own.
+    assert!(
+        recovered_text.contains("[image 2: 800x800 PNG]"),
+        "{recovered_text}"
+    );
+    assert_eq!(images_of(&recovered), vec!["image/png", "image/png"]);
 
     let (is_error, output) = execute(&second, &old_kernel, "20 + 22").await;
     assert!(!is_error, "{output}");
@@ -648,12 +660,124 @@ async fn fresh_server_attach_recovers_kernel_notebook_and_output() {
         .unwrap()
         .path();
     let notebook_text = std::fs::read_to_string(notebook).unwrap();
-    assert!(
-        notebook_text.contains("recovered-output"),
-        "{notebook_text}"
-    );
+    assert!(notebook_text.contains("recovered-output"));
+    assert!(notebook_text.contains("image/png"));
 
     terminate(&second, Some(&machine_id)).await;
+}
+
+/// Python defining `png(w, h, noise=False)` (a solid-red PNG, or random pixels
+/// that do not compress; stdlib only) and importing `display` and `Image`.
+const PNG_HELPER: &str = r"import os, struct, zlib
+from IPython.display import Image, display
+def png(w, h, noise=False):
+    row = lambda: os.urandom(3 * w) if noise else b'\xff\x00\x00' * w
+    raw = b''.join(b'\x00' + row() for _ in range(h))
+    chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))";
+
+fn images_of(result: &CallToolResult) -> Vec<String> {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_image().map(|image| image.mime_type.clone()))
+        .collect()
+}
+
+/// Image outputs reach the model as MCP image content — from execute(), and
+/// from get_output() for a background cell — capped per reply, downscaled when
+/// large, and kept in the notebook.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn image_outputs_are_returned_capped_and_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("images")).await;
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+    let (failed, output) = execute(&server, &kernel_id, PNG_HELPER).await;
+    assert!(!failed, "{output}");
+
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code:
+                "print('before'); display(Image(png(40, 20))); print('after'); Image(png(3000, 10))"
+                    .to_string(),
+            timeout: Some(60),
+            background: None,
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!is_error(&result), "{text}");
+    // Prints and images keep the order the cell produced them in.
+    assert!(
+        text.starts_with("before\n[image 1: 40x20 PNG]\nafter\n[image 2: 3000x10 PNG]"),
+        "{text}"
+    );
+    assert!(!text.contains("IPython.core.display.Image"), "{text}");
+    assert_eq!(images_of(&result), vec!["image/png", "image/png"]);
+
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.clone(),
+            code: "for _ in range(10): display(Image(png(4, 4)))".to_string(),
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let cell_number: u32 = text_of(&result)
+        .lines()
+        .find_map(|line| line.strip_prefix("Cell number: "))
+        .expect("cell number")
+        .parse()
+        .unwrap();
+    let result = server
+        .get_output(Parameters(remote_kernels::server::GetOutputParams {
+            kernel_id: kernel_id.clone(),
+            cell_number,
+            wait: Some(true),
+            timeout: Some(30),
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert_eq!(images_of(&result).len(), 8, "{text}");
+    assert!(text.contains("2 more image(s) not shown"), "{text}");
+
+    // A live-plot loop keeps only its last frame, in the reply and the notebook.
+    let (failed, text) = execute(
+        &server,
+        &kernel_id,
+        "from IPython.display import clear_output\nfor i in range(20):\n    clear_output(wait=True)\n    print(f'step {i}')\n    display(Image(png(4, 4)))",
+    )
+    .await;
+    assert!(!failed, "{text}");
+    assert!(text.starts_with("step 19\n[image 1: 4x4 PNG]"), "{text}");
+    assert!(!text.contains("not shown"), "{text}");
+
+    let notebook = std::fs::read_dir(dir.path().join("remote-kernels"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let notebook: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(notebook).unwrap()).unwrap();
+    let saved_images = notebook["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|cell| cell["outputs"].as_array().unwrap())
+        .filter(|output| output["data"]["image/png"].is_string())
+        .count();
+    assert_eq!(saved_images, 13);
+
+    terminate(&server, Some(&machine_id)).await;
 }
 
 /// Budget supervisor: with a tiny budget and a huge fake burn rate, the next
