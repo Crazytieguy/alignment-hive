@@ -61,8 +61,8 @@ here works until the binary resolves.
    in the prompt. Verify with `$ROUTER doctor` afterwards.
 4. **Service**: `$ROUTER service install` (installs and starts the
    launchd/systemd user service), then `$ROUTER doctor` until healthy.
-   The defaults need no config file — all four GPT routes (astra, sol,
-   terra, luna), port 8787. Only if 8787 is taken, write `port = <other>` to
+   The defaults need no config file — every built-in GPT route, port
+   8787. Only if 8787 is taken, write `port = <other>` to
    `~/.config/model-router/config.toml` (`$ROUTER config-template` prints
    the annotated template) and `$ROUTER service restart`.
 5. **Wire Claude Code (ask first)**: find where the plugin is installed by
@@ -93,15 +93,16 @@ here works until the binary resolves.
    a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
    context window — it only applies to model IDs that don't start with
    `claude-` (the `gpt-*` routes), so Claude models keep their
-   built-in windows; 258400 is the Codex backend's effective input limit.
-   On an existing install with configured open-weights routes, run
-   `$ROUTER doctor` after raising the value — it fails with the fix
-   spelled out if a route's window no longer fits under the new
-   declaration.
-   Then list the routes in the `/model` picker: one row per routing ID that
-   `$ROUTER doctor` lists under `routed-models` (the four GPT routes on a
-   default install, plus any Grok or open-weights routes already
-   configured). Claude Code reads `modelPicker` only from
+   built-in windows. 258400 matches Codex's own default window. The cap is
+   optional but recommended: the GPT models accept up to 828400 (Codex's
+   opt-in maximum), but input past 272K is billed at a higher rate. After
+   raising the value, run `$ROUTER doctor` — it fails with the fix spelled
+   out if a route's window no longer fits under the new declaration (Grok
+   and many open-weights routes stop at 500000 or below).
+   Then list the routes in the `/model` picker: one row per GPT-6 route,
+   plus one per Grok or open-weights route already configured (the
+   `routed-models` line of `$ROUTER doctor`; the GPT-5.6 routes stay
+   served but off the picker). Claude Code reads `modelPicker` only from
    `~/.claude/settings.json` (project and local files are ignored) and only
    from 2.1.242 on; add it there as a sibling of `env`, and drop the
    `ANTHROPIC_CUSTOM_MODEL_OPTION` pair an earlier install wrote (the rows
@@ -110,9 +111,8 @@ here works until the binary resolves.
    "modelPicker": {
      "options": [
        { "model": "gpt-6-astra", "label": "GPT-6 Astra" },
-       { "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol" },
-       { "model": "gpt-5.6-terra", "label": "GPT-5.6 Terra" },
-       { "model": "gpt-5.6-luna", "label": "GPT-5.6 Luna" }
+       { "model": "gpt-6-sol", "label": "GPT-6 Sol" },
+       { "model": "gpt-6-luna", "label": "GPT-6 Luna" }
      ]
    }
    ```

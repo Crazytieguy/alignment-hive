@@ -71,16 +71,15 @@ ID**. The router has no say, and no API response can tell it otherwise:
 - A model ID Claude Code doesn't recognize gets **200000** tokens.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` overrides that, but it is **one global
   value** and it is **ignored for any ID starting with `claude-`**.
-- Setup writes `CLAUDE_CODE_MAX_CONTEXT_TOKENS=258400`, the Codex backend's
-  effective input limit behind the GPT routes (272K × 95%).
+- Setup writes `CLAUDE_CODE_MAX_CONTEXT_TOKENS=258400`, Codex's own default
+  window for the GPT routes (272K × 95%).
 
 Every routed ID shares that one number. Kimi K3 and GLM-5.2 have 1M-token
 windows, so a 258400 declaration clips them to a quarter of their capacity.
 
-**Raising the global value is not an option**, so don't offer it: the shipped
-GPT agents and the `choosing-models` skill name the `gpt-*` IDs, which
-would inherit the larger number and start sending the Codex backend
-requests past its limit.
+**Don't raise the global value to fit an open-weights model**: every
+`gpt-*` route inherits it, GPT input past 272K is billed at a higher rate,
+and the GPT routes stop at 828400 anyway.
 
 ### On OpenRouter, pin the window first
 

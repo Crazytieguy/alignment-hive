@@ -17,7 +17,7 @@ effort: <low|medium|high|xhigh>
 Complete the task you are given.
 ```
 
-- GPT example: `gpt-5.6-sol(medium)` in file `gpt-5.6-sol-medium.md`.
+- GPT example: `gpt-6-luna(medium)` in file `gpt-6-luna-medium.md`.
   GPT levels: low, medium, high, xhigh, max (`none` is not one of them).
 - Open-weights models: `effort:` is optional. It does reach the host, as
   OpenAI's `reasoning_effort` — every Claude Code level is accepted, including

@@ -23,17 +23,18 @@ present themselves as Claude.
 ## What you get
 
 - GPT subagents — `gpt-6-astra(low)`, `gpt-6-astra(medium)`,
-  `gpt-6-astra(high)`, `gpt-5.6-terra(high)`, `gpt-5.6-luna(high)` —
+  `gpt-6-astra(high)`, `gpt-6-sol(medium)`, `gpt-6-sol(high)`,
+  `gpt-6-luna(high)` —
   usable from any project, plus dynamic per-invocation model + effort
   choice in Workflow orchestration.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
-- Optional Grok family — grok-4.6 under your own xAI subscription OAuth
+- Optional Grok family — grok-4.7 under your own xAI subscription OAuth
   login (no API key), riding the same CLIProxyAPI instance. Off by
   default; opt in during `/model-router:setup`.
 - A `choosing-models` skill that helps Claude pick the right model and
   effort when delegating.
-- Adversarial code and plan reviewers on GPT-5.6 Sol — a second model with
+- Adversarial code and plan reviewers on GPT-6 Astra — a second model with
   prompts tuned to push back on what Claude wrote.
 - Working WebSearch on GPT sessions: Claude Code's WebSearch runs a side
   LLM call that loses its links through the Codex translation (and takes

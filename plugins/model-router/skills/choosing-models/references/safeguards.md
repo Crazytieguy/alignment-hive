@@ -21,6 +21,16 @@ publish no vendor safety framework.
   Fable 5 (still routable) has the earlier, deliberately over-cautious
   classifiers.
   [Anthropic, 2026-06-09](https://www.anthropic.com/news/claude-fable-5-mythos-5).
+- **Opus 5.5** — biology classifiers match Fable 5.1's (fallback to
+  Opus 5); cyber classifiers enforce Opus 5's policy with Fable-level
+  robustness (source-code vulnerability finding allowed, binary
+  vulnerability finding and exploit work blocked; fallback to Opus 4.8);
+  a narrow frontier-LLM-development classifier (e.g. kernel work on some
+  ML accelerators) falls back to Opus 5; weapons and distillation
+  requests are blocked with no fallback. In Claude Code the session
+  continues on the fallback model. Rated CB-1, below CB-2.
+  [Anthropic, 2026-09-22](https://www.anthropic.com/claude-opus-5-5);
+  [system card, 2026-09-22](https://www.anthropic.com/claude-opus-5-5-system-card).
 - **Opus 5** — defensive security work allowed (source-code vulnerability
   scanning, triage, secure coding); classifiers block exploit generation,
   binary vulnerability scanning, and penetration testing — ~85% less
@@ -42,14 +52,21 @@ publish no vendor safety framework.
   writing (secure code review and patching are allowed), refuses cyber
   jailbreak prompts far more often than sol (91.5% vs 59%), and
   tool-using traffic is monitored for misalignment with account-level
-  enforcement. Elevated cyber access runs through the Daybreak
+  enforcement. It also refuses more on some bio evaluations, and users
+  report refusals beyond security (reactions to fiction, election
+  predictions). Elevated cyber access runs through the Daybreak
   trusted-access program for verified defenders.
   [System card, 2026-09-03](https://deploymentsafety.openai.com/gpt-6-astra);
   [Path to Astra](https://openai.com/index/path-to-astra/).
-- **GPT-5.6 (sol/terra/luna, via Codex)** — "High" (not Critical) in both
-  bio/chem and cyber: real-time monitors plus account-level enforcement.
-  [System card, Jul 2026](https://deploymentsafety.openai.com/gpt-5-6).
-- **Grok 4.6 (xAI)** — the lightest safeguard stack of the
+- **GPT-6 Sol / Luna and GPT-5.6 (via Codex)** — "High" (not Critical)
+  in both bio/chem and cyber: real-time monitors plus account-level
+  enforcement, without Astra's extra cyber restrictions. Sol and Luna
+  refuse harmful requests about as often as their GPT-5.6 counterparts;
+  their cyber jailbreak resistance sits between GPT-5.6 sol's and
+  Astra's.
+  [Sol/Luna appendix, 2026-09-22](https://deploymentsafety.openai.com/gpt-6-astra/sec:appendix-sol-luna/);
+  [GPT-5.6 card, Jul 2026](https://deploymentsafety.openai.com/gpt-5-6).
+- **Grok 4.7 (xAI)** — the lightest safeguard stack of the
   framework-backed vendors: refusal training plus runtime input and
   topical filters that vary by deployment surface (CSAM, self-harm,
   bio/chem weapons pathways, and cyber-specific input controls). The
@@ -58,11 +75,12 @@ publish no vendor safety framework.
   offensive-cyber risk but contains no quantitative thresholds, and no
   document pins down which controls run on the subscription-OAuth path
   this plugin uses. Its
-  [model card, 2026-08-12](https://media.x.ai/v1/website/card-4p6-4cd2dc57.pdf)
-  reports tighter CBRN/weapons refusals than grok-4.5 but more assistance
-  on borderline dual-use cyber — roughly twice as often as 4.5, about
-  half as often as GPT-5.6 sol. The legacy grok-4.5 route shipped with no
-  model card, so what is deployed on it is uncertain.
+  [model card, 2026-09-21](https://media.x.ai/v1/website/4p7card-5eccc980.pdf)
+  reports fewer harmful or dual-use cyber completions than 4.6 (3.3% vs
+  5.9% on its HackerBench), more biosecurity refusals, and CBRN and
+  general refusals in line with 4.6. The legacy grok-4.6 route has its own
+  [card](https://media.x.ai/v1/website/card-4p6-4cd2dc57.pdf); grok-4.5
+  shipped with none, so what is deployed on it is uncertain.
 - **Kimi K2.7 / K3** — no published vendor safety framework or model-card
   safety section (checked 2026-07-21:
   [github.com/moonshotai/kimi-k2](https://github.com/moonshotai/kimi-k2)).
@@ -85,6 +103,5 @@ happen, and they are less strict than Astra's
 GPT-5.6/Codex is reported less strict in practice, though not refusal-free:
 in [one comparison](https://www.techtimes.com/articles/319808/20260707/gpt-56-sol-review-faster-coding-half-fable-5-cost-benchmark-problem.htm)
 both Codex and Fable refused exploit-adjacent security fixes that Kimi K3
-completed. Astra refuses more of this than sol by design; the gpt-5.6-sol
-route stays served for such work (no shipped agent — see the setup skill's
-`custom-agents.md`, or Workflow's `model: 'gpt-5.6-sol'`).
+completed. Astra refuses more of this by design; gpt-6-sol, without Astra's extra
+cyber restrictions, is the GPT model to try for such work.

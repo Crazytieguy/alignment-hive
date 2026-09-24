@@ -5,9 +5,9 @@ user's own xAI subscription login (SuperGrok, or an X account with Premium —
 the login itself is the test; it costs nothing to try). No API key. Off by
 default; nothing below changes a GPT-only install.
 
-Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
-`grok-4.5` route is also registered so configs and agents that predate
-4.6 keep working.
+Built-in route when enabled: `grok-4.7` (500K-token window). Legacy
+`grok-4.6` and `grok-4.5` routes are also registered so configs and
+agents that predate 4.7 keep working.
 
 1. Enable the family in `~/.config/model-router/config.toml`:
    ```toml
@@ -42,27 +42,29 @@ Built-in route when enabled: `grok-4.6` (500K-token window). A legacy
 5. **`/model` picker row**: add to the step-5 `modelPicker` options in
    `~/.claude/settings.json`:
    ```json
-   { "model": "grok-4.6", "label": "Grok 4.6" }
+   { "model": "grok-4.7", "label": "Grok 4.7" }
    ```
    With project-scoped wiring there is only the single-slot env pair; if
    the user prefers Grok in it, replace both values
-   (`"ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.6"`,
-   `"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.6"`) and GPT stays off
+   (`"ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.7"`,
+   `"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.7"`) and GPT stays off
    the picker there. Subagents for both families keep working either way.
 6. Create agents so Claude can delegate — use the template in
-   `references/custom-agents.md`. Recommended set: `grok-4.6(high)` (xAI's
-   own default effort) and optionally `grok-4.6(medium)` for faster runs
-   (`model: grok-4.6`, `effort: high`/`medium`). Effort comes from agent
+   `references/custom-agents.md`. Recommended set: `grok-4.7(high)` (xAI's
+   own default effort) and optionally `grok-4.7(medium)` for faster runs
+   (`model: grok-4.7`, `effort: high`/`medium`). Grok agents or a picker
+   row from an earlier setup that name `grok-4.6`: offer to move them to
+   `grok-4.7`. Effort comes from agent
    frontmatter exactly like the GPT agents — the router translates it for
    xAI.
 7. Smoke-test with a direct request through the gateway:
    ```
    curl -s <base_url from doctor --json>/v1/messages \
      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
-     -d '{"model":"grok-4.6","max_tokens":300,"messages":[{"role":"user","content":"reply with exactly: ok"}]}'
+     -d '{"model":"grok-4.7","max_tokens":300,"messages":[{"role":"user","content":"reply with exactly: ok"}]}'
    ```
    A response naming a `grok-*` model proves the chain (the served name
-   carries a `-build` suffix — grok-4.6 answers as `grok-4.6-build` —
+   carries a `-build` suffix — grok-4.7 answers as `grok-4.7-build` —
    that's expected).
 
 If the user asks to remove Grok (or at full uninstall): delete the `[grok]`
