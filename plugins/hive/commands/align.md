@@ -70,15 +70,16 @@ Check the four settings files to discover already-installed plugins. A plugin en
 
 **Install with the claude CLI, never by editing `enabledPlugins` by hand** — a settings entry alone installs nothing (archive-sourced plugins in particular never load without a real install). Default to project-level: `--scope project` (shared via `.claude/settings.json`) or `--scope local` (machine-only, `.claude/settings.local.json`), unless the user explicitly asks for a global install (`--scope user`). Infer from existing project-level settings whether the user prefers local-only or shared — if unclear, ask once and use that for all installations.
 
-Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin gets three options: **Yes** (install), **No** (skip), **Tell me more**. After the user responds, process "Tell me more" answers one plugin at a time in sequence: (1) fetch the full, untruncated content of that plugin's README (use curl — WebFetch summarizes), (2) present the README to the user — verbatim when it is short, and as a faithful summary that keeps every setup step when it is long, (3) ask a fresh AskUserQuestion with only **Yes** / **No**. Do not advance to the next "Tell me more" plugin until the current one has a Yes/No answer.
+Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin gets three options: **Yes** (install), **No** (skip), **Tell me more**. The two cross-model plugins are one question instead, with options **Codex**, **model-router**, **Neither** and **Tell me more** (the follow-up then covers both READMEs). After the user responds, process "Tell me more" answers one plugin at a time in sequence: (1) fetch the full, untruncated content of that plugin's README (use curl — WebFetch summarizes), (2) present the README to the user — verbatim when it is short, and as a faithful summary that keeps every setup step when it is long, (3) ask a fresh AskUserQuestion with only **Yes** / **No**. Do not advance to the next "Tell me more" plugin until the current one has a Yes/No answer.
 
 #### Plugin list
 
-- **MATS**: `mats@alignment-hive` — For MATS fellows (handbook, lit review, best practices)
-- **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (RunPod, vast.ai, Kubernetes)
-- **Codebase exploration**: `precis` — Structural codebase summaries for fast agent context
-- **Cross-model review**: `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code
-- **Cross-model subagents (experimental)**: `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental alternative to the codex plugin
+- **MATS**: `mats@alignment-hive` — For MATS fellows: literature review pipeline (arXiv, Semantic Scholar, LessWrong)
+- **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (needs a RunPod or vast.ai account, or a Kubernetes cluster)
+- **Codebase exploration**: `precis` — Gives Claude a summary of your codebase at the start of each session
+- **Cross-model review** (both need a ChatGPT subscription; offer as one choice):
+  - `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code; the stable option
+  - `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental
 - **Reply TL;DRs**: `tldr@alignment-hive` — One-sentence TL;DR after every long reply; /focus then collapses messages to their TL;DRs — **Always recommend**
 - **Hidden-payload stripping**: `agent-sanitizer@agent-sanitizer` — Catches prompt injections hidden inside text that looks harmless: invisible characters, hidden HTML and look-alike glyphs are stripped before Claude reads them — **Always recommend**
 
