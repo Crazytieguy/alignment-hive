@@ -48,8 +48,8 @@ export const OFFICES = {
     label: "MATS office",
     timezone: "America/Los_Angeles",
     weekdays: [2, 4], // Tue, Thu
-    // Week of 2026-08-10: Mon + Tue instead of Tue + Thu.
-    override: { from: "2026-08-10", until: "2026-08-16", weekdays: [1, 2] },
+    // MATS 11 sessions start Thursday 2026-10-01, so that week is Thu only.
+    override: { from: "2026-09-28", until: "2026-10-04", weekdays: [4] },
     start: "10:30",
     end: "18:00",
   },
@@ -57,8 +57,6 @@ export const OFFICES = {
     label: "Far Labs",
     timezone: "America/Los_Angeles",
     weekdays: [3], // Wed
-    // Week of 2026-08-10: skipped entirely.
-    override: { from: "2026-08-10", until: "2026-08-16", weekdays: [] },
     start: "10:30",
     end: "18:00",
   },
@@ -67,7 +65,7 @@ export const OFFICES = {
 export type OfficeSlug = keyof typeof OFFICES;
 
 /** Meeting lengths the booker may choose, in minutes. */
-export const DURATIONS = [60, 90, 120] as const;
+export const DURATIONS = [30, 60, 90] as const;
 export type Duration = (typeof DURATIONS)[number];
 
 /** Earliest a slot may be booked: at least this many hours from now (0 = last-minute allowed). */

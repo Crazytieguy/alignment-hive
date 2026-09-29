@@ -222,27 +222,13 @@ describe("schedule override", () => {
     expect(days).toContain("2026-06-25");
   });
 
-  // Pins the 2026-08 schedule; delete together with the mats `override` once it has passed.
-  test("real mats schedule: Tue+Thu, but Mon+Tue the week of 2026-08-10", () => {
-    const slots = generateSlots(OFFICES.mats, 90, [], ms("2026-08-03T00:00"));
-    expect(onLocalDate(slots, "2026-08-04").length).toBeGreaterThan(0); // Tue this week
-    expect(onLocalDate(slots, "2026-08-06").length).toBeGreaterThan(0); // Thu this week
-    expect(onLocalDate(slots, "2026-08-10").length).toBeGreaterThan(0); // Mon next week: open
-    expect(onLocalDate(slots, "2026-08-11").length).toBeGreaterThan(0); // Tue next week
-    expect(onLocalDate(slots, "2026-08-13")).toHaveLength(0); // Thu next week: closed
-    expect(onLocalDate(slots, "2026-08-17")).toHaveLength(0); // Mon the week after: closed
-    expect(onLocalDate(slots, "2026-08-18").length).toBeGreaterThan(0); // Tue the week after
-    expect(onLocalDate(slots, "2026-08-20").length).toBeGreaterThan(0); // Thu the week after
-  });
-
-  // Pins the 2026-08 schedule; delete together with the far-labs `override` once it has passed.
-  test("real far-labs schedule: Wednesdays, skipping the week of 2026-08-10", () => {
-    const slots = generateSlots(OFFICES["far-labs"], 90, [], ms("2026-08-03T00:00"));
-    expect(slots.length).toBeGreaterThan(0);
-    for (const s of slots) expect(local(s).weekday).toBe(3);
-    expect(onLocalDate(slots, "2026-08-05").length).toBeGreaterThan(0); // Wed this week
-    expect(onLocalDate(slots, "2026-08-12")).toHaveLength(0); // Wed next week: skipped
-    expect(onLocalDate(slots, "2026-08-19").length).toBeGreaterThan(0); // Wed the week after
+  // Pins the MATS 11 start; delete together with the mats `override` once it has passed.
+  test("real mats schedule: Thu only the week of 2026-09-28, then Tue+Thu", () => {
+    const slots = generateSlots(OFFICES.mats, 90, [], ms("2026-09-28T00:00"));
+    expect(onLocalDate(slots, "2026-09-29")).toHaveLength(0); // Tue this week: closed
+    expect(onLocalDate(slots, "2026-10-01").length).toBeGreaterThan(0); // Thu this week
+    expect(onLocalDate(slots, "2026-10-06").length).toBeGreaterThan(0); // Tue next week
+    expect(onLocalDate(slots, "2026-10-08").length).toBeGreaterThan(0); // Thu next week
   });
 });
 

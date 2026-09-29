@@ -52,9 +52,9 @@ function timeLabel(ms: number, visitorZone: string, officeZone: string): string 
   return visitor === office ? visitor : `${visitor} (${office} at the office)`;
 }
 
-/** Suggested length by group size: 60 min solo, 90 for 2–3, 120 for 4+. */
+/** Suggested length by group size: 30 min solo, 60 for 2–3, 90 for 4+. */
 function suggestedDuration(attendees: number): Duration {
-  return attendees >= 4 ? 120 : attendees >= 2 ? 90 : 60;
+  return attendees >= 4 ? 90 : attendees >= 2 ? 60 : 30;
 }
 
 interface Availability {
@@ -85,7 +85,7 @@ function Booking({ office }: { office: OfficeSlug }) {
 
   const [avail, setAvail] = useState<Availability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [duration, setDuration] = useState<Duration>(60);
+  const [duration, setDuration] = useState<Duration>(30);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedStartUtc, setSelectedStartUtc] = useState<number | null>(null);
   const [cancelUrl, setCancelUrl] = useState<string | null>(null);
@@ -288,7 +288,7 @@ function Form({
           Meeting length
         </span>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          We suggest 60 min for one person, 90 for 2–3, and 120 for 4+ — but pick whatever works.
+          We suggest 30 min for one person, 60 for 2–3, and 90 for 4+. Book more if you have something specific or complicated to discuss.
         </p>
         <div className="mt-2 flex gap-2">
           {DURATIONS.map((d) => (
