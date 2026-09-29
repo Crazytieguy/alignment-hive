@@ -3,6 +3,8 @@
 > **Experimental.** This routes all your Claude Code traffic through a local
 > gateway; a bug here breaks your sessions until you remove one settings line
 > (`ANTHROPIC_BASE_URL`), which always restores direct Anthropic access.
+>
+> Remote Control doesn't work while model-router is installed.
 
 model-router lets Claude Code delegate to GPT models as native subagents,
 alongside Claude models, in the same session. It runs a small loopback

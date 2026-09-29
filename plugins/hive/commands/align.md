@@ -75,11 +75,11 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 #### Plugin list
 
 - **MATS**: `mats@alignment-hive` — For MATS fellows: literature review pipeline (arXiv, Semantic Scholar, LessWrong)
-- **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels (needs a RunPod or vast.ai account, or a Kubernetes cluster)
+- **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels; supports RunPod, vast.ai and Kubernetes
 - **Codebase exploration**: `precis` — Gives Claude a summary of your codebase at the start of each session
 - **Cross-model review** (both need a ChatGPT subscription; offer as one choice):
   - `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code; the stable option
-  - `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental
+  - `model-router@alignment-hive` — GPT models as native Claude Code subagents via a local gateway; experimental. Remote Control doesn't work while it's installed, so users of Remote Control should pick Codex
 - **Reply TL;DRs**: `tldr@alignment-hive` — One-sentence TL;DR after every long reply; /focus then collapses messages to their TL;DRs — **Always recommend**
 - **Hidden-payload stripping**: `agent-sanitizer@agent-sanitizer` — Catches prompt injections hidden inside text that looks harmless: invisible characters, hidden HTML and look-alike glyphs are stripped before Claude reads them — **Always recommend**
 
