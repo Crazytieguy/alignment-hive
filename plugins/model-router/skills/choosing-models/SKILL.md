@@ -16,10 +16,9 @@ Token price and token *usage* are different axes; per-task cost is their
 product, and the models below differ on both. Under subscriptions the
 billing pool matters more than list price: GPT delegation bills the
 separate Codex subscription and preserves Claude usage entirely, and OpenAI
-subscriptions are more generous per dollar. The Codex allowance also
-stretches much further on the smaller GPT-6 models: a Plus plan gets
-roughly three times as many Sol messages as Astra messages, and about
-seventy times as many Luna ones. Within the Claude family, Fable use is
+subscriptions are more generous per dollar. The Codex allowance roughly
+tracks token price, so it stretches much further on the smaller GPT
+models. Within the Claude family, Fable use is
 capped at a share of the weekly limit (currently up to ~50%); the other
 Claude models draw on the whole limit.
 
@@ -37,8 +36,8 @@ What "literal" looks like differs by model. OpenAI describes GPT-6 Astra
 as stopping to ask when an answer could change the result and handing
 back a first implementation for review; users confirm the early stops,
 and also report it over-engineering or going past the ask on long runs.
-Sol and Luna share its training methods, with no reports yet on how
-their temperament compares. GPT-5.6, by contrast, tended to over-persist
+Sol and Luna share its training methods; how their temperament compares
+is less documented. GPT-5.6, by contrast, tended to over-persist
 — working around constraints to finish rather than escalating. The same
 prompt hygiene serves every one of them: state the desired outcome, the
 constraints, what counts as done, and whether being blocked should be
@@ -67,15 +66,15 @@ untrusted content.
   5.1 on most coding and knowledge work at 40% of Fable's token price
   ($4/$20), though Anthropic says the real-world gap is narrower than the
   scores suggest. Artificial Analysis ranks it first, it draws on the
-  general Claude limit rather than the Fable cap, and hands-on reports
-  are still thin. Early reports put it ahead of Fable on writing, including
+  general Claude limit rather than the Fable cap, and user reports put
+  it ahead of Fable on writing, including
   copy that persists (prompts, skills, docs). Effort: medium (its
   default) for most tasks. At xhigh it thinks far more per turn, and on scope-penalizing evals
   (FrontierCode) it peaks at medium. Never use max: it outspends Fable in
   tokens there. Its system card flags overstating what it checked and
   asserting unverified inferences as fact, and it is weaker than Fable on
-  open-ended research; on consequential work, have both Fable and Astra
-  review it. In unattended runs it can end its turn on a progress report,
+  open-ended research; on consequential work, have both Fable and
+  GPT-6.1 Sol review it. In unattended runs it can end its turn on a progress report,
   so say what counts as done.
 - **Fable** — review, judgement- and taste-heavy work such as design and
   front-end, and open-ended brainstorming and discussion. No measured edge
@@ -85,9 +84,8 @@ untrusted content.
   for most tasks. At high and above it does more on its own — extra
   verification, proactive edits — and token use climbs with it. Mind the
   Fable usage cap.
-- **gpt-6-astra** — a reviewer alongside Fable, and the pick for
-  ambitious, long-running build projects. Priced like Fable ($10/$50) but
-  reported to spend a fraction of the tokens, and it bills Codex. Its
+- **gpt-6-astra** — the strongest GPT model, for hard tasks where 6.1 Sol
+  falls short. Priced like Fable ($10/$50) but reported to spend a fraction of the tokens, and it bills Codex. Its
   clearest gains over other models are computer use, long autonomous runs,
   and research-level math, all confirmed by users (computer use from
   inside Claude Code as well); it is strong at 3D work too, though Opus
@@ -97,19 +95,24 @@ untrusted content.
   Effort: medium for most tasks, high for hard ones, and not above high —
   the reported gains past high are small at multiples of the cost. `none`
   is not accepted. Plus plans cap Astra usage; Pro plans don't.
-- **gpt-6-sol** — cost-efficient work on the Codex subscription,
-  high-volume work included, where frontier judgement isn't needed. A
-  fifth of Astra's token price; OpenAI places it close behind Astra,
-  while independent indexes put it level with GPT-5.6 overall. Define
-  what done looks like. Effort: medium for
-  most tasks, high for hard ones.
+- **gpt-6.1-sol** — a reviewer alongside Fable, and self-contained
+  non-coding work such as audits; for coding, Claude models look like
+  the better default. A fifth of Astra's token price ($2/$10). User
+  reports suggest it reviews about as well as Astra, an impression rather
+  than a measurement; OpenAI and Artificial Analysis both place it just
+  behind Astra overall. Define what done looks like. Effort: medium or
+  high by default, but the full range is usable.
 - **gpt-6-luna** — high-volume work that doesn't need frontier
   intelligence: reading piles of documents, extraction, triage,
   mechanical transforms. A twentieth of Sol's token price. Effort: high,
   OpenAI's suggested starting point.
-- **Sonnet 5, Haiku 4.5** — obsolete: Opus 5.5 and the smaller GPT-6
-  models beat them on cost-efficiency. Anthropic says Sonnet and Haiku 5.5
-  follow in the coming weeks.
+- **Sonnet 5.5** — half of Opus 5.5's token price ($2/$10), but rarely
+  cheaper in real work: cache reads cost the same on both ($0.20/MTok)
+  and dominate long sessions, and Opus 5.5 appears to use fewer tokens
+  per task. It can pay off on self-contained subtasks with few turns and
+  a lot of uncached input or output. Effort: medium or high,
+  the other efforts are rarely optimal.
+- **Haiku 4.5** — obsolete: other models beat it on cost-efficiency.
 
 This guidance draws on broad usage reports; for a recurring use case of
 your own, a small blind comparison on the actual task — a Workflow with
@@ -161,7 +164,7 @@ is no strengths/weaknesses guidance for them yet.
 
 The Agent tool's `model` parameter does not accept GPT models. Use the
 shipped agents instead — `gpt-6-astra(low)`, `gpt-6-astra(medium)`,
-`gpt-6-astra(high)`, `gpt-6-sol(medium)`, `gpt-6-sol(high)`,
+`gpt-6-astra(high)`, `gpt-6.1-sol(medium)`, `gpt-6.1-sol(high)`,
 `gpt-6-luna(high)` — or, for any other model/effort combination,
 Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. With the
 Grok family configured, `{model: 'grok-4.7', effort: 'high'}` works the

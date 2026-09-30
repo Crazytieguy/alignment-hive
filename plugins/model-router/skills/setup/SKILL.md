@@ -79,7 +79,7 @@ here works until the binary resolves.
    ```
    `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude models' native 1M
    context windows. Claude Code grants those only when the base URL is
-   `api.anthropic.com`, so behind the gateway Fable 5.1, Opus 5 and Sonnet 5
+   `api.anthropic.com`, so behind the gateway Fable 5.1, Opus 5.5 and Sonnet 5.5
    silently fall back to 200K wherever the model string carries no `[1m]`
    suffix — including agent definitions the user did not write. The flag is
    undocumented (Claude Code names it in its own copy, for proxies that front
@@ -99,10 +99,11 @@ here works until the binary resolves.
    raising the value, run `$ROUTER doctor` — it fails with the fix spelled
    out if a route's window no longer fits under the new declaration (Grok
    and many open-weights routes stop at 500000 or below).
-   Then list the routes in the `/model` picker: one row per GPT-6 route,
-   plus one per Grok or open-weights route already configured (the
-   `routed-models` line of `$ROUTER doctor`; the GPT-5.6 routes stay
-   served but off the picker). Claude Code reads `modelPicker` only from
+   Then list the routes in the `/model` picker: one row per shipped GPT
+   route below, plus one per Grok or open-weights route already configured
+   (the `routed-models` line of `$ROUTER doctor`; older GPT routes stay
+   served but off the picker, so an earlier install's GPT-6 Sol or GPT-5.6
+   rows are dropped). Claude Code reads `modelPicker` only from
    `~/.claude/settings.json` (project and local files are ignored) and only
    from 2.1.242 on; add it there as a sibling of `env`, and drop the
    `ANTHROPIC_CUSTOM_MODEL_OPTION` pair an earlier install wrote (the rows
@@ -111,7 +112,7 @@ here works until the binary resolves.
    "modelPicker": {
      "options": [
        { "model": "gpt-6-astra", "label": "GPT-6 Astra" },
-       { "model": "gpt-6-sol", "label": "GPT-6 Sol" },
+       { "model": "gpt-6.1-sol", "label": "GPT-6.1 Sol" },
        { "model": "gpt-6-luna", "label": "GPT-6 Luna" }
      ]
    }

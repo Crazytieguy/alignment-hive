@@ -25,7 +25,7 @@ present themselves as Claude.
 ## What you get
 
 - GPT subagents — `gpt-6-astra(low)`, `gpt-6-astra(medium)`,
-  `gpt-6-astra(high)`, `gpt-6-sol(medium)`, `gpt-6-sol(high)`,
+  `gpt-6-astra(high)`, `gpt-6.1-sol(medium)`, `gpt-6.1-sol(high)`,
   `gpt-6-luna(high)` —
   usable from any project, plus dynamic per-invocation model + effort
   choice in Workflow orchestration.
@@ -36,7 +36,7 @@ present themselves as Claude.
   default; opt in during `/model-router:setup`.
 - A `choosing-models` skill that helps Claude pick the right model and
   effort when delegating.
-- Adversarial code and plan reviewers on GPT-6 Astra — a second model with
+- Adversarial code and plan reviewers on GPT-6.1 Sol — a second model with
   prompts tuned to push back on what Claude wrote.
 - Working WebSearch on GPT sessions: Claude Code's WebSearch runs a side
   LLM call that loses its links through the Codex translation (and takes

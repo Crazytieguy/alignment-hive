@@ -39,6 +39,10 @@ publish no vendor safety framework.
   fallback: biology/chem stays on Opus 5 under Opus-4.8-level safeguards.
   [Support, 2026-07](https://support.claude.com/en/articles/16049681-why-claude-switched-models-in-your-conversation-with-opus-5);
   [Anthropic, 2026-07-24](https://www.anthropic.com/news/claude-opus-5).
+- **Sonnet 5.5** — the first Sonnet with the frontier cyber
+  classifiers: higher-risk cyber requests visibly fall back to Sonnet 5.
+  It crosses no new RSP thresholds.
+  [Anthropic, 2026-09-28](https://www.anthropic.com/claude-sonnet-5-5).
 - **Opus 4.8 / Sonnet 5** — same posture: ASL-3 ("equal to or stronger than
   historical ASL-3"), narrow CBRN classifiers only, no blocking cyber
   classifier.
@@ -58,6 +62,9 @@ publish no vendor safety framework.
   trusted-access program for verified defenders.
   [System card, 2026-09-03](https://deploymentsafety.openai.com/gpt-6-astra);
   [Path to Astra](https://openai.com/index/path-to-astra/).
+- **GPT-6.1 Sol (via Codex)** — rated Critical in cyber like Astra and
+  deployed under Astra's safeguard stack; High in bio/chem.
+  [System card, 2026-09-29](https://deploymentsafety.openai.com/gpt-6-1-sol).
 - **GPT-6 Sol / Luna and GPT-5.6 (via Codex)** — "High" (not Critical)
   in both bio/chem and cyber: real-time monitors plus account-level
   enforcement, without Astra's extra cyber restrictions. Sol and Luna
@@ -103,5 +110,5 @@ happen, and they are less strict than Astra's
 GPT-5.6/Codex is reported less strict in practice, though not refusal-free:
 in [one comparison](https://www.techtimes.com/articles/319808/20260707/gpt-56-sol-review-faster-coding-half-fable-5-cost-benchmark-problem.htm)
 both Codex and Fable refused exploit-adjacent security fixes that Kimi K3
-completed. Astra refuses more of this by design; gpt-6-sol, without Astra's extra
-cyber restrictions, is the GPT model to try for such work.
+completed. Astra and 6.1 Sol refuse more of this by design; gpt-6-sol, without
+Astra's extra cyber restrictions, is the GPT model to try for such work.
