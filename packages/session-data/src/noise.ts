@@ -5,7 +5,7 @@
  * Rewind marks do read these rules: a rewound run marks its entries only when it holds a visible
  * message or reply, so a rule that hides a new kind of entry can also unmark a run made only of it.
  */
-import type { Entry, Transcript } from './transcript';
+import type { Entry, ToolEntry, Transcript } from './transcript';
 
 /**
  * Slash commands that change settings: hidden even with arguments. Not `permissions`: a plugin
@@ -149,8 +149,15 @@ export function isHumanMessage(e: Entry): boolean {
   );
 }
 
+/** Tool calls whose result is the human's words: their answers to questions, or artifact comments read. */
+function carriesHumanWords(e: ToolEntry): boolean {
+  return e.tool === 'AskUserQuestion' || (e.tool === 'ArtifactComments' && READS.includes(String(e.input.action)));
+}
+const READS: ReadonlyArray<string> = ['read', 'comments'];
+
 /**
- * The outline: the human's messages (user entries without `origin`, interrupts included),
+ * The outline: the human's messages (user entries without `origin`, interrupts included), tool
+ * calls whose result holds their words (AskUserQuestion answers, artifact comments read),
  * compactions, tool calls that started or messaged agents, and fork and continuation links. In an
  * agent's transcript, its session's later messages to it (origin `coordinator`) count as the human's.
  * `startsAgents`: the caller linked the tool entry to agent transcripts.
@@ -162,7 +169,7 @@ export function inOutline(e: Entry, startsAgents: boolean, agentTranscript = fal
     case 'system':
       return e.subtype === 'compact_boundary';
     case 'tool':
-      return startsAgents;
+      return startsAgents || carriesHumanWords(e);
     case 'fork-context-ref':
     case 'continued-in':
       return true;

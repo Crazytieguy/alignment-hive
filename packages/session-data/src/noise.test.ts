@@ -110,6 +110,12 @@ describe('selection', () => {
     expect(inOutline({ ...base, kind: 'system', text: '', subtype: 'turn_duration' }, false)).toBe(false);
     expect(inOutline(tool, false)).toBe(false); // links come from the caller
     expect(inOutline(tool, true)).toBe(true);
+    const call = (name: string, input: Record<string, unknown> = {}): Entry => ({ ...tool, tool: name, input });
+    expect(inOutline(call('AskUserQuestion'), false)).toBe(true);
+    expect(inOutline(call('ArtifactComments', { action: 'read' }), false)).toBe(true);
+    expect(inOutline(call('ArtifactComments', { action: 'comments' }), false)).toBe(true);
+    expect(inOutline(call('ArtifactComments', { action: 'reply' }), false)).toBe(false);
+    expect(inOutline(call('Bash'), false)).toBe(false);
     expect(inOutline({ ...base, kind: 'assistant', text: 'x' }, false)).toBe(false);
     expect(inOutline({ ...base, kind: 'continued-in', target: 'x' }, false)).toBe(true);
   });

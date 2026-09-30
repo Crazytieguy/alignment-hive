@@ -243,7 +243,7 @@ export const locatorErrors = {
 
 /** The usage lines of `hive local`: the top of its help page, and what a malformed call prints. */
 export const localUsage = `  hive local sessions                   sessions, latest activity first (20; -n N for more)
-  hive local outline SESSION            the human's messages, compactions, and calls that started or messaged agents
+  hive local outline SESSION            the human's messages and answers, compactions, and calls that started or messaged agents
   hive local show SESSION [RANGE...]    entries, each field clipped to 1000 chars; no RANGE = the whole session
   hive local grep PATTERN [SESSION...]  entries whose text, tool input or result matches a JavaScript regex`;
 
@@ -273,6 +273,8 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
   hidden   with --all-entries: the rule that normally hides the entry
   In an agent's transcript, user entries are messages from the session that started it.
   A user entry "[Request interrupted by user]" marks where the human stopped Claude; it is not typed text.
+  The human also answers through tools: AskUserQuestion results, and ArtifactComments reads (comments on
+  artifact pages). outline lists both. An ArtifactComments result is cut to its comments.
   sessions rows: loc, start and end (times of its first and last entries; a fork starts at its own first
   entry, not the context it copied), branch, title (Claude Code's session title, if any), first (the first
   human message, or slash command if none, clipped to its first line), and project with --all-projects.
@@ -301,11 +303,11 @@ Scope for sessions and grep: this project and its worktrees by default; --projec
   --since T and --until T filter by entry time. T is 2h, 7d, or a local date such as 2026-09-12;
   --until DATE includes that whole day. show, outline and grep SESSION find the session in any project.
 Output is never capped. Size a broad grep with -c or -l first; read a session's shape with outline, its end with | tail.
-Notes and counts go to stderr. Errors exit 2 and name the cause.`;
+Notes, warnings and errors go to stderr, also as JSON lines ({"note":...}, {"warning":...}, {"error":...}), so
+  2>&1 | jq still parses. Errors exit 2.`;
 
 export const localErrors = {
-  prefix: (message: string): string => `hive local: ${message}`,
-  usage: (lines: string): string => `usage:\n${lines}\nhive local --help for the whole page`,
+  usage: (lines: string): string => `${lines}\nhive local --help for the whole page`,
   unknownCommand: (verb: string): string => `unknown command ${verb}`,
   unknownFlag: (flag: string, verb: string): string => `unknown flag ${flag} for ${verb}`,
   noValue: (flag: string): string => `${flag} takes no value`,
@@ -336,8 +338,7 @@ export const localErrors = {
 export const localNotes = {
   ruleCount: (rule: string, n: number): string => `${rule} ${n}`,
   malformed: (loc: string, lines: Array<number>): string =>
-    `warning: ${loc}: ${lines.length} malformed line${lines.length > 1 ? 's' : ''} skipped (line ${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ', ...' : ''})`,
-  unreadable: (message: string): string => `warning: ${message}`,
+    `${loc}: ${lines.length} malformed line${lines.length > 1 ? 's' : ''} skipped (line ${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ', ...' : ''})`,
   sessions: (shown: number, total: number, all: boolean, windowed: boolean): string => {
     const where = `${all ? ' in all projects' : ''}${windowed ? ' active in the --since/--until window' : ''}`;
     return shown < total

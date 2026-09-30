@@ -72,8 +72,10 @@ export class LocalError extends Error {
 }
 
 export const emit = (row: unknown): void => writeLine(JSON.stringify(row));
-/** A line on stderr, never colored (console.error is, under FORCE_COLOR). */
-export const note = (text: string): void => void process.stderr.write(`${text}\n`);
+/** One JSON object per stderr line, so that `2>&1 | jq` still parses; never colored (console.error is, under FORCE_COLOR). */
+const stderrRow = (row: Record<string, string>): void => void process.stderr.write(`${JSON.stringify(row)}\n`);
+export const note = (text: string): void => stderrRow({ note: text });
+export const warn = (text: string): void => stderrRow({ warning: text });
 
 interface FlagSpec {
   bool: Array<string>;
@@ -252,14 +254,18 @@ export async function localCore(env: LocalEnv, argv: Array<string>): Promise<num
     return await (await load()).run(env, args);
   } catch (error) {
     if (!(error instanceof LocalError || error instanceof LocatorError)) throw error;
-    note(localErrors.prefix(error.message));
-    if (error instanceof LocalError && error.usage) {
-      note(localErrors.usage(localUsage));
-    }
+    const usage = error instanceof LocalError && error.usage;
+    stderrRow(usage ? { error: error.message, usage: localErrors.usage(localUsage) } : { error: error.message });
     return 2;
   }
 }
 
+/** Any other failure (a filesystem error, a bug) is an error row too, so stderr stays JSON. */
 export async function local(): Promise<number> {
-  return localCore(localEnv(), process.argv.slice(3));
+  try {
+    return await localCore(localEnv(), process.argv.slice(3));
+  } catch (error) {
+    stderrRow({ error: error instanceof Error ? error.message : String(error) });
+    return 2;
+  }
 }

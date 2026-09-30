@@ -5,7 +5,7 @@ import { clipAround, clipFirstLine, entryRow, mapStrings } from '../lib/local-ro
 import { escapeRegExp, mandatoryLiteral, mayMatch } from '../lib/grep-prefilter';
 import { loadTranscript, readBytes, selectRange } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
-import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow } from './local';
+import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow, warn } from './local';
 import { sessionsByActivity } from './sessions';
 import type { Entry } from '@alignment-hive/session-data';
 import type { Range, TranscriptRef } from '../lib/locators';
@@ -171,7 +171,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
         bytes = await readBytes(target.ref);
       } catch (error) {
         if (!(error instanceof LocalError)) throw error;
-        note(localNotes.unreadable(error.message));
+        warn(error.message);
         continue;
       }
       if (literal !== undefined && !mayMatch(bytes, literal, ignoreCase, re)) continue;
