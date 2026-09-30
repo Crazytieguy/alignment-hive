@@ -36,7 +36,8 @@ pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
 /// their display names.
-const CODEX_NATIVE_MODELS: [(&str, &str); 6] = [
+const CODEX_NATIVE_MODELS: [(&str, &str); 7] = [
+    ("gpt-6.1-sol", "GPT-6.1 Sol"),
     ("gpt-6-astra", "GPT-6 Astra"),
     ("gpt-6-sol", "GPT-6 Sol"),
     ("gpt-6-luna", "GPT-6 Luna"),

@@ -1544,3 +1544,27 @@ tail as items, `reasoning: None`, originator + turn-metadata headers). No
 related CLIProxyAPI issue is open. Why this particular session wedged (turn
 cap, state size, a stuck in-flight turn) is unknown: 25 turns showed no
 growth. Fix: a fresh id per search (0.1.30, binary 0.1.22).
+
+## GPT-6.1 Sol (2026-09-29, CLIProxyAPI 7.3.16, router 0.1.23)
+
+OpenAI released `gpt-6.1-sol` on 2026-09-29. No pin change: the live 7.3.16
+child listed it the same day with no restart, having pulled the entry from
+its remote catalog (`router-for-me/models`, entry added 2026-09-29). The
+catalog, like Codex's own, gives it the GPT-6 windows (272K default, 872K
+max), so the window constants stand.
+
+Sandbox: worktree binary on 8897 in external mode against the live child on
+8317 (its own gateway key), private XDG dirs, curl and a Python probe only,
+stopped by PID afterwards. Live service health and version unchanged.
+
+| check | result |
+|---|---|
+| upstream list | `gpt-6.1-sol` served alongside `gpt-6-sol` (`/v1/models` needs the child's key; unauthenticated it returns `Missing API key`) |
+| smoke via child | answers at medium, high and max; thinking tokens 26 / 19 / 111 on a one-line prompt |
+| smoke via router | answers as OpenAI, not Claude; `gpt-6-sol` unchanged |
+| tool use | two-turn round trip correct |
+| doctor | all green, incl. `routed-models` and `shipped-agent-routes gpt-6-astra, gpt-6.1-sol, gpt-6-luna` |
+
+Not re-measured: upstream `reasoning.effort` mapping (no request log on the
+live child), WebSearch, and overflow; the route shares the code paths the
+2026-09-23 checks covered.
