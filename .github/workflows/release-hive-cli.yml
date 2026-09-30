@@ -78,6 +78,10 @@ jobs:
             packages/hive-cli/src/cli.ts \
             --outfile dist/hive-cli-${{ matrix.target }}
 
+      - name: Check the compiled debrief renderer
+        if: matrix.target == 'linux-x64'
+        run: bun test ./packages/hive-cli/scripts/debrief-compiled.check.ts
+
       - name: Codesign macOS binary
         if: startsWith(matrix.target, 'darwin-')
         run: codesign -f -s - dist/hive-cli-${{ matrix.target }}

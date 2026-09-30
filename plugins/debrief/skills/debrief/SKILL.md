@@ -3,7 +3,7 @@ name: debrief
 description: This skill should be used when the user asks for a debrief, review or report of what was done in this session, or for another round of an earlier debrief. Also offer it when a long stretch of work the user wasn't watching is finished. Not for reviewing code this session did not write.
 ---
 
-!`MIN_HIVE_CLI=0.1.23; hive debrief preflight --min "$MIN_HIVE_CLI" --session "${CLAUDE_SESSION_ID}" 2>&1 || printf 'debrief: hive CLI missing, too old, or session stamp unavailable; install or update the CLI (the command is in /hive:align), update the hive plugin, restart\n'`
+!`MIN_HIVE_CLI=0.2.0; hive debrief preflight --min "$MIN_HIVE_CLI" --session "${CLAUDE_SESSION_ID}" 2>&1 || printf 'debrief: hive CLI missing, too old, or session stamp unavailable; install or update the CLI (the command is in /hive:align), update the hive plugin, restart\n'`
 
 If preflight failed, resolve it with the user before authoring.
 
