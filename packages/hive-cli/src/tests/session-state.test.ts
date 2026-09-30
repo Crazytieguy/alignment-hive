@@ -265,8 +265,10 @@ describe('excludeSessionChecked', () => {
   });
 
   test('refuses uploaded and partial sessions without writing', async () => {
-    const uploadedState = { ...emptyState(), uploadedMap: new Map([['sess-1', uploadedFor(session())]]) };
-    expect((await excludeSessionChecked(stateDir, uploadedState, session())).result).toBe('denied-uploaded');
+    // One session object: two calls stamp mtimes a tick apart, which reads as modified since upload.
+    const uploaded = session();
+    const uploadedState = { ...emptyState(), uploadedMap: new Map([['sess-1', uploadedFor(uploaded)]]) };
+    expect((await excludeSessionChecked(stateDir, uploadedState, uploaded)).result).toBe('denied-uploaded');
 
     const partialState = { ...emptyState(), startedMap: new Map([['sess-1', Date.now()]]) };
     expect((await excludeSessionChecked(stateDir, partialState, session())).result).toBe('denied-partial');

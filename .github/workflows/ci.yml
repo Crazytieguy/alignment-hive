@@ -38,6 +38,10 @@ jobs:
       - name: Lint
         run: bun run --filter '@alignment-hive/hive-cli' lint
 
+      # The compiled CLI embeds the review app's bundle; one test compiles it.
+      - name: Build review app
+        run: bun run --filter '@alignment-hive/review-app' build
+
       - name: Test
         run: bun run --filter '@alignment-hive/hive-cli' test
 
