@@ -6,18 +6,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/ensure-jq.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-jq.sh\"",
             "async": true,
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/ensure-deno.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-deno.sh\"",
             "async": true,
             "timeout": 60
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-start.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-start.sh\"",
             "timeout": 5
           }
         ]
@@ -42,12 +42,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/sandbox-permissions.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/sandbox-permissions.sh\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/auto-deny.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-deny.sh\"",
             "timeout": 5
           }
         ]
