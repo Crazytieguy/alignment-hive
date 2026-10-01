@@ -1,5 +1,12 @@
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
-import { isEmptySession, isHumanMessage, parseTranscript, readRecords, readTranscript } from '@alignment-hive/session-data';
+import {
+  isEmptySession,
+  isHumanMessage,
+  parseTranscript,
+  readRecords,
+  readTranscript,
+  sessionSummary,
+} from '@alignment-hive/session-data';
 import type { Entry, Transcript } from '@alignment-hive/session-data';
 import type { TranscriptRef } from './locators';
 
@@ -110,7 +117,7 @@ const isTypedCommand = (e: Entry): boolean =>
  * The first human message, from growing head chunks, or the first slash command in a file with no
  * human message; `empty` when the file has no human message and no reply either.
  */
-export function firstHumanMessage(ref: TranscriptRef, size: number): { entry?: Entry; empty: boolean } {
+export function firstHumanMessage(ref: Pick<TranscriptRef, 'path'>, size: number): { entry?: Entry; empty: boolean } {
   let empty = false;
   let command: Entry | undefined;
   const entry = scan(ref.path, size, 'head', 4 * CHUNK, (text, whole) => {
@@ -128,7 +135,7 @@ export function firstHumanMessage(ref: TranscriptRef, size: number): { entry?: E
 const TITLE_RECORDS = ['"type":"custom-title"', '"type":"ai-title"', '"type":"summary"'];
 
 /** The session's title, from its title records alone. */
-export function sessionTitle(ref: TranscriptRef): string | undefined {
+export function sessionTitle(ref: Pick<TranscriptRef, 'path'>): string | undefined {
   const buf = readFileSync(ref.path);
   const lines: Array<{ at: number; text: string }> = [];
   for (const needle of TITLE_RECORDS) {
@@ -142,4 +149,11 @@ export function sessionTitle(ref: TranscriptRef): string | undefined {
   // In file order, so the parser's rule picks the latest title.
   const ordered = lines.sort((a, b) => a.at - b.at).map((l) => l.text);
   return ordered.length ? parseTranscript(ordered.join('\n')).title : undefined;
+}
+
+/** sessionSummary of the whole file, from its title records, else its head. */
+export function fileSessionSummary(ref: Pick<TranscriptRef, 'path'>, size: number): string | undefined {
+  const title = sessionTitle(ref);
+  const first = title ? undefined : firstHumanMessage(ref, size).entry;
+  return sessionSummary({ title, entries: first ? [first] : [] });
 }

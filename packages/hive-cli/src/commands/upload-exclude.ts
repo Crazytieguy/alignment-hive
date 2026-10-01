@@ -1,17 +1,18 @@
+import { parseCommandArgs, usageError } from '../lib/args';
 import { ensureStateDir, getStateDir, loadTranscriptsDirs } from '../lib/config';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
-import { lookupRawSession } from '../lib/session-lookup';
+import { lookupParentSession } from '../lib/session-lookup';
 import { excludeSessionChecked } from '../lib/session-state';
 import { loadSessionStateWithMigrations } from '../lib/upload-session';
 
 export async function uploadExclude(args: Array<string>): Promise<number> {
-  const all = args.includes('--all');
-  const prefix = args[0];
-  if (!all && !prefix) {
-    printError(hive.upload.excludeUsage);
-    return 1;
-  }
+  const parsed = parseCommandArgs({ bool: ['--all'], value: [] }, args, hive.upload.usage);
+  if (typeof parsed === 'number') return parsed;
+  const all = parsed.flags.has('--all');
+  const prefix = parsed.positional[0] as string | undefined;
+  // Exactly one target: `exclude <id> --all` must not widen to every session.
+  if (parsed.positional.length + (all ? 1 : 0) !== 1) return usageError(hive.upload.excludeTakesOne, hive.upload.usage);
 
   const cwd = process.cwd();
   const stateDir = getStateDir(cwd);
@@ -21,7 +22,7 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
   // pending (excludable), not as uploaded.
   const transcriptsDirs = await loadTranscriptsDirs(stateDir);
   const state = await loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd);
-  const { parentSessions, sessionById } = state;
+  const { parentSessions } = state;
 
   if (parentSessions.length === 0) {
     printInfo(hive.upload.noSessions);
@@ -30,25 +31,26 @@ export async function uploadExclude(args: Array<string>): Promise<number> {
 
   if (all) {
     let count = 0;
+    const partial: Array<string> = [];
+    const priorUpload: Array<string> = [];
     for (const session of parentSessions) {
-      const { result } = await excludeSessionChecked(stateDir, state, session);
-      if (result === 'excluded') count++;
+      const id = session.sessionId.slice(0, 8);
+      const outcome = await excludeSessionChecked(stateDir, state, session);
+      if (outcome.result === 'excluded') {
+        count++;
+        if (outcome.hadPriorUpload) priorUpload.push(id);
+      } else if (outcome.result === 'denied-partial') partial.push(id);
     }
-    if (count === 0) {
-      printInfo(hive.upload.allExcludedOrUploaded);
-      return 0;
-    }
-    printSuccess(hive.upload.excludedCount(count));
-    return 0;
+    if (count > 0) printSuccess(hive.upload.excludedCount(count));
+    else if (partial.length === 0) printInfo(hive.upload.allExcludedOrUploaded);
+    for (const id of priorUpload) printInfo(hive.upload.excludedPriorUploadNote(id));
+    for (const id of partial) printError(hive.upload.cannotExcludePartial(id));
+    return partial.length > 0 ? 1 : 0;
   }
 
-  const result = lookupRawSession([...sessionById.values()], prefix);
+  const result = lookupParentSession(state, prefix!, hive.upload.agentCannotExclude);
   if (!result.found) {
     printError(result.error);
-    return 1;
-  }
-  if (result.session.agentId) {
-    printError(hive.upload.agentCannotExclude);
     return 1;
   }
 

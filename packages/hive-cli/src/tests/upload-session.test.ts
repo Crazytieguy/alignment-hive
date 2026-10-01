@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { SessionMetaSchema, parseTranscript } from '@alignment-hive/session-data';
+import { SessionMetaSchema, parseTranscript, sessionSummary } from '@alignment-hive/session-data';
 import { buildSessionMeta } from '../lib/session-format';
 import { statePaths } from '../lib/config';
 import { hive } from '../lib/messages';
@@ -10,9 +10,12 @@ import {
   discoverWorkflowRuns,
   readAndSanitizeSession,
   readParseableRunBlobs,
+  readSessionSummary,
+  summarizeSessions,
   uploadOneSession,
 } from '../lib/upload-session';
 import type { DiscoveredSession } from '../lib/session-state';
+import type { SummaryCache } from '../lib/upload-session';
 
 const SID = 'parent-session-xyz';
 const HOME = homedir();
@@ -267,5 +270,67 @@ describe('uploadOneSession', () => {
     });
     expect(result).toEqual({ ok: false, error: hive.upload.noProjectConsent });
     await rm(stateDir, { recursive: true, force: true });
+  });
+});
+
+describe('readSessionSummary', () => {
+  const user = (content: string, extra: object = {}) =>
+    JSON.stringify({ type: 'user', uuid: content, timestamp: 't', message: { role: 'user', content }, ...extra });
+  const files: Record<string, Array<string>> = {
+    head: [user('<command-name>/clear</command-name>'), user('first line\nsecond'), user('later')],
+    latestTitle: [
+      JSON.stringify({ type: 'ai-title', aiTitle: 'early' }),
+      user('hello'),
+      JSON.stringify({ type: 'custom-title', customTitle: 'named' }),
+    ],
+    secret: [user(`deploy with ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs`)],
+    none: [JSON.stringify({ type: 'system', subtype: 'x' })],
+    long: [user('x'.repeat(5000))],
+  };
+
+  test('matches sessionSummary over the whole parsed file, sanitized', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-summary-'));
+    try {
+      for (const [name, lines] of Object.entries(files)) {
+        const path = join(dir, `${name}.jsonl`);
+        const text = lines.join('\n') + '\n';
+        await writeFile(path, text);
+        const whole = sessionSummary(parseTranscript(text)) ?? '';
+        const got = await readSessionSummary(path);
+        if (name === 'secret') {
+          expect(got).toStartWith('deploy with [REDACTED:');
+        } else {
+          expect(got).toBe(whole);
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('summarizeSessions with a cache rereads a file only when it changes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-summary-cache-'));
+    try {
+      const path = join(dir, 's.jsonl');
+      await writeFile(path, user('before') + '\n');
+      const session: DiscoveredSession = { sessionId: 's', path, mtime: new Date() };
+      const state = {
+        parentSessions: [session],
+        uploadedMap: new Map(),
+        excludedSet: new Set<string>(),
+        startedMap: new Map(),
+      };
+      const ctx = { ...state, consentMtime: 0, snoozeUntil: null };
+      const cache: SummaryCache = new Map();
+      expect((await summarizeSessions(state, ctx, cache))[0].summary).toBe('before');
+      cache.set(path, { ...cache.get(path)!, summary: 'cached' });
+      expect((await summarizeSessions(state, ctx, cache))[0].summary).toBe('cached');
+      await writeFile(path, user('after') + '\n');
+      const later = new Date(Date.now() + 60_000);
+      await utimes(path, later, later);
+      expect((await summarizeSessions(state, ctx, cache))[0].summary).toBe('after');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

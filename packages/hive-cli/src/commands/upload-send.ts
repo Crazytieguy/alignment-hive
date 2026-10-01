@@ -8,11 +8,11 @@ import {
   loadTranscriptsDirs,
   statePaths,
 } from '../lib/config';
-import { parseWholeNumber } from '../lib/args';
+import { parseCommandArgs, parseWholeNumber, usageError } from '../lib/args';
 import { resolveProjectConsent } from '../lib/convex';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
-import { lookupRawSession } from '../lib/session-lookup';
+import { lookupParentSession } from '../lib/session-lookup';
 import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
 import {
@@ -62,28 +62,29 @@ async function acquireUploadLock(lockFile: string): Promise<boolean> {
 }
 
 export async function uploadSend(args: Array<string>): Promise<number> {
-  let delaySeconds = 0;
-  let sessionPrefix: string | undefined;
-  let targetSessionIds: Array<string> | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--delay' && args[i + 1]) {
-      const n = parseWholeNumber(args[i + 1]);
-      if (n === null) {
-        printError(hive.upload.invalidDelay(args[i + 1]));
-        return 1;
-      }
-      delaySeconds = n;
-      i++;
-    } else if (args[i] === '--sessions' && args[i + 1]) {
-      targetSessionIds = args[i + 1].split(',').filter(Boolean);
-      i++;
-    } else if (!args[i].startsWith('-')) {
-      sessionPrefix = args[i];
-    }
+  // A mistyped invocation must never fall through to the manual batch, which uploads pending
+  // sessions still inside their review window: every malformed argument stops here.
+  const parsed = parseCommandArgs({ bool: [], value: ['--delay', '--sessions'] }, args, hive.upload.usage);
+  if (typeof parsed === 'number') return parsed;
+  const delayArg = parsed.flags.get('--delay') as string | undefined;
+  const sessionsArg = parsed.flags.get('--sessions') as string | undefined;
+  const sessionPrefix = parsed.positional[0] as string | undefined;
+  const withFlags = delayArg !== undefined || sessionsArg !== undefined;
+  // An empty id would read as "no id" further down: the batch.
+  if (parsed.positional.length > 1 || sessionPrefix === '' || (sessionPrefix !== undefined && withFlags)) {
+    return usageError(hive.upload.sendTakesOne, hive.upload.usage);
   }
+  let delaySeconds = 0;
+  if (delayArg !== undefined) {
+    const n = parseWholeNumber(delayArg);
+    if (n === null) return usageError(hive.upload.invalidDelay(delayArg), hive.upload.usage);
+    delaySeconds = n;
+  }
+  const targetSessionIds = sessionsArg?.split(',').filter(Boolean);
 
-  const isBackground = delaySeconds > 0;
+  // --delay marks the scheduled job (session-start passes it): ready sessions only, snooze honoured,
+  // silent. Keyed on the flag, not its value, so `--delay 0` is still the background job.
+  const isBackground = delayArg !== undefined;
   const cwd = process.cwd();
   const stateDir = getStateDir(cwd);
   await ensureStateDir(stateDir);
@@ -136,21 +137,17 @@ async function doUploadWork(
     getOrCreateCheckoutId(stateDir),
     loadConsentWindows(ids),
   ]);
-  const { parentSessions, sessionById } = state;
+  const { parentSessions } = state;
   // A manual `hive upload send` ignores a snooze; the background job checked it before starting.
   const statusCtx: StatusContext = { ...state, consentMtime, snoozeUntil: null };
   const upload = (session: (typeof parentSessions)[number]) =>
     uploadOneSession({ session, state, statusCtx, consentWindows, transcriptsDirs, checkoutId, ids, stateDir });
 
   // Single session mode
-  if (sessionPrefix) {
-    const result = lookupRawSession([...sessionById.values()], sessionPrefix);
+  if (sessionPrefix !== undefined) {
+    const result = lookupParentSession(state, sessionPrefix, hive.upload.agentCannotUpload);
     if (!result.found) {
       printError(result.error);
-      return 1;
-    }
-    if (result.session.agentId) {
-      printError(hive.upload.agentCannotUpload);
       return 1;
     }
     const id = result.session.sessionId.slice(0, 8);

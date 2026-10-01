@@ -2,7 +2,8 @@
 
 import { config as loadDotenv } from 'dotenv';
 import { version } from '../package.json';
-import { errors, reviewCliMessages } from './lib/messages';
+import { parseCommandArgs, usageError } from './lib/args';
+import { errors, hive, reviewCliMessages } from './lib/messages';
 import { printError } from './lib/output';
 
 // Dev binary only: ALIGNMENT_HIVE_DEV is baked in by --define at build time, so a production
@@ -17,34 +18,34 @@ const COMMANDS = new Map<string, () => Promise<number>>([
   [
     'upload',
     async () => {
-      const sub = process.argv[3];
+      const sub = process.argv[3] as string | undefined;
       switch (sub) {
         case 'list':
           return (await import('./commands/upload-list')).uploadList(process.argv.slice(4));
-        case 'review':
+        case 'review': {
+          const parsed = parseCommandArgs({ bool: [], value: [] }, process.argv.slice(4), hive.upload.usage);
+          if (typeof parsed === 'number') return parsed;
+          if (parsed.positional.length > 0) {
+            return usageError(hive.upload.takesNoArguments('review', parsed.positional[0]), hive.upload.usage);
+          }
           return (await import('./commands/upload-review')).uploadReview();
+        }
         case 'exclude':
           return (await import('./commands/upload-exclude')).uploadExclude(process.argv.slice(4));
         case 'snooze':
           return (await import('./commands/upload-snooze')).uploadSnooze(process.argv.slice(4));
         case 'send':
           return (await import('./commands/upload-send')).uploadSend(process.argv.slice(4));
-        default: {
-          console.log(
-            [
-              'Usage: hive upload <subcommand>',
-              '',
-              'Subcommands:',
-              '  send [session-id]   Upload sessions (all eligible, or a specific one)',
-              '  list                List sessions with upload status',
-              '  review              Open local web UI to review sessions',
-              '  exclude <id|--all>  Exclude a session from upload',
-              '  snooze [duration]   Pause all uploads (default: 24h, max: 7d)',
-              '  snooze --clear      Cancel active snooze',
-            ].join('\n'),
-          );
-          return isHelp(sub) ? 0 : 1;
-        }
+        default:
+          if (isHelp(sub)) {
+            console.log(hive.upload.usage);
+            return 0;
+          }
+          if (sub === undefined) {
+            console.error(hive.upload.usage);
+            return 2;
+          }
+          return usageError(errors.unknownCommand(sub), hive.upload.usage);
       }
     },
   ],

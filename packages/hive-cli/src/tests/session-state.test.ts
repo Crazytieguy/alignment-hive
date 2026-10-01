@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +16,13 @@ import {
   needsWorkflowReopen,
   runWorkflowBackfill,
 } from '../lib/session-state';
-import type { DiscoveredSession, SessionState, StatusContext, UploadedEntry } from '../lib/session-state';
+import type {
+  DiscoveredSession,
+  DiscoveryCache,
+  SessionState,
+  StatusContext,
+  UploadedEntry,
+} from '../lib/session-state';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -97,6 +103,29 @@ describe('discoverSessions', () => {
     const ids = (await discoverSessions([transcriptsDir], projectRepo)).map((s) => s.sessionId);
     expect(ids).not.toContain('user-only');
     expect(ids).toContain('agent-user-only');
+  });
+
+  test('a cache finds the same sessions and keeps a verdict until the file changes', async () => {
+    const cache: DiscoveryCache = new Map();
+    const ids = async () =>
+      (await discoverSessions([transcriptsDir], projectRepo, cache)).map((s) => s.sessionId).sort();
+    const uncached = (await discoverSessions([transcriptsDir], projectRepo)).map((s) => s.sessionId).sort();
+    expect(await ids()).toEqual(uncached);
+    expect(await ids()).toEqual(uncached);
+
+    // A cached verdict stands while the mtime matches.
+    const own = join(transcriptsDir, 'own-session.jsonl');
+    cache.set(own, { ...cache.get(own)!, keep: false });
+    expect(await ids()).not.toContain('own-session');
+
+    // A changed file is read again.
+    writeSession('user-only', projectRepo, [
+      { type: 'user', cwd: projectRepo, sessionId: 'user-only' },
+      { type: 'assistant', message: { content: 'hi' } },
+    ]);
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(join(transcriptsDir, 'user-only.jsonl'), later, later);
+    expect(await ids()).toContain('user-only');
   });
 });
 

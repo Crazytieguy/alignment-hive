@@ -74,6 +74,13 @@ export function makeProjectSessionFilter(projectCwd: string): (filePath: string)
 }
 
 /**
+ * Discovery verdicts by file path, for a long-lived caller (the review server) to pass to
+ * every load: a file whose mtime is unchanged keeps its verdict without its head being read
+ * again. Which sessions are found does not change.
+ */
+export type DiscoveryCache = Map<string, { mtimeMs: number; keep: boolean }>;
+
+/**
  * Discover parent and agent sessions from transcript directories. Parent sessions with no
  * assistant message (abandoned/empty) are dropped; sessions recorded under a different project
  * (colliding dir names) are dropped too — see makeProjectSessionFilter.
@@ -81,19 +88,25 @@ export function makeProjectSessionFilter(projectCwd: string): (filePath: string)
 export async function discoverSessions(
   transcriptsDirs: Array<string>,
   projectCwd?: string,
+  cache?: DiscoveryCache,
 ): Promise<Array<DiscoveredSession>> {
   const dirResults = await Promise.all(transcriptsDirs.map((dir) => findRawSessions(dir).catch(() => [])));
-  const belongsToProject = projectCwd === undefined ? () => true : makeProjectSessionFilter(projectCwd);
+  let belongsToProject: ((filePath: string) => boolean) | undefined;
 
   const results = await Promise.all(
     dirResults.flat().map(async (ref) => {
-      if (!belongsToProject(ref.path)) return null;
-      // Blank-session filtering applies to abandoned parent sessions only, not agents.
-      const [session, hasContent] = await Promise.all([
-        toDiscoveredSession(ref),
-        ref.agentId ? true : hasAssistantContent(ref.path).catch(() => false),
-      ]);
-      return hasContent ? session : null;
+      const session = await toDiscoveredSession(ref);
+      if (!session) return null;
+      const mtimeMs = session.mtime.getTime();
+      const cached = cache?.get(ref.path);
+      if (cached?.mtimeMs === mtimeMs) return cached.keep ? session : null;
+      belongsToProject ??= projectCwd === undefined ? () => true : makeProjectSessionFilter(projectCwd);
+      const keep =
+        belongsToProject(ref.path) &&
+        // Blank-session filtering applies to abandoned parent sessions only, not agents.
+        (ref.agentId ? true : await hasAssistantContent(ref.path).catch(() => false));
+      cache?.set(ref.path, { mtimeMs, keep });
+      return keep ? session : null;
     }),
   );
   return results.filter((r): r is DiscoveredSession => r !== null);
@@ -293,9 +306,10 @@ export async function loadSessionState(
   stateDir: string,
   transcriptsDirs: Array<string>,
   projectCwd: string,
+  cache?: DiscoveryCache,
 ): Promise<SessionState> {
   const [allSessions, uploadedMap, excludedSet, startedMap] = await Promise.all([
-    discoverSessions(transcriptsDirs, projectCwd),
+    discoverSessions(transcriptsDirs, projectCwd, cache),
     loadUploadedSessions(stateDir),
     loadExcludedSessions(stateDir),
     loadStartedUploads(stateDir),

@@ -18,11 +18,18 @@ export async function uploadReview(): Promise<number> {
   const server = Bun.serve({
     port: 0,
     hostname: 'localhost',
-    idleTimeout: 30,
-    async fetch(req) {
+    // Disabled: Bun closes a connection whose handler has not responded within the timeout, and
+    // an upload of a large session can legitimately run for minutes.
+    idleTimeout: 0,
+    async fetch(req, srv) {
       const url = new URL(req.url);
 
       if (url.pathname.startsWith('/trpc')) {
+        // Only the page this server opened: a DNS-rebinding page reaches 127.0.0.1 under its own Host.
+        const host = req.headers.get('host');
+        if (host !== `localhost:${srv.port}` && host !== `127.0.0.1:${srv.port}`) {
+          return new Response(null, { status: 403 });
+        }
         return fetchRequestHandler({ endpoint: '/trpc', req, router });
       }
 

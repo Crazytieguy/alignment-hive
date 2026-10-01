@@ -1,4 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
@@ -8,15 +8,13 @@ import {
   extractWorkflowRunRow,
   formatSessionStatus,
   isInConsentWindow,
-  parseTranscript,
   readRecords,
-  readTranscript,
-  sessionSummary,
   uploadRecord,
 } from '@alignment-hive/session-data';
 import { getClaudeProjectDir, isSharingDisabledLocally, readStateFile, statePaths } from './config';
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { hive } from './messages';
+import { fileSessionSummary } from './session-facts';
 import { buildSessionMeta } from './session-format';
 import { sanitizeDeep, sanitizeString } from './sanitize';
 import {
@@ -34,7 +32,7 @@ import { extractCwds } from './transcript-discovery';
 import type { ProjectIds } from './config';
 import type { Id } from '../../../web/convex/_generated/dataModel';
 import type { UploadRecord, WorkflowRunUpload } from './convex';
-import type { DiscoveredSession, SessionState, StatusContext } from './session-state';
+import type { DiscoveredSession, DiscoveryCache, SessionState, StatusContext } from './session-state';
 import type { ConsentWindow, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
 
 const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
@@ -62,23 +60,40 @@ export async function mapBatched<T, TResult>(
 export async function readAndSanitizeSession(sessionPath: string) {
   const rawContent = await readFile(sessionPath, 'utf-8');
   const { records } = readRecords(rawContent);
-  const rawSummary = sessionSummary(readTranscript(records));
   return {
     sanitizedEntries: records
       .map(uploadRecord)
       .filter((e) => e !== undefined)
       .map((e) => sanitizeDeep(e)),
     lineCount: records.filter(countsAsLine).length,
-    summary: rawSummary ? sanitizeString(rawSummary) : undefined,
+    summary: (await readSessionSummary(sessionPath)) || undefined,
     cwds: extractCwds(rawContent),
   };
 }
 
 export type SessionReadResult = Awaited<ReturnType<typeof readAndSanitizeSession>>;
 
-export async function readSessionSummary(sessionPath: string): Promise<string> {
-  const summary = sessionSummary(parseTranscript(await readFile(sessionPath, 'utf-8')));
+/** Every distinct cwd a session file records, without sanitizing it (see readAndSanitizeSession). */
+export async function readSessionCwds(sessionPath: string): Promise<Set<string>> {
+  return extractCwds(await readFile(sessionPath, 'utf-8'));
+}
+
+/** The sanitized one-line summary the upload list, the review UI and the backend show; '' when none. */
+export async function readSessionSummary(sessionPath: string, size?: number): Promise<string> {
+  const summary = fileSessionSummary({ path: sessionPath }, size ?? (await stat(sessionPath)).size);
   return summary ? sanitizeString(summary) : '';
+}
+
+/** Summaries by path, revalidated by file size and mtime; for a long-lived caller (the review server). */
+export type SummaryCache = Map<string, { size: number; mtimeMs: number; summary: string }>;
+
+async function cachedSessionSummary(path: string, cache: SummaryCache): Promise<string> {
+  const { size, mtimeMs } = await stat(path);
+  const hit = cache.get(path);
+  if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.summary;
+  const summary = await readSessionSummary(path, size);
+  cache.set(path, { size, mtimeMs, summary });
+  return summary;
 }
 
 /** Load session state, then apply the workflow backfill (reopens uploads missing workflow data). */
@@ -86,8 +101,9 @@ export async function loadSessionStateWithMigrations(
   stateDir: string,
   transcriptsDirs: Array<string>,
   projectCwd: string,
+  cache?: DiscoveryCache,
 ): Promise<SessionState & { migrationTimestamp: number | null }> {
-  const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd);
+  const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd, cache);
   // Run discovery reads the parent's own project dir only (empty cwd set): parsing every uploaded
   // parent for worktree cwds on each state load would be prohibitive, and worktree runs come back
   // via the discoveredRunIds recorded at upload (see needsWorkflowReopen).
@@ -97,12 +113,26 @@ export async function loadSessionStateWithMigrations(
   return { ...state, migrationTimestamp };
 }
 
-export interface SessionRow {
-  session: DiscoveredSession;
+export interface SessionStatusFields {
   status: ReturnType<typeof computeSessionStatus>;
   partialUpload: boolean;
   statusLabel: string;
+}
+
+export interface SessionRow extends SessionStatusFields {
+  session: DiscoveredSession;
   summary: string;
+}
+
+/** A session's status as the user sees it (CLI table and review UI). */
+export function sessionStatusFields(
+  session: DiscoveredSession,
+  state: Pick<SessionState, 'uploadedMap' | 'startedMap'>,
+  statusCtx: StatusContext,
+): SessionStatusFields {
+  const status = computeSessionStatus(session, statusCtx);
+  const partialUpload = hasIncompleteUpload(session.sessionId, state.uploadedMap, state.startedMap);
+  return { status, partialUpload, statusLabel: formatSessionStatus(status, partialUpload) };
 }
 
 /**
@@ -112,19 +142,16 @@ export interface SessionRow {
 export async function summarizeSessions(
   state: Pick<SessionState, 'parentSessions' | 'uploadedMap' | 'excludedSet' | 'startedMap'>,
   statusCtx: StatusContext,
+  cache?: SummaryCache,
 ): Promise<Array<SessionRow>> {
   const sorted = [...state.parentSessions].sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-  return mapBatched(sorted, SUMMARY_CONCURRENCY, async (session) => {
-    const status = computeSessionStatus(session, statusCtx);
-    const partialUpload = hasIncompleteUpload(session.sessionId, state.uploadedMap, state.startedMap);
-    return {
-      session,
-      status,
-      partialUpload,
-      statusLabel: formatSessionStatus(status, partialUpload),
-      summary: await readSessionSummary(session.path).catch(() => ''),
-    };
-  });
+  return mapBatched(sorted, SUMMARY_CONCURRENCY, async (session) => ({
+    session,
+    ...sessionStatusFields(session, state, statusCtx),
+    summary: await (cache ? cachedSessionSummary(session.path, cache) : readSessionSummary(session.path)).catch(
+      () => '',
+    ),
+  }));
 }
 
 /** Build NDJSON upload content from sanitized entries. */
@@ -255,16 +282,18 @@ export async function readParseableRunBlobs(
 }
 
 /**
- * Find a parent session's workflow runs, sanitize each blob (secret redaction + home-path
- * normalization), and extract the indexed row.
+ * Find a parent session's workflow runs (or only `onlyRunId`), sanitize each blob (secret
+ * redaction + home-path normalization), and extract the indexed row.
  */
 export async function discoverWorkflowRuns(
   parent: DiscoveredSession,
   cwds: Set<string>,
+  onlyRunId?: string,
 ): Promise<Array<DiscoveredWorkflowRun>> {
   const home = homedir();
   const runs: Array<DiscoveredWorkflowRun> = [];
   for (const [workflowRunId, data] of await readParseableRunBlobs(parent, cwds)) {
+    if (onlyRunId !== undefined && workflowRunId !== onlyRunId) continue;
     // strict: see sanitizeDeep
     const blob = redactHomePaths(sanitizeDeep(data, true), home);
     runs.push({ row: extractWorkflowRunRow(workflowRunId, blob), blob });
@@ -336,7 +365,7 @@ interface UploadParentOpts {
  */
 async function uploadVeto(stateDir: string, sessionId: string): Promise<string | null> {
   if (isSharingDisabledLocally(stateDir)) return hive.upload.noProjectConsent;
-  if (await isSessionExcluded(stateDir, sessionId)) return 'Session was excluded during upload';
+  if (await isSessionExcluded(stateDir, sessionId)) return hive.upload.excludedDuringUpload;
   return null;
 }
 

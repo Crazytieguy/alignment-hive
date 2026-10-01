@@ -14,3 +14,17 @@ export function lookupRawSession(sessions: Array<DiscoveredSession>, prefix: str
   if (matches.length > MAX_LISTED_MATCHES) shown.push(errors.andMore(matches.length - MAX_LISTED_MATCHES));
   return { found: false, error: [errors.multipleSessions(prefix), ...shown].join('\n') };
 }
+
+/**
+ * Resolve a prefix against parent sessions only, so agent ids never make a prefix ambiguous;
+ * an exact agent id gets `agentError` instead of not-found.
+ */
+export function lookupParentSession(
+  state: { parentSessions: Array<DiscoveredSession>; sessionById: Map<string, DiscoveredSession> },
+  prefix: string,
+  agentError: string,
+): SessionLookupResult {
+  const result = lookupRawSession(state.parentSessions, prefix);
+  if (!result.found && state.sessionById.get(prefix)?.agentId) return { found: false, error: agentError };
+  return result;
+}

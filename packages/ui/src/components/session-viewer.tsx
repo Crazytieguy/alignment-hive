@@ -192,22 +192,26 @@ function BlockRow({ entry, isExpanded, onToggle, renderAgentLink }: BlockRowProp
   const agentId = entry.kind === "tool" ? entry.agentId : undefined;
 
   if (!isExpanded) {
+    // The toggle is a real button for keyboard users; the agent link sits beside it, not inside it.
     return (
-      <div
-        onClick={onToggle}
-        className="flex h-7 w-full cursor-pointer items-center gap-2 px-4 text-left text-sm hover:bg-muted/50"
-      >
-        <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">
-          {entry.n}
-        </span>
-        <span
-          className={`w-16 shrink-0 font-mono text-xs font-medium ${typeColor}`}
+      <div className="flex h-7 w-full items-center gap-2 pr-4 text-sm hover:bg-muted/50">
+        <button
+          onClick={onToggle}
+          aria-expanded={false}
+          className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-4 text-left"
         >
-          {typeLabel}
-        </span>
-        <span className="truncate text-muted-foreground">{summary}</span>
+          <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">
+            {entry.n}
+          </span>
+          <span
+            className={`w-16 shrink-0 font-mono text-xs font-medium ${typeColor}`}
+          >
+            {typeLabel}
+          </span>
+          <span className="truncate text-muted-foreground">{summary}</span>
+        </button>
         {agentId && renderAgentLink && (
-          <span className="ml-auto shrink-0" onClick={(e) => e.stopPropagation()}>
+          <span className="ml-auto shrink-0">
             {renderAgentLink(agentId)}
           </span>
         )}
@@ -224,6 +228,7 @@ function BlockRow({ entry, isExpanded, onToggle, renderAgentLink }: BlockRowProp
     <div className="border-b border-border">
       <button
         onClick={onToggle}
+        aria-expanded={true}
         className="flex h-7 w-full items-center gap-2 bg-muted/50 px-4 text-left text-sm"
       >
         <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">
