@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { ArgsError, parseFlags } from '../lib/args';
 import {
   claudeProjectsRoot,
   getClaudeProjectDir,
@@ -16,6 +17,7 @@ import { makeProjectSessionFilter } from '../lib/session-state';
 import { writeLine } from '../lib/stdout';
 import { parseTimeSpec } from '../lib/time-filter';
 import { extractCwdFromFile, projectScanData, resolveTranscriptDirs } from '../lib/transcript-discovery';
+import type { FlagSpec, ParsedArgs } from '../lib/args';
 import type { Locator } from '../lib/locators';
 
 /** A project's transcripts: its dirs and those of its worktrees. */
@@ -77,10 +79,6 @@ const stderrRow = (row: Record<string, string>): void => void process.stderr.wri
 export const note = (text: string): void => stderrRow({ note: text });
 export const warn = (text: string): void => stderrRow({ warning: text });
 
-interface FlagSpec {
-  bool: Array<string>;
-  value: Array<string>;
-}
 const SCOPE = ['--project', '--since', '--until', '--clip'];
 const SPECS: Record<string, FlagSpec> = {
   sessions: { bool: ['--all-projects'], value: ['-n', ...SCOPE] },
@@ -92,50 +90,10 @@ const SPECS: Record<string, FlagSpec> = {
   },
 };
 
-export interface Args {
-  flags: Map<string, string | true>;
-  positional: Array<string>;
-  help: boolean;
-}
+export type Args = ParsedArgs;
 
-/** Flags anywhere, `--flag=value`, short-flag clusters (`-ic`, `-m5`), and `--` before a leading-dash pattern. */
 export function parseArgs(verb: string, args: Array<string>): Args {
-  const spec = SPECS[verb];
-  const flags = new Map<string, string | true>();
-  const positional: Array<string> = [];
-  let help = false;
-  const set = (name: string, inline: string | undefined, next: () => string | undefined) => {
-    if (spec.bool.includes(name)) {
-      if (inline !== undefined) throw new LocalError(localErrors.noValue(name), true);
-      flags.set(name, true);
-    } else if (spec.value.includes(name)) {
-      const value = inline ?? next();
-      if (value === undefined) throw new LocalError(localErrors.needsValue(name), true);
-      flags.set(name, value);
-    } else throw new LocalError(localErrors.unknownFlag(name, verb), true);
-  };
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === '--') {
-      positional.push(...args.slice(i + 1));
-      break;
-    }
-    if (a === '--help' || a === '-h') help = true;
-    else if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      set(eq < 0 ? a : a.slice(0, eq), eq < 0 ? undefined : a.slice(eq + 1), () => args[++i]);
-    } else if (a.startsWith('-') && a.length > 1 && !/^-\d/.test(a)) {
-      for (let j = 1; j < a.length; j++) {
-        const flag = `-${a[j]}`;
-        if (flag === '-h') help = true;
-        else if (spec.value.includes(flag)) {
-          set(flag, a.slice(j + 1) || undefined, () => args[++i]);
-          break;
-        } else set(flag, undefined, () => undefined);
-      }
-    } else positional.push(a);
-  }
-  return { flags, positional, help };
+  return parseFlags(SPECS[verb], args, { ...localErrors, unknownFlag: (flag) => localErrors.unknownFlag(flag, verb) });
 }
 
 export function numberFlag(args: Args, name: string, fallback: number): number {
@@ -253,8 +211,8 @@ export async function localCore(env: LocalEnv, argv: Array<string>): Promise<num
     }
     return await (await load()).run(env, args);
   } catch (error) {
-    if (!(error instanceof LocalError || error instanceof LocatorError)) throw error;
-    const usage = error instanceof LocalError && error.usage;
+    if (!(error instanceof LocalError || error instanceof LocatorError || error instanceof ArgsError)) throw error;
+    const usage = error instanceof ArgsError || (error instanceof LocalError && error.usage);
     stderrRow(usage ? { error: error.message, usage: localErrors.usage(localUsage) } : { error: error.message });
     return 2;
   }

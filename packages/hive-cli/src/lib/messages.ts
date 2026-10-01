@@ -481,6 +481,8 @@ export const hive = {
     agentCannotUpload: 'Agent sessions cannot be uploaded individually. Upload the parent session instead.',
     outsideConsentWindow: 'Session was last modified outside an active consent window.',
     excludedDuringUpload: 'Session was excluded during upload',
+    otherExcludedDuringUpload:
+      'Another session was excluded during upload. Upload again to leave out its copied records.',
   },
   sessionStart: {
     alignNudgeNew: `run ${boldMagenta('/hive:align')} for setup recommendations`,

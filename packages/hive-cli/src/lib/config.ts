@@ -216,7 +216,9 @@ export function statePaths(stateDir: string) {
     excludedSessions: join(stateDir, 'excluded-sessions'),
     startedUploads: join(stateDir, 'started-uploads'),
     agentMigrationTs: join(stateDir, 'agent-upload-migration-ts'),
-    workflowMigrationTs: join(stateDir, 'workflow-upload-migration-ts'),
+    workflowReopens: join(stateDir, 'workflow-reopens'),
+    /** 0.2.1 and earlier: one reopen time shared by every workflow reopen; runWorkflowBackfill deletes it. */
+    legacyWorkflowMigrationTs: join(stateDir, 'workflow-upload-migration-ts'),
     snoozeUntil: join(stateDir, 'snooze-until'),
     uploadScheduled: join(stateDir, 'upload-scheduled'),
     uploadLock: join(stateDir, 'upload-lock'),

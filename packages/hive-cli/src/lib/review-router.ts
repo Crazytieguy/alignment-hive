@@ -8,6 +8,7 @@ import { buildSessionMeta } from './session-format';
 import { excludeSessionChecked, findAgentsForParent } from './session-state';
 import { getSnoozeUntil, setSnooze } from './snooze';
 import { parseDuration } from './time-filter';
+import { withUploadLock } from './upload-lock';
 import {
   discoverWorkflowRuns,
   loadConsentWindows,
@@ -32,14 +33,19 @@ export function createReviewRouter(stateDir: string, cwd: string) {
   const discoveryCache: DiscoveryCache = new Map();
   const summaryCache: SummaryCache = new Map();
   // The last few sanitized transcripts, so a refetch or moving between a parent and its agents
-  // does not sanitize again.
-  const reads = new Map<string, { size: number; mtimeMs: number; read: SessionReadResult }>();
-  const readSanitized = async (path: string): Promise<SessionReadResult> => {
+  // does not sanitize again. The excluded count (the file only grows) revalidates them too: an
+  // exclusion changes what other sessions' copies of it show.
+  const reads = new Map<string, { size: number; mtimeMs: number; excluded: number; read: SessionReadResult }>();
+  const readSanitized = async (session: DiscoveredSession, excludedSet: Set<string>): Promise<SessionReadResult> => {
+    const { path } = session;
     const { size, mtimeMs } = await stat(path);
     const hit = reads.get(path);
     reads.delete(path);
-    const read = hit && hit.size === size && hit.mtimeMs === mtimeMs ? hit.read : await readAndSanitizeSession(path);
-    reads.set(path, { size, mtimeMs, read });
+    const read =
+      hit && hit.size === size && hit.mtimeMs === mtimeMs && hit.excluded === excludedSet.size
+        ? hit.read
+        : await readAndSanitizeSession(session, excludedSet);
+    reads.set(path, { size, mtimeMs, excluded: excludedSet.size, read });
     if (reads.size > MAX_CACHED_READS) reads.delete(reads.keys().next().value!);
     return read;
   };
@@ -53,21 +59,20 @@ export function createReviewRouter(stateDir: string, cwd: string) {
   };
   type State = Awaited<ReturnType<typeof loadState>>;
 
+  type StatusInputs = Pick<StatusContext, 'consentMtime' | 'snoozeUntil' | 'consentWindows'>;
+
   /**
    * Status inputs beyond the state. Without the backend's consent time, every session not yet
    * uploaded or excluded shows as pending, never as more uploadable than it may be.
    */
-  const statusInputs = async (): Promise<
-    Pick<StatusContext, 'consentMtime' | 'snoozeUntil'> & { consentError?: string }
-  > => {
+  const statusInputs = async (): Promise<StatusInputs & { consentError?: string }> => {
     const [consent, snoozeUntil] = await Promise.all([
-      resolveProjectConsent(cwd).then(
-        ({ consentMtime }) => ({ consentMtime }),
-        (err: unknown) => ({
+      resolveProjectConsent(cwd)
+        .then(async ({ consentMtime, ids }) => ({ consentMtime, consentWindows: await loadConsentWindows(ids) }))
+        .catch((err: unknown) => ({
           consentMtime: Date.now(),
           consentError: err instanceof Error ? err.message : String(err),
-        }),
-      ),
+        })),
       getSnoozeUntil(stateDir),
     ]);
     return { ...consent, snoozeUntil };
@@ -76,8 +81,8 @@ export function createReviewRouter(stateDir: string, cwd: string) {
   const statusOf = (
     session: DiscoveredSession,
     state: State,
-    { consentMtime, snoozeUntil }: Pick<StatusContext, 'consentMtime' | 'snoozeUntil'>,
-  ) => sessionStatusFields(session, state, { ...state, consentMtime, snoozeUntil });
+    { consentMtime, snoozeUntil, consentWindows }: StatusInputs,
+  ) => sessionStatusFields(session, state, { ...state, consentMtime, snoozeUntil, consentWindows });
 
   const findSession = (state: State, sessionId: string): DiscoveredSession => {
     const session = state.sessionById.get(sessionId);
@@ -136,7 +141,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         const [state, inputs] = await Promise.all([loadState(), statusInputs()]);
         const session = findSession(state, input.sessionId);
 
-        const sessionRead = await readSanitized(session.path);
+        const sessionRead = await readSanitized(session, state.excludedSet);
         const agents = session.agentId
           ? []
           : await findAgentsForParent(session, state.agentsByParent, state.transcriptsDirs, sessionRead.cwds);
@@ -186,7 +191,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
               ),
             );
           if (!agent) throw new Error(errors.sessionNotFound(`${input.sessionId}/agent-${input.agentId}`));
-          const { sanitizedEntries } = await readSanitized(agent.path);
+          const { sanitizedEntries } = await readSanitized(agent, state.excludedSet);
           return { entries: sanitizedEntries, messageCount: sanitizedEntries.length };
         }),
 
@@ -229,20 +234,27 @@ export function createReviewRouter(stateDir: string, cwd: string) {
         const session = findSession(state, input.sessionId);
         if (session.agentId) throw new Error(hive.upload.agentCannotUpload);
 
-        const result = await uploadOneSession({
-          session,
-          state,
-          statusCtx: { ...state, consentMtime, snoozeUntil: null },
-          consentWindows: await loadConsentWindows(ids),
-          transcriptsDirs: state.transcriptsDirs,
-          checkoutId,
-          ids,
-          stateDir,
-        });
+        const consentWindows = await loadConsentWindows(ids);
+        // The same lock as `hive upload send`, so this never runs alongside the scheduled upload.
+        const result = await withUploadLock(stateDir, () =>
+          uploadOneSession({
+            session,
+            state,
+            statusCtx: { ...state, consentMtime, snoozeUntil: null, consentWindows },
+            transcriptsDirs: state.transcriptsDirs,
+            checkoutId,
+            ids,
+            stateDir,
+          }),
+        );
+        if (!result) throw new Error(hive.upload.uploadInProgress);
         if (!result.ok) throw new Error(result.error);
 
         const [fresh, snoozeUntil] = await Promise.all([loadState(), getSnoozeUntil(stateDir)]);
-        return { ...result, ...statusOf(findSession(fresh, session.sessionId), fresh, { consentMtime, snoozeUntil }) };
+        return {
+          ...result,
+          ...statusOf(findSession(fresh, session.sessionId), fresh, { consentMtime, snoozeUntil, consentWindows }),
+        };
       }),
     }),
 

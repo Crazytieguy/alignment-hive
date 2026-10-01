@@ -4,17 +4,29 @@ import { tmpdir } from 'node:os';
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as realConvex from '../lib/convex';
 
-// No network: consent comes from `consent`, and every upload entry point throws.
+// No network: consent comes from `consent` and `history`, and every upload entry point throws
+// unless a test captures it in `backend`.
 let consent: () => Promise<{ consentMtime: number; ids: { directory: string } }>;
+type History = { global: Array<{ sessionSharing: boolean; timestamp: number }>; project: History['global'] };
+const sharingOn = (): History => ({
+  global: [{ sessionSharing: true, timestamp: 1 }],
+  project: [{ sessionSharing: true, timestamp: 1 }],
+});
+let history = sharingOn();
 const blocked = (name: string) => () => {
   throw new Error(`${name} must not be called`);
 };
+const blockedBackend = () => ({
+  generateUploadUrls: blocked('generateUploadUrls') as (...args: Array<any>) => unknown,
+  saveUploads: blocked('saveUploads') as (...args: Array<any>) => unknown,
+});
+let backend = blockedBackend();
 mock.module('../lib/convex', () => ({
   ...realConvex,
   resolveProjectConsent: () => consent(),
-  getConsentHistory: () => Promise.resolve({ global: [], project: [] }),
-  generateUploadUrls: blocked('generateUploadUrls'),
-  saveUploads: blocked('saveUploads'),
+  getConsentHistory: () => Promise.resolve(history),
+  generateUploadUrls: (...args: Array<any>) => backend.generateUploadUrls(...args),
+  saveUploads: (...args: Array<any>) => backend.saveUploads(...args),
   saveWorkflowRuns: blocked('saveWorkflowRuns'),
 }));
 mock.module('../lib/auth', () => ({ getAuthData: blocked('getAuthData') }));
@@ -94,9 +106,50 @@ afterAll(async () => {
 
 beforeEach(async () => {
   consent = () => Promise.resolve({ consentMtime: 0, ids: { directory: root } });
+  history = sharingOn();
+  backend = blockedBackend();
   await rm(statePaths(stateDir).excludedSessions, { force: true });
   await rm(statePaths(stateDir).sharingDisabled, { force: true });
+  await rm(statePaths(stateDir).uploadLock, { force: true });
 });
+
+/** Capture uploads instead of sending them: the sent bodies, and the backend calls by name. */
+function captureUploads() {
+  const calls: Array<string> = [];
+  const sent: Array<string> = [];
+  backend = {
+    generateUploadUrls: (parent: string, agents: Array<string>) => {
+      calls.push('generateUploadUrls');
+      return Object.fromEntries((agents.length ? agents : [parent]).map((id) => [id, `https://fake.invalid/${id}`]));
+    },
+    saveUploads: () => {
+      calls.push('saveUploads');
+    },
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((_url: unknown, init?: { body?: unknown }) => {
+    sent.push(String(init?.body ?? ''));
+    return Promise.resolve(new Response(JSON.stringify({ storageId: `st_${sent.length}` })));
+  }) as unknown as typeof fetch;
+  return { calls, sent, restore: () => (globalThis.fetch = realFetch) };
+}
+
+/** A transcript record of `sessionId`, as Claude Code writes it. */
+const record = (sessionId: string, type: 'user' | 'assistant', uuid: string, parentUuid: string | null, text: string) =>
+  JSON.stringify({
+    type,
+    uuid,
+    parentUuid,
+    sessionId,
+    timestamp: OLD.toISOString(),
+    cwd: root,
+    message: { role: type, content: text },
+  });
+
+async function writeLines(path: string, records: Array<string>, mtime = OLD): Promise<void> {
+  await writeFile(path, records.join('\n') + '\n');
+  await utimes(path, mtime, mtime);
+}
 
 describe('sessions.list', () => {
   test('lists parents with statuses and summaries', async () => {
@@ -175,8 +228,169 @@ describe('sessions.upload', () => {
     await expect(caller().sessions.upload({ sessionId: 'p1' })).rejects.toThrow(hive.upload.noProjectConsent);
   });
 
+  test('refused while another upload holds the lock, without touching the backend', async () => {
+    // The scheduled background send holds the lock (a live pid: this process).
+    await writeFile(statePaths(stateDir).uploadLock, String(process.pid));
+    const { calls, restore } = captureUploads();
+    try {
+      await expect(caller().sessions.upload({ sessionId: 'p2' })).rejects.toThrow(hive.upload.uploadInProgress);
+      expect(calls).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   test('an already uploaded session succeeds with its fresh status', async () => {
     const r = await caller().sessions.upload({ sessionId: 'p3' });
     expect(r).toMatchObject({ ok: true, alreadyUploaded: true, status: { type: 'uploaded' } });
+  });
+});
+
+describe('sharing was off when the session was last modified', () => {
+  const S = 'not-shared-1';
+  const path = () => join(transcripts, `${S}.jsonl`);
+  beforeAll(async () => {
+    await writeLines(path(), [record(S, 'user', 'n1', null, 'hi'), record(S, 'assistant', 'n2', 'n1', 'ok')]);
+  });
+  afterAll(async () => {
+    await rm(path(), { force: true });
+  });
+
+  test('lists it as not-shared, not ready, and refuses its upload before any backend call', async () => {
+    // Project sharing was turned off before the session's last change and on again after it.
+    history = {
+      global: [{ sessionSharing: true, timestamp: 1 }],
+      project: [
+        { sessionSharing: true, timestamp: 1 },
+        { sessionSharing: false, timestamp: OLD.getTime() - DAY_MS },
+        { sessionSharing: true, timestamp: OLD.getTime() + DAY_MS },
+      ],
+    };
+    const { sessions } = await caller().sessions.list();
+    expect(sessions.find((s) => s.sessionId === S)).toMatchObject({
+      status: { type: 'not-shared' },
+      statusLabel: 'sharing was off',
+    });
+    expect(sessions.find((s) => s.sessionId === 'p1')!.status).toEqual({ type: 'not-shared' });
+
+    const { calls, restore } = captureUploads();
+    try {
+      await expect(caller().sessions.upload({ sessionId: S })).rejects.toThrow(hive.upload.outsideConsentWindow);
+      expect(calls).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('a session that carries a copy of an excluded session', () => {
+  // Resuming A copies A's records, under A's session id, into the new session B's file.
+  const A = 'resumed-from-a';
+  const B = 'resumed-as-b';
+  const copyOfA = [
+    record(A, 'user', 'c1', null, 'PRIVATE-A prompt'),
+    record(A, 'assistant', 'c2', 'c1', 'PRIVATE-A reply'),
+  ];
+  beforeAll(async () => {
+    await writeLines(join(transcripts, `${A}.jsonl`), copyOfA);
+    await writeLines(join(transcripts, `${B}.jsonl`), [
+      // A's title, whose leafUuid points into A's own file.
+      JSON.stringify({ type: 'summary', summary: 'PRIVATE-A title', leafUuid: 'a-only' }),
+      ...copyOfA,
+      record(B, 'user', 'b1', 'c2', 'B follow-up'),
+      record(B, 'assistant', 'b2', 'b1', 'B answer'),
+    ]);
+  });
+  /** Back to the shared fixture's upload records: only p3 uploaded. */
+  const resetUploads = async () => {
+    await rm(statePaths(stateDir).startedUploads, { force: true });
+    await writeFile(
+      statePaths(stateDir).uploadedSessions,
+      JSON.stringify({
+        sessionId: 'p3',
+        rawMtime: OLD.toISOString(),
+        uploadedAt: new Date().toISOString(),
+        agentSessionIds: [],
+      }) + '\n',
+    );
+  };
+  afterAll(async () => {
+    await rm(join(transcripts, `${A}.jsonl`), { force: true });
+    await rm(join(transcripts, `${B}.jsonl`), { force: true });
+    await resetUploads();
+  });
+
+  test("once A is excluded, B neither shows nor uploads A's content, and keeps its own", async () => {
+    const before = await caller().sessions.content({ sessionId: B });
+    expect(JSON.stringify(before.entries)).toContain('PRIVATE-A');
+
+    expect(await caller().sessions.exclude({ sessionId: A })).toMatchObject({ status: { type: 'excluded' } });
+
+    const { sessions } = await caller().sessions.list();
+    expect(sessions.find((s) => s.sessionId === B)!.summary).toBe('B follow-up');
+    const content = await caller().sessions.content({ sessionId: B });
+    expect(JSON.stringify(content.entries)).not.toContain('PRIVATE-A');
+    expect(JSON.stringify(content.entries)).toContain('B answer');
+    // A's records keep their place in the chain, so B's own records still hang off them.
+    expect(content.entries.slice(0, 2)).toEqual([
+      { type: 'user', uuid: 'c1', parentUuid: null },
+      { type: 'assistant', uuid: 'c2', parentUuid: 'c1' },
+    ]);
+    // The excluded session's own preview still shows its content.
+    expect(JSON.stringify((await caller().sessions.content({ sessionId: A })).entries)).toContain('PRIVATE-A');
+
+    const { calls, sent, restore } = captureUploads();
+    try {
+      expect(await caller().sessions.upload({ sessionId: B })).toMatchObject({ ok: true });
+      expect(calls).toEqual(['generateUploadUrls', 'saveUploads']);
+      expect(sent.join('')).not.toContain('PRIVATE-A');
+      expect(sent.join('')).toContain('B answer');
+    } finally {
+      restore();
+    }
+  });
+
+  test('a session resumed from one that is not excluded keeps its copied title', async () => {
+    const C = 'resumed-from-z';
+    await writeLines(join(transcripts, `${C}.jsonl`), [
+      JSON.stringify({ type: 'summary', summary: 'Z title', leafUuid: 'z-only' }),
+      record('not-excluded-z', 'user', 'z1', null, 'Z prompt'),
+      record(C, 'user', 'd1', 'z1', 'C follow-up'),
+      record(C, 'assistant', 'd2', 'd1', 'C answer'),
+    ]);
+    try {
+      await caller().sessions.exclude({ sessionId: A });
+      const { sessions } = await caller().sessions.list();
+      expect(sessions.find((s) => s.sessionId === C)!.summary).toBe('Z title');
+      expect(JSON.stringify((await caller().sessions.content({ sessionId: C })).entries)).toContain('Z title');
+    } finally {
+      await rm(join(transcripts, `${C}.jsonl`), { force: true });
+    }
+  });
+
+  test("excluding A while B's upload is under way stops it before A's copies are sent", async () => {
+    await resetUploads();
+    const { calls, sent, restore } = captureUploads();
+    const mint = backend.generateUploadUrls;
+    backend.generateUploadUrls = async (...args: Array<any>) => {
+      expect(await caller().sessions.exclude({ sessionId: A })).toMatchObject({ status: { type: 'excluded' } });
+      return mint(...args);
+    };
+    try {
+      await expect(caller().sessions.upload({ sessionId: B })).rejects.toThrow(hive.upload.otherExcludedDuringUpload);
+      expect(calls).toEqual(['generateUploadUrls']);
+      expect(sent).toEqual([]);
+    } finally {
+      restore();
+    }
+    // The next upload reads B against the new excluded set.
+    const retry = captureUploads();
+    try {
+      expect(await caller().sessions.upload({ sessionId: B })).toMatchObject({ ok: true });
+      expect(retry.sent.join('')).not.toContain('PRIVATE-A');
+      expect(retry.sent.join('')).toContain('B answer');
+    } finally {
+      retry.restore();
+    }
   });
 });

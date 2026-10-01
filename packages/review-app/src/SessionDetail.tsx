@@ -9,7 +9,15 @@ import {
   canExclude,
   canUpload,
 } from "@alignment-hive/session-data";
-import { StatusBadge, contentKey, useExclude, useInFlight, useUpload } from "./sessions";
+import {
+  StatusBadge,
+  agentContentKey,
+  contentKey,
+  useExclude,
+  useInFlight,
+  useUpload,
+  workflowRunKey,
+} from "./sessions";
 
 /** The upload records the review server sends, parsed as the web viewer will parse the upload. */
 function parseEntries(uploadRecords: Array<unknown>) {
@@ -19,8 +27,10 @@ function parseEntries(uploadRecords: Array<unknown>) {
 /** Tool entries may carry the agent id with or without the agent- prefix. */
 const bareAgentId = (agentId: string) => agentId.replace(/^agent-/, "");
 
-// Sanitizing a large session takes a while, and the transcript under review rarely changes.
-const CONTENT_QUERY = { staleTime: 10 * 60_000 } as const;
+// Sanitizing a large session takes a while, so a reopened preview shows from the cache at once,
+// but it is refetched on every open, since Upload sends the file as it is then (the server's read
+// cache keeps an unchanged file cheap).
+const CONTENT_QUERY = { staleTime: 10 * 60_000, refetchOnMount: "always" } as const;
 
 type ContentResult = Awaited<ReturnType<typeof trpc.sessions.content.query>>;
 type Agent = ContentResult["agents"][number];
@@ -62,7 +72,7 @@ function AgentButton({
 function RunBlob({ sessionId, runId }: { sessionId: string; runId: string }) {
   const [open, setOpen] = useState(false);
   const { data, error, isLoading } = useQuery({
-    queryKey: ["workflow-run", sessionId, runId],
+    queryKey: workflowRunKey(sessionId, runId),
     queryFn: ({ signal }) => trpc.sessions.workflowRun.query({ sessionId, runId }, { signal }),
     enabled: open,
     ...CONTENT_QUERY,
@@ -173,7 +183,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
   const viewingAgent = viewingAgentId ? data?.agents.find((a) => a.agentId === viewingAgentId) : undefined;
 
   const agentQuery = useQuery({
-    queryKey: ["agent-content", sessionId, viewingAgentId],
+    queryKey: agentContentKey(sessionId, viewingAgentId),
     queryFn: ({ signal }) => trpc.sessions.agentContent.query({ sessionId, agentId: viewingAgentId! }, { signal }),
     enabled: !!viewingAgent,
     ...CONTENT_QUERY,

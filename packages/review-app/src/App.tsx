@@ -1,13 +1,16 @@
-import { useState } from "react";
-import { SessionList, type Filter } from "./SessionList";
+import { useRef, useState } from "react";
+import { SessionList } from "./SessionList";
 import { SessionDetail } from "./SessionDetail";
 import { Notices } from "./notices";
-import { navigate, useRoute } from "./route";
+import { navigate, useRoute, type Filter } from "./route";
 
 export function App() {
   const route = useRoute();
-  // Kept here so the list's filter and selection survive a visit to a session.
-  const [filter, setFilter] = useState<Filter>("pending");
+  // The filter lives in the hash; the last one is kept so the in-app Back buttons return to it.
+  const listFilter = useRef<Filter>("pending");
+  if (route.page === "list") listFilter.current = route.filter;
+  const toList = () => navigate({ page: "list", filter: listFilter.current });
+  // Kept here so the list's selection survives a visit to a session.
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   return (
@@ -17,7 +20,7 @@ export function App() {
           <h1 className="text-lg font-semibold">Session Review</h1>
           {route.page === "detail" && (
             <button
-              onClick={() => navigate({ page: "list" })}
+              onClick={toList}
               className="text-sm text-muted-foreground hover:text-foreground"
             >
               &larr; Back to list
@@ -37,9 +40,9 @@ export function App() {
         <Notices />
         {route.page === "list" && (
           <SessionList
-            filter={filter}
-            onFilterChange={(f) => {
-              setFilter(f);
+            filter={route.filter}
+            onFilterChange={(filter) => {
+              navigate({ page: "list", filter }, { replace: true });
               setSelected(new Set());
             }}
             selected={selected}
@@ -52,7 +55,7 @@ export function App() {
             sessionId={route.sessionId}
             viewingAgentId={route.page === "agent" ? route.agentId : undefined}
             onBack={() =>
-              navigate(route.page === "agent" ? { page: "detail", sessionId: route.sessionId } : { page: "list" })
+              route.page === "agent" ? navigate({ page: "detail", sessionId: route.sessionId }) : toList()
             }
             onSelectAgent={(agentId) => navigate({ page: "agent", sessionId: route.sessionId, agentId })}
           />

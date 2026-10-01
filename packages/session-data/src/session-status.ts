@@ -5,11 +5,23 @@ export type SessionStatus =
   | { type: 'uploaded' }
   | { type: 'pending'; remainingMs: number }
   | { type: 'snoozed' }
-  | { type: 'ready' };
+  | { type: 'ready' }
+  /** Last modified while sharing was off: never uploads unless the session changes again. */
+  | { type: 'not-shared' };
 
 /** States in which no complete upload of the current session content is recorded. */
-function isPreUploadState(status: SessionStatus): boolean {
-  return status.type === 'pending' || status.type === 'snoozed' || status.type === 'ready';
+export function isPreUploadState(status: SessionStatus): boolean {
+  return (
+    status.type === 'pending' || status.type === 'snoozed' || status.type === 'ready' || status.type === 'not-shared'
+  );
+}
+
+/**
+ * Sessions that will upload unless the user acts: the default `hive upload list` view and "To
+ * review". A not-shared session uploads only if it changes again, and then it is pending.
+ */
+export function awaitsReview(status: SessionStatus): boolean {
+  return isPreUploadState(status) && status.type !== 'not-shared';
 }
 
 /**
@@ -57,6 +69,8 @@ export function formatSessionStatus(status: SessionStatus, hasPartialUpload = fa
       return 'snoozed';
     case 'pending':
       return `pending (${formatRemaining(status.remainingMs)})`;
+    case 'not-shared':
+      return 'sharing was off';
   }
 }
 

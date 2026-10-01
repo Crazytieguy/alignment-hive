@@ -1,13 +1,14 @@
+import { readFileSync } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
   WorkflowRunBlobSchema,
+  chainStub,
   computeConsentWindows,
   countsAsLine,
   extractWorkflowRunRow,
   formatSessionStatus,
-  isInConsentWindow,
   readRecords,
   uploadRecord,
 } from '@alignment-hive/session-data';
@@ -21,7 +22,7 @@ import {
   computeSessionStatus,
   findAgentsForParent,
   hasIncompleteUpload,
-  isSessionExcluded,
+  loadExcludedSessions,
   loadSessionState,
   loadUploadedSessions,
   recordUploadStarted,
@@ -32,8 +33,8 @@ import { extractCwds } from './transcript-discovery';
 import type { ProjectIds } from './config';
 import type { Id } from '../../../web/convex/_generated/dataModel';
 import type { UploadRecord, WorkflowRunUpload } from './convex';
-import type { DiscoveredSession, DiscoveryCache, SessionState, StatusContext } from './session-state';
-import type { ConsentWindow, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
+import type { ConsentWindows, DiscoveredSession, DiscoveryCache, SessionState, StatusContext } from './session-state';
+import type { RawRecord, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
 
 const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
 const SUMMARY_CONCURRENCY = 10;
@@ -56,17 +57,57 @@ export async function mapBatched<T, TResult>(
   return out;
 }
 
-/** Read a session file into its sanitized upload records. Also extracts cwds for worktree agent discovery. */
-export async function readAndSanitizeSession(sessionPath: string) {
-  const rawContent = await readFile(sessionPath, 'utf-8');
+/** The session whose records a transcript file holds: an agent's records carry its parent's id. */
+type TranscriptOwner = Pick<DiscoveredSession, 'path' | 'sessionId' | 'parentSessionId'>;
+
+/**
+ * Whether a record is a copy of another, excluded session's: Claude Code copies the earlier
+ * conversation into a resumed session's file, under the original session id. Such records keep
+ * only their place in the parent chain, so excluding a session also keeps its copies local. A
+ * `summary` record carries no session id, and its leafUuid may point into a file this one doesn't
+ * copy: in a file that holds an excluded session's records, one whose leafUuid is not among this
+ * session's own records counts as a copy, of the earlier conversation's title. `text` (the whole
+ * file) is read only once a summary record is checked, and parsed only if it names an excluded id.
+ */
+function excludedCopy(
+  owner: TranscriptOwner,
+  excluded: ReadonlySet<string>,
+  text: () => string,
+): (r: RawRecord) => boolean {
+  const ownId = owner.parentSessionId ?? owner.sessionId;
+  const isForeign = (r: RawRecord): boolean => typeof r.data.sessionId === 'string' && r.data.sessionId !== ownId;
+  let copied: { ownUuids: Set<string> } | null | undefined;
+  const copiedTitle = (leafUuid: unknown): boolean => {
+    if (copied === undefined) {
+      const raw = text();
+      const records = [...excluded].some((id) => raw.includes(id)) ? readRecords(raw).records : [];
+      copied = records.some((r) => isForeign(r) && excluded.has(r.data.sessionId as string))
+        ? { ownUuids: new Set(records.flatMap((r) => (r.uuid && !isForeign(r) ? [r.uuid] : []))) }
+        : null;
+    }
+    return copied !== null && !(typeof leafUuid === 'string' && copied.ownUuids.has(leafUuid));
+  };
+  return (r) =>
+    isForeign(r)
+      ? excluded.has(r.data.sessionId as string)
+      : r.type === 'summary' && excluded.size > 0 && copiedTitle(r.data.leafUuid);
+}
+
+/**
+ * Read a session file into its sanitized upload records, given the excluded session ids (see
+ * excludedCopy). Also extracts cwds for worktree agent discovery.
+ */
+export async function readAndSanitizeSession(session: TranscriptOwner, excluded: ReadonlySet<string>) {
+  const rawContent = await readFile(session.path, 'utf-8');
   const { records } = readRecords(rawContent);
+  const isCopy = excludedCopy(session, excluded, () => rawContent);
   return {
     sanitizedEntries: records
-      .map(uploadRecord)
+      .map((r) => (isCopy(r) ? chainStub(r) : uploadRecord(r)))
       .filter((e) => e !== undefined)
       .map((e) => sanitizeDeep(e)),
-    lineCount: records.filter(countsAsLine).length,
-    summary: (await readSessionSummary(sessionPath)) || undefined,
+    lineCount: records.filter((r) => !isCopy(r) && countsAsLine(r)).length,
+    summary: (await readSessionSummary(session, excluded)) || undefined,
     cwds: extractCwds(rawContent),
   };
 }
@@ -78,21 +119,40 @@ export async function readSessionCwds(sessionPath: string): Promise<Set<string>>
   return extractCwds(await readFile(sessionPath, 'utf-8'));
 }
 
-/** The sanitized one-line summary the upload list, the review UI and the backend show; '' when none. */
-export async function readSessionSummary(sessionPath: string, size?: number): Promise<string> {
-  const summary = fileSessionSummary({ path: sessionPath }, size ?? (await stat(sessionPath)).size);
+/**
+ * The sanitized one-line summary the upload list, the review UI and the backend show, skipping
+ * copies of excluded sessions (see excludedCopy); '' when none.
+ */
+export async function readSessionSummary(
+  session: TranscriptOwner,
+  excluded: ReadonlySet<string>,
+  size?: number,
+): Promise<string> {
+  const isCopy = excludedCopy(session, excluded, () => readFileSync(session.path, 'utf-8'));
+  const summary = fileSessionSummary(
+    { path: session.path },
+    size ?? (await stat(session.path)).size,
+    (r) => !isCopy(r),
+  );
   return summary ? sanitizeString(summary) : '';
 }
 
-/** Summaries by path, revalidated by file size and mtime; for a long-lived caller (the review server). */
-export type SummaryCache = Map<string, { size: number; mtimeMs: number; summary: string }>;
+/**
+ * Summaries by path, revalidated by file size, mtime and the excluded count (the excluded file
+ * only grows); for a long-lived caller (the review server).
+ */
+export type SummaryCache = Map<string, { size: number; mtimeMs: number; excluded: number; summary: string }>;
 
-async function cachedSessionSummary(path: string, cache: SummaryCache): Promise<string> {
-  const { size, mtimeMs } = await stat(path);
-  const hit = cache.get(path);
-  if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.summary;
-  const summary = await readSessionSummary(path, size);
-  cache.set(path, { size, mtimeMs, summary });
+async function cachedSessionSummary(
+  session: TranscriptOwner,
+  excluded: ReadonlySet<string>,
+  cache: SummaryCache,
+): Promise<string> {
+  const { size, mtimeMs } = await stat(session.path);
+  const hit = cache.get(session.path);
+  if (hit && hit.size === size && hit.mtimeMs === mtimeMs && hit.excluded === excluded.size) return hit.summary;
+  const summary = await readSessionSummary(session, excluded, size);
+  cache.set(session.path, { size, mtimeMs, excluded: excluded.size, summary });
   return summary;
 }
 
@@ -102,15 +162,15 @@ export async function loadSessionStateWithMigrations(
   transcriptsDirs: Array<string>,
   projectCwd: string,
   cache?: DiscoveryCache,
-): Promise<SessionState & { migrationTimestamp: number | null }> {
+): Promise<SessionState & { reopenedAt: Map<string, number> }> {
   const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd, cache);
   // Run discovery reads the parent's own project dir only (empty cwd set): parsing every uploaded
   // parent for worktree cwds on each state load would be prohibitive, and worktree runs come back
   // via the discoveredRunIds recorded at upload (see needsWorkflowReopen).
-  const migrationTimestamp = await runWorkflowBackfill(state, stateDir, async (parent) => [
+  const reopenedAt = await runWorkflowBackfill(state, stateDir, async (parent) => [
     ...(await readParseableRunBlobs(parent, new Set())).keys(),
   ]);
-  return { ...state, migrationTimestamp };
+  return { ...state, reopenedAt };
 }
 
 export interface SessionStatusFields {
@@ -148,9 +208,9 @@ export async function summarizeSessions(
   return mapBatched(sorted, SUMMARY_CONCURRENCY, async (session) => ({
     session,
     ...sessionStatusFields(session, state, statusCtx),
-    summary: await (cache ? cachedSessionSummary(session.path, cache) : readSessionSummary(session.path)).catch(
-      () => '',
-    ),
+    summary: await (
+      cache ? cachedSessionSummary(session, state.excludedSet, cache) : readSessionSummary(session, state.excludedSet)
+    ).catch(() => ''),
   }));
 }
 
@@ -193,21 +253,12 @@ async function uploadToStorage(url: string, content: string): Promise<Id<'_stora
   return result.storageId as Id<'_storage'>;
 }
 
-export interface ConsentWindows {
-  global: Array<ConsentWindow>;
-  project: Array<ConsentWindow>;
-}
-
 export async function loadConsentWindows(ids: ProjectIds): Promise<ConsentWindows> {
   const consentHistory = await getConsentHistory(ids);
   return {
     global: computeConsentWindows(consentHistory.global),
     project: computeConsentWindows(consentHistory.project),
   };
-}
-
-export function isInConsentWindows(mtime: number, windows: ConsentWindows): boolean {
-  return isInConsentWindow(mtime, windows.global) && isInConsentWindow(mtime, windows.project);
 }
 
 function escapeRegExp(s: string): string {
@@ -306,8 +357,8 @@ export type UploadResult = { ok: true; agentCount: number; alreadyUploaded?: tru
 export interface UploadOneOpts {
   session: DiscoveredSession;
   state: Pick<SessionState, 'agentsByParent'>;
-  statusCtx: StatusContext;
-  consentWindows: ConsentWindows;
+  /** Windows required: the status is what refuses a session last modified while sharing was off. */
+  statusCtx: StatusContext & { consentWindows: ConsentWindows };
   transcriptsDirs: Array<string>;
   checkoutId: string;
   ids: ProjectIds;
@@ -316,24 +367,24 @@ export interface UploadOneOpts {
 
 /**
  * The single-session upload path shared by `hive upload send` and the review UI: gate on status
- * and consent windows, read and sanitize, find agents, upload. Never throws; failures come back
- * as `{ ok: false, error }`.
+ * (which covers the consent windows), read and sanitize, find agents, upload. Never throws;
+ * failures come back as `{ ok: false, error }`.
  */
 export async function uploadOneSession(opts: UploadOneOpts): Promise<UploadResult> {
-  const { session, statusCtx, consentWindows, transcriptsDirs } = opts;
+  const { session, statusCtx, transcriptsDirs } = opts;
   const status = computeSessionStatus(session, statusCtx);
   if (status.type === 'excluded')
     return { ok: false, error: hive.upload.sessionExcluded(session.sessionId.slice(0, 8)) };
   if (status.type === 'uploaded') return { ok: true, agentCount: 0, alreadyUploaded: true };
-  const veto = await uploadVeto(opts.stateDir, session.sessionId);
+  if (status.type === 'not-shared') return { ok: false, error: hive.upload.outsideConsentWindow };
+  // Fresh: the user may have excluded a session this one copies since the load (see uploadVeto).
+  const excluded = await loadExcludedSessions(opts.stateDir);
+  const veto = await uploadVeto(opts.stateDir, session.sessionId, excluded);
   if (veto) return { ok: false, error: veto };
-  if (!isInConsentWindows(session.mtime.getTime(), consentWindows)) {
-    return { ok: false, error: hive.upload.outsideConsentWindow };
-  }
   try {
-    const parentRead = await readAndSanitizeSession(session.path);
+    const parentRead = await readAndSanitizeSession(session, excluded);
     const agents = await findAgentsForParent(session, opts.state.agentsByParent, transcriptsDirs, parentRead.cwds);
-    return await uploadParentWithAgents({ parent: session, parentRead, agents, ...opts });
+    return await uploadParentWithAgents({ parent: session, parentRead, agents, excluded, ...opts });
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -343,10 +394,36 @@ interface UploadParentOpts {
   parent: DiscoveredSession;
   parentRead: SessionReadResult;
   agents: Array<DiscoveredSession>;
+  excluded: ReadonlySet<string>;
   checkoutId: string;
   ids: ProjectIds;
   stateDir: string;
 }
+
+/**
+ * A reason to stop an upload that was eligible when the caller loaded its state: the local
+ * opt-out (`hive consent disable`) or an exclusion recorded since (the review UI's upload and
+ * exclude are independent requests). Any exclusion missing from `excludedAtRead`, the set the
+ * upload's records were read against, vetoes too: it may be a session this one copies, whose
+ * copies were read in full (the next run reads them against the new set). Read fresh from disk
+ * immediately before every transfer and every backend save, so a marker written during the slow
+ * work in between (reading, sanitizing, URL minting) stops the next send; only a request already
+ * in flight completes.
+ */
+async function uploadVeto(
+  stateDir: string,
+  sessionId: string,
+  excludedAtRead: ReadonlySet<string>,
+): Promise<string | null> {
+  if (isSharingDisabledLocally(stateDir)) return hive.upload.noProjectConsent;
+  const excluded = await loadExcludedSessions(stateDir);
+  if (excluded.has(sessionId)) return hive.upload.excludedDuringUpload;
+  // The excluded file only grows, so a larger set holds an id the read did not.
+  if (excluded.size > excludedAtRead.size) return hive.upload.otherExcludedDuringUpload;
+  return null;
+}
+
+class UploadVetoedError extends Error {}
 
 /**
  * Upload a parent session, then its agents, then (best-effort) its workflow run metadata. Agents
@@ -356,25 +433,10 @@ interface UploadParentOpts {
  * are tolerated (recorded via discoveredRunIds / runUploadAttempts so the workflow backfill can
  * reopen the parent, bounded by MAX_RUN_UPLOAD_ATTEMPTS). Backend failures throw.
  */
-/**
- * A reason to stop an upload that was eligible when the caller loaded its state: the local
- * opt-out (`hive consent disable`) or an exclusion recorded since (the review UI's upload and
- * exclude are independent requests). Read fresh from disk immediately before every transfer and
- * every backend save, so a marker written during the slow work in between (reading, sanitizing,
- * URL minting) stops the next send; only a request already in flight completes.
- */
-async function uploadVeto(stateDir: string, sessionId: string): Promise<string | null> {
-  if (isSharingDisabledLocally(stateDir)) return hive.upload.noProjectConsent;
-  if (await isSessionExcluded(stateDir, sessionId)) return hive.upload.excludedDuringUpload;
-  return null;
-}
-
-class UploadVetoedError extends Error {}
-
 async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadResult> {
-  const { parent, parentRead, agents, checkoutId, ids, stateDir } = opts;
+  const { parent, parentRead, agents, excluded, checkoutId, ids, stateDir } = opts;
   const assertNoVeto = async (): Promise<void> => {
-    const reason = await uploadVeto(stateDir, parent.sessionId);
+    const reason = await uploadVeto(stateDir, parent.sessionId, excluded);
     if (reason) throw new UploadVetoedError(reason);
   };
   const send = async (url: string, content: string): Promise<Id<'_storage'>> => {
@@ -433,7 +495,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
       batch.map(async (agent): Promise<UploadRecord> => {
         const url = urls[agent.sessionId];
         if (!url) throw new Error('No upload URL for agent');
-        const agentRead = await readAndSanitizeSession(agent.path);
+        const agentRead = await readAndSanitizeSession(agent, excluded);
         const content = buildUploadContent(
           agentRead.sanitizedEntries,
           agent.sessionId,

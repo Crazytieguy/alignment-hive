@@ -74,6 +74,7 @@ describe('upload send argument parsing', () => {
     ['--delay'],
     ['--delay', '--sessions', 'abc'],
     ['--delay='],
+    ['--sessions=', 'abc'],
     ['--delay', 'abc'],
     ['--delay', '5', '-x'],
     ['abc', 'def'],

@@ -7,7 +7,7 @@ import {
   readTranscript,
   sessionSummary,
 } from '@alignment-hive/session-data';
-import type { Entry, Transcript } from '@alignment-hive/session-data';
+import type { Entry, RawRecord, Transcript } from '@alignment-hive/session-data';
 import type { TranscriptRef } from './locators';
 
 // What `sessions` and `grep` need of a session without parsing all of it: the first and last entry
@@ -109,6 +109,13 @@ export function sessionFacts(ref: TranscriptRef): SessionFacts {
   return facts;
 }
 
+/** Which records count, for the summary helpers below; all of them by default. */
+type RecordFilter = (r: RawRecord) => boolean;
+
+function parseKept(text: string, keep?: RecordFilter): Transcript {
+  return keep ? readTranscript(readRecords(text).records.filter(keep)) : parseTranscript(text);
+}
+
 /** A slash command the human typed; hidden as noise when it has no arguments (`/review`). */
 const isTypedCommand = (e: Entry): boolean =>
   e.kind === 'user' && e.origin === undefined && e.command !== undefined && !e.isMeta && !e.isCompactSummary;
@@ -117,11 +124,15 @@ const isTypedCommand = (e: Entry): boolean =>
  * The first human message, from growing head chunks, or the first slash command in a file with no
  * human message; `empty` when the file has no human message and no reply either.
  */
-export function firstHumanMessage(ref: Pick<TranscriptRef, 'path'>, size: number): { entry?: Entry; empty: boolean } {
+export function firstHumanMessage(
+  ref: Pick<TranscriptRef, 'path'>,
+  size: number,
+  keep?: RecordFilter,
+): { entry?: Entry; empty: boolean } {
   let empty = false;
   let command: Entry | undefined;
   const entry = scan(ref.path, size, 'head', 4 * CHUNK, (text, whole) => {
-    const t = parseTranscript(text);
+    const t = parseKept(text, keep);
     const found = t.entries.find(isHumanMessage);
     if (!found && whole) {
       empty = isEmptySession(t);
@@ -135,7 +146,7 @@ export function firstHumanMessage(ref: Pick<TranscriptRef, 'path'>, size: number
 const TITLE_RECORDS = ['"type":"custom-title"', '"type":"ai-title"', '"type":"summary"'];
 
 /** The session's title, from its title records alone. */
-export function sessionTitle(ref: Pick<TranscriptRef, 'path'>): string | undefined {
+export function sessionTitle(ref: Pick<TranscriptRef, 'path'>, keep?: RecordFilter): string | undefined {
   const buf = readFileSync(ref.path);
   const lines: Array<{ at: number; text: string }> = [];
   for (const needle of TITLE_RECORDS) {
@@ -148,12 +159,16 @@ export function sessionTitle(ref: Pick<TranscriptRef, 'path'>): string | undefin
   }
   // In file order, so the parser's rule picks the latest title.
   const ordered = lines.sort((a, b) => a.at - b.at).map((l) => l.text);
-  return ordered.length ? parseTranscript(ordered.join('\n')).title : undefined;
+  return ordered.length ? parseKept(ordered.join('\n'), keep).title : undefined;
 }
 
 /** sessionSummary of the whole file, from its title records, else its head. */
-export function fileSessionSummary(ref: Pick<TranscriptRef, 'path'>, size: number): string | undefined {
-  const title = sessionTitle(ref);
-  const first = title ? undefined : firstHumanMessage(ref, size).entry;
+export function fileSessionSummary(
+  ref: Pick<TranscriptRef, 'path'>,
+  size: number,
+  keep?: RecordFilter,
+): string | undefined {
+  const title = sessionTitle(ref, keep);
+  const first = title ? undefined : firstHumanMessage(ref, size, keep).entry;
   return sessionSummary({ title, entries: first ? [first] : [] });
 }

@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc";
 import { Alert, Button } from "@alignment-hive/ui";
 // Shared status rules — the exclusion veto is privacy-critical and must match the CLI exactly.
-import { canExclude } from "@alignment-hive/session-data";
+import { awaitsReview, canExclude } from "@alignment-hive/session-data";
 import { hive } from "../../hive-cli/src/lib/messages";
 import {
   StatusBadge,
@@ -15,8 +15,7 @@ import {
   type Session,
   type Status,
 } from "./sessions";
-
-export type Filter = "pending" | "uploaded" | "excluded" | "all";
+import { FILTERS, type Filter } from "./route";
 
 const FILTER_LABELS: Record<Filter, string> = {
   pending: "To review",
@@ -26,7 +25,7 @@ const FILTER_LABELS: Record<Filter, string> = {
 };
 
 function matchesFilter(filter: Filter, status: Status) {
-  if (filter === "pending") return status.type === "pending" || status.type === "ready" || status.type === "snoozed";
+  if (filter === "pending") return awaitsReview(status);
   if (filter === "all") return true;
   return status.type === filter;
 }
@@ -117,7 +116,7 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
   }
 
   const counts = Object.fromEntries(
-    (Object.keys(FILTER_LABELS) as Array<Filter>).map((f) => [f, sessions.filter((s) => matchesFilter(f, s.status)).length]),
+    FILTERS.map((f) => [f, sessions.filter((s) => matchesFilter(f, s.status)).length]),
   ) as Record<Filter, number>;
 
   const toggleSelect = (id: string) => {
@@ -145,7 +144,7 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
       )}
 
       <div className="flex items-center gap-2">
-        {(Object.keys(FILTER_LABELS) as Array<Filter>).map((f) => (
+        {FILTERS.map((f) => (
           <button
             key={f}
             onClick={() => onFilterChange(f)}

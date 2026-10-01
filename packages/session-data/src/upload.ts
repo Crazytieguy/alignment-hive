@@ -73,10 +73,13 @@ export function uploadRecord(r: RawRecord): Record<string, unknown> | undefined 
     ? withToolUseResult(r.data)
     : isQueuedCommand(r)
       ? QueuedCommandSchema.parse(r.data)
-      : r.uuid
-        ? { type: r.type, uuid: r.uuid, parentUuid: r.parentUuid }
-        : undefined;
+      : chainStub(r);
   return kept && (stripBinary(kept) as Record<string, unknown>);
+}
+
+/** What an upload keeps of a record that stays local: its place in the parent chain, if it has one. */
+export function chainStub(r: RawRecord): Record<string, unknown> | undefined {
+  return r.uuid ? { type: r.type, uuid: r.uuid, parentUuid: r.parentUuid } : undefined;
 }
 
 function withToolUseResult(data: Record<string, unknown>): Record<string, unknown> {

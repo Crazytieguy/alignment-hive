@@ -1,12 +1,12 @@
 import { createReadStream } from 'node:fs';
-import { appendFile, writeFile } from 'node:fs/promises';
+import { appendFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { canExclude } from '@alignment-hive/session-data';
-import { getClaudeProjectDir, getMainWorktreePath, readStateFile, readTimestamp, statePaths } from './config';
+import { canExclude, isInConsentWindow } from '@alignment-hive/session-data';
+import { getClaudeProjectDir, getMainWorktreePath, readStateFile, statePaths } from './config';
 import { extractCwdFromFile } from './transcript-discovery';
 import { findRawSessions, scanSubagentDir, toDiscoveredSession } from './session-io';
-import type { SessionStatus } from '@alignment-hive/session-data';
+import type { ConsentWindow, SessionStatus } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-io';
 
 export type { DiscoveredSession };
@@ -134,7 +134,7 @@ export async function loadUploadedSessions(stateDir: string): Promise<Map<string
   return map;
 }
 
-async function loadExcludedSessions(stateDir: string): Promise<Set<string>> {
+export async function loadExcludedSessions(stateDir: string): Promise<Set<string>> {
   const content = (await readStateFile(statePaths(stateDir).excludedSessions)) ?? '';
   return new Set(
     content
@@ -196,12 +196,25 @@ export function hasIncompleteUpload(
 
 // --- Session status ---
 
+export interface ConsentWindows {
+  global: Array<ConsentWindow>;
+  project: Array<ConsentWindow>;
+}
+
+/** Whether sharing was on, both globally and for the project, at `mtime`. */
+export function isInConsentWindows(mtime: number, windows: ConsentWindows): boolean {
+  return isInConsentWindow(mtime, windows.global) && isInConsentWindow(mtime, windows.project);
+}
+
 export interface StatusContext {
   uploadedMap: Map<string, UploadedEntry>;
   excludedSet: Set<string>;
   consentMtime: number;
   snoozeUntil: number | null;
-  migrationTimestamp?: number | null;
+  /** When each reopened upload was reopened, by reopenKey (see runWorkflowBackfill). */
+  reopenedAt?: Map<string, number>;
+  /** Without them (offline callers), a session last modified while sharing was off is not told apart. */
+  consentWindows?: ConsentWindows;
 }
 
 /** Whether the recorded upload (if any) is for the session's current content. */
@@ -210,24 +223,25 @@ export function isSessionUploaded(session: DiscoveredSession, uploadedMap: Map<s
   return !!uploaded && uploaded.rawMtime === session.mtime.toISOString();
 }
 
+/** Identifies one recorded upload; a later upload of the same session gets a new key. */
+export function reopenKey(entry: Pick<UploadedEntry, 'sessionId' | 'uploadedAt'>): string {
+  return `${entry.sessionId}@${entry.uploadedAt}`;
+}
+
 export function computeSessionStatus(session: DiscoveredSession, ctx: StatusContext): SessionStatus {
-  const { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp } = ctx;
+  const { uploadedMap, excludedSet, consentMtime, snoozeUntil, reopenedAt, consentWindows } = ctx;
 
   if (excludedSet.has(session.sessionId)) return { type: 'excluded' };
 
-  const isCurrentUpload = isSessionUploaded(session, uploadedMap);
-  // A current upload is final unless the workflow backfill reopened it (agentSessionIds dropped
-  // in memory) and a review window exists to gate the re-upload.
-  if (
-    isCurrentUpload &&
-    (uploadedMap.get(session.sessionId)!.agentSessionIds !== undefined || migrationTimestamp == null)
-  ) {
-    return { type: 'uploaded' };
-  }
+  // A current upload is final unless the workflow backfill reopened it; the re-upload then waits
+  // a review period from the reopen.
+  const uploaded = isSessionUploaded(session, uploadedMap) ? uploadedMap.get(session.sessionId)! : undefined;
+  const reopened = uploaded && reopenedAt?.get(reopenKey(uploaded));
+  if (uploaded && reopened === undefined) return { type: 'uploaded' };
 
-  const eligibleAt = isCurrentUpload
-    ? migrationTimestamp! + REVIEW_PERIOD_MS
-    : Math.max(session.mtime.getTime(), consentMtime, migrationTimestamp ?? 0) + REVIEW_PERIOD_MS;
+  if (consentWindows && !isInConsentWindows(session.mtime.getTime(), consentWindows)) return { type: 'not-shared' };
+
+  const eligibleAt = (reopened ?? Math.max(session.mtime.getTime(), consentMtime)) + REVIEW_PERIOD_MS;
   const now = Date.now();
   if (now < eligibleAt) return { type: 'pending', remainingMs: eligibleAt - now };
   return snoozeUntil ? { type: 'snoozed' } : { type: 'ready' };
@@ -249,11 +263,6 @@ export async function recordExcludedSession(stateDir: string, sessionId: string)
   await appendFile(statePaths(stateDir).excludedSessions, sessionId + '\n');
 }
 
-/** Re-read the excluded set fresh from disk (not from a possibly-stale loaded state snapshot). */
-export async function isSessionExcluded(stateDir: string, sessionId: string): Promise<boolean> {
-  return (await loadExcludedSessions(stateDir)).has(sessionId);
-}
-
 export type ExcludeCheckResult = 'excluded' | 'already-excluded' | 'denied-uploaded' | 'denied-partial';
 
 export interface ExcludeOutcome {
@@ -266,24 +275,30 @@ export interface ExcludeOutcome {
 /**
  * The single exclusion path (CLI command and review UI both go through here). Owns every input
  * to its own veto — status and partial-upload state are computed here, not by callers, so no
- * call site can weaken the check by assembling them wrong.
+ * call site can weaken the check by assembling them wrong. The state files are read fresh, not
+ * taken from the caller's snapshot: an upload may have started or finished since it loaded.
  */
 export async function excludeSessionChecked(
   stateDir: string,
-  state: Pick<SessionState, 'uploadedMap' | 'excludedSet' | 'startedMap'> & { migrationTimestamp: number | null },
+  state: Pick<StatusContext, 'reopenedAt'>,
   session: DiscoveredSession,
 ): Promise<ExcludeOutcome> {
-  // consentMtime/snooze only shift sessions between pending/snoozed/ready — all equally
-  // excludable — so exclusion stays offline-capable with placeholder values.
+  const [uploadedMap, excludedSet, startedMap] = await Promise.all([
+    loadUploadedSessions(stateDir),
+    loadExcludedSessions(stateDir),
+    loadStartedUploads(stateDir),
+  ]);
+  // consentMtime, snooze and consent windows only shift sessions between pending, snoozed, ready
+  // and not-shared — all equally excludable — so exclusion stays offline-capable without them.
   const status = computeSessionStatus(session, {
-    uploadedMap: state.uploadedMap,
-    excludedSet: state.excludedSet,
+    uploadedMap,
+    excludedSet,
     consentMtime: 0,
     snoozeUntil: null,
-    migrationTimestamp: state.migrationTimestamp,
+    reopenedAt: state.reopenedAt,
   });
-  const hasPartial = hasIncompleteUpload(session.sessionId, state.uploadedMap, state.startedMap);
-  const hadPriorUpload = state.uploadedMap.has(session.sessionId);
+  const hasPartial = hasIncompleteUpload(session.sessionId, uploadedMap, startedMap);
+  const hadPriorUpload = uploadedMap.has(session.sessionId);
 
   if (!canExclude(status, hasPartial)) {
     if (status.type === 'excluded') return { result: 'already-excluded', hadPriorUpload };
@@ -372,19 +387,33 @@ export function needsWorkflowReopen(
   return [...knownRunIds].some((id) => !recordedRuns.has(id));
 }
 
+/** When each recorded upload was first found reopened, by reopenKey. */
+async function loadWorkflowReopens(stateDir: string): Promise<Map<string, number>> {
+  const content = (await readStateFile(statePaths(stateDir).workflowReopens)) ?? '';
+  const map = new Map<string, number>();
+  for (const raw of stateLines(content)) {
+    const { key, at } = raw as { key: string; at: number };
+    if (!map.has(key)) map.set(key, at);
+  }
+  return map;
+}
+
 /**
  * Reopen uploaded parents whose recorded upload is missing workflow data: a discovered workflow
  * subagent absent from agentSessionIds, or a parseable run-metadata file absent from
- * workflowRunIds. Reopening drops agentSessionIds in memory so the parent re-enters the review
- * window via computeSessionStatus instead of re-uploading immediately. The window is anchored to
- * a write-once persisted workflow timestamp, so a permanently blocked reopen cannot reset it every
- * run. Returns that timestamp, or null when nothing was reopened. Mutates state.uploadedMap.
+ * workflowRunIds. A reopened parent re-enters the review window via computeSessionStatus instead
+ * of re-uploading immediately. Each window starts when that upload was first found reopened,
+ * persisted, so a permanently blocked reopen cannot reset it every run. Returns the reopen times
+ * by reopenKey (StatusContext.reopenedAt).
  */
 export async function runWorkflowBackfill(
   state: SessionState,
   stateDir: string,
   discoverRunIds: (parent: DiscoveredSession) => Promise<Array<string>>,
-): Promise<number | null> {
+): Promise<Map<string, number>> {
+  // The legacy anchor can't say which upload it was for, so it seeds nothing: a reopen it covered
+  // gets a fresh window once (a later upload, never an earlier one).
+  await rm(statePaths(stateDir).legacyWorkflowMigrationTs, { force: true }).catch(() => {});
   // Legacy records without agentSessionIds are not reopened: uploads from before agent tracking stay as they are.
   const candidates = state.parentSessions.flatMap((parent) => {
     if (state.excludedSet.has(parent.sessionId)) return [];
@@ -402,23 +431,23 @@ export async function runWorkflowBackfill(
     candidates.map(({ parent }) => discoverRunIds(parent).catch(() => [] as Array<string>)),
   );
 
-  let reopened = 0;
-  for (let i = 0; i < candidates.length; i++) {
-    const { parent, uploaded } = candidates[i];
-    const agents = state.agentsByParent.get(parent.sessionId) ?? [];
-    if (needsWorkflowReopen(uploaded, agents, discovered[i])) {
-      state.uploadedMap.set(parent.sessionId, { ...uploaded, agentSessionIds: undefined });
-      reopened++;
-    }
-  }
-  if (reopened === 0) return null;
+  const reopened = candidates
+    .filter(({ parent, uploaded }, i) =>
+      needsWorkflowReopen(uploaded, state.agentsByParent.get(parent.sessionId) ?? [], discovered[i]),
+    )
+    .map(({ uploaded }) => reopenKey(uploaded));
+  if (reopened.length === 0) return new Map();
 
-  const file = statePaths(stateDir).workflowMigrationTs;
-  const existing = await readTimestamp(file);
-  if (existing !== null) return existing;
+  const anchors = await loadWorkflowReopens(stateDir);
   const now = Date.now();
-  await writeFile(file, String(now));
-  return now;
+  const added = reopened.filter((key) => !anchors.has(key));
+  if (added.length > 0) {
+    await appendFile(
+      statePaths(stateDir).workflowReopens,
+      added.map((key) => JSON.stringify({ key, at: now }) + '\n').join(''),
+    );
+  }
+  return new Map(reopened.map((key) => [key, anchors.get(key) ?? now]));
 }
 
 /**

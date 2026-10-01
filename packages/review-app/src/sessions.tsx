@@ -14,6 +14,8 @@ type StatusFields = Pick<Session, "status" | "partialUpload" | "statusLabel">;
 
 export const sessionsKey = ["sessions"] as const;
 export const contentKey = (sessionId: string) => ["session-content", sessionId] as const;
+export const agentContentKey = (sessionId: string, agentId?: string) => ["agent-content", sessionId, agentId] as const;
+export const workflowRunKey = (sessionId: string, runId: string) => ["workflow-run", sessionId, runId] as const;
 
 /** The id prefix the CLI prints in its messages. */
 const shortId = (sessionId: string) => sessionId.slice(0, 8);
@@ -44,6 +46,16 @@ function patchStatuses(queryClient: QueryClient, updates: Array<[string, StatusF
   }
 }
 
+/**
+ * After an exclude or upload, refetch the list and every cached preview: an exclusion changes what
+ * other sessions that copy it show, and a failed upload may have left a partial one, which the
+ * detail view's status must show.
+ */
+function invalidateAfterChange(queryClient: QueryClient) {
+  const keys: Array<unknown> = [sessionsKey[0], contentKey("")[0], agentContentKey("")[0], workflowRunKey("", "")[0]];
+  void queryClient.invalidateQueries({ predicate: (q) => keys.includes(q.queryKey[0]) });
+}
+
 /** Ids with an exclude or upload in flight, from any page, so a row or button shows it and can't be clicked twice. */
 export function useInFlight(kind: "exclude" | "upload"): Set<string> {
   const keys = kind === "exclude" ? ["exclude", "exclude-many"] : ["upload"];
@@ -68,7 +80,7 @@ export function useExclude() {
       else notify("success", [line]);
     },
     onError: (err) => notify("error", [errorMessage(err)]),
-    onSettled: () => void queryClient.invalidateQueries({ queryKey: sessionsKey }),
+    onSettled: () => invalidateAfterChange(queryClient),
   });
 }
 
@@ -103,7 +115,7 @@ export function useExcludeMany() {
       }
     },
     onError: (err) => notify("error", [errorMessage(err)]),
-    onSettled: () => void queryClient.invalidateQueries({ queryKey: sessionsKey }),
+    onSettled: () => invalidateAfterChange(queryClient),
   });
 }
 
@@ -119,8 +131,7 @@ export function useUpload() {
       notify("success", [result.alreadyUploaded ? hive.upload.alreadyUploaded(id) : hive.upload.uploadedSession(id)]);
     },
     onError: (err) => notify("error", [errorMessage(err)]),
-    // A failed upload may still have recorded a started attempt (partially uploaded).
-    onSettled: () => void queryClient.invalidateQueries({ queryKey: sessionsKey }),
+    onSettled: () => invalidateAfterChange(queryClient),
   });
 }
 
@@ -155,6 +166,8 @@ function statusHint(status: Status, partialUpload: boolean): string {
       return "On the server";
     case "excluded":
       return "Will not be uploaded";
+    case "not-shared":
+      return "Last active while sharing was off; uploads only if you continue it";
   }
 }
 

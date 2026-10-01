@@ -178,7 +178,7 @@ describe('readAndSanitizeSession', () => {
           .map((entry) => JSON.stringify(entry))
           .join('\n'),
       );
-      const { sanitizedEntries, lineCount } = await readAndSanitizeSession(path);
+      const { sanitizedEntries, lineCount } = await readAndSanitizeSession({ sessionId: 's', path }, new Set());
       const meta = buildSessionMeta({
         sessionId: 's',
         checkoutId: 'c',
@@ -245,7 +245,7 @@ describe('readAndSanitizeSession', () => {
         }),
       ].join('\n'),
     );
-    const r = await readAndSanitizeSession(path);
+    const r = await readAndSanitizeSession({ sessionId: 's', path }, new Set());
     const text = JSON.stringify(r.sanitizedEntries) + r.summary;
     expect(text).not.toContain('ghp_');
     expect(text).toContain('[REDACTED:');
@@ -261,8 +261,13 @@ describe('uploadOneSession', () => {
     const result = await uploadOneSession({
       session: { sessionId: 's1', path: join(stateDir, 'missing.jsonl'), mtime: new Date(0) },
       state: { agentsByParent: new Map() },
-      statusCtx: { uploadedMap: new Map(), excludedSet: new Set(), consentMtime: 0, snoozeUntil: null },
-      consentWindows: { global: [{ start: 0, end: Infinity }], project: [{ start: 0, end: Infinity }] },
+      statusCtx: {
+        uploadedMap: new Map(),
+        excludedSet: new Set(),
+        consentMtime: 0,
+        snoozeUntil: null,
+        consentWindows: { global: [{ start: 0, end: Infinity }], project: [{ start: 0, end: Infinity }] },
+      },
       transcriptsDirs: [],
       checkoutId: 'c',
       ids: { directory: '/proj' },
@@ -296,7 +301,7 @@ describe('readSessionSummary', () => {
         const text = lines.join('\n') + '\n';
         await writeFile(path, text);
         const whole = sessionSummary(parseTranscript(text)) ?? '';
-        const got = await readSessionSummary(path);
+        const got = await readSessionSummary({ sessionId: name, path }, new Set());
         if (name === 'secret') {
           expect(got).toStartWith('deploy with [REDACTED:');
         } else {

@@ -1,4 +1,4 @@
-import { open, readFile, rm, unlink } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { canUpload, isEligibleForAutoUpload } from '@alignment-hive/session-data';
 import {
   ensureStateDir,
@@ -15,51 +15,15 @@ import { printError, printInfo, printSuccess } from '../lib/output';
 import { lookupParentSession } from '../lib/session-lookup';
 import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
+import { acquireUploadLock, releaseUploadLock } from '../lib/upload-lock';
 import {
-  isInConsentWindows,
   loadConsentWindows,
   loadSessionStateWithMigrations,
   mapBatched,
   uploadOneSession,
 } from '../lib/upload-session';
-import type { StatusContext } from '../lib/session-state';
 
 const UPLOAD_CONCURRENCY = 5;
-
-async function acquireUploadLock(lockFile: string): Promise<boolean> {
-  async function tryCreate(): Promise<boolean> {
-    try {
-      const fd = await open(lockFile, 'wx');
-      await fd.writeFile(String(process.pid));
-      await fd.close();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  if (await tryCreate()) return true;
-
-  // File exists — check if the owning process is still alive
-  try {
-    const content = await readFile(lockFile, 'utf-8');
-    const pid = parseInt(content.trim(), 10);
-    if (!isNaN(pid)) {
-      try {
-        process.kill(pid, 0);
-        return false; // Process is alive — lock is held
-      } catch {
-        // Process is dead — stale lock
-      }
-    }
-    // Stale lock: remove and retry. Only the 'wx' create is atomic; two racers that both saw
-    // the dead pid may briefly clobber each other here, which is acceptable for a dedupe hint.
-    await rm(lockFile, { force: true });
-    return tryCreate();
-  } catch {
-    return false;
-  }
-}
 
 export async function uploadSend(args: Array<string>): Promise<number> {
   // A mistyped invocation must never fall through to the manual batch, which uploads pending
@@ -98,13 +62,12 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     }
     if (isBackground && (await getSnoozeUntil(stateDir)) !== null) return 0;
 
-    const lockFile = statePaths(stateDir).uploadLock;
-    if (!(await acquireUploadLock(lockFile))) {
+    if (!(await acquireUploadLock(stateDir))) {
       if (isBackground) return 0; // another upload is running: nothing to do
       printError(hive.upload.uploadInProgress);
       return 1;
     }
-    const releaseLock = () => rm(lockFile, { force: true });
+    const releaseLock = () => releaseUploadLock(stateDir);
     const onSignal = () => {
       releaseLock().finally(() => process.exit(1));
     };
@@ -139,9 +102,9 @@ async function doUploadWork(
   ]);
   const { parentSessions } = state;
   // A manual `hive upload send` ignores a snooze; the background job checked it before starting.
-  const statusCtx: StatusContext = { ...state, consentMtime, snoozeUntil: null };
+  const statusCtx = { ...state, consentMtime, snoozeUntil: null, consentWindows };
   const upload = (session: (typeof parentSessions)[number]) =>
-    uploadOneSession({ session, state, statusCtx, consentWindows, transcriptsDirs, checkoutId, ids, stateDir });
+    uploadOneSession({ session, state, statusCtx, transcriptsDirs, checkoutId, ids, stateDir });
 
   // Single session mode
   if (sessionPrefix !== undefined) {
@@ -171,8 +134,7 @@ async function doUploadWork(
   const candidates = parentSessions.filter((session) => {
     if (targetSet && !targetSet.has(session.sessionId)) return false;
     const status = computeSessionStatus(session, statusCtx);
-    const allowed = isBackground ? isEligibleForAutoUpload(status) : canUpload(status);
-    return allowed && isInConsentWindows(session.mtime.getTime(), consentWindows);
+    return isBackground ? isEligibleForAutoUpload(status) : canUpload(status);
   });
 
   if (candidates.length === 0) {

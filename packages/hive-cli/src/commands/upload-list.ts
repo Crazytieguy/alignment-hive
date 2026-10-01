@@ -1,11 +1,13 @@
-import { getStatusColor } from '@alignment-hive/session-data';
+import { awaitsReview, getStatusColor } from '@alignment-hive/session-data';
 import { parseCommandArgs, usageError } from '../lib/args';
 import { ensureStateDir, getStateDir, loadTranscriptsDirs } from '../lib/config';
 import { resolveProjectConsent } from '../lib/convex';
 import { hive } from '../lib/messages';
 import { colors, printInfo, printWarning } from '../lib/output';
+import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
-import { loadSessionStateWithMigrations, summarizeSessions } from '../lib/upload-session';
+import { loadConsentWindows, loadSessionStateWithMigrations, summarizeSessions } from '../lib/upload-session';
+import type { SessionStatus } from '@alignment-hive/session-data';
 
 const SUMMARY_WIDTH = 60;
 
@@ -21,7 +23,7 @@ export async function uploadList(args: Array<string>): Promise<number> {
   const stateDir = getStateDir(cwd);
   await ensureStateDir(stateDir);
 
-  const { consentMtime } = await resolveProjectConsent(cwd);
+  const { consentMtime, ids } = await resolveProjectConsent(cwd);
 
   const snoozeUntil = await getSnoozeUntil(stateDir);
   if (snoozeUntil) {
@@ -30,14 +32,20 @@ export async function uploadList(args: Array<string>): Promise<number> {
   }
 
   const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-  const state = await loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd);
+  const [state, consentWindows] = await Promise.all([
+    loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd),
+    loadConsentWindows(ids),
+  ]);
   if (state.parentSessions.length === 0) {
     printInfo(hive.upload.noSessions);
     return 0;
   }
 
-  const rows = await summarizeSessions(state, { ...state, consentMtime, snoozeUntil });
-  const visible = showAll ? rows : rows.filter((r) => r.status.type !== 'uploaded' && r.status.type !== 'excluded');
+  // Statuses for every session feed the counts; only the shown sessions are read for a summary.
+  const statusCtx = { ...state, consentMtime, snoozeUntil, consentWindows };
+  const statuses = state.parentSessions.map((session) => computeSessionStatus(session, statusCtx));
+  const listed = showAll ? state.parentSessions : state.parentSessions.filter((_, i) => awaitsReview(statuses[i]));
+  const visible = await summarizeSessions({ ...state, parentSessions: listed }, statusCtx);
 
   if (visible.length > 0) {
     console.log(`${'ID'.padEnd(10)} ${'DATE'.padEnd(12)} ${'STATUS'.padEnd(24)} SUMMARY`);
@@ -53,16 +61,22 @@ export async function uploadList(args: Array<string>): Promise<number> {
     );
   }
 
-  const counts = { ready: 0, pending: 0, uploaded: 0, excluded: 0 };
-  for (const { status } of rows) counts[status.type === 'snoozed' ? 'pending' : status.type]++;
+  const counts: Record<Exclude<SessionStatus['type'], 'snoozed'>, number> = {
+    ready: 0,
+    pending: 0,
+    'not-shared': 0,
+    uploaded: 0,
+    excluded: 0,
+  };
+  for (const { type } of statuses) counts[type === 'snoozed' ? 'pending' : type]++;
   const parts = Object.entries(counts)
     .filter(([, n]) => n > 0)
     .map(([name, n]) => `${n} ${name}`);
   if (visible.length > 0) console.log('');
   console.log(
-    visible.length === rows.length
-      ? hive.upload.listTotal(rows.length, parts.join(', '))
-      : hive.upload.listShowing(visible.length, rows.length, parts.join(', ')),
+    visible.length === statuses.length
+      ? hive.upload.listTotal(statuses.length, parts.join(', '))
+      : hive.upload.listShowing(visible.length, statuses.length, parts.join(', ')),
   );
 
   return 0;

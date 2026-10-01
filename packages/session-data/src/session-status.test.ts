@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  awaitsReview,
   canExclude,
   canUpload,
   formatRemaining,
@@ -15,12 +16,14 @@ describe('eligibility rules', () => {
     expect(canExclude({ type: 'snoozed' }, false)).toBe(true);
     expect(canExclude({ type: 'excluded' }, false)).toBe(false);
     expect(canExclude({ type: 'uploaded' }, false)).toBe(false);
+    expect(canExclude({ type: 'not-shared' }, false)).toBe(true);
   });
 
   test('canExclude refuses any state with a partial upload (data may already be on the server)', () => {
     expect(canExclude({ type: 'ready' }, true)).toBe(false);
     expect(canExclude({ type: 'pending', remainingMs: 1000 }, true)).toBe(false);
     expect(canExclude({ type: 'snoozed' }, true)).toBe(false);
+    expect(canExclude({ type: 'not-shared' }, true)).toBe(false);
   });
 
   test('canUpload', () => {
@@ -29,6 +32,7 @@ describe('eligibility rules', () => {
     expect(canUpload({ type: 'snoozed' })).toBe(false);
     expect(canUpload({ type: 'excluded' })).toBe(false);
     expect(canUpload({ type: 'uploaded' })).toBe(false);
+    expect(canUpload({ type: 'not-shared' })).toBe(false);
   });
 
   test('isEligibleForAutoUpload', () => {
@@ -37,6 +41,16 @@ describe('eligibility rules', () => {
     expect(isEligibleForAutoUpload({ type: 'snoozed' })).toBe(false);
     expect(isEligibleForAutoUpload({ type: 'excluded' })).toBe(false);
     expect(isEligibleForAutoUpload({ type: 'uploaded' })).toBe(false);
+    expect(isEligibleForAutoUpload({ type: 'not-shared' })).toBe(false);
+  });
+
+  test('awaitsReview', () => {
+    expect(awaitsReview({ type: 'ready' })).toBe(true);
+    expect(awaitsReview({ type: 'pending', remainingMs: 1000 })).toBe(true);
+    expect(awaitsReview({ type: 'snoozed' })).toBe(true);
+    expect(awaitsReview({ type: 'not-shared' })).toBe(false);
+    expect(awaitsReview({ type: 'excluded' })).toBe(false);
+    expect(awaitsReview({ type: 'uploaded' })).toBe(false);
   });
 });
 
@@ -48,6 +62,12 @@ describe('labels', () => {
     expect(formatSessionStatus({ type: 'uploaded' }, true)).toBe('uploaded');
     expect(formatSessionStatus({ type: 'excluded' }, true)).toBe('excluded');
     expect(getStatusColor({ type: 'ready' }, true)).toBe('yellow');
+    expect(formatSessionStatus({ type: 'not-shared' }, true)).toBe('partially uploaded');
+  });
+
+  test('a session last modified while sharing was off says so, in the neutral colour', () => {
+    expect(formatSessionStatus({ type: 'not-shared' })).toBe('sharing was off');
+    expect(getStatusColor({ type: 'not-shared' })).toBe('default');
   });
 
   test('remaining time rounds minutes up', () => {

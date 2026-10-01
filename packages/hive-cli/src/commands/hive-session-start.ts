@@ -19,7 +19,8 @@ import { colors } from '../lib/output';
 import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
 import { spawnBackgroundCommand } from '../lib/spawn';
-import { loadSessionStateWithMigrations } from '../lib/upload-session';
+import { loadConsentWindows, loadSessionStateWithMigrations } from '../lib/upload-session';
+import type { ProjectIds } from '../lib/config';
 import type { HookInput } from '../lib/hook-input';
 
 const UPLOAD_SCHEDULE_COOLDOWN_MS = 15 * 60 * 1000;
@@ -92,8 +93,9 @@ export async function hiveSessionStart(): Promise<number> {
   }
 
   let consentMtime: number;
+  let ids: ProjectIds;
   try {
-    ({ consentMtime } = await resolveProjectConsent(cwd));
+    ({ consentMtime, ids } = await resolveProjectConsent(cwd));
   } catch {
     // No consent or the backend is unreachable: /hive:align owns the setup flow.
     return flush();
@@ -102,14 +104,16 @@ export async function hiveSessionStart(): Promise<number> {
   const transcriptsDirs = await loadTranscriptsDirs(stateDir);
   if (transcriptsDirs.length === 0) return flush();
 
-  const {
-    parentSessions: allSessions,
-    uploadedMap,
-    excludedSet,
-    migrationTimestamp,
-  } = await loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd);
+  // The consent windows tell apart sessions last modified while sharing was off, which never
+  // upload and so must not count as ready.
+  const [state, consentWindows] = await Promise.all([
+    loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd),
+    loadConsentWindows(ids).catch(() => null),
+  ]);
+  if (!consentWindows) return flush();
+  const allSessions = state.parentSessions;
   const snoozeUntil = await getSnoozeUntil(stateDir);
-  const statusCtx = { uploadedMap, excludedSet, consentMtime, snoozeUntil, migrationTimestamp };
+  const statusCtx = { ...state, consentMtime, snoozeUntil, consentWindows };
 
   // Ready or snoozed (never both: a snooze replaces 'ready' with 'snoozed').
   const eligibleIds: Array<string> = [];
