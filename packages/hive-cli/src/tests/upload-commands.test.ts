@@ -2,8 +2,10 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as realAuth from '../lib/auth';
 import * as realConvex from '../lib/convex';
+import { mockForFile } from './file-mock';
 
 // Every network entry point is stubbed; resolveProjectConsent is the first step of any upload run,
 // so a call to it means the command reached the upload path.
@@ -12,8 +14,7 @@ const blocked = (name: string) => () => {
   calls.push(name);
   throw new Error(`${name} must not be called`);
 };
-mock.module('../lib/convex', () => ({
-  ...realConvex,
+mockForFile('../lib/convex', realConvex, {
   resolveProjectConsent: (cwd: string) => {
     calls.push('resolveProjectConsent');
     return Promise.resolve({ consentMtime: 0, ids: { directory: cwd } });
@@ -25,8 +26,8 @@ mock.module('../lib/convex', () => ({
   generateUploadUrls: blocked('generateUploadUrls'),
   saveUploads: blocked('saveUploads'),
   saveWorkflowRuns: blocked('saveWorkflowRuns'),
-}));
-mock.module('../lib/auth', () => ({ getAuthData: blocked('getAuthData') }));
+});
+mockForFile('../lib/auth', realAuth, { getAuthData: blocked('getAuthData') });
 
 const { uploadSend } = await import('../commands/upload-send');
 const { uploadExclude } = await import('../commands/upload-exclude');

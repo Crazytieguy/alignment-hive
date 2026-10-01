@@ -1,10 +1,12 @@
 import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as realAuth from '../lib/auth';
 import * as realConvex from '../lib/convex';
 import * as realHookInput from '../lib/hook-input';
 import * as realSpawn from '../lib/spawn';
+import { mockForFile } from './file-mock';
 
 // No network and no processes: consent comes from `history`, and spawns are only recorded.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -13,20 +15,18 @@ let history: { global: Array<{ sessionSharing: boolean; timestamp: number }>; pr
 const spawned: Array<Array<string>> = [];
 let root = '';
 
-mock.module('../lib/convex', () => ({
-  ...realConvex,
+mockForFile('../lib/convex', realConvex, {
   resolveProjectConsent: (cwd: string) => Promise.resolve({ consentMtime: 0, ids: { directory: cwd } }),
   getConsentHistory: () => Promise.resolve(history),
-}));
-mock.module('../lib/auth', () => ({ getAuthData: () => Promise.resolve({ accessToken: 'test' }) }));
-mock.module('../lib/hook-input', () => ({ ...realHookInput, readHookInput: () => Promise.resolve({ cwd: root }) }));
-mock.module('../lib/spawn', () => ({
-  ...realSpawn,
+});
+mockForFile('../lib/auth', realAuth, { getAuthData: () => Promise.resolve({ accessToken: 'test' }) });
+mockForFile('../lib/hook-input', realHookInput, { readHookInput: () => Promise.resolve({ cwd: root }) });
+mockForFile('../lib/spawn', realSpawn, {
   spawnBackgroundCommand: (args: Array<string>) => {
     spawned.push(args);
     return true;
   },
-}));
+});
 
 const { hiveSessionStart } = await import('../commands/hive-session-start');
 const { getStateDir, statePaths } = await import('../lib/config');

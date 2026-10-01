@@ -1,8 +1,10 @@
 import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import * as realAuth from '../lib/auth';
 import * as realConvex from '../lib/convex';
+import { mockForFile } from './file-mock';
 
 // No network: consent comes from `consent` and `history`, and every upload entry point throws
 // unless a test captures it in `backend`.
@@ -21,15 +23,14 @@ const blockedBackend = () => ({
   saveUploads: blocked('saveUploads') as (...args: Array<any>) => unknown,
 });
 let backend = blockedBackend();
-mock.module('../lib/convex', () => ({
-  ...realConvex,
+mockForFile('../lib/convex', realConvex, {
   resolveProjectConsent: () => consent(),
   getConsentHistory: () => Promise.resolve(history),
   generateUploadUrls: (...args: Array<any>) => backend.generateUploadUrls(...args),
   saveUploads: (...args: Array<any>) => backend.saveUploads(...args),
   saveWorkflowRuns: blocked('saveWorkflowRuns'),
-}));
-mock.module('../lib/auth', () => ({ getAuthData: blocked('getAuthData') }));
+});
+mockForFile('../lib/auth', realAuth, { getAuthData: blocked('getAuthData') });
 
 const { createReviewRouter } = await import('../lib/review-router');
 const { statePaths } = await import('../lib/config');
