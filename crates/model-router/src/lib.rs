@@ -13,6 +13,7 @@ mod identity;
 mod overflow;
 mod prompt_cache;
 pub mod proxy;
+mod rate_limit;
 mod routing;
 pub mod service;
 pub mod state;
