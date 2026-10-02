@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, ensure};
 use serde::Deserialize;
@@ -206,6 +207,12 @@ pub struct Config {
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
+    /// Optional upstream rate limiting for routed requests. When present,
+    /// routed requests acquire a concurrency permit before reaching the
+    /// upstream; excess requests queue up to the configured timeout.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+
     /// What Claude Code believes routed models' context windows are.
     /// [`Config::load`] reads it from Claude Code's own settings, so it is
     /// normally absent here; an explicit value is the escape hatch for a
@@ -263,6 +270,86 @@ pub enum WebSearchMode {
     Scrape,
     /// Pass `WebSearch` sub-calls through untouched.
     Off,
+}
+
+/// Upstream rate limiting for routed (non-Claude) requests. A global default
+/// covers every routed request; per-family and per-route rules override it in
+/// that priority order. Omitting the section entirely disables rate limiting.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RateLimitConfig {
+    /// Maximum concurrent in-flight requests across all routed models. `None`
+    /// means unlimited at this level (a per-route or per-family rule may
+    /// still apply).
+    pub max_concurrent: Option<usize>,
+
+    /// How long a request waits for a permit before receiving a 429.
+    #[serde(
+        default = "RateLimitConfig::default_queue_timeout",
+        deserialize_with = "deserialize_duration_secs"
+    )]
+    pub queue_timeout: Duration,
+
+    /// Per-route overrides.
+    #[serde(default)]
+    pub routes: Vec<RateLimitRouteRule>,
+
+    /// Per-family overrides.
+    #[serde(default)]
+    pub families: Vec<RateLimitFamilyRule>,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: None,
+            queue_timeout: Self::default_queue_timeout(),
+            routes: Vec::new(),
+            families: Vec::new(),
+        }
+    }
+}
+
+impl RateLimitConfig {
+    fn default_queue_timeout() -> Duration {
+        Duration::from_secs(30)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RateLimitRouteRule {
+    pub routing_id: String,
+    pub max_concurrent: usize,
+    /// Overrides the global `queue-timeout` for this route.
+    #[serde(default, deserialize_with = "deserialize_option_duration_secs")]
+    pub queue_timeout: Option<Duration>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RateLimitFamilyRule {
+    pub family: ModelFamily,
+    pub max_concurrent: usize,
+    /// Overrides the global `queue-timeout` for this family.
+    #[serde(default, deserialize_with = "deserialize_option_duration_secs")]
+    pub queue_timeout: Option<Duration>,
+}
+
+fn deserialize_duration_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let secs = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(secs))
+}
+
+fn deserialize_option_duration_secs<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let secs = Option::<u64>::deserialize(deserializer)?;
+    Ok(secs.map(Duration::from_secs))
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -849,7 +936,8 @@ impl Config {
             self.validate_context_window(route)?;
         }
 
-        self.validate_openai_providers(cliproxy)
+        self.validate_openai_providers(cliproxy)?;
+        self.validate_rate_limit(&routing_ids)
     }
 
     /// Context-window fields on one route.
@@ -961,6 +1049,46 @@ impl Config {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_rate_limit(&self, routing_ids: &HashSet<&String>) -> anyhow::Result<()> {
+        let Some(rl) = &self.rate_limit else {
+            return Ok(());
+        };
+        if let Some(max) = rl.max_concurrent {
+            ensure!(
+                max > 0,
+                "[rate-limit] max-concurrent must be greater than zero"
+            );
+        }
+        for rule in &rl.routes {
+            ensure!(
+                !rule.routing_id.is_empty(),
+                "[rate-limit.routes] routing-id cannot be empty"
+            );
+            ensure!(
+                rule.max_concurrent > 0,
+                "[rate-limit.routes] max-concurrent must be greater than zero for {}",
+                rule.routing_id
+            );
+            ensure!(
+                routing_ids.contains(&rule.routing_id)
+                    || self
+                        .generated_models
+                        .iter()
+                        .any(|r| r.routing_id == rule.routing_id),
+                "[rate-limit.routes] routing-id {:?} does not match any configured model",
+                rule.routing_id
+            );
+        }
+        for rule in &rl.families {
+            ensure!(
+                rule.max_concurrent > 0,
+                "[rate-limit.families] max-concurrent must be greater than zero for {:?}",
+                rule.family.as_str()
+            );
         }
         Ok(())
     }

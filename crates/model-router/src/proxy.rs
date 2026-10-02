@@ -16,6 +16,7 @@ use crate::capture::{CaptureSink, RequestCapture, StreamingCapture, redact_heade
 use crate::config::{Config, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::overflow::OverflowRewrite;
+use crate::rate_limit::RateLimiter;
 use crate::routing::{RoutingDecision, decide, substitute_model};
 use crate::stub;
 use crate::usage::{GptPolicies, SseUsageTransformer, UsagePolicy, estimate_input_tokens};
@@ -37,6 +38,8 @@ struct AppState {
     pending_searches: Arc<websearch::PendingSearches>,
     /// In-flight xAI search streams, owned so shutdown can wait for them.
     xai_searches: Arc<XaiSearchTasks>,
+    /// Optional upstream rate limiter for routed (non-Claude) requests.
+    rate_limiter: Option<RateLimiter>,
 }
 
 /// Passive response tap: watches a forwarded `/v1/messages` response for
@@ -107,6 +110,7 @@ impl AppState {
             // streams are fine while a blackholed upstream still times out.
             .read_timeout(std::time::Duration::from_mins(10))
             .build()?;
+        let rate_limiter = RateLimiter::from_config(&config);
         let xai_searches = Arc::new(XaiSearchTasks::new());
         Ok(Self {
             config: Arc::new(config),
@@ -115,6 +119,7 @@ impl AppState {
             cliproxy_upstream,
             pending_searches: Arc::new(websearch::PendingSearches::default()),
             xai_searches,
+            rate_limiter,
         })
     }
 
@@ -361,7 +366,30 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
 
     match decision.route {
         None => claude_response(&state, &parts, body, &decision, capture).await,
-        Some(route) => gpt_response(&state, &parts, body, route, capture).await,
+        Some(route) => {
+            // Acquire a rate-limit permit before reaching the upstream. The
+            // permit is held until the response is fully built (including the
+            // streaming body setup), so a slot stays occupied for the whole
+            // request lifetime.
+            let _permit = if let Some(limiter) = &state.rate_limiter {
+                match limiter.acquire(route).await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return local_error_response(
+                            &state,
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "rate_limit_error",
+                            "upstream concurrency limit reached; retry after a short delay",
+                            capture,
+                        )
+                        .await;
+                    }
+                }
+            } else {
+                None
+            };
+            gpt_response(&state, &parts, body, route, capture).await
+        }
     }
 }
 
