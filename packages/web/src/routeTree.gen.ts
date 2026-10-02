@@ -9,36 +9,40 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as CallbackRouteImport } from './routes/callback'
-import { Route as AuthorizedRouteImport } from './routes/authorized'
-import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as BookIndexRouteImport } from './routes/book/index'
-import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
-import { Route as FeedbackSubmitRouteImport } from './routes/feedback/submit'
-import { Route as FeedbackStatusRouteImport } from './routes/feedback/status'
-import { Route as FeedbackMatsRouteImport } from './routes/feedback/mats'
-import { Route as BookingCreateRouteImport } from './routes/booking/create'
-import { Route as BookingCancelRouteImport } from './routes/booking/cancel'
-import { Route as BookingAvailabilityRouteImport } from './routes/booking/availability'
-import { Route as BookCancelRouteImport } from './routes/book/cancel'
-import { Route as BookOfficeRouteImport } from './routes/book/$office'
-import { Route as AuthorizedAgreementRouteImport } from './routes/authorized/agreement'
-import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
-import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
-import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
-import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
+import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
+import { Route as AuthorizedRouteImport } from './routes/authorized'
+import { Route as CallbackRouteImport } from './routes/callback'
 import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticated/consent'
-import { Route as AuthorizedUsersIndexRouteImport } from './routes/authorized/users/index'
-import { Route as AuthorizedSessionsIndexRouteImport } from './routes/authorized/sessions/index'
-import { Route as AuthorizedUsersUserIdRouteImport } from './routes/authorized/users/$userId'
-import { Route as AuthorizedSessionsSessionIdRouteImport } from './routes/authorized/sessions/$sessionId'
-import { Route as ApiGithubInstalledRouteImport } from './routes/api/github/installed'
+import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
+import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
+import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
+import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
+import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
+import { Route as AuthorizedAgreementRouteImport } from './routes/authorized/agreement'
+import { Route as BookIndexRouteImport } from './routes/book/index'
+import { Route as BookOfficeRouteImport } from './routes/book/$office'
+import { Route as BookCancelRouteImport } from './routes/book/cancel'
+import { Route as BookingAvailabilityRouteImport } from './routes/booking/availability'
+import { Route as BookingCancelRouteImport } from './routes/booking/cancel'
+import { Route as BookingCreateRouteImport } from './routes/booking/create'
+import { Route as FeedbackMatsRouteImport } from './routes/feedback/mats'
+import { Route as FeedbackStatusRouteImport } from './routes/feedback/status'
+import { Route as FeedbackSubmitRouteImport } from './routes/feedback/submit'
 import { Route as AuthenticatedConsentProjectsRouteImport } from './routes/_authenticated/consent_.projects'
+import { Route as ApiGithubInstalledRouteImport } from './routes/api/github/installed'
+import { Route as AuthorizedSessionsIndexRouteImport } from './routes/authorized/sessions/index'
+import { Route as AuthorizedSessionsSessionIdRouteImport } from './routes/authorized/sessions/$sessionId'
+import { Route as AuthorizedUsersIndexRouteImport } from './routes/authorized/users/index'
+import { Route as AuthorizedUsersUserIdRouteImport } from './routes/authorized/users/$userId'
 
-const CallbackRoute = CallbackRouteImport.update({
-  id: '/callback',
-  path: '/callback',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedRoute = AuthenticatedRouteImport.update({
+  id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthorizedRoute = AuthorizedRouteImport.update({
@@ -46,83 +50,14 @@ const AuthorizedRoute = AuthorizedRouteImport.update({
   path: '/authorized',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthenticatedRoute = AuthenticatedRouteImport.update({
-  id: '/_authenticated',
+const CallbackRoute = CallbackRouteImport.update({
+  id: '/callback',
+  path: '/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BookIndexRoute = BookIndexRouteImport.update({
-  id: '/book/',
-  path: '/book/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthorizedIndexRoute = AuthorizedIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => AuthorizedRoute,
-} as any)
-const FeedbackSubmitRoute = FeedbackSubmitRouteImport.update({
-  id: '/feedback/submit',
-  path: '/feedback/submit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const FeedbackStatusRoute = FeedbackStatusRouteImport.update({
-  id: '/feedback/status',
-  path: '/feedback/status',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const FeedbackMatsRoute = FeedbackMatsRouteImport.update({
-  id: '/feedback/mats',
-  path: '/feedback/mats',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BookingCreateRoute = BookingCreateRouteImport.update({
-  id: '/booking/create',
-  path: '/booking/create',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BookingCancelRoute = BookingCancelRouteImport.update({
-  id: '/booking/cancel',
-  path: '/booking/cancel',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BookingAvailabilityRoute = BookingAvailabilityRouteImport.update({
-  id: '/booking/availability',
-  path: '/booking/availability',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BookCancelRoute = BookCancelRouteImport.update({
-  id: '/book/cancel',
-  path: '/book/cancel',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BookOfficeRoute = BookOfficeRouteImport.update({
-  id: '/book/$office',
-  path: '/book/$office',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthorizedAgreementRoute = AuthorizedAgreementRouteImport.update({
-  id: '/agreement',
-  path: '/agreement',
-  getParentRoute: () => AuthorizedRoute,
-} as any)
-const AuthSignOutRoute = AuthSignOutRouteImport.update({
-  id: '/auth/sign-out',
-  path: '/auth/sign-out',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
-  id: '/welcome',
-  path: '/welcome',
-  getParentRoute: () => AuthenticatedRoute,
-} as any)
-const AuthenticatedPolicyRoute = AuthenticatedPolicyRouteImport.update({
-  id: '/policy',
-  path: '/policy',
+const AuthenticatedConsentRoute = AuthenticatedConsentRouteImport.update({
+  id: '/consent',
+  path: '/consent',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedInstallRoute = AuthenticatedInstallRouteImport.update({
@@ -130,35 +65,74 @@ const AuthenticatedInstallRoute = AuthenticatedInstallRouteImport.update({
   path: '/install',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthenticatedConsentRoute = AuthenticatedConsentRouteImport.update({
-  id: '/consent',
-  path: '/consent',
+const AuthenticatedPolicyRoute = AuthenticatedPolicyRouteImport.update({
+  id: '/policy',
+  path: '/policy',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthorizedUsersIndexRoute = AuthorizedUsersIndexRouteImport.update({
-  id: '/users/',
-  path: '/users/',
+const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
+  id: '/welcome',
+  path: '/welcome',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthSignOutRoute = AuthSignOutRouteImport.update({
+  id: '/auth/sign-out',
+  path: '/auth/sign-out',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthorizedIndexRoute = AuthorizedIndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => AuthorizedRoute,
 } as any)
-const AuthorizedSessionsIndexRoute = AuthorizedSessionsIndexRouteImport.update({
-  id: '/sessions/',
-  path: '/sessions/',
+const AuthorizedAgreementRoute = AuthorizedAgreementRouteImport.update({
+  id: '/agreement',
+  path: '/agreement',
   getParentRoute: () => AuthorizedRoute,
 } as any)
-const AuthorizedUsersUserIdRoute = AuthorizedUsersUserIdRouteImport.update({
-  id: '/users/$userId',
-  path: '/users/$userId',
-  getParentRoute: () => AuthorizedRoute,
+const BookIndexRoute = BookIndexRouteImport.update({
+  id: '/book/',
+  path: '/book/',
+  getParentRoute: () => rootRouteImport,
 } as any)
-const AuthorizedSessionsSessionIdRoute =
-  AuthorizedSessionsSessionIdRouteImport.update({
-    id: '/sessions/$sessionId',
-    path: '/sessions/$sessionId',
-    getParentRoute: () => AuthorizedRoute,
-  } as any)
-const ApiGithubInstalledRoute = ApiGithubInstalledRouteImport.update({
-  id: '/api/github/installed',
-  path: '/api/github/installed',
+const BookOfficeRoute = BookOfficeRouteImport.update({
+  id: '/book/$office',
+  path: '/book/$office',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookCancelRoute = BookCancelRouteImport.update({
+  id: '/book/cancel',
+  path: '/book/cancel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookingAvailabilityRoute = BookingAvailabilityRouteImport.update({
+  id: '/booking/availability',
+  path: '/booking/availability',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookingCancelRoute = BookingCancelRouteImport.update({
+  id: '/booking/cancel',
+  path: '/booking/cancel',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BookingCreateRoute = BookingCreateRouteImport.update({
+  id: '/booking/create',
+  path: '/booking/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FeedbackMatsRoute = FeedbackMatsRouteImport.update({
+  id: '/feedback/mats',
+  path: '/feedback/mats',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FeedbackStatusRoute = FeedbackStatusRouteImport.update({
+  id: '/feedback/status',
+  path: '/feedback/status',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FeedbackSubmitRoute = FeedbackSubmitRouteImport.update({
+  id: '/feedback/submit',
+  path: '/feedback/submit',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedConsentProjectsRoute =
@@ -167,6 +141,32 @@ const AuthenticatedConsentProjectsRoute =
     path: '/consent/projects',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const ApiGithubInstalledRoute = ApiGithubInstalledRouteImport.update({
+  id: '/api/github/installed',
+  path: '/api/github/installed',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthorizedSessionsIndexRoute = AuthorizedSessionsIndexRouteImport.update({
+  id: '/sessions/',
+  path: '/sessions/',
+  getParentRoute: () => AuthorizedRoute,
+} as any)
+const AuthorizedSessionsSessionIdRoute =
+  AuthorizedSessionsSessionIdRouteImport.update({
+    id: '/sessions/$sessionId',
+    path: '/sessions/$sessionId',
+    getParentRoute: () => AuthorizedRoute,
+  } as any)
+const AuthorizedUsersIndexRoute = AuthorizedUsersIndexRouteImport.update({
+  id: '/users/',
+  path: '/users/',
+  getParentRoute: () => AuthorizedRoute,
+} as any)
+const AuthorizedUsersUserIdRoute = AuthorizedUsersUserIdRouteImport.update({
+  id: '/users/$userId',
+  path: '/users/$userId',
+  getParentRoute: () => AuthorizedRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -187,13 +187,13 @@ export interface FileRoutesByFullPath {
   '/feedback/status': typeof FeedbackStatusRoute
   '/feedback/submit': typeof FeedbackSubmitRoute
   '/authorized/': typeof AuthorizedIndexRoute
-  '/book': typeof BookIndexRoute
+  '/book/': typeof BookIndexRoute
   '/consent/projects': typeof AuthenticatedConsentProjectsRoute
   '/api/github/installed': typeof ApiGithubInstalledRoute
   '/authorized/sessions/$sessionId': typeof AuthorizedSessionsSessionIdRoute
   '/authorized/users/$userId': typeof AuthorizedUsersUserIdRoute
-  '/authorized/sessions': typeof AuthorizedSessionsIndexRoute
-  '/authorized/users': typeof AuthorizedUsersIndexRoute
+  '/authorized/sessions/': typeof AuthorizedSessionsIndexRoute
+  '/authorized/users/': typeof AuthorizedUsersIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -271,13 +271,13 @@ export interface FileRouteTypes {
     | '/feedback/status'
     | '/feedback/submit'
     | '/authorized/'
-    | '/book'
+    | '/book/'
     | '/consent/projects'
     | '/api/github/installed'
     | '/authorized/sessions/$sessionId'
     | '/authorized/users/$userId'
-    | '/authorized/sessions'
-    | '/authorized/users'
+    | '/authorized/sessions/'
+    | '/authorized/users/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -354,11 +354,18 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/callback': {
-      id: '/callback'
-      path: '/callback'
-      fullPath: '/callback'
-      preLoaderRoute: typeof CallbackRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated': {
+      id: '/_authenticated'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof AuthenticatedRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/authorized': {
@@ -368,116 +375,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthorizedRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/_authenticated': {
-      id: '/_authenticated'
-      path: ''
-      fullPath: ''
-      preLoaderRoute: typeof AuthenticatedRouteImport
+    '/callback': {
+      id: '/callback'
+      path: '/callback'
+      fullPath: '/callback'
+      preLoaderRoute: typeof CallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/book/': {
-      id: '/book/'
-      path: '/book'
-      fullPath: '/book'
-      preLoaderRoute: typeof BookIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/authorized/': {
-      id: '/authorized/'
-      path: '/'
-      fullPath: '/authorized/'
-      preLoaderRoute: typeof AuthorizedIndexRouteImport
-      parentRoute: typeof AuthorizedRoute
-    }
-    '/feedback/submit': {
-      id: '/feedback/submit'
-      path: '/feedback/submit'
-      fullPath: '/feedback/submit'
-      preLoaderRoute: typeof FeedbackSubmitRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/feedback/status': {
-      id: '/feedback/status'
-      path: '/feedback/status'
-      fullPath: '/feedback/status'
-      preLoaderRoute: typeof FeedbackStatusRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/feedback/mats': {
-      id: '/feedback/mats'
-      path: '/feedback/mats'
-      fullPath: '/feedback/mats'
-      preLoaderRoute: typeof FeedbackMatsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/booking/create': {
-      id: '/booking/create'
-      path: '/booking/create'
-      fullPath: '/booking/create'
-      preLoaderRoute: typeof BookingCreateRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/booking/cancel': {
-      id: '/booking/cancel'
-      path: '/booking/cancel'
-      fullPath: '/booking/cancel'
-      preLoaderRoute: typeof BookingCancelRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/booking/availability': {
-      id: '/booking/availability'
-      path: '/booking/availability'
-      fullPath: '/booking/availability'
-      preLoaderRoute: typeof BookingAvailabilityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/book/cancel': {
-      id: '/book/cancel'
-      path: '/book/cancel'
-      fullPath: '/book/cancel'
-      preLoaderRoute: typeof BookCancelRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/book/$office': {
-      id: '/book/$office'
-      path: '/book/$office'
-      fullPath: '/book/$office'
-      preLoaderRoute: typeof BookOfficeRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/authorized/agreement': {
-      id: '/authorized/agreement'
-      path: '/agreement'
-      fullPath: '/authorized/agreement'
-      preLoaderRoute: typeof AuthorizedAgreementRouteImport
-      parentRoute: typeof AuthorizedRoute
-    }
-    '/auth/sign-out': {
-      id: '/auth/sign-out'
-      path: '/auth/sign-out'
-      fullPath: '/auth/sign-out'
-      preLoaderRoute: typeof AuthSignOutRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/_authenticated/welcome': {
-      id: '/_authenticated/welcome'
-      path: '/welcome'
-      fullPath: '/welcome'
-      preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/policy': {
-      id: '/_authenticated/policy'
-      path: '/policy'
-      fullPath: '/policy'
-      preLoaderRoute: typeof AuthenticatedPolicyRouteImport
+    '/_authenticated/consent': {
+      id: '/_authenticated/consent'
+      path: '/consent'
+      fullPath: '/consent'
+      preLoaderRoute: typeof AuthenticatedConsentRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/install': {
@@ -487,32 +396,123 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedInstallRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/consent': {
-      id: '/_authenticated/consent'
-      path: '/consent'
-      fullPath: '/consent'
-      preLoaderRoute: typeof AuthenticatedConsentRouteImport
+    '/_authenticated/policy': {
+      id: '/_authenticated/policy'
+      path: '/policy'
+      fullPath: '/policy'
+      preLoaderRoute: typeof AuthenticatedPolicyRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/authorized/users/': {
-      id: '/authorized/users/'
-      path: '/users'
-      fullPath: '/authorized/users'
-      preLoaderRoute: typeof AuthorizedUsersIndexRouteImport
+    '/_authenticated/welcome': {
+      id: '/_authenticated/welcome'
+      path: '/welcome'
+      fullPath: '/welcome'
+      preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/auth/sign-out': {
+      id: '/auth/sign-out'
+      path: '/auth/sign-out'
+      fullPath: '/auth/sign-out'
+      preLoaderRoute: typeof AuthSignOutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/authorized/': {
+      id: '/authorized/'
+      path: '/'
+      fullPath: '/authorized/'
+      preLoaderRoute: typeof AuthorizedIndexRouteImport
       parentRoute: typeof AuthorizedRoute
+    }
+    '/authorized/agreement': {
+      id: '/authorized/agreement'
+      path: '/agreement'
+      fullPath: '/authorized/agreement'
+      preLoaderRoute: typeof AuthorizedAgreementRouteImport
+      parentRoute: typeof AuthorizedRoute
+    }
+    '/book/': {
+      id: '/book/'
+      path: '/book'
+      fullPath: '/book/'
+      preLoaderRoute: typeof BookIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/book/$office': {
+      id: '/book/$office'
+      path: '/book/$office'
+      fullPath: '/book/$office'
+      preLoaderRoute: typeof BookOfficeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/book/cancel': {
+      id: '/book/cancel'
+      path: '/book/cancel'
+      fullPath: '/book/cancel'
+      preLoaderRoute: typeof BookCancelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/booking/availability': {
+      id: '/booking/availability'
+      path: '/booking/availability'
+      fullPath: '/booking/availability'
+      preLoaderRoute: typeof BookingAvailabilityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/booking/cancel': {
+      id: '/booking/cancel'
+      path: '/booking/cancel'
+      fullPath: '/booking/cancel'
+      preLoaderRoute: typeof BookingCancelRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/booking/create': {
+      id: '/booking/create'
+      path: '/booking/create'
+      fullPath: '/booking/create'
+      preLoaderRoute: typeof BookingCreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/feedback/mats': {
+      id: '/feedback/mats'
+      path: '/feedback/mats'
+      fullPath: '/feedback/mats'
+      preLoaderRoute: typeof FeedbackMatsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/feedback/status': {
+      id: '/feedback/status'
+      path: '/feedback/status'
+      fullPath: '/feedback/status'
+      preLoaderRoute: typeof FeedbackStatusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/feedback/submit': {
+      id: '/feedback/submit'
+      path: '/feedback/submit'
+      fullPath: '/feedback/submit'
+      preLoaderRoute: typeof FeedbackSubmitRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/consent_/projects': {
+      id: '/_authenticated/consent_/projects'
+      path: '/consent/projects'
+      fullPath: '/consent/projects'
+      preLoaderRoute: typeof AuthenticatedConsentProjectsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/api/github/installed': {
+      id: '/api/github/installed'
+      path: '/api/github/installed'
+      fullPath: '/api/github/installed'
+      preLoaderRoute: typeof ApiGithubInstalledRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/authorized/sessions/': {
       id: '/authorized/sessions/'
       path: '/sessions'
-      fullPath: '/authorized/sessions'
+      fullPath: '/authorized/sessions/'
       preLoaderRoute: typeof AuthorizedSessionsIndexRouteImport
-      parentRoute: typeof AuthorizedRoute
-    }
-    '/authorized/users/$userId': {
-      id: '/authorized/users/$userId'
-      path: '/users/$userId'
-      fullPath: '/authorized/users/$userId'
-      preLoaderRoute: typeof AuthorizedUsersUserIdRouteImport
       parentRoute: typeof AuthorizedRoute
     }
     '/authorized/sessions/$sessionId': {
@@ -522,19 +522,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthorizedSessionsSessionIdRouteImport
       parentRoute: typeof AuthorizedRoute
     }
-    '/api/github/installed': {
-      id: '/api/github/installed'
-      path: '/api/github/installed'
-      fullPath: '/api/github/installed'
-      preLoaderRoute: typeof ApiGithubInstalledRouteImport
-      parentRoute: typeof rootRouteImport
+    '/authorized/users/': {
+      id: '/authorized/users/'
+      path: '/users'
+      fullPath: '/authorized/users/'
+      preLoaderRoute: typeof AuthorizedUsersIndexRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
-    '/_authenticated/consent_/projects': {
-      id: '/_authenticated/consent_/projects'
-      path: '/consent/projects'
-      fullPath: '/consent/projects'
-      preLoaderRoute: typeof AuthenticatedConsentProjectsRouteImport
-      parentRoute: typeof AuthenticatedRoute
+    '/authorized/users/$userId': {
+      id: '/authorized/users/$userId'
+      path: '/users/$userId'
+      fullPath: '/authorized/users/$userId'
+      preLoaderRoute: typeof AuthorizedUsersUserIdRouteImport
+      parentRoute: typeof AuthorizedRoute
     }
   }
 }

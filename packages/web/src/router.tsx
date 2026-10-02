@@ -14,13 +14,14 @@ import { routeTree } from "./routeTree.gen";
 import { Button } from "@alignment-hive/ui";
 
 function DefaultErrorComponent({
-  error,
+  error: thrown,
   reset,
 }: {
-  error: Error;
+  error: unknown;
   reset: () => void;
 }) {
   const isDev = process.env.NODE_ENV === "development";
+  const error = thrown instanceof Error ? thrown : new Error(String(thrown));
 
   return (
     <div className="p-8 max-w-xl mx-auto">
