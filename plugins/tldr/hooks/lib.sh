@@ -2,13 +2,11 @@
 # /focus-state helpers shared by both hooks. Only the Stop hook writes the
 # seen-focus sentinel, at the moment it requests a TL;DR while /focus is on.
 
-# CLAUDE_CONFIG_DIR relocates both .claude.json and the user settings.json.
+# CLAUDE_CONFIG_DIR relocates .claude.json.
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   CLAUDE_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
-  USER_SETTINGS="$CLAUDE_CONFIG_DIR/settings.json"
 else
   CLAUDE_JSON="$HOME/.claude.json"
-  USER_SETTINGS="$HOME/.claude/settings.json"
 fi
 
 focus_is_on() {

@@ -279,31 +279,18 @@ print(msg + "|" + ctx_ok)
 '
 }
 NUDGE_FOCUS="esc-ok:focus|ctx-ok"
-NUDGE_TUI="esc-ok:tui|ctx-ok"
 
+# Fullscreen can be on with no tui setting (fresh installs, gates, bg
+# sessions), so the nudge never names /tui; /focus explains it when needed.
 rm -rf "$D" "$H"
 mkdir -p "$H"
 out=$(run_start "$H" "$D")
-check "no sentinel, no fullscreen: /tui nudge" "$out" "$NUDGE_TUI"
-
-mkdir -p "$H/.claude"
-printf '{"tui": "fullscreen"}' >"$H/.claude/settings.json"
-out=$(run_start "$H" "$D")
-check "no sentinel, fullscreen: /focus nudge" "$out" "$NUDGE_FOCUS"
+check "no sentinel, no tui setting: /focus nudge" "$out" "$NUDGE_FOCUS"
 
 printf '{"briefTranscript": true}' >"$H/.claude.json"
 out=$(run_start "$H" "$D")
 check "focus already on: no nudge" "$out" "NONE|ctx-ok"
 assert_sentinel "focus already on: sentinel NOT written" "missing"
-
-rm -f "$H/.claude/settings.json"
-mkdir -p "$TMP/proj/.claude"
-printf '{"tui": "fullscreen"}' >"$TMP/proj/.claude/settings.local.json"
-rm -f "$H/.claude.json"
-out=$(run_start "$H" "$D")
-check "fullscreen set in project settings: /focus nudge" "$out" "$NUDGE_FOCUS"
-rm -f "$TMP/proj/.claude/settings.local.json"
-printf '{"tui": "fullscreen"}' >"$H/.claude/settings.json"
 
 rm -f "$H/.claude.json"
 mkdir -p "$D" && touch "$D/seen-focus"

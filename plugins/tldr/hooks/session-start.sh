@@ -20,12 +20,10 @@ CONTEXT="When the Stop hook asks you to TL;DR your last message, reply with one 
 
 nudge=""
 if ! focus_seen && ! focus_is_on; then
-  # /focus only exists in the fullscreen renderer; tui may be set in any of the four settings files.
-  if grep -qs '"tui"[[:space:]]*:[[:space:]]*"fullscreen"' "$USER_SETTINGS" "${USER_SETTINGS%.json}.local.json" "${CLAUDE_PROJECT_DIR:-.}/.claude/settings.json" "${CLAUDE_PROJECT_DIR:-.}/.claude/settings.local.json"; then
-    nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
-  else
-    nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/tui fullscreen${RESET}, then ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
-  fi
+  # /focus needs the fullscreen renderer, which Claude Code can enable without
+  # any setting (fresh installs, feature gates, bg sessions). Don't guess: when
+  # it's off, /focus itself tells the user to run /tui fullscreen.
+  nudge="${BOLD}tldr:${RESET} run ${MAGENTA}/focus${RESET} to collapse long replies to their TL;DRs"
 fi
 
 if [ -n "$nudge" ]; then
