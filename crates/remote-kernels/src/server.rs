@@ -70,7 +70,7 @@ enum WaitOutcome {
 }
 
 /// Render an output's reply text, adding its images to `images`. Image
-/// decoding and downscaling run on the blocking pool.
+/// decoding runs on the blocking pool.
 async fn render_output(
     output: ExecutionOutput,
     mut images: ImageCollector,
@@ -2909,8 +2909,7 @@ impl RemoteKernelsServer {
             .await
     }
 
-    /// Shared footer for execution results: images-not-shown note,
-    /// spend/budget line, cleanup-disabled nudge, and error-vs-success
+    /// Shared footer for execution results: spend/budget line, cleanup-disabled nudge, and error-vs-success
     /// wrapping. The images follow the text, in marker order.
     async fn finish_execution_reply(
         &self,
@@ -2919,10 +2918,6 @@ impl RemoteKernelsServer {
         cleanup_disabled: bool,
         is_error: bool,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(footer) = images.footer() {
-            body.push('\n');
-            body.push_str(&footer);
-        }
         let spend = self.state.lock().await.session_spend();
         if let Some(spend_line) = self.format_spend_line(spend) {
             body.push_str(&spend_line);

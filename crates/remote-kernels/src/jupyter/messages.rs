@@ -440,7 +440,6 @@ mod tests {
         let mut images = ImageCollector::default();
         assert_eq!(output.render(&mut images), "step 19\n[image 1: 1x1 PNG]");
         assert_eq!(images.images.len(), 1);
-        assert_eq!(images.over_cap, 0);
 
         // A trailing wait=True clear with nothing after it clears nothing.
         output.process_iopub(&iopub("clear_output", serde_json::json!({"wait": true})));

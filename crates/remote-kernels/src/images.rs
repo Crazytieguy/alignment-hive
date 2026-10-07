@@ -1,5 +1,5 @@
 //! Image outputs (plots, `IPython.display.Image`) returned to the model as MCP
-//! image content, bounded so a plotting loop cannot flood the context.
+//! image content. Claude Code's MCP output limit bounds how many fit in a reply.
 
 use std::io::Cursor;
 
@@ -7,8 +7,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use image::{ImageFormat, ImageReader, Limits};
 
-/// Images returned per tool reply; the rest stay in the notebook.
-pub const MAX_IMAGES_PER_REPLY: usize = 8;
 /// Decoder limits: a hostile or runaway image is refused, not decoded.
 const DECODE_MAX_EDGE: u32 = 20_000;
 const DECODE_MAX_ALLOC: u64 = 512 * 1024 * 1024;
@@ -24,18 +22,12 @@ pub struct ReturnedImage {
 #[derive(Debug, Default)]
 pub struct ImageCollector {
     pub images: Vec<ReturnedImage>,
-    /// Images left out because the reply already held `MAX_IMAGES_PER_REPLY`.
-    pub over_cap: usize,
 }
 
 impl ImageCollector {
     /// Validate one image output and return the marker that stands in for it
     /// in the reply text.
     pub fn add(&mut self, mime: &str, base64: &str) -> String {
-        if self.images.len() >= MAX_IMAGES_PER_REPLY {
-            self.over_cap += 1;
-            return format!("[image not shown: limit of {MAX_IMAGES_PER_REPLY} per reply]");
-        }
         // The image crate is not expected to panic on bad input, but a panic
         // here would take the whole reply with it.
         let prepared = std::panic::catch_unwind(|| prepare(mime, base64))
@@ -47,16 +39,6 @@ impl ImageCollector {
             }
             Err(reason) => format!("[image not shown: {reason}]"),
         }
-    }
-
-    /// The reply footer for images left out by the cap.
-    pub fn footer(&self) -> Option<String> {
-        (self.over_cap > 0).then(|| {
-            format!(
-                "{} more image(s) not shown (limit {MAX_IMAGES_PER_REPLY} per reply). They are saved in the kernel's local notebook; display one in a later execute() to see it.",
-                self.over_cap
-            )
-        })
     }
 }
 
@@ -118,23 +100,6 @@ mod tests {
         let large = png(3000, 2000);
         assert_eq!(images.add("image/png", &large), "[image 2: 3000x2000 PNG]");
         assert_eq!(images.images[1].base64, large);
-    }
-
-    #[test]
-    fn cap_counts_images_left_out() {
-        let data = png(8, 8);
-        let mut images = ImageCollector::default();
-        for _ in 0..MAX_IMAGES_PER_REPLY {
-            images.add("image/png", &data);
-        }
-        assert!(images.footer().is_none());
-        assert!(
-            images
-                .add("image/png", &data)
-                .starts_with("[image not shown")
-        );
-        assert_eq!(images.images.len(), MAX_IMAGES_PER_REPLY);
-        assert!(images.footer().unwrap().starts_with("1 more image(s)"));
     }
 
     #[test]

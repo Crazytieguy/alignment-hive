@@ -686,11 +686,10 @@ fn images_of(result: &CallToolResult) -> Vec<String> {
 }
 
 /// Image outputs reach the model as MCP image content — from execute(), and
-/// from get_output() for a background cell — capped per reply, downscaled when
-/// large, and kept in the notebook.
+/// from get_output() for a background cell — and are kept in the notebook.
 #[tokio::test]
 #[ignore = "needs uv + network for jupyter-server; run with --ignored"]
-async fn image_outputs_are_returned_capped_and_saved() {
+async fn image_outputs_are_returned_and_saved() {
     let dir = tempfile::tempdir().unwrap();
     let server = server_in(dir.path(), None);
     let (machine_id, _) = start_machine(&server, Some("images")).await;
@@ -746,8 +745,9 @@ async fn image_outputs_are_returned_capped_and_saved() {
         .await
         .unwrap();
     let text = text_of(&result);
-    assert_eq!(images_of(&result).len(), 8, "{text}");
-    assert!(text.contains("2 more image(s) not shown"), "{text}");
+    assert_eq!(images_of(&result).len(), 10, "{text}");
+    assert!(text.contains("[image 10: 4x4 PNG]"), "{text}");
+    assert!(!text.contains("not shown"), "{text}");
 
     // A live-plot loop keeps only its last frame, in the reply and the notebook.
     let (failed, text) = execute(
