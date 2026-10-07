@@ -77,18 +77,18 @@ here works until the binary resolves.
    "ENABLE_TOOL_SEARCH": "true",
    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "258400"
    ```
-   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude models' native 1M
-   context windows. Claude Code grants those only when the base URL is
-   `api.anthropic.com`, so behind the gateway Fable 5.1, Opus 5.5 and Sonnet 5.5
-   silently fall back to 200K wherever the model string carries no `[1m]`
-   suffix — including agent definitions the user did not write. The flag is
-   undocumented (Claude Code names it in its own copy, for proxies that front
-   the real API — which is what the Claude branch is); it also restores the
-   rest of Claude Code's first-party behaviour, including error reporting,
-   refusal fallback and first-party billing headers, and it disables
-   `/v1/models` gateway discovery. GPT routing is unaffected: the router
-   strips `anthropic-beta` and credentials on that branch, and the GPT window
-   still comes from `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on Claude
+   Code's first-party behaviour, which it otherwise withholds from any base URL
+   other than `api.anthropic.com`: refusal fallback, WebSearch's
+   standard/extended mode choice, some API betas, first-party billing
+   headers and error reporting. On
+   Claude Code before 2.1.285 it also keeps Claude models' 1M context
+   windows. The flag is undocumented (Claude Code names it in its own copy,
+   for proxies that front the real API — which is what the Claude branch
+   is), and it disables `/v1/models` gateway discovery. GPT routing is
+   unaffected: the router strips `anthropic-beta` and credentials on that
+   branch, and the GPT window still comes from
+   `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
    `ENABLE_TOOL_SEARCH` matters: tool search silently disables itself behind
    a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
    context window — it only applies to model IDs that don't start with
@@ -139,18 +139,10 @@ here works until the binary resolves.
    Don't env-prefix the step 5 variables onto them: once the settings env
    block exists it silently overrides shell-provided values. (If the user
    declined step 5, prefixing `ANTHROPIC_BASE_URL=<base_url>` onto the
-   routing test is instead required, and the window check is meaningless —
-   against the direct Anthropic API it prints 1000000 regardless of the
-   flag.)
+   routing test is instead required.)
    Routing: `claude -p 'reply with ok' --model gpt-6-astra`.
    Picker rows: `/model` in a fresh interactive session lists them after
    the Claude models.
-   1M windows, to confirm they survive the current Claude Code version:
-   `claude -p 'say ok' --model fable --output-format json | jq
-   '.modelUsage[].contextWindow'` — it must print 1000000. On 200000,
-   re-check the step 5 wiring first (right settings file; run from inside
-   the project if the wiring is project-scoped); only if it is correct did
-   a Claude Code release drop the flag.
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) Grok models
@@ -162,10 +154,7 @@ here works until the binary resolves.
 
 `$ROUTER doctor` names the failing layer (config, binary cache, auth,
 service, upstream). Fix only that layer using the matching step above;
-`$ROUTER service restart` after config changes. Doctor does not see Claude
-Code's env block: if Claude models report a 200K window, re-check step 5's
-`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` with the step 6 window check —
-a Claude Code release could drop the flag. A picker row that fails on its
+`$ROUTER service restart` after config changes. A picker row that fails on its
 first turn with "There's an issue with the selected model" names a route the
 gateway doesn't serve: compare the rows with doctor's `routed-models`. A
 `fallback-model` failure means a Claude Code `fallbackModel` setting is in

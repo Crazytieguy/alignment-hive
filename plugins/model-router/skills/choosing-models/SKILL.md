@@ -169,8 +169,3 @@ shipped agents instead — `gpt-6-astra(low)`, `gpt-6-astra(medium)`,
 Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. With the
 Grok family configured, `{model: 'grok-4.7', effort: 'high'}` works the
 same way.
-
-For Claude models, include the `[1m]` suffix — `fable[1m]`, `sonnet[1m]`,
-`opus[1m]` — in agent definitions and Workflow `model` params, or omit
-`model` to inherit the parent's. It is harmless when the model already has
-its full window, and the difference between 1M and 200K when it doesn't.

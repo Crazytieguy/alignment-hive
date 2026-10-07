@@ -96,7 +96,8 @@ raw SSE inspected.
   models keep their built-in windows). Gateway model discovery silently
   drops IDs that don't start with `claude`/`anthropic`.
 - Claude context windows behind the gateway (measured 2026-07-28, Claude Code
-  2.1.220). Claude Code grants a natively-1M Claude model its 1M window only
+  2.1.220; no longer true from 2.1.285: see "Claude windows without the first-party
+  flag" at the end). Claude Code grants a natively-1M Claude model its 1M window only
   when `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`; behind the
   router that check fails, so `claude-fable-5`, `claude-opus-5` and
   `claude-sonnet-5` report 200000. Measured with
@@ -1568,3 +1569,52 @@ stopped by PID afterwards. Live service health and version unchanged.
 Not re-measured: upstream `reasoning.effort` mapping (no request log on the
 live child), WebSearch, and overflow; the route shares the code paths the
 2026-09-23 checks covered.
+
+## Claude windows without the first-party flag (2026-10-07, Claude Code 2.1.293, router 0.1.23)
+
+The 2.1.258 retest trigger fired: 2.1.285's changelog says sessions behind a
+custom `ANTHROPIC_BASE_URL` now use the 1M window of models that have one.
+
+Method: `claude -p 'Reply with just: ok' --output-format json
+--strict-mcp-config | jq '.modelUsage'` through the live router, with
+`--settings '{"env":{"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL":"0"}}'`
+overriding the user settings' `"1"` (the env parser reads `0`/`false`/`no`/
+`off` as false). The override was confirmed on the wire: a recording proxy
+in front of the router saw no `cch=` billing attestation with `"0"` and one
+with `"1"`. Plus string extraction from the 2.1.293 binary.
+
+| arm (flag off unless noted) | contextWindow |
+|---|---|
+| `--model` fable, opus, sonnet, haiku | 1000000 each (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`) |
+| `--model claude-fable-5-1`, `claude-opus-5-5` | 1000000 |
+| sonnet main, `--agents` probe with `model: fable` / `opus` / `claude-fable-5-1` | 1000000 for both parent and agent |
+| same with the flag on | 1000000 |
+| `--model gpt-6-luna` | 258400 (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, unchanged) |
+
+Binary: the window resolver (`Pv`) takes 1M from the model catalog's
+`native_1m` and no longer consults the base-URL check, so for native-1M
+models (every current one tested above) the `[1m]` suffix and the flag are
+both irrelevant to the window. Older opt-in models (Sonnet 4.x, Opus 4/4.1,
+Haiku 4.5: catalog window 200000 with `supports_1m_suffix`) still need the
+suffix for 1M, on any base URL. Workflow `model` params were not measured;
+they resolve through the same function.
+
+What the flag still changes (Fable request, flag off vs on, same prompt):
+
+- Billing header: off sends `cc_version` and `cc_entrypoint` only; on adds
+  `cch=`, `cc_prompt_id`, `cc_turn_origin`, `cc_prompt_index`,
+  `cc_turn_index`.
+- Betas only with the flag: `thinking-binding-controls-2026-08-01`,
+  `cache-diagnosis-2026-04-07`. Headers only with the flag:
+  `anthropic-dispatch-id`, `x-claude-code-prompt-id`,
+  `x-claude-code-request-class`. Body field only with the flag: `diagnostics`.
+- System prompt: only with the flag, the WebSearch `mode` paragraph
+  (standard vs extended search).
+- Binary only, not measured: refusal fallback (`switchModelsOnFlag` and the
+  refusal path both require the first-party check), the served model
+  catalog, first-party error reporting, and several server-gated
+  experiments. Gateway discovery still skips while the flag is set.
+
+Decision: keep the flag in setup for first-party parity; drop the 1M
+rationale, the step 6 window check, the Repair 200K hint, and the `[1m]`
+advice in choosing-models.
