@@ -5,8 +5,8 @@ use std::sync::Arc;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, Meta, ProgressNotificationParam, ServerCapabilities,
-    ServerInfo,
+    CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, RequestMetaObject,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::{
     ErrorData as McpError, Peer, RoleServer, ServerHandler, tool, tool_handler, tool_router,
@@ -90,12 +90,12 @@ async fn render_output(
 
 /// An execution result: the text, then its images in marker order.
 fn execution_reply(body: String, images: ImageCollector, is_error: bool) -> CallToolResult {
-    let mut content = vec![Content::text(body)];
+    let mut content = vec![ContentBlock::text(body)];
     content.extend(
         images
             .images
             .into_iter()
-            .map(|image| Content::image(image.base64, image.mime)),
+            .map(|image| ContentBlock::image(image.base64, image.mime)),
     );
     if is_error {
         CallToolResult::error(content)
@@ -373,7 +373,7 @@ fn generate_token() -> String {
 /// uniformly `return err_text(...)`.
 #[allow(clippy::unnecessary_wraps)]
 fn err_text(msg: impl Into<String>) -> Result<CallToolResult, McpError> {
-    Ok(CallToolResult::error(vec![Content::text(msg.into())]))
+    Ok(CallToolResult::error(vec![ContentBlock::text(msg.into())]))
 }
 
 /// Validate `start(vast_offers=...)` against the rest of the request.
@@ -912,7 +912,7 @@ impl RemoteKernelsServer {
             {
                 Ok(summary) => {
                     let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
-                    Ok(CallToolResult::success(vec![Content::text(format!(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                         "Machine started successfully!\n{summary}\n\nUse create_kernel() to start a kernel.{note}{reconcile_note}"
                     ))]))
                 }
@@ -926,7 +926,7 @@ impl RemoteKernelsServer {
                         ConnectMode::Fresh,
                     );
                     let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
-                    Ok(CallToolResult::success(vec![Content::text(format!(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                         "Machine {machine_id} (provider id: {}) is still queued or waiting for capacity. \
                          It was NOT cleaned up — setup continues in the background. Poll \
                          status() until it shows running, or terminate(instance=\"{machine_id}\") \
@@ -964,7 +964,7 @@ impl RemoteKernelsServer {
                 ConnectMode::Fresh,
             );
             let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
-            Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Machine {machine_id} is provisioning (provider id: {}, GPU: {}). Setup continues in the \
                  background — poll status() until it shows running before creating kernels.{note}{reconcile_note}",
                 handle.external_id, handle.gpu_name
@@ -1268,7 +1268,7 @@ impl RemoteKernelsServer {
                 } else {
                     ""
                 };
-                Ok(CallToolResult::success(vec![Content::text(format!(
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "Attached to machine.\n{summary}\n\n{recovery}{reconciliation}{finish_note}"
                 ))]))
             }
@@ -1279,7 +1279,7 @@ impl RemoteKernelsServer {
                     &record.runtime,
                     ConnectMode::Attach { force, resumed },
                 );
-                Ok(CallToolResult::success(vec![Content::text(format!(
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "Machine {machine_id} is still provisioning; attachment continues in the background. Poll status()."
                 ))]))
             }
@@ -1361,7 +1361,10 @@ impl RemoteKernelsServer {
     /// Search vast.ai marketplace offers for manual host selection rather than
     /// automatic cheapest-first selection. Returns a comparison table and picking
     /// advice; free, read-only, and creates nothing. Parameters override the
-    /// configured search for this call only. Returned offer ids can be supplied
+    /// configured search for this call only. Per filter key, lowest first:
+    /// built-in baselines, `[vast.query]`, the typed parameters, `query`. `vm`
+    /// is the exception: the filters it adds sit below `[vast.query]`.
+    /// Returned offer ids can be supplied
     /// in preference order to `start` through `vast_offers`; availability can change
     /// before rental, and the configured rental price and VM constraints still apply.
     #[tool(name = "search_vast_offers")]
@@ -1380,7 +1383,7 @@ impl RemoteKernelsServer {
             .search_offers_report(&params.0)
             .await
             .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(report)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(report)]))
     }
 
     /// Stop a machine without waiting for running kernels to finish. Runs the
@@ -1467,7 +1470,7 @@ impl RemoteKernelsServer {
             .map_err(|e| McpError::internal_error(format!("Failed to stop machine: {e}"), None))?;
 
         let cost_note = self.session_cost_note(&target.runtime).await;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Machine {machine_id} {}.{cost_note} \
              Use attach(\"{machine_id}\") to resume it or terminate(instance=\"{machine_id}\") to delete it.",
             actual.past_tense(),
@@ -1559,7 +1562,7 @@ impl RemoteKernelsServer {
                 target.machine_id
             )
         };
-        Ok(CallToolResult::success(vec![Content::text(message)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
 
     /// Queue end-of-run operations: drain running work, download listed files into
@@ -1706,7 +1709,7 @@ impl RemoteKernelsServer {
             .err()
             .map(|error| format!("\nMarker write failed: {error}"))
             .unwrap_or_default();
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Finish plan queued for machine {machine_id}: after pending executions complete, {downloads_sentence}{action_sentence}. {guarantee}{marker_note}"
         ))]))
     }
@@ -2282,7 +2285,7 @@ impl RemoteKernelsServer {
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(info)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(info)]))
     }
 
     /// Create a Jupyter kernel on a running machine. Returns the kernel ID and the
@@ -2396,7 +2399,7 @@ impl RemoteKernelsServer {
                 "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
             );
         }
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
     }
 
     /// Execute Python code in a kernel. Returns the output (stdout, stderr, result,
@@ -2410,7 +2413,7 @@ impl RemoteKernelsServer {
     pub async fn execute_tool(
         &self,
         params: Parameters<ExecuteParams>,
-        meta: Meta,
+        meta: RequestMetaObject,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.execute_inner(params.0, Some((meta, peer))).await
@@ -2427,7 +2430,7 @@ impl RemoteKernelsServer {
     async fn execute_inner(
         &self,
         params: ExecuteParams,
-        progress: Option<(Meta, Peer<RoleServer>)>,
+        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
 
@@ -2546,7 +2549,7 @@ impl RemoteKernelsServer {
                         "\nWARNING: its notebook cell could not be created, so the result cannot be collected with get_output(); the kernel still runs it, and the machine-side recorder (if active) captures the output.",
                     );
                 }
-                return Ok(CallToolResult::success(vec![Content::text(msg)]));
+                return Ok(CallToolResult::success(vec![ContentBlock::text(msg)]));
             }
 
             (rx, cell_number, kernel_id, machine_id, cleanup)
@@ -2603,7 +2606,7 @@ impl RemoteKernelsServer {
                     "\nCell number: {cell_num}\nUse get_output(kernel_id=\"{kernel_id}\", cell_number={cell_num}) to check on it."
                 );
             }
-            return Ok(CallToolResult::success(vec![Content::text(msg)]));
+            return Ok(CallToolResult::success(vec![ContentBlock::text(msg)]));
         }
 
         let Some(output) = completed_output else {
@@ -2634,7 +2637,7 @@ impl RemoteKernelsServer {
     pub async fn wait_tool(
         &self,
         params: Parameters<WaitParams>,
-        meta: Meta,
+        meta: RequestMetaObject,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.wait_inner(params.0, Some((meta, peer))).await
@@ -2648,7 +2651,7 @@ impl RemoteKernelsServer {
     async fn wait_inner(
         &self,
         params: WaitParams,
-        progress: Option<(Meta, Peer<RoleServer>)>,
+        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
         // 0 means "no cap", same as omitting the timeout (and as execute()).
         let timeout = params.timeout.filter(|&secs| secs != 0);
@@ -2699,7 +2702,7 @@ impl RemoteKernelsServer {
     async fn wait_all(
         &self,
         timeout_secs: Option<u64>,
-        progress: Option<(Meta, Peer<RoleServer>)>,
+        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
         let deadline = timeout_secs.map(|secs| {
             tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
@@ -2890,15 +2893,13 @@ impl RemoteKernelsServer {
                 if let Some(progress_token) = meta.get_progress_token() {
                     let elapsed = started.elapsed().as_secs();
                     let _ = peer
-                        .notify_progress(ProgressNotificationParam {
-                            progress_token,
-                            progress: elapsed as f64,
-                            total: None,
-                            message: Some(format!(
-                                "wait: elapsed={elapsed}s collected={}/{total}",
-                                total - held.len()
-                            )),
-                        })
+                        .notify_progress(
+                            ProgressNotificationParam::new(progress_token, elapsed as f64)
+                                .with_message(format!(
+                                    "wait: elapsed={elapsed}s collected={}/{total}",
+                                    total - held.len()
+                                )),
+                        )
                         .await;
                 }
             }
@@ -2955,7 +2956,7 @@ impl RemoteKernelsServer {
         &self,
         held: HeldExecution,
         timeout_secs: Option<u64>,
-        progress: Option<(Meta, Peer<RoleServer>)>,
+        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
         let cleanup = held.cleanup;
         let deadline = timeout_secs.map(|secs| {
@@ -2968,10 +2969,12 @@ impl RemoteKernelsServer {
                 self.finish_execution_reply(body, images, cleanup == Cleanup::Disabled, is_error)
                     .await
             }
-            WaitOutcome::StillRunning => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Execution still running after {}s. Use wait() again or get_output() to collect it.",
-                timeout_secs.expect("StillRunning requires a timeout")
-            ))])),
+            WaitOutcome::StillRunning => {
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Execution still running after {}s. Use wait() again or get_output() to collect it.",
+                    timeout_secs.expect("StillRunning requires a timeout")
+                ))]))
+            }
             WaitOutcome::Fenced(message) => {
                 err_text(format!("{message}; the execution continues on the machine"))
             }
@@ -2989,7 +2992,7 @@ impl RemoteKernelsServer {
         &self,
         mut held: HeldExecution,
         deadline: Option<tokio::time::Instant>,
-        progress: Option<&(Meta, Peer<RoleServer>)>,
+        progress: Option<&(RequestMetaObject, Peer<RoleServer>)>,
     ) -> WaitOutcome {
         let started = std::time::Instant::now();
         let mut fence_check = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -3020,12 +3023,10 @@ impl RemoteKernelsServer {
                                 .map_or("connection unavailable", |conn| if conn.is_busy() { "running" } else { "queued" })
                         };
                         let elapsed = started.elapsed().as_secs();
-                        let _ = peer.notify_progress(ProgressNotificationParam {
-                            progress_token,
-                            progress: elapsed as f64,
-                            total: None,
-                            message: Some(format!("wait: elapsed={elapsed}s state={execution_state}")),
-                        }).await;
+                        let _ = peer.notify_progress(
+                            ProgressNotificationParam::new(progress_token, elapsed as f64)
+                                .with_message(format!("wait: elapsed={elapsed}s state={execution_state}")),
+                        ).await;
                     }
                 }
                 () = async { timeout.as_mut().expect("guarded timeout").as_mut().await }, if timeout.is_some() => {
@@ -3077,7 +3078,7 @@ impl RemoteKernelsServer {
     pub async fn get_output_tool(
         &self,
         params: Parameters<GetOutputParams>,
-        meta: Meta,
+        meta: RequestMetaObject,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.get_output_inner(params.0, Some((meta, peer))).await
@@ -3094,7 +3095,7 @@ impl RemoteKernelsServer {
     async fn get_output_inner(
         &self,
         params: GetOutputParams,
-        progress: Option<(Meta, Peer<RoleServer>)>,
+        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
     ) -> Result<CallToolResult, McpError> {
         let wait = params.wait.unwrap_or(true);
         let timeout_secs = params.timeout.unwrap_or(30);
@@ -3158,7 +3159,7 @@ impl RemoteKernelsServer {
                     .await
                 }
                 WaitOutcome::StillRunning => {
-                    Ok(CallToolResult::success(vec![Content::text(format!(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                         "Execution still running after {timeout_secs}s. Use get_output() again to check."
                     ))]))
                 }
@@ -3190,7 +3191,7 @@ impl RemoteKernelsServer {
                         inst.pending_executions
                             .insert((params.kernel_id, params.cell_number), result_rx);
                     }
-                    Ok(CallToolResult::success(vec![Content::text(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(
                         "Execution is still running.",
                     )]))
                 }
@@ -3266,7 +3267,7 @@ impl RemoteKernelsServer {
             ));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(result)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
     }
 
     /// Download a file or directory from a machine into the project directory.
@@ -3309,7 +3310,7 @@ impl RemoteKernelsServer {
             .await
             .map_err(|e| McpError::internal_error(format!("Download failed: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![Content::text(result)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
     }
 
     /// Shut down a kernel and free its resources.
@@ -3369,7 +3370,7 @@ impl RemoteKernelsServer {
                 "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
             );
         }
-        Ok(CallToolResult::success(vec![Content::text(message)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
 
     /// Interrupt the currently running execution in a kernel.
@@ -3404,7 +3405,7 @@ impl RemoteKernelsServer {
             McpError::internal_error(format!("Failed to interrupt kernel: {e}"), None)
         })?;
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Kernel {kernel_id} interrupted."
         ))]))
     }
@@ -3526,7 +3527,7 @@ impl RemoteKernelsServer {
                 "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
             );
         }
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
     }
 }
 
@@ -5559,7 +5560,7 @@ impl RemoteKernelsServer {
                     marker.runtime
                 ));
             }
-            return Ok(CallToolResult::success(vec![Content::text(format!(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Machine {machine_id}: the machine named {name} at {} ({external_id}) was \
                  terminated and its unconfirmed record cleared. Nothing is billing.",
                 marker.runtime
@@ -5571,7 +5572,7 @@ impl RemoteKernelsServer {
             .promote_unconfirmed(machine_id, marker, &external_id, Phase::Stopped)
             .await
         {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Machine {machine_id}: the machine its create never confirmed does exist \
                  ({external_id}) and was stopped; it keeps its data. \
                  attach(\"{machine_id}\") resumes it or \
@@ -6795,13 +6796,10 @@ impl RemoteKernelsServer {
 
 #[tool_handler]
 impl ServerHandler for RemoteKernelsServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(self.instructions.clone()),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(self.instructions.clone())
     }
 }
 
