@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { findRawSessions, scanSubagentDir } from '../lib/session-io';
-import { discoverSessions, loadSessionState } from '../lib/session-state';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { countRawLines, findRawSessions, scanSubagentDir } from '../lib/session-io';
+import { discoverSessions, loadSessionState, withDiscoveryCache } from '../lib/session-state';
+import { runCommand } from '../lib/spawn';
 
 const PARENT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -155,5 +156,138 @@ describe('loadSessionState', () => {
     ).toEqual(['agent-flat01', 'agent-nometa', 'agent-task01', 'agent-wf001', 'agent-wf002']);
     expect(state.sessionById.size).toBe(6);
     await rm(stateDir, { recursive: true, force: true });
+  });
+});
+
+describe('discoverSessions — many transcripts', () => {
+  test('finds every session when there are more files than are read at once', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-many-'));
+    const ids = Array.from({ length: 100 }, (_, i) => `session-${String(i).padStart(3, '0')}`);
+    await Promise.all(ids.map((id) => writeFile(join(dir, `${id}.jsonl`), `${userLine(id)}\n${assistantLine(id)}\n`)));
+    // One without an assistant message is still dropped.
+    await writeFile(join(dir, 'blank.jsonl'), `${userLine('blank')}\n`);
+
+    const found = (await discoverSessions([dir], dir)).map((s) => s.sessionId).sort();
+    expect(found).toEqual(ids);
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('withDiscoveryCache — verdicts kept in the state dir', () => {
+  let dir: string;
+  let stateDir: string;
+  const T = new Date('2026-05-30T00:00:00Z');
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'hive-cache-'));
+    stateDir = join(dir, 'state');
+    await mkdir(join(dir, 'transcripts'), { recursive: true });
+    await mkdir(stateDir);
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function write(id: string, content: string, mtime = T): Promise<void> {
+    const path = join(dir, 'transcripts', `${id}.jsonl`);
+    await writeFile(path, content);
+    await utimes(path, mtime, mtime);
+  }
+  const discover = async (): Promise<Array<string>> =>
+    (await withDiscoveryCache(stateDir, (cache) => discoverSessions([join(dir, 'transcripts')], dir, cache)))
+      .map((s) => s.sessionId)
+      .sort();
+  const savedPaths = async (): Promise<Array<string>> =>
+    Object.keys(
+      (JSON.parse(await readFile(join(stateDir, 'discovery-cache'), 'utf-8')) as { entries: object }).entries,
+    ).map((p) => basename(p, '.jsonl'));
+
+  test('an unchanged file keeps its verdict; a changed mtime reads it again', async () => {
+    await write('a', `${userLine('a')}\n${assistantLine('a')}\n`);
+    await write('blank', `${userLine('blank')}\n`);
+    expect(await discover()).toEqual(['a']);
+
+    // Same mtime: the saved verdict stands even though the content now has an assistant line.
+    await write('blank', `${userLine('blank')}\n${assistantLine('blank')}\n`);
+    expect(await discover()).toEqual(['a']);
+
+    await write('blank', `${userLine('blank')}\n${assistantLine('blank')}\n`, new Date(T.getTime() + 1000));
+    expect(await discover()).toEqual(['a', 'blank']);
+  });
+
+  test('which project a cached cwd belongs to is resolved again on every run', async () => {
+    // Recorded under a cwd that is not a git checkout yet, so it is kept.
+    const other = join(dir, 'other');
+    await mkdir(other);
+    const cwdLine = JSON.stringify({ type: 'user', uuid: 'u', parentUuid: null, cwd: other, sessionId: 'f' });
+    await write('f', `${cwdLine}\n${assistantLine('f')}\n`);
+    expect(await discover()).toEqual(['f']);
+
+    // The cwd becomes another project's checkout; the transcript is untouched.
+    await runCommand(['git', 'init', '-q'], { cwd: other });
+    expect(await discover()).toEqual([]);
+    expect(await discoverSessions([join(dir, 'transcripts')], dir)).toEqual([]);
+  });
+
+  // Root reads a file whatever its mode.
+  test.skipIf(process.getuid?.() === 0)(
+    'a transcript that cannot be read is not cached, so it is found once readable again',
+    async () => {
+      await write('a', `${userLine('a')}\n${assistantLine('a')}\n`);
+      const path = join(dir, 'transcripts', 'a.jsonl');
+      await chmod(path, 0o000);
+      try {
+        expect(await discover()).toEqual([]);
+        expect(await savedPaths()).toEqual([]);
+      } finally {
+        await chmod(path, 0o644); // mtime unchanged
+      }
+      expect(await discover()).toEqual(['a']);
+    },
+  );
+
+  test('a corrupt cache falls back to full discovery', async () => {
+    await write('a', `${userLine('a')}\n${assistantLine('a')}\n`);
+    await writeFile(join(stateDir, 'discovery-cache'), '{"version":1,"entries":');
+    expect(await discover()).toEqual(['a']);
+    expect(await savedPaths()).toEqual(['a']);
+  });
+
+  test('files no longer found drop out of the saved cache', async () => {
+    await write('a', `${userLine('a')}\n${assistantLine('a')}\n`);
+    await write('b', `${userLine('b')}\n${assistantLine('b')}\n`);
+    await discover();
+    expect((await savedPaths()).sort()).toEqual(['a', 'b']);
+
+    await rm(join(dir, 'transcripts', 'b.jsonl'));
+    expect(await discover()).toEqual(['a']);
+    expect(await savedPaths()).toEqual(['a']);
+  });
+});
+
+describe('countRawLines', () => {
+  async function count(content: string): Promise<number> {
+    const path = join(root, 'count.jsonl');
+    await writeFile(path, content);
+    return countRawLines(path);
+  }
+
+  test('counts lines with content, skipping blank and whitespace-only ones', async () => {
+    expect(await count('')).toBe(0);
+    expect(await count('\n\n')).toBe(0);
+    expect(await count('{"a":1}\n')).toBe(1);
+    expect(await count('{"a":1}')).toBe(1);
+    expect(await count('{"a":1}\n\n  \t\n{"b":2}\n')).toBe(2);
+    expect(await count('  {"a":1}\n   ')).toBe(1);
+  });
+
+  test('CRLF line endings count each line once', async () => {
+    expect(await count('{"a":1}\r\n{"b":2}\r\n\r\n')).toBe(2);
+  });
+
+  test('counts multi-byte text and lines longer than the read chunk', async () => {
+    const long = `{"text":"${'é'.repeat(700_000)}"}`; // ~1.4 MB, crosses the 1 MB read chunk
+    expect(await count(`${long}\n{"b":2}\n${long}`)).toBe(3);
+    expect(await count(`${'\n'.repeat(1 << 20)}{"a":1}\n`)).toBe(1);
   });
 });

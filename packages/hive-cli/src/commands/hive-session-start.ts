@@ -16,7 +16,7 @@ import { readHookInput } from '../lib/hook-input';
 import { hive } from '../lib/messages';
 import { isRegistryBackfillDone } from '../lib/registry-backfill';
 import { colors } from '../lib/output';
-import { computeSessionStatus } from '../lib/session-state';
+import { computeSessionStatus, withDiscoveryCache } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
 import { spawnBackgroundCommand } from '../lib/spawn';
 import { loadConsentWindows, loadSessionStateWithMigrations } from '../lib/upload-session';
@@ -107,7 +107,7 @@ export async function hiveSessionStart(): Promise<number> {
   // The consent windows tell apart sessions last modified while sharing was off, which never
   // upload and so must not count as ready.
   const [state, consentWindows] = await Promise.all([
-    loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd),
+    withDiscoveryCache(stateDir, (cache) => loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd, cache)),
     loadConsentWindows(ids).catch(() => null),
   ]);
   if (!consentWindows) return flush();

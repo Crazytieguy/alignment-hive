@@ -1,8 +1,11 @@
-import { createReadStream } from 'node:fs';
-import { appendFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { constants, createReadStream } from 'node:fs';
+import { access, appendFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { canExclude, isInConsentWindow } from '@alignment-hive/session-data';
+import { z } from 'zod';
+import { mapBatched } from './batch';
 import { getClaudeProjectDir, getMainWorktreePath, readStateFile, statePaths } from './config';
 import { extractCwdFromFile } from './transcript-discovery';
 import { findRawSessions, scanSubagentDir, toDiscoveredSession } from './session-io';
@@ -10,6 +13,12 @@ import type { ConsentWindow, SessionStatus } from '@alignment-hive/session-data'
 import type { DiscoveredSession } from './session-io';
 
 export type { DiscoveredSession };
+
+/**
+ * Transcripts whose heads discovery reads at once. A registry can hold thousands of files, and
+ * every open read stream holds its own buffer, so reading them all at once took ~700 MB.
+ */
+const DISCOVERY_CONCURRENCY = 32;
 
 /** Sessions, consent changes and backfill reopens all wait this long before an upload. */
 const REVIEW_PERIOD_MS = 24 * 60 * 60 * 1000;
@@ -59,10 +68,15 @@ async function hasAssistantContent(path: string): Promise<boolean> {
  * repo, are kept, so worktree and deleted-worktree discovery behave as before.
  */
 export function makeProjectSessionFilter(projectCwd: string): (filePath: string) => boolean {
+  const belongs = makeProjectCwdFilter(projectCwd);
+  return (filePath) => belongs(extractCwdFromFile(filePath));
+}
+
+/** makeProjectSessionFilter for an already-read session cwd; git is asked once per distinct cwd. */
+function makeProjectCwdFilter(projectCwd: string): (sessionCwd: string | null) => boolean {
   const projectMain = getMainWorktreePath(projectCwd) ?? projectCwd;
   const mainCache = new Map<string, string | null>();
-  return (filePath) => {
-    const sessionCwd = extractCwdFromFile(filePath);
+  return (sessionCwd) => {
     if (!sessionCwd || sessionCwd === projectMain || sessionCwd === projectCwd) return true;
     let main = mainCache.get(sessionCwd);
     if (main === undefined) {
@@ -74,11 +88,48 @@ export function makeProjectSessionFilter(projectCwd: string): (filePath: string)
 }
 
 /**
- * Discovery verdicts by file path, for a long-lived caller (the review server) to pass to
- * every load: a file whose mtime is unchanged keeps its verdict without its head being read
- * again. Which sessions are found does not change.
+ * What discovery reads from each transcript's head, by file path: its recorded cwd, and for a
+ * parent session whether it has an assistant message. A file whose mtime is unchanged is not read
+ * again. Only facts from the file itself are kept: which project a cwd belongs to depends on the
+ * git checkouts present now, so it is resolved again on every discovery. The review server keeps
+ * one in memory across loads; short-lived callers keep it in the state dir (withDiscoveryCache).
  */
-export type DiscoveryCache = Map<string, { mtimeMs: number; keep: boolean }>;
+export type DiscoveryCache = Map<string, { mtimeMs: number; cwd: string | null; hasAssistant: boolean }>;
+
+const PersistedDiscoveryCacheSchema = z.object({
+  version: z.literal(2),
+  entries: z.record(z.string(), z.tuple([z.number(), z.string().nullable(), z.boolean()])),
+});
+
+/**
+ * Run `fn` with the state dir's discovery cache, then save what it left there. A missing or
+ * unreadable cache starts empty, so the worst case is a full discovery; a failed save is ignored.
+ * Concurrent writers each replace the file whole, and any of their caches is valid.
+ */
+export async function withDiscoveryCache<T>(stateDir: string, fn: (cache: DiscoveryCache) => Promise<T>): Promise<T> {
+  const file = statePaths(stateDir).discoveryCache;
+  const cache: DiscoveryCache = new Map();
+  try {
+    const parsed = PersistedDiscoveryCacheSchema.safeParse(JSON.parse(await readFile(file, 'utf-8')));
+    for (const [path, [mtimeMs, cwd, hasAssistant]] of Object.entries(parsed.data?.entries ?? {})) {
+      cache.set(path, { mtimeMs, cwd, hasAssistant });
+    }
+  } catch {
+    // no cache yet, or a torn one
+  }
+  const result = await fn(cache);
+  const entries = Object.fromEntries(
+    [...cache].map(([path, { mtimeMs, cwd, hasAssistant }]) => [path, [mtimeMs, cwd, hasAssistant]]),
+  );
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify({ version: 2, entries }));
+    await rename(tmp, file);
+  } catch {
+    await rm(tmp, { force: true });
+  }
+  return result;
+}
 
 /**
  * Discover parent and agent sessions from transcript directories. Parent sessions with no
@@ -91,24 +142,40 @@ export async function discoverSessions(
   cache?: DiscoveryCache,
 ): Promise<Array<DiscoveredSession>> {
   const dirResults = await Promise.all(transcriptsDirs.map((dir) => findRawSessions(dir).catch(() => [])));
-  let belongsToProject: ((filePath: string) => boolean) | undefined;
+  const refs = dirResults.flat();
+  let belongsToProject: ((sessionCwd: string | null) => boolean) | undefined;
 
-  const results = await Promise.all(
-    dirResults.flat().map(async (ref) => {
-      const session = await toDiscoveredSession(ref);
-      if (!session) return null;
-      const mtimeMs = session.mtime.getTime();
-      const cached = cache?.get(ref.path);
-      if (cached?.mtimeMs === mtimeMs) return cached.keep ? session : null;
-      belongsToProject ??= projectCwd === undefined ? () => true : makeProjectSessionFilter(projectCwd);
-      const keep =
-        belongsToProject(ref.path) &&
-        // Blank-session filtering applies to abandoned parent sessions only, not agents.
-        (ref.agentId ? true : await hasAssistantContent(ref.path).catch(() => false));
-      cache?.set(ref.path, { mtimeMs, keep });
-      return keep ? session : null;
-    }),
-  );
+  if (cache) {
+    // Entries for files no longer found would only accumulate.
+    const found = new Set(refs.map((ref) => ref.path));
+    for (const path of cache.keys()) if (!found.has(path)) cache.delete(path);
+  }
+
+  const results = await mapBatched(refs, DISCOVERY_CONCURRENCY, async (ref) => {
+    const session = await toDiscoveredSession(ref);
+    if (!session) return null;
+    const mtimeMs = session.mtime.getTime();
+    let facts = cache?.get(ref.path);
+    if (facts?.mtimeMs !== mtimeMs) {
+      try {
+        // extractCwdFromFile reads an unreadable file as having no cwd, so readability is checked
+        // first: a failed read is never cached, or the session would stay hidden once it is fixed.
+        await access(ref.path, constants.R_OK);
+        facts = {
+          mtimeMs,
+          cwd: extractCwdFromFile(ref.path),
+          // Blank-session filtering applies to abandoned parent sessions only, not agents.
+          hasAssistant: ref.agentId ? true : await hasAssistantContent(ref.path),
+        };
+        cache?.set(ref.path, facts);
+      } catch {
+        facts = { mtimeMs, cwd: null, hasAssistant: !!ref.agentId };
+        cache?.delete(ref.path);
+      }
+    }
+    belongsToProject ??= projectCwd === undefined ? () => true : makeProjectCwdFilter(projectCwd);
+    return facts.hasAssistant && belongsToProject(facts.cwd) ? session : null;
+  });
   return results.filter((r): r is DiscoveredSession => r !== null);
 }
 

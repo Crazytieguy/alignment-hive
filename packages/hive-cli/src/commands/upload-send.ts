@@ -9,19 +9,15 @@ import {
   statePaths,
 } from '../lib/config';
 import { parseCommandArgs, parseWholeNumber, usageError } from '../lib/args';
+import { mapBatched } from '../lib/batch';
 import { resolveProjectConsent } from '../lib/convex';
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
+import { withPidLock } from '../lib/pid-lock';
 import { lookupParentSession } from '../lib/session-lookup';
 import { computeSessionStatus } from '../lib/session-state';
 import { getSnoozeUntil } from '../lib/snooze';
-import { acquireUploadLock, releaseUploadLock } from '../lib/upload-lock';
-import {
-  loadConsentWindows,
-  loadSessionStateWithMigrations,
-  mapBatched,
-  uploadOneSession,
-} from '../lib/upload-session';
+import { loadConsentWindows, loadSessionStateWithMigrations, uploadOneSession } from '../lib/upload-session';
 
 const UPLOAD_CONCURRENCY = 5;
 
@@ -62,23 +58,15 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     }
     if (isBackground && (await getSnoozeUntil(stateDir)) !== null) return 0;
 
-    if (!(await acquireUploadLock(stateDir))) {
+    const result = await withPidLock(statePaths(stateDir).uploadLock, () =>
+      doUploadWork(sessionPrefix, targetSessionIds, isBackground, stateDir, cwd),
+    );
+    if (result === null) {
       if (isBackground) return 0; // another upload is running: nothing to do
       printError(hive.upload.uploadInProgress);
       return 1;
     }
-    const releaseLock = () => releaseUploadLock(stateDir);
-    const onSignal = () => {
-      releaseLock().finally(() => process.exit(1));
-    };
-    process.on('SIGTERM', onSignal);
-    process.on('SIGINT', onSignal);
-
-    try {
-      return await doUploadWork(sessionPrefix, targetSessionIds, isBackground, stateDir, cwd);
-    } finally {
-      await releaseLock();
-    }
+    return result;
   } finally {
     // The session-start hook wrote this marker when it scheduled us.
     if (isBackground) await unlink(statePaths(stateDir).uploadScheduled).catch(() => {});

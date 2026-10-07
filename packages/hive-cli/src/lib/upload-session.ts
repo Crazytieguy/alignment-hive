@@ -16,6 +16,7 @@ import { getClaudeProjectDir, isSharingDisabledLocally, readStateFile, statePath
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { hive } from './messages';
 import { fileSessionSummary } from './session-facts';
+import { chunk, mapBatched } from './batch';
 import { buildSessionMeta } from './session-format';
 import { sanitizeDeep, sanitizeString } from './sanitize';
 import {
@@ -38,24 +39,6 @@ import type { RawRecord, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive
 
 const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
 const SUMMARY_CONCURRENCY = 10;
-
-/** Split into fixed-size chunks (bounds the per-mutation arg-array size for large workflows). */
-function chunk<T>(arr: Array<T>, size: number): Array<Array<T>> {
-  const out: Array<Array<T>> = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-/** Map over items with at most `size` calls in flight at once. */
-export async function mapBatched<T, TResult>(
-  items: Array<T>,
-  size: number,
-  fn: (item: T) => Promise<TResult>,
-): Promise<Array<TResult>> {
-  const out: Array<TResult> = [];
-  for (const batch of chunk(items, size)) out.push(...(await Promise.all(batch.map(fn))));
-  return out;
-}
 
 /** The session whose records a transcript file holds: an agent's records carry its parent's id. */
 type TranscriptOwner = Pick<DiscoveredSession, 'path' | 'sessionId' | 'parentSessionId'>;

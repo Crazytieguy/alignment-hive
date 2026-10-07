@@ -222,6 +222,8 @@ export function statePaths(stateDir: string) {
     snoozeUntil: join(stateDir, 'snooze-until'),
     uploadScheduled: join(stateDir, 'upload-scheduled'),
     uploadLock: join(stateDir, 'upload-lock'),
+    heartbeatLock: join(stateDir, 'heartbeat-lock'),
+    discoveryCache: join(stateDir, 'discovery-cache'),
     errorLog: join(stateDir, 'error.log'),
     alignVersion: join(stateDir, 'align-version'),
     sharingDisabled: join(stateDir, 'sharing-disabled'),

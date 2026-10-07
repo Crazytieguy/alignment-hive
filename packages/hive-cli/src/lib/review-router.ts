@@ -1,14 +1,14 @@
 import { stat } from 'node:fs/promises';
 import { initTRPC } from '@trpc/server';
 import { z } from 'zod';
-import { getOrCreateCheckoutId, loadTranscriptsDirs } from './config';
+import { getOrCreateCheckoutId, loadTranscriptsDirs, statePaths } from './config';
 import { resolveProjectConsent } from './convex';
 import { errors, hive } from './messages';
+import { withPidLock } from './pid-lock';
 import { buildSessionMeta } from './session-format';
 import { excludeSessionChecked, findAgentsForParent } from './session-state';
 import { getSnoozeUntil, setSnooze } from './snooze';
 import { parseDuration } from './time-filter';
-import { withUploadLock } from './upload-lock';
 import {
   discoverWorkflowRuns,
   loadConsentWindows,
@@ -236,7 +236,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
 
         const consentWindows = await loadConsentWindows(ids);
         // The same lock as `hive upload send`, so this never runs alongside the scheduled upload.
-        const result = await withUploadLock(stateDir, () =>
+        const result = await withPidLock(statePaths(stateDir).uploadLock, () =>
           uploadOneSession({
             session,
             state,

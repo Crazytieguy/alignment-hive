@@ -1,18 +1,45 @@
-import { createReadStream } from 'node:fs';
-import { readFile, readdir, stat } from 'node:fs/promises';
-import { createInterface } from 'node:readline';
+import { open, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { findInFileHead } from './transcript-discovery';
 
-/** Count non-empty lines in a file by streaming (no parsing) */
+const NEWLINE = 0x0a;
+const COUNT_CHUNK_BYTES = 1 << 20;
+
+/** The ASCII bytes String.prototype.trim strips: space, and \t through \r (\n included). */
+const isBlankByte = (b: number): boolean => b === 0x20 || (b >= 0x09 && b <= 0x0d);
+
+/**
+ * Count non-blank lines by scanning raw bytes: no decoding and no per-line strings, so memory
+ * stays at one chunk however large the transcript.
+ */
 export async function countRawLines(filePath: string): Promise<number> {
-  const stream = createReadStream(filePath, { encoding: 'utf-8' });
-  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  const handle = await open(filePath, 'r');
+  const buf = Buffer.allocUnsafe(COUNT_CHUNK_BYTES);
   let count = 0;
-  for await (const line of rl) {
-    if (line.trim()) count++;
+  let lineHasContent = false;
+  try {
+    for (;;) {
+      const { bytesRead } = await handle.read(buf, 0, buf.length, null);
+      if (bytesRead === 0) break;
+      const bytes = buf.subarray(0, bytesRead);
+      let i = 0;
+      while (i < bytesRead) {
+        if (!lineHasContent) {
+          if (!isBlankByte(bytes[i])) lineHasContent = true;
+          i++;
+          continue;
+        }
+        const nl = bytes.indexOf(NEWLINE, i);
+        if (nl === -1) break;
+        count++;
+        lineHasContent = false;
+        i = nl + 1;
+      }
+    }
+  } finally {
+    await handle.close();
   }
-  return count;
+  return lineHasContent ? count + 1 : count;
 }
 
 /** parentSessionId of a flat agent file: the sessionId field of its first line. */

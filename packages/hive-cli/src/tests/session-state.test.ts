@@ -108,7 +108,7 @@ describe('discoverSessions', () => {
     expect(ids).toContain('agent-user-only');
   });
 
-  test('a cache finds the same sessions and keeps a verdict until the file changes', async () => {
+  test('a cache finds the same sessions and keeps what it read until the file changes', async () => {
     const cache: DiscoveryCache = new Map();
     const ids = async () =>
       (await discoverSessions([transcriptsDir], projectRepo, cache)).map((s) => s.sessionId).sort();
@@ -116,9 +116,9 @@ describe('discoverSessions', () => {
     expect(await ids()).toEqual(uncached);
     expect(await ids()).toEqual(uncached);
 
-    // A cached verdict stands while the mtime matches.
+    // What was read stands while the mtime matches.
     const own = join(transcriptsDir, 'own-session.jsonl');
-    cache.set(own, { ...cache.get(own)!, keep: false });
+    cache.set(own, { ...cache.get(own)!, hasAssistant: false });
     expect(await ids()).not.toContain('own-session');
 
     // A changed file is read again.
