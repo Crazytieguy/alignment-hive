@@ -1,14 +1,14 @@
 ---
-name: choosing-models
-description: This skill should be read before delegating work to subagents or Workflow agents, unless the user has already named a model. Covers the strengths, cost dynamics, and effort levels of the available models — Claude, GPT, and optionally Grok families — and the mechanics of routing to non-Claude models through model-router.
+name: delegating-to-models
+description: This skill should be read before delegating work to subagents or Workflow agents. Covers picking a model from the Claude, GPT, and optionally Grok families (strengths, cost dynamics), setting the effort level, prompt hygiene per family, combining independent runs, and the mechanics of routing to non-Claude models through model-router.
 ---
 
-# Choosing models for delegation
+# Delegating to models
 
 model-router makes GPT models available as native Claude Code subagents
 alongside Claude models. This skill gives high-level strengths, weaknesses,
-and cost dynamics; weigh them against the task at hand rather than following
-rules mechanically.
+cost dynamics and effort guidance; weigh them against the task at hand
+rather than following rules mechanically.
 
 ## Cost dynamics
 
@@ -58,6 +58,23 @@ auto mode adds its own classifier pass over tool calls for whichever
 model is running, cutting the risk below these numbers for all of them.
 Relevant when a task involves browsing untrusted websites or processing
 untrusted content.
+
+## Effort
+
+Anthropic's [Spending your effort](https://claude.dev/blog/spending-your-effort/)
+(Sep 2026) measured Claude models only (Opus 5.5, Fable 5.1); GPT and other
+models may respond differently. Effort mostly sets how much verification
+and independent judgement the model applies. Higher effort pays off most on
+tasks with hidden edge cases (security, hardware, bug fixes in existing
+code, numerical work), where the model reproduces before fixing, writes
+adversarial tests and checks against reference implementations. It does
+not fix a wrong reading of the task; a clearer spec does, and a detailed
+spec also narrows the gap between levels. Unattended runs gain more from
+higher effort than ones where a user can answer questions. The post's
+guide: low for quick drafts to iterate on, medium for most feature work,
+high where verification matters, max for fully autonomous hard problems
+(the per-model notes below qualify this). Low to max cost about 3x the
+tokens, and wall-clock time grows from minutes to over an hour.
 
 ## Model notes
 
@@ -162,10 +179,12 @@ is no strengths/weaknesses guidance for them yet.
 
 ## Mechanics
 
-The Agent tool's `model` parameter does not accept GPT models. Use the
-shipped agents instead — `gpt-6-astra(low)`, `gpt-6-astra(medium)`,
-`gpt-6-astra(high)`, `gpt-6.1-sol(medium)`, `gpt-6.1-sol(high)`,
-`gpt-6-luna(high)` — or, for any other model/effort combination,
-Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. With the
-Grok family configured, `{model: 'grok-4.7', effort: 'high'}` works the
-same way.
+The Agent tool's `model` parameter only accepts Claude models. For GPT,
+use the shipped agents — `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` — or
+Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. With
+the Grok family configured, `grok-4.7` agents and
+`{model: 'grok-4.7', effort: 'high'}` work the same way.
+
+Consider setting the Agent tool's `effort` parameter when delegating,
+Claude models included. Without it, the GPT, Grok and open-weights agents
+run at this session's effort level.

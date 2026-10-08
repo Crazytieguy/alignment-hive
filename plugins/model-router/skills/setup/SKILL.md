@@ -132,7 +132,7 @@ here works until the binary resolves.
    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-6 Astra"
    ```
 6. Tell the user to restart Claude Code sessions (settings are read at
-   startup), and that the GPT agents and `choosing-models` skill are now
+   startup), and that the GPT agents and `delegating-to-models` skill are now
    available.
    Offer to run smoke tests. A fresh `claude -p` reads the step 5 settings
    at its own startup, so they work without restarting the current session.
@@ -147,8 +147,10 @@ here works until the binary resolves.
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) Grok models
    under their own xAI subscription login (no API key) — if yes, read
-   `references/grok.md` and follow it; (c) agents for other model x effort
-   combinations — if yes, follow `references/custom-agents.md`.
+   `references/grok.md` and follow it. Agents from an earlier setup named
+   `<routing-id>(<effort>)` (in `~/.claude/agents/` or the project's
+   `.claude/agents/`): offer to replace them following
+   `references/custom-agents.md`.
 
 ## Repair
 

@@ -414,10 +414,8 @@ fn upstream_checks(
 /// change.
 ///
 /// Split from the transport so every outcome is unit-testable.
-/// Routing IDs the plugin's shipped agents name in their `model:` line
-/// (`gpt-6-astra(low|medium|high)`, `gpt-6.1-sol(medium|high)`, the two
-/// reviewers, `gpt-6-luna(high)`). Keep in step with
-/// `plugins/model-router/agents/`.
+/// Routing IDs the plugin's shipped agents (the two reviewers included)
+/// name in their `model:` line. Keep in step with `plugins/model-router/agents/`.
 const SHIPPED_AGENT_ROUTES: [&str; 3] = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"];
 
 /// A hand-written `[[models]]` block replaces the built-in routes wholesale,

@@ -49,14 +49,10 @@ agents that predate 4.7 keep working.
    (`"ANTHROPIC_CUSTOM_MODEL_OPTION": "grok-4.7"`,
    `"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Grok 4.7"`) and GPT stays off
    the picker there. Subagents for both families keep working either way.
-6. Create agents so Claude can delegate — use the template in
-   `references/custom-agents.md`. Recommended set: `grok-4.7(high)` (xAI's
-   own default effort) and optionally `grok-4.7(medium)` for faster runs
-   (`model: grok-4.7`, `effort: high`/`medium`). Grok agents or a picker
-   row from an earlier setup that name `grok-4.6`: offer to move them to
-   `grok-4.7`. Effort comes from agent
-   frontmatter exactly like the GPT agents — the router translates it for
-   xAI.
+6. Create a `grok-4.7` agent so Claude can delegate, from the template in
+   `references/custom-agents.md`. Grok agents or a picker row from an
+   earlier setup that name `grok-4.6`: offer to move them to `grok-4.7`. Effort works exactly
+   like the GPT agents — the router translates it for xAI.
 7. Smoke-test with a direct request through the gateway:
    ```
    curl -s <base_url from doctor --json>/v1/messages \

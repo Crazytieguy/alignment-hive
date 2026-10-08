@@ -21,7 +21,7 @@ pub fn identity_text(display_name: &str) -> String {
 /// Appended to the identity block on subagent conversations only. GPT
 /// models follow the harness's delegation-encouraging tool and skill copy
 /// literally, so without a counterweight a subagent re-delegates (observed:
-/// read choosing-models, then fan out) or loads skills whose trigger wording
+/// read the delegation skill, then fan out) or loads skills whose trigger wording
 /// merely brushes the task (observed: the bundled claude-api skill's ~175K
 /// payload, fatal at a 258400-token window); no harness layer tells it not
 /// to.
