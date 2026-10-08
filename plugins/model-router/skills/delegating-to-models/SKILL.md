@@ -47,10 +47,10 @@ Claude and GPT models have de-correlated strengths and weaknesses: the
 mistakes one family makes, the other tends to catch. For best results, have
 a Claude model review GPT work and vice versa.
 
-Claude models are much harder to prompt-inject than GPT models, and the
-gap is between families rather than within them: on the Gray Swan
-indirect-injection benchmark Opus 5.5 and Fable 5.1 tie near 1% attack
-success over 15 attempts, GPT-6 Astra sits at 8.5% (down from 27% for
+The larger Claude models are much harder to prompt-inject than GPT
+models: on the Gray Swan indirect-injection benchmark Opus 5.5 and Fable
+5.1 tie near 1% attack success over 15 attempts, Sonnet 5.5 sits at
+3.4%, Haiku 5.5 at 7.1%, GPT-6 Astra at 8.5% (down from 27% for
 GPT-5.6), and OpenAI reports Sol and Luna improved over GPT-5.6 without
 publishing a comparable number. A Claude session that a safety
 classifier drops to Opus 4.8 loses much of that robustness. Claude Code's
@@ -123,13 +123,24 @@ tokens, and wall-clock time grows from minutes to over an hour.
   intelligence: reading piles of documents, extraction, triage,
   mechanical transforms. A twentieth of Sol's token price. Effort: high,
   OpenAI's suggested starting point.
-- **Sonnet 5.5** — half of Opus 5.5's token price ($2/$10), but rarely
-  cheaper in real work: cache reads cost the same on both ($0.20/MTok)
-  and dominate long sessions, and Opus 5.5 appears to use fewer tokens
-  per task. It can pay off on self-contained subtasks with few turns and
-  a lot of uncached input or output. Effort: medium or high,
+- **Sonnet 5.5** — half of Opus 5.5's token price ($2/$10, cache reads
+  included), but Opus 5.5 uses fewer tokens per task, so the per-task
+  gap is much smaller than the price gap. Effort: medium or high,
   the other efforts are rarely optimal.
-- **Haiku 4.5** — obsolete: other models beat it on cost-efficiency.
+- **Haiku 5.5** — the Claude counterpart to gpt-6-luna. It looks somewhat
+  more capable than Luna (Artificial Analysis's index puts it ahead at
+  every effort level) and somewhat more expensive in practice: both list
+  at $0.10/$0.50, but Haiku 5.5 spends about two to three times Luna's
+  tokens at the same effort, and token counts aren't directly comparable
+  across the two tokenizers. Once a prompt passes 100k tokens, the whole
+  request is billed at 5x (input, output and cache reads), and Claude
+  Code doesn't compact anywhere near that point, so it is cheapest on
+  short tasks. It draws on the Claude limit, so when Opus or Fable carry
+  most of the work, Luna usually spends the less strained subscription. For truly high-volume use, benchmark the task
+  against Luna with larger models such as Opus 5.5 and GPT-6.1 Sol as
+  judges. Anthropic's prompting guide says that at low and medium effort
+  it sometimes reports a change as done without running a check, so say
+  what verification is expected.
 
 This guidance draws on broad usage reports; for a recurring use case of
 your own, a small blind comparison on the actual task — a Workflow with

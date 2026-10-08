@@ -48,8 +48,15 @@ publish no vendor safety framework.
   classifier.
   [Opus card, 2026-05-28](https://www-cdn.anthropic.com/0b4915911bb0d19eca5b5ee635c80fef830a37ea.pdf);
   [Sonnet card, 2026-06-30](https://www.anthropic.com/claude-sonnet-5-system-card).
-- **Haiku 4.5** — ASL-2; lightest safeguards of the family.
-  [Card, 2025-10](https://assets.anthropic.com/m/99128ddd009bdcb/original/Claude-Haiku-4-5-System-Card.pdf).
+- **Haiku 5.5** — biology classifiers match Opus 5's and Sonnet 5's
+  (harmful misuse only, not Opus 5.5's research-biology ones); cyber
+  classifiers are narrower than on the larger models (looser than
+  Sonnet 5.5's; penetration testing still blocked);
+  frontier-LLM-development and weapons classifiers as well. There is no
+  fallback model: a blocked request ends in a refusal. It crosses no new
+  RSP thresholds.
+  [Anthropic, 2026-10-07](https://www.anthropic.com/claude-haiku-5-5);
+  [system card, 2026-10-07](https://www.anthropic.com/claude-haiku-5-5-system-card).
 - **GPT-6 Astra (via Codex)** — the first model at "Critical" cyber
   capability under the Preparedness Framework, and the strictest GPT
   deployment: the released model refuses proof-of-concept exploit
