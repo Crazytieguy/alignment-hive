@@ -22,7 +22,7 @@
   "dispositions": {},
   "history": {},
   "renderedAt": "2026-09-16T00:00:00.000Z",
-  "rendererVersion": "0.2.2",
+  "rendererVersion": "0.2.3",
   "coverage": {
     "lines": 2,
     "changedLines": 2,
