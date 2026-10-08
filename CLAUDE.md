@@ -9,3 +9,7 @@ From the repo root: `bun run --filter '*' <script>` for all workspaces, or `bun 
 ## Codebase Exploration
 
 Always use `precis` for codebase exploration: `precis .` for an overview, `precis <dir>` to zoom in.
+
+## Versions
+
+Don't bump versions (`plugin.json`, `Cargo.toml`, `package.json`, `cli-version`, `binary-version`) as part of a change. The user releases with `/release-plugins`, which bumps everything changed since its last release.

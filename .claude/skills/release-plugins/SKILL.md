@@ -1,66 +1,70 @@
 ---
 name: release-plugins
-description: Versioning and releasing this repo's plugins and their binaries. Use when changing anything under plugins/ or crates/, registering a new plugin, or troubleshooting a release.
+description: Bump versions for everything changed since its last release, push main, and watch the release CI.
+disable-model-invocation: true
 ---
 
-# Releasing a plugin
+# Releasing plugins
 
-Ask before releasing.
+The user invoking this skill is the go-ahead to bump, commit, and push `main`
+(and push a remote-kernels tag). Code changes land without version bumps; all
+bumping happens here.
 
-## Registering a plugin
+## 1. Find what changed
 
-Add it to `.claude-plugin/marketplace.json` with a `name` matching its
-`plugins/` folder. The platform-specific archive entries are the exception:
-their names carry a target triple and their urls are fixed, so they are
-written once (see Design notes).
+Release from the main checkout. Pull first (`git pull --ff-only`) so local
+`main` includes everything on `origin/main`, then run
+`bash .claude/skills/release-plugins/scripts/unreleased.sh` for each
+component's commits since its version last changed.
 
-## Versions
+Skip changes that don't reach users: tests, lint fixes, and `CLAUDE.md`
+files. Whatever else is listed is a release.
 
-| File | Bump when |
+## 2. Pick versions
+
+Patch bumps by default. If a change might warrant more than a patch (a
+breaking change, or a new feature in an otherwise stable component), ask the
+user before bumping; otherwise just proceed.
+
+| Component changed | Bump |
 |---|---|
-| `plugins/<name>/.claude-plugin/plugin.json` | any plugin content change — the auto-updater compares these |
-| `plugins/hive/cli-version` | alongside `packages/hive-cli/package.json` |
-| `plugins/<name>/binary-version` | a new crate binary is released; must equal the crate's `Cargo.toml` version |
+| `plugins/<name>/` | its `.claude-plugin/plugin.json` (the auto-updater compares these) |
+| `crates/<name>/` | its `Cargo.toml`, `plugins/<name>/binary-version` to match, and that plugin's `plugin.json`; run `cargo check -p <name>` so `Cargo.lock` follows |
+| hive-cli | `packages/hive-cli/package.json`, `plugins/hive/cli-version` to match, and the hive `plugin.json` |
 
-Patch bumps unless the user asks for a minor.
+## 3. Commit, push, watch
 
-For model-router, CI enforces that `binary-version` and
-`crates/model-router/Cargo.toml` match, and a push to `main` that changes
-`binary-version` auto-tags and releases the binary. remote-kernels releases its
-binary from a manual tag push — see `crates/remote-kernels/CLAUDE.md`.
+Commit only the version files, titled with what ships (e.g. `release: hive
+0.6.6, model-router 0.1.37 (binary 0.1.25)`), and push `main`. For a
+remote-kernels binary, also `git tag remote-kernels-vX.Y.Z && git push origin
+remote-kernels-vX.Y.Z`.
 
-## Plain plugins
+Then watch every run the push triggered (`gh run list --commit <sha>`, `gh run
+watch <id>`) until it finishes, and report what was released. If a run
+fails, see Troubleshooting.
 
-Bump `plugin.json` and commit. The marketplace entry is a path source, so
-landing on `main` is the release.
+- Plain plugins are path sources, so the push itself is the release.
+- A model-router `binary-version` change auto-tags and releases the binary; a
+  remote-kernels binary releases from its tag. Either binary workflow then calls
+  *Plugin archives*.
+- A content change to model-router or remote-kernels triggers *Plugin
+  archives*, which rebuilds the per-platform zips.
+- A hive-cli version change triggers *Release hive-cli*.
 
 ## Binary-shipping plugins (model-router, remote-kernels)
 
 These are also published as `archive` marketplace entries: one zip per
 platform, with that platform's released binary bundled inside, so a plugin
 update and its binary install as one artifact. `plugins/<name>/` stays the
-single source.
+single source. CI enforces that model-router's `binary-version` matches its
+`Cargo.toml`.
 
-**Content change:** bump `plugin.json`, commit, land. CI rebuilds the zips and
-replaces the release assets.
-
-**Binary change:** bump the crate's `Cargo.toml`, `binary-version` and
-`plugin.json` together, commit, land. For model-router that push releases the
-binary; remote-kernels also needs its tag pushed (see above). The binary release
-workflow calls the plugin-archives workflow after it has cut the binary, which
-then publishes the zips around it.
-
-**Rollback:** revert the commit and land. The build is byte-deterministic, so
+**Rollback:** revert the commit and push. The build is byte-deterministic, so
 CI reproduces the previous zips exactly and puts them back; machines on the
 bad version move back on their next update pass.
 
-## Commands
-
-`python3 scripts/plugin-archives.py <command>`:
-
-- `build` — build the zips into `dist/plugin-archives/` (git-ignored) to
-  inspect them
-- `publish` — build and upload; CI only
+`python3 scripts/plugin-archives.py build` builds the zips into
+`dist/plugin-archives/` (git-ignored) to inspect them; `publish` is CI only.
 
 ## Troubleshooting
 

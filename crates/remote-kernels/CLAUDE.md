@@ -11,14 +11,3 @@ suite (`#[ignore]`d, needs `uv`):
 ```sh
 cargo test --features fake-runtime --test fake_e2e -- --ignored --test-threads=1
 ```
-
-## Publishing
-
-Don't publish or release without asking.
-
-1. Bump version in `Cargo.toml`
-2. Set `plugins/remote-kernels/binary-version` to match (the bootstrap script uses this to resolve the binary), and bump `plugins/remote-kernels/.claude-plugin/plugin.json` (plugin content changed)
-3. Update README.md if needed
-4. Commit the version bumps and `Cargo.lock`
-5. `git tag remote-kernels-vX.Y.Z && git push origin remote-kernels-vX.Y.Z`
-6. GitHub Actions builds binaries and creates a GitHub Release automatically, then publishes the platform-specific plugin archives around it

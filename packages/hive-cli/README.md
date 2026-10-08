@@ -30,7 +30,7 @@ See [the authoring reference](../../plugins/debrief/references/authoring.md) for
 
 ## Version Sync
 
-For a release, bump `plugins/hive/cli-version` together with `package.json` (`bootstrap.sh` downloads the binary for that version), then bump the plugin version so the marketplace ships the new file. The retrieval skill injects `hive local --help` whole, so a change to that page is a change to the skill.
+`plugins/hive/cli-version` must equal `package.json`'s version: `bootstrap.sh` downloads the binary for that version. `/release-plugins` bumps both, along with the hive plugin. The retrieval skill injects `hive local --help` whole, so a change to that page is a change to the skill.
 
 ## Dev Binary
 
