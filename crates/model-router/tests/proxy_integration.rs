@@ -2404,6 +2404,50 @@ async fn gpt_turn_drops_tool_schema_patterns_the_codex_validator_rejects() {
     assert_eq!(forwarded[0].body, claude_body.as_bytes());
 }
 
+/// A GPT compaction request keeps its tools but must be answered in text:
+/// Claude Code's compaction header turns tool use off, and only there.
+#[tokio::test]
+async fn gpt_compaction_request_is_answered_without_tools() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let app = model_router::proxy::app(websearch_config(cpa_address))
+        .await
+        .unwrap();
+    let body = serde_json::json!({
+        "model": "claude-gpt-test", "max_tokens": 16, "tools": artifact_tools(),
+        "messages": [{"role": "user", "content": "Summarize the conversation."}],
+    })
+    .to_string();
+    for compaction in [true, false] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("content-type", "application/json");
+        if compaction {
+            request = request.header("x-claude-code-compaction", "auto");
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body.clone())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let forwarded = cpa_observed.lock().await;
+    let documents: Vec<serde_json::Value> = forwarded
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(
+        documents[0]["tool_choice"],
+        serde_json::json!({"type": "none"})
+    );
+    assert_eq!(documents[0]["tools"].as_array().unwrap().len(), 2);
+    assert!(documents[1].get("tool_choice").is_none());
+}
+
 /// A forced WebSearch sub-call from a GPT-origin agent, arriving on the
 /// Claude branch with the caller's full tool set, is forwarded to the GPT
 /// upstream by the legacy path when alpha search fails — with the same

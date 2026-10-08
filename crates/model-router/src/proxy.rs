@@ -483,13 +483,32 @@ async fn gpt_origin_on_claude_branch(
     forward_to_anthropic(state, parts, body, capture, None).await
 }
 
+/// The gateway hint Claude Code puts on its compaction requests (sent with
+/// `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` or the first-party base-URL flag).
+const COMPACTION_HEADER: &str = "x-claude-code-compaction";
+
 /// The DOM-level rewrites every GPT-branch turn gets, in one parse: the
-/// identity system block ([`crate::identity`]) and the removal of tool-schema
-/// patterns the Codex validator cannot compile ([`crate::tool_schema`]).
-fn rewrite_gpt_body(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8>> {
+/// identity system block ([`crate::identity`]), the removal of tool-schema
+/// patterns the Codex validator cannot compile ([`crate::tool_schema`]), and
+/// on a compaction request a text-only reply.
+///
+/// Compaction is a one-turn fork that keeps the conversation's tools (for the
+/// prompt cache) and asks for a text summary. A GPT subagent answers it by
+/// calling its hand-back tool instead, which Claude Code reads as an empty
+/// summary, so the compaction fails and the agent runs on to the hard limit.
+/// `tool_choice: none` keeps the tools declared and forces text.
+fn rewrite_gpt_body(body: &[u8], display_name: &str, compaction: bool) -> anyhow::Result<Vec<u8>> {
     let mut document: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
     crate::identity::inject_identity_into(&mut document, display_name)?;
+    if compaction
+        && document
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| !tools.is_empty())
+    {
+        document["tool_choice"] = serde_json::json!({"type": "none"});
+    }
     let affected = crate::tool_schema::drop_unportable_patterns(&mut document);
     if !affected.is_empty() {
         tracing::debug!(
@@ -525,7 +544,8 @@ async fn gpt_response(
             .await;
         }
     };
-    let rewritten = match rewrite_gpt_body(&rewritten, &route.display_name) {
+    let compaction = parts.headers.contains_key(COMPACTION_HEADER);
+    let rewritten = match rewrite_gpt_body(&rewritten, &route.display_name, compaction) {
         Ok(body) => Bytes::from(body),
         Err(error) => {
             tracing::warn!(%error, "failed to rewrite routed request body");
