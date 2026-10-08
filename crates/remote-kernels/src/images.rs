@@ -122,6 +122,6 @@ mod tests {
             marker.starts_with("[image not shown: could not be decoded"),
             "{marker}"
         );
-        assert!(images.images.is_empty());
+        assert_eq!(images.images, Vec::<ReturnedImage>::new());
     }
 }

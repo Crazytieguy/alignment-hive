@@ -1685,7 +1685,7 @@ mod tests {
         // The same fragment with no WAL left behind it: those bytes are the
         // only trace the event ever existed, so spend fails closed.
         std::fs::write(&path, format!("{recovered}{fragment}")).unwrap();
-        assert!(guard.pending_for(&path).is_empty());
+        assert_eq!(guard.pending_for(&path), Vec::<String>::new());
         let (_, corruption) = read_events_partial(&path, &guard.pending_for(&path));
         assert!(
             corruption.is_some(),

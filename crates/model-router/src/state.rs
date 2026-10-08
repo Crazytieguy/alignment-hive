@@ -549,7 +549,7 @@ pub(crate) mod tests {
         let absent = dir.path().join("nope");
         assert!(find_auth(&absent, CODEX_AUTH_PREFIX).is_none());
         assert!(find_auth(&absent, GROK_AUTH_PREFIX).is_none());
-        assert!(harden_auth_files(&absent).unwrap().is_empty());
+        assert_eq!(harden_auth_files(&absent).unwrap(), Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -582,7 +582,7 @@ pub(crate) mod tests {
         );
 
         // Idempotent: a second run reports nothing left to do.
-        assert!(harden_auth_files(root).unwrap().is_empty());
+        assert_eq!(harden_auth_files(root).unwrap(), Vec::<PathBuf>::new());
     }
 
     #[test]

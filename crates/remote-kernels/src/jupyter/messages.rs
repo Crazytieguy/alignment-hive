@@ -461,7 +461,7 @@ mod tests {
         ));
         let mut images = ImageCollector::default();
         assert_eq!(output.render(&mut images), "ValueError: bad\n");
-        assert!(images.images.is_empty());
+        assert_eq!(images.images, Vec::<crate::images::ReturnedImage>::new());
         assert!(output.outputs.is_empty());
         assert_eq!(output.status, ExecutionStatus::Errored);
     }
@@ -485,6 +485,6 @@ mod tests {
             svg.render(&mut images).unwrap(),
             "<Figure>\n[image/svg+xml output not shown: only PNG and JPEG images are returned]"
         );
-        assert!(images.images.is_empty());
+        assert_eq!(images.images, Vec::<crate::images::ReturnedImage>::new());
     }
 }

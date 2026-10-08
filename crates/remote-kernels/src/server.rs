@@ -7362,7 +7362,7 @@ mod tests {
         assert_eq!(value["cells"][0]["outputs"][0]["text"][0], "saved\n");
         let mut bindings = vec![binding];
         bindings.clear();
-        assert!(bindings.is_empty());
+        assert_eq!(bindings, Vec::<KernelRecord>::new());
     }
 
     #[cfg(feature = "fake-runtime")]

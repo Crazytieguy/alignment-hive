@@ -300,7 +300,10 @@ mod tests {
             }}
         }}]});
         let original = document.clone();
-        assert!(drop_unportable_patterns(&mut document).is_empty());
+        assert_eq!(
+            drop_unportable_patterns(&mut document),
+            Vec::<String>::new()
+        );
         assert_eq!(document, original);
     }
 

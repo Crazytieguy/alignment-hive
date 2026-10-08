@@ -1163,12 +1163,12 @@ mod tests {
         }
         assert_eq!(config.name, "remote-kernels");
         assert!(config.budget_cap.is_none());
-        assert!(config.inherit_env.is_empty());
+        assert_eq!(config.inherit_env, Vec::<String>::new());
         assert!(config.env_file.is_none());
         assert!(config.env.is_empty());
         assert_eq!(config.notebook_dir, PathBuf::from("remote-kernels"));
-        assert!(config.sync_include.is_empty());
-        assert!(config.startup_commands.is_empty());
+        assert_eq!(config.sync_include, Vec::<String>::new());
+        assert_eq!(config.startup_commands, Vec::<String>::new());
         assert_eq!(config.runpod.gpu_count, 1);
         assert_eq!(config.runpod.container_disk_gb, 50);
         assert_eq!(config.runpod.volume_gb, 20);
