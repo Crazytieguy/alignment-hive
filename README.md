@@ -65,7 +65,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 | [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `remote-kernels@alignment-hive` |
 | [model-router](plugins/model-router) | GPT models as native Claude Code subagents via a local gateway (experimental) | `model-router@alignment-hive` |
 | [mats](plugins/mats) | Literature review pipeline (arXiv, Semantic Scholar, LessWrong) | `mats@alignment-hive` |
-| [tldr](plugins/tldr) | One-sentence TL;DR after every long reply — pairs with `/focus` | `tldr@alignment-hive` |
+| [tldr](plugins/tldr) | Long replies collapse to a one-sentence TL;DR; `/tldr` toggles | `tldr@alignment-hive` |
 
 [Codex for Claude Code](https://github.com/Crazytieguy/codex-plugin-cc) — Codex reviews and task delegation without leaving Claude Code — is maintained in a separate repo.
 

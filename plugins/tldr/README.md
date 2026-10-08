@@ -1,9 +1,11 @@
 # tldr
 
-One-sentence TL;DR after every long reply — pairs with `/focus` to collapse messages to their TL;DRs.
+Long replies collapse to a one-sentence TL;DR.
 
 ## What This Plugin Does
 
-**TL;DR after long replies** — A Stop hook asks Claude to follow up any multi-line reply over ~100 words with a single plain sentence. The full reply is untouched; the TL;DR arrives as a separate short message right after it.
+**Collapses long replies** — Any reply text over ~100 words is drawn as a one-sentence TL;DR that Haiku writes from that text alone. `[ more ]` under it shows the full text, `[ less ]` collapses it again.
 
-**Pairs with `/focus`** — Claude Code's focus view collapses each turn down to its final message — which, with this plugin, is the TL;DR. Toggle `/focus` to switch between skimming one-liners and reading full replies. Focus view is only available in the fullscreen renderer (`/tui fullscreen`).
+**`/tldr` toggles it** — `/tldr` turns collapsing off or back on, and the choice is kept across sessions. `/tldr more` and `/tldr less` expand or collapse the newest reply from the keyboard.
+
+Only the display changes: Claude still writes and reads its full replies.

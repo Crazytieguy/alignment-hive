@@ -1,5 +1,6 @@
 {
   "name": "tldr",
-  "version": "0.1.4",
-  "description": "One-sentence TL;DR after every long reply — pairs with /focus to collapse messages to their TL;DRs."
+  "version": "0.1.5",
+  "description": "Collapses long replies to a one-sentence TL;DR: [ more ] expands one, /tldr turns it off.",
+  "types": "./types/index.d.ts"
 }

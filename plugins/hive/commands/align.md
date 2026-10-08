@@ -81,7 +81,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
   - `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code; the stable alternative
   - `model-router@alignment-hive` — Recommended, experimental. GPT models as regular Claude Code subagents (parallel, in workflows), plus optional Grok and open-weights models. Remote Control doesn't work while it's installed; if you use it, pick Codex
 - **Session debriefs**: `debrief@alignment-hive` — In beta. `/debrief:debrief` turns a finished session into a page of what was done, how it was checked and what needs your call; needs the hive CLI
-- **Reply TL;DRs**: `tldr@alignment-hive` — One-sentence TL;DR after every long reply; /focus then collapses messages to their TL;DRs — **Always recommend**
+- **Reply TL;DRs**: `tldr@alignment-hive` — Long replies collapse to a one-sentence TL;DR, [ more ] expands one; /tldr turns it off — **Always recommend**
 - **Hidden-payload stripping**: `agent-sanitizer@agent-sanitizer` — Catches prompt injections hidden inside text that looks harmless: invisible characters, hidden HTML and look-alike glyphs are stripped before Claude reads them — **Always recommend**
 
 #### After installing agent-sanitizer

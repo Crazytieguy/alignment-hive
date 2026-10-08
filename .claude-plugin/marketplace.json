@@ -114,7 +114,7 @@
     {
       "name": "tldr",
       "source": "./plugins/tldr",
-      "description": "One-sentence TL;DR after every long reply — pairs with /focus to collapse messages to their TL;DRs."
+      "description": "Collapses long replies to a one-sentence TL;DR: [ more ] expands one, /tldr turns it off."
     }
   ]
 }
