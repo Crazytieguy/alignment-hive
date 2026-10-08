@@ -463,7 +463,7 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
         wanted
             .entry(route.family.as_str())
             .or_default()
-            .insert(route.upstream_model.as_str());
+            .insert(route.split_upstream_model().0);
     }
     if wanted.is_empty() {
         return Check {

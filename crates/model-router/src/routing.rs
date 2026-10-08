@@ -52,10 +52,11 @@ pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
 /// it on the xAI path, so the suffix is the only channel that reaches xAI
 /// (measured; see `docs/experiments.md`). The value passes through
 /// unvalidated on purpose: the child owns the per-model clamping table, and
-/// a copy here would drift.
+/// a copy here would drift. A route whose `upstream-model` already pins an
+/// effort is forwarded as written: a second suffix would break the grammar.
 #[must_use]
 pub fn effort_qualified_model<'a>(route: &'a ModelRoute, body: &[u8]) -> Cow<'a, str> {
-    if route.family != ModelFamily::Grok {
+    if route.family != ModelFamily::Grok || route.split_upstream_model().1.is_some() {
         return Cow::Borrowed(&route.upstream_model);
     }
     match requested_effort(body) {
@@ -257,6 +258,20 @@ mod tests {
                 "effort {effort}"
             );
         }
+    }
+
+    #[test]
+    fn a_grok_route_that_pins_an_effort_keeps_it() {
+        // A second suffix (`grok-4.5(low)(high)`) would break the grammar;
+        // the hand-written pin wins over the request.
+        let pinned = route(ModelFamily::Grok, "grok-4.5(low)");
+        let body = br#"{"model":"r","output_config":{"effort":"high"},"messages":[]}"#;
+        assert_eq!(effort_qualified_model(&pinned, body), "grok-4.5(low)");
+        assert_eq!(pinned.split_upstream_model(), ("grok-4.5", Some("low")));
+        assert_eq!(
+            route(ModelFamily::Grok, "grok-4.5").split_upstream_model(),
+            ("grok-4.5", None)
+        );
     }
 
     #[test]

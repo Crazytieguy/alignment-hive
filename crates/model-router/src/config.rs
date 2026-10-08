@@ -55,7 +55,20 @@ pub(crate) fn is_codex_native_model(upstream_model: &str) -> bool {
 }
 
 fn is_built_in(table: &[(&str, &str)], upstream_model: &str) -> bool {
-    table.iter().any(|(model, _)| *model == upstream_model)
+    let (base, _) = split_effort_suffix(upstream_model);
+    table.iter().any(|(model, _)| *model == base)
+}
+
+/// A model ID split at `CLIProxyAPI`'s `model(effort)` grammar: the base
+/// model ID, and the effort a hand-written route pinned there, if any.
+/// Model-list lookups compare the base; on Grok routes a pinned effort
+/// replaces the per-request one (`routing::effort_qualified_model`).
+#[must_use]
+pub fn split_effort_suffix(model: &str) -> (&str, Option<&str>) {
+    model
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once('('))
+        .map_or((model, None), |(base, effort)| (base, Some(effort)))
 }
 
 /// Which backend context-overflow dialect this route speaks, if the router
@@ -395,6 +408,12 @@ pub struct ModelRoute {
 }
 
 impl ModelRoute {
+    /// [`split_effort_suffix`] of this route's `upstream_model`.
+    #[must_use]
+    pub fn split_upstream_model(&self) -> (&str, Option<&str>) {
+        split_effort_suffix(&self.upstream_model)
+    }
+
     /// The scale this route's reported usage needs, if any. `None` when
     /// scaling is off or the real window already matches what the client
     /// believes (an identity scale is a no-op, not an error).
@@ -1736,6 +1755,15 @@ mod tests {
         );
         assert_eq!(overflow_dialect(&hand_written.models[0]), None);
         assert_eq!(overflow_dialect(&hand_written.models[1]), None);
+        // A pinned effort suffix still names the built-in model.
+        let pinned = parse_and_prepare(
+            "[[models]]\nrouting-id = \"g\"\nupstream-model = \"grok-4.5(low)\"\n\
+             display-name = \"G\"\nfamily = \"grok\"\n",
+        );
+        assert_eq!(
+            overflow_dialect(&pinned.models[0]),
+            Some(OverflowDialect::Xai)
+        );
     }
 
     #[test]

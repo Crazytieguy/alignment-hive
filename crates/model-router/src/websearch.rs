@@ -165,10 +165,12 @@ const ALPHA_SEARCH_DEFAULT_MODEL: &str = "gpt-6-astra";
 /// The model id an `alpha/search` payload is addressed with for a request
 /// from `upstream_model`: `/v1/alpha/search` is served by `ChatGPT`'s Codex
 /// backend and `CLIProxyAPI` forwards the body unchanged, so a non-Codex slug
-/// has no meaning to it and a known-good Codex slug stands in.
+/// has no meaning to it and a known-good Codex slug stands in. A pinned
+/// `(effort)` suffix is dropped for the same reason.
 fn alpha_search_model(upstream_model: &str) -> &str {
-    if crate::config::is_codex_native_model(upstream_model) {
-        upstream_model
+    let (base, _) = crate::config::split_effort_suffix(upstream_model);
+    if crate::config::is_codex_native_model(base) {
+        base
     } else {
         ALPHA_SEARCH_DEFAULT_MODEL
     }
@@ -1326,6 +1328,11 @@ mod tests {
         assert_eq!(
             alpha_request_body(&subcall, "openai-compat--kimi-k3")["model"],
             "gpt-6-astra"
+        );
+        // A route's pinned effort suffix is no part of the slug.
+        assert_eq!(
+            alpha_request_body(&subcall, "gpt-6.1-sol(high)")["model"],
+            "gpt-6.1-sol"
         );
         let body = alpha_request_body(&subcall, "gpt-5.6-terra");
         assert_eq!(body["model"], "gpt-5.6-terra");
