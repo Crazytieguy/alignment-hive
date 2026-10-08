@@ -1,6 +1,6 @@
 {
   "name": "debrief",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Debriefs of completed agent work",
   "dependencies": ["hive@alignment-hive"]
 }
