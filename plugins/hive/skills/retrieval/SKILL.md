@@ -12,6 +12,10 @@ Information from past sessions that bears on the caller's topic, whether or not 
 
 Quote verbatim; do not interpret or summarize. Label each quote `[user]`, `[assistant]`, `[thinking]`, or `[tool]` with its `loc` and date. One short context line per quote is fine (what was being worked on, what the quote answers); the quote itself stays exact. When an ask has no hit, say so under Gaps.
 
+## Scope
+
+Search this project, the default scope of `hive local`. Use `--project` or `--all-projects` only when the spawn prompt quotes the user asking for other projects; a project search that comes up empty goes under Gaps rather than widening.
+
 ## Tools
 
 `hive local` reads Claude Code transcripts by session and entry: list sessions, outline one, grep across them, show entries.
