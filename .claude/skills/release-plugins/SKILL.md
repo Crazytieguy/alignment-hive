@@ -39,8 +39,8 @@ Commit only the version files, titled with what ships (e.g. `release: hive
 remote-kernels binary, also `git tag remote-kernels-vX.Y.Z && git push origin
 remote-kernels-vX.Y.Z`.
 
-Then watch every run the push triggered (`gh run list --commit <sha>`, `gh run
-watch <id>`) until it finishes, and report what was released. If a run
+Then watch every run the push triggered (`gh run list --commit <full sha>`;
+a short sha matches nothing) until each finishes, and report what was released. If a run
 fails, see Troubleshooting.
 
 - Plain plugins are path sources, so the push itself is the release.
