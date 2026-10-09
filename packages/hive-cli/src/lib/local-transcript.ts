@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { readRecords, readTranscript } from '@alignment-hive/session-data';
+import { leanRecord, parseTranscript, readRecords, readTranscript } from '@alignment-hive/session-data';
 import { LocalError, warn } from '../commands/local';
 import { linkAgents } from './locators';
 import { localErrors, localNotes } from './messages';
@@ -75,7 +75,7 @@ export function loadTranscript(
   agents: ReadonlyArray<TranscriptRef>,
   print: Printer,
 ): LoadedTranscript {
-  const { records, malformed } = readRecords(bytes);
+  const { records, malformed } = readRecords(bytes, leanRecord);
   const t = readTranscript(records);
   for (const e of t.entries)
     if (e.kind === 'tool' && e.tool === 'ArtifactComments' && e.result) e.result = commentsOnly(e.result);
@@ -104,7 +104,7 @@ export function commentsOnly(result: string): string {
 
 /** How many entries a transcript has; an unreadable file is a LocalError naming it. */
 export async function entryCount(ref: TranscriptRef): Promise<number> {
-  return readTranscript(readRecords(await readBytes(ref)).records).entries.length;
+  return parseTranscript(await readBytes(ref)).entries.length;
 }
 
 /** The entries in the range; a range past the end clamps, one that starts past it is an error. */

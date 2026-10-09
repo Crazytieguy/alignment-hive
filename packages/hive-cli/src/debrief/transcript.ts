@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { hiddenBy, isHumanMessage, readRecords, readTranscript } from '@alignment-hive/session-data';
+import { hiddenBy, isHumanMessage, parseTranscript } from '@alignment-hive/session-data';
 import { claudeProjectsRoot } from '../lib/config';
 import { LocatorError, canonicalLocator, parseLocator, resolveTranscript } from '../lib/locators';
 import { review as msg } from '../lib/messages';
@@ -118,7 +118,7 @@ export class Transcripts {
   constructor(readonly session: string, private root = claudeProjectsRoot()) {}
   private read(ref: TranscriptRef): Promise<Transcript> {
     let transcript = this.parsed.get(ref.path);
-    if (!transcript) { transcript = readFile(ref.path).then((bytes) => readTranscript(readRecords(bytes).records)); this.parsed.set(ref.path, transcript); }
+    if (!transcript) { transcript = readFile(ref.path).then(parseTranscript); this.parsed.set(ref.path, transcript); }
     return transcript;
   }
   /** One lookup under the projects root per transcript a locator names, however many entries cite it. */

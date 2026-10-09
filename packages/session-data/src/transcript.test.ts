@@ -1,7 +1,9 @@
 // The numbering rule and the entry shape.
 import { describe, expect, test } from 'bun:test';
 import { hiddenBy } from './noise';
-import { parseTranscript } from './transcript';
+import { readRecords } from './records';
+import { branchFixtures, migrationFixture, overlapFixtures, plumbingFixture } from './test-fixtures';
+import { leanRecord, parseTranscript, readTranscript } from './transcript';
 
 const J = (...rs: Array<object>) => rs.map((r) => JSON.stringify(r)).join('\n') + '\n';
 let k = 0;
@@ -298,5 +300,28 @@ describe('entries', () => {
     expect(agent.entries.some((e) => e.sidechain)).toBe(false);
     const parent = parseTranscript(J(user('main', { isSidechain: false }), user('inline', { isSidechain: true })));
     expect(parent.entries.map((e) => e.sidechain)).toEqual([undefined, true]);
+  });
+});
+
+describe('leanRecord', () => {
+  test('a lean parse is the full one; only payloads readTranscript never reads go', () => {
+    const fixtures = [...branchFixtures(), ...overlapFixtures(), plumbingFixture(), migrationFixture()];
+    const contents = fixtures.flatMap((f) =>
+      f.files.filter((file) => file.path.endsWith('.jsonl')).map((file) => file.content),
+    );
+    const launch = J(
+      asst([{ type: 'tool_use', id: 'tA', name: 'Agent', input: {} }]),
+      user([{ type: 'tool_result', tool_use_id: 'tA', content: 'done' }], {
+        toolUseResult: { agentId: 'a1', runId: 'wf_1', content: [{ type: 'text', text: 'report' }] },
+      }),
+      { type: 'progress', uuid: u(), parentUuid: null, gitBranch: 'b', data: { type: 'agent_progress' } },
+      user([{ type: 'tool_result', tool_use_id: 'tB', content: 'x' }], { toolUseResult: [{ type: 'image' }] }),
+    );
+    for (const content of [...contents, launch])
+      expect(parseTranscript(content)).toEqual(readTranscript(readRecords(content).records));
+    const lean = readRecords(launch, leanRecord).records.map((r) => r.data);
+    expect(lean[1].toolUseResult).toEqual({ agentId: 'a1', runId: 'wf_1' });
+    expect(lean[2]).toEqual({ type: 'progress', uuid: lean[2].uuid, parentUuid: null, gitBranch: 'b' });
+    expect(lean[3]).not.toHaveProperty('toolUseResult');
   });
 });

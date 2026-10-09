@@ -200,6 +200,23 @@ function collectResults(records: Array<RawRecord>): Map<string, Result> {
   return results;
 }
 
+/**
+ * A record without what readTranscript never reads, for a caller that keeps only the transcript:
+ * toolUseResult but for the ids collectResults joins on, and a progress record's payload. These
+ * repeat or go beyond the conversation (command output, whole files, images again) and are most of
+ * a large file's bytes.
+ */
+export function leanRecord(r: RawRecord): RawRecord {
+  if (r.type === 'progress' && 'data' in r.data) {
+    const { data: _, ...rest } = r.data;
+    return { ...r, data: rest };
+  }
+  if (!('toolUseResult' in r.data)) return r;
+  const { toolUseResult, ...rest } = r.data;
+  const meta = obj(toolUseResult);
+  return { ...r, data: meta ? { ...rest, toolUseResult: { agentId: meta.agentId, runId: meta.runId } } : rest };
+}
+
 /** Records to entries. */
 export function readTranscript(records: Array<RawRecord>): Transcript {
   const agent = isAgentRecords(records);
@@ -311,9 +328,9 @@ export function readTranscript(records: Array<RawRecord>): Transcript {
   return t;
 }
 
-/** readRecords, then readTranscript. */
-export function parseTranscript(content: string): Transcript {
-  return readTranscript(readRecords(content).records);
+/** readRecords through leanRecord, then readTranscript. */
+export function parseTranscript(content: string | Uint8Array): Transcript {
+  return readTranscript(readRecords(content, leanRecord).records);
 }
 
 // Branch states. A transition is a user message R that does not continue from the conversational
