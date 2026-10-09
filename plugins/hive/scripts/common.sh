@@ -1,4 +1,4 @@
-# Sourced by session-start.sh, register-transcript-dir.sh and align-status.sh.
+# Sourced by session-start.sh, register-transcript-dir.sh, align-status.sh and hive.sh.
 
 # The CLI's state dir: <main worktree>/.claude/hive (resolved from the cwd), or $1/.claude/hive outside a repo.
 resolve_state_dir() {

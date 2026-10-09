@@ -7,7 +7,7 @@
     },
     "packages/hive-cli": {
       "name": "@alignment-hive/hive-cli",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "dependencies": {
         "@alignment-hive/session-data": "workspace:*",
         "@inquirer/prompts": "^7",
@@ -136,9 +136,14 @@
         "vite-tsconfig-paths": "^6.0.1",
       },
     },
+    "plugins": {
+      "name": "@alignment-hive/plugins",
+    },
   },
   "packages": {
     "@alignment-hive/hive-cli": ["@alignment-hive/hive-cli@workspace:packages/hive-cli"],
+
+    "@alignment-hive/plugins": ["@alignment-hive/plugins@workspace:plugins"],
 
     "@alignment-hive/review-app": ["@alignment-hive/review-app@workspace:packages/review-app"],
 

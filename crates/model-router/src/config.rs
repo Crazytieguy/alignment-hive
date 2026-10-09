@@ -47,6 +47,30 @@ const CODEX_NATIVE_MODELS: [(&str, &str); 7] = [
     ("gpt-5.6-luna", "GPT-5.6 Luna"),
 ];
 
+/// The shipped GPT routes, in `/model` picker order: `model-router settings
+/// models` lists them in the picker (labelled with their display names
+/// above), and the plugin's shipped agents name them in their `model:` line
+/// (keep in step with `plugins/model-router/agents/`). The other built-in GPT
+/// routes are retired: still served, off the picker.
+pub(crate) const SHIPPED_GPT_ROUTES: [&str; 3] = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"];
+
+/// [`SHIPPED_GPT_ROUTES`] with their picker labels.
+pub(crate) fn shipped_picker_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SHIPPED_GPT_ROUTES.into_iter().map(|id| {
+        let (_, label) = CODEX_NATIVE_MODELS
+            .iter()
+            .find(|(model, _)| *model == id)
+            .expect("every shipped route is a built-in GPT route");
+        (id, *label)
+    })
+}
+
+/// A built-in GPT route that is no longer shipped (see [`SHIPPED_GPT_ROUTES`]).
+#[must_use]
+pub(crate) fn is_retired_gpt_route(model: &str) -> bool {
+    is_codex_native_model(model) && !SHIPPED_GPT_ROUTES.contains(&split_effort_suffix(model).0)
+}
+
 /// Whether `upstream_model` is served by the Codex backend. Derived aliases
 /// (`openai-compat--*`) and hand-written `[[models]]` entries pointing at
 /// other backends do not qualify.

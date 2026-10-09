@@ -145,8 +145,9 @@ export async function loadSessionStateWithMigrations(
   transcriptsDirs: Array<string>,
   projectCwd: string,
   cache?: DiscoveryCache,
+  onlySession?: string,
 ): Promise<SessionState & { reopenedAt: Map<string, number> }> {
-  const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd, cache);
+  const state = await loadSessionState(stateDir, transcriptsDirs, projectCwd, cache, onlySession);
   // Run discovery reads the parent's own project dir only (empty cwd set): parsing every uploaded
   // parent for worktree cwds on each state load would be prohibitive, and worktree runs come back
   // via the discoveredRunIds recorded at upload (see needsWorkflowReopen).

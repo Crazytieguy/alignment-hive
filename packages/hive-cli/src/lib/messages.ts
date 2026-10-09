@@ -1,8 +1,5 @@
-import { colors } from './output';
 import type { GitUpstream } from '../debrief/git';
 import type { FIXED_SECTIONS } from '../debrief/parse';
-
-const { boldMagenta, dim } = colors;
 
 /** Read lazily: the dev binary loads ALIGNMENT_HIVE_URL from .env after this module is imported. */
 export function consentUrl(): string {
@@ -149,7 +146,7 @@ export const reviewDiffMessages = {
 
 export const reviewCliMessages = {
   version: (value: string) => `hive ${value}`,
-  mainUsage: 'Usage: hive <session-start|upload|heartbeat|checkout-ping|login|local|consent|debrief>',
+  mainUsage: 'Usage: hive <session-start|notices|upload|heartbeat|checkout-ping|login|local|consent|debrief>',
   usage: 'Usage: hive debrief <dir|render|capture|preflight> [--help]',
   dirUsage: 'Usage: hive debrief dir --session FULL_SESSION_ID --round N [--data DIR]',
   coverage: (c: { lines: number; changedLines: number; files: number; changedFiles: number }) => `debrief: ${c.lines} of ${c.changedLines} changed lines (${c.files} of ${c.changedFiles} files) are in files some item shows`,
@@ -464,11 +461,13 @@ export const hive = {
       '  list [--all]        List sessions not yet uploaded or excluded (--all: every session)',
       '  review              Open local web UI to review sessions',
       '  exclude <id|--all>  Exclude a session from upload',
+      "  status <id>         One session's sharing state as JSON",
       '  snooze [duration]   Pause automatic uploads (default: 24h, max: 7d)',
       '  snooze --clear      Cancel active snooze',
     ].join('\n'),
     takesNoArguments: (sub: string, arg: string): string => `${sub} takes no arguments (got "${arg}")`,
     excludeTakesOne: 'exclude takes one session id or --all',
+    statusTakesOne: 'status takes one full session id',
     sendTakesOne: 'send takes at most one session id, and not together with --delay or --sessions',
     snoozeTakesOne: 'snooze takes one duration or --clear',
     sessionExcluded: (id: string): string => `Session ${id} is excluded.`,
@@ -484,17 +483,33 @@ export const hive = {
     otherExcludedDuringUpload:
       'Another session was excluded during upload. Upload again to leave out its copied records.',
   },
-  sessionStart: {
-    alignNudgeNew: `run ${boldMagenta('/hive:align')} for setup recommendations`,
-    alignNudgeUpdate: `run ${boldMagenta('/hive:align')} for new recommendations`,
-    loginExpired: `login expired, run ${boldMagenta('hive login')} to reconnect`,
+  // The hive plugin's rows in the band above the prompt, from `hive notices`. Plain text: the band
+  // draws the plugin's name and the buttons.
+  notices: {
+    alignNew: 'setup recommendations available',
+    alignUpdate: 'new setup recommendations available',
+    alignAction: 'Run /hive:align',
+    loginExpired: 'login expired, so uploads have stopped',
+    loginAction: 'Copy login command',
+    uploading: (count: number, minutes: number): string =>
+      `uploading ${count} session${count === 1 ? '' : 's'} to alignment-hive in ${minutes}m`,
+    snooze: 'Snooze 24h',
+    snoozed: (count: number): string =>
+      `${count} session${count === 1 ? '' : 's'} ready to upload to alignment-hive · uploads snoozed`,
+    // The time is the soonest pending session's: each uploads when its own review window closes.
     pending: (count: number, timeStr: string): string =>
-      `${count} session${count === 1 ? '' : 's'} pending ${dim('·')} ${count === 1 ? 'uploads' : 'first uploads'} in ${timeStr}`,
-    eligibleSnoozed: (count: number): string =>
-      `${count} session${count === 1 ? '' : 's'} pending ${dim('·')} uploads snoozed`,
-    uploading: (count: number, delayMin: number): string =>
-      `uploading ${count} session${count === 1 ? '' : 's'} in ${delayMin}m`,
-    reviewHint: `${boldMagenta('$ hive upload review')} ${dim('to preview')}`,
+      count === 1
+        ? `1 session pending upload to alignment-hive · uploads in ${timeStr}`
+        : `${count} sessions pending upload to alignment-hive · next in ${timeStr}`,
+    review: 'Review sessions',
+    // The review window restarts on any change to the session, not only the person's messages.
+    thisSessionPending: 'this session uploads to alignment-hive after 24h idle',
+    thisSessionReady: 'this session is ready to upload to alignment-hive',
+    thisSession: (state: 'excluded' | 'uploaded' | 'partial', hadPriorUpload: boolean): string =>
+      `this session: ${state === 'partial' ? 'partly uploaded' : state}${state === 'excluded' && hadPriorUpload ? ' (an earlier copy stays shared)' : ''}`,
+    keepPrivate: 'Keep private',
+    usage: 'Usage: hive notices <session-id> [--session-only]',
+    takesOne: 'notices takes one full session id',
   },
   checkoutPing: {
     timedOut: (seconds: number): string => `checkout ping gave up after ${seconds}s`,

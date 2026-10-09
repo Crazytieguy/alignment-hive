@@ -1,0 +1,8 @@
+{
+  "name": "@alignment-hive/plugins",
+  "private": true,
+  "scripts": {
+    "test": "bun test ./notice-band.test.ts ./debrief/hooks ./hive/hooks",
+    "sync-notice-band": "bash ./sync-notice-band.sh"
+  }
+}

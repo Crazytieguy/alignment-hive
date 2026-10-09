@@ -1,67 +1,19 @@
-import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
-import { formatRemaining } from '@alignment-hive/session-data';
-import { getAuthData } from '../lib/auth';
-import {
-  ensureStateDir,
-  getStateDir,
-  isSharingDisabledLocally,
-  loadTranscriptsDirs,
-  readStateFile,
-  readTimestamp,
-  statePaths,
-} from '../lib/config';
-import { resolveProjectConsent } from '../lib/convex';
+import { ensureStateDir, getStateDir, statePaths } from '../lib/config';
 import { readHookInput } from '../lib/hook-input';
-import { hive } from '../lib/messages';
 import { isRegistryBackfillDone } from '../lib/registry-backfill';
-import { colors } from '../lib/output';
-import { computeSessionStatus, withDiscoveryCache } from '../lib/session-state';
-import { getSnoozeUntil } from '../lib/snooze';
+import { UPLOAD_DELAY_MINUTES, isUploadScheduled, loadSharingSnapshot, summarizeUploads } from '../lib/sharing';
 import { spawnBackgroundCommand } from '../lib/spawn';
-import { loadConsentWindows, loadSessionStateWithMigrations } from '../lib/upload-session';
-import type { ProjectIds } from '../lib/config';
-import type { HookInput } from '../lib/hook-input';
 
-const UPLOAD_SCHEDULE_COOLDOWN_MS = 15 * 60 * 1000;
-const UPLOAD_DELAY_MINUTES = 10;
-
-async function checkUploadScheduled(stateDir: string): Promise<boolean> {
-  const scheduledAt = await readTimestamp(statePaths(stateDir).uploadScheduled);
-  return scheduledAt !== null && Date.now() - scheduledAt < UPLOAD_SCHEDULE_COOLDOWN_MS;
-}
-
-function emitHookMessages(messages: Array<string>, hookInput: HookInput): void {
-  if (messages.length === 0) return;
-  // Claude Code prefixes the first line with "<Event>[:<source>] says: "; pad continuation
-  // lines past that and past our own "hive: " so the content column lines up.
-  const prefix = `${hookInput.hookEventName ?? 'SessionStart'}${hookInput.source ? `:${hookInput.source}` : ''} says: hive: `;
-  const pad = ' '.repeat(prefix.length);
-  const text = messages.map((m, i) => (i === 0 ? `${colors.boldBlue('hive:')} ${m}` : `${pad}${m}`)).join('\n');
-  console.log(JSON.stringify({ systemMessage: text }));
-}
-
-/** Nudge to run /hive:align on first run and whenever the plugin's minor version changes. */
-async function checkAlignVersion(stateDir: string): Promise<string | null> {
-  const pluginVersion = process.env.HIVE_PLUGIN_VERSION;
-  if (!pluginVersion) return null;
-
-  const currentVersion = await readStateFile(statePaths(stateDir).alignVersion);
-  if (currentVersion === null) return hive.sessionStart.alignNudgeNew;
-  const minor = (v: string) => v.trim().split('.').slice(0, 2).join('.');
-  return minor(currentVersion) === minor(pluginVersion) ? null : hive.sessionStart.alignNudgeUpdate;
-}
-
+/**
+ * The SessionStart hook's work: background pings, scans and uploads. It prints nothing; the hive
+ * plugin's band shows what the person should know, through `hive notices`.
+ */
 export async function hiveSessionStart(): Promise<number> {
-  const messages: Array<string> = [];
   const hookInput = await readHookInput();
   const cwd = hookInput.cwd || process.cwd();
   const stateDir = getStateDir(cwd);
-
   await ensureStateDir(stateDir);
-
-  const alignNudge = await checkAlignVersion(stateDir);
-  if (alignNudge) messages.push(alignNudge);
 
   // Detached so startup never waits on the network; an in-process request would either block
   // the hook or be cut off by process.exit. Before the sharing opt-out on purpose: the ping
@@ -75,86 +27,22 @@ export async function hiveSessionStart(): Promise<number> {
     spawnBackgroundCommand(['registry-backfill'], statePaths(stateDir).errorLog);
   }
 
-  const flush = (): number => {
-    emitHookMessages(messages, hookInput);
-    return 0;
-  };
+  const snapshot = await loadSharingSnapshot(stateDir, cwd);
+  if (snapshot.kind !== 'on') return 0;
 
-  if (isSharingDisabledLocally(stateDir)) return flush();
-
-  try {
-    // Not logged in: /hive:align owns the setup flow, so the hook stays quiet rather than nagging.
-    if (!(await getAuthData())) return flush();
-  } catch {
-    // A login that can no longer be refreshed fails silently everywhere else (heartbeats and
-    // uploads just stop), so this is where the user finds out.
-    messages.push(hive.sessionStart.loginExpired);
-    return flush();
-  }
-
-  let consentMtime: number;
-  let ids: ProjectIds;
-  try {
-    ({ consentMtime, ids } = await resolveProjectConsent(cwd));
-  } catch {
-    // No consent or the backend is unreachable: /hive:align owns the setup flow.
-    return flush();
-  }
-
-  const transcriptsDirs = await loadTranscriptsDirs(stateDir);
-  if (transcriptsDirs.length === 0) return flush();
-
-  // The consent windows tell apart sessions last modified while sharing was off, which never
-  // upload and so must not count as ready.
-  const [state, consentWindows] = await Promise.all([
-    withDiscoveryCache(stateDir, (cache) => loadSessionStateWithMigrations(stateDir, transcriptsDirs, cwd, cache)),
-    loadConsentWindows(ids).catch(() => null),
-  ]);
-  if (!consentWindows) return flush();
-  const allSessions = state.parentSessions;
-  const snoozeUntil = await getSnoozeUntil(stateDir);
-  const statusCtx = { ...state, consentMtime, snoozeUntil, consentWindows };
-
-  // Ready or snoozed (never both: a snooze replaces 'ready' with 'snoozed').
-  const eligibleIds: Array<string> = [];
-  let pendingCount = 0;
-  let earliestRemainingMs = Infinity;
-  for (const session of allSessions) {
-    const status = computeSessionStatus(session, statusCtx);
-    if (status.type === 'ready' || status.type === 'snoozed') {
-      eligibleIds.push(session.sessionId);
-    } else if (status.type === 'pending') {
-      pendingCount++;
-      earliestRemainingMs = Math.min(earliestRemainingMs, status.remainingMs);
-    }
-  }
-
-  if (pendingCount > 0) {
-    messages.push(hive.sessionStart.pending(pendingCount, formatRemaining(earliestRemainingMs)));
-  }
-
-  let spawned = false;
-  if (eligibleIds.length > 0 && snoozeUntil) {
-    messages.push(hive.sessionStart.eligibleSnoozed(eligibleIds.length));
-  } else if (eligibleIds.length > 0 && !(await checkUploadScheduled(stateDir))) {
-    spawned = spawnBackgroundCommand(
+  const { eligibleIds } = summarizeUploads(snapshot);
+  if (eligibleIds.length > 0 && !snapshot.snoozeUntil && !(await isUploadScheduled(stateDir))) {
+    const spawned = spawnBackgroundCommand(
       ['upload', 'send', '--delay', String(UPLOAD_DELAY_MINUTES * 60), '--sessions', eligibleIds.join(',')],
       statePaths(stateDir).errorLog,
     );
-    if (spawned) {
-      // Written only after a successful spawn: the child sleeps --delay first, so this cannot race it.
-      await writeFile(statePaths(stateDir).uploadScheduled, String(Date.now()));
-      messages.push(hive.sessionStart.uploading(eligibleIds.length, UPLOAD_DELAY_MINUTES));
-    }
+    // Written only after a successful spawn: the child sleeps --delay first, so this cannot race it.
+    if (spawned) await writeFile(statePaths(stateDir).uploadScheduled, String(Date.now()));
   }
 
-  if (pendingCount > 0 || (eligibleIds.length > 0 && snoozeUntil) || spawned) {
-    messages.push(hive.sessionStart.reviewHint);
-  }
-
-  if (allSessions.length > 0) {
+  if (snapshot.state.parentSessions.length > 0) {
     spawnBackgroundCommand(['heartbeat'], statePaths(stateDir).errorLog);
   }
 
-  return flush();
+  return 0;
 }

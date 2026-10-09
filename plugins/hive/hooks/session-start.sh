@@ -52,13 +52,6 @@ fi
 
 # --- Delegate to binary (handles version check, consent, uploads) ---
 
-export HIVE_PLUGIN_VERSION="$(plugin_version "$CLAUDE_PLUGIN_ROOT")"
-
-# Dev binary shortcircuit: use the locally-built binary when running from the repo
-if [[ "$CLAUDE_PLUGIN_ROOT" == "${CLAUDE_PROJECT_DIR}"/* ]] && [ -x "$CLAUDE_PROJECT_DIR/.dev/hive" ]; then
-  HIVE="$CLAUDE_PROJECT_DIR/.dev/hive"
-else
-  # Bootstrap: ensure the correct CLI version is cached, updated, and exec'd
-  HIVE="${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"
-fi
-echo "$HOOK_INPUT" | "$HIVE" session-start 2>>"$ERROR_LOG" || true
+# Silent: what the person should know shows in the plugin's band (hooks/register.tsx), and
+# bootstrap.sh's not-installed and update-failed lines are band rows too.
+echo "$HOOK_INPUT" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/hive.sh" session-start >/dev/null 2>>"$ERROR_LOG" || true

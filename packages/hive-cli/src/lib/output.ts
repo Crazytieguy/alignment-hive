@@ -1,12 +1,18 @@
-// ESC escapes survive both a plain terminal and JSON.stringify (escaped as a \u sequence) in a hook systemMessage.
+// NO_COLOR (no-color.org) leaves the text plain: the hive plugin's band sets it, since it shows
+// the CLI's words in a toast.
+const paint =
+  (code: string) =>
+  (s: string): string =>
+    process.env.NO_COLOR ? s : `\x1b[${code}m${s}\x1b[0m`;
+
 export const colors = {
-  red: (s: string) => `\x1b[31m${s}\x1b[0m`,
-  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
-  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
-  blue: (s: string) => `\x1b[34m${s}\x1b[0m`,
-  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
-  boldMagenta: (s: string) => `\x1b[1;35m${s}\x1b[0m`,
-  boldBlue: (s: string) => `\x1b[1;34m${s}\x1b[0m`,
+  red: paint('31'),
+  green: paint('32'),
+  yellow: paint('33'),
+  blue: paint('34'),
+  dim: paint('2'),
+  boldMagenta: paint('1;35'),
+  boldBlue: paint('1;34'),
 };
 
 export function printError(message: string): void {

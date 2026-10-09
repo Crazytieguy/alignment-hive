@@ -51,5 +51,6 @@ jobs:
       - name: Test session-data
         run: bun run --filter '@alignment-hive/session-data' test
 
+      # Mods' own tests (plugins/*/tests) need Claude Code's kit: `claude plugin test plugins/<name>`.
       - name: Test plugin hooks
-        run: bun test plugins/debrief plugins/hive
+        run: bun run --filter '@alignment-hive/plugins' test

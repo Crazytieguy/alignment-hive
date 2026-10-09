@@ -15,6 +15,7 @@ const isHelp = (arg: string | undefined) => arg === 'help' || arg === '--help' |
 
 const COMMANDS = new Map<string, () => Promise<number>>([
   ['session-start', async () => (await import('./commands/hive-session-start')).hiveSessionStart()],
+  ['notices', async () => (await import('./commands/notices')).hiveNotices(process.argv.slice(3))],
   [
     'upload',
     async () => {
@@ -32,6 +33,8 @@ const COMMANDS = new Map<string, () => Promise<number>>([
         }
         case 'exclude':
           return (await import('./commands/upload-exclude')).uploadExclude(process.argv.slice(4));
+        case 'status':
+          return (await import('./commands/upload-status')).uploadStatus(process.argv.slice(4));
         case 'snooze':
           return (await import('./commands/upload-snooze')).uploadSnooze(process.argv.slice(4));
         case 'send':

@@ -1,16 +1,1 @@
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|clear",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
+{ "modules": ["./register.tsx"] }

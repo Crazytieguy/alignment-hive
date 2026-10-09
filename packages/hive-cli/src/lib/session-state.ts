@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { mapBatched } from './batch';
 import { getClaudeProjectDir, getMainWorktreePath, readStateFile, statePaths } from './config';
 import { extractCwdFromFile } from './transcript-discovery';
-import { findRawSessions, scanSubagentDir, toDiscoveredSession } from './session-io';
+import { findRawSessions, findSessionRefs, scanSubagentDir, toDiscoveredSession } from './session-io';
 import type { ConsentWindow, SessionStatus } from '@alignment-hive/session-data';
 import type { DiscoveredSession } from './session-io';
 
@@ -140,12 +140,20 @@ export async function discoverSessions(
   transcriptsDirs: Array<string>,
   projectCwd?: string,
   cache?: DiscoveryCache,
+  onlySession?: string,
 ): Promise<Array<DiscoveredSession>> {
-  const dirResults = await Promise.all(transcriptsDirs.map((dir) => findRawSessions(dir).catch(() => [])));
+  // One session's files when `onlySession` names it: listing every session's subagents is most of
+  // a full discovery's time.
+  const dirResults = await Promise.all(
+    transcriptsDirs.map((dir) =>
+      (onlySession ? findSessionRefs(dir, onlySession) : findRawSessions(dir)).catch(() => []),
+    ),
+  );
   const refs = dirResults.flat();
   let belongsToProject: ((sessionCwd: string | null) => boolean) | undefined;
 
-  if (cache) {
+  // A partial discovery says nothing of the other sessions' files, so it keeps their entries.
+  if (cache && !onlySession) {
     // Entries for files no longer found would only accumulate.
     const found = new Set(refs.map((ref) => ref.path));
     for (const path of cache.keys()) if (!found.has(path)) cache.delete(path);
@@ -389,9 +397,10 @@ export async function loadSessionState(
   transcriptsDirs: Array<string>,
   projectCwd: string,
   cache?: DiscoveryCache,
+  onlySession?: string,
 ): Promise<SessionState> {
   const [allSessions, uploadedMap, excludedSet, startedMap] = await Promise.all([
-    discoverSessions(transcriptsDirs, projectCwd, cache),
+    discoverSessions(transcriptsDirs, projectCwd, cache, onlySession),
     loadUploadedSessions(stateDir),
     loadExcludedSessions(stateDir),
     loadStartedUploads(stateDir),

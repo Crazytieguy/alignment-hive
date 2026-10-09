@@ -98,34 +98,22 @@ here works until the binary resolves.
    limit (input past 272K is billed at a higher rate; they accept up to
    828400). Per-model entries need Claude Code 2.1.288+ (`claude
    --version`; have the user update first if older).
-   Then list the routes in the `/model` picker: one row per shipped GPT
-   route below, plus one per Grok or open-weights route already configured
-   (the `routed-models` line of `$ROUTER doctor`; older GPT routes stay
-   served but off the picker, so an earlier install's GPT-6 Sol or GPT-5.6
-   rows are dropped). Claude Code reads `modelPicker` only from
-   `~/.claude/settings.json` (project and local files are ignored) and only
-   from 2.1.242 on; add it there as a sibling of `env`, and drop the
-   `ANTHROPIC_CUSTOM_MODEL_OPTION` pair an earlier install wrote (the rows
-   replace it):
-   ```json
-   "modelPicker": {
-     "options": [
-       { "model": "gpt-6-astra", "label": "GPT-6 Astra" },
-       { "model": "gpt-6.1-sol", "label": "GPT-6.1 Sol" },
-       { "model": "gpt-6-luna", "label": "GPT-6 Luna" }
-     ]
-   }
-   ```
-   The rows follow the built-in Claude models, and a routed ID picked there
-   gets the declared context window like any other. Rows are never checked
-   against the router — an unserved row is selectable and fails on its
-   first turn — so drop a row when its route goes. Two cases keep the
-   single-slot pair instead, in the wired file's `env` block (one entry
-   only; the other routes stay off the picker, reachable through agents or
-   `--model`): project-scoped wiring, where user-level rows would show in
-   every project, including ones that don't go through the gateway; and
-   Claude Code below 2.1.242 (`claude --version`), where the key is
-   unmeasured.
+   Then list the routes in the `/model` picker: `$ROUTER settings models
+   --apply --project-dir <project>`. It edits `modelPicker` in
+   `~/.claude/settings.json` (the only file Claude Code reads it from):
+   adds the shipped GPT routes' rows with their `modelSettings` windows,
+   drops retired GPT rows (GPT-6 Sol, GPT-5.6), keeps every other row, and
+   replaces an earlier install's `ANTHROPIC_CUSTOM_MODEL_OPTION` pair. When
+   it prints `"applied": false`, its `reason` says what needs the user. Add
+   a row per configured Grok or open-weights route (`routed-models` in
+   `$ROUTER doctor`) by hand, and drop a row when its route goes: rows are
+   never checked against the router, and an unserved one fails on its
+   first turn. Two cases keep the single-slot pair instead, in the wired
+   file's `env` block (one entry only; the other routes stay off the
+   picker, reachable through agents or `--model`): project-scoped wiring,
+   where user-level rows would show in every project, including ones that
+   don't go through the gateway; and Claude Code below 2.1.242 (`claude
+   --version`), where the key is unmeasured.
    ```json
    "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-6-astra",
    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-6 Astra"
@@ -165,11 +153,13 @@ the user's call.
 
 ## Disable / uninstall
 
-1. Remove `ANTHROPIC_BASE_URL` (and optionally the other keys step 5 added,
-   `modelPicker` included) from the settings file it was written to — this
-   alone restores direct Anthropic access. Also remove a `model` key naming
-   a routed ID (written when a picker row was saved as the default), or new
-   sessions start on a model Anthropic doesn't serve.
+1. `$ROUTER settings bypass --project-dir <project>` removes
+   `ANTHROPIC_BASE_URL` from every settings file that has it, and a `model`
+   key naming a routed ID (else new sessions start on a model Anthropic
+   doesn't serve) — this alone restores direct Anthropic access. On
+   `"status": "shared-file"` it edits nothing: the checked-in project file
+   holds them, so ask before removing them there. Optionally remove the
+   other keys step 5 added, `modelPicker` included.
 2. `$ROUTER service uninstall`.
 3. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,
    and `~/.cache/model-router` (the state dir includes the Codex auth login —

@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use model_router::config::{Config, UpstreamMode};
-use model_router::{acquire, discovery, doctor, proxy, service, state, supervisor, verify};
+use model_router::{
+    acquire, discovery, doctor, proxy, service, settings_edit, state, supervisor, verify,
+};
 use state::{Dirs, InstanceLock};
 use supervisor::Supervisor;
 
@@ -58,6 +60,33 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    /// Edit Claude Code's settings files for the router; prints one JSON
+    /// object.
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommand {
+    /// Bring the /model picker in ~/.claude/settings.json up to the shipped
+    /// GPT routes (a report, unless --apply).
+    Models {
+        /// Make the change rather than report it.
+        #[arg(long)]
+        apply: bool,
+        /// The project whose settings files decide the wiring (default: cwd).
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// Take this install's `ANTHROPIC_BASE_URL`, and a default model naming a
+    /// routed ID, out of the project's and the user's settings files.
+    Bypass {
+        /// The project whose settings files to edit.
+        #[arg(long)]
+        project_dir: PathBuf,
     },
 }
 
@@ -195,6 +224,54 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Restart => service::restart(),
             ServiceCommand::Refresh => service::refresh(&dirs),
         },
+        Command::Settings { command } => {
+            let report = settings(&dirs, &config_path, command)?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+    }
+}
+
+fn settings(
+    dirs: &Dirs,
+    config_path: &std::path::Path,
+    command: SettingsCommand,
+) -> anyhow::Result<serde_json::Value> {
+    let home = state::home_dir();
+    let config = Config::load(config_path).map_err(|error| format!("{error:#}"));
+    // Orders `settings models --apply` and `settings bypass`.
+    let lock = dirs.state_dir.join("settings.lock");
+    match command {
+        SettingsCommand::Models { apply, project_dir } => {
+            let home = home.context("HOME is not set")?;
+            let project = match project_dir {
+                Some(dir) => dir,
+                None => std::env::current_dir()?,
+            };
+            let claude_version = || {
+                let output = std::process::Command::new("claude")
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())?;
+                settings_edit::Version::parse(&String::from_utf8_lossy(&output.stdout))
+            };
+            settings_edit::models(
+                &home,
+                &project,
+                config.as_ref().map_err(String::as_str),
+                claude_version,
+                apply.then_some(lock.as_path()),
+            )
+        }
+        SettingsCommand::Bypass { project_dir } => {
+            // The token the service minted, and one pinned in the config.
+            let tokens: Vec<String> = state::load_ingress_token(dirs)
+                .into_iter()
+                .chain(config.ok().and_then(|config| config.ingress_token))
+                .collect();
+            settings_edit::bypass(home.as_deref(), &project_dir, &tokens, &lock)
+        }
     }
 }
 

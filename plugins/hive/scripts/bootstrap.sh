@@ -5,17 +5,24 @@ set -euo pipefail
 # Ensures the correct version is cached and that ~/.local/bin/hive points at it, then exec's
 # the binary with all arguments, so the caller can pipe stdin to it.
 #
-# Outputs JSON systemMessage to stdout for expected issues (not installed, download failed).
+# For expected issues (not installed, download failed) it prints the plugin band's row as JSON
+# ({"notices": [...]}, the Notice shape in hooks/notice-band.tsx) in place of the CLI's output.
 # Unexpected errors go to stderr (caller redirects to error log).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 CACHE_BASE="$HOME/.cache/hive"
 
+# A row whose button copies the install script's command (it asks questions, so it runs in a
+# terminal of the person's own): id, severity, text.
+install_notice() {
+  printf '{"notices": [{"id": "%s", "severity": "%s", "text": "%s", "actions": [{"id": "install", "label": "Copy install command", "kind": "copy", "command": "curl -fsSL https://alignment-hive.com/install.sh | bash"}]}]}\n' "$1" "$2" "$3"
+}
+
 # --- Check if hive is installed globally ---
 
 if ! command -v hive >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/hive" ]; then
-  echo '{"systemMessage": "\u001b[1;34mhive:\u001b[0m to install, run \u001b[1;35m$ curl -fsSL https://alignment-hive.com/install.sh | bash\u001b[0m"}'
+  install_notice install action "CLI not installed"
   exit 0
 fi
 
@@ -67,7 +74,7 @@ if [ ! -x "$BINARY" ]; then
   trap 'rm -f "$TMPFILE"' EXIT
   if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
     echo "Failed to download hive-cli v${VERSION} from $DOWNLOAD_URL" >&2
-    echo '{"systemMessage": "\u001b[1;34mhive:\u001b[0m CLI update failed"}'
+    install_notice update-failed problem "CLI update failed"
     exit 0
   fi
 

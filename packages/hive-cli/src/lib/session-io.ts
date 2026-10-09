@@ -178,6 +178,23 @@ export async function findRawSessions(rawDir: string): Promise<Array<RawSessionR
 }
 
 /**
+ * One session's refs in a transcripts dir, as findRawSessions finds them: its transcript and its
+ * subagents/ subtree, without scanning the dir's other sessions. Legacy flat agents are left out:
+ * a session written now has none.
+ */
+export async function findSessionRefs(rawDir: string, sessionId: string): Promise<Array<RawSessionRef>> {
+  const path = join(rawDir, `${sessionId}.jsonl`);
+  const [hasTranscript, agents] = await Promise.all([
+    stat(path).then(
+      (s) => s.isFile(),
+      () => false,
+    ),
+    scanSubagentDir(join(rawDir, sessionId, 'subagents'), sessionId).catch(() => []),
+  ]);
+  return [...(hasTranscript ? [{ path }] : []), ...agents];
+}
+
+/**
  * Legacy flat agents (<rawDir>/agent-*.jsonl, Dec 2025 to Jan 2026) among a dir's file names: the
  * parent comes from the first line's sessionId, agentType from a sibling .meta.json when one exists
  * (rare for this layout). `idPrefix` keeps only agents whose id starts with it.

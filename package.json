@@ -2,5 +2,5 @@
   "name": "alignment-hive",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["packages/*"]
+  "workspaces": ["packages/*", "plugins"]
 }

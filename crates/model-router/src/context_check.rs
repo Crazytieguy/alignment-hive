@@ -120,6 +120,15 @@ fn recommended_window(route: &ModelRoute, actual: u64) -> u64 {
     }
 }
 
+/// The per-model `autoCompactWindow` doctor asks for on `route`, or `None`
+/// when its real window is unknown or below what a setting can express.
+pub(crate) fn recommended_entry(route: &ModelRoute) -> Option<u64> {
+    route
+        .context_window
+        .filter(|actual| *actual >= MIN_COMPACT_WINDOW)
+        .map(|actual| recommended_window(route, actual))
+}
+
 /// Allowed, but worth a warning: a GPT route compacting past Codex's
 /// default window crosses the 272K billing step.
 fn past_recommendation(route: &ModelRoute, client: u64) -> Option<String> {

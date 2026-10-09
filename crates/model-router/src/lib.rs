@@ -15,6 +15,7 @@ mod prompt_cache;
 pub mod proxy;
 mod routing;
 pub mod service;
+pub mod settings_edit;
 pub mod state;
 mod stub;
 pub mod supervisor;

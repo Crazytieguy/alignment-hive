@@ -91,7 +91,7 @@ impl Dirs {
         self.state_dir.join("gateway-secret")
     }
 
-    /// Create-once ingress token. `hooks/session-start.sh` reads this path
+    /// Create-once ingress token. `scripts/check.sh` reads this path
     /// by hand; keep the two in step.
     #[must_use]
     pub fn ingress_token_file(&self) -> PathBuf {

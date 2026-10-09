@@ -36,3 +36,7 @@ target/
 # Local working notes
 notes/
 __pycache__/
+
+# Written by Claude Code when it loads a mod (plugin hooks module)
+plugins/*/tsconfig.json
+plugins/*/.claude-plugin/types/
