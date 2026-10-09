@@ -133,21 +133,30 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   } else {
     const inScope = await scopeOf(env, args);
     scope = localNotes.scopeLabel(inScope.label);
-    const sessions = sessionsByActivity(await sessionsIn(inScope));
+    const refs = await sessionsIn(inScope);
     const agentsBySession = Map.groupBy(
       await agentsOf(
         env.root,
-        sessions.map((f) => f.ref.session),
+        refs.map((ref) => ref.session),
       ),
       (a) => a.session,
     );
+    // Like the agent filter, assume mtime bounds entry times; backdated copies/restores/imports can drop sessions.
+    // Each transcript is skipped by its own times only: an agent can outlive its session. A file's
+    // mtime bounds its last entry. Agents that repeat their session are searched only when named.
+    const written = (path: string) => w.since === undefined || lastWrite(path) >= w.since;
+    const wanted = (a: TranscriptRef) => !repeatsSession(a.agentId ?? '') && written(a.path);
+    const recentAgents = new Map(
+      withAgents ? refs.map((ref) => [ref.session, (agentsBySession.get(ref.session) ?? []).filter(wanted)]) : [],
+    );
+    // A session last written before --since has no entry in the window: its times are read only to
+    // place its agents among the others, when it has any to search.
+    const sessions = sessionsByActivity(
+      refs.filter((ref) => written(ref.path) || recentAgents.get(ref.session)?.length),
+    );
     for (const f of sessions) {
       const agents = agentsBySession.get(f.ref.session) ?? [];
-      // Each transcript is skipped by its own times only: an agent can outlive its session. An agent
-      // file's mtime bounds its last entry. Agents that repeat their session are searched only when named.
-      const wanted = (a: TranscriptRef) =>
-        !repeatsSession(a.agentId ?? '') && (w.since === undefined || lastWrite(a.path) >= w.since);
-      const recent = withAgents ? agents.filter(wanted) : [];
+      const recent = recentAgents.get(f.ref.session) ?? [];
       const targets = [...(spanInWindow(f, w) ? [{ ref: f.ref }] : []), ...recent.map((ref) => ({ ref }))];
       if (targets.length) groups.push({ targets, agents });
     }
