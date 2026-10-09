@@ -8,6 +8,7 @@ import { renderReview } from './render';
 
 const REVIEW_ID = '22222222-2222-4222-8222-222222222222';
 const RENDERED_AT = '2026-09-16T00:00:00.000Z';
+const RENDERER_VERSION = '0.0.0';
 const fixtures: Array<Awaited<ReturnType<typeof createReviewFixture>>> = [];
 afterEach(async () => { await Promise.all(fixtures.splice(0).map((f) => f.cleanup())); });
 async function setup(body = reviewItem('choice', '```ref\ndiff: source.ts\ncaption: Exact source\n```')) {
@@ -112,6 +113,6 @@ test('full manifested render golden is deterministic (UPDATE_SNAPSHOTS=1)', asyn
   await f.write('source.ts', 'export const value = 2;\n');
   const result = await renderReview(f.input, { cwd: f.repo, projects: f.projects, outDir: join(f.root, 'round1') });
   for (const [name, source] of [['manifest.json', result.manifestPath], ['manifested-page.html', result.pagePath]]) {
-    await expectSnapshot(name, snapshotHtml((await readFile(source, 'utf8')).replaceAll(result.manifest.reviewId, REVIEW_ID).replaceAll(result.manifest.renderedAt, RENDERED_AT)));
+    await expectSnapshot(name, snapshotHtml((await readFile(source, 'utf8')).replaceAll(result.manifest.reviewId, REVIEW_ID).replaceAll(result.manifest.renderedAt, RENDERED_AT).replace(/("rendererVersion": ?)"[^"]*"/g, `$1"${RENDERER_VERSION}"`)));
   }
 });
