@@ -176,19 +176,35 @@ export function sessionPresence(ref: TranscriptRef): SessionPresence & { timed: 
   return { ...presence, timed: timed !== undefined };
 }
 
-export function sessionFacts(ref: TranscriptRef): SessionFacts {
-  const { presence, tail, ...rest } = ends(ref);
+/** The session's start time: its head, then windows of the rest, read only as far as it needs. */
+function startOf(path: string, size: number, head: Buffer): number | undefined {
+  return startTime(
+    (function* () {
+      yield head.toString('utf8');
+      for (const w of windows(path, size, head.length, WINDOW)) yield w.toString('utf8');
+    })(),
+  );
+}
+
+/**
+ * The facts of one session file. With `startOnUse`, `start` is read only when first used: a fork's
+ * own first entry can lie megabytes into the file, and grep needs it only for --until and to order
+ * sessions that ended together. Read later rather than now, it is no cheaper to a caller that reads
+ * every one: `sessions` peaked 30% higher.
+ */
+export function sessionFacts(ref: TranscriptRef, startOnUse = false): SessionFacts {
+  const { presence, tail, head } = ends(ref);
   const facts: SessionFacts = presence;
   const { size } = facts;
   if (size === 0) return facts;
-  // The head, then windows of the rest, read only as far as the start time needs.
-  const head = rest.head();
-  facts.start = startTime(
-    (function* () {
-      yield head.toString('utf8');
-      for (const w of windows(ref.path, size, head.length, WINDOW)) yield w.toString('utf8');
-    })(),
-  );
+  if (startOnUse) {
+    // The head is read again on use, so that no facts hold their file's ends meanwhile.
+    let start: { ms?: number } | undefined;
+    Object.defineProperty(facts, 'start', {
+      enumerable: true,
+      get: () => (start ??= { ms: startOf(ref.path, size, edgeLines(ref.path, size, CHUNK, 'head').lines) }).ms,
+    });
+  } else facts.start = startOf(ref.path, size, head());
   // The branch comes from the same parse as the last entry time.
   const last = (text: string) => {
     const t = parseTranscript(text);

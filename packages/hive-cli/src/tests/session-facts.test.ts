@@ -30,11 +30,12 @@ describe('facts read a window of the file at a time', () => {
     // No newline after the last line: a live file mid-write.
     await writeFile(path, lines.map((l) => JSON.stringify(l)).join('\n'));
     const ref = { path, session: 'fork' };
-    expect(sessionFacts(ref)).toMatchObject({
-      start: ms('2026-09-20T11:00:05.000Z'),
-      end: ms('2026-09-20T11:00:09.000Z'),
-      hasAssistant: true,
-    });
+    for (const startOnUse of [false, true])
+      expect(sessionFacts(ref, startOnUse)).toMatchObject({
+        start: ms('2026-09-20T11:00:05.000Z'),
+        end: ms('2026-09-20T11:00:09.000Z'),
+        hasAssistant: true,
+      });
     expect(sessionPresence(ref).timed).toBe(true);
     expect(sessionTitle(ref)).toBe('Last');
     const at = (t: string) => someEntry(ref, (e) => e.time === t);
@@ -94,6 +95,7 @@ describe('facts read a window of the file at a time', () => {
         .join(''),
     );
     expect(sessionFacts({ path: fork, session: 'young' }).start).toBe(ms('2026-09-20T10:00:00.000Z'));
+    expect(sessionFacts({ path: fork, session: 'young' }, true).start).toBe(ms('2026-09-20T10:00:00.000Z'));
     const untimed = join(dir, 'untimed.jsonl');
     await writeFile(untimed, JSON.stringify({ type: 'custom-title', customTitle: 'Only a title' }) + '\n');
     expect(sessionPresence({ path: untimed, session: 'untimed' }).timed).toBe(false);

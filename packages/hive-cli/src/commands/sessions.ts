@@ -20,11 +20,14 @@ export async function sessionsIn(scope: Scope): Promise<Array<TranscriptRef>> {
 const byActivity = (a: SessionFacts, b: SessionFacts): number =>
   (b.end ?? 0) - (a.end ?? 0) || (b.start ?? 0) - (a.start ?? 0);
 
-/** Sessions by last activity, newest first; files with no entry time are left out. */
+/**
+ * Sessions by last activity, newest first; files with no entry time are left out. Each `start` is
+ * read on use (see sessionFacts): its one caller, grep, needs few of them.
+ */
 export function sessionsByActivity(refs: Array<TranscriptRef>): Array<SessionFacts> {
   return refs
-    .map(sessionFacts)
-    .filter((f) => f.start !== undefined || f.end !== undefined)
+    .map((ref) => sessionFacts(ref, true))
+    .filter((f) => f.end !== undefined || f.start !== undefined)
     .sort(byActivity);
 }
 
