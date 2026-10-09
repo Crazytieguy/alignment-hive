@@ -31,6 +31,9 @@ const say = (text: string) => ({
   uuid: `a${Math.random()}`,
   message: { content: [{ type: 'text', text }] },
 });
+const text = (t: string) => ({ type: 'text', text: t });
+const use = (id: string) => ({ type: 'tool_use', id, name: 'Bash', input: {} });
+const result = (id: string, content: string) => ({ type: 'tool_result', tool_use_id: id, content });
 const files = [
   J(user('say "hello" from C:\\Users\\me; match \\d+ in the regex')),
   J(say("return lines.join('\\n');"), say("cat <<'EOF'\nimport x from 'y'")),
@@ -45,6 +48,15 @@ const files = [
   J(say('pass --agents to include them'), user('Another session:\n<agent-message from="a1">hi</agent-message>')),
   J(say("it said 'ok' and left")),
   J(user('abc<system-reminder>note</system-reminder>def')),
+  J(user('ab<system-reminder>1</system-reminder>cd<system-reminder>2</system-reminder>ef "quoted" too')),
+  // A reminder that closes in the record's next text block, which the parser joins before stripping.
+  J(user([text('see abc<system-reminder> a'), text('note </system-reminder>def')])),
+  // One result's unclosed reminder must not hide a join in the next result.
+  J(
+    { type: 'assistant', uuid: 'a1', message: { content: [use('t1'), use('t2')] } },
+    user([result('t1', 'x\n<system-reminder> y'), result('t2', 'zzq<system-reminder>z</system-reminder>wwk')]),
+  ),
+  J(say('no join: <system-reminder>abc</system-reminder>'), user('abc\n<system-reminder>x</system-reminder>def')),
   J(say('nothing to see here')),
   J(user([{ type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }])),
   Buffer.from('{"type": "user", "uuid": "s1", "message": {"content": [{"type": "document", "source": {}}]}}\n'),
@@ -71,6 +83,9 @@ const patterns: Array<[string, boolean, boolean]> = [
   ['<agent-message from=', true, false],
   ['(?<=\\s)(?<q>[\'"])ok\\k<q>', false, false],
   ['abcdef', false, false],
+  ['ABCDEF', false, true],
+  ['zzqwwk', false, false],
+  ['de"', false, false],
   ['UNKNOWN', false, true],
   ['REFRESH token', false, true],
   ['COLOR ON 2026-09', false, true],
@@ -103,5 +118,12 @@ describe('mayMatch', () => {
       expect([at, mayMatch(buf, 'needle', true, re)]).toEqual([at, true]);
     }
     expect(mayMatch(Buffer.alloc(big, 'x'), 'needle', true, re)).toBe(false);
+  });
+
+  test('a reminder joining text inside one string keeps only files whose joined text may match', () => {
+    const joined = J(user('abc<system-reminder>note</system-reminder>def'));
+    expect(mayMatch(joined, 'cde', false, /cde/m)).toBe(true);
+    expect(mayMatch(joined, 'CDE', true, /CDE/im)).toBe(true);
+    expect(mayMatch(joined, 'xyz', false, /xyz/m)).toBe(false);
   });
 });

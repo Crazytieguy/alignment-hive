@@ -137,19 +137,46 @@ function commandTexts(buf: Buffer): Array<string> {
   );
 }
 
-/** Whether stripping a `<system-reminder>` block can join two printable characters in some string. */
-function reminderJoins(buf: Buffer): boolean {
+/** Whether a `"` that ends a JSON string lies in buf[from, to), which starts inside a string. */
+function endsString(buf: Buffer, from: number, to: number): boolean {
+  for (let q = buf.indexOf(0x22, from); q >= 0 && q < to; q = buf.indexOf(0x22, q + 1)) {
+    let slashes = 0;
+    while (buf[q - 1 - slashes] === 0x5c) slashes++;
+    if (slashes % 2 === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether stripping `<system-reminder>` blocks can join text into a match. Where a block that opens
+ * and closes inside one JSON string joins two printable characters, its line, stripped of such
+ * blocks, must hold the literal. A block that closes in a later string of its line may join a
+ * record's text blocks, which the parser strips together, so the file is parsed.
+ */
+function reminderJoins(buf: Buffer, literal: string, ignoreCase: boolean): boolean {
+  // Like the single-literal prefilter, reminder joins assume printable ASCII is written unescaped (no \uXXXX or \/).
   const open = '<system-reminder>';
   const close = '</system-reminder>';
   const escape = (k: number) => buf[k] === 0x5c && [0x6e, 0x72, 0x74].includes(buf[k + 1]); // \n \r \t
   for (let i = buf.indexOf(open); i >= 0; ) {
-    const e = buf.indexOf(close, i);
-    if (e < 0) return false;
-    const after = e + close.length;
-    const safeBefore = buf[i - 1] === 0x22 || buf[i - 1] === 10 || (escape(i - 2) && buf[i - 3] !== 0x5c);
-    const safeAfter = buf[after] === 0x22 || escape(after);
-    if (!safeBefore && !safeAfter) return true;
-    i = buf.indexOf(open, after);
+    const newline = buf.indexOf(10, i);
+    const end = newline < 0 ? buf.length : newline;
+    const kept: Array<Buffer> = [];
+    let from = buf.lastIndexOf(10, i) + 1;
+    let joins = false;
+    for (let j = i; j >= 0 && j < end; j = buf.indexOf(open, from)) {
+      const e = buf.indexOf(close, j);
+      if (e < 0 || e >= end) break;
+      if (endsString(buf, j, e)) return true;
+      const after = e + close.length;
+      const safeBefore = buf[j - 1] === 0x22 || buf[j - 1] === 10 || (escape(j - 2) && buf[j - 3] !== 0x5c);
+      const safeAfter = buf[after] === 0x22 || escape(after);
+      joins ||= !safeBefore && !safeAfter;
+      kept.push(buf.subarray(from, j));
+      from = after;
+    }
+    if (joins && holds(Buffer.concat([...kept, buf.subarray(from, end)]), literal, ignoreCase)) return true;
+    i = buf.indexOf(open, end);
   }
   return false;
 }
@@ -187,5 +214,5 @@ export function mayMatch(buf: Buffer, literal: string, ignoreCase: boolean, re: 
   // `/name args` adds a space, and a slash when the name lacks one.
   const command = literal.includes(' ') || literal.includes('/');
   if (command && has('<command-name>') && commandTexts(buf).some((t) => re.test(t))) return true;
-  return reminderJoins(buf);
+  return reminderJoins(buf, literal, ignoreCase);
 }
