@@ -15,10 +15,11 @@ bumping happens here.
 Release from the main checkout. Pull first (`git pull --ff-only`) so local
 `main` includes everything on `origin/main`, then run
 `bash .claude/skills/release-plugins/scripts/unreleased.sh` for each
-component's commits since its version last changed.
+component's commits since its version last changed on `origin/main`.
 
 Skip changes that don't reach users: tests, lint fixes, and `CLAUDE.md`
-files. Whatever else is listed is a release.
+files. Whatever else is listed is a release. A version already bumped in an
+unpushed commit (the script flags it) ships as-is, with no second bump.
 
 ## 2. Pick versions
 

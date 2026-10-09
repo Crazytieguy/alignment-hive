@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 # Lists every releasable component with commits since its version was last
-# changed. Run from the repo root.
+# changed on origin/main. A version already bumped in an unpushed commit is
+# reported as such, so it ships as-is rather than being bumped again. Run from
+# the repo root after pulling.
+
+version_of() { # rev, file, pattern
+  git show "$1:$2" 2>/dev/null | grep -m1 -E "$3" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
+}
 
 report() { # name, version file, version pattern, paths...
   local name=$1 file=$2 pattern=$3; shift 3
-  local base version log
-  base=$(git log -1 --format=%h -G"$pattern" -- "$file")
-  version=$(grep -m1 -E "$pattern" "$file" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+  local base released current log
+  base=$(git log -1 --format=%h -G"$pattern" origin/main -- "$file")
+  released=$(version_of origin/main "$file" "$pattern")
+  current=$(version_of HEAD "$file" "$pattern")
+  if [ -z "$base" ]; then
+    echo "## $name $current (never released)"
+    echo
+    return
+  fi
   log=$(git log --format='  %h %s' "$base"..HEAD -- "$@")
   [ -z "$log" ] && return
-  echo "## $name $version (bumped in $base)"
+  if [ "$current" = "$released" ]; then
+    echo "## $name $released (bumped in $base)"
+  else
+    echo "## $name $released (bumped in $base); already $current in an unpushed commit, ship as-is"
+  fi
   echo "$log"
   git diff --stat=100 "$base"..HEAD -- "$@" | sed 's/^/  /'
   echo
