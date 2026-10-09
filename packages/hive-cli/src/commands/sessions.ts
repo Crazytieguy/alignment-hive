@@ -1,29 +1,39 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { parseTranscript } from '@alignment-hive/session-data';
 import { preferred, printer, sessionFiles } from '../lib/locators';
 import { clipToFirstLine, localTime } from '../lib/local-rows';
 import { localErrors, localNotes } from '../lib/messages';
-import { firstHumanMessage, sessionFacts, sessionTitle } from '../lib/session-facts';
+import { firstHumanMessage, sessionFacts, sessionPresence, sessionTitle } from '../lib/session-facts';
 import { extractCwd, extractCwdFromFile } from '../lib/transcript-discovery';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow } from './local';
-import type { SessionFacts } from '../lib/session-facts';
+import type { SessionFacts, SessionPresence } from '../lib/session-facts';
 import type { TranscriptRef } from '../lib/locators';
 import type { Args, LocalEnv, Scope } from './local';
 
 /** Each session of a scope once: a session that ran in several dirs keeps the file with the conversation. */
-async function sessionsIn(scope: Scope): Promise<Array<TranscriptRef>> {
+export async function sessionsIn(scope: Scope): Promise<Array<TranscriptRef>> {
   const files = (await sessionFiles(scope.dirs)).filter((ref) => scope.belongs(ref.path));
   return Promise.all([...Map.groupBy(files, (ref) => ref.session).values()].map(preferred));
 }
 
+/** Newest first: by last entry time, then first. */
+const byActivity = (a: SessionFacts, b: SessionFacts): number =>
+  (b.end ?? 0) - (a.end ?? 0) || (b.start ?? 0) - (a.start ?? 0);
+
 /** Sessions by last activity, newest first; files with no entry time are left out. */
-export async function sessionsByActivity(scope: Scope): Promise<Array<SessionFacts>> {
-  return (await sessionsIn(scope))
+export function sessionsByActivity(refs: Array<TranscriptRef>): Array<SessionFacts> {
+  return refs
     .map(sessionFacts)
     .filter((f) => f.start !== undefined || f.end !== undefined)
-    .sort((a, b) => (b.end ?? 0) - (a.end ?? 0) || (b.start ?? 0) - (a.start ?? 0));
+    .sort(byActivity);
 }
+
+/**
+ * Sessions with no human message and no reply are left out. A file with an assistant record near
+ * either end has a reply; only the rest are parsed to check.
+ */
+const humanOf = (f: SessionPresence) => (f.hasAssistant ? undefined : firstHumanMessage(f.ref, f.size));
 
 export async function run(env: LocalEnv, args: Args): Promise<number> {
   if (args.positional.length) throw new LocalError(localErrors.sessionsTakesNoSession(args.positional[0]), true);
@@ -31,22 +41,54 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   const clip = clipToFirstLine(numberFlag(args, '--clip', 150));
   const scope = await scopeOf(env, args);
   const w = timeWindow(args);
-  // A session is in the window when one of its entries is. Its first or last entry decides unless
-  // it spans the whole window, when it is read to look for an entry inside.
-  const active = (await sessionsByActivity(scope)).filter(
-    (f) =>
+  const windowed = w.since !== undefined || w.until !== undefined;
+  // Like grep's agent filter, assume mtime bounds entry times; backdated copies/restores/imports can drop or misorder sessions.
+  // A file's mtime bounds its last entry time, so files are read newest-written first: one last
+  // written before --since has no entry in the window, and once `limit` listed sessions ended after
+  // the next file was last written, no later file is shown. Without a window those are only counted.
+  const files = (await sessionsIn(scope))
+    .map((ref, order) => ({ ref, order, written: statSync(ref.path).mtimeMs }))
+    .filter((file) => w.since === undefined || file.written >= w.since)
+    .sort((x, y) => y.written - x.written);
+  const listed: Array<{ f: SessionFacts; order: number; human?: ReturnType<typeof humanOf> }> = [];
+  let counted = 0;
+  /** The `limit` latest ends among the listed sessions read so far, latest first. */
+  const latest: Array<number> = [];
+  for (const { ref, order, written } of files) {
+    if (!windowed && (limit === 0 || (latest.length >= limit && latest[limit - 1] > written))) {
+      const p = sessionPresence(ref);
+      if (p.timed && !humanOf(p)?.empty) counted++;
+      continue;
+    }
+    const f = sessionFacts(ref);
+    if (f.start === undefined && f.end === undefined) continue;
+    // A session is in the window when one of its entries is. Its first or last entry decides unless
+    // it spans the whole window, when it is read to look for an entry inside.
+    const active =
       spanInWindow(f, w) &&
       (inWindow(f.start, w) ||
         inWindow(f.end, w) ||
         parseTranscript(readFileSync(f.ref.path, 'utf8')).entries.some((e) =>
           inWindow(e.time ? Date.parse(e.time) : undefined, w),
-        )),
-  );
-  // Sessions with no human message and no reply are left out. A file with an assistant record near
-  // either end has a reply; only the rest are parsed to check.
-  const listed = active
-    .map((f) => ({ f, human: f.hasAssistant ? undefined : firstHumanMessage(f.ref, f.size) }))
-    .filter(({ human }) => !human?.empty);
+        ));
+    if (!active) continue;
+    const human = humanOf(f);
+    if (human?.empty) continue;
+    listed.push({ f, order, human });
+    const end = f.end ?? 0;
+    if (latest.length < limit || end > latest[limit - 1]) {
+      let at = 0;
+      for (let hi = latest.length; at < hi; ) {
+        const mid = (at + hi) >> 1;
+        if (latest[mid] >= end) at = mid + 1;
+        else hi = mid;
+      }
+      latest.splice(at, 0, end);
+      latest.length = Math.min(latest.length, limit);
+    }
+  }
+  // In the order a sort of every session gives.
+  listed.sort((x, y) => byActivity(x.f, y.f) || x.order - y.order);
   const print = await printer(env.root);
   // A file whose first cwd lies past the head read takes its project dir's cwd, from another file there.
   const dirCwd = new Map<string, string | null>();
@@ -71,7 +113,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
     if (first?.kind === 'user') row.first = clip('first', first.text);
     emit(row);
   }
-  const windowed = w.since !== undefined || w.until !== undefined;
-  note(localNotes.sessions(Math.min(limit, listed.length), listed.length, scope.all, windowed));
+  const total = listed.length + counted;
+  note(localNotes.sessions(Math.min(limit, total), total, scope.all, windowed));
   return 0;
 }

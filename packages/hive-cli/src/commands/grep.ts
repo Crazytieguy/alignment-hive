@@ -6,7 +6,7 @@ import { escapeRegExp, mandatoryLiterals, mayMatch } from '../lib/grep-prefilter
 import { loadTranscript, reusedBytes, selectRange } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow, warn } from './local';
-import { sessionsByActivity } from './sessions';
+import { sessionsByActivity, sessionsIn } from './sessions';
 import type { Entry } from '@alignment-hive/session-data';
 import type { Range, TranscriptRef } from '../lib/locators';
 import type { Clip, RowContext } from '../lib/local-rows';
@@ -133,7 +133,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   } else {
     const inScope = await scopeOf(env, args);
     scope = localNotes.scopeLabel(inScope.label);
-    const sessions = await sessionsByActivity(inScope);
+    const sessions = sessionsByActivity(await sessionsIn(inScope));
     const agentsBySession = Map.groupBy(
       await agentsOf(
         env.root,

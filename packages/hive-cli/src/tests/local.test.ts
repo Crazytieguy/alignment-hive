@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
@@ -359,6 +359,31 @@ describe('sessions', () => {
     out.length = 0;
     await hl('sessions', '--all-projects', '--since', '2026-09-20T10:14:00Z');
     expect(rows()).toEqual([]);
+  });
+
+  test('each file last written just after its last entry: the newest are read, the rest only counted', async () => {
+    const written: Array<[string, string]> = [
+      [join(project(), `${A}.jsonl`), '2026-09-20T10:59:00Z'],
+      [join(project(), `${C}.jsonl`), '2026-09-20T10:30:00Z'],
+      [join(root, '-p-other', `${D}.jsonl`), '2026-09-20T10:30:00Z'],
+      [join(project(), `${B}.jsonl`), '2026-09-19T10:00:00Z'],
+      [join(root, '-p-other', `${W}.jsonl`), '2026-09-18T09:00:00Z'],
+    ];
+    try {
+      for (const [path, at] of written) await utimes(path, new Date(at), new Date(at));
+      // Once A is read, no file written before A's last entry can come first: B and W are only counted.
+      await hl('sessions', '--all-projects', '-n', '1');
+      expect(rows().map((r) => r.loc)).toEqual([A.slice(0, 8)]);
+      expect(err).toEqual(['1 of 4 sessions in all projects; -n N for more']);
+      out.length = 0;
+      err.length = 0;
+      // B and W were last written before --since, so have no entry in the window.
+      await hl('sessions', '--all-projects', '-n', '1', '--since', '2026-09-19T12:00:00Z');
+      expect(rows().map((r) => r.loc)).toEqual([A.slice(0, 8)]);
+      expect(err).toEqual(['1 of 2 sessions in all projects active in the --since/--until window; -n N for more']);
+    } finally {
+      for (const [path] of written) await utimes(path, new Date(), new Date());
+    }
   });
 });
 

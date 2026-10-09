@@ -74,29 +74,52 @@ function firstOwnTime(text: string): number | undefined {
   return times.find((ms) => opened === undefined || ms >= opened - COPIED);
 }
 
-export interface SessionFacts {
+export interface SessionPresence {
   ref: TranscriptRef;
   size: number;
-  /** First and last entry times, in ms; a fork's first is its own, after the context it copied. */
-  start?: number;
-  end?: number;
-  branch?: string;
   /** An assistant record lies near either end; files without one get an exact emptiness check. */
   hasAssistant: boolean;
 }
 
-export function sessionFacts(ref: TranscriptRef): SessionFacts {
+export interface SessionFacts extends SessionPresence {
+  /** First and last entry times, in ms; a fork's first is its own, after the context it copied. */
+  start?: number;
+  end?: number;
+  branch?: string;
+}
+
+/** The size and 64 KB ends of a file, which every fact starts from. */
+function ends(ref: TranscriptRef): { presence: SessionPresence; head: string; tail: string } {
   const size = statSync(ref.path).size;
-  const facts: SessionFacts = { ref, size, hasAssistant: false };
-  if (size === 0) return facts;
   const head = edge(ref.path, size, CHUNK, 'head').text;
   const tail = edge(ref.path, size, CHUNK, 'tail').text;
-  facts.hasAssistant = head.includes('"type":"assistant"') || tail.includes('"type":"assistant"');
+  const hasAssistant = head.includes('"type":"assistant"') || tail.includes('"type":"assistant"');
+  return { presence: { ref, size, hasAssistant }, head, tail };
+}
+
+const firstTime = (text: string) => edgeTime(parseTranscript(text), false);
+
+/**
+ * Whether a file has an entry time at all, as when sessionFacts sets its start and end, without
+ * finding them: its first entry time is near the head, where a fork's own first one may not be.
+ */
+export function sessionPresence(ref: TranscriptRef): SessionPresence & { timed: boolean } {
+  const { presence, head } = ends(ref);
+  const { size } = presence;
+  const timed = (firstTime(head) ?? scan(ref.path, size, 'head', CHUNK * 16, firstTime)) !== undefined;
+  return { ...presence, timed };
+}
+
+export function sessionFacts(ref: TranscriptRef): SessionFacts {
+  const { presence, head, tail } = ends(ref);
+  const facts: SessionFacts = presence;
+  const { size } = facts;
+  if (size === 0) return facts;
   facts.start =
     firstOwnTime(head) ??
     scan(ref.path, size, 'head', CHUNK * 16, firstOwnTime) ??
     // A fork with no entry of its own yet: its first copied one.
-    scan(ref.path, size, 'head', CHUNK * 16, (text) => edgeTime(parseTranscript(text), false));
+    scan(ref.path, size, 'head', CHUNK * 16, firstTime);
   // The branch comes from the same parse as the last entry time.
   const last = (text: string) => {
     const t = parseTranscript(text);
