@@ -1,6 +1,6 @@
 {
   "name": "mats",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Resources for MATS fellows",
   "types": "./types/index.d.ts"
 }
