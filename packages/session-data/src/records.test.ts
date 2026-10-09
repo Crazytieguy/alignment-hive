@@ -27,6 +27,20 @@ describe('readRecords', () => {
     expect(readRecords('')).toEqual({ records: [], malformed: [] });
   });
 
+  test("a file's bytes read as its text does, line numbers included", () => {
+    const text = [
+      '{"type":"user","text":"héllo 🙂"}',
+      '\uFEFF{"type":"system"}',
+      '{"bad',
+      '',
+      '{"type":"assistant"}',
+      '{"ty',
+    ];
+    for (const content of [text.join('\n'), `${text.join('\n')}\n`, text.join('\r\n'), '', '\n'])
+      expect(readRecords(new TextEncoder().encode(content))).toEqual(readRecords(content));
+    expect(readRecords(new TextEncoder().encode(text.join('\n'))).malformed).toEqual([2, 3]);
+  });
+
   test('toRecord', () => {
     expect(toRecord({ type: 'user', uuid: 'u', parentUuid: 'p' })).toMatchObject({
       type: 'user',

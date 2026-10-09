@@ -23,26 +23,41 @@ export function toRecord(value: unknown): RawRecord | undefined {
   return record;
 }
 
+/** Keeps a BOM, as Buffer's toString does: a line that starts with one is not JSON either way. */
+const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });
+
 /**
- * Parse JSONL text into records. Blank lines and values that are not records are skipped.
- * `malformed` lists the 1-based lines that are not JSON, except the last line of a file without a
- * trailing newline: a live file mid-write.
+ * Parse JSONL text, or a file's bytes, into records, each passed through `map`. Bytes are decoded
+ * one line at a time: no string of the whole file exists, and a line of plain ASCII stays one byte
+ * per character where one emoji anywhere would make a whole-file string two. Blank lines and values
+ * that are not records are skipped. `malformed` lists the 1-based lines that are not JSON, except
+ * the last line of a file without a trailing newline: a live file mid-write.
  */
-export function readRecords(content: string): { records: Array<RawRecord>; malformed: Array<number> } {
+export function readRecords(
+  content: string | Uint8Array,
+  map: (r: RawRecord) => RawRecord = (r) => r,
+): { records: Array<RawRecord>; malformed: Array<number> } {
   const records: Array<RawRecord> = [];
   const malformed: Array<number> = [];
-  const lines = content.split('\n');
-  for (const [i, text] of lines.entries()) {
-    if (text.trim() === '') continue;
-    let value: unknown;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      if (i < lines.length - 1) malformed.push(i + 1);
-      continue;
+  const newline = (from: number) =>
+    typeof content === 'string' ? content.indexOf('\n', from) : content.indexOf(10, from);
+  const line = (from: number, to: number) =>
+    typeof content === 'string' ? content.slice(from, to) : utf8.decode(content.subarray(from, to));
+  for (let n = 1, start = 0; ; n++) {
+    const end = newline(start);
+    const text = line(start, end < 0 ? content.length : end);
+    if (text.trim() !== '') {
+      let value: unknown;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        if (end >= 0) malformed.push(n);
+      }
+      const record = toRecord(value);
+      if (record) records.push(map(record));
     }
-    const record = toRecord(value);
-    if (record) records.push(record);
+    if (end < 0) break;
+    start = end + 1;
   }
   return { records, malformed };
 }

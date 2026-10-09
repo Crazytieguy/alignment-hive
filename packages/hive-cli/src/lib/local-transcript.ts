@@ -29,7 +29,7 @@ export function loadTranscript(
   agents: ReadonlyArray<TranscriptRef>,
   print: Printer,
 ): LoadedTranscript {
-  const { records, malformed } = readRecords(bytes.toString('utf8'));
+  const { records, malformed } = readRecords(bytes);
   const t = readTranscript(records);
   for (const e of t.entries)
     if (e.kind === 'tool' && e.tool === 'ArtifactComments' && e.result) e.result = commentsOnly(e.result);
@@ -58,7 +58,7 @@ export function commentsOnly(result: string): string {
 
 /** How many entries a transcript has; an unreadable file is a LocalError naming it. */
 export async function entryCount(ref: TranscriptRef): Promise<number> {
-  return readTranscript(readRecords((await readBytes(ref)).toString('utf8')).records).entries.length;
+  return readTranscript(readRecords(await readBytes(ref)).records).entries.length;
 }
 
 /** The entries in the range; a range past the end clamps, one that starts past it is an error. */

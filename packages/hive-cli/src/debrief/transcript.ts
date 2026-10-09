@@ -118,7 +118,7 @@ export class Transcripts {
   constructor(readonly session: string, private root = claudeProjectsRoot()) {}
   private read(ref: TranscriptRef): Promise<Transcript> {
     let transcript = this.parsed.get(ref.path);
-    if (!transcript) { transcript = readFile(ref.path, 'utf8').then((text) => readTranscript(readRecords(text).records)); this.parsed.set(ref.path, transcript); }
+    if (!transcript) { transcript = readFile(ref.path).then((bytes) => readTranscript(readRecords(bytes).records)); this.parsed.set(ref.path, transcript); }
     return transcript;
   }
   /** One lookup under the projects root per transcript a locator names, however many entries cite it. */
