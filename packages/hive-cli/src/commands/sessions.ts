@@ -1,5 +1,7 @@
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
+import { isHumanMessage, leanRecord, readRecords, readTranscript } from '@alignment-hive/session-data';
+import { cutoffTime, recordsAsOf } from '../lib/as-of';
 import { preferred, printer, sessionFiles } from '../lib/locators';
 import { clipToFirstLine, localTime } from '../lib/local-rows';
 import { localErrors, localNotes } from '../lib/messages';
@@ -8,12 +10,25 @@ import { extractCwd, extractCwdFromFile } from '../lib/transcript-discovery';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow } from './local';
 import type { SessionFacts, SessionPresence } from '../lib/session-facts';
 import type { TranscriptRef } from '../lib/locators';
+import type { Transcript } from '@alignment-hive/session-data';
 import type { Args, LocalEnv, Scope } from './local';
 
 /** Each session of a scope once: a session that ran in several dirs keeps the file with the conversation. */
 export async function sessionsIn(scope: Scope): Promise<Array<TranscriptRef>> {
   const files = (await sessionFiles(scope.dirs)).filter((ref) => scope.belongs(ref.path));
   return Promise.all([...Map.groupBy(files, (ref) => ref.session).values()].map(preferred));
+}
+
+/** A session's facts; `asOf` holds its entries before HIVE_LOCAL_CUTOFF when it ran past it. */
+type Facts = SessionFacts & { asOf?: Transcript };
+
+/** Facts as of HIVE_LOCAL_CUTOFF: a session still running then reads from its records before it, untitled. */
+function factsAsOf(f: SessionFacts): Facts {
+  const cutoff = cutoffTime();
+  if (cutoff === undefined || (f.end !== undefined && f.end < cutoff)) return f;
+  const asOf = readTranscript(recordsAsOf(readRecords(readFileSync(f.ref.path), leanRecord).records));
+  const end = asOf.entries.findLast((e) => e.time !== undefined)?.time;
+  return { ...f, end: end ? Date.parse(end) : undefined, branch: asOf.branch, asOf };
 }
 
 /** Newest first: by last entry time, then first. */
@@ -24,9 +39,9 @@ const byActivity = (a: SessionFacts, b: SessionFacts): number =>
  * Sessions by last activity, newest first; files with no entry time are left out. Each `start` is
  * read on use (see sessionFacts): its one caller, grep, needs few of them.
  */
-export function sessionsByActivity(refs: Array<TranscriptRef>): Array<SessionFacts> {
+export function sessionsByActivity(refs: Array<TranscriptRef>): Array<Facts> {
   return refs
-    .map((ref) => sessionFacts(ref, true))
+    .map((ref) => factsAsOf(sessionFacts(ref, true)))
     .filter((f) => f.end !== undefined || f.start !== undefined)
     .sort(byActivity);
 }
@@ -53,7 +68,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
     .map((ref, order) => ({ ref, order, written: statSync(ref.path).mtimeMs }))
     .filter((file) => w.since === undefined || file.written >= w.since)
     .sort((x, y) => y.written - x.written);
-  const listed: Array<{ f: SessionFacts; order: number; human?: ReturnType<typeof humanOf> }> = [];
+  const listed: Array<{ f: Facts; order: number; human?: ReturnType<typeof humanOf> }> = [];
   let counted = 0;
   /** The `limit` latest ends among the listed sessions read so far, latest first. */
   const latest: Array<number> = [];
@@ -63,7 +78,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       if (p.timed && !humanOf(p)?.empty) counted++;
       continue;
     }
-    const f = sessionFacts(ref);
+    const f = factsAsOf(sessionFacts(ref));
     if (f.start === undefined && f.end === undefined) continue;
     // A session is in the window when one of its entries is. Its first or last entry decides unless
     // it spans the whole window, when it is read to look for an entry inside.
@@ -71,7 +86,9 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       spanInWindow(f, w) &&
       (inWindow(f.start, w) ||
         inWindow(f.end, w) ||
-        someEntry(f.ref, (e) => inWindow(e.time ? Date.parse(e.time) : undefined, w)));
+        (f.asOf
+          ? f.asOf.entries.some((e) => inWindow(e.time ? Date.parse(e.time) : undefined, w))
+          : someEntry(f.ref, (e) => inWindow(e.time ? Date.parse(e.time) : undefined, w))));
     if (!active) continue;
     const human = humanOf(f);
     if (human?.empty) continue;
@@ -108,9 +125,9 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
     if (start) row.start = start;
     if (end) row.end = end;
     if (f.branch) row.branch = f.branch;
-    const title = sessionTitle(f.ref);
+    const title = f.asOf ? undefined : sessionTitle(f.ref);
     if (title) row.title = clip('title', title);
-    const first = (human ?? firstHumanMessage(f.ref, f.size)).entry;
+    const first = f.asOf ? f.asOf.entries.find(isHumanMessage) : (human ?? firstHumanMessage(f.ref, f.size)).entry;
     if (first?.kind === 'user') row.first = clip('first', first.text);
     emit(row);
   }

@@ -3,8 +3,9 @@
 
 import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { leanRecord, parseTranscript, readRecords, readTranscript } from '@alignment-hive/session-data';
+import { leanRecord, readRecords, readTranscript } from '@alignment-hive/session-data';
 import { LocalError, warn } from '../commands/local';
+import { recordsAsOf } from './as-of';
 import { linkAgents } from './locators';
 import { localErrors, localNotes } from './messages';
 import type { Entry, Transcript } from '@alignment-hive/session-data';
@@ -79,7 +80,7 @@ export function loadTranscript(
   print: Printer,
 ): LoadedTranscript {
   const { records, malformed } = readRecords(bytes, leanRecord);
-  const t = readTranscript(records);
+  const t = readTranscript(recordsAsOf(records));
   for (const e of t.entries)
     if (e.kind === 'tool' && e.tool === 'ArtifactComments' && e.result) e.result = commentsOnly(e.result);
   const prefix = print.transcript(ref, agents);
@@ -107,7 +108,7 @@ export function commentsOnly(result: string): string {
 
 /** How many entries a transcript has; an unreadable file is a LocalError naming it. */
 export async function entryCount(ref: TranscriptRef): Promise<number> {
-  return parseTranscript(await readBytes(ref)).entries.length;
+  return readTranscript(recordsAsOf(readRecords(await readBytes(ref), leanRecord).records)).entries.length;
 }
 
 /** The entries in the range; a range past the end clamps, one that starts past it is an error. */

@@ -847,6 +847,46 @@ describe('found by trying every feature', () => {
   });
 });
 
+describe('HIVE_LOCAL_CUTOFF', () => {
+  const at = async (cutoff: string, run: () => Promise<void>) => {
+    process.env.HIVE_LOCAL_CUTOFF = cutoff;
+    try {
+      await run();
+    } finally {
+      delete process.env.HIVE_LOCAL_CUTOFF;
+    }
+  };
+
+  test('every verb reads the transcripts as they stood then: no later result, entry, end or title', async () => {
+    // A's Bash call is at T(3) and its result at T(4).
+    await at(T(4), async () => {
+      expect(await hl('show', A)).toBe(0);
+      const bash = rows().find((r) => r.tool === 'Bash');
+      expect(bash?.loc).toBe(`${A.slice(0, 8)}:4`);
+      expect(bash?.result).toBeUndefined();
+      expect(rows().map((r) => r.loc)).toEqual([`${A.slice(0, 8)}:1`, `${A.slice(0, 8)}:3`, `${A.slice(0, 8)}:4`]);
+      out.length = 0;
+      expect(await hl('grep', '-F', '3 fail')).toBe(1);
+      expect(await hl('grep', '-F', 'needle')).toBe(1);
+      expect(await hl('sessions')).toBe(0);
+      expect(rows()[0]).toEqual({
+        loc: A.slice(0, 8),
+        start: localTime(T(1)),
+        end: localTime(T(3)),
+        branch: 'main',
+        first: 'Why does "the build" fail?',
+      });
+    });
+  });
+
+  test('a value that is not a time is an error', async () => {
+    await at('soon', async () => {
+      expect(await hl('sessions')).toBe(2);
+      expect(err).toEqual(['HIVE_LOCAL_CUTOFF is not a time: "soon"']);
+    });
+  });
+});
+
 describe('CLAUDE_CONFIG_DIR and project scope', () => {
   const session = (cwd: string, text: string) =>
     J([{ type: 'user', uuid: `u-${text}`, timestamp: T(1), cwd, message: { content: text } }]);

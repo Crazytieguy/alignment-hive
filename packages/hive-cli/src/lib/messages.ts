@@ -331,6 +331,7 @@ export const localErrors = {
   badNumber: (flag: string, value: string): string => `bad value for ${flag}: "${value}" (a whole number)`,
   badTime: (flag: string, value: string): string =>
     `bad time "${value}" for ${flag}: use 2h, 7d, or a local date such as 2026-09-12`,
+  badCutoff: (value: string): string => `HIVE_LOCAL_CUTOFF is not a time: "${value}"`,
   scopeConflict: '--project and --all-projects cannot be used together',
   noProject: (path: string, current: boolean): string =>
     `no Claude Code transcripts for project ${path}${current ? ' (the current project)' : ''}; use --project DIR or --all-projects`,

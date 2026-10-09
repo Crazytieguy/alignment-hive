@@ -19,6 +19,7 @@ import { LocatorError, parseLocator, parseRange, projectDirs } from '../lib/loca
 import { localErrors, localHelp, localNotes, localUsage } from '../lib/messages';
 import { makeProjectSessionFilter } from '../lib/session-state';
 import { writeLine } from '../lib/stdout';
+import { cutoffTime } from '../lib/as-of';
 import { parseTimeSpec } from '../lib/time-filter';
 import { extractCwdFromFile, projectScanData, resolveTranscriptDirs } from '../lib/transcript-discovery';
 import type { FlagSpec, ParsedArgs } from '../lib/args';
@@ -123,7 +124,10 @@ export function timeWindow(args: Args): Window {
     const wholeDay = flag === '--until' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     return wholeDay ? new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1).getTime() : t.getTime();
   };
-  return { since: bound('--since'), until: bound('--until') };
+  // HIVE_LOCAL_CUTOFF caps the window.
+  const until = bound('--until');
+  const cutoff = cutoffTime();
+  return { since: bound('--since'), until: cutoff === undefined ? until : Math.min(until ?? cutoff, cutoff) };
 }
 
 export const inWindow = (t: number | undefined, w: Window): boolean =>
