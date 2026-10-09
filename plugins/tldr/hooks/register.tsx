@@ -9,7 +9,7 @@ const isOn = atom({ plugin: 'tldr', key: 'isOn' } as const, true)
 const line = atom({ plugin: 'tldr', key: 'line' } as const, '')
 const isExpanded = atom({ plugin: 'tldr', key: 'isExpanded' } as const, false)
 const isLearned = atom({ plugin: 'tldr', key: 'isLearned' } as const, false)
-const isFinal = atom({ plugin: 'tldr', key: 'isFinal' } as const, false)
+const isTurnRunning = atom({ plugin: 'tldr', key: 'isTurnRunning' } as const, false)
 
 const FAIL = '!fail:'
 const RETRY_MS = 60_000 // a failed summary is tried again on a redraw this long after
@@ -20,6 +20,8 @@ const KEEP_SESSIONS = 20
 // Module state starts over on every reload; $.state and $.store survive it.
 const started = new Set<string>() // ids queued, in flight or summarized this load
 const order: string[] = [] // long blocks in the order first drawn, for /tldr more|less
+const drawnBefore = new Set<string>() // long blocks first drawn before this load's first turn: left alone
+let hasTurnStarted = false
 const queue: (() => Promise<void>)[] = []
 let running = 0
 let saving: Promise<void> = Promise.resolve()
@@ -75,7 +77,7 @@ async function summarize($: EngineInterface, id: string, text: string) {
   await saving
 }
 
-/** Summarize a block's visible text, drawn after its row was stored (isFinal): only then is it whole. */
+/** Summarize a block's visible text, drawn after its turn ended: only then is it whole. */
 function start($: EngineInterface, id: string, text: string) {
   if (started.has(id)) return
   started.add(id)
@@ -112,14 +114,18 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('session.append', { door: 'response' }, async ($, e, next) => {
-    const r = await next(e)
-    // The row is stored, so its blocks are whole. Marking it redraws a block already drawn (it may
-    // have been drawn while streaming), and that drawing starts the summary from its visible text.
-    if (!e.agentId && r.uuid && r.message?.type === 'assistant') {
-      await update($, memberOf(isFinal, { requestId: r.uuid }), () => true)
-    }
-    return r
+  // A block is whole once the turn that wrote it has ended. Surfaces draw a message under ids of
+  // their own (the desktop's is not the stored row's uuid), so the turn's end is the signal, not
+  // the stored row: flipping the atom redraws every pending block that read it, which starts its summary.
+  on('turn.start', async ($, e, next) => {
+    hasTurnStarted = true
+    await update($, isTurnRunning, () => true) // a subagent's run raises no turn.start
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) await update($, isTurnRunning, () => false)
+    return next(e)
   })
 
   on('command.run', { command: 'tldr' }, async ($, e) => {
@@ -149,13 +155,18 @@ export const register: Register = on => {
     const text = e.props.text
     if (e.props.isSummary || !isLong(text) || !(await read($, isOn))) return next(e)
     const id = e.requestId
-    if (!order.includes(id)) order.push(id)
+    if (!order.includes(id)) {
+      order.push(id)
+      if (!hasTurnStarted) drawnBefore.add(id)
+    }
     const t = await read($, memberOf(line, e))
-    const fin = await read($, memberOf(isFinal, e))
-    if (fin && (!t || t.startsWith(FAIL))) start($, id, text)
+    // Only a block still owed a summary reads the turn state, so a turn's start and end redraw those alone.
+    const isOwed = (!t || t.startsWith(FAIL)) && !drawnBefore.has(id)
+    const fin = isOwed && !(await read($, isTurnRunning))
+    if (fin) start($, id, text)
 
-    // No summary and none coming (not stored yet, so maybe streaming, or stored before this
-    // session's mod started): the engine's own drawing, untouched.
+    // No summary and none coming (its turn still running, or drawn before this load's first turn):
+    // the engine's own drawing, untouched.
     if (!t && !fin) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -187,7 +198,14 @@ export const register: Register = on => {
         <Box flexDirection="row">
           {bullet ? <Text>{bullet}</Text> : null}
           <Box flexGrow={1} flexShrink={1}>
-            {t ? <Text>{t}</Text> : <Text dimColor italic>summarizing…</Text>}
+            {t ? (
+              <Text>
+                <Text dimColor>tl;dr </Text>
+                {t}
+              </Text>
+            ) : (
+              <Text dimColor italic>summarizing…</Text>
+            )}
           </Box>
         </Box>
         <Box marginTop={1} paddingLeft={indent}>

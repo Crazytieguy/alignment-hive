@@ -9,8 +9,8 @@ declare module 'claude-code' {
       isExpanded: StateFamily<boolean>
       /** The person has used [ more ], [ less ] or /tldr (mirrors $.store 'learned'). */
       isLearned: boolean
-      /** By message id: its row was stored, so the drawn text is whole. */
-      isFinal: StateFamily<boolean>
+      /** A main-loop turn is running, so a block it draws may still grow. */
+      isTurnRunning: boolean
     }
   }
 }
