@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { parseTranscript } from '@alignment-hive/session-data';
 import { search } from '../commands/grep';
-import { mandatoryLiteral, mayMatch } from '../lib/grep-prefilter';
+import { mandatoryLiteral, mandatoryLiterals, mayMatch } from '../lib/grep-prefilter';
 
 describe('mandatoryLiteral', () => {
   test('the longest run every match must contain', () => {
@@ -18,6 +18,19 @@ describe('mandatoryLiteral', () => {
       expect([pattern, mandatoryLiteral(pattern, false)]).toEqual([pattern, undefined]);
     // D4's P20: a named group makes `\k<q>` a backreference, not the text "k<q>".
     expect(mandatoryLiteral('(?<=\\s)(?<q>[\'"])ok\\k<q>', false)).toBeUndefined();
+  });
+});
+
+describe('mandatoryLiterals', () => {
+  test("one per alternative, also inside a group that is the whole pattern; none when an alternative hasn't one", () => {
+    expect(mandatoryLiterals('brunch|jam', false)).toEqual(['brunch', 'jam']);
+    expect(mandatoryLiterals('(error|fail(ed)?)', false)).toEqual(['error', 'fail']);
+    expect(mandatoryLiterals('(?:a\\[x|b[cd]e)', false)).toEqual(['a[x', 'b']);
+    expect(mandatoryLiterals('(foo)bar|baz', false)).toEqual(['bar', 'baz']);
+    expect(mandatoryLiterals('colou?r', false)).toEqual(['colo']);
+    expect(mandatoryLiterals('a|b', true)).toEqual(['a|b']);
+    for (const pattern of ['brunch|', 'x|\\d+', '(a|b)+', '(a|b)c?|d', '(?=a|b)', '(?<q>a)|\\k<q>'])
+      expect([pattern, mandatoryLiterals(pattern, false)]).toEqual([pattern, undefined]);
   });
 });
 
@@ -85,6 +98,10 @@ const patterns: Array<[string, boolean, boolean]> = [
   ['abcdef', false, false],
   ['ABCDEF', false, true],
   ['zzqwwk', false, false],
+  ['(frob|zzqwwk)', false, false],
+  ['nothing|BRUNCH', false, true],
+  ['(?:\\[image:|quux)', false, false],
+  ['frob|/security-review the', false, false],
   ['de"', false, false],
   ['UNKNOWN', false, true],
   ['REFRESH token', false, true],
@@ -98,10 +115,10 @@ describe('mayMatch', () => {
     for (const [pattern, fixed, ignoreCase] of patterns) {
       const source = fixed ? pattern.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') : pattern;
       const re = new RegExp(source, ignoreCase ? 'mi' : 'm');
-      const literal = mandatoryLiteral(pattern, fixed);
+      const literals = mandatoryLiterals(pattern, fixed);
       for (const [i, buf] of files.entries()) {
         const hits = parseTranscript(buf.toString('utf8')).entries.some((e) => search(e, re).length > 0);
-        const kept = literal === undefined || mayMatch(buf, literal, ignoreCase, re);
+        const kept = literals === undefined || literals.some((l) => mayMatch(buf, l, ignoreCase, re));
         if (hits) expect([pattern, i, kept]).toEqual([pattern, i, true]);
         if (!kept) skipped++;
       }

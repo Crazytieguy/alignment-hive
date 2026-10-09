@@ -53,10 +53,15 @@ function closing(pattern: string, i: number): number {
   return pattern.length;
 }
 
-/** Whether the pattern has a `|` outside every group and class. */
-function topLevelAlternation(pattern: string): boolean {
+/** A named group, whose `\k<name>` is a backreference, not text. */
+const NAMED_GROUP = /\(\?<(?![=!])/;
+
+/** The pattern's alternatives: its parts between the `|`s outside every group and class. */
+function alternatives(pattern: string): Array<string> {
+  const parts: Array<string> = [];
   let depth = 0;
   let inClass = false;
+  let start = 0;
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i];
     if (c === '\\') i++;
@@ -64,9 +69,13 @@ function topLevelAlternation(pattern: string): boolean {
     else if (c === '[') inClass = true;
     else if (c === '(') depth++;
     else if (c === ')') depth--;
-    else if (c === '|' && depth === 0) return true;
+    else if (c === '|' && depth === 0) {
+      parts.push(pattern.slice(start, i));
+      start = i + 1;
+    }
   }
-  return false;
+  parts.push(pattern.slice(start));
+  return parts;
 }
 
 /**
@@ -78,7 +87,7 @@ export function mandatoryLiteral(pattern: string, fixed: boolean): string | unde
   const runs: Array<string> = [];
   if (fixed) runs.push(pattern);
   else {
-    if (/\(\?<(?![=!])/.test(pattern) || topLevelAlternation(pattern)) return undefined;
+    if (NAMED_GROUP.test(pattern) || alternatives(pattern).length > 1) return undefined;
     let run = '';
     for (let i = 0; i < pattern.length; ) {
       const c = pattern[i];
@@ -121,6 +130,21 @@ export function mandatoryLiteral(pattern: string, fixed: boolean): string | unde
   const parts = runs.flatMap((r) => r.split(/[^\x20\x21\x23-\x5b\x5d-\x7e]+/));
   const best = parts.reduce((a, b) => (b.length > a.length ? b : a), '');
   return best || undefined;
+}
+
+/**
+ * Literals one of which every match must contain: mandatoryLiteral of each alternative, also of
+ * alternatives in a group that is the whole pattern (`(error|fail)`); undefined when one has none.
+ */
+export function mandatoryLiterals(pattern: string, fixed: boolean): Array<string> | undefined {
+  if (fixed || NAMED_GROUP.test(pattern)) {
+    const literal = mandatoryLiteral(pattern, fixed);
+    return literal === undefined ? undefined : [literal];
+  }
+  const open = pattern.startsWith('(?:') ? 3 : pattern.startsWith('(') && !pattern.startsWith('(?') ? 1 : 0;
+  const body = open && closing(pattern, 0) === pattern.length ? pattern.slice(open, -1) : pattern;
+  const literals = alternatives(body).map((p) => mandatoryLiteral(p, false));
+  return literals.every((l) => l !== undefined) ? literals : undefined;
 }
 
 /** The synthesized `/name args` texts of a file, from its `<command-name>` lines alone. */

@@ -2,7 +2,7 @@ import { statSync } from 'node:fs';
 import { hiddenBy, repeatsSession } from '@alignment-hive/session-data';
 import { agentsOf, parseLocator, printer, resolveTranscript, sessionAgents } from '../lib/locators';
 import { clipAround, clipFirstLine, entryRow, mapStrings } from '../lib/local-rows';
-import { escapeRegExp, mandatoryLiteral, mayMatch } from '../lib/grep-prefilter';
+import { escapeRegExp, mandatoryLiterals, mayMatch } from '../lib/grep-prefilter';
 import { loadTranscript, reusedBytes, selectRange } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow, warn } from './local';
@@ -93,7 +93,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   const fixed = args.flags.get('-F') === true;
   const ignoreCase = args.flags.get('-i') === true;
   const re = compile(pattern, fixed, ignoreCase);
-  const literal = mandatoryLiteral(pattern, fixed);
+  const literals = mandatoryLiterals(pattern, fixed);
   const count = args.flags.get('-c') === true;
   const list = args.flags.get('-l') === true;
   if (count && list) throw new LocalError(localErrors.countOrList, true);
@@ -175,7 +175,8 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
         warn(error.message);
         continue;
       }
-      if (literal !== undefined && !mayMatch(bytes, literal, ignoreCase, re)) continue;
+      // Like the single-literal prefilter, alternations assume printable ASCII is written unescaped (no \uXXXX or \/).
+      if (literals && !literals.some((l) => mayMatch(bytes, l, ignoreCase, re))) continue;
       const loaded = loadTranscript(target.ref, bytes, group.agents, print);
       let k = 0;
       for (const e of target.ranges ? inRanges(loaded, target.ranges) : loaded.t.entries) {
