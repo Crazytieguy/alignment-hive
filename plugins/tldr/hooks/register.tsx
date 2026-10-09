@@ -9,17 +9,16 @@ const isOn = atom({ plugin: 'tldr', key: 'isOn' } as const, true)
 const line = atom({ plugin: 'tldr', key: 'line' } as const, '')
 const isExpanded = atom({ plugin: 'tldr', key: 'isExpanded' } as const, false)
 const isLearned = atom({ plugin: 'tldr', key: 'isLearned' } as const, false)
+const isFinal = atom({ plugin: 'tldr', key: 'isFinal' } as const, false)
 
 const FAIL = '!fail:'
-const SETTLE_MS = 700 // a block's text must hold still this long before it is summarized
 const RETRY_MS = 60_000 // a failed summary is tried again on a redraw this long after
 const MAX_RUNNING = 3
 const KEEP_PER_SESSION = 200
 const KEEP_SESSIONS = 20
 
 // Module state starts over on every reload; $.state and $.store survive it.
-const pending = new Map<string, string>() // message id -> newest text, while waiting out SETTLE_MS
-const made = new Map<string, string>() // message id -> text its summary was started from
+const started = new Set<string>() // ids queued, in flight or summarized this load
 const order: string[] = [] // long blocks in the order first drawn, for /tldr more|less
 const queue: (() => Promise<void>)[] = []
 let running = 0
@@ -52,20 +51,23 @@ async function save($: EngineInterface, id: string, t: string) {
 }
 
 async function summarize($: EngineInterface, id: string, text: string) {
-  const r = await $.model.complete({
-    model: 'haiku',
-    system: GUIDELINES,
-    prompt: '<message>\n' + text + '\n</message>',
-    maxTokens: 160,
-    effort: 'low',
-    timeoutMs: 30000,
-  })
-  if (made.get(id) !== text) return // the block changed meanwhile; a newer summary is on its way
-  const t = r.isAnswered ? lineFor(r.text) : FAIL + (r.reason ?? 'no answer')
+  let t: string
+  try {
+    const r = await $.model.complete({
+      model: 'haiku',
+      system: GUIDELINES,
+      prompt: '<message>\n' + text + '\n</message>',
+      effort: 'low',
+      timeoutMs: 30000,
+    })
+    t = r.isAnswered ? lineFor(r.text) : FAIL + (r.reason ?? 'no answer')
+  } catch (err) {
+    t = FAIL + 'refused: ' + String(err) // the engine refused to send it (a blocked model, say)
+  }
   await update($, memberOf(line, { requestId: id }), () => t)
-  await $.ui.log(`tldr ${id} ok=${r.isAnswered} in=${r.usage?.input_tokens} out=${r.usage?.output_tokens}: ${t}`, { to: 'debug' })
-  if (!r.isAnswered) {
-    $.clock.after(RETRY_MS, () => made.delete(id))
+  await $.ui.log(`tldr ${id}: ${t}`, { to: 'debug' })
+  if (t.startsWith(FAIL)) {
+    $.clock.after(RETRY_MS, () => started.delete(id))
     return
   }
   // Serialized read-modify-writes; a failed save must not stall the ones after it.
@@ -73,25 +75,12 @@ async function summarize($: EngineInterface, id: string, text: string) {
   await saving
 }
 
-/** Summarize once the block's text has held still for SETTLE_MS (a streaming block keeps changing). */
-function want($: EngineInterface, id: string, text: string) {
-  const isWaiting = pending.has(id)
-  pending.set(id, text)
-  if (isWaiting) return // the running timer picks up the newest text
-  let last = text
-  const settle = () => {
-    const now = pending.get(id)!
-    if (now !== last) {
-      last = now
-      $.clock.after(SETTLE_MS, settle)
-      return
-    }
-    pending.delete(id)
-    made.set(id, now)
-    queue.push(() => summarize($, id, now))
-    pump()
-  }
-  $.clock.after(SETTLE_MS, settle)
+/** Summarize a block's visible text, drawn after its row was stored (isFinal): only then is it whole. */
+function start($: EngineInterface, id: string, text: string) {
+  if (started.has(id)) return
+  started.add(id)
+  queue.push(() => summarize($, id, text).catch(() => {}))
+  pump()
 }
 
 async function setOn($: EngineInterface, value: boolean) {
@@ -123,6 +112,16 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('session.append', { door: 'response' }, async ($, e, next) => {
+    const r = await next(e)
+    // The row is stored, so its blocks are whole. Marking it redraws a block already drawn (it may
+    // have been drawn while streaming), and that drawing starts the summary from its visible text.
+    if (!e.agentId && r.uuid && r.message?.type === 'assistant') {
+      await update($, memberOf(isFinal, { requestId: r.uuid }), () => true)
+    }
+    return r
+  })
+
   on('command.run', { command: 'tldr' }, async ($, e) => {
     const what = parseArgs(e.args)
     await learn($)
@@ -136,7 +135,8 @@ export const register: Register = on => {
     const wantOpen = what === 'more'
     for (let i = order.length - 1; i >= 0; i--) {
       const me = { requestId: order[i]! }
-      if ((await read($, memberOf(line, me))).startsWith(FAIL)) continue // drawn in full anyway
+      const t = await read($, memberOf(line, me))
+      if (!t || t.startsWith(FAIL)) continue // drawn in full anyway
       if ((await read($, memberOf(isExpanded, me))) !== wantOpen) {
         await update($, memberOf(isExpanded, me), () => wantOpen)
         return { text: wantOpen ? 'Expanded the latest collapsed reply.' : 'Collapsed the latest expanded reply.' }
@@ -151,10 +151,12 @@ export const register: Register = on => {
     const id = e.requestId
     if (!order.includes(id)) order.push(id)
     const t = await read($, memberOf(line, e))
-    // Summarize when none was started this load and there is none (or a failed one, due its
-    // retry), or when the text changed since the last one was started.
-    const madeFrom = made.get(id)
-    if (madeFrom === undefined ? !t || t.startsWith(FAIL) : madeFrom !== text) want($, id, text)
+    const fin = await read($, memberOf(isFinal, e))
+    if (fin && (!t || t.startsWith(FAIL))) start($, id, text)
+
+    // No summary and none coming (not stored yet, so maybe streaming, or stored before this
+    // session's mod started): the engine's own drawing, untouched.
+    if (!t && !fin) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const indent = e.surface === 'terminal' ? 2 : 0 // under the message text, past the bullet
