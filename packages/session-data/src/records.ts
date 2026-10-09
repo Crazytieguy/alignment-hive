@@ -27,6 +27,14 @@ export function toRecord(value: unknown): RawRecord | undefined {
 const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });
 
 /**
+ * Under Bun, a full garbage collection after every this many characters of lines parsed, across
+ * calls. Each line's text is garbage once parsed, as is what `map` drops, and left to itself Bun
+ * collected too late: that garbage grew past twice what a parse keeps.
+ */
+const COLLECT_EVERY = 16 * 2 ** 20;
+let parsed = 0;
+
+/**
  * Parse JSONL text, or a file's bytes, into records, each passed through `map`. Bytes are decoded
  * one line at a time: no string of the whole file exists, and a line of plain ASCII stays one byte
  * per character where one emoji anywhere would make a whole-file string two. Blank lines and values
@@ -55,6 +63,11 @@ export function readRecords(
       }
       const record = toRecord(value);
       if (record) records.push(map(record));
+    }
+    parsed += text.length;
+    if (parsed >= COLLECT_EVERY && typeof Bun !== 'undefined') {
+      parsed = 0;
+      Bun.gc(true);
     }
     if (end < 0) break;
     start = end + 1;
