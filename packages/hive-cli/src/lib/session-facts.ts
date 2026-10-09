@@ -29,20 +29,18 @@ function readChunk(path: string, pos: number, len: number): Buffer {
   }
 }
 
-/** Complete lines at one end of a file, `len` bytes or the whole file; `bytes` is their length. */
-function edge(
-  path: string,
-  size: number,
-  len: number,
-  end: 'head' | 'tail',
-): { text: string; whole: boolean; bytes: number } {
-  if (len >= size) {
-    const all = readChunk(path, 0, size);
-    return { text: all.toString('utf8'), whole: true, bytes: all.length };
-  }
+/** Complete lines at one end of a file, `len` bytes or the whole file, undecoded. */
+function edgeLines(path: string, size: number, len: number, end: 'head' | 'tail'): { lines: Buffer; whole: boolean } {
+  if (len >= size) return { lines: readChunk(path, 0, size), whole: true };
   const buf = end === 'head' ? readChunk(path, 0, len) : readChunk(path, size - len, len);
   const lines = end === 'head' ? buf.subarray(0, buf.lastIndexOf(NEWLINE) + 1) : buf.subarray(buf.indexOf(NEWLINE) + 1);
-  return { text: lines.toString('utf8'), whole: false, bytes: lines.length };
+  return { lines, whole: false };
+}
+
+/** Complete lines at one end of a file, `len` bytes or the whole file. */
+function edge(path: string, size: number, len: number, end: 'head' | 'tail'): { text: string; whole: boolean } {
+  const { lines, whole } = edgeLines(path, size, len, end);
+  return { text: lines.toString('utf8'), whole };
 }
 
 /**
@@ -153,44 +151,51 @@ export interface SessionFacts extends SessionPresence {
   branch?: string;
 }
 
-/**
- * The size and 64 KB ends of a file, which every fact starts from, and its parts from the head on:
- * the head, then windows of the rest, read only as far as they are used.
- */
-function ends(ref: TranscriptRef): { presence: SessionPresence; parts: () => Generator<string>; tail: string } {
+const ASSISTANT = '"type":"assistant"';
+
+/** The size and 64 KB ends of a file, undecoded, which every fact starts from; the head is read when used. */
+function ends(ref: TranscriptRef): { presence: SessionPresence; head: () => Buffer; tail: Buffer } {
   const size = statSync(ref.path).size;
-  const head = edge(ref.path, size, CHUNK, 'head');
-  const tail = edge(ref.path, size, CHUNK, 'tail').text;
-  const hasAssistant = head.text.includes('"type":"assistant"') || tail.includes('"type":"assistant"');
-  const parts = function* () {
-    yield head.text;
-    for (const w of windows(ref.path, size, head.bytes, WINDOW)) yield w.toString('utf8');
-  };
-  return { presence: { ref, size, hasAssistant }, parts, tail };
+  const tail = edgeLines(ref.path, size, CHUNK, 'tail').lines;
+  let read: Buffer | undefined;
+  // A file of one chunk is its own head.
+  const head = () => (read ??= size > CHUNK ? edgeLines(ref.path, size, CHUNK, 'head').lines : tail);
+  const hasAssistant = tail.includes(ASSISTANT) || head().includes(ASSISTANT);
+  return { presence: { ref, size, hasAssistant }, head, tail };
 }
 
 /**
  * Whether a file has an entry time at all, as when sessionFacts sets its start and end, without
- * finding them: its first entry time is near the head, where a fork's own first one may not be.
+ * finding them. Nearly every file has one among its last few lines, so only those are parsed first.
  */
 export function sessionPresence(ref: TranscriptRef): SessionPresence & { timed: boolean } {
-  const { presence, parts } = ends(ref);
-  return { ...presence, timed: parts().some((text) => edgeTime(parseTranscript(text), false) !== undefined) };
+  const { presence, tail } = ends(ref);
+  const parsed = (text: string) => edgeTime(parseTranscript(text), true);
+  const near = tail.subarray(tail.indexOf(NEWLINE, Math.max(0, tail.length - 4096)) + 1);
+  const timed = parsed(near.toString('utf8')) ?? scan(ref.path, presence.size, 'tail', CHUNK, parsed);
+  return { ...presence, timed: timed !== undefined };
 }
 
 export function sessionFacts(ref: TranscriptRef): SessionFacts {
-  const { presence, parts, tail } = ends(ref);
+  const { presence, tail, ...rest } = ends(ref);
   const facts: SessionFacts = presence;
   const { size } = facts;
   if (size === 0) return facts;
-  facts.start = startTime(parts());
+  // The head, then windows of the rest, read only as far as the start time needs.
+  const head = rest.head();
+  facts.start = startTime(
+    (function* () {
+      yield head.toString('utf8');
+      for (const w of windows(ref.path, size, head.length, WINDOW)) yield w.toString('utf8');
+    })(),
+  );
   // The branch comes from the same parse as the last entry time.
   const last = (text: string) => {
     const t = parseTranscript(text);
     const end = edgeTime(t, true);
     return end === undefined ? undefined : { end, branch: t.branch };
   };
-  const found = last(tail) ?? scan(ref.path, size, 'tail', CHUNK * 16, last);
+  const found = last(tail.toString('utf8')) ?? scan(ref.path, size, 'tail', CHUNK * 16, last);
   facts.end = found?.end;
   facts.branch = found?.branch;
   return facts;
