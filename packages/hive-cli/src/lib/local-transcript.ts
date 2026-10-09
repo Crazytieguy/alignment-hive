@@ -1,3 +1,4 @@
+import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { readRecords, readTranscript } from '@alignment-hive/session-data';
 import { LocalError, warn } from '../commands/local';
@@ -12,11 +13,56 @@ export interface LoadedTranscript {
   ctx: RowContext;
 }
 
-/** A transcript file's bytes; an unreadable file is a LocalError naming it. */
+/** Smaller files use reusedBytes' scratch buffer; larger ones are mapped on macOS or read elsewhere. */
+const REUSE_MAX = 16 * 1024 * 1024;
+
+/**
+ * A transcript file's bytes; an unreadable file is a LocalError naming it. Large files on macOS are
+ * mapped, so the system can drop and reload file-backed pages. Smaller files or failed mappings are read.
+ */
 export async function readBytes(ref: TranscriptRef): Promise<Buffer> {
+  // Claude Code can truncate in place; on Linux a mapped page past the new EOF raises uncatchable SIGBUS.
+  if (process.platform === 'darwin') {
+    try {
+      if (statSync(ref.path).size >= REUSE_MAX) {
+        const mapped = Bun.mmap(ref.path, { shared: false });
+        return Buffer.from(mapped.buffer, mapped.byteOffset, mapped.length);
+      }
+    } catch {
+      // reading reports why
+    }
+  }
   return readFile(ref.path).catch((error: Error) => {
     throw new LocalError(localErrors.cannotRead(ref.path, error.message));
   });
+}
+
+/**
+ * readBytes for a loop over many files that keeps none of their bytes: each call's buffer is
+ * overwritten by the next. Parsed records and entries keep decoded strings, not these bytes.
+ */
+export function reusedBytes(): (ref: TranscriptRef) => Promise<Buffer> {
+  let scratch = Buffer.alloc(0);
+  return async (ref) => {
+    let fd;
+    try {
+      fd = openSync(ref.path, 'r');
+      const size = fstatSync(fd).size;
+      if (size < REUSE_MAX) {
+        if (scratch.length <= size) scratch = Buffer.alloc(Math.min(REUSE_MAX, Math.max(size + 1, 1 << 20)));
+        let n = 0;
+        for (let got = 1; got > 0 && n < scratch.length; n += got)
+          got = readSync(fd, scratch, n, scratch.length - n, n);
+        // A file that grew past the buffer while being read is read whole below.
+        if (n < scratch.length) return scratch.subarray(0, n);
+      }
+    } catch {
+      // readBytes reports why.
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return readBytes(ref);
+  };
 }
 
 /**

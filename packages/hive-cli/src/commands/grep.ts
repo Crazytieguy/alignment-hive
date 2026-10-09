@@ -3,7 +3,7 @@ import { hiddenBy, repeatsSession } from '@alignment-hive/session-data';
 import { agentsOf, parseLocator, printer, resolveTranscript, sessionAgents } from '../lib/locators';
 import { clipAround, clipFirstLine, entryRow, mapStrings } from '../lib/local-rows';
 import { escapeRegExp, mandatoryLiteral, mayMatch } from '../lib/grep-prefilter';
-import { loadTranscript, readBytes, selectRange } from '../lib/local-transcript';
+import { loadTranscript, reusedBytes, selectRange } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow, warn } from './local';
 import { sessionsByActivity } from './sessions';
@@ -162,13 +162,14 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   let matched = 0;
   let transcripts = 0;
   let hiddenHits = 0;
+  const read = reusedBytes();
   for (const group of groups) {
     for (const target of group.targets) {
       if (target.ref.agentId) agentTranscripts++;
       else sessions++;
       let bytes;
       try {
-        bytes = await readBytes(target.ref);
+        bytes = await read(target.ref);
       } catch (error) {
         if (!(error instanceof LocalError)) throw error;
         warn(error.message);
