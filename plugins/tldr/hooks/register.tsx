@@ -1,5 +1,5 @@
 // tldr as a mod: each long assistant text block is drawn as a one-sentence
-// Haiku TL;DR with [ more ] to expand it. Only the drawing changes; the stored
+// Sonnet TL;DR with [ more ] to expand it. Only the drawing changes; the stored
 // transcript and the model's context are untouched. /tldr toggles it globally.
 import { atom, read, update, memberOf } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -56,7 +56,7 @@ async function summarize($: EngineInterface, id: string, text: string) {
   let t: string
   try {
     const r = await $.model.complete({
-      model: 'haiku',
+      model: 'sonnet',
       system: GUIDELINES,
       prompt: '<message>\n' + text + '\n</message>',
       effort: 'low',

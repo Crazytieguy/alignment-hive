@@ -1,11 +1,10 @@
 // Pure helpers, tested with `claude plugin test`.
 
-export const GUIDELINES = `You write the one sentence a reader sees in place of a long message from an AI assistant; the full message stays one click away. The reader asked the assistant for something, maybe hours of work ago, and wants to know how it went.
+export const GUIDELINES = `The user's screen will show the message below, an AI assistant's message to them, collapsed to one sentence; the full message stays one click away. Write that sentence in the assistant's voice, to the user: its "I" stays "I", the user is "you".
 
-- One plain sentence, under 30 words, no prefix. Write as the assistant, to the reader: its "I" stays "I", the reader is "you".
-- Lead with the outcome: the answer, result or finding, keeping the message's hedges, tense and who did what.
-- Mention a question or request only if the message actually puts one to the reader, in its own words. Never comment on the message or on what it doesn't ask.
-- If the reader must answer or decide and one sentence can't carry what they need, end by saying what to look at in the full message.
+- One plain sentence, aim for under 30 words, no prefix.
+- Lead with its main point, keeping its hedges and status (proposed vs done, verified vs not).
+- If it puts a question or decision to the user that one sentence can't carry, end by saying what to look at in the full message.
 
 Reply with the sentence only.`
 
