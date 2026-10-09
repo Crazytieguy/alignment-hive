@@ -157,13 +157,22 @@ function reminderJoins(buf: Buffer): boolean {
 /** The pattern that matches `text` literally. */
 export const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
+/** The size of the pieces `holds` decodes. */
+const WINDOW = 4 * 2 ** 20;
+
 /** Whether the raw bytes hold the literal, ignoring the case of its ASCII letters under `-i`. */
 function holds(buf: Buffer, literal: string, ignoreCase: boolean): boolean {
   if (!ignoreCase) return buf.includes(literal);
   // Its other characters appear as they are, so the longest run of them must; it is a cheap first test.
   const exact = literal.split(/[a-z]+/i).reduce((a, b) => (b.length > a.length ? b : a), '');
-  // Without the u flag, no non-ASCII character matches an ASCII letter under i.
-  return (!exact || buf.includes(exact)) && new RegExp(escapeRegExp(literal), 'i').test(buf.toString('latin1'));
+  if (exact && !buf.includes(exact)) return false;
+  // Without the u flag, no non-ASCII character matches an ASCII letter under i, and a match is as
+  // long as the literal: windows overlapping by that much find every match, and no string of the
+  // whole file is made.
+  const re = new RegExp(escapeRegExp(literal), 'i');
+  for (let at = 0; at < buf.length; at += WINDOW)
+    if (re.test(buf.toString('latin1', at, at + WINDOW + literal.length - 1))) return true;
+  return false;
 }
 
 /** Whether a file may hold a match, so it must be parsed. False only when it provably cannot. */

@@ -93,4 +93,15 @@ describe('mayMatch', () => {
     }
     expect(skipped).toBeGreaterThan(100); // the filter does skip files
   });
+
+  test('under -i, finds the literal wherever it lies, across the pieces it decodes', () => {
+    const big = 9 * 2 ** 20;
+    const re = /needle/im;
+    for (const at of [0, 4 * 2 ** 20 - 3, 4 * 2 ** 20, 8 * 2 ** 20 - 1, big - 6]) {
+      const buf = Buffer.alloc(big, 'x');
+      buf.write('NeEdLe', at, 'latin1');
+      expect([at, mayMatch(buf, 'needle', true, re)]).toEqual([at, true]);
+    }
+    expect(mayMatch(Buffer.alloc(big, 'x'), 'needle', true, re)).toBe(false);
+  });
 });
