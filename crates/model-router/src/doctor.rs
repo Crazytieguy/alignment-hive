@@ -14,6 +14,8 @@ use crate::state::{Dirs, GROK_AUTH_PREFIX, find_auth, harden_auth_files};
 pub struct Check {
     pub name: &'static str,
     pub ok: bool,
+    /// Passing, but past a recommendation the user should know about.
+    pub warn: bool,
     pub detail: String,
 }
 
@@ -32,6 +34,8 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     let mut checks = Vec::new();
     let home = crate::state::home_dir();
     let project = std::env::current_dir().unwrap_or_default();
+    let settings = crate::claude_settings::settings_by_precedence(home.as_deref(), &project);
+    let declared = crate::client_window::resolve(&settings);
 
     // Auth-file permissions are a property of the state directory alone, so
     // this runs before — and independently of — the config load, the
@@ -44,6 +48,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     let config = match Config::load(config_path) {
         Ok(config) => {
             checks.push(Check {
+                warn: false,
                 name: "config",
                 ok: true,
                 detail: if config_path.exists() {
@@ -56,6 +61,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         }
         Err(error) => {
             checks.push(Check {
+                warn: false,
                 name: "config",
                 ok: false,
                 detail: format!("{error:#}"),
@@ -112,6 +118,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                 .get(crate::config::CLIPROXY_UPSTREAM)
                 .is_some_and(|upstream| upstream.mode == UpstreamMode::Managed);
             checks.push(Check {
+                warn: false,
                 name: "openai-providers",
                 ok: managed && keyless == 0,
                 detail: if !managed {
@@ -147,9 +154,10 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
 
     if let Some(address) = router_address {
         match health {
-            Some((status, version, upstream_state, running_window)) => {
+            Some((status, version, upstream_state, running_declaration)) => {
                 let ok = status == "ok";
                 checks.push(Check {
+                    warn: false,
                     name: "router",
                     ok,
                     detail: format!(
@@ -165,6 +173,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                     let gate_ok =
                         probe_ok(&format!("{base_url}{}", crate::proxy::HEALTH_PATH)).await;
                     checks.push(Check {
+                        warn: false,
                         name: "ingress-token",
                         ok: gate_ok,
                         detail: if gate_ok {
@@ -176,23 +185,8 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                         },
                     });
                 }
-                // The running service resolved its context declaration at
-                // startup; a settings edit since then silently moves every
-                // scaled route's compaction point until it restarts.
-                if let (Some(running), Some(current)) = (
-                    running_window,
-                    crate::client_window::resolve(home.as_deref(), &project).value(),
-                ) && running != current
-                {
-                    checks.push(Check {
-                        name: "context-declaration",
-                        ok: false,
-                        detail: format!(
-                            "the running service resolved {running} but {} is now {current}; run \
-                             `model-router service restart`",
-                            crate::client_window::ENV_VAR
-                        ),
-                    });
+                if let (Some(config), Some(running)) = (&config, running_declaration) {
+                    checks.extend(context_declaration_check(config, running, declared));
                 }
                 // A healthy-but-stale service is otherwise invisible: the
                 // SessionStart hook retries `service refresh` silently.
@@ -200,6 +194,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                     && expected != version
                 {
                     checks.push(Check {
+                        warn: false,
                         name: "router-version",
                         ok: false,
                         detail: format!(
@@ -211,6 +206,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                 }
             }
             None => checks.push(Check {
+                warn: false,
                 name: "router",
                 ok: false,
                 detail: format!(
@@ -233,10 +229,10 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         checks.extend(context_window_checks(
             config,
             dirs,
-            home.as_deref(),
-            &project,
+            declared,
+            &crate::client_window::resolve_compaction(home.as_deref(), &settings),
         ));
-        checks.extend(fallback_model_check(home.as_deref(), &project));
+        checks.extend(fallback_model_check(&settings));
     }
 
     let healthy = checks.iter().all(|check| check.ok);
@@ -248,27 +244,62 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     }
 }
 
-/// The `context-windows` check as doctor runs it: the windows the service
-/// discovered at its last start are applied first (the config on disk does
-/// not carry them), then the picker rows that size routes client-side are
-/// read, and the check sees both. Failing to re-prepare the config with the
-/// cached windows is reported in the check's place.
+/// The running service resolved its context declaration at startup
+/// (`running`, from its health endpoint); a settings edit since then moves
+/// every scaled route's compaction point until it restarts. Reported only
+/// when the two differ and some route asks for `context-window-scaling`:
+/// otherwise the declaration drives nothing in the service.
+fn context_declaration_check(
+    config: &Config,
+    running: Option<u64>,
+    declared: crate::client_window::EnvSetting,
+) -> Option<Check> {
+    // An explicit `declared-context-window` wins over the client's, in the
+    // service and here alike.
+    let current = config.declared_context_window.or(declared.value());
+    if running == current
+        || !config
+            .effective_models()
+            .any(|route| route.context_window_scaling)
+    {
+        return None;
+    }
+    let show = |value: Option<u64>| value.map_or_else(|| "unset".to_string(), |v| v.to_string());
+    Some(Check {
+        warn: false,
+        name: "context-declaration",
+        ok: false,
+        detail: format!(
+            "the running service scales routes for {} = {} but it is now {}; run \
+             `model-router service restart`",
+            crate::client_window::ENV_VAR,
+            show(running),
+            show(current),
+        ),
+    })
+}
+
+/// The `context-windows` check as doctor runs it: the routes are scaled for
+/// `declared` and the windows the service discovered at its last start are
+/// applied (the config on disk carries neither), then checked against Claude
+/// Code's settings. Failing to re-prepare the config with the cached windows
+/// is reported in the check's place.
 fn context_window_checks(
     mut config: Config,
     dirs: &Dirs,
-    home: Option<&std::path::Path>,
-    project: &std::path::Path,
+    declared: crate::client_window::EnvSetting,
+    compaction: &crate::client_window::Compaction,
 ) -> Vec<Check> {
+    config.adopt_client_window(declared);
     if let Err(error) = crate::discovery::apply_cached_windows(&mut config, dirs) {
         return vec![Check {
+            warn: false,
             name: "context-windows",
             ok: false,
             detail: format!("applying the discovered context windows failed: {error:#}"),
         }];
     }
-    let client = crate::client_window::resolve(home, project);
-    let rows = crate::claude_settings::picker_behaves_as(home);
-    crate::context_check::check(&config, client, &rows)
+    crate::context_check::check(&config, declared, compaction)
         .into_iter()
         .collect()
 }
@@ -282,11 +313,8 @@ fn context_window_checks(
 /// that here would only be confidently wrong; an all-unrecognised chain
 /// still fails since the setting is the hazard. `--fallback-model` on the
 /// command line is invisible here.
-fn fallback_model_check(
-    home: Option<&std::path::Path>,
-    project: &std::path::Path,
-) -> Option<Check> {
-    let (path, raw) = crate::claude_settings::winning_setting(home, project, &["fallbackModel"])?;
+fn fallback_model_check(settings: &[(std::path::PathBuf, serde_json::Value)]) -> Option<Check> {
+    let (path, raw) = crate::claude_settings::winning_setting(settings, &["fallbackModel"])?;
     // Claude Code drops blank entries and ignores non-arrays, but the key
     // still shadows lower files.
     let chain = raw
@@ -298,6 +326,7 @@ fn fallback_model_check(
         .filter(|entry| !entry.is_empty())
         .collect::<Vec<_>>();
     (!chain.is_empty()).then(|| Check {
+        warn: false,
         name: "fallback-model",
         ok: false,
         detail: format!(
@@ -318,16 +347,19 @@ fn fallback_model_check(
 fn auth_permission_check(dirs: &Dirs, checks: &mut Vec<Check>) {
     let check = match harden_auth_files(&dirs.auth_dir()) {
         Ok(hardened) if hardened.is_empty() => Check {
+            warn: false,
             name: "auth-permissions",
             ok: true,
             detail: "auth files are 0600".to_string(),
         },
         Ok(hardened) => Check {
+            warn: false,
             name: "auth-permissions",
             ok: true,
             detail: format!("tightened {} auth file(s) to 0600", hardened.len()),
         },
         Err(error) => Check {
+            warn: false,
             name: "auth-permissions",
             ok: false,
             detail: format!("{error:#}"),
@@ -346,6 +378,7 @@ fn upstream_checks(
         UpstreamMode::Managed => {
             let cached = crate::acquire::cached_upstream(dirs).is_some();
             checks.push(Check {
+                warn: false,
                 name: "upstream-binary",
                 ok: cached,
                 detail: if cached {
@@ -361,6 +394,7 @@ fn upstream_checks(
             let auth = find_auth(&dirs.auth_dir(), crate::state::CODEX_AUTH_PREFIX)
                 .map(|path| format!("login present: {}", path.display()));
             checks.push(Check {
+                warn: false,
                 name: "codex-auth",
                 ok: auth.is_some(),
                 detail: auth.unwrap_or_else(|| {
@@ -371,6 +405,7 @@ fn upstream_checks(
             if config.grok.enabled {
                 let auth = find_auth(&dirs.auth_dir(), GROK_AUTH_PREFIX);
                 checks.push(Check {
+                    warn: false,
                     name: "grok-auth",
                     ok: auth.is_some(),
                     detail: auth.map_or_else(
@@ -381,6 +416,7 @@ fn upstream_checks(
             }
         }
         UpstreamMode::External => checks.push(Check {
+            warn: false,
             name: "upstream-mode",
             ok: true,
             detail: format!(
@@ -389,6 +425,7 @@ fn upstream_checks(
             ),
         }),
         UpstreamMode::Stub => checks.push(Check {
+            warn: false,
             name: "upstream-mode",
             ok: true,
             detail: "stub backend (protocol testing only)".to_string(),
@@ -434,12 +471,14 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
         .collect();
     if missing.is_empty() {
         return Check {
+            warn: false,
             name: "shipped-agent-routes",
             ok: true,
             detail: SHIPPED_AGENT_ROUTES.join(", "),
         };
     }
     Check {
+        warn: false,
         name: "shipped-agent-routes",
         ok: false,
         detail: format!(
@@ -467,6 +506,7 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
     }
     if wanted.is_empty() {
         return Check {
+            warn: false,
             name: "routed-models",
             ok: true,
             detail: "no routed models configured".to_string(),
@@ -478,6 +518,7 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
         // conflating them would send the user to the wrong fix.
         Err(error) => {
             return Check {
+                warn: false,
                 name: "routed-models",
                 ok: false,
                 detail: format!("could not read the upstream model list: {error}"),
@@ -486,6 +527,7 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
     };
     let Some(served) = crate::verify::parse_catalog(body) else {
         return Check {
+            warn: false,
             name: "routed-models",
             ok: false,
             detail: "upstream /v1/models response was not a model list".to_string(),
@@ -503,6 +545,7 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
         })
         .collect::<Vec<_>>();
     Check {
+        warn: false,
         name: "routed-models",
         ok: missing.is_empty(),
         detail: if missing.is_empty() {
@@ -585,9 +628,12 @@ async fn probe_ok(url: &str) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 
+/// The health fields doctor reads. The last is the service's startup context
+/// declaration: `None` from a service too old to report it, `Some(None)` when
+/// it resolved none.
 async fn probe_health(
     address: std::net::SocketAddr,
-) -> Option<(String, String, String, Option<u64>)> {
+) -> Option<(String, String, String, Option<Option<u64>>)> {
     let client = probe_client()?;
     let body = client
         .get(format!("http://{address}{}", crate::proxy::HEALTH_PATH))
@@ -608,7 +654,7 @@ async fn probe_health(
             .to_string(),
         value
             .get("declared-context-window")
-            .and_then(serde_json::Value::as_u64),
+            .map(serde_json::Value::as_u64),
     ))
 }
 
@@ -619,7 +665,11 @@ impl Report {
         use std::fmt::Write as _;
         let mut out = format!("model-router doctor (v{})\n", self.version);
         for check in &self.checks {
-            let mark = if check.ok { "ok " } else { "FAIL" };
+            let mark = match (check.ok, check.warn) {
+                (false, _) => "FAIL",
+                (true, true) => "warn",
+                (true, false) => "ok ",
+            };
             let _ = writeln!(out, "  [{mark}] {:<16} {}", check.name, check.detail);
         }
         if let Some(base_url) = &self.base_url {
@@ -639,7 +689,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::claude_settings::write_settings;
+    use crate::claude_settings::{settings_by_precedence, write_settings};
     use crate::config::parse_and_prepare as config;
 
     fn grok_enabled() -> Config {
@@ -878,14 +928,16 @@ mod tests {
     fn fallback_model_fails_on_the_winning_chain_only() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        assert!(fallback_model_check(Some(home.path()), project.path()).is_none());
+        let fallback =
+            || fallback_model_check(&settings_by_precedence(Some(home.path()), project.path()));
+        assert!(fallback().is_none());
 
         write_settings(
             home.path(),
             "settings.json",
             r#"{"fallbackModel":["sonnet","default"]}"#,
         );
-        let check = fallback_model_check(Some(home.path()), project.path()).unwrap();
+        let check = fallback().unwrap();
         assert_eq!(check.name, "fallback-model");
         assert!(!check.ok);
         assert!(
@@ -897,35 +949,92 @@ mod tests {
         // A project file that sets the key owns it whole, even set to nothing
         // usable; only its own usable entries are reported.
         write_settings(project.path(), "settings.json", r#"{"fallbackModel":[]}"#);
-        assert!(fallback_model_check(Some(home.path()), project.path()).is_none());
+        assert!(fallback().is_none());
         write_settings(
             project.path(),
             "settings.json",
             r#"{"fallbackModel":"sonnet"}"#,
         );
-        assert!(fallback_model_check(Some(home.path()), project.path()).is_none());
+        assert!(fallback().is_none());
         write_settings(
             project.path(),
             "settings.json",
             r#"{"fallbackModel":[" opus ", ""]}"#,
         );
-        let check = fallback_model_check(Some(home.path()), project.path()).unwrap();
+        let check = fallback().unwrap();
         assert!(check.detail.contains("(opus)"), "{}", check.detail);
     }
 
-    /// The doctor wiring end to end: the service's cached discovery reaches
-    /// the check, and so does the user file's picker row.
+    /// A service that resolved a different declaration at startup fails
+    /// only when some route is scaled by it.
     #[test]
-    fn context_windows_check_sees_cached_discovery_and_picker_rows() {
+    fn context_declaration_fails_only_for_a_stale_scaling_service() {
+        use crate::client_window::EnvSetting;
+        let source = |extra: &str| {
+            format!(
+                r#"
+{extra}
+[[openai-providers]]
+name = "openrouter"
+base-url = "https://openrouter.ai/api/v1"
+[[openai-providers.models]]
+name = "moonshotai/kimi-k3"
+routing-id = "kimi-k3"
+display-name = "Kimi K3"
+context-window = 1000000
+context-window-scaling = true
+"#
+            )
+        };
+        let scaled = config(&source(""));
+
+        let check =
+            context_declaration_check(&scaled, Some(258_400), EnvSetting::Settings(1_000_000))
+                .unwrap();
+        assert_eq!(check.name, "context-declaration");
+        assert!(!check.ok);
+        assert_eq!(
+            check.detail,
+            "the running service scales routes for CLAUDE_CODE_MAX_CONTEXT_TOKENS = 258400 but \
+             it is now 1000000; run `model-router service restart`"
+        );
+        // Undeclared on either side still counts as a change.
+        let check =
+            context_declaration_check(&scaled, None, EnvSetting::Environment(258_400)).unwrap();
+        assert!(
+            check.detail.contains("= unset but it is now 258400"),
+            "{check:?}"
+        );
+
+        // Unchanged: nothing to report.
+        assert!(
+            context_declaration_check(&scaled, Some(258_400), EnvSetting::Settings(258_400))
+                .is_none()
+        );
+        // An explicit config value wins in the service and here alike.
+        let pinned = config(&source("declared-context-window = 258400"));
+        assert!(
+            context_declaration_check(&pinned, Some(258_400), EnvSetting::Settings(1_000_000))
+                .is_none()
+        );
+        // No route asks for scaling: the declaration drives nothing.
+        let unscaled = config(&source("").replace("context-window-scaling = true", ""));
+        assert!(
+            context_declaration_check(&unscaled, Some(258_400), EnvSetting::Settings(1_000_000))
+                .is_none()
+        );
+    }
+
+    /// The doctor wiring end to end: the service's cached discovery reaches
+    /// the check.
+    #[test]
+    fn context_windows_check_sees_cached_discovery() {
         let state = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
         let dirs = Dirs::under(state.path());
         std::fs::create_dir_all(&dirs.state_dir).unwrap();
         let load = || {
             config(
                 r#"
-declared-context-window = 250000
 [[openai-providers]]
 name = "openrouter"
 base-url = "https://openrouter.ai/api/v1"
@@ -936,11 +1045,9 @@ display-name = "Kimi K3"
 "#,
             )
         };
-        write_settings(
-            home.path(),
-            "settings.json",
-            r#"{"modelPicker":{"options":[{"model":"kimi-k3","behavesAs":"claude-opus-4-8"}]}}"#,
-        );
+        let settings = crate::client_window::SettingsDirs::new();
+        settings.user(r#"{"modelSettings":{"kimi-k3":{"autoCompactWindow":500000}}}"#);
+        let compaction = settings.resolve(None);
         let cache = |window: u64| {
             crate::discovery::write_cache(
                 &dirs.state_dir.join("context-windows.json"),
@@ -951,38 +1058,44 @@ display-name = "Kimi K3"
             );
         };
         let run = || {
-            let checks = context_window_checks(load(), &dirs, Some(home.path()), project.path());
+            let checks = context_window_checks(
+                load(),
+                &dirs,
+                crate::client_window::EnvSetting::Settings(1_000_000),
+                &compaction,
+            );
             assert_eq!(checks.len(), 1, "{checks:?}");
             checks.into_iter().next().unwrap()
         };
 
-        // No discovery yet: the row is reported, nothing is judged.
+        // No discovery yet: reported, not judged.
         let check = run();
-        assert!(check.ok, "{check:?}");
-        assert!(check.detail.contains("real unknown"), "{check:?}");
+        assert!(
+            check.detail.contains("kimi-k3 real window unknown"),
+            "{check:?}"
+        );
 
         cache(202_752);
         let check = run();
-        assert!(!check.ok, "{check:?}");
-        assert!(
-            check.detail.contains("behavesAs claude-opus-4-8"),
-            "{check:?}"
-        );
-        assert!(check.detail.contains("guarantees 202752"), "{check:?}");
+        assert!(check.detail.contains("kimi-k3 OVERRUN RISK"), "{check:?}");
 
         cache(1_048_576);
         let check = run();
-        assert!(check.ok, "{check:?}");
-        assert!(check.detail.contains("real 1048576"), "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("kimi-k3 clipped to 500000 (real 1048576)"),
+            "{check:?}"
+        );
     }
 
     #[test]
     fn fallback_model_ignores_unreadable_and_silent_settings() {
         let project = tempfile::tempdir().unwrap();
         write_settings(project.path(), "settings.json", "{ not json");
-        assert!(fallback_model_check(None, project.path()).is_none());
+        assert!(fallback_model_check(&settings_by_precedence(None, project.path())).is_none());
         write_settings(project.path(), "settings.json", r#"{"model":"opus"}"#);
-        assert!(fallback_model_check(None, project.path()).is_none());
+        assert!(fallback_model_check(&settings_by_precedence(None, project.path())).is_none());
     }
 
     #[test]

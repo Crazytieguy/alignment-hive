@@ -1618,3 +1618,52 @@ What the flag still changes (Fable request, flag off vs on, same prompt):
 Decision: keep the flag in setup for first-party parity; drop the 1M
 rationale, the step 6 window check, the Repair 200K hint, and the `[1m]`
 advice in choosing-models.
+
+## Per-model `/autocompact` replaces scaling and `behavesAs` (2026-10-08, Claude Code 2.1.294, router 0.1.23)
+
+2.1.288 changed `/autocompact` to save its window per model. It writes
+`modelSettings.<model id>.autoCompactWindow` (100000–1000000, or `"auto"`)
+to user settings. Every settings file is read, higher ones override per
+model, and a top-level `autoCompactWindow` in a file replaces the per-model
+entries of the files below it. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` beats all
+of it. The window in force is `min(model window, setting)`, so it can only
+lower the window. Routed IDs key by their routing ID: with a 1M
+declaration, `claude -p "/autocompact" --model gpt-6-astra --settings ...`
+read "258.4k tokens (from settings)", and an unlisted `gpt-6-luna` read
+"1m tokens (default for an unrecognized model)".
+
+Method: a `gpt-6-luna` session reads a ~24-token-per-line file in 700-line
+`Read` chunks (~16.7K tokens each); haiku parent for the subagent arms;
+`--settings` overriding the user env; `--debug` for the gate's own log line
+(`autocompact: tokens=… level=… effectiveWindow=…`).
+
+| arm | settings | result |
+|---|---|---|
+| main session | 1M declared, per-model 100K | compacted twice |
+| subagent | 1M declared, per-model 200K | `effectiveWindow=180000`, `level=compact`, then `Reactive compact: empty summary text in summarization response` ×3, circuit breaker; ran on to 242K |
+| subagent | 200K declared | `Prompt is too long · automatic compaction failed: summarization produced empty response`; agent died at 173K |
+| subagent, fixed router | 1M declared, per-model 200K | compacted 173.8K → 17.0K, finished the task correctly |
+
+So subagents honor the per-model window; their compaction was failing. The
+compaction fork keeps the conversation's tools for the prompt cache, and in
+it GPT called `SubagentHandback` (denied in the fork) instead of writing
+the summary, so Claude Code saw empty text. The main session has no
+hand-back tool, which is why it compacted. That failure was live in the
+shipped setup too: any GPT subagent that filled its 258400 window died.
+Claude Code sends `x-claude-code-compaction` on these requests (with
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`, or with the first-party flag), and
+`tool_choice: {"type":"none"}` passes through CLIProxyAPI (with the tool
+offered, GPT called it under `auto` and wrote text under `none`), so the
+router now sets that on compaction requests.
+
+Decision: setup declares `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` and gives
+each route a per-model entry at its real window (GPT 258400 by choice,
+Grok 500000, open-weights their own; doctor names each). Usage scaling
+stays served for existing installs but is deprecated: setup no longer
+writes it, a route that can't be scaled runs unscaled instead of failing
+the config, and doctor tells the user to replace it. `behavesAs` rows fail
+doctor. Doctor checks each route's real window against where Claude Code
+compacts it: `min(declaration, per-model window)`, times real/declared on
+a scaled route. Retest trigger: a Claude Code
+release that changes `/autocompact`, the compaction fork, or the gateway
+hint headers.

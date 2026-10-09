@@ -200,6 +200,13 @@ async fn main() -> anyhow::Result<()> {
 
 async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()> {
     let mut config = Config::load(config_path)?;
+    // The deprecated `context-window-scaling` reports usage against the
+    // window Claude Code was configured with; read it rather than make the
+    // config restate it.
+    config.read_client_window(
+        state::home_dir().as_deref(),
+        &std::env::current_dir().unwrap_or_default(),
+    );
     let token = match config.ingress_token.take() {
         Some(token) => token,
         None => state::load_or_create_ingress_token(dirs)?,
@@ -231,10 +238,11 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
 
     // Ask the hosts for the windows of the provider routes that did not name
     // one. Best-effort: an unreachable host leaves the cached windows in
-    // place, and a route with none runs unscaled rather than blocking Claude
-    // traffic. Requests arriving meanwhile wait in the accept backlog.
+    // place, and a route with none is still served (doctor reports it) rather
+    // than blocking Claude traffic. Requests arriving meanwhile wait in the accept backlog.
     discovery::fetch_context_windows(&config, dirs).await;
     discovery::apply_cached_windows(&mut config, dirs)?;
+    config.warn_unscaled_routes();
 
     let managed_config = Some(config.cliproxy_upstream().clone())
         .filter(|upstream| upstream.mode == UpstreamMode::Managed);

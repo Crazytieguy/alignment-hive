@@ -459,6 +459,7 @@ async fn gpt_sse_usage_rewrite_is_streamed_and_captured() {
 /// A route whose real window is four times what Claude Code believes reports a
 /// quarter of its real usage, so the client's auto-compact gate — which sums
 /// the usage of the last message carrying one — trips at the real limit.
+/// Deprecated, but kept working for configs that still ask for it.
 #[tokio::test]
 async fn scaled_route_reports_usage_in_the_clients_coordinate_system() {
     let fake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -6,7 +6,7 @@ use anyhow::{Context, ensure};
 use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
-use crate::client_window::{UsageScale, client_context_window};
+use crate::client_window::{EnvSetting, UsageScale, client_context_window};
 
 /// The single supported upstream name: the managed/external `CLIProxyAPI`
 /// gateway. Renamed from `codex` in 0.1.3 (the upstream carries more than
@@ -25,13 +25,14 @@ const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
 /// (`effective_context_window_percent`, verified in the codex-rs client).
 /// The backend itself accepted ~912K on 2026-09-23. Load-bearing as the `M`
 /// in the translated `prompt is too long` overflow error (see
-/// [`crate::overflow`]); `doctor` flags a declaration raised past it.
+/// [`crate::overflow`]); `doctor` flags a compaction window raised past it.
 pub(crate) const GPT_CONTEXT_WINDOW: u64 = 828_400;
 
-/// Codex's default window for the same models: 272K at the same 95%. Setup
-/// declares `CLAUDE_CODE_MAX_CONTEXT_TOKENS` at this value to match Codex;
-/// raising it toward [`GPT_CONTEXT_WINDOW`] is the user's opt-in, as in
-/// Codex (input past 272K is billed at a higher rate).
+/// Codex's default window for the same models: 272K at the same 95%. The
+/// built-in GPT routes compact here (the per-model `autoCompactWindow`
+/// `doctor` asks for) to match Codex; raising it toward
+/// [`GPT_CONTEXT_WINDOW`] is the user's opt-in, as in Codex (input past 272K
+/// is billed at a higher rate).
 pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
@@ -219,12 +220,16 @@ pub struct Config {
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
-    /// What Claude Code believes routed models' context windows are.
-    /// [`Config::load`] reads it from Claude Code's own settings, so it is
-    /// normally absent here; an explicit value is the escape hatch for a
-    /// settings file the router cannot see (a project-level override, when
-    /// the service was started from elsewhere).
+    /// Deprecated, with `context-window-scaling`: the window Claude Code
+    /// believes routed models have, which scaled routes report usage
+    /// against. Normally absent, so the service reads Claude Code's own
+    /// setting at startup ([`Config::adopt_client_window`]); an explicit
+    /// value was the escape hatch for a settings file the service cannot see.
     pub declared_context_window: Option<u64>,
+    /// Set when [`Self::declared_context_window`] came from the client
+    /// rather than the config file, so doctor doesn't flag it as deprecated.
+    #[serde(skip)]
+    pub declared_adopted: bool,
 
     /// Routes the router generates rather than reads: the built-in Grok
     /// family when `[grok] enabled`, plus one per `[[openai-providers]]`
@@ -248,10 +253,8 @@ pub struct GrokConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Rescale the built-in Grok routes' reported usage so auto-compaction
-    /// fires at their real windows rather than at the single declared one.
-    /// See [`ModelRoute::context_window_scaling`]; off by default, because
-    /// clipping keeps every displayed token count true.
+    /// Deprecated: rescale the built-in Grok routes' reported usage. See
+    /// [`ModelRoute::context_window_scaling`].
     #[serde(default)]
     pub context_window_scaling: bool,
 }
@@ -317,10 +320,7 @@ pub struct ProviderModel {
     /// catalog reports nothing useful.
     pub context_window: Option<u64>,
 
-    /// Rescale this route's reported usage so Claude Code compacts at the
-    /// model's real window rather than at the single one it believes every
-    /// routed model has. Only a window *larger* than the declared one can be
-    /// scaled — see [`crate::client_window::UsageScale`].
+    /// Deprecated; see [`ModelRoute::context_window_scaling`].
     #[serde(default)]
     pub context_window_scaling: bool,
 
@@ -389,12 +389,16 @@ pub struct ModelRoute {
     /// The model's real context window in tokens. See [`ProviderModel`].
     pub context_window: Option<u64>,
 
-    /// See [`ProviderModel::context_window_scaling`].
+    /// Deprecated in favour of a per-model `autoCompactWindow`, and kept so
+    /// existing installs behave as they did: rescale this route's reported
+    /// usage so Claude Code compacts at the model's real window rather than
+    /// at the single one it believes every routed model has. Only a window
+    /// *larger* than the declared one is scaled — see [`UsageScale`].
     #[serde(default)]
     pub context_window_scaling: bool,
 
     /// Computed by [`Config::prepare`] from the two fields above and the
-    /// client-side window for this routing ID; never read from TOML.
+    /// client-side window; never read from TOML.
     #[serde(skip)]
     pub usage_scale: Option<UsageScale>,
 
@@ -414,15 +418,15 @@ impl ModelRoute {
         split_effort_suffix(&self.upstream_model)
     }
 
-    /// The scale this route's reported usage needs, if any. `None` when
-    /// scaling is off or the real window already matches what the client
-    /// believes (an identity scale is a no-op, not an error).
+    /// The scale this route's reported usage needs, if any: `None` when
+    /// scaling is off, the real window is unknown, or it is not larger than
+    /// the client's (an identity scale is a no-op, and scaling up is unsound).
     fn scale_for(&self, declared: Option<u64>) -> Option<UsageScale> {
         let actual = self
             .context_window
             .filter(|_| self.context_window_scaling)?;
         let client = client_context_window(declared);
-        if client == actual {
+        if actual <= client {
             return None;
         }
         UsageScale::new(client, actual)
@@ -547,10 +551,7 @@ fn template_grok_section() -> String {
     format!(
         "# Optional Grok (xAI) family: rides the same managed CLIProxyAPI child\n# under an xAI \
          subscription OAuth login (`model-router login grok`).\n# Off by default. Built-in routes \
-         when enabled:\n{routes}\n#[grok]\n# Default: false\n#enabled = true\n# Rescale reported \
-         usage so auto-compaction fires at Grok's real window instead of at\n# \
-         CLAUDE_CODE_MAX_CONTEXT_TOKENS. Off by default: clipping keeps every\n# displayed token \
-         count true.\n# Default: false\n#context-window-scaling = true\n"
+         when enabled:\n{routes}\n#[grok]\n# Default: false\n#enabled = true\n"
     )
 }
 
@@ -572,15 +573,9 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 #name = "moonshotai/kimi-k3"
 #routing-id = "kimi-k3"
 #display-name = "Kimi K3"
-# Claude Code sizes context client-side from the model ID, so it believes every
-# routed model has the one window declared by CLAUDE_CODE_MAX_CONTEXT_TOKENS.
-# Setting this rescales the route's reported usage so auto-compaction fires at
-# the model's real window instead. The real window is discovered from the host
-# at startup (cached in the state dir). Only larger-than-declared windows can
-# be scaled; a smaller one needs a lower CLAUDE_CODE_MAX_CONTEXT_TOKENS.
-# Cost: this route's token counts read in the declared coordinate system.
-#context-window-scaling = true
-# Override for the discovered window, for hosts whose catalog reports none.
+# The model's real context window is discovered from the host at startup
+# (cached in the state dir); `doctor` checks it against where Claude Code
+# compacts the route. Override it for hosts whose catalog reports none.
 #context-window = 1048576
 # OpenRouter only: route this model solely to sub-providers serving at least
 # this many tokens (OpenRouter otherwise routes to any of them, and their
@@ -588,11 +583,6 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 # shows which. A model with no qualifying sub-provider is not served.
 #min-context-window = 1000000
 
-# What Claude Code believes routed models' context windows are. Read from
-# ~/.claude/settings.json (or the project's) at startup, so it normally needs
-# no entry here — set it only when a settings file the service cannot see
-# holds the real value.
-# declared-context-window = {declared_context_window}
 "#;
 
 /// The built-in routes of one family: one bare routing ID per model.
@@ -641,22 +631,8 @@ impl Config {
             Self::default()
         };
         config.load_secrets(&path.with_file_name("secrets.toml"))?;
-        config.resolve_declared_context_window();
         config.prepare()?;
         Ok(config)
-    }
-
-    /// Reads the context window Claude Code was configured with, so it does
-    /// not have to be restated here. An explicit `declared-context-window`
-    /// wins — it is the escape hatch for a project-level settings override,
-    /// which a service started outside the project cannot see.
-    fn resolve_declared_context_window(&mut self) {
-        if self.declared_context_window.is_some() {
-            return;
-        }
-        let home = crate::state::home_dir();
-        let cwd = std::env::current_dir().unwrap_or_default();
-        self.declared_context_window = crate::client_window::resolve(home.as_deref(), &cwd).value();
     }
 
     /// Attaches API keys from `secrets.toml` to matching providers. A missing
@@ -700,6 +676,27 @@ impl Config {
         Ok(())
     }
 
+    /// Takes the context window Claude Code was configured with (`client`,
+    /// from its environment or settings) as `declared-context-window` unless
+    /// the config states one, and rescales the routes for it. An explicit
+    /// value wins: it is the escape hatch for a project-level settings
+    /// override, which a service started outside the project cannot see.
+    pub(crate) fn adopt_client_window(&mut self, client: EnvSetting) {
+        if self.declared_context_window.is_none() {
+            self.declared_context_window = client.value();
+            self.declared_adopted = self.declared_context_window.is_some();
+        }
+        self.compute_usage_scales();
+    }
+
+    /// [`Self::adopt_client_window`] with the value in force for a client
+    /// started in `project` (the process environment, else the settings
+    /// files).
+    pub fn read_client_window(&mut self, home: Option<&Path>, project: &Path) {
+        let settings = crate::claude_settings::settings_by_precedence(home, project);
+        self.adopt_client_window(crate::client_window::resolve(&settings));
+    }
+
     /// Resolves every route's usage scale.
     fn compute_usage_scales(&mut self) {
         let declared = self.declared_context_window;
@@ -709,6 +706,33 @@ impl Config {
             .chain(self.generated_models.iter_mut())
         {
             route.usage_scale = route.scale_for(declared);
+        }
+    }
+
+    /// Logs every route that asks for `context-window-scaling` and runs
+    /// unscaled. Never an error: a declaration raised to a route's window or
+    /// past it (setup's 1M) with the key left behind must still serve.
+    pub fn warn_unscaled_routes(&self) {
+        let client = client_context_window(self.declared_context_window);
+        for route in self
+            .effective_models()
+            .filter(|route| route.context_window_scaling && route.usage_scale.is_none())
+        {
+            if let Some(window) = route.context_window {
+                tracing::warn!(
+                    route = route.routing_id,
+                    window,
+                    client,
+                    "context-window-scaling is set but the real window is not larger than the \
+                     one Claude Code believes; leaving this route unscaled"
+                );
+            } else {
+                tracing::warn!(
+                    route = route.routing_id,
+                    "context-window-scaling is set but no context window is known; this route \
+                     will not be scaled (set `context-window` explicitly to scale it anyway)"
+                );
+            }
         }
     }
 
@@ -865,36 +889,16 @@ impl Config {
                 "duplicate model routing-id: {}",
                 route.routing_id
             );
-            self.validate_context_window(route)?;
-        }
-
-        self.validate_openai_providers(cliproxy)
-    }
-
-    /// Context-window fields on one route.
-    fn validate_context_window(&self, route: &ModelRoute) -> anyhow::Result<()> {
-        if let Some(window) = route.context_window {
-            ensure!(
-                window > 0,
-                "context-window must be greater than zero for {}",
-                route.routing_id
-            );
-        }
-        if route.context_window_scaling {
-            let client = client_context_window(self.declared_context_window);
-            // See `UsageScale`: only scaling down is sound.
-            if let Some(actual) = route.context_window {
+            if let Some(window) = route.context_window {
                 ensure!(
-                    actual >= client,
-                    "model {} sets context-window {actual}, below the {client} Claude Code \
-                     believes it has: scaling cannot protect a model whose window is smaller \
-                     than the declared one. Lower CLAUDE_CODE_MAX_CONTEXT_TOKENS to {actual} \
-                     instead (and scale the larger routes back up from there)",
+                    window > 0,
+                    "context-window must be greater than zero for {}",
                     route.routing_id
                 );
             }
         }
-        Ok(())
+
+        self.validate_openai_providers(cliproxy)
     }
 
     fn validate_openai_providers(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
@@ -1072,10 +1076,7 @@ impl Config {
             max_request_body_bytes = defaults.max_request_body_bytes,
             anthropic_base = defaults.anthropic_upstream_base,
             models = template_models_section(&defaults.models),
-            providers = TEMPLATE_PROVIDERS_SECTION.replace(
-                "{declared_context_window}",
-                &CODEX_DEFAULT_CONTEXT_WINDOW.to_string(),
-            ),
+            providers = TEMPLATE_PROVIDERS_SECTION,
             grok = template_grok_section(),
             capture_file = defaults.capture.file.display(),
             capture_max_response_body_bytes = defaults.capture.max_response_body_bytes,
@@ -1611,7 +1612,7 @@ mod tests {
             "display-name = \"Kimi K2.7\"\nmin-context-window = 1000000",
         ));
         assert!(error.contains("only OpenRouter supports"), "{error}");
-        let error = prepare_error(&kimi_toml("min-context-window = 0", false));
+        let error = prepare_error(&kimi_toml("min-context-window = 0"));
         assert!(error.contains("greater than zero"), "{error}");
     }
 
@@ -1676,12 +1677,10 @@ mod tests {
 
     // ---- context windows ----
 
-    /// One `OpenRouter` model with the context fields under test, under the
-    /// declaration setup writes.
-    fn kimi_toml(window: &str, scaling: bool) -> String {
+    /// One `OpenRouter` model with the context fields under test.
+    fn kimi_toml(window: &str) -> String {
         format!(
             r#"
-                declared-context-window = {CODEX_DEFAULT_CONTEXT_WINDOW}
                 [[openai-providers]]
                 name = "openrouter"
                 base-url = "https://openrouter.ai/api/v1"
@@ -1690,13 +1689,8 @@ mod tests {
                 routing-id = "kimi-k3"
                 display-name = "Kimi K3"
                 {window}
-                context-window-scaling = {scaling}
             "#
         )
-    }
-
-    fn kimi(window: u64, scaling: bool) -> String {
-        kimi_toml(&format!("context-window = {window}"), scaling)
     }
 
     fn route<'a>(config: &'a Config, routing_id: &str) -> &'a ModelRoute {
@@ -1706,11 +1700,26 @@ mod tests {
             .unwrap()
     }
 
+    /// [`kimi_toml`] with the deprecated scaling on, under the declaration
+    /// the old setup wrote.
+    fn scaled_kimi(window: u64) -> String {
+        format!(
+            "declared-context-window = {CODEX_DEFAULT_CONTEXT_WINDOW}\n{}",
+            kimi_toml(&format!(
+                "context-window = {window}\ncontext-window-scaling = true"
+            ))
+        )
+    }
+
     #[test]
     fn derived_route_inherits_window_and_scale() {
-        let config = parse_and_prepare(&kimi(1_000_000, true));
+        let config = parse_and_prepare(&kimi_toml("context-window = 1000000"));
+        let unscaled = route(&config, "kimi-k3");
+        assert_eq!(unscaled.context_window, Some(1_000_000));
+        assert!(unscaled.usage_scale.is_none());
+
+        let config = parse_and_prepare(&scaled_kimi(1_000_000));
         let route = route(&config, "kimi-k3");
-        assert_eq!(route.context_window, Some(1_000_000));
         assert!(route.context_window_scaling);
         // A real 1M-token conversation reports as the declared window, so
         // Claude Code compacts at the model's real limit.
@@ -1722,28 +1731,70 @@ mod tests {
 
     #[test]
     fn scaling_is_none_when_the_windows_already_agree() {
-        let config = parse_and_prepare(&kimi(CODEX_DEFAULT_CONTEXT_WINDOW, true));
+        let config = parse_and_prepare(&scaled_kimi(CODEX_DEFAULT_CONTEXT_WINDOW));
         assert!(route(&config, "kimi-k3").usage_scale.is_none());
     }
 
     #[test]
-    fn scaling_a_window_below_the_declared_one_is_rejected() {
-        let error = prepare_error(&kimi(125_000, true));
-        assert!(
-            error.contains(&format!("below the {CODEX_DEFAULT_CONTEXT_WINDOW}")),
-            "{error}"
+    fn scaling_a_window_below_the_declared_one_leaves_the_route_unscaled() {
+        // Scaling up is unsound, but a config that asks for it must still
+        // serve: the service logs it and doctor judges the route unscaled.
+        let config = parse_and_prepare(&scaled_kimi(125_000));
+        let route = route(&config, "kimi-k3");
+        assert_eq!(route.context_window, Some(125_000));
+        assert!(route.usage_scale.is_none());
+    }
+
+    #[test]
+    fn a_scaling_route_without_a_window_waits_for_discovery() {
+        // `serve` fills these in from the host; until then the route is
+        // simply unscaled rather than a config error.
+        let config = parse_and_prepare(&kimi_toml("context-window-scaling = true"));
+        let route = route(&config, "kimi-k3");
+        assert!(route.context_window.is_none());
+        assert!(route.usage_scale.is_none());
+    }
+
+    #[test]
+    fn the_clients_window_is_adopted_unless_the_config_declares_one() {
+        let source = kimi_toml("context-window = 1000000\ncontext-window-scaling = true");
+        let scaled = |config: &Config| {
+            route(config, "kimi-k3")
+                .usage_scale
+                .unwrap()
+                .apply(1_000_000)
+        };
+
+        let mut config = parse_and_prepare(&source);
+        config.adopt_client_window(EnvSetting::Settings(500_000));
+        assert_eq!(config.declared_context_window, Some(500_000));
+        assert_eq!(scaled(&config), 500_000);
+        // Re-preparing (discovery does) keeps the adopted declaration.
+        config.prepare().unwrap();
+        assert_eq!(scaled(&config), 500_000);
+
+        // A raised declaration the route's window does not exceed: unscaled.
+        let mut config = parse_and_prepare(&source);
+        config.adopt_client_window(EnvSetting::Environment(1_000_000));
+        assert!(route(&config, "kimi-k3").usage_scale.is_none());
+
+        // Nothing resolved: Claude Code's own default.
+        let mut config = parse_and_prepare(&source);
+        config.adopt_client_window(EnvSetting::Unresolved);
+        assert_eq!(
+            scaled(&config),
+            crate::client_window::UNDECLARED_CONTEXT_WINDOW
         );
-        assert!(
-            error.contains("Lower CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
-            "{error}"
-        );
+
+        let mut config = parse_and_prepare(&scaled_kimi(1_000_000));
+        config.adopt_client_window(EnvSetting::Settings(500_000));
+        assert_eq!(scaled(&config), CODEX_DEFAULT_CONTEXT_WINDOW);
     }
 
     #[test]
     fn overflow_translation_is_armed_for_built_in_models_only() {
         use crate::overflow::OverflowDialect;
-        let config =
-            parse_and_prepare(&format!("{}[grok]\nenabled = true\n", kimi_toml("", false)));
+        let config = parse_and_prepare(&format!("{}[grok]\nenabled = true\n", kimi_toml("")));
         let dialect = |routing_id: &str| overflow_dialect(route(&config, routing_id));
         assert_eq!(dialect("gpt-5.6-sol"), Some(OverflowDialect::Codex));
         assert_eq!(dialect("grok-4.5"), Some(OverflowDialect::Xai));
@@ -1767,18 +1818,9 @@ mod tests {
     }
 
     #[test]
-    fn a_scaling_route_without_a_window_waits_for_discovery() {
-        // `serve` fills these in from the host; until then the route is
-        // simply unscaled rather than a config error.
-        let config = parse_and_prepare(&kimi_toml("", true));
-        let route = route(&config, "kimi-k3");
-        assert!(route.context_window.is_none());
-        assert!(route.usage_scale.is_none());
-    }
-
-    #[test]
     fn windows_must_be_positive() {
-        assert!(prepare_error(&kimi(0, true)).contains("greater than zero"));
+        assert!(prepare_error(&kimi_toml("context-window = 0")).contains("greater than zero"));
+        assert!(prepare_error("declared-context-window = 0").contains("must be greater than zero"));
     }
 
     // ---- Grok family (optional) ----
@@ -1810,7 +1852,10 @@ mod tests {
         let config = parse_and_prepare("[grok]\nenabled = true\n");
         assert!(route(&config, "grok-4.5").usage_scale.is_none());
 
-        let config = parse_and_prepare("[grok]\nenabled = true\ncontext-window-scaling = true\n");
+        let config = parse_and_prepare(
+            "declared-context-window = 258400\n[grok]\nenabled = true\ncontext-window-scaling = \
+             true\n",
+        );
         let route = route(&config, "grok-4.5");
         let scale = route.usage_scale.expect("grok-4.5 unscaled");
         // A full real window reports as the declared one.

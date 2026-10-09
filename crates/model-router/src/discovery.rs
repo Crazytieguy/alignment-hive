@@ -1,8 +1,9 @@
 //! Context-window discovery and sub-provider pinning for
 //! `[[openai-providers]]` routes.
 //!
-//! A route that opts into `context-window-scaling` needs its real window, and
-//! `doctor` reports every route against it; the host already publishes it.
+//! `doctor` checks every route's real window against where Claude Code will
+//! compact it, a route that still uses the deprecated `context-window-scaling`
+//! needs it, and the host already publishes that window.
 //! Asking the host beats asking the user: the number is provider-specific,
 //! changes when a model is upgraded, and a mistyped one moves the compaction
 //! point silently.
@@ -23,7 +24,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::client_window::client_context_window;
 use crate::config::{Config, OpenAiProvider, ProviderModel, is_openrouter};
 use crate::state::Dirs;
 
@@ -143,18 +143,18 @@ pub async fn fetch_context_windows(config: &Config, dirs: &Dirs) {
 /// from the cache [`fetch_context_windows`] maintains, then re-prepares the
 /// config so the generated routes and usage scales reflect them. A model
 /// with nothing cached is left as it was, which `doctor` reports. An
-/// explicit `context-window` is never touched.
+/// explicit `context-window` is never touched. A scaling route takes its
+/// window even when that is not above the client's: it then runs unscaled
+/// ([`Config::warn_unscaled_routes`]), and `doctor` can still judge it.
 ///
 /// # Errors
 /// Returns the error of re-preparing the config, which the applied values
-/// themselves cannot cause (windows are positive, and only scaling routes
-/// are validated against the declaration).
+/// themselves cannot cause (windows are positive, and scaling never fails).
 pub fn apply_cached_windows(config: &mut Config, dirs: &Dirs) -> anyhow::Result<()> {
     if !needs_discovery(config) {
         return Ok(());
     }
     let cache = read_cache(&dirs.state_dir.join(CACHE_FILE));
-    let believed = client_context_window(config.declared_context_window);
     for provider in &mut config.openai_providers {
         for model in &mut provider.models {
             if !needs_lookup(model) {
@@ -189,27 +189,9 @@ pub fn apply_cached_windows(config: &mut Config, dirs: &Dirs) -> anyhow::Result<
                 .filter(|c| c.pin.is_none() || model.pinned_providers.is_some())
                 .map(|c| c.window)
                 .filter(|window| *window > 0);
-            // A scaling route never takes a window at or below the client's:
-            // scaling cannot help there, and a discovered number must never
-            // fail the config the way a hand-written one does.
-            match window {
-                Some(window) if !model.context_window_scaling || window > believed => {
-                    tracing::info!(model = model.name, window, "discovered context window");
-                    model.context_window = Some(window);
-                }
-                Some(window) => tracing::warn!(
-                    model = model.name,
-                    window,
-                    believed,
-                    "discovered context window is not larger than the one Claude Code already \
-                     believes; leaving this route unscaled"
-                ),
-                None if model.context_window_scaling => tracing::warn!(
-                    model = model.name,
-                    "no context window discovered; this route will not be scaled — set \
-                     `context-window` explicitly to scale it anyway"
-                ),
-                None => {}
+            if let Some(window) = window {
+                tracing::info!(model = model.name, window, "discovered context window");
+                model.context_window = Some(window);
             }
         }
     }
@@ -617,9 +599,11 @@ mod tests {
     }
 
     fn two_route_config() -> Config {
-        crate::config::parse_and_prepare(
-            r#"
-declared-context-window = 250000
+        crate::config::parse_and_prepare(two_route_config_source())
+    }
+
+    fn two_route_config_source() -> &'static str {
+        r#"
 [[openai-providers]]
 name = "openrouter"
 base-url = "https://openrouter.ai/api/v1"
@@ -627,13 +611,11 @@ base-url = "https://openrouter.ai/api/v1"
 name = "moonshotai/kimi-k3"
 routing-id = "kimi-k3"
 display-name = "Kimi K3"
-context-window-scaling = true
 [[openai-providers.models]]
 name = "z-ai/glm-5.2"
 routing-id = "glm-5.2"
 display-name = "GLM-5.2"
-"#,
-        )
+"#
     }
 
     fn route_window(config: &Config, routing_id: &str) -> Option<u64> {
@@ -645,7 +627,7 @@ display-name = "GLM-5.2"
     }
 
     #[test]
-    fn cached_windows_reach_every_undeclared_route_and_scale_only_above_the_client() {
+    fn cached_windows_reach_every_undeclared_route() {
         let dir = tempfile::tempdir().unwrap();
         let dirs = Dirs::under(dir.path());
         std::fs::create_dir_all(&dirs.state_dir).unwrap();
@@ -668,27 +650,47 @@ display-name = "GLM-5.2"
         let mut config = two_route_config();
         apply_cached_windows(&mut config, &dirs).unwrap();
         assert_eq!(route_window(&config, "kimi-k3"), Some(1_048_576));
-        // The plain route takes the host's number even below the client's
-        // window: it is what doctor has to warn about.
+        // Below every client window too: it is what doctor has to warn about.
         assert_eq!(route_window(&config, "glm-5.2"), Some(202_752));
-        let kimi = config
-            .effective_models()
-            .find(|route| route.routing_id == "kimi-k3")
-            .unwrap();
-        assert!(kimi.usage_scale.is_some(), "re-prepare computes the scale");
+    }
 
-        // A scaling route never takes a window at or below the client's: the
-        // config would have refused it hand-written.
-        write_cache(
-            &dirs.state_dir.join(CACHE_FILE),
-            &BTreeMap::from([(
-                cache_key("openrouter", "moonshotai/kimi-k3"),
-                window(200_000),
-            )]),
-        );
-        let mut config = two_route_config();
-        apply_cached_windows(&mut config, &dirs).unwrap();
-        assert_eq!(route_window(&config, "kimi-k3"), None);
+    #[test]
+    fn a_scaling_route_is_scaled_only_above_the_client_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
+        let scaling = || {
+            crate::config::parse_and_prepare(&two_route_config_source().replacen(
+                "display-name = \"Kimi K3\"",
+                "display-name = \"Kimi K3\"\ncontext-window-scaling = true",
+                1,
+            ))
+        };
+        let kimi = |config: &Config| {
+            config
+                .effective_models()
+                .find(|route| route.routing_id == "kimi-k3")
+                .unwrap()
+                .usage_scale
+        };
+        let applied = |real: u64, declared: u64| {
+            write_cache(
+                &dirs.state_dir.join(CACHE_FILE),
+                &BTreeMap::from([(cache_key("openrouter", "moonshotai/kimi-k3"), window(real))]),
+            );
+            let mut config = scaling();
+            config.adopt_client_window(crate::client_window::EnvSetting::Settings(declared));
+            apply_cached_windows(&mut config, &dirs).unwrap();
+            config
+        };
+
+        let config = applied(1_048_576, 258_400);
+        assert_eq!(kimi(&config).unwrap().apply(1_048_576), 258_400);
+        // Not above the client's: the window still lands, unscaled, and the
+        // config does not fail.
+        let config = applied(202_752, 1_000_000);
+        assert_eq!(route_window(&config, "kimi-k3"), Some(202_752));
+        assert!(kimi(&config).is_none());
     }
 
     fn pinned_config(min: Option<u64>, explicit_window: Option<u64>) -> Config {
@@ -698,7 +700,6 @@ display-name = "GLM-5.2"
         });
         crate::config::parse_and_prepare(&format!(
             r#"
-declared-context-window = 250000
 [[openai-providers]]
 name = "openrouter"
 base-url = "https://openrouter.ai/api/v1"

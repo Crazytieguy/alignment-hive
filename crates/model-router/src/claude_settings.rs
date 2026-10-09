@@ -1,13 +1,13 @@
-//! Claude Code's settings files, and how one value is resolved across them.
+//! Claude Code's settings files, and how values are resolved across them.
 //!
 //! Reverse engineered, like everything else about the client
-//! (`plugins/model-router/docs/experiments.md` records the read-outs): the
-//! files are consulted highest-precedence first, and the first that sets a
-//! key owns it whole — a value a higher file shadows is never in effect,
-//! however well-formed. Managed (admin) settings sit above all of these and
-//! are not read here.
+//! (`plugins/model-router/docs/experiments.md` records the read-outs): most
+//! keys are owned whole by the highest-precedence file that sets one — a
+//! value a higher file shadows is never in effect, however well-formed. A few
+//! merge across files instead, so callers get every file in order too.
+//! Managed (admin) settings and `--settings` sit above all of these and are
+//! not read here.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// A settings file's JSON; unreadable or malformed files read as nothing.
@@ -15,57 +15,43 @@ fn read_settings(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-/// Claude Code's settings files in precedence order, highest first.
-fn settings_files(home: Option<&Path>, project: &Path) -> impl Iterator<Item = PathBuf> {
+/// How messages name the user settings file.
+pub(crate) const USER_SETTINGS_DISPLAY: &str = "~/.claude/settings.json";
+
+/// The user settings file.
+pub(crate) fn user_settings_file(home: &Path) -> PathBuf {
+    home.join(".claude/settings.json")
+}
+
+/// Every readable settings file with its JSON, in precedence order, highest
+/// first: project-local, project, user. Unreadable or malformed files are
+/// skipped.
+pub(crate) fn settings_by_precedence(
+    home: Option<&Path>,
+    project: &Path,
+) -> Vec<(PathBuf, serde_json::Value)> {
     [
         project.join(".claude/settings.local.json"),
         project.join(".claude/settings.json"),
     ]
     .into_iter()
-    .chain(home.map(|home| home.join(".claude/settings.json")))
+    .chain(home.map(user_settings_file))
+    .filter_map(|path| read_settings(&path).map(|settings| (path, settings)))
+    .collect()
 }
 
 /// The highest-precedence file that sets `key` (a path into the JSON), with
 /// the raw value. The winner owns the key whole: a malformed value is the
 /// caller's to reject, never a reason to fall through to a shadowed file.
-/// Unreadable or malformed files are skipped.
-pub(crate) fn winning_setting(
-    home: Option<&Path>,
-    project: &Path,
+/// `settings` is [`settings_by_precedence`]'s result.
+pub(crate) fn winning_setting<'a>(
+    settings: &'a [(PathBuf, serde_json::Value)],
     key: &[&str],
-) -> Option<(PathBuf, serde_json::Value)> {
-    settings_files(home, project).find_map(|path| {
-        let settings = read_settings(&path)?;
-        let value = key.iter().try_fold(&settings, |node, key| node.get(key))?;
-        Some((path, value.clone()))
+) -> Option<(&'a Path, &'a serde_json::Value)> {
+    settings.iter().find_map(|(path, settings)| {
+        let value = key.iter().try_fold(settings, |node, key| node.get(key))?;
+        Some((path.as_path(), value))
     })
-}
-
-/// The `behavesAs` target of every `modelPicker` row in the user settings
-/// file, keyed by the row's `model` (both trimmed; rows without a non-empty
-/// target are left out).
-///
-/// Claude Code honours `modelPicker` from managed settings, `--settings`,
-/// and `~/.claude/settings.json` only — never from a project checkout — and
-/// the highest of those that defines it replaces the rest whole. Only the
-/// user file is readable here: a managed or `--settings` picker is
-/// invisible, and so are the rows a running session loaded at its start.
-/// Callers must say so rather than report the user file as the truth.
-pub(crate) fn picker_behaves_as(home: Option<&Path>) -> BTreeMap<String, String> {
-    home.and_then(|home| read_settings(&home.join(".claude/settings.json")))
-        .as_ref()
-        .and_then(|settings| settings.get("modelPicker"))
-        .and_then(|picker| picker.get("options"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|row| {
-            let model = row.get("model")?.as_str()?.trim();
-            let target = row.get("behavesAs")?.as_str()?.trim();
-            (!model.is_empty() && !target.is_empty())
-                .then(|| (model.to_string(), target.to_string()))
-        })
-        .collect()
 }
 
 /// Test fixture: writes `.claude/<name>` under `dir`.
@@ -94,49 +80,13 @@ mod tests {
         );
         write_settings(project.path(), "settings.local.json", "{ not json");
 
-        let (path, value) =
-            winning_setting(Some(home.path()), project.path(), &["env", "A"]).unwrap();
+        let settings = settings_by_precedence(Some(home.path()), project.path());
+        let (path, value) = winning_setting(&settings, &["env", "A"]).unwrap();
         assert_eq!(path, home.path().join(".claude/settings.json"));
         assert_eq!(value, "1");
-        let (path, value) = winning_setting(Some(home.path()), project.path(), &["k"]).unwrap();
+        let (path, value) = winning_setting(&settings, &["k"]).unwrap();
         assert_eq!(path, project.path().join(".claude/settings.json"));
         assert_eq!(value, "x");
-        assert!(winning_setting(Some(home.path()), project.path(), &["env", "C"]).is_none());
-    }
-
-    #[test]
-    fn picker_rows_come_from_the_user_file_only() {
-        let home = tempfile::tempdir().unwrap();
-        assert!(picker_behaves_as(None).is_empty());
-        assert!(picker_behaves_as(Some(home.path())).is_empty());
-
-        write_settings(
-            home.path(),
-            "settings.json",
-            r#"{"modelPicker":{"options":[
-                {"model":" kimi-k3 ","label":"Kimi K3","behavesAs":" claude-opus-4-8 "},
-                {"model":"gpt-5.6-sol","label":"GPT-5.6 Sol"},
-                {"model":"glm-5.2","behavesAs":"  "},
-                {"model":"","behavesAs":"claude-opus-4-8"},
-                {"behavesAs":"claude-opus-4-8"},
-                "not a row"
-            ]}}"#,
-        );
-        let rows = picker_behaves_as(Some(home.path()));
-        assert_eq!(
-            rows,
-            BTreeMap::from([("kimi-k3".to_string(), "claude-opus-4-8".to_string())])
-        );
-
-        // Malformed file: nothing, not a panic.
-        write_settings(home.path(), "settings.json", "{ not json");
-        assert!(picker_behaves_as(Some(home.path())).is_empty());
-        // A well-formed file whose picker is the wrong shape: also nothing.
-        write_settings(
-            home.path(),
-            "settings.json",
-            r#"{"modelPicker":{"options":"x"}}"#,
-        );
-        assert!(picker_behaves_as(Some(home.path())).is_empty());
+        assert!(winning_setting(&settings, &["env", "C"]).is_none());
     }
 }

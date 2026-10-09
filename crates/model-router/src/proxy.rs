@@ -18,7 +18,7 @@ use crate::headers;
 use crate::overflow::OverflowRewrite;
 use crate::routing::{RoutingDecision, decide, substitute_model};
 use crate::stub;
-use crate::usage::{GptPolicies, SseUsageTransformer, UsagePolicy, estimate_input_tokens};
+use crate::usage::{GptPolicies, SseUsageTransformer, estimate_input_tokens};
 use crate::websearch;
 
 /// Maximum time SIGINT/SIGTERM may spend draining in-flight connections.
@@ -668,26 +668,27 @@ async fn gpt_branch_subcall(
 /// (see [`crate::overflow::Estimate`]).
 fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPolicies {
     let streaming = crate::routing::is_streaming(rewritten);
-    let usage = UsagePolicy {
-        estimate: if streaming {
-            estimate_input_tokens(rewritten)
-        } else {
-            0
-        },
-        scale: route.usage_scale,
+    let estimate = if streaming {
+        estimate_input_tokens(rewritten)
+    } else {
+        0
     };
     let overflow = route
         .context_window
         .zip(crate::config::overflow_dialect(route))
         .map(|(window, dialect)| {
-            let estimate = if streaming {
-                crate::overflow::Estimate::Computed(usage.estimate)
+            let overflow_estimate = if streaming {
+                crate::overflow::Estimate::Computed(estimate)
             } else {
                 crate::overflow::Estimate::Deferred(rewritten.clone())
             };
-            OverflowRewrite::new(window, estimate, dialect)
+            OverflowRewrite::new(window, overflow_estimate, dialect)
         });
-    GptPolicies { usage, overflow }
+    GptPolicies {
+        estimate,
+        scale: route.usage_scale,
+        overflow,
+    }
 }
 
 /// A sub-call arriving on the GPT branch whose `WebSearch` was invoked by a
@@ -1436,9 +1437,10 @@ fn health_response(state: &AppState) -> Response {
             "status": if healthy { "ok" } else { "degraded" },
             "version": env!("CARGO_PKG_VERSION"),
             "cliproxy-upstream": upstream,
-            // What this process resolved at startup. Doctor compares it with
-            // a fresh read so a settings change that the running service has
-            // not picked up is visible rather than silently mis-scaling.
+            // What this process resolved at startup (null: undeclared).
+            // Doctor compares it with a fresh read so a settings change the
+            // running service has not picked up is visible rather than
+            // silently mis-scaling.
             "declared-context-window": state.config.declared_context_window,
         })
         .to_string(),
@@ -1814,6 +1816,12 @@ mod tests {
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "degraded");
         assert_eq!(health["cliproxy-upstream"], "unavailable");
+        // Present even when undeclared, so doctor can tell an undeclared
+        // service from one too old to report it.
+        assert_eq!(
+            health.get("declared-context-window"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[tokio::test]

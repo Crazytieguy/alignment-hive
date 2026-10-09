@@ -75,30 +75,29 @@ here works until the binary resolves.
    "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
    "ENABLE_TOOL_SEARCH": "true",
-   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "258400"
+   "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
    ```
-   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on Claude
-   Code's first-party behaviour, which it otherwise withholds from any base URL
-   other than `api.anthropic.com`: refusal fallback, WebSearch's
-   standard/extended mode choice, some API betas, first-party billing
-   headers and error reporting. On
-   Claude Code before 2.1.285 it also keeps Claude models' 1M context
-   windows. The flag is undocumented (Claude Code names it in its own copy,
-   for proxies that front the real API — which is what the Claude branch
-   is), and it disables `/v1/models` gateway discovery. GPT routing is
-   unaffected: the router strips `anthropic-beta` and credentials on that
-   branch, and the GPT window still comes from
-   `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
-   `ENABLE_TOOL_SEARCH` matters: tool search silently disables itself behind
-   a gateway. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declares the GPT models'
-   context window — it only applies to model IDs that don't start with
-   `claude-` (the `gpt-*` routes), so Claude models keep their
-   built-in windows. 258400 matches Codex's own default window. The cap is
-   optional but recommended: the GPT models accept up to 828400 (Codex's
-   opt-in maximum), but input past 272K is billed at a higher rate. After
-   raising the value, run `$ROUTER doctor` — it fails with the fix spelled
-   out if a route's window no longer fits under the new declaration (Grok
-   and many open-weights routes stop at 500000 or below).
+   and, as a sibling of `env`, a `modelSettings` entry for each route:
+   apply every fix `$ROUTER doctor`'s `context-windows` line prints, e.g.:
+   ```json
+   "modelSettings": {
+     "gpt-6-astra": { "autoCompactWindow": 258400 },
+     "gpt-6.1-sol": { "autoCompactWindow": 258400 },
+     "gpt-6-luna": { "autoCompactWindow": 258400 }
+   }
+   ```
+   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on
+   Claude Code's first-party behaviour (refusal fallback, WebSearch modes,
+   API betas), which it otherwise withholds behind a custom base URL.
+   Tool search disables itself behind a gateway unless
+   `ENABLE_TOOL_SEARCH` is set. `CLAUDE_CODE_GATEWAY_HINT_HEADERS` lets the
+   router recognize compaction requests. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
+   every route's context window; each route compacts at its own
+   `modelSettings` entry. For the GPT routes 258400 is the recommended
+   limit (input past 272K is billed at a higher rate; they accept up to
+   828400). Per-model entries need Claude Code 2.1.288+ (`claude
+   --version`; have the user update first if older).
    Then list the routes in the `/model` picker: one row per shipped GPT
    route below, plus one per Grok or open-weights route already configured
    (the `routed-models` line of `$ROUTER doctor`; older GPT routes stay

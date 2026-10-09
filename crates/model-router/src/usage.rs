@@ -107,25 +107,20 @@ fn count_serialized_tokens(encoding: &tiktoken_rs::CoreBPE, value: &Value) -> u6
         .map_or(0, |text| count_text_tokens(encoding, &text))
 }
 
-/// How one routed request's token usage is reported back to Claude Code.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct UsagePolicy {
-    /// Stands in for the `input_tokens: 0` that `CLIProxyAPI` reports at
-    /// `message_start`.
-    pub(crate) estimate: u64,
-    /// Set when the route's real context window differs from the one Claude
-    /// Code believes it has. Applied to streamed responses only: Claude Code
-    /// streams every conversation turn, and the buffered sub-call answers
-    /// are conversation context for nobody.
-    pub(crate) scale: Option<UsageScale>,
-}
-
 /// Everything the GPT branch rewrites in one request's response: usage
 /// reporting, plus (for routes where it is known-correct) the
 /// context-overflow error translation.
 #[derive(Clone, Debug)]
 pub(crate) struct GptPolicies {
-    pub(crate) usage: UsagePolicy,
+    /// Stands in for the `input_tokens: 0` that `CLIProxyAPI` reports at
+    /// `message_start`.
+    pub(crate) estimate: u64,
+    /// The deprecated `context-window-scaling` rescale, set when the route's
+    /// real window is larger than the one Claude Code believes it has.
+    /// Applied to streamed responses only: Claude Code streams every
+    /// conversation turn, and the buffered sub-call answers are conversation
+    /// context for nobody.
+    pub(crate) scale: Option<UsageScale>,
     pub(crate) overflow: Option<crate::overflow::OverflowRewrite>,
 }
 
@@ -244,7 +239,7 @@ impl SseEventBuffer {
 }
 
 fn transform_event(event: Vec<u8>, policies: &GptPolicies) -> Vec<u8> {
-    let UsagePolicy { estimate, scale } = policies.usage;
+    let (estimate, scale) = (policies.estimate, policies.scale);
     let Ok(text) = std::str::from_utf8(&event) else {
         return event;
     };
@@ -278,15 +273,12 @@ fn transform_event(event: Vec<u8>, policies: &GptPolicies) -> Vec<u8> {
             data.get_mut("message")
                 .and_then(|message| message.get_mut("usage"))
         };
-        match usage {
-            Some(usage) => {
-                let injected =
-                    event_name == "message_start" && inject_estimated_input_tokens(usage, estimate);
-                let scaled = scale.is_some_and(|scale| scale_usage(usage, scale));
-                injected || scaled
-            }
-            None => false,
-        }
+        usage.is_some_and(|usage| {
+            let injected =
+                event_name == "message_start" && inject_estimated_input_tokens(usage, estimate);
+            let scaled = scale.is_some_and(|scale| scale_usage(usage, scale));
+            injected || scaled
+        })
     };
     if !changed {
         return event;
@@ -424,7 +416,8 @@ mod tests {
         transformed_policies(
             chunks,
             GptPolicies {
-                usage: UsagePolicy { estimate, scale },
+                estimate,
+                scale,
                 overflow: None,
             },
         )
@@ -456,10 +449,8 @@ mod tests {
 
     fn overflow_policies(estimate: u64) -> GptPolicies {
         GptPolicies {
-            usage: UsagePolicy {
-                estimate,
-                scale: None,
-            },
+            estimate,
+            scale: None,
             overflow: Some(crate::overflow::OverflowRewrite::new(
                 258_400,
                 crate::overflow::Estimate::Computed(estimate),
@@ -590,7 +581,7 @@ data: {"type":"message_delta","usage":{"input_tokens":400,"output_tokens":80,"ca
     }
 
     #[test]
-    fn without_a_scale_events_are_byte_identical() {
+    fn message_delta_usage_passes_through_byte_identical() {
         let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":42,\"output_tokens\":3}}\n\n";
         assert_eq!(transformed(&[delta], 99), delta);
     }

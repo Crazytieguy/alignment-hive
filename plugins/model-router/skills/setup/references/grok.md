@@ -22,23 +22,8 @@ agents that predate 4.7 keep working.
    `$ROUTER service restart`.
 3. `$ROUTER doctor` — `grok-auth` confirms the login, `routed-models`
    confirms the live child actually serves the Grok ID.
-4. **Context window**: Claude Code decides a model's window client-side
-   from the model ID; for routed IDs the one global
-   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` declaration applies, and it is sized
-   to 258400 for the GPT routes (the Codex backend's input limit — raising
-   it would push those routes past it). So the Grok routes are clipped to
-   258400 of their real 500K windows unless their reported usage is rescaled:
-   ```toml
-   [grok]
-   enabled = true
-   context-window-scaling = true
-   ```
-   With scaling, the router divides each route's reported usage by
-   `500000 / 258400`, so auto-compaction fires near the real window; the
-   cost is that Claude Code's displayed token counts for Grok routes read
-   low by that ratio (percentages stay right). Recommend scaling — the
-   larger window is much of the point — but flip it only with the user's
-   explicit OK after stating that displayed-count caveat.
+4. **Context window**: apply every fix `$ROUTER doctor`'s
+   `context-windows` line prints for the Grok routes.
 5. **`/model` picker row**: add to the step-5 `modelPicker` options in
    `~/.claude/settings.json`:
    ```json
@@ -51,8 +36,9 @@ agents that predate 4.7 keep working.
    the picker there. Subagents for both families keep working either way.
 6. Create a `grok-4.7` agent so Claude can delegate, from the template in
    `references/custom-agents.md`. Grok agents or a picker row from an
-   earlier setup that name `grok-4.6`: offer to move them to `grok-4.7`. Effort works exactly
-   like the GPT agents — the router translates it for xAI.
+   earlier setup that name `grok-4.6`: offer to move them to `grok-4.7`.
+   Effort works exactly like the GPT agents — the router translates it for
+   xAI.
 7. Smoke-test with a direct request through the gateway:
    ```
    curl -s <base_url from doctor --json>/v1/messages \
