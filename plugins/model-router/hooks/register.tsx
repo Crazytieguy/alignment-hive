@@ -44,8 +44,8 @@ async function retry($: EngineInterface, row: string): Promise<void> {
  * A settings edit by the binary (`model-router settings`, the setup skill's own), as the toast
  * that says what it did. The edits take effect when Claude Code next starts.
  */
-async function editSettings($: EngineInterface, operation: 'models' | 'bypass'): Promise<string> {
-  const args = operation === 'models' ? ['models', '--apply'] : ['bypass']
+async function editSettings($: EngineInterface, operation: 'models' | 'windows' | 'bypass'): Promise<string> {
+  const args = operation === 'bypass' ? ['bypass'] : [operation, '--apply']
   const { exitCode, stdout } = await $.process.run(
     ['bash', `${$.plugin.root}/scripts/bootstrap.sh`, 'settings', ...args, '--project-dir', projectDir],
     { env: { CLAUDE_PLUGIN_ROOT: $.plugin.root } },
@@ -70,6 +70,17 @@ async function editSettings($: EngineInterface, operation: 'models' | 'bypass'):
     // Only retired rows dropped: nothing added to name.
     if (added.length === 0) return 'Updated /model. Restart Claude Code to see it.'
     return `Added ${added.join(', ')} to /model. Restart Claude Code to pick it; Customize runs setup.`
+  }
+  if (operation === 'windows') {
+    if (!result.applied) return `${result.reason ?? 'Nothing to change'}: run /model-router:setup`
+    // "gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K".
+    const byWindow = new Map<number, string[]>()
+    for (const [id, window] of Object.entries(result.windows ?? {})) {
+      byWindow.set(window, [...(byWindow.get(window) ?? []), id])
+    }
+    const windows = [...byWindow].map(([window, ids]) => `${ids.join(', ')} at ${Math.round(window / 1000)}K`)
+    const at = windows.length ? `: ${windows.join('; ')}` : ''
+    return `Context windows set per model in ${result.file}${at}. Restart Claude Code to use them.`
   }
   if (result.status === 'done') {
     return `Claude Code now talks to Anthropic directly (${(result.files ?? []).join(', ')}). Restart it to get back online, then run /model-router:setup.`
@@ -122,8 +133,9 @@ export const register: Register = on => {
         return
       }
       // The settings edits take effect at the next start: the row's work is done this session.
-      if (action.id === 'add-models' || action.id === 'bypass') {
-        const said = await editSettings($, action.id === 'add-models' ? 'models' : 'bypass').catch(
+      if (action.id === 'add-models' || action.id === 'windows' || action.id === 'bypass') {
+        const operation = action.id === 'add-models' ? 'models' : action.id
+        const said = await editSettings($, operation).catch(
           () => 'Could not edit your settings: run /model-router:setup',
         )
         await dismiss(notice)

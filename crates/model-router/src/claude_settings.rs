@@ -23,6 +23,21 @@ pub(crate) fn user_settings_file(home: &Path) -> PathBuf {
     home.join(".claude/settings.json")
 }
 
+/// Settings files with their JSON, as [`settings_by_precedence`] reads them.
+pub(crate) type Settings = [(PathBuf, serde_json::Value)];
+
+/// The settings files Claude Code reads for `project`, in precedence order,
+/// highest first: project-local, project (checked in), user.
+pub(crate) fn settings_paths(home: Option<&Path>, project: &Path) -> Vec<PathBuf> {
+    [
+        project.join(".claude/settings.local.json"),
+        project.join(".claude/settings.json"),
+    ]
+    .into_iter()
+    .chain(home.map(user_settings_file))
+    .collect()
+}
+
 /// Every readable settings file with its JSON, in precedence order, highest
 /// first: project-local, project, user. Unreadable or malformed files are
 /// skipped.
@@ -30,14 +45,10 @@ pub(crate) fn settings_by_precedence(
     home: Option<&Path>,
     project: &Path,
 ) -> Vec<(PathBuf, serde_json::Value)> {
-    [
-        project.join(".claude/settings.local.json"),
-        project.join(".claude/settings.json"),
-    ]
-    .into_iter()
-    .chain(home.map(user_settings_file))
-    .filter_map(|path| read_settings(&path).map(|settings| (path, settings)))
-    .collect()
+    settings_paths(home, project)
+        .into_iter()
+        .filter_map(|path| read_settings(&path).map(|settings| (path, settings)))
+        .collect()
 }
 
 /// The highest-precedence file that sets `key` (a path into the JSON), with

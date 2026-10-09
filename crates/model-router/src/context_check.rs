@@ -182,7 +182,7 @@ fn scaling_note(route: &ModelRoute, compaction: &Compaction, declared: u64) -> S
 /// [`Config::adopt_client_window`]), as the service's do.
 #[must_use]
 pub fn check(config: &Config, declared: EnvSetting, compaction: &Compaction) -> Option<Check> {
-    let declared_in_config = config.declared_context_window.is_some() && !config.declared_adopted;
+    let declared_in_config = config.declares_window_in_config();
     let deprecated = declared_in_config
         || config
             .effective_models()

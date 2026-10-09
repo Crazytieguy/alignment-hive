@@ -231,6 +231,8 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
             dirs,
             declared,
             &crate::client_window::resolve_compaction(home.as_deref(), &settings),
+            home.as_deref()
+                .map(|home| (home, project.as_path(), settings.as_slice())),
         ));
         checks.extend(fallback_model_check(&settings));
     }
@@ -283,12 +285,19 @@ fn context_declaration_check(
 /// `declared` and the windows the service discovered at its last start are
 /// applied (the config on disk carries neither), then checked against Claude
 /// Code's settings. Failing to re-prepare the config with the cached windows
-/// is reported in the check's place.
+/// is reported in the check's place. With `next` (home, project and its
+/// settings files as read), a change `settings windows --apply` would make
+/// for the next session is added as a warning, though this one may run fine.
 fn context_window_checks(
     mut config: Config,
     dirs: &Dirs,
     declared: crate::client_window::EnvSetting,
     compaction: &crate::client_window::Compaction,
+    next: Option<(
+        &std::path::Path,
+        &std::path::Path,
+        &crate::claude_settings::Settings,
+    )>,
 ) -> Vec<Check> {
     config.adopt_client_window(declared);
     if let Err(error) = crate::discovery::apply_cached_windows(&mut config, dirs) {
@@ -299,9 +308,14 @@ fn context_window_checks(
             detail: format!("applying the discovered context windows failed: {error:#}"),
         }];
     }
-    crate::context_check::check(&config, declared, compaction)
-        .into_iter()
-        .collect()
+    let mut check = crate::context_check::check(&config, declared, compaction);
+    if let (Some(check), Some((home, project, settings))) = (&mut check, next)
+        && let Some(note) = crate::settings_edit::windows_note(home, project, settings, &config)
+    {
+        check.warn = true;
+        check.detail = format!("{}; {note}", check.detail);
+    }
+    check.into_iter().collect()
 }
 
 /// Fails when a settings `fallbackModel` chain is in effect: Claude Code
@@ -1063,6 +1077,7 @@ display-name = "Kimi K3"
                 &dirs,
                 crate::client_window::EnvSetting::Settings(1_000_000),
                 &compaction,
+                None,
             );
             assert_eq!(checks.len(), 1, "{checks:?}");
             checks.into_iter().next().unwrap()

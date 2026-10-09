@@ -14,11 +14,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::claude_settings::{USER_SETTINGS_DISPLAY, user_settings_file, winning_setting};
-
-/// Every settings file with its JSON, as
-/// [`crate::claude_settings::settings_by_precedence`] reads them.
-type Settings = [(PathBuf, serde_json::Value)];
+use crate::claude_settings::{
+    Settings, USER_SETTINGS_DISPLAY, user_settings_file, winning_setting,
+};
 
 /// The setting that sets every routed model's context window.
 pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
@@ -138,6 +136,40 @@ fn resolve_with(env: Option<&str>, settings: &Settings) -> EnvSetting {
     env_setting(ENV_VAR, env, settings, |value| (value > 0).then_some(value))
 }
 
+/// `var` as the next Claude Code session started over `files` inherits it,
+/// which [`resolve`] cannot say once a settings edit is made mid-session. A
+/// settings file's `env` beats an inherited value
+/// (`plugins/model-router/docs/experiments.md`), and Claude Code puts the
+/// `env` of `current` (the files of the session this process runs in) into
+/// this process's environment `env`, so it only stands for the shell when
+/// neither sets the variable.
+fn inherited<'a>(
+    var: &str,
+    env: Option<&'a str>,
+    current: &Settings,
+    files: &Settings,
+) -> Option<&'a str> {
+    let sets = |settings: &Settings| winning_setting(settings, &["env", var]).is_some();
+    env.filter(|_| !sets(current) && !sets(files))
+}
+
+/// [`ENV_VAR`] as the next session started over `files` reads it, `current`
+/// as in [`inherited`].
+#[must_use]
+pub fn next_session(current: &Settings, files: &Settings) -> EnvSetting {
+    let env = std::env::var(ENV_VAR).ok();
+    resolve_with(inherited(ENV_VAR, env.as_deref(), current, files), files)
+}
+
+/// [`resolve_compaction`] as the next session started over `files` reads it,
+/// `current` as in [`inherited`].
+#[must_use]
+pub fn next_compaction(home: Option<&Path>, current: &Settings, files: &Settings) -> Compaction {
+    let env = std::env::var(AUTO_COMPACT_ENV_VAR).ok();
+    let env = inherited(AUTO_COMPACT_ENV_VAR, env.as_deref(), current, files);
+    resolve_compaction_with(env, home, files)
+}
+
 /// Reads one env setting the way Claude Code does. The environment wins when
 /// present: it is the value Claude Code merged and runs with, so a malformed
 /// one is unresolved rather than a reason to consult the files. Otherwise
@@ -216,14 +248,21 @@ impl Compaction {
     /// `"auto"` does not fall back to the default.
     #[must_use]
     pub fn window(&self, routing_id: &str, context_window: u64) -> u64 {
-        let configured = self.env.value().or_else(|| match self.entry(routing_id) {
+        self.cap(routing_id)
+            .map_or(context_window, |tokens| tokens.min(context_window))
+    }
+
+    /// The window configured for `routing_id`, if any caps it (`"auto"`
+    /// does not).
+    #[must_use]
+    pub fn cap(&self, routing_id: &str) -> Option<u64> {
+        self.env.value().or_else(|| match self.entry(routing_id) {
             Some(Entry {
                 value: Configured::Tokens(tokens),
                 ..
             }) => Some(*tokens),
             _ => None,
-        });
-        configured.map_or(context_window, |tokens| tokens.min(context_window))
+        })
     }
 
     /// Where a per-model entry for `routing_id` takes effect: the file that
@@ -237,6 +276,13 @@ impl Compaction {
             }
             _ => USER_SETTINGS_DISPLAY.to_string(),
         }
+    }
+
+    /// Whether anything sets where `routing_id` compacts: the env var, its
+    /// own entry or a default (an `"auto"` entry counts: it is a choice).
+    #[must_use]
+    pub fn is_configured(&self, routing_id: &str) -> bool {
+        self.env.value().is_some() || self.entry(routing_id).is_some()
     }
 
     fn entry(&self, routing_id: &str) -> Option<&Entry> {
@@ -426,6 +472,28 @@ mod tests {
             ),
             EnvSetting::Unresolved
         );
+    }
+
+    #[test]
+    fn the_next_session_reads_a_file_over_the_environment() {
+        let project = tempfile::tempdir().unwrap();
+        let settings = || settings_by_precedence(None, project.path());
+        let shell = Some("258400");
+        assert_eq!(inherited(ENV_VAR, shell, &[], &settings()), shell);
+        write_settings(
+            project.path(),
+            "settings.json",
+            r#"{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"1000000"}}"#,
+        );
+        // A file the next session reads beats the shell.
+        assert_eq!(inherited(ENV_VAR, shell, &[], &settings()), None);
+        assert_eq!(
+            resolve_with(None, &settings()),
+            EnvSetting::Settings(1_000_000)
+        );
+        // So does one of this session's: the environment holds its value,
+        // which a view without that file must not inherit.
+        assert_eq!(inherited(ENV_VAR, shell, &settings(), &[]), None);
     }
 
     #[test]

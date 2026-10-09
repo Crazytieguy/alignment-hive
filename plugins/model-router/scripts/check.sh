@@ -57,31 +57,53 @@ if [ -n "$HEALTH" ]; then
     # `model-router doctor`.
     (nohup bash "$BOOTSTRAP" service refresh >/dev/null 2>&1 &) 2>/dev/null
   fi
-  # The /model picker lacks a shipped GPT route or lists a retired one
-  # (`settings models` decides; skipped while the service is on another
-  # version, so session start never waits on a binary download). Add to /model
-  # runs `settings models --apply` (hooks/register.tsx); until then, a row each
-  # session, unless dismissed for this plugin version.
-  if [ "$RUNNING_VERSION" = "$PLUGIN_VERSION" ] &&
-    MODELS=$(bash "$BOOTSTRAP" settings models --project-dir "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null) &&
-    printf '%s' "$MODELS" | grep -q '"needed":true'; then
-    # "GPT-6.1 Sol" or "GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna".
-    LABELS=$(printf '%s' "$MODELS" | sed -n 's/.*"labels":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /')
-    if [ -n "$LABELS" ]; then
-      TEXT="$LABELS can be added to /model"
-      LABEL="Add to /model"
-    else
-      TEXT="/model still lists retired GPT models"
-      LABEL="Update /model"
-    fi
-    if printf '%s' "$MODELS" | grep -q '"canApply":true'; then
-      ACTIONS='{"id": "add-models", "label": "'"$LABEL"'", "kind": "plugin"}, {"id": "customize", "label": "Customize", "kind": "command", "command": "/model-router:setup"}'
+  # Settings migrations: `settings <operation>` decides each, skipped while the
+  # service is on another version (so session start never waits on a binary
+  # download). Its button runs `settings <operation> --apply`
+  # (hooks/register.tsx); until then, a row each session, unless dismissed for
+  # this plugin version.
+  ROWS=""
+  # Whether `settings $1` needs a change, its report left in OUT.
+  needed() {
+    [ "$RUNNING_VERSION" = "$PLUGIN_VERSION" ] &&
+      OUT=$(bash "$BOOTSTRAP" settings "$1" --project-dir "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null) &&
+      printf '%s' "$OUT" | grep -q '"needed":true'
+  }
+  # Adds the row for OUT: id, text, and the button's action id and label,
+  # offered with Customize when the binary can apply it, else Run setup.
+  add_row() {
+    if printf '%s' "$OUT" | grep -q '"canApply":true'; then
+      ACTIONS='{"id": "'"$3"'", "label": "'"$4"'", "kind": "plugin"}, {"id": "customize", "label": "Customize", "kind": "command", "command": "/model-router:setup"}'
     else
       ACTIONS='{"id": "setup", "label": "Run setup", "kind": "command", "command": "/model-router:setup"}'
     fi
-    printf '{"notices": [{"id": "new-model", "severity": "action", "text": "%s", "version": "%s", "actions": [%s]}]}\n' \
-      "$TEXT" "$PLUGIN_VERSION" "$ACTIONS"
+    ROWS=$(printf '%s{"id": "%s", "severity": "action", "text": "%s", "version": "%s", "actions": [%s]},' \
+      "$ROWS" "$1" "$2" "$PLUGIN_VERSION" "$ACTIONS")
+  }
+  # The /model picker lacks a shipped GPT route or lists a retired one.
+  if needed models; then
+    # "GPT-6.1 Sol" or "GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna".
+    LABELS=$(printf '%s' "$OUT" | sed -n 's/.*"labels":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /')
+    if [ -n "$LABELS" ]; then
+      add_row new-model "$LABELS can be added to /model" add-models "Add to /model"
+    else
+      add_row new-model "/model still lists retired GPT models" add-models "Update /model"
+    fi
   fi
+  # The next session's context windows are not setup's: the old setup's single
+  # declaration, usage scaling or a behavesAs row (`legacy`), or a route with no
+  # compaction window.
+  if needed windows; then
+    ROUTES=$(printf '%s' "$OUT" | sed -n 's/.*"routes":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g')
+    if printf '%s' "$OUT" | grep -q '"legacy":true'; then
+      add_row windows "context windows are still set the old way" windows "Migrate"
+    elif [ -n "$ROUTES" ]; then
+      add_row windows "no context window set for $ROUTES" windows "Set"
+    else
+      add_row windows "context windows need setup" windows "Set"
+    fi
+  fi
+  [ -n "$ROWS" ] && printf '{"notices": [%s]}\n' "${ROWS%,}"
   exit 0
 fi
 

@@ -700,6 +700,12 @@ impl Config {
         Ok(())
     }
 
+    /// Whether the config file itself sets the deprecated
+    /// `declared-context-window` (rather than it being adopted).
+    pub(crate) const fn declares_window_in_config(&self) -> bool {
+        self.declared_context_window.is_some() && !self.declared_adopted
+    }
+
     /// Takes the context window Claude Code was configured with (`client`,
     /// from its environment or settings) as `declared-context-window` unless
     /// the config states one, and rescales the routes for it. An explicit

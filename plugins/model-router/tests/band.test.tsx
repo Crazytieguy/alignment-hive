@@ -87,6 +87,29 @@ describe('model-router settings buttons', () => {
     await ui.unmount()
   })
 
+  test('Migrate has the binary move the windows and says where, at what window', async ($, on) => {
+    const windowsRow = {
+      id: 'windows',
+      severity: 'action',
+      text: 'context windows are still set the old way',
+      actions: [{ id: 'windows', label: 'Migrate', kind: 'plugin' }, customizeAction],
+    }
+    const { toasts, settingsCalls } = await startWithSettings($, on, [windowsRow], {
+      applied: true,
+      file: '/home/me/.claude/settings.json',
+      declared: 1000000,
+      windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'grok-4.7': 500000 },
+    })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:windows:windows' })
+    expect(settingsCalls).toEqual([['settings', 'windows', '--apply', '--project-dir', '/proj']])
+    expect(toasts[0]).toBe(
+      'Context windows set per model in /home/me/.claude/settings.json: gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K. Restart Claude Code to use them.',
+    )
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  })
+
   test('Customize runs setup instead', async ($, on) => {
     const { commands, settingsCalls } = await startWithSettings($, on, [newModel], {})
     const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })

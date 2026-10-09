@@ -75,29 +75,26 @@ here works until the binary resolves.
    "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
    "ENABLE_TOOL_SEARCH": "true",
-   "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
-   "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
-   ```
-   and, as a sibling of `env`, a `modelSettings` entry for each route:
-   apply every fix `$ROUTER doctor`'s `context-windows` line prints, e.g.:
-   ```json
-   "modelSettings": {
-     "gpt-6-astra": { "autoCompactWindow": 258400 },
-     "gpt-6.1-sol": { "autoCompactWindow": 258400 },
-     "gpt-6-luna": { "autoCompactWindow": 258400 }
-   }
+   "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"
    ```
    `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on
    Claude Code's first-party behaviour (refusal fallback, WebSearch modes,
    API betas), which it otherwise withholds behind a custom base URL.
    Tool search disables itself behind a gateway unless
    `ENABLE_TOOL_SEARCH` is set. `CLAUDE_CODE_GATEWAY_HINT_HEADERS` lets the
-   router recognize compaction requests. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
-   every route's context window; each route compacts at its own
-   `modelSettings` entry. For the GPT routes 258400 is the recommended
-   limit (input past 272K is billed at a higher rate; they accept up to
-   828400). Per-model entries need Claude Code 2.1.288+ (`claude
-   --version`; have the user update first if older).
+   router recognize compaction requests.
+   Then size the routes: `$ROUTER settings windows --apply --project-dir
+   <project>`. It sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (every route's
+   context window) to 1000000 and gives each route a `modelSettings`
+   `autoCompactWindow`, where it compacts: 258400 for the GPT routes (input
+   past 272K is billed at a higher rate; they accept up to 828400), else its
+   real window. It also migrates an earlier setup's lower declaration. When
+   it prints `"applied": false`, its `reason` says what needs the user. A
+   reason naming the checked-in `.claude/settings.json` as shared: ask
+   whether to write there (collaborators get the windows too), or to
+   override it in `.claude/settings.local.json` (this checkout only) or
+   `~/.claude/settings.json` (every project, while the shared file sets
+   neither), then re-run with `--file <that file>`.
    Then list the routes in the `/model` picker: `$ROUTER settings models
    --apply --project-dir <project>`. It edits `modelPicker` in
    `~/.claude/settings.json` (the only file Claude Code reads it from):

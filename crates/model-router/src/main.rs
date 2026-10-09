@@ -81,6 +81,22 @@ enum SettingsCommand {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
+    /// Bring Claude Code's context windows for the routes up to setup's:
+    /// a 1M declaration and a per-model compaction window for each route
+    /// (a report, unless --apply).
+    Windows {
+        /// Make the change rather than report it.
+        #[arg(long)]
+        apply: bool,
+        /// The project whose settings files decide the wiring (default: cwd).
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        /// The settings file to write (the user's, or the project's
+        /// settings.json or settings.local.json; created if missing), rather
+        /// than the one that declares the window or wires the router.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// Take this install's `ANTHROPIC_BASE_URL`, and a default model naming a
     /// routed ID, out of the project's and the user's settings files.
     Bypass {
@@ -239,27 +255,50 @@ fn settings(
 ) -> anyhow::Result<serde_json::Value> {
     let home = state::home_dir();
     let config = Config::load(config_path).map_err(|error| format!("{error:#}"));
-    // Orders `settings models --apply` and `settings bypass`.
+    // Orders the settings edits.
     let lock = dirs.state_dir.join("settings.lock");
+    let claude_version = || {
+        let output = std::process::Command::new("claude")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        settings_edit::Version::parse(&String::from_utf8_lossy(&output.stdout))
+    };
+    let project = |project_dir: Option<PathBuf>| match project_dir {
+        Some(dir) => std::path::absolute(dir),
+        None => std::env::current_dir(),
+    };
     match command {
         SettingsCommand::Models { apply, project_dir } => {
             let home = home.context("HOME is not set")?;
-            let project = match project_dir {
-                Some(dir) => dir,
-                None => std::env::current_dir()?,
-            };
-            let claude_version = || {
-                let output = std::process::Command::new("claude")
-                    .arg("--version")
-                    .output()
-                    .ok()
-                    .filter(|output| output.status.success())?;
-                settings_edit::Version::parse(&String::from_utf8_lossy(&output.stdout))
-            };
+            let project = project(project_dir)?;
             settings_edit::models(
                 &home,
                 &project,
                 config.as_ref().map_err(String::as_str),
+                claude_version,
+                apply.then_some(lock.as_path()),
+            )
+        }
+        SettingsCommand::Windows {
+            apply,
+            project_dir,
+            file,
+        } => {
+            let home = home.context("HOME is not set")?;
+            let project = project(project_dir)?;
+            // With the windows the service discovered, as doctor judges them.
+            let config = config.and_then(|mut config| {
+                discovery::apply_cached_windows(&mut config, dirs)
+                    .map(|()| config)
+                    .map_err(|error| format!("{error:#}"))
+            });
+            settings_edit::windows(
+                &home,
+                &project,
+                config.as_ref().map_err(String::as_str),
+                file.map(std::path::absolute).transpose()?.as_deref(),
                 claude_version,
                 apply.then_some(lock.as_path()),
             )
