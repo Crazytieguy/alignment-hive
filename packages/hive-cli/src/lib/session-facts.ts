@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import {
   isEmptySession,
   isHumanMessage,
@@ -53,7 +53,7 @@ function* windows(path: string, size: number, pos: number, len: number): Generat
   try {
     const buf = Buffer.allocUnsafe(Math.min(len, size - pos));
     // Each window starts at a line. A line longer than a window is read again, whole, once its end
-    // is found: gathering it piece by piece took ~1 GB to read the titles of 1300 sessions.
+    // is found: gathering it piece by piece took ~1 GB over 1300 sessions.
     while (pos < size) {
       const read = readSync(fd, buf, 0, Math.min(buf.length, size - pos), pos);
       if (read === 0) return;
@@ -253,23 +253,59 @@ export function firstHumanMessage(
 
 const TITLE_RECORDS = ['"type":"custom-title"', '"type":"ai-title"', '"type":"summary"'];
 
-/** The session's title, from its title records alone, found a window of the file at a time. */
+const TITLE_OVERLAP = Math.max(...TITLE_RECORDS.map((s) => s.length)) - 1;
+
+/**
+ * The session's title, from its title records alone, found a 64 KB chunk of the file at a time:
+ * other lines, however long, never become strings. Lines are kept in file order, so the parser's
+ * rule picks the latest title.
+ */
 export function sessionTitle(ref: Pick<TranscriptRef, 'path'>, keep?: RecordFilter): string | undefined {
-  const ordered: Array<string> = [];
-  for (const buf of windows(ref.path, statSync(ref.path).size, 0, WINDOW)) {
-    const lines: Array<{ at: number; text: string }> = [];
-    for (const needle of TITLE_RECORDS) {
-      for (let i = buf.indexOf(needle); i >= 0; ) {
-        const at = buf.lastIndexOf(NEWLINE, i) + 1;
-        const end = buf.indexOf(NEWLINE, i);
-        lines.push({ at, text: buf.toString('utf8', at, end < 0 ? buf.length : end) });
-        i = end < 0 ? -1 : buf.indexOf(needle, end);
+  const fd = openSync(ref.path, 'r');
+  const buf = Buffer.allocUnsafe(CHUNK);
+  const lines: Array<string> = [];
+  let start = 0;
+  let pos = 0;
+  let matched = false;
+  // The end of the line so far, to find a record type split across chunks.
+  let tail = Buffer.alloc(0);
+  const add = (end: number) => {
+    if (!matched) return;
+    const line = Buffer.allocUnsafe(end - start);
+    const n = readSync(fd, line, 0, line.length, start);
+    lines.push(line.toString('utf8', 0, n));
+  };
+  try {
+    const size = fstatSync(fd).size;
+    for (;;) {
+      const n = readSync(fd, buf, 0, Math.min(buf.length, size - pos), pos);
+      if (n === 0) break;
+      let i = 0;
+      while (i < n) {
+        const nl = buf.indexOf(NEWLINE, i);
+        const end = nl < 0 || nl >= n ? n : nl;
+        const part = buf.subarray(i, end);
+        if (!matched) {
+          const boundary = tail.length ? Buffer.concat([tail, part.subarray(0, TITLE_OVERLAP)]) : part;
+          matched = TITLE_RECORDS.some((needle) => part.includes(needle) || boundary.includes(needle));
+        }
+        if (end < n) {
+          add(pos + end);
+          start = pos + end + 1;
+          matched = false;
+          tail = Buffer.alloc(0);
+        } else {
+          tail = Buffer.from(Buffer.concat([tail, part.subarray(-TITLE_OVERLAP)]).subarray(-TITLE_OVERLAP));
+        }
+        i = end + 1;
       }
+      pos += n;
     }
-    // In file order, so the parser's rule picks the latest title.
-    ordered.push(...lines.sort((a, b) => a.at - b.at).map((l) => l.text));
+    add(pos);
+  } finally {
+    closeSync(fd);
   }
-  return ordered.length ? parseKept(ordered.join('\n'), keep).title : undefined;
+  return lines.length ? parseKept(lines.join('\n'), keep).title : undefined;
 }
 
 /** Whether any entry of the file passes `test`, parsed a window at a time. */

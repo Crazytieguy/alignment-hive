@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { parseTranscript, readRecords, readTranscript } from '@alignment-hive/session-data';
 import { sessionFacts, sessionPresence, sessionTitle, someEntry } from '../lib/session-facts';
 
 let dir = '';
@@ -100,5 +101,41 @@ describe('facts read a window of the file at a time', () => {
     await writeFile(untimed, JSON.stringify({ type: 'custom-title', customTitle: 'Only a title' }) + '\n');
     expect(sessionPresence({ path: untimed, session: 'untimed' }).timed).toBe(false);
     expect(sessionFacts({ path: untimed, session: 'untimed' })).toMatchObject({ start: undefined, end: undefined });
+  });
+});
+
+describe('chunked session titles', () => {
+  const J = (r: object) => JSON.stringify(r);
+  const path = () => join(dir, 'titled.jsonl');
+
+  test('finds every title marker split across a chunk boundary, including UTF-8 titles', async () => {
+    const record = J({ type: 'custom-title', customTitle: '測定 café' });
+    for (let split = 1; split < '"type":"custom-title"'.length; split++) {
+      const content = ' '.repeat(65536 - split) + record + '\n';
+      await writeFile(path(), content);
+      expect(sessionTitle({ path: path() })).toBe(parseTranscript(content).title);
+    }
+  });
+
+  test('skips giant non-title lines, finds giant title lines, and keeps file-order precedence', async () => {
+    const content = [
+      J({ type: 'ai-title', aiTitle: 'early' }),
+      J({ type: 'system', content: 'x'.repeat(2 * 65536 + 13) }),
+      J({ type: 'custom-title', padding: 'y'.repeat(3 * 65536), customTitle: 'earlier custom' }),
+      J({ type: 'summary', summary: 'later summary' }),
+      J({ type: 'custom-title', customTitle: 'latest custom' }),
+      J({ type: 'ai-title', aiTitle: 'latest AI' }),
+    ].join('\n');
+    await writeFile(path(), content);
+    expect(sessionTitle({ path: path() })).toBe(parseTranscript(content).title);
+    const keep = (r: ReturnType<typeof readRecords>['records'][number]) => r.type !== 'custom-title';
+    expect(sessionTitle({ path: path() }, keep)).toBe(readTranscript(readRecords(content).records.filter(keep)).title);
+  });
+
+  test('does not join a title marker across lines; empty and incomplete files have no title', async () => {
+    for (const content of ['', '"type":"cus\ntom-title"', '{"type":"custom-title","customTitle":']) {
+      await writeFile(path(), content);
+      expect(sessionTitle({ path: path() })).toBeUndefined();
+    }
   });
 });
