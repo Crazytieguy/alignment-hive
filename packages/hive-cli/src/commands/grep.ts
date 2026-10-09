@@ -92,8 +92,11 @@ interface Group {
  */
 export async function run(env: LocalEnv, args: Args): Promise<number> {
   if (!args.positional.length) throw new LocalError(localErrors.needsPattern, true);
-  const [pattern, ...sessionArgs] = args.positional;
+  const [given, ...sessionArgs] = args.positional;
   const fixed = args.flags.get('-F') === true;
+  // `a\|b` is alternation in grep's basic syntax and a literal | in JavaScript's; agents mean grep's.
+  const pattern = fixed ? given : given.replace(/(?<!\\)\\\|/g, '|');
+  if (pattern !== given) note(localNotes.breAlternation);
   const ignoreCase = args.flags.get('-i') === true;
   const re = compile(pattern, fixed, ignoreCase);
   const literals = mandatoryLiterals(pattern, fixed);

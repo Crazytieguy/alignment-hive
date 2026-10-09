@@ -847,6 +847,20 @@ describe('found by trying every feature', () => {
   });
 });
 
+describe('grep reads \\| as alternation', () => {
+  test('a\\|b finds either, with a note; [|] and \\\\| keep their meaning', async () => {
+    expect(await hl('grep', '-F', '|')).toBe(1);
+    err.length = 0;
+    expect(await hl('grep', 'needle\\|no-such-text')).toBe(0);
+    expect(rows().map((r) => r.loc)).toEqual([`${A.slice(0, 8)}:12`]);
+    expect(err[0]).toBe('read \\| as | (alternation), as grep does; [|] matches a literal |');
+    out.length = 0;
+    err.length = 0;
+    expect(await hl('grep', 'needle[|]')).toBe(1);
+    expect(err.some((t) => t.startsWith('read'))).toBe(false);
+  });
+});
+
 describe('HIVE_LOCAL_CUTOFF', () => {
   const at = async (cutoff: string, run: () => Promise<void>) => {
     process.env.HIVE_LOCAL_CUTOFF = cutoff;

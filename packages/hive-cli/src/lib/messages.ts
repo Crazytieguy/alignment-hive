@@ -383,6 +383,7 @@ export const localNotes = {
     `searching the newest ${cap.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} sessions (the --all-projects cap); narrow with --since or --project`,
   hiddenHits: (n: number): string => `; ${n} more in hidden entries (--all-entries includes them)`,
   noMatch: (searched: string, hidden: string): string => `no match in ${searched}${hidden}`,
+  breAlternation: 'read \\| as | (alternation), as grep does; [|] matches a literal |',
   matches: (entries: number, transcripts: number, searched: string, hidden: string): string =>
     `${entries} matching entr${entries === 1 ? 'y' : 'ies'} in ${transcripts} transcript${transcripts === 1 ? '' : 's'}; searched ${searched}${hidden}`,
 };
