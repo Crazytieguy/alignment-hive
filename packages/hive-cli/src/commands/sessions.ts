@@ -1,10 +1,9 @@
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { parseTranscript } from '@alignment-hive/session-data';
 import { preferred, printer, sessionFiles } from '../lib/locators';
 import { clipToFirstLine, localTime } from '../lib/local-rows';
 import { localErrors, localNotes } from '../lib/messages';
-import { firstHumanMessage, sessionFacts, sessionPresence, sessionTitle } from '../lib/session-facts';
+import { firstHumanMessage, sessionFacts, sessionPresence, sessionTitle, someEntry } from '../lib/session-facts';
 import { extractCwd, extractCwdFromFile } from '../lib/transcript-discovery';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow } from './local';
 import type { SessionFacts, SessionPresence } from '../lib/session-facts';
@@ -68,9 +67,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       spanInWindow(f, w) &&
       (inWindow(f.start, w) ||
         inWindow(f.end, w) ||
-        parseTranscript(readFileSync(f.ref.path, 'utf8')).entries.some((e) =>
-          inWindow(e.time ? Date.parse(e.time) : undefined, w),
-        ));
+        someEntry(f.ref, (e) => inWindow(e.time ? Date.parse(e.time) : undefined, w)));
     if (!active) continue;
     const human = humanOf(f);
     if (human?.empty) continue;
