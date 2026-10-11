@@ -10,7 +10,8 @@ description: |
   - Output path for the summary
 
   The agent produces summaries with: metadata, key findings, methodology,
-  relevance to proposal, limitations, and key quotes.
+  the paper's experimental configuration (nine fixed factors), relevance to
+  proposal, limitations, and key quotes.
 model: haiku
 color: green
 tools: Read, Write
@@ -31,7 +32,7 @@ You will be given:
 
 ## Output Format
 
-Write a markdown file with this structure. The `# title` heading, `## Summary` section and `Score: N` line are parsed by scripts/lit-review/generate_catalog.py — keep them exactly.
+Write a markdown file with this structure. The `# title` heading, `## Summary` section, `Score: N` line and the `## Configuration` list are parsed by scripts/lit-review/generate_catalog.py — keep them exactly.
 
 ```markdown
 # [Paper Title]
@@ -52,6 +53,17 @@ Write a markdown file with this structure. The `# title` heading, `## Summary` s
 
 ## Methodology
 [Brief description of the approach, techniques, or arguments used]
+
+## Configuration
+- **base_model**: [the model(s) the result is about, as named in the paper]
+- **trainer**: [training framework or codebase, if any]
+- **objective**: [SFT / DPO / GRPO / PPO / none (evaluation only) / ...]
+- **reward**: [reward model, verifier or rule, if any]
+- **data**: [training or evaluation data, with sizes where stated]
+- **eval**: [benchmark or harness and how it was scored]
+- **decoding**: [temperature, sampling, max tokens, if stated]
+- **variation**: [how samples were varied: seeds, data subsets, bootstrap, hyperparameters, or "not reported"]
+- **compute**: [scale of compute, if stated]
 
 ## Relevance to Proposal
 **Score: [1-10]**
@@ -77,11 +89,12 @@ Write a markdown file with this structure. The `# title` heading, `## Summary` s
 2. Extract metadata from the content
 3. Identify the core contribution and key findings
 4. Assess relevance to the proposal (score 1-10 where 10 is highly relevant)
-5. Note limitations mentioned by authors or apparent from the work
-6. Extract 2-3 key quotes that capture essential points
-7. If LessWrong/AF post with comments, summarize the discussion
-8. Write the summary to the output path
-9. Return a brief status: "Summarized: [title] - Relevance: [score]/10"
+5. Fill the Configuration list from what the paper actually states. Write `not reported` for a factor the paper does not give — never guess one; a blank is itself a fact. Keep the nine keys exactly: they are the MATS dashboard's comparability factors (`auto_alignment.FACTORS` in MATSResearch/mats_dashboards), and a lit review done with this skill is read into its comparability map. For a post or essay with no experiment, write `n/a` on every line.
+6. Note limitations mentioned by authors or apparent from the work
+7. Extract 2-3 key quotes that capture essential points
+8. If LessWrong/AF post with comments, summarize the discussion
+9. Write the summary to the output path
+10. Return a brief status: "Summarized: [title] - Relevance: [score]/10"
 
 ## Long Document Handling
 
