@@ -1,34 +1,28 @@
 ---
 name: release-plugins
-description: alignment-hive's release steps — bump versions for everything changed since its last release, push main, and the CI that push triggers.
-disable-model-invocation: true
+description: Release considerations special to alignment-hive (version bumps, checks, the remote-kernels tag, what CI a push triggers, plugin archives, rollback, troubleshooting). Use when releasing this repo, bumping versions, or when a release workflow, binary release, or plugin archive looks wrong.
 ---
 
-# Releasing plugins
+# alignment-hive release considerations
 
-The user invoking this skill, or `/release` in this repo, is the go-ahead to
-bump, commit, and push `main` (and push a remote-kernels tag). Code changes
-land without version bumps; all bumping happens here.
+The git process of a release isn't detailed here; it comes from the user.
+These are the considerations special to this repo.
 
-These are alignment-hive's specifics. The general flow (syncing with
-`origin/main`, reviewing what ships, pushing, seeing CI through) is the user's
-global `release` skill; if it isn't loaded, read
-`~/.claude/skills/release/SKILL.md` and follow both.
+## Versions
 
-## 1. Find what changed
-
-Run `bash .claude/skills/release-plugins/scripts/unreleased.sh` for each
+Code changes land without version bumps, so a release needs a bump commit.
+`bash .claude/skills/release-plugins/scripts/unreleased.sh` lists each
 component's commits since its version last changed on `origin/main`.
 
-Skip changes that don't reach users: tests, lint fixes, and `CLAUDE.md`
-files. Whatever else is listed is a release. A version already bumped in an
-unpushed commit (the script flags it) ships as-is, with no second bump.
-
-## 2. Pick versions
-
-Patch bumps by default. If a change might warrant more than a patch (a
-breaking change, or a new feature in an otherwise stable component), ask the
-user before bumping; otherwise just proceed.
+- Changes that don't reach users don't need a release: tests, lint fixes, and
+  `CLAUDE.md` files. Whatever else is listed does.
+- A version already bumped in an unpushed commit (the script flags it) ships
+  as-is, with no second bump.
+- Patch bumps by default. If a change might warrant more than a patch (a
+  breaking change, or a new feature in an otherwise stable component), ask the
+  user before bumping.
+- The bump commit holds only version files, titled with what ships (e.g.
+  `release: hive 0.6.6, model-router 0.1.37 (binary 0.1.25)`).
 
 | Component changed | Bump |
 |---|---|
@@ -36,15 +30,24 @@ user before bumping; otherwise just proceed.
 | `crates/<name>/` | its `Cargo.toml`, `plugins/<name>/binary-version` to match, and that plugin's `plugin.json`; run `cargo check -p <name>` so `Cargo.lock` follows |
 | hive-cli | `packages/hive-cli/package.json`, `plugins/hive/cli-version` to match, and the hive `plugin.json` |
 
-## 3. Commit and push
+## Checks
 
-Commit only the version files, titled with what ships (e.g. `release: hive
-0.6.6, model-router 0.1.37 (binary 0.1.25)`), and push `main`. For a
-remote-kernels binary, also `git tag remote-kernels-vX.Y.Z && git push origin
-remote-kernels-vX.Y.Z`.
+- `bun run --filter '@alignment-hive/review-app' build` first: a hive-cli test
+  compiles the CLI, which embeds the review app's bundle.
+- `bun run --filter '*' lint` and `bun run --filter '*' test`.
+- Mods' own tests (`plugins/*/tests`): `claude plugin test plugins/<name>`.
+- A changed crate: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+  warnings`, and `cargo test` in it. For remote-kernels, add
+  `--features fake-runtime` to clippy and test, and run its ignored E2E suite
+  with `cargo test --features fake-runtime --test fake_e2e -- --ignored
+  --test-threads=1`.
 
-`gh run list --commit <full sha>` lists the runs the push triggered (a short
-sha matches nothing). If a run fails, see Troubleshooting. What triggers what:
+## Tags
+
+A remote-kernels binary release needs the tag `remote-kernels-vX.Y.Z` on the
+bump commit. Nothing else is tagged by hand.
+
+## What a push triggers
 
 - Plain plugins are path sources, so the push itself is the release.
 - A model-router `binary-version` change auto-tags and releases the binary; a
@@ -52,7 +55,8 @@ sha matches nothing). If a run fails, see Troubleshooting. What triggers what:
   *Plugin archives*.
 - A content change to model-router or remote-kernels triggers *Plugin
   archives*, which rebuilds the per-platform zips.
-- A hive-cli version change triggers *Release hive-cli*.
+- *Release hive-cli* runs on hive-cli source changes and publishes only when
+  `packages/hive-cli/package.json` has a new version.
 
 ## Binary-shipping plugins (model-router, remote-kernels)
 

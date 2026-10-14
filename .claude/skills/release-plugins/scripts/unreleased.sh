@@ -42,5 +42,5 @@ for dir in crates/*/; do
 done
 # The paths that trigger .github/workflows/release-hive-cli.yml.
 report "hive-cli" packages/hive-cli/package.json '"version"' \
-  packages/hive-cli/src packages/session-data/src packages/ui/src \
+  packages/hive-cli/src packages/hive-cli/assets packages/session-data/src packages/ui/src \
   packages/review-app/src packages/review-app/index.html
