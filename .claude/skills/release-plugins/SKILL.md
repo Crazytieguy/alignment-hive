@@ -67,7 +67,8 @@ single source. CI enforces that model-router's `binary-version` matches its
 `Cargo.toml`.
 
 **Rollback:** revert the commit and push. The build is byte-deterministic, so
-CI reproduces the previous zips exactly and puts them back; machines on the
+CI reproduces the previous zips exactly (unless that binary release was re-run
+since, which replaces its assets) and puts them back; machines on the
 bad version move back on their next update pass.
 
 `python3 scripts/plugin-archives.py build` builds the zips into
@@ -77,8 +78,10 @@ bad version move back on their next update pass.
 
 **A binary release is missing its assets.** Re-run *Auto-tag model-router
 release* against `main`; for remote-kernels, re-run *Release* at the
-`remote-kernels-vX.Y.Z` tag. Both are idempotent, and each publishes the plugin
-archives when it finishes.
+`remote-kernels-vX.Y.Z` tag. Each publishes the plugin archives when it
+finishes. The release is created with all its assets in one `gh release
+create`, so a re-run fails if a partial release exists; delete that release
+(keep the tag) first.
 
 **The zips are missing but the binary release is fine.** Re-run *Plugin
 archives* against `main`. It skips any plugin whose binary release is missing
