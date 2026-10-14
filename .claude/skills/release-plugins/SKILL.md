@@ -1,20 +1,23 @@
 ---
 name: release-plugins
-description: Bump versions for everything changed since its last release, push main, and watch the release CI.
+description: alignment-hive's release steps — bump versions for everything changed since its last release, push main, and the CI that push triggers.
 disable-model-invocation: true
 ---
 
 # Releasing plugins
 
-The user invoking this skill is the go-ahead to bump, commit, and push `main`
-(and push a remote-kernels tag). Code changes land without version bumps; all
-bumping happens here.
+The user invoking this skill, or `/release` in this repo, is the go-ahead to
+bump, commit, and push `main` (and push a remote-kernels tag). Code changes
+land without version bumps; all bumping happens here.
+
+These are alignment-hive's specifics. The general flow (syncing with
+`origin/main`, reviewing what ships, pushing, seeing CI through) is the user's
+global `release` skill; if it isn't loaded, read
+`~/.claude/skills/release/SKILL.md` and follow both.
 
 ## 1. Find what changed
 
-Release from the main checkout. Pull first (`git pull --ff-only`) so local
-`main` includes everything on `origin/main`, then run
-`bash .claude/skills/release-plugins/scripts/unreleased.sh` for each
+Run `bash .claude/skills/release-plugins/scripts/unreleased.sh` for each
 component's commits since its version last changed on `origin/main`.
 
 Skip changes that don't reach users: tests, lint fixes, and `CLAUDE.md`
@@ -33,16 +36,15 @@ user before bumping; otherwise just proceed.
 | `crates/<name>/` | its `Cargo.toml`, `plugins/<name>/binary-version` to match, and that plugin's `plugin.json`; run `cargo check -p <name>` so `Cargo.lock` follows |
 | hive-cli | `packages/hive-cli/package.json`, `plugins/hive/cli-version` to match, and the hive `plugin.json` |
 
-## 3. Commit, push, watch
+## 3. Commit and push
 
 Commit only the version files, titled with what ships (e.g. `release: hive
 0.6.6, model-router 0.1.37 (binary 0.1.25)`), and push `main`. For a
 remote-kernels binary, also `git tag remote-kernels-vX.Y.Z && git push origin
 remote-kernels-vX.Y.Z`.
 
-Then watch every run the push triggered (`gh run list --commit <full sha>`;
-a short sha matches nothing) until each finishes, and report what was released. If a run
-fails, see Troubleshooting.
+`gh run list --commit <full sha>` lists the runs the push triggered (a short
+sha matches nothing). If a run fails, see Troubleshooting. What triggers what:
 
 - Plain plugins are path sources, so the push itself is the release.
 - A model-router `binary-version` change auto-tags and releases the binary; a
