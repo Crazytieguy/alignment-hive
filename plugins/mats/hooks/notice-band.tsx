@@ -76,10 +76,10 @@ export function noticeRows(
       return (
         <Box key={key} flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
           <Text>
-            <Text color={mark.color} bold>
+            <Text color={mark.color} weight="semibold">
               {mark.glyph}{' '}
             </Text>
-            <Text bold>{plugin}</Text> {notice.busy ? `${notice.text} · ${notice.busy}` : notice.text}
+            <Text weight="semibold">{plugin}</Text> {notice.busy ? `${notice.text} · ${notice.busy}` : notice.text}
           </Text>
           {/* Grows to fill its line, so the buttons stay right-aligned when they wrap. */}
           <Box flexDirection="row" flexGrow={1} justifyContent="flex-end" columnGap={1}>

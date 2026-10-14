@@ -117,9 +117,13 @@ export const register: Register = on => {
   // A block is whole once the turn that wrote it has ended. Surfaces draw a message under ids of
   // their own (the desktop's is not the stored row's uuid), so the turn's end is the signal, not
   // the stored row: flipping the atom redraws every pending block that read it, which starts its summary.
+  // Subagents' and teammates' turns (e.agentId set) also raise turn.start and turn.complete; only
+  // the main loop's draw the blocks summarized here.
   on('turn.start', async ($, e, next) => {
-    hasTurnStarted = true
-    await update($, isTurnRunning, () => true) // a subagent's run raises no turn.start
+    if (!e.agentId) {
+      hasTurnStarted = true
+      await update($, isTurnRunning, () => true)
+    }
     return next(e)
   })
 
