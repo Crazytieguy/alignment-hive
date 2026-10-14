@@ -24,6 +24,8 @@ Search this project, the default scope of `hive local`. Use `--project` or `--al
 !`hive local --help 2>/dev/null || echo "(hive local --help unavailable)"`
 ```
 
+Start with `hive local sessions`' default page or a grep with `--since`. Widen the time window if needed; do not enumerate thousands of sessions just to select a few with jq.
+
 To find the latest entries across sessions, merge by time and stop at a session whose end is older than what you need.
 
 Use git commands if they help, but past sessions are the primary source.

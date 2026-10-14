@@ -302,7 +302,9 @@ Scope for sessions and grep: this project and its worktrees by default; --projec
   A folder outside git is that folder only: the sessions started in it.
   --since T and --until T filter by entry time. T is 2h, 7d, or a local date such as 2026-09-12;
   --until DATE includes that whole day. show, outline and grep SESSION find the session in any project.
-Output is never capped. Size a broad grep with -c or -l first; read a session's shape with outline, its end with | tail.
+Start with sessions' default page or a grep with --since T, then widen the window if needed.
+-c and -l reduce output, not scanning. Name known sessions for follow-up searches.
+Output is never capped. Read a session's shape with outline, its end with | tail.
 Notes, warnings and errors go to stderr, also as JSON lines ({"note":...}, {"warning":...}, {"error":...}), so
   2>&1 | jq still parses. Errors exit 2.`;
 
