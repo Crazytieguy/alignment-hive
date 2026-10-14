@@ -55,8 +55,9 @@ bump commit. Nothing else is tagged by hand.
   *Plugin archives*.
 - A content change to model-router or remote-kernels triggers *Plugin
   archives*, which rebuilds the per-platform zips.
-- *Release hive-cli* runs on hive-cli source changes and publishes only when
-  `packages/hive-cli/package.json` has a new version.
+- *Release hive-cli* runs on hive-cli source changes and, only when
+  `packages/hive-cli/package.json` has a new version, attaches compiled
+  binaries to a `hive-cli-vX.Y.Z` GitHub release (it isn't on npm).
 
 ## Binary-shipping plugins (model-router, remote-kernels)
 
