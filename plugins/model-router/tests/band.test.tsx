@@ -2,6 +2,8 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { fitsToast } from '../hooks/register'
+
 const BAND = {
   plugin: 'model-router',
   component: 'AbovePrompt' as const,
@@ -45,6 +47,7 @@ async function startWithSettings($: Engine, on: On, rows: unknown[], settings: u
   const toasts: string[] = []
   const settingsCalls: string[][] = []
   const commands: string[] = []
+  mock.env(on, { HOME: '/home/me' })
   on('classic.SessionStart', async () => ({}))
   on('process.run', async (_$, e) => {
     const isSettings = e.argv[2] === 'settings'
@@ -82,12 +85,12 @@ describe('model-router settings buttons', () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:new-model:add-models' })
     expect(settingsCalls).toEqual([['settings', 'models', '--apply', '--project-dir', '/proj']])
-    expect(toasts[0]).toBe('Added gpt-6.1-sol (compacts at 475K) to /model. Restart Claude Code to pick it; Customize runs setup.')
+    expect(toasts[0]).toBe('Added to /model; restart Claude Code to pick. Compacts gpt-6.1-sol at 475K.')
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
 
-  test('Migrate has the binary move the windows and says where, at what window', async ($, on) => {
+  test('Migrate has the binary move the windows and says at what window', async ($, on) => {
     const windowsRow = {
       id: 'windows',
       severity: 'action',
@@ -103,9 +106,7 @@ describe('model-router settings buttons', () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:windows:windows' })
     expect(settingsCalls).toEqual([['settings', 'windows', '--apply', '--project-dir', '/proj']])
-    expect(toasts[0]).toBe(
-      'Context windows set per model in /home/me/.claude/settings.json: gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K. Restart Claude Code to use them.',
-    )
+    expect(toasts[0]).toBe('Restart Claude Code to compact gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K.')
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
@@ -126,9 +127,7 @@ describe('model-router settings buttons', () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:windows-update:windows' })
     expect(settingsCalls).toEqual([['settings', 'windows', '--apply', '--project-dir', '/proj']])
-    expect(toasts[0]).toBe(
-      'Context windows set per model in /home/me/.claude/settings.json: gpt-6.1-sol at 475K. Restart Claude Code to use them.',
-    )
+    expect(toasts[0]).toBe('Restart Claude Code to compact gpt-6.1-sol at 475K (in ~/.claude/settings.json).')
     await ui.unmount()
   })
 
@@ -151,7 +150,7 @@ describe('model-router settings buttons', () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:down:bypass' })
     expect(settingsCalls).toEqual([['settings', 'bypass', '--project-dir', '/proj']])
-    expect(toasts[0]).toMatch(/talks to Anthropic directly \(\/home\/me\/\.claude\/settings\.json\)\. Restart it/)
+    expect(toasts[0]).toBe('Bypassed the router. Restart Claude Code to get back online, then run /model-router:setup.')
     await ui.unmount()
   })
 
@@ -164,9 +163,61 @@ describe('model-router settings buttons', () => {
     )
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:down:bypass' })
-    expect(toasts[0]).toMatch(/^\/proj\/\.claude\/settings\.json routes through model-router and collaborators share it/)
+    expect(toasts[0]).toBe(
+      'In shared .claude/settings.json, remove ANTHROPIC_BASE_URL (and a GPT "model"), then restart Claude Code.',
+    )
     await ui.unmount()
   })
+
+  // The longest toasts these buttons raise: every model the binary ships, the other outcomes.
+  const longest: [string, typeof addAction, unknown][] = [
+    [
+      'every shipped model added',
+      addAction,
+      { applied: true, added: ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol'], windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000 } },
+    ],
+    [
+      'every window set',
+      { id: 'windows', label: 'Migrate', kind: 'plugin' },
+      { applied: true, file: '/proj/.claude/settings.local.json', windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000, 'grok-4.7': 500000 } },
+    ],
+    ['a refusal', addAction, { applied: false, reason: 'Claude Code 2.1.200 predates per-model windows (2.1.288); update it first' }],
+    ['a changed bypass', bypassAction, { status: 'changed', files: ['/home/me/.claude/settings.json', '/proj/.claude/settings.local.json'] }],
+    ['a bypass with nothing to edit', bypassAction, { status: 'not-found' }],
+  ]
+  test('a button pressed after another session made the same edit says it is already done', async ($, on) => {
+    const { toasts } = await startWithSettings($, on, [newModel], { applied: true, unchanged: true })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:new-model:add-models' })
+    expect(toasts).toEqual(['Already in /model; restart Claude Code to pick.'])
+    await ui.unmount()
+  })
+
+  test('a changed bypass names the files it did change when they fit', async ($, on) => {
+    const { toasts } = await startWithSettings(
+      $,
+      on,
+      [{ id: 'down', severity: 'urgent', text: 'down', actions: [bypassAction, retryAction] }],
+      { status: 'changed', files: ['/home/me/.claude/settings.json'] },
+    )
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:down:bypass' })
+    expect(toasts).toEqual([
+      'Settings changed mid-edit, so Bypass router is not finished: try again. Changed so far: ~/.claude/settings.json',
+    ])
+    await ui.unmount()
+  })
+
+  for (const [name, action, settings] of longest) {
+    test(`the toast for ${name} shows whole`, async ($, on) => {
+      const { toasts } = await startWithSettings($, on, [{ id: 'row', severity: 'action', text: 'row', actions: [action] }], settings)
+      const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+      await ui.press({ key: `model-router:row:${action.id}` })
+      expect(toasts).toHaveLength(1)
+      expect(fitsToast(toasts[0]!)).toBe(true)
+      await ui.unmount()
+    })
+  }
 })
 
 describe('model-router check', () => {

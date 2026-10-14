@@ -550,7 +550,9 @@ fn models_with(
     // A file someone else wrote since it was read is planned again, once.
     for _ in 0..2 {
         match plan_models(home, project, config, version) {
-            Plan::Current => return Ok(json!({"applied": false, "reason": "nothing to change"})),
+            // Already as the edit would leave it: done since the report, by another session or
+            // by setup.
+            Plan::Current => return Ok(json!({"applied": true, "unchanged": true})),
             Plan::Blocked { reason, .. } => return Ok(json!({"applied": false, "reason": reason})),
             Plan::Ready {
                 adds,
@@ -1054,9 +1056,8 @@ fn windows_with(
     let _lock = lock(lock_path)?;
     for _ in 0..2 {
         match plan().for_version(version) {
-            WindowsPlan::Current => {
-                return Ok(json!({"applied": false, "reason": "nothing to change"}));
-            }
+            // Already as the edit would leave it, as for models.
+            WindowsPlan::Current => return Ok(json!({"applied": true, "unchanged": true})),
             WindowsPlan::Blocked { reason, .. } => {
                 return Ok(json!({"applied": false, "reason": reason}));
             }
@@ -1867,6 +1868,24 @@ mod tests {
         assert_eq!(report["needed"], true, "{report}");
         assert_eq!(report["canApply"], false, "{report}");
         report["reason"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_second_apply_reports_the_edit_already_made() {
+        let dirs = Dirs::new();
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"258400"}}}}"#
+        ));
+        assert_eq!(dirs.models(CURRENT, true)["applied"], true);
+        assert_eq!(
+            dirs.models(CURRENT, true),
+            json!({"applied": true, "unchanged": true})
+        );
+        assert_eq!(windows_of(&dirs, "", CURRENT, true)["applied"], true);
+        assert_eq!(
+            windows_of(&dirs, "", CURRENT, true),
+            json!({"applied": true, "unchanged": true})
+        );
     }
 
     #[test]

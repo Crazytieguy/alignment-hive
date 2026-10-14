@@ -40,9 +40,38 @@ async function retry($: EngineInterface, row: string): Promise<void> {
   }
 }
 
+/** "gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K": routes grouped by compaction window. */
+function compactsAt(windows: Record<string, number>): string {
+  const byWindow = new Map<number, string[]>()
+  for (const [id, window] of Object.entries(windows)) {
+    byWindow.set(window, [...(byWindow.get(window) ?? []), id])
+  }
+  return [...byWindow].map(([window, ids]) => `${ids.join(', ')} at ${Math.round(window / 1000)}K`).join('; ')
+}
+
+/**
+ * Whether a toast shows whole on the terminal: Claude Code 2.1.299 word-wraps it at 40 columns
+ * (a 44-column box less its frame) and draws 3 lines, the third cut at its end.
+ */
+export function fitsToast(text: string): boolean {
+  const lines: string[] = []
+  for (const word of text.split(' ')) {
+    const last = lines.at(-1)
+    if (last !== undefined && last.length + 1 + word.length <= 40) lines[lines.length - 1] = `${last} ${word}`
+    else for (let at = 0; at < Math.max(word.length, 1); at += 40) lines.push(word.slice(at, at + 40))
+  }
+  return lines.length <= 3
+}
+
+/** The first of `texts` that fits in a toast, else the last. */
+const firstFitting = (...texts: string[]): string => texts.find(fitsToast) ?? texts.at(-1)!
+
 /**
  * A settings edit by the binary (`model-router settings`, the setup skill's own), as the toast
  * that says what it did. The edits take effect when Claude Code next starts.
+ *
+ * A toast shows 3 lines of 40 columns and cuts the rest, so what to do comes first, and the files
+ * edited only where they fit.
  */
 async function editSettings($: EngineInterface, operation: 'models' | 'windows' | 'bypass'): Promise<string> {
   const args = operation === 'bypass' ? ['bypass'] : [operation, '--apply']
@@ -53,6 +82,8 @@ async function editSettings($: EngineInterface, operation: 'models' | 'windows' 
   if (exitCode !== 0 || !stdout.trim()) return 'Could not edit your settings: run /model-router:setup'
   const result = JSON.parse(stdout) as {
     applied?: boolean
+    // Already as the edit would leave it: another session, or setup, made it since this one started.
+    unchanged?: boolean
     added?: string[]
     windows?: Record<string, number>
     reason?: string
@@ -60,39 +91,43 @@ async function editSettings($: EngineInterface, operation: 'models' | 'windows' 
     files?: string[]
     file?: string
   }
+  // A settings file as the person knows it: relative to the project, or under ~.
+  const home = await $.env.get('HOME')
+  const shown = (file: string) => {
+    if (file.startsWith(`${projectDir}/`)) return file.slice(projectDir.length + 1)
+    return home && file.startsWith(`${home}/`) ? `~${file.slice(home.length)}` : file
+  }
 
   if (operation === 'models') {
-    if (!result.applied) return `${result.reason ?? 'Nothing to add'}: run /model-router:setup`
-    const added = (result.added ?? []).map(id => {
-      const window = result.windows?.[id]
-      return window ? `${id} (compacts at ${Math.round(window / 1000)}K)` : id
-    })
+    if (!result.applied) return `Not added, run /model-router:setup: ${result.reason ?? 'no reason given'}`
+    if (result.unchanged) return 'Already in /model; restart Claude Code to pick.'
+    const added = Object.fromEntries(
+      (result.added ?? []).flatMap(id => (result.windows?.[id] ? [[id, result.windows[id]]] : [])),
+    )
     // Only retired rows dropped: nothing added to name.
-    if (added.length === 0) return 'Updated /model. Restart Claude Code to see it.'
-    return `Added ${added.join(', ')} to /model. Restart Claude Code to pick it; Customize runs setup.`
+    if (!result.added?.length) return 'Updated /model. Restart Claude Code to see it.'
+    const compacts = Object.keys(added).length ? ` Compacts ${compactsAt(added)}.` : ''
+    return `Added to /model; restart Claude Code to pick.${compacts}`
   }
   if (operation === 'windows') {
-    if (!result.applied) return `${result.reason ?? 'Nothing to change'}: run /model-router:setup`
-    // "gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K".
-    const byWindow = new Map<number, string[]>()
-    for (const [id, window] of Object.entries(result.windows ?? {})) {
-      byWindow.set(window, [...(byWindow.get(window) ?? []), id])
-    }
-    const windows = [...byWindow].map(([window, ids]) => `${ids.join(', ')} at ${Math.round(window / 1000)}K`)
-    const at = windows.length ? `: ${windows.join('; ')}` : ''
-    return `Context windows set per model in ${result.file}${at}. Restart Claude Code to use them.`
+    if (!result.applied) return `Not changed, run /model-router:setup: ${result.reason ?? 'no reason given'}`
+    if (result.unchanged) return 'Windows already set; restart Claude Code to use them.'
+    if (!Object.keys(result.windows ?? {}).length) return 'Windows set; restart Claude Code to use them.'
+    const compact = `Restart Claude Code to compact ${compactsAt(result.windows!)}`
+    return firstFitting(...(result.file ? [`${compact} (in ${shown(result.file)}).`] : []), `${compact}.`)
   }
   if (result.status === 'done') {
-    return `Claude Code now talks to Anthropic directly (${(result.files ?? []).join(', ')}). Restart it to get back online, then run /model-router:setup.`
+    return 'Bypassed the router. Restart Claude Code to get back online, then run /model-router:setup.'
   }
   // Another writer kept changing a file: its edit is not done, nothing of theirs was overwritten.
   if (result.status === 'changed') {
-    const done = result.files?.length ? ` (changed so far: ${result.files.join(', ')})` : ''
-    return `Your settings changed while editing; Bypass router is not finished${done}. Try again.`
+    const unfinished = 'Settings changed mid-edit, so Bypass router is not finished: try again.'
+    const done = result.files?.length ? [`${unfinished} Changed so far: ${result.files.map(shown).join(', ')}`] : []
+    return firstFitting(...done, unfinished)
   }
   if (result.status === 'shared-file') {
-    const done = result.files?.length ? ` (changed so far: ${result.files.join(', ')})` : ''
-    return `${result.file} routes through model-router and collaborators share it: remove ANTHROPIC_BASE_URL (and a GPT "model") there, then restart Claude Code${done}`
+    const file = shown(result.file ?? '.claude/settings.json')
+    return `In shared ${file}, remove ANTHROPIC_BASE_URL (and a GPT "model"), then restart Claude Code.`
   }
   return 'ANTHROPIC_BASE_URL is not in your settings files: unset it where you set it, then restart Claude Code'
 }
