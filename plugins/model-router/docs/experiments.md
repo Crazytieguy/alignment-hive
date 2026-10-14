@@ -1667,3 +1667,30 @@ compacts it: `min(declaration, per-model window)`, times real/declared on
 a scaled route. Retest trigger: a Claude Code
 release that changes `/autocompact`, the compaction fork, or the gateway
 hint headers.
+
+## Codex's GPT-6.1 Sol default window (2026-10-13, Codex 0.162.1, CLIProxyAPI 7.3.16, router 0.1.25)
+
+`codex debug models` (the live catalog, fetched at run time) now gives
+`gpt-6.1-sol` `context_window` 500000; `--bundled` (the binary's own
+catalog) still says 272000, so the change is server-side. Every other
+GPT-6 and GPT-5.6 model is unchanged at 272000, `max_context_window` is
+872000 throughout, and `effective_context_window_percent` is 95, with no
+`auto_compact_token_limit`. In codex-rs 0.162.1
+(`protocol/src/openai_models.rs`) the usable window is
+`context_window × 95%` and auto-compaction fires at `context_window × 90%`
+unless the catalog or config sets a lower limit. Sol therefore gets
+475000 usable, compacting at 450000, where the others get 258400 and
+244800. Grok 4.7, 4.6 and 4.5 are 500000 in the pinned CLIProxyAPI
+registry, in its latest release (8.0.28), and in xAI's model docs.
+
+Decision: the per-model Codex default replaces the single 258400. Setup
+and `settings models` give `gpt-6.1-sol` 475000. `settings windows` moves
+an entry still at a superseded default (258400 for Sol) to the current
+one, and offers that in the band as Update. Doctor warns past the route's
+own default, and names the 272K billing step only for 258400 routes. A
+person who wants Sol at 258400 can dismiss the row (`windows-update`): the
+dismissal holds until the outdated routes change, not just for the plugin
+version. Only the edited file and those below it are checked, so an entry
+at 258400 in a file above it (a checked-in project file) is not moved. Retest trigger: the live catalog changes a built-in
+model's `context_window` (diff `codex debug models` against
+`CODEX_DEFAULT_WINDOW_CHANGES`).

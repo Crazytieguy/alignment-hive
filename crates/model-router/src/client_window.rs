@@ -285,6 +285,19 @@ impl Compaction {
         self.env.value().is_some() || self.entry(routing_id).is_some()
     }
 
+    /// The window `routing_id`'s own `modelSettings` entry sets, when that
+    /// entry decides where it compacts (no env override).
+    #[must_use]
+    pub fn own_window(&self, routing_id: &str) -> Option<u64> {
+        if self.env.value().is_some() {
+            return None;
+        }
+        match self.by_model.get(routing_id)?.value {
+            Configured::Tokens(tokens) => Some(tokens),
+            Configured::Auto => None,
+        }
+    }
+
     fn entry(&self, routing_id: &str) -> Option<&Entry> {
         self.by_model.get(routing_id).or(self.default.as_ref())
     }

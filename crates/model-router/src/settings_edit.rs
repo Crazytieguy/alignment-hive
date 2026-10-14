@@ -26,7 +26,7 @@ use crate::config::{
     Config, ModelRoute, SHIPPED_GPT_ROUTES, is_codex_native_model, is_retired_gpt_route,
     shipped_picker_rows,
 };
-use crate::context_check::{self, recommended_entry};
+use crate::context_check::{self, is_superseded_default, recommended_entry};
 
 const BASE_URL: &str = "ANTHROPIC_BASE_URL";
 const OPTION: &str = "ANTHROPIC_CUSTOM_MODEL_OPTION";
@@ -617,8 +617,11 @@ enum WindowsPlan {
         /// The declaration being raised, as the next session would read it;
         /// the only legacy a ready plan can have.
         raises: Option<EnvSetting>,
-        /// The entries added, in route order.
+        /// The entries set: missing ones in route order, then outdated ones.
         windows: Vec<(String, u64)>,
+        /// The routes among `windows` whose entry is raised from a Codex
+        /// default that has since moved.
+        updates: Vec<String>,
     },
 }
 
@@ -688,7 +691,8 @@ fn plan_windows(
         .effective_models()
         .filter(|route| !baseline.is_configured(&route.routing_id))
         .collect();
-    if !legacy && missing.is_empty() {
+    let outdated = outdated_entries(config, &baseline);
+    if !legacy && missing.is_empty() && outdated.is_empty() {
         return WindowsPlan::Current;
     }
 
@@ -731,6 +735,7 @@ fn plan_windows(
     };
     let windows: Vec<(String, u64)> = missing
         .iter()
+        .chain(&outdated)
         .filter_map(|route| Some((route.routing_id.clone(), recommended_entry(route)?)))
         .collect();
     let edited = match edit_windows(&doc, raise, &windows) {
@@ -752,7 +757,26 @@ fn plan_windows(
         doc: edited,
         raises: raise.then_some(declared),
         windows,
+        updates: outdated
+            .iter()
+            .map(|route| route.routing_id.clone())
+            .collect(),
     }
+}
+
+/// The routes whose own entry in `compaction` is still at a Codex default
+/// that has since moved (setup wrote it, the person did not choose it), and
+/// that have a window to move it to.
+fn outdated_entries<'a>(config: &'a Config, compaction: &Compaction) -> Vec<&'a ModelRoute> {
+    config
+        .effective_models()
+        .filter(|route| {
+            recommended_entry(route).is_some()
+                && compaction
+                    .own_window(&route.routing_id)
+                    .is_some_and(|window| is_superseded_default(route, window))
+        })
+        .collect()
 }
 
 /// `settings` (as read) for `files`, with `edit` (a file and its new JSON)
@@ -908,6 +932,7 @@ pub(crate) fn windows_note(
         path,
         raises,
         windows,
+        updates,
         ..
     } = plan_windows(home, project, settings, config, None)
     else {
@@ -922,11 +947,23 @@ pub(crate) fn windows_note(
              before per-model windows"
         )
     } else {
-        let routes: Vec<&str> = windows.iter().map(|(id, _)| id.as_str()).collect();
-        format!(
-            "{} has no compaction window for the next session",
-            routes.join(", ")
-        )
+        let (outdated, missing): (Vec<_>, Vec<_>) =
+            windows.iter().partition(|(id, _)| updates.contains(id));
+        let missing = (!missing.is_empty()).then(|| {
+            let routes: Vec<&str> = missing.iter().map(|(id, _)| id.as_str()).collect();
+            format!(
+                "{} has no compaction window for the next session",
+                routes.join(", ")
+            )
+        });
+        let outdated = outdated.iter().map(|(id, window)| {
+            format!("{id} still compacts at Codex's former default (now {window})")
+        });
+        missing
+            .into_iter()
+            .chain(outdated)
+            .collect::<Vec<_>>()
+            .join("; ")
     };
     Some(format!(
         "{what}; `model-router settings windows --apply` fixes {}",
@@ -974,7 +1011,9 @@ fn windows_with(
     let Ok(config) = config else {
         return Ok(match apply {
             Some(_) => json!({"applied": false, "reason": "the router config does not load"}),
-            None => json!({"needed": false, "canApply": false, "legacy": false, "routes": []}),
+            None => json!({
+                "needed": false, "canApply": false, "legacy": false, "routes": [], "updates": [],
+            }),
         });
     };
     let plan = || {
@@ -988,21 +1027,24 @@ fn windows_with(
             plan => plan,
         };
         return Ok(match plan {
-            WindowsPlan::Current => {
-                json!({"needed": false, "canApply": false, "legacy": false, "routes": []})
-            }
+            WindowsPlan::Current => json!({
+                "needed": false, "canApply": false, "legacy": false, "routes": [], "updates": [],
+            }),
             WindowsPlan::Blocked { legacy, reason } => json!({
-                "needed": true, "canApply": false, "legacy": legacy, "routes": [],
+                "needed": true, "canApply": false, "legacy": legacy, "routes": [], "updates": [],
                 "reason": reason,
             }),
             WindowsPlan::Ready {
                 path,
                 raises,
                 windows,
+                updates,
                 ..
             } => json!({
                 "needed": true, "canApply": true, "legacy": raises.is_some(), "file": path,
-                "routes": windows.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "routes": windows.iter().map(|(id, _)| id)
+                    .filter(|id| !updates.contains(id)).collect::<Vec<_>>(),
+                "updates": updates,
             }),
         });
     };
@@ -1024,6 +1066,7 @@ fn windows_with(
                 doc,
                 raises,
                 windows,
+                ..
             } => {
                 if write(&path, original.as_deref(), &doc, before_commit)? {
                     let windows: serde_json::Map<String, Value> = windows
@@ -1277,7 +1320,7 @@ mod tests {
         assert_eq!(
             dirs.models(CURRENT, true),
             json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6-luna"],
-                   "windows": {"gpt-6.1-sol": 258_400, "gpt-6-luna": 258_400}})
+                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6-luna": 258_400}})
         );
         let expected = format!(
             r#"{{
@@ -1309,7 +1352,7 @@ mod tests {
   "alpha": true,
   "modelSettings": {{
     "gpt-6.1-sol": {{
-      "autoCompactWindow": 258400
+      "autoCompactWindow": 475000
     }},
     "gpt-6-luna": {{
       "autoCompactWindow": 258400
@@ -1332,13 +1375,13 @@ mod tests {
         ));
         assert_eq!(
             dirs.models(CURRENT, true)["windows"],
-            json!({"gpt-6.1-sol": 258_400})
+            json!({"gpt-6.1-sol": 475_000})
         );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(
             written["modelSettings"],
             json!({"gpt-6-luna": {"autoCompactWindow": 500_000},
-                   "gpt-6.1-sol": {"x": 1, "autoCompactWindow": 258_400}})
+                   "gpt-6.1-sol": {"x": 1, "autoCompactWindow": 475_000}})
         );
     }
 
@@ -1351,7 +1394,7 @@ mod tests {
         assert_eq!(
             dirs.models(CURRENT, true),
             json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6-luna"],
-                   "windows": {"gpt-6.1-sol": 258_400, "gpt-6-luna": 258_400}})
+                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6-luna": 258_400}})
         );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(written["env"], json!({BASE_URL: URL, "KEEP": "1"}));
@@ -1690,7 +1733,7 @@ mod tests {
             assert_eq!(
                 first.join().unwrap(),
                 json!({"applied": true, "added": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"],
-                       "windows": {"gpt-6-astra": 258_400, "gpt-6.1-sol": 258_400,
+                       "windows": {"gpt-6-astra": 258_400, "gpt-6.1-sol": 475_000,
                                    "gpt-6-luna": 258_400}})
             );
             // The lock held the bypass until the first had committed.
@@ -1783,9 +1826,14 @@ mod tests {
 
     /// `modelSettings` with every built-in GPT route at Codex's default.
     fn gpt_entries() -> String {
+        entries_at(crate::config::codex_default_window)
+    }
+
+    /// `modelSettings` with every built-in GPT route at `window(id)`.
+    fn entries_at(window: impl Fn(&str) -> u64) -> String {
         let entries: Vec<String> = GPT_ROUTES
             .iter()
-            .map(|id| format!(r#""{id}":{{"autoCompactWindow":258400}}"#))
+            .map(|id| format!(r#""{id}":{{"autoCompactWindow":{}}}"#, window(id)))
             .collect();
         format!("{{{}}}", entries.join(","))
     }
@@ -1832,7 +1880,7 @@ mod tests {
         assert_eq!(
             windows_of(&dirs, "", CURRENT, false),
             json!({"needed": true, "canApply": true, "legacy": true, "routes": GPT_ROUTES,
-                   "file": dirs.home.path().join(".claude/settings.json")})
+                   "updates": [], "file": dirs.home.path().join(".claude/settings.json")})
         );
         let note = windows_note(
             dirs.home.path(),
@@ -1897,7 +1945,7 @@ mod tests {
         assert_eq!(local["env"][ENV_VAR], "1000000");
         assert_eq!(
             local["modelSettings"]["gpt-6.1-sol"]["autoCompactWindow"],
-            258_400
+            475_000
         );
     }
 
@@ -1911,11 +1959,107 @@ mod tests {
         assert_eq!(
             windows_of(&dirs, "", CURRENT, false),
             json!({"needed": true, "canApply": true, "legacy": false, "routes": ["gpt-6-luna"],
-                   "file": dirs.home.path().join(".claude/settings.json")})
+                   "updates": [], "file": dirs.home.path().join(".claude/settings.json")})
         );
         let applied = windows_of(&dirs, "", CURRENT, true);
         assert_eq!(applied["declared"], Value::Null, "{applied}");
         assert_eq!(applied["windows"], json!({"gpt-6-luna": 258_400}));
+    }
+
+    /// Setup's windows from before Codex raised GPT-6.1 Sol's default: its
+    /// entry moves to the new default, every other one stays.
+    #[test]
+    fn an_entry_at_a_former_codex_default_moves_to_the_current_one() {
+        let dirs = Dirs::new();
+        let entries = entries_at(|_| 258_400);
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{entries}}}"#
+        ));
+        assert_eq!(
+            windows_of(&dirs, "", CURRENT, false),
+            json!({"needed": true, "canApply": true, "legacy": false, "routes": [],
+                   "updates": ["gpt-6.1-sol"],
+                   "file": dirs.home.path().join(".claude/settings.json")})
+        );
+        let note = windows_note(
+            dirs.home.path(),
+            dirs.project.path(),
+            &settings_by_precedence(Some(dirs.home.path()), dirs.project.path()),
+            &crate::config::parse_and_prepare(""),
+        )
+        .unwrap();
+        assert!(
+            note.starts_with(
+                "gpt-6.1-sol still compacts at Codex's former default (now 475000); \
+                 `model-router settings windows --apply` fixes"
+            ),
+            "{note}"
+        );
+        let applied = windows_of(&dirs, "", CURRENT, true);
+        assert_eq!(applied["declared"], Value::Null, "{applied}");
+        assert_eq!(applied["windows"], json!({"gpt-6.1-sol": 475_000}));
+        let settings: Value = serde_json::from_str(&dirs.user_text()).unwrap();
+        let expected: Value = serde_json::from_str(&gpt_entries()).unwrap();
+        assert_eq!(settings["modelSettings"], expected);
+        assert_eq!(windows_of(&dirs, "", CURRENT, false)["needed"], false);
+
+        // A window the person chose is theirs.
+        let chosen = entries_at(|id| {
+            if id == "gpt-6.1-sol" {
+                300_000
+            } else {
+                258_400
+            }
+        });
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{chosen}}}"#
+        ));
+        assert_eq!(windows_of(&dirs, "", CURRENT, false)["needed"], false);
+    }
+
+    /// An entry at a former default is left alone when the route has no
+    /// window to move it to (a hand-written Sol route, real window unknown),
+    /// or when the env override decides every route's window.
+    #[test]
+    fn an_outdated_entry_with_nothing_to_move_to_or_overridden_is_left_alone() {
+        let dirs = Dirs::new();
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},
+                "modelSettings":{{"sol":{{"autoCompactWindow":258400}}}}}}"#
+        ));
+        let source = "[[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.1-sol\"\n\
+                      display-name = \"Sol\"\n";
+        let report = windows_of(&dirs, source, CURRENT, false);
+        assert_eq!(report["updates"], json!([]), "{report}");
+        assert_eq!(report["needed"], false, "{report}");
+
+        let entries = entries_at(|_| 258_400);
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW":"258400"}},"modelSettings":{entries}}}"#
+        ));
+        let report = windows_of(&dirs, "", CURRENT, false);
+        assert_eq!(report["updates"], json!([]), "{report}");
+    }
+
+    /// A missing entry and an outdated one are set together, the missing one
+    /// named under `routes`.
+    #[test]
+    fn a_missing_and_an_outdated_entry_are_set_together() {
+        let dirs = Dirs::new();
+        let entries =
+            entries_at(|_| 258_400).replace(r#""gpt-6-luna":{"autoCompactWindow":258400},"#, "");
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{entries}}}"#
+        ));
+        let report = windows_of(&dirs, "", CURRENT, false);
+        assert_eq!(report["routes"], json!(["gpt-6-luna"]), "{report}");
+        assert_eq!(report["updates"], json!(["gpt-6.1-sol"]), "{report}");
+        let applied = windows_of(&dirs, "", CURRENT, true);
+        assert_eq!(
+            applied["windows"],
+            json!({"gpt-6-luna": 258_400, "gpt-6.1-sol": 475_000})
+        );
     }
 
     #[test]

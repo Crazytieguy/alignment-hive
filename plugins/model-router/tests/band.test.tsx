@@ -77,12 +77,12 @@ describe('model-router settings buttons', () => {
     const { toasts, settingsCalls } = await startWithSettings($, on, [newModel], {
       applied: true,
       added: ['gpt-6.1-sol'],
-      windows: { 'gpt-6.1-sol': 258400 },
+      windows: { 'gpt-6.1-sol': 475000 },
     })
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:new-model:add-models' })
     expect(settingsCalls).toEqual([['settings', 'models', '--apply', '--project-dir', '/proj']])
-    expect(toasts[0]).toBe('Added gpt-6.1-sol (compacts at 258K) to /model. Restart Claude Code to pick it; Customize runs setup.')
+    expect(toasts[0]).toBe('Added gpt-6.1-sol (compacts at 475K) to /model. Restart Claude Code to pick it; Customize runs setup.')
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
@@ -107,6 +107,28 @@ describe('model-router settings buttons', () => {
       'Context windows set per model in /home/me/.claude/settings.json: gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K. Restart Claude Code to use them.',
     )
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('Update has the binary raise a window Codex raised and names the new one', async ($, on) => {
+    const windowsRow = {
+      id: 'windows-update',
+      severity: 'action',
+      text: 'Codex raised the default context window of gpt-6.1-sol',
+      actions: [{ id: 'windows', label: 'Update', kind: 'plugin' }, customizeAction],
+    }
+    const { toasts, settingsCalls } = await startWithSettings($, on, [windowsRow], {
+      applied: true,
+      file: '/home/me/.claude/settings.json',
+      declared: null,
+      windows: { 'gpt-6.1-sol': 475000 },
+    })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:windows-update:windows' })
+    expect(settingsCalls).toEqual([['settings', 'windows', '--apply', '--project-dir', '/proj']])
+    expect(toasts[0]).toBe(
+      'Context windows set per model in /home/me/.claude/settings.json: gpt-6.1-sol at 475K. Restart Claude Code to use them.',
+    )
     await ui.unmount()
   })
 

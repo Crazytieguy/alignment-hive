@@ -70,7 +70,8 @@ if [ -n "$HEALTH" ]; then
       printf '%s' "$OUT" | grep -q '"needed":true'
   }
   # Adds the row for OUT: id, text, and the button's action id and label,
-  # offered with Customize when the binary can apply it, else Run setup.
+  # offered with Customize when the binary can apply it, else Run setup. A
+  # dismissal holds until the plugin's next version, or until $5 changes.
   add_row() {
     if printf '%s' "$OUT" | grep -q '"canApply":true'; then
       ACTIONS='{"id": "'"$3"'", "label": "'"$4"'", "kind": "plugin"}, {"id": "customize", "label": "Customize", "kind": "command", "command": "/model-router:setup"}'
@@ -78,7 +79,7 @@ if [ -n "$HEALTH" ]; then
       ACTIONS='{"id": "setup", "label": "Run setup", "kind": "command", "command": "/model-router:setup"}'
     fi
     ROWS=$(printf '%s{"id": "%s", "severity": "action", "text": "%s", "version": "%s", "actions": [%s]},' \
-      "$ROWS" "$1" "$2" "$PLUGIN_VERSION" "$ACTIONS")
+      "$ROWS" "$1" "$2" "${5:-$PLUGIN_VERSION}" "$ACTIONS")
   }
   # The /model picker lacks a shipped GPT route or lists a retired one.
   if needed models; then
@@ -91,14 +92,22 @@ if [ -n "$HEALTH" ]; then
     fi
   fi
   # The next session's context windows are not setup's: the old setup's single
-  # declaration, usage scaling or a behavesAs row (`legacy`), or a route with no
-  # compaction window.
+  # declaration, usage scaling or a behavesAs row (`legacy`), a route with no
+  # compaction window, or one still at a Codex default that has since moved
+  # (`updates`).
   if needed windows; then
     ROUTES=$(printf '%s' "$OUT" | sed -n 's/.*"routes":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g')
+    UPDATES=$(printf '%s' "$OUT" | sed -n 's/.*"updates":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g')
     if printf '%s' "$OUT" | grep -q '"legacy":true'; then
       add_row windows "context windows are still set the old way" windows "Migrate"
+    elif [ -n "$ROUTES" ] && [ -n "$UPDATES" ]; then
+      add_row windows "no context window set for $ROUTES; Codex raised the default context window of $UPDATES" windows "Set"
     elif [ -n "$ROUTES" ]; then
       add_row windows "no context window set for $ROUTES" windows "Set"
+    elif [ -n "$UPDATES" ]; then
+      # Its own row, dismissed until the routes change rather than until the
+      # next version: someone keeping the old window chose it.
+      add_row windows-update "Codex raised the default context window of $UPDATES" windows "Update" "updates:$UPDATES"
     else
       add_row windows "context windows need setup" windows "Set"
     fi

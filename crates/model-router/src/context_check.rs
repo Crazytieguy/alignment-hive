@@ -9,7 +9,10 @@ use crate::client_window::{
     AUTO_COMPACT_ENV_VAR, Compaction, ENV_VAR, EnvSetting, MAX_COMPACT_WINDOW, MIN_COMPACT_WINDOW,
     UsageScale, client_context_window,
 };
-use crate::config::{CODEX_DEFAULT_CONTEXT_WINDOW, Config, ModelRoute, overflow_dialect};
+use crate::config::{
+    CODEX_DEFAULT_CONTEXT_WINDOW, Config, ModelRoute, codex_default_window, overflow_dialect,
+    superseded_codex_windows,
+};
 use crate::doctor::Check;
 use crate::overflow::OverflowDialect;
 
@@ -108,16 +111,25 @@ impl RouteStatus {
     }
 }
 
+/// Codex's default window for `route`, when it is a built-in GPT route (the
+/// only routes with the Codex dialect).
+fn codex_default(route: &ModelRoute) -> Option<u64> {
+    (overflow_dialect(route) == Some(OverflowDialect::Codex))
+        .then(|| codex_default_window(&route.upstream_model))
+}
+
 /// The per-model `autoCompactWindow` a route should have, given its real
-/// window: Codex's default for the built-in GPT routes (the only routes with
-/// the Codex dialect), else the real window, up to the most Claude Code
-/// accepts.
+/// window: Codex's default for the built-in GPT routes, else the real
+/// window, up to the most Claude Code accepts.
 fn recommended_window(route: &ModelRoute, actual: u64) -> u64 {
-    if overflow_dialect(route) == Some(OverflowDialect::Codex) {
-        CODEX_DEFAULT_CONTEXT_WINDOW
-    } else {
-        actual.min(MAX_COMPACT_WINDOW)
-    }
+    codex_default(route).unwrap_or_else(|| actual.min(MAX_COMPACT_WINDOW))
+}
+
+/// Whether `window` is a Codex default `route` has since left: an entry
+/// holding one is due the current default.
+pub(crate) fn is_superseded_default(route: &ModelRoute, window: u64) -> bool {
+    codex_default(route).is_some()
+        && superseded_codex_windows(&route.upstream_model).contains(&window)
 }
 
 /// The per-model `autoCompactWindow` doctor asks for on `route`, or `None`
@@ -130,15 +142,17 @@ pub(crate) fn recommended_entry(route: &ModelRoute) -> Option<u64> {
 }
 
 /// Allowed, but worth a warning: a GPT route compacting past Codex's
-/// default window crosses the 272K billing step.
+/// default window, which for most crosses the 272K billing step.
 fn past_recommendation(route: &ModelRoute, client: u64) -> Option<String> {
-    (overflow_dialect(route) == Some(OverflowDialect::Codex)
-        && client > CODEX_DEFAULT_CONTEXT_WINDOW
-        && route.context_window.is_some_and(|actual| client <= actual))
-    .then(|| {
+    let default = codex_default(route)?;
+    (client > default && route.context_window.is_some_and(|actual| client <= actual)).then(|| {
+        let billing = if default <= CODEX_DEFAULT_CONTEXT_WINDOW {
+            ": input past 272K is billed at a higher rate"
+        } else {
+            ""
+        };
         format!(
-            "{} compacts at {client}, past the recommended {CODEX_DEFAULT_CONTEXT_WINDOW}: \
-             input past 272K is billed at a higher rate",
+            "{} compacts at {client}, past the recommended {default}{billing}",
             route.routing_id
         )
     })
@@ -331,7 +345,10 @@ context-window = {window}
     fn setup_settings(kimi: Option<u64>) -> String {
         let entries = config("")
             .effective_models()
-            .map(|route| (route.routing_id.clone(), CODEX_DEFAULT_CONTEXT_WINDOW))
+            .map(|route| {
+                let window = codex_default_window(&route.upstream_model);
+                (route.routing_id.clone(), window)
+            })
             .chain(kimi.map(|window| ("kimi-k3".to_string(), window)))
             .map(|(id, window)| format!(r#""{id}":{{"autoCompactWindow":{window}}}"#))
             .collect::<Vec<_>>()
@@ -606,6 +623,30 @@ context-window = {window}
         );
         let recommended = checked("", EnvSetting::Settings(1_000_000), &settings(258_400));
         assert!(recommended.ok && !recommended.warn, "{recommended:?}");
+    }
+
+    /// GPT-6.1 Sol's Codex default is 475000: it is recommended as is, and
+    /// past it the warning names it without the 272K billing step.
+    #[test]
+    fn gpt_6_1_sol_is_recommended_at_its_own_codex_default() {
+        let settings = |window: u64| {
+            setup_settings(None).replace(
+                r#""gpt-6.1-sol":{"autoCompactWindow":475000}"#,
+                &format!(r#""gpt-6.1-sol":{{"autoCompactWindow":{window}}}"#),
+            )
+        };
+        let recommended = checked("", EnvSetting::Settings(1_000_000), &settings(475_000));
+        assert!(recommended.ok && !recommended.warn, "{recommended:?}");
+        let past = checked("", EnvSetting::Settings(1_000_000), &settings(600_000));
+        assert!(past.ok && past.warn, "{past:?}");
+        assert!(
+            past.detail
+                .contains("gpt-6.1-sol compacts at 600000, past the recommended 475000;"),
+            "{past:?}"
+        );
+        // Codex's former default is clipped, not a warning.
+        let former = checked("", EnvSetting::Settings(1_000_000), &settings(258_400));
+        assert!(former.ok && !former.warn, "{former:?}");
     }
 
     /// A declaration adopted from Claude Code's settings is not a config key

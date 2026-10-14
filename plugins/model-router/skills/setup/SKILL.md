@@ -86,9 +86,11 @@ here works until the binary resolves.
    Then size the routes: `$ROUTER settings windows --apply --project-dir
    <project>`. It sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (every route's
    context window) to 1000000 and gives each route a `modelSettings`
-   `autoCompactWindow`, where it compacts: 258400 for the GPT routes (input
-   past 272K is billed at a higher rate; they accept up to 828400), else its
-   real window. It also migrates an earlier setup's lower declaration. When
+   `autoCompactWindow`, where it compacts: Codex's default for the GPT routes
+   (258400, as input past 272K is billed at a higher rate; 475000 for
+   gpt-6.1-sol; they accept up to 828400), else its real window. It also
+   migrates an earlier setup's lower declaration, and moves an entry still
+   at a Codex default that has since changed. When
    it prints `"applied": false`, its `reason` says what needs the user. A
    reason naming the checked-in `.claude/settings.json` as shared: ask
    whether to write there (collaborators get the windows too), or to

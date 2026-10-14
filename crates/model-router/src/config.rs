@@ -29,11 +29,39 @@ const DERIVED_ALIAS_PREFIX: &str = "openai-compat--";
 pub(crate) const GPT_CONTEXT_WINDOW: u64 = 828_400;
 
 /// Codex's default window for the same models: 272K at the same 95%. The
-/// built-in GPT routes compact here (the per-model `autoCompactWindow`
-/// `doctor` asks for) to match Codex; raising it toward
-/// [`GPT_CONTEXT_WINDOW`] is the user's opt-in, as in Codex (input past 272K
-/// is billed at a higher rate).
+/// built-in GPT routes compact at their Codex default (the per-model
+/// `autoCompactWindow` `doctor` asks for, see [`codex_default_window`]) to
+/// match Codex; raising it toward [`GPT_CONTEXT_WINDOW`] is the user's
+/// opt-in, as in Codex (input past 272K is billed at a higher rate).
 pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
+
+/// The built-in GPT models whose Codex default differs from
+/// [`CODEX_DEFAULT_CONTEXT_WINDOW`], with the defaults they had before: an
+/// entry still at one of those was set to Codex's default rather than
+/// chosen, so `settings windows` moves it. GPT-6.1 Sol: 500K at 95%, from
+/// Codex's live catalog (2026-10-13, Codex 0.162.1; the catalog bundled in
+/// the binary still says 272K).
+const CODEX_DEFAULT_WINDOW_CHANGES: [(&str, u64, &[u64]); 1] =
+    [("gpt-6.1-sol", 475_000, &[CODEX_DEFAULT_CONTEXT_WINDOW])];
+
+/// Codex's default window for a built-in GPT upstream model.
+#[must_use]
+pub(crate) fn codex_default_window(upstream_model: &str) -> u64 {
+    codex_window_change(upstream_model).map_or(CODEX_DEFAULT_CONTEXT_WINDOW, |(_, now, _)| now)
+}
+
+/// The Codex defaults `upstream_model` had before its current one.
+#[must_use]
+pub(crate) fn superseded_codex_windows(upstream_model: &str) -> &'static [u64] {
+    codex_window_change(upstream_model).map_or(&[], |(_, _, before)| before)
+}
+
+fn codex_window_change(upstream_model: &str) -> Option<(&'static str, u64, &'static [u64])> {
+    let (base, _) = split_effort_suffix(upstream_model);
+    CODEX_DEFAULT_WINDOW_CHANGES
+        .into_iter()
+        .find(|(model, _, _)| *model == base)
+}
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
 /// their display names.
