@@ -5,7 +5,7 @@
  * copy numbers like the local file. Branch states come only from positively established rewinds.
  */
 import { hiddenBy, isCommandMarkup, untaggedOrigin } from './noise';
-import { readRecords } from './records';
+import { leanRecord, readRecords } from './records';
 import type { RawRecord } from './records';
 
 export type BranchState = 'abandoned' | 'unknown';
@@ -198,23 +198,6 @@ function collectResults(records: Array<RawRecord>): Map<string, Result> {
     }
   }
   return results;
-}
-
-/**
- * A record without what readTranscript never reads, for a caller that keeps only the transcript:
- * toolUseResult but for the ids collectResults joins on, and a progress record's payload. These
- * repeat or go beyond the conversation (command output, whole files, images again) and are most of
- * a large file's bytes.
- */
-export function leanRecord(r: RawRecord): RawRecord {
-  if (r.type === 'progress' && 'data' in r.data) {
-    const { data: _, ...rest } = r.data;
-    return { ...r, data: rest };
-  }
-  if (!('toolUseResult' in r.data)) return r;
-  const { toolUseResult, ...rest } = r.data;
-  const meta = obj(toolUseResult);
-  return { ...r, data: meta ? { ...rest, toolUseResult: { agentId: meta.agentId, runId: meta.runId } } : rest };
 }
 
 /** Records to entries. */

@@ -1,9 +1,9 @@
 // The numbering rule and the entry shape.
 import { describe, expect, test } from 'bun:test';
 import { hiddenBy } from './noise';
-import { readRecords } from './records';
+import { leanRecord, readRecords } from './records';
 import { branchFixtures, migrationFixture, overlapFixtures, plumbingFixture } from './test-fixtures';
-import { leanRecord, parseTranscript, readTranscript } from './transcript';
+import { parseTranscript, readTranscript } from './transcript';
 
 const J = (...rs: Array<object>) => rs.map((r) => JSON.stringify(r)).join('\n') + '\n';
 let k = 0;
