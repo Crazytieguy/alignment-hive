@@ -13,6 +13,9 @@ const isTurnRunning = atom({ plugin: 'tldr', key: 'isTurnRunning' } as const, fa
 
 const FAIL = '!fail:'
 const RETRY_MS = 60_000 // a failed summary is tried again on a redraw this long after
+const SEND_AFTER_MS = 250 // past the render that asked: a call sent while its render is in flight is cut when a newer render supersedes it
+const TRIES = 3 // an aborted call is sent again, drawn as summarizing meanwhile, before it shows as failed
+const ABORT_RETRY_MS = 1_000
 const MAX_RUNNING = 3
 const KEEP_PER_SESSION = 200
 const KEEP_SESSIONS = 20
@@ -52,7 +55,7 @@ async function save($: EngineInterface, id: string, t: string) {
   }
 }
 
-async function summarize($: EngineInterface, id: string, text: string) {
+async function summarize($: EngineInterface, id: string, text: string, tries: number) {
   let t: string
   try {
     const r = await $.model.complete({
@@ -62,6 +65,10 @@ async function summarize($: EngineInterface, id: string, text: string) {
       effort: 'low',
       timeoutMs: 30000,
     })
+    if (!r.isAnswered && r.reason === 'aborted' && tries < TRIES) {
+      $.clock.after(ABORT_RETRY_MS, () => enqueue($, id, text, tries + 1))
+      return
+    }
     t = r.isAnswered ? lineFor(r.text) : FAIL + (r.reason ?? 'no answer')
   } catch (err) {
     t = FAIL + 'refused: ' + String(err) // the engine refused to send it (a blocked model, say)
@@ -77,12 +84,18 @@ async function summarize($: EngineInterface, id: string, text: string) {
   await saving
 }
 
+function enqueue($: EngineInterface, id: string, text: string, tries: number) {
+  queue.push(() => summarize($, id, text, tries).catch(() => {}))
+  pump()
+}
+
 /** Summarize a block's visible text, drawn after its turn ended: only then is it whole. */
 function start($: EngineInterface, id: string, text: string) {
   if (started.has(id)) return
   started.add(id)
-  queue.push(() => summarize($, id, text).catch(() => {}))
-  pump()
+  // Sent from a timer, once the render that asked has settled: the turn's end redraws the block
+  // several times in a few milliseconds, and a call sent during one is aborted when the next supersedes it.
+  $.clock.after(SEND_AFTER_MS, () => enqueue($, id, text, 1))
 }
 
 async function setOn($: EngineInterface, value: boolean) {
