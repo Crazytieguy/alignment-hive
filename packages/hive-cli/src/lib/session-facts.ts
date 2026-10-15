@@ -2,6 +2,7 @@ import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import {
   isEmptySession,
   isHumanMessage,
+  leanRecord,
   parseTranscript,
   readRecords,
   readTranscript,
@@ -115,7 +116,7 @@ function startTime(parts: Iterable<string>): number | undefined {
   // A later window can supply the first record timestamp and classify earlier entry times as copied.
   const pending: Array<number> = [];
   for (const text of parts) {
-    const { records } = readRecords(text);
+    const { records } = readRecords(text, leanRecord);
     opened ??= records
       .map((r) => (typeof r.data.timestamp === 'string' ? Date.parse(r.data.timestamp) : Number.NaN))
       .find((ms) => !Number.isNaN(ms));
@@ -221,7 +222,7 @@ export function sessionFacts(ref: TranscriptRef, startOnUse = false): SessionFac
 type RecordFilter = (r: RawRecord) => boolean;
 
 function parseKept(text: string, keep?: RecordFilter): Transcript {
-  return keep ? readTranscript(readRecords(text).records.filter(keep)) : parseTranscript(text);
+  return keep ? readTranscript(readRecords(text, leanRecord).records.filter(keep)) : parseTranscript(text);
 }
 
 /** A slash command the human typed; hidden as noise when it has no arguments (`/review`). */

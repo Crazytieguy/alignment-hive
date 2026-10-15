@@ -18,6 +18,32 @@ describe('readRecords', () => {
     ]);
   });
 
+  test('through leanRecord, request records are dropped unparsed; a whole read keeps them', () => {
+    const text = [
+      '{"type":"user","uuid":"u1"}',
+      '{"type":"api-request-shape","shapeHash":"h","shape":{"system":[]}}',
+      '{"type":"api-request","params":{"broken"', // never parsed, so never malformed
+      '{"type":"api-request-blob","hash":"h","message":{"content":"{\\"type\\":\\"user\\"}"}}',
+      '{"bad',
+      ' {"type":"api-request","id":"q"}', // not at the line's start: read like any other line
+      '{"type":"assistant","uuid":"a1"}',
+    ].join('\n');
+    for (const content of [text, new TextEncoder().encode(text)]) {
+      const lean = readRecords(content, leanRecord);
+      expect(lean.records.map((r) => r.type)).toEqual(['user', 'api-request', 'assistant']);
+      expect(lean.malformed).toEqual([5]);
+    }
+    const whole = readRecords(text);
+    expect(whole.records.map((r) => r.type)).toEqual([
+      'user',
+      'api-request-shape',
+      'api-request-blob',
+      'api-request',
+      'assistant',
+    ]);
+    expect(whole.malformed).toEqual([3, 5]);
+  });
+
   test('lines that are not JSON are malformed; a partial last line and values that are not records are skipped', () => {
     const text = ['{"type":"user"', '[1,2]', '{"no":"type"}', '{"type":"system"}', '{"type":"assis'].join('\n');
     const { records, malformed } = readRecords(text);

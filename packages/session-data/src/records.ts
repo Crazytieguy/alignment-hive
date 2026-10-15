@@ -28,7 +28,8 @@ export function toRecord(value: unknown): RawRecord | undefined {
  * toolUseResult but for the ids collectResults joins on, and a progress record's payload. These
  * repeat or go beyond the conversation (command output, whole files, images again) and are most of
  * a large file's bytes. readRecords given a file's bytes and this map does not decode or parse a
- * top-level toolUseResult at all (see "Skipping toolUseResult").
+ * top-level toolUseResult at all (see "Skipping toolUseResult"); given text or bytes, it drops
+ * request records (see REQUEST_PREFIX) unparsed.
  */
 export function leanRecord(r: RawRecord): RawRecord {
   if (r.type === 'progress' && 'data' in r.data) {
@@ -43,6 +44,14 @@ export function leanRecord(r: RawRecord): RawRecord {
       : undefined;
   return { ...r, data: meta ? { ...rest, toolUseResult: { agentId: meta.agentId, runId: meta.runId } } : rest };
 }
+
+/**
+ * How Claude Code begins each `api-request`, `api-request-blob` and `api-request-shape` line (it
+ * writes `type` first). These record every API request's system prompt, tools, parameters and
+ * message hashes so a request can be replayed: since 2.1.300, often most of a file's bytes, none of
+ * them read by readTranscript. Uploads still parse them, then drop them (no uuid, so no chain stub).
+ */
+const REQUEST_PREFIX = '{"type":"api-request';
 
 /** Keeps a BOM, as Buffer's toString does: a line that starts with one is not JSON either way. */
 const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });
@@ -74,10 +83,21 @@ export function readRecords(
     typeof content === 'string' ? content.indexOf('\n', from) : content.indexOf(10, from);
   const line = (from: number, to: number) =>
     typeof content === 'string' ? content.slice(from, to) : utf8.decode(content.subarray(from, to));
-  const bytes = map === leanRecord && typeof content !== 'string' ? lineBytes(content) : undefined;
+  const lean = map === leanRecord;
+  const bytes = lean && typeof content !== 'string' ? lineBytes(content) : undefined;
+  // The prefix holds no newline, so a match from a line's start lies within that line.
+  const isRequest = (from: number) =>
+    typeof content === 'string'
+      ? content.startsWith(REQUEST_PREFIX, from)
+      : equals(content, from, from + REQUEST_BYTES.length, REQUEST_BYTES);
   let key = -1;
   for (let n = 1, start = 0; ; n++) {
     const end = newline(start);
+    if (lean && isRequest(start)) {
+      if (end < 0) break;
+      start = end + 1;
+      continue;
+    }
     const stop = end < 0 ? content.length : end;
     let value: unknown;
     let length = 0;
@@ -150,6 +170,7 @@ export function readRecords(
 // other line, and any line where the shortened parse fails, is parsed whole.
 
 const ascii = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
+const REQUEST_BYTES = ascii(REQUEST_PREFIX);
 const RESULT_KEY = ascii('"toolUseResult":');
 const RESULT = ascii('toolUseResult');
 const AGENT_ID = ascii('agentId');

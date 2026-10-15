@@ -616,10 +616,19 @@ export function overlapFixtures(): Array<Fixture> {
 }
 
 // Plumbing records in the parent chain: a hook attachment and a progress record, which uploads
-// drop. R rewinds to A1 through the hook; locally U2..A3 are abandoned.
+// drop. R rewinds to A1 through the hook; locally U2..A3 are abandoned. Request records (no uuid,
+// outside the chain) precede A1, as Claude Code writes them before each API call.
 export function plumbingFixture(): Fixture {
   const b = new Builder(sid('fd000001'), '2026-09-12T10:00:00Z');
   b.prompt('U1', null, 'Rename the helper.')
+    .raw('RS', { type: 'api-request-shape', sessionId: b.session, shapeHash: 'h0', shape: { system: [], tools: [] } })
+    .raw('RB', {
+      type: 'api-request-blob',
+      sessionId: b.session,
+      hash: 'h1',
+      message: { role: 'user', content: [{ type: 'text', text: 'Rename the helper.' }] },
+    })
+    .raw('RQ', { type: 'api-request', sessionId: b.session, id: 'q1', shapeHash: 'h0', params: {}, keep: 0, tail: ['h1'] })
     .say('A1', 'U1', 'msg_fd1_1', 'Which helper?')
     .raw('H1', {
       type: 'attachment',

@@ -318,7 +318,8 @@ describe('leanRecord', () => {
       user([{ type: 'tool_result', tool_use_id: 'tB', content: 'x' }], { toolUseResult: [{ type: 'image' }] }),
     );
     for (const content of [...contents, launch])
-      expect(parseTranscript(content)).toEqual(readTranscript(readRecords(content).records));
+      for (const read of [content, new TextEncoder().encode(content)])
+        expect(parseTranscript(read)).toEqual(readTranscript(readRecords(content).records));
     const lean = readRecords(launch, leanRecord).records.map((r) => r.data);
     expect(lean[1].toolUseResult).toEqual({ agentId: 'a1', runId: 'wf_1' });
     expect(lean[2]).toEqual({ type: 'progress', uuid: lean[2].uuid, parentUuid: null, gitBranch: 'b' });
