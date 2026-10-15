@@ -1271,7 +1271,8 @@ async fn alpha_search(
         .get("results")
         .and_then(serde_json::Value::as_array)
         .map(|results| websearch::links_from_alpha_results(results))
-        .unwrap_or_default();
+        .filter(|links| !links.is_empty())
+        .unwrap_or_else(|| websearch::links_from_alpha_output(&output));
     anyhow::ensure!(
         !links.is_empty() || !output.trim().is_empty(),
         "alpha search returned neither links nor output"

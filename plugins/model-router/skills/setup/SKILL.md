@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth, optional Grok (xAI) family, OS service, and Claude Code settings wiring.
+description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) family, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -52,13 +52,25 @@ here works until the binary resolves.
    step 5.
 2. **Upstream binary**: `$ROUTER ensure-upstream` — downloads the pinned,
    checksum-verified CLIProxyAPI release into the cache. No-op when present.
-3. **Codex auth**: `$ROUTER doctor` reports auth state. If it found and
+3. **GPT auth**: `$ROUTER doctor` reports auth state. If it found and
    imported an existing CLIProxyAPI Codex login, say so and move on. If not,
-   the user must run the interactive login themselves (it opens a browser
+   ask whether the user will sign in with a ChatGPT subscription
+   (recommended) or use an OpenAI API key (billed per token). For the
+   subscription, the user must
+   run the interactive login themselves (it opens a browser
    for Codex OAuth), either way works: paste the full expanded
    `.../scripts/bootstrap.sh login` command for them to run in a separate
    terminal, or have them type `! $ROUTER login` (expanded to the real path)
-   in the prompt. Verify with `$ROUTER doctor` afterwards.
+   in the prompt. For an API key, write `[gpt]` / `auth = "api-key"` to
+   `~/.config/model-router/config.toml`, and add a placeholder to
+   `~/.config/model-router/secrets.toml` (create it chmod 600 if absent):
+   ```toml
+   [gpt]
+   api-key = "REPLACE-WITH-YOUR-KEY"
+   ```
+   Ask the user to swap in their real key and wait for them to confirm
+   (`$ROUTER service restart` if the service is already installed). Verify
+   with `$ROUTER doctor` afterwards.
 4. **Service**: `$ROUTER service install` (installs and starts the
    launchd/systemd user service), then `$ROUTER doctor` until healthy.
    The defaults need no config file — every built-in GPT route, port

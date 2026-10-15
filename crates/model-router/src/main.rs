@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use model_router::config::{Config, UpstreamMode};
+use model_router::config::{Config, GptAuth, UpstreamMode};
 use model_router::{
     acquire, discovery, doctor, proxy, service, settings_edit, state, supervisor, verify,
 };
@@ -128,6 +128,8 @@ struct LoginDescriptor {
     /// Whether the router would actually use this provider's credential.
     /// Keeps the login routine provider-blind — no `match` on the variant.
     is_enabled: fn(&Config) -> bool,
+    /// Why the login is refused when `is_enabled` is false.
+    disabled: &'static str,
     /// Printed before spawning the child, only when the flow does something
     /// the child's own output doesn't explain (Codex opens a browser).
     /// `None` when the child's output speaks for itself.
@@ -141,8 +143,9 @@ impl LoginProvider {
                 label: "Codex",
                 flag: "-codex-login",
                 auth_prefix: state::CODEX_AUTH_PREFIX,
-                // Codex is the default family; nothing gates it.
-                is_enabled: |_| true,
+                is_enabled: |config| config.gpt.auth == GptAuth::Subscription,
+                disabled: "GPT routes use an API key ([gpt] auth = \"api-key\"), so a Codex login \
+                           would sit unused; remove that setting to use the subscription",
                 start_notice: Some(
                     "Opening the Codex OAuth flow (browser + loopback callback on port 1455)...",
                 ),
@@ -152,6 +155,7 @@ impl LoginProvider {
                 flag: "-xai-login",
                 auth_prefix: state::GROK_AUTH_PREFIX,
                 is_enabled: |config| config.grok.enabled,
+                disabled: "Grok routing is off; enable it before logging in",
                 // The xAI device flow prints its own verification URL and
                 // code; nothing to add.
                 start_notice: None,
@@ -370,7 +374,7 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
             match Supervisor::start(
                 dirs,
                 &upstream,
-                config.openai_providers.clone(),
+                supervisor::ChildCredentials::of(&config),
                 supervisor::Tuning::default(),
             ) {
                 Ok(supervisor) => (Some(supervisor.handle()), Some(supervisor)),
@@ -427,12 +431,16 @@ async fn login(
     // enabled, no route uses the credential and it would sit unused.
     anyhow::ensure!(
         (descriptor.is_enabled)(&config),
-        "{} routing is off; enable it in {} before logging in",
-        descriptor.label,
+        "{} (config: {})",
+        descriptor.disabled,
         config_path.display()
     );
     let binary = acquire::ensure_upstream(dirs).await?;
-    let paths = supervisor::prepare_managed_state(dirs, &upstream, &config.openai_providers)?;
+    let paths = supervisor::prepare_managed_state(
+        dirs,
+        &upstream,
+        &supervisor::ChildCredentials::of(&config),
+    )?;
     let existing = state::auth_files(&paths.auth_dir, descriptor.auth_prefix)?;
     if let Some(existing) = existing.first() {
         println!(

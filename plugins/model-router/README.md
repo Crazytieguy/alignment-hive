@@ -17,7 +17,8 @@ Anthropic-format gateway on your machine:
   `gpt-6-astra`) are stripped of all Anthropic credentials and
   forwarded to a supervised local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
   instance, which translates them to the Codex protocol under your separate
-  Codex subscription OAuth. No API keys required on either side.
+  Codex subscription OAuth. No API keys required on either side, though an
+  OpenAI API key (billed per token) works in place of the subscription.
 
 Routed GPT models receive an honest-identity system block, so they never
 present themselves as Claude.

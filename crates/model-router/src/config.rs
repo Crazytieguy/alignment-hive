@@ -264,6 +264,11 @@ pub struct Config {
     #[serde(default)]
     pub grok: GrokConfig,
 
+    /// How the built-in GPT routes authenticate: the Codex subscription
+    /// login (default) or an `OpenAI` API key.
+    #[serde(default)]
+    pub gpt: GptConfig,
+
     /// Optional request/response capture settings.
     #[serde(default)]
     pub capture: CaptureConfig,
@@ -311,6 +316,35 @@ pub struct GrokConfig {
     pub context_window_scaling: bool,
 }
 
+/// `[gpt]`: the credential behind the built-in GPT routes.
+// No `Debug` outside tests: `api_key` must not reach a log through `{:?}`.
+#[derive(Clone, Default, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GptConfig {
+    #[serde(default)]
+    pub auth: GptAuth,
+
+    /// Loaded from `[gpt] api-key` in the sibling `secrets.toml`, never from
+    /// the config file, and only under `auth = "api-key"`. `None` there means
+    /// the key is missing: the GPT routes have no credential, and doctor says
+    /// so.
+    #[serde(skip)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GptAuth {
+    /// The Codex OAuth login (`model-router login`), billed to the `ChatGPT`
+    /// subscription.
+    #[default]
+    Subscription,
+    /// An `OpenAI` API key, billed per token, served through the managed
+    /// child's Codex executor (the Responses API).
+    ApiKey,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct WebSearchConfig {
@@ -350,12 +384,21 @@ pub struct OpenAiProvider {
 }
 
 /// `secrets.toml`, sibling of the config file: keeps API keys out of the
-/// freely-editable config. `[openai-providers]` maps provider name to key.
+/// freely-editable config. `[openai-providers]` maps provider name to key;
+/// `[gpt] api-key` is the `OpenAI` key for `[gpt] auth = "api-key"`.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct SecretsFile {
     #[serde(default)]
     openai_providers: BTreeMap<String, String>,
+    #[serde(default)]
+    gpt: GptSecrets,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct GptSecrets {
+    api_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -687,15 +730,17 @@ impl Config {
         Ok(config)
     }
 
-    /// Attaches API keys from `secrets.toml` to matching providers. A missing
-    /// file or missing entry is not an error (the provider runs degraded and
-    /// doctor/verify-providers point at it); an unreadable or invalid file is.
+    /// Attaches API keys from `secrets.toml` to matching providers, and the
+    /// GPT key under `[gpt] auth = "api-key"`. A missing file or missing entry
+    /// is not an error (the route runs degraded and doctor/verify-providers
+    /// point at it); an unreadable or invalid file is.
     ///
     /// # Errors
     /// Returns an error when the secrets file exists but cannot be read or
     /// parsed.
     pub fn load_secrets(&mut self, path: &Path) -> anyhow::Result<()> {
-        if self.openai_providers.is_empty() || !path.exists() {
+        let gpt_key = self.gpt.auth == GptAuth::ApiKey;
+        if (self.openai_providers.is_empty() && !gpt_key) || !path.exists() {
             return Ok(());
         }
         let contents = std::fs::read_to_string(path)
@@ -710,6 +755,9 @@ impl Config {
         }
         for provider in &mut self.openai_providers {
             provider.api_key = secrets.openai_providers.get(&provider.name).cloned();
+        }
+        if gpt_key {
+            self.gpt.api_key = secrets.gpt.api_key;
         }
         Ok(())
     }
@@ -956,7 +1004,27 @@ impl Config {
             }
         }
 
+        self.validate_gpt_auth(cliproxy)?;
         self.validate_openai_providers(cliproxy)
+    }
+
+    fn validate_gpt_auth(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
+        if self.gpt.auth == GptAuth::Subscription {
+            return Ok(());
+        }
+        ensure!(
+            cliproxy.mode != UpstreamMode::External,
+            "[gpt] auth = \"api-key\" requires [upstreams.{CLIPROXY_UPSTREAM}] mode = \"managed\" \
+             (an external CLIProxyAPI owns its credentials; add a codex-api-key entry there \
+             instead)"
+        );
+        if let Some(api_key) = &self.gpt.api_key {
+            ensure!(
+                !api_key.is_empty(),
+                "[gpt] api-key in secrets.toml is empty"
+            );
+        }
+        Ok(())
     }
 
     fn validate_openai_providers(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
@@ -1114,6 +1182,16 @@ impl Config {
 # Default: "alpha"
 #mode = "alpha"
 
+# How the built-in GPT routes authenticate. "subscription" (the default)
+# spends your ChatGPT plan through the Codex login (`model-router login`).
+# "api-key" bills an OpenAI API key per token instead (managed mode only);
+# any Codex login is then ignored. The key goes in secrets.toml, never here:
+#   [gpt]
+#   api-key = "sk-..."
+#[gpt]
+# Default: "subscription"
+#auth = "api-key"
+
 {grok}
 #[capture]
 # Capture is off by default. Captures include prompt and response bodies; keep
@@ -1159,8 +1237,14 @@ fn parse_toml_sanitized<T: serde::de::DeserializeOwned>(
                 format!(" at line {line}, column {column}")
             })
             .unwrap_or_default();
+        // A key pasted without quotes is the common slip in secrets.toml.
+        let hint = if error.message().contains("must be quoted") {
+            " (wrap the value in double quotes)"
+        } else {
+            ""
+        };
         anyhow::anyhow!(
-            "failed to parse {}{location}: {}",
+            "failed to parse {}{location}: {}{hint}",
             path.display(),
             error.message()
         )
@@ -1508,6 +1592,60 @@ mod tests {
         let error = format!("{:#}", Config::load(&path).unwrap_err());
         assert!(!error.contains("SENTINEL"), "{error}");
         assert!(error.contains("secrets.toml"), "{error}");
+    }
+
+    #[test]
+    fn gpt_api_key_loads_only_under_api_key_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let secrets = path.with_file_name("secrets.toml");
+        std::fs::write(&secrets, "[gpt]\napi-key = \"sk-live\"\n").unwrap();
+
+        // Subscription (the default) never reads the key.
+        std::fs::write(&path, "").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.gpt.auth, GptAuth::Subscription);
+        assert_eq!(config.gpt.api_key, None);
+
+        std::fs::write(&path, "[gpt]\nauth = \"api-key\"\n").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.gpt.auth, GptAuth::ApiKey);
+        assert_eq!(config.gpt.api_key.as_deref(), Some("sk-live"));
+
+        // A missing key loads (doctor reports it); an empty one is an error.
+        std::fs::remove_file(&secrets).unwrap();
+        assert_eq!(Config::load(&path).unwrap().gpt.api_key, None);
+        std::fs::write(&secrets, "[gpt]\napi-key = \"\"\n").unwrap();
+        let error = Config::load(&path).unwrap_err().to_string();
+        assert!(error.contains("[gpt] api-key"), "{error}");
+    }
+
+    #[test]
+    fn gpt_api_key_auth_requires_managed_mode_and_stays_out_of_the_config() {
+        let error = toml::from_str::<Config>(
+            "[gpt]\nauth = \"api-key\"\n\n[upstreams.cliproxy]\nmode = \"external\"\nbase-url = \"http://127.0.0.1:8317\"\n",
+        )
+        .unwrap()
+        .prepare()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("managed"), "{error}");
+        assert!(toml::from_str::<Config>("[gpt]\napi-key = \"sk-inline\"\n").is_err());
+    }
+
+    #[test]
+    fn unquoted_secret_gets_a_quoting_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[gpt]\nauth = \"api-key\"\n").unwrap();
+        std::fs::write(
+            path.with_file_name("secrets.toml"),
+            "[gpt]\napi-key = sk-SENTINEL-DO-NOT-PRINT\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", Config::load(&path).unwrap_err());
+        assert!(error.contains("double quotes"), "{error}");
+        assert!(!error.contains("SENTINEL"), "{error}");
     }
 
     #[test]

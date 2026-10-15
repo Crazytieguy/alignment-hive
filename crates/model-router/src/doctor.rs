@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use crate::acquire::UPSTREAM_VERSION;
-use crate::config::{Config, UpstreamMode};
+use crate::config::{Config, GptAuth, UpstreamMode};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::ModelFamily;
@@ -405,15 +405,37 @@ fn upstream_checks(
                 },
             });
 
-            let auth = find_auth(&dirs.auth_dir(), crate::state::CODEX_AUTH_PREFIX)
-                .map(|path| format!("login present: {}", path.display()));
-            checks.push(Check {
-                warn: false,
-                name: "codex-auth",
-                ok: auth.is_some(),
-                detail: auth.unwrap_or_else(|| {
-                    "no Codex login found; run `model-router login`".to_string()
-                }),
+            checks.push(match config.gpt.auth {
+                GptAuth::Subscription => {
+                    let auth = find_auth(&dirs.auth_dir(), crate::state::CODEX_AUTH_PREFIX)
+                        .map(|path| format!("login present: {}", path.display()));
+                    Check {
+                        warn: false,
+                        name: "codex-auth",
+                        ok: auth.is_some(),
+                        detail: auth.unwrap_or_else(|| {
+                            "no Codex login found; run `model-router login`".to_string()
+                        }),
+                    }
+                }
+                GptAuth::ApiKey => {
+                    let (ok, detail) = match config.gpt.api_key {
+                        Some(_) => (
+                            true,
+                            "OpenAI API key set in secrets.toml (billed per token)",
+                        ),
+                        None => (
+                            false,
+                            "[gpt] auth = \"api-key\" but secrets.toml has no [gpt] api-key",
+                        ),
+                    };
+                    Check {
+                        warn: false,
+                        name: "gpt-api-key",
+                        ok,
+                        detail: detail.to_string(),
+                    }
+                }
             });
 
             if config.grok.enabled {

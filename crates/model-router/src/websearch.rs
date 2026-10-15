@@ -260,6 +260,34 @@ impl Links {
     }
 }
 
+/// Extracts deduplicated links from the source headers in an
+/// `alpha/search` `output`: a `Title (url)` line followed by a line opening
+/// with a citation marker (`U+E200`). The API-key backend answers with
+/// `output` alone, no `results` array.
+#[must_use]
+pub fn links_from_alpha_output(output: &str) -> Vec<Link> {
+    let mut links = Links::default();
+    let mut rows = output.lines().peekable();
+    while let Some(line) = rows.next() {
+        if !rows.peek().is_some_and(|next| next.starts_with('\u{E200}')) {
+            continue;
+        }
+        let Some(header) = line.trim_end().strip_suffix(')') else {
+            continue;
+        };
+        let Some((title, url)) = header.rsplit_once(" (") else {
+            continue;
+        };
+        if url.starts_with("http://") || url.starts_with("https://") {
+            links.push(title.trim(), url);
+            if links.full() {
+                break;
+            }
+        }
+    }
+    links.links
+}
+
 /// Extracts deduplicated links from an `alpha/search` `results` array.
 #[must_use]
 pub fn links_from_alpha_results(results: &[Value]) -> Vec<Link> {
@@ -1347,6 +1375,36 @@ mod tests {
         assert_ne!(
             alpha_request_body(&subcall, "gpt-5.6-terra")["id"],
             body["id"]
+        );
+    }
+
+    #[test]
+    fn alpha_output_source_headers_become_links() {
+        let output = "Rust 1.85.0 | Rust Blog (https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)\n\
+            \u{E200}cite\u{E202}turn0search0\u{E201} [wordlim: 200] body text (https://not.a/source)\n\
+            more body\n\
+            Release notes (with parens) (https://doc.rust-lang.org/releases.html)\n\
+            \u{E200}cite\u{E202}turn0search1\u{E201}\n\
+            Duplicate (https://doc.rust-lang.org/releases.html)\n\
+            \u{E200}cite\u{E202}turn0search2\u{E201}\n\
+            Not followed by a marker (https://ignored.example/)\n";
+        let links = links_from_alpha_output(output);
+        let pairs: Vec<_> = links
+            .iter()
+            .map(|link| (link.title.as_str(), link.url.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (
+                    "Rust 1.85.0 | Rust Blog",
+                    "https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html"
+                ),
+                (
+                    "Release notes (with parens)",
+                    "https://doc.rust-lang.org/releases.html"
+                ),
+            ]
         );
     }
 

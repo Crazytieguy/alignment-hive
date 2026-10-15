@@ -4,7 +4,8 @@ Routes open-weights models (Kimi, GLM, DeepSeek, ...) through the managed
 CLIProxyAPI child.
 
 1. Ask which models and which host. The host account and API key are the
-   user's to create. A US host (OpenRouter, Fireworks, Together, ...) keeps
+   user's to create. For OpenAI's own GPT models, use `[gpt]` (setup step 3)
+   instead. A US host (OpenRouter, Fireworks, Together, ...) keeps
    prompts away from the model vendor.
 2. Append a provider block to `~/.config/model-router/config.toml`. Each
    `[[openai-providers.models]]` block automatically becomes a routed model —
