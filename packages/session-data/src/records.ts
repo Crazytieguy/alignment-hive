@@ -45,13 +45,18 @@ export function leanRecord(r: RawRecord): RawRecord {
   return { ...r, data: meta ? { ...rest, toolUseResult: { agentId: meta.agentId, runId: meta.runId } } : rest };
 }
 
+const REQUEST_TYPE = 'api-request';
+
 /**
- * How Claude Code begins each `api-request`, `api-request-blob` and `api-request-shape` line (it
- * writes `type` first). These record every API request's system prompt, tools, parameters and
- * message hashes so a request can be replayed: since 2.1.300, often most of a file's bytes, none of
- * them read by readTranscript. Uploads still parse them, then drop them (no uuid, so no chain stub).
+ * A request record: `api-request`, `api-request-blob` or `api-request-shape`. Since 2.1.300 Claude
+ * Code records every API request's system prompt, tools, parameters (the safety classifier's context
+ * among them) and message hashes, so a request can be replayed: often most of a file's bytes, none
+ * of them read by readTranscript. Uploads keep them whole; the lean read drops them unparsed.
  */
-const REQUEST_PREFIX = '{"type":"api-request';
+export const isRequestType = (type: string): boolean => type.startsWith(REQUEST_TYPE);
+
+/** How Claude Code begins each request record's line: it writes `type` first. */
+const REQUEST_PREFIX = `{"type":"${REQUEST_TYPE}`;
 
 /** Keeps a BOM, as Buffer's toString does: a line that starts with one is not JSON either way. */
 const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });

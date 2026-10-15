@@ -253,6 +253,22 @@ export function sanitizeString(content: string): string {
   return result;
 }
 
+/** An API beta flag name: lowercase words and digits joined by hyphens, e.g. `context-1m-2025-08-07`. */
+const BETA_FLAG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * sanitizeDeep for one uploaded transcript record. A request record's own `params.betas` stays
+ * whole when every entry is a flag name: the high-entropy rule takes the longer flags for secrets.
+ * Only that path of a top-level `api-request` record; a `betas` anywhere else is scanned as usual.
+ */
+export function sanitizeRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = sanitizeDeep(record);
+  const params = record.type === 'api-request' ? record.params : undefined;
+  const betas = params !== null && typeof params === 'object' ? (params as Record<string, unknown>).betas : undefined;
+  if (!Array.isArray(betas) || !betas.every((b) => typeof b === 'string' && BETA_FLAG.test(b))) return sanitized;
+  return { ...sanitized, params: { ...(sanitized.params as Record<string, unknown>), betas } };
+}
+
 /**
  * Redact secrets in every string of a value. Transcript entries are schema-shaped (keys are
  * field names; SAFE_KEYS values are ids/paths), so the default walk skips both. `strict` also

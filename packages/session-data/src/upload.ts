@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isQueuedCommand } from './transcript';
+import { isRequestType } from './records';
 import type { RawRecord } from './records';
 
 /** Title records, which an upload keeps so its session has a name. */
@@ -65,11 +66,13 @@ function stripBinary(value: unknown): unknown {
 
 /**
  * What an upload keeps of a record (before secret sanitizing), or undefined for a record that
- * stays local. Any other record with a uuid keeps only its place in the parent chain (type, uuid,
- * parentUuid), so an uploaded copy finds the same rewinds.
+ * stays local. Request records (see isRequestType) go whole, for research that replays a request or
+ * studies the safety classifier's context; they take no entry number and count as no line. Any
+ * other record with a uuid keeps only its place in the parent chain (type, uuid, parentUuid), so an
+ * uploaded copy finds the same rewinds.
  */
 export function uploadRecord(r: RawRecord): Record<string, unknown> | undefined {
-  const kept = UPLOADED_TYPES.has(r.type)
+  const kept = UPLOADED_TYPES.has(r.type) || isRequestType(r.type)
     ? withToolUseResult(r.data)
     : isQueuedCommand(r)
       ? QueuedCommandSchema.parse(r.data)
@@ -91,7 +94,7 @@ function withToolUseResult(data: Record<string, unknown>): Record<string, unknow
 
 /**
  * Whether an uploaded record counts toward the session's line count: the conversation's records,
- * not titles or the id-only stubs of records that stay local.
+ * not titles, request records or the id-only stubs of records that stay local.
  */
 export function countsAsLine(r: RawRecord): boolean {
   return (UPLOADED_TYPES.has(r.type) && !TITLE_TYPES.has(r.type)) || isQueuedCommand(r);

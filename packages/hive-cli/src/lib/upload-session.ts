@@ -18,7 +18,7 @@ import { hive } from './messages';
 import { fileSessionSummary } from './session-facts';
 import { chunk, mapBatched } from './batch';
 import { buildSessionMeta } from './session-format';
-import { sanitizeDeep, sanitizeString } from './sanitize';
+import { sanitizeDeep, sanitizeRecord, sanitizeString } from './sanitize';
 import {
   computeSessionStatus,
   findAgentsForParent,
@@ -88,7 +88,7 @@ export async function readAndSanitizeSession(session: TranscriptOwner, excluded:
     sanitizedEntries: records
       .map((r) => (isCopy(r) ? chainStub(r) : uploadRecord(r)))
       .filter((e) => e !== undefined)
-      .map((e) => sanitizeDeep(e)),
+      .map((e) => sanitizeRecord(e)),
     lineCount: records.filter((r) => !isCopy(r) && countsAsLine(r)).length,
     summary: (await readSessionSummary(session, excluded)) || undefined,
     cwds: extractCwds(rawContent),

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { detectSecrets, sanitizeDeep, sanitizeString } from '../lib/sanitize';
+import { detectSecrets, sanitizeDeep, sanitizeRecord, sanitizeString } from '../lib/sanitize';
 
 // High-entropy test tokens (repeated characters fail entropy checks); GitHub PATs are ghp_ + 36 alphanumerics.
 const TEST_GITHUB_TOKEN = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
@@ -137,6 +137,24 @@ describe('SAFE_KEYS', () => {
     expect(sanitized.sessionId).toBe(input.sessionId);
     expect(sanitized.content).toContain('[REDACTED:');
     expect(sanitized.content).not.toContain('ghp_');
+  });
+
+  test("sanitizeRecord keeps a request's beta flags whole, and scans any other betas", () => {
+    const betas = ['mid-conversation-tool-changes-2026-07-01', 'thinking-display-updates-2026-08-18'];
+    const request = { type: 'api-request', params: { model: 'm', betas, note: TEST_GITHUB_TOKEN } };
+    const kept = sanitizeRecord(request) as typeof request;
+    expect(kept.params.betas).toEqual(betas);
+    expect(kept.params.note).not.toContain('ghp_');
+    expect(sanitizeDeep(request).params.betas).not.toEqual(betas);
+    // Not flag-shaped, or not a request record's own params: scanned as usual.
+    const secret = [`GITHUB_TOKEN=${TEST_GITHUB_TOKEN}`];
+    const leaks = [
+      { type: 'api-request', params: { betas: [...betas, ...secret] } },
+      { type: 'assistant', params: { betas: secret } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', input: { betas: secret } }] } },
+      { type: 'assistant', nested: { type: 'api-request', params: { betas: secret } } },
+    ];
+    for (const r of leaks) expect(JSON.stringify(sanitizeRecord(r))).not.toContain('ghp_');
   });
 
   test('strict mode disables the SAFE_KEYS skip (workflow run blobs carry arbitrary values)', () => {

@@ -29,6 +29,25 @@ describe('the upload field set', () => {
     ]);
   });
 
+  test('request records are kept whole but for binary payloads, and count as no line', () => {
+    const shape = { type: 'api-request-shape', sessionId: 's', shapeHash: 'h0', shape: { system: [{ type: 'text', text: 'sys' }] } };
+    const request = {
+      type: 'api-request',
+      sessionId: 's',
+      shapeHash: 'h0',
+      params: { model: 'm', safeguards: [{ type: 'dangerous_tool_use', classifier_context: { rules: {} } }] },
+      tail: ['h1'],
+    };
+    const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
+    const blob = { type: 'api-request-blob', sessionId: 's', hash: 'h1', message: { role: 'user', content: [image] } };
+    expect(project(shape, request, blob)).toEqual([
+      shape,
+      request,
+      { ...blob, message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png' } }] } },
+    ]);
+    expect(readRecords(J(shape, request, blob)).records.some(countsAsLine)).toBe(false);
+  });
+
   test('attachments: queued messages reduced to the fields the parser reads; others to their place in the chain', () => {
     const out = project(
       {

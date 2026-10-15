@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { trpc } from "./trpc";
 import { Alert, SessionViewer, Button, formatSessionId } from "@alignment-hive/ui";
 import {
+  isRequestType,
   readTranscript,
   toRecord,
   // Shared status rules — the exclusion veto is privacy-critical and must match the CLI exactly.
@@ -19,9 +20,58 @@ import {
   workflowRunKey,
 } from "./sessions";
 
-/** The upload records the review server sends, parsed as the web viewer will parse the upload. */
-function parseEntries(uploadRecords: Array<unknown>) {
-  return readTranscript(uploadRecords.flatMap((r) => toRecord(r) ?? [])).entries;
+/**
+ * The upload records the review server sends: the transcript as the web viewer will parse it, and
+ * the request records the upload carries whole, which the transcript shows none of.
+ */
+function parseUpload(uploadRecords: Array<unknown>) {
+  const records = uploadRecords.flatMap((r) => toRecord(r) ?? []);
+  const requests = records.filter((r) => isRequestType(r.type)).map((r) => r.data);
+  const kb = Math.round(requests.reduce((n, r) => n + JSON.stringify(r).length, 0) / 1024);
+  return { entries: readTranscript(records).entries, requests, kb };
+}
+
+/** A blob's message role (a blob has no timestamp). */
+function messageRole(r: Record<string, unknown>): string {
+  const message = r.message;
+  return message !== null && typeof message === "object" && "role" in message ? String(message.role) : "";
+}
+
+/** One request record, rendered as JSON only once opened: some run to tens of kilobytes. */
+function RequestRecord({ record }: { record: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer font-mono text-xs text-muted-foreground hover:text-foreground">
+        {String(record.type)} {typeof record.timestamp === "string" ? record.timestamp : messageRole(record)}
+      </summary>
+      {open && (
+        <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 text-[10px] leading-snug">
+          {JSON.stringify(record, null, 2)}
+        </pre>
+      )}
+    </details>
+  );
+}
+
+function RequestRecords({ records, kb }: { records: Array<Record<string, unknown>>; kb: number }) {
+  if (records.length === 0) return null;
+  return (
+    <details className="mt-4 min-w-0 rounded-lg border border-border bg-card p-4">
+      <summary className="cursor-pointer text-sm font-medium text-foreground">
+        Request context to upload ({records.length} records, {kb.toLocaleString()} KB)
+      </summary>
+      <p className="mt-2 text-xs text-muted-foreground">
+        What Claude Code sent with each API request: the system prompt, tool definitions, instruction and memory
+        files, injected context, request parameters and the safety classifier's context.
+      </p>
+      <div className="mt-2 space-y-1">
+        {records.map((r, i) => (
+          <RequestRecord key={i} record={r} />
+        ))}
+      </div>
+    </details>
+  );
 }
 
 /** Tool entries may carry the agent id with or without the agent- prefix. */
@@ -195,7 +245,8 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
   const uploading = useInFlight("upload").has(sessionId);
 
   const rawEntries = viewingAgentId ? agentQuery.data?.entries : data?.entries;
-  const entries = useMemo(() => (rawEntries ? parseEntries(rawEntries) : undefined), [rawEntries]);
+  const parsed = useMemo(() => (rawEntries ? parseUpload(rawEntries) : undefined), [rawEntries]);
+  const entries = parsed?.entries;
 
   if (isLoading) {
     return (
@@ -279,7 +330,10 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
         <div>
           {entries ? (
             // Keyed so switching agents starts collapsed at the top instead of keeping the last one's rows open.
-            <SessionViewer key={displayId} entries={entries} renderAgentLink={renderAgentLink} />
+            <>
+              <SessionViewer key={displayId} entries={entries} renderAgentLink={renderAgentLink} />
+              <RequestRecords key={`requests-${displayId}`} records={parsed!.requests} kb={parsed!.kb} />
+            </>
           ) : agentQuery.error ? (
             <div className="flex h-96 items-center justify-center text-destructive">
               {agentQuery.error instanceof Error ? agentQuery.error.message : "Failed to load agent session"}
