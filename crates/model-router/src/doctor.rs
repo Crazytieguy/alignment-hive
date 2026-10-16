@@ -35,7 +35,8 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
     let home = crate::state::home_dir();
     let project = std::env::current_dir().unwrap_or_default();
     let settings = crate::claude_settings::settings_by_precedence(home.as_deref(), &project);
-    let declared = crate::client_window::resolve(&settings);
+    let env = crate::client_window::WindowEnv::read();
+    let declared = crate::client_window::resolve(&env, &settings);
 
     // Auth-file permissions are a property of the state directory alone, so
     // this runs before — and independently of — the config load, the
@@ -230,9 +231,9 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
             config,
             dirs,
             declared,
-            &crate::client_window::resolve_compaction(home.as_deref(), &settings),
+            &crate::client_window::resolve_compaction(&env, home.as_deref(), &settings),
             home.as_deref()
-                .map(|home| (home, project.as_path(), settings.as_slice())),
+                .map(|home| (&env, home, project.as_path(), settings.as_slice())),
         ));
         checks.extend(fallback_model_check(&settings));
     }
@@ -285,15 +286,17 @@ fn context_declaration_check(
 /// `declared` and the windows the service discovered at its last start are
 /// applied (the config on disk carries neither), then checked against Claude
 /// Code's settings. Failing to re-prepare the config with the cached windows
-/// is reported in the check's place. With `next` (home, project and its
-/// settings files as read), a change `settings windows --apply` would make
-/// for the next session is added as a warning, though this one may run fine.
+/// is reported in the check's place. With `next` (the window env, home,
+/// project and its settings files as read), a change `settings windows
+/// --apply` would make for the next session is added as a warning, though
+/// this one may run fine.
 fn context_window_checks(
     mut config: Config,
     dirs: &Dirs,
     declared: crate::client_window::EnvSetting,
     compaction: &crate::client_window::Compaction,
     next: Option<(
+        &crate::client_window::WindowEnv,
         &std::path::Path,
         &std::path::Path,
         &crate::claude_settings::Settings,
@@ -309,8 +312,9 @@ fn context_window_checks(
         }];
     }
     let mut check = crate::context_check::check(&config, declared, compaction);
-    if let (Some(check), Some((home, project, settings))) = (&mut check, next)
-        && let Some(note) = crate::settings_edit::windows_note(home, project, settings, &config)
+    if let (Some(check), Some((env, home, project, settings))) = (&mut check, next)
+        && let Some(note) =
+            crate::settings_edit::windows_note(env, home, project, settings, &config)
     {
         check.warn = true;
         check.detail = format!("{}; {note}", check.detail);

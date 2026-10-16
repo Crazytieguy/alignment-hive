@@ -125,11 +125,31 @@ impl EnvSetting {
     }
 }
 
+/// [`ENV_VAR`] and [`AUTO_COMPACT_ENV_VAR`] as a process environment holds
+/// them. Read once by the command and passed in, so the readings below never
+/// take them from wherever the code happens to run (a test, say).
+#[derive(Debug, Clone, Default)]
+pub struct WindowEnv {
+    context_window: Option<String>,
+    auto_compact: Option<String>,
+}
+
+impl WindowEnv {
+    /// This process's values.
+    #[must_use]
+    pub fn read() -> Self {
+        Self {
+            context_window: std::env::var(ENV_VAR).ok(),
+            auto_compact: std::env::var(AUTO_COMPACT_ENV_VAR).ok(),
+        }
+    }
+}
+
 /// Reads the effective [`ENV_VAR`]. Zero reads as unset, as it does to
 /// Claude Code.
 #[must_use]
-pub fn resolve(settings: &Settings) -> EnvSetting {
-    resolve_with(std::env::var(ENV_VAR).ok().as_deref(), settings)
+pub fn resolve(env: &WindowEnv, settings: &Settings) -> EnvSetting {
+    resolve_with(env.context_window.as_deref(), settings)
 }
 
 fn resolve_with(env: Option<&str>, settings: &Settings) -> EnvSetting {
@@ -153,20 +173,25 @@ fn inherited<'a>(
     env.filter(|_| !sets(current) && !sets(files))
 }
 
-/// [`ENV_VAR`] as the next session started over `files` reads it, `current`
-/// as in [`inherited`].
+/// [`ENV_VAR`] as the next session started over `files` reads it, `env` and
+/// `current` as in [`inherited`].
 #[must_use]
-pub fn next_session(current: &Settings, files: &Settings) -> EnvSetting {
-    let env = std::env::var(ENV_VAR).ok();
-    resolve_with(inherited(ENV_VAR, env.as_deref(), current, files), files)
+pub fn next_session(env: &WindowEnv, current: &Settings, files: &Settings) -> EnvSetting {
+    let env = env.context_window.as_deref();
+    resolve_with(inherited(ENV_VAR, env, current, files), files)
 }
 
 /// [`resolve_compaction`] as the next session started over `files` reads it,
-/// `current` as in [`inherited`].
+/// `env` and `current` as in [`inherited`].
 #[must_use]
-pub fn next_compaction(home: Option<&Path>, current: &Settings, files: &Settings) -> Compaction {
-    let env = std::env::var(AUTO_COMPACT_ENV_VAR).ok();
-    let env = inherited(AUTO_COMPACT_ENV_VAR, env.as_deref(), current, files);
+pub fn next_compaction(
+    env: &WindowEnv,
+    home: Option<&Path>,
+    current: &Settings,
+    files: &Settings,
+) -> Compaction {
+    let env = env.auto_compact.as_deref();
+    let env = inherited(AUTO_COMPACT_ENV_VAR, env, current, files);
     resolve_compaction_with(env, home, files)
 }
 
@@ -309,12 +334,8 @@ impl Compaction {
 /// table to that default plus its own per-model entries.
 /// `home` locates the user file among `settings`.
 #[must_use]
-pub fn resolve_compaction(home: Option<&Path>, settings: &Settings) -> Compaction {
-    resolve_compaction_with(
-        std::env::var(AUTO_COMPACT_ENV_VAR).ok().as_deref(),
-        home,
-        settings,
-    )
+pub fn resolve_compaction(env: &WindowEnv, home: Option<&Path>, settings: &Settings) -> Compaction {
+    resolve_compaction_with(env.auto_compact.as_deref(), home, settings)
 }
 
 pub(crate) fn resolve_compaction_with(

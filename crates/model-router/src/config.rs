@@ -800,7 +800,10 @@ impl Config {
     /// files).
     pub fn read_client_window(&mut self, home: Option<&Path>, project: &Path) {
         let settings = crate::claude_settings::settings_by_precedence(home, project);
-        self.adopt_client_window(crate::client_window::resolve(&settings));
+        self.adopt_client_window(crate::client_window::resolve(
+            &crate::client_window::WindowEnv::read(),
+            &settings,
+        ));
     }
 
     /// Resolves every route's usage scale.

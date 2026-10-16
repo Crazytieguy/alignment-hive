@@ -19,8 +19,8 @@ use crate::claude_settings::{
     winning_setting,
 };
 use crate::client_window::{
-    Compaction, ENV_VAR, EnvSetting, MAX_COMPACT_WINDOW, MIN_COMPACT_WINDOW, client_context_window,
-    next_compaction, next_session, resolve_compaction,
+    Compaction, ENV_VAR, EnvSetting, MAX_COMPACT_WINDOW, MIN_COMPACT_WINDOW, WindowEnv,
+    client_context_window, next_compaction, next_session, resolve_compaction,
 };
 use crate::config::{
     Config, ModelRoute, SHIPPED_GPT_ROUTES, is_codex_native_model, is_retired_gpt_route,
@@ -650,8 +650,10 @@ impl WindowsPlan {
 /// `context-windows` check passes without a warning is ready, both in this
 /// project and from the edited file down (as a project without overrides
 /// reads it); the rest needs setup. `settings` are the project's files as
-/// read; `config` carries the service's discovered windows.
+/// read; `config` carries the service's discovered windows; `env` is this
+/// process's, as [`next_session`] takes it.
 fn plan_windows(
+    env: &WindowEnv,
     home: &Path,
     project: &Path,
     settings: &[(PathBuf, Value)],
@@ -669,9 +671,9 @@ fn plan_windows(
             .map_or(wired, |(file, _)| file)
             .to_path_buf(),
     };
-    let declared = next_session(settings, settings);
+    let declared = next_session(env, settings, settings);
     let raise = client_context_window(declared.value()) < SETUP_DECLARATION;
-    let legacy_config = legacy_sizing(config, &resolve_compaction(Some(home), settings));
+    let legacy_config = legacy_sizing(config, &resolve_compaction(env, Some(home), settings));
     let legacy = raise || legacy_config.is_some();
     let blocked = |reason: String| WindowsPlan::Blocked { legacy, reason };
     let Some(path_rank) = rank(&path) else {
@@ -688,7 +690,7 @@ fn plan_windows(
         .filter(|(file, _)| rank(file).is_some_and(|at| at >= path_rank))
         .cloned()
         .collect();
-    let baseline = next_compaction(Some(home), settings, &below);
+    let baseline = next_compaction(env, Some(home), settings, &below);
     let missing: Vec<&ModelRoute> = config
         .effective_models()
         .filter(|route| !baseline.is_configured(&route.routing_id))
@@ -705,8 +707,11 @@ fn plan_windows(
     // it does now, here and from the edited file down: raising the
     // declaration moves it to its cap, or to 1M with none (or `"auto"`).
     let views = [
-        (next_compaction(Some(home), settings, settings), declared),
-        (baseline, next_session(settings, &below)),
+        (
+            next_compaction(env, Some(home), settings, settings),
+            declared,
+        ),
+        (baseline, next_session(env, settings, &below)),
     ];
     let unknown = config.effective_models().filter(|route| {
         let id = &route.routing_id;
@@ -749,7 +754,7 @@ fn plan_windows(
     let current = with_edit(&files, settings, (&path, &edited));
     for from in std::iter::once(0).chain((path_rank > 0).then_some(path_rank)) {
         let after = with_edit(&files[from..], settings, (&path, &edited));
-        if let Some(reason) = doctor_after(home, &current, &after, raise, config) {
+        if let Some(reason) = doctor_after(env, home, &current, &after, raise, config) {
             return blocked(reason);
         }
     }
@@ -836,13 +841,14 @@ fn legacy_sizing(config: &Config, compaction: &Compaction) -> Option<String> {
 /// with the edit): `None` when it passes without a warning, and a `raise`
 /// the files leave in effect.
 fn doctor_after(
+    env: &WindowEnv,
     home: &Path,
     current: &[(PathBuf, Value)],
     after: &[(PathBuf, Value)],
     raise: bool,
     config: &Config,
 ) -> Option<String> {
-    let declared = next_session(current, after);
+    let declared = next_session(env, current, after);
     if raise && client_context_window(declared.value()) < SETUP_DECLARATION {
         let (file, _) = winning_setting(after, &["env", ENV_VAR])?;
         return Some(format!(
@@ -850,7 +856,7 @@ fn doctor_after(
             file.display()
         ));
     }
-    let compaction = next_compaction(Some(home), current, after);
+    let compaction = next_compaction(env, Some(home), current, after);
     let check = context_check::check(config, declared, &compaction)?;
     (!check.ok || check.warn).then(|| {
         format!(
@@ -922,9 +928,10 @@ fn too_old(version: Option<Version>) -> Option<String> {
 }
 
 /// Doctor's line when `settings windows --apply` would make a change, from
-/// the project's `settings` as doctor read them. A change that needs the
-/// person is left to doctor's own lines and to the command's reason.
+/// the project's `settings` and `env` as doctor read them. A change that
+/// needs the person is left to doctor's own lines and to the command's reason.
 pub(crate) fn windows_note(
+    env: &WindowEnv,
     home: &Path,
     project: &Path,
     settings: &[(PathBuf, Value)],
@@ -936,7 +943,7 @@ pub(crate) fn windows_note(
         windows,
         updates,
         ..
-    } = plan_windows(home, project, settings, config, None)
+    } = plan_windows(env, home, project, settings, config, None)
     else {
         return None;
     };
@@ -988,6 +995,7 @@ pub fn windows(
     apply: Option<&Path>,
 ) -> anyhow::Result<Value> {
     windows_with(
+        &WindowEnv::read(),
         home,
         project,
         config,
@@ -998,8 +1006,11 @@ pub fn windows(
     )
 }
 
-/// [`windows`], with `before_commit` passed to [`write`].
+/// [`windows`] over `env` rather than this process's, with `before_commit`
+/// passed to [`write`].
+#[allow(clippy::too_many_arguments)]
 fn windows_with(
+    env: &WindowEnv,
     home: &Path,
     project: &Path,
     config: Result<&Config, &str>,
@@ -1020,7 +1031,7 @@ fn windows_with(
     };
     let plan = || {
         let settings = settings_by_precedence(Some(home), project);
-        plan_windows(home, project, &settings, config, target)
+        plan_windows(env, home, project, &settings, config, target)
     };
     let Some(lock_path) = apply else {
         // Ask for the version only when it decides.
@@ -1848,13 +1859,15 @@ mod tests {
     ) -> Value {
         let config = crate::config::parse_and_prepare(source);
         let lock = dirs.lock();
-        windows(
+        windows_with(
+            &WindowEnv::default(),
             dirs.home.path(),
             dirs.project.path(),
             Ok(&config),
             target,
             || version,
             apply.then_some(lock.as_path()),
+            &mut || {},
         )
         .unwrap()
     }
@@ -1902,6 +1915,7 @@ mod tests {
                    "updates": [], "file": dirs.home.path().join(".claude/settings.json")})
         );
         let note = windows_note(
+            &WindowEnv::default(),
             dirs.home.path(),
             dirs.project.path(),
             &settings_by_precedence(Some(dirs.home.path()), dirs.project.path()),
@@ -2001,6 +2015,7 @@ mod tests {
                    "file": dirs.home.path().join(".claude/settings.json")})
         );
         let note = windows_note(
+            &WindowEnv::default(),
             dirs.home.path(),
             dirs.project.path(),
             &settings_by_precedence(Some(dirs.home.path()), dirs.project.path()),
@@ -2282,6 +2297,7 @@ display-name = "Kimi K3"
         let lock = dirs.lock();
         let mut writes = 0;
         let report = windows_with(
+            &WindowEnv::default(),
             dirs.home.path(),
             dirs.project.path(),
             Ok(&config),
