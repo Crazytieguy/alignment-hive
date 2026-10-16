@@ -1,6 +1,6 @@
 {
   "name": "tldr",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Collapses long replies to a one-sentence TL;DR: [ more ] expands one, /tldr turns it off.",
   "types": "./types/index.d.ts"
 }
