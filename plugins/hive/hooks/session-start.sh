@@ -1,8 +1,7 @@
 #!/bin/bash
-set -euo pipefail
-
 # SessionStart hook for the hive plugin: minimal bash that records session state and
 # delegates to the binary. Prefer exiting 0 — a non-zero exit shows a warning to the user.
+set -euo pipefail
 
 source "${CLAUDE_PLUGIN_ROOT}/scripts/common.sh"
 

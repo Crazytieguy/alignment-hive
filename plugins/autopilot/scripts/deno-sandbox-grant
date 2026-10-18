@@ -1,4 +1,6 @@
 #!/bin/bash
+# Validates scoped --allow-* flags and appends them to the session's grants file, which
+# deno-sandbox turns into deno flags and sandbox-permissions.sh reads for read grants.
 set -euo pipefail
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ $# -eq 0 ]; then

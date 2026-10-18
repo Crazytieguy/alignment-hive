@@ -1,10 +1,12 @@
 #!/bin/bash
+# SessionStart hook: prints autopilot's status line and, while the deno sandbox is on, exports the
+# sandbox's env through CLAUDE_ENV_FILE, scaffolds .claude/deno-sandbox/ and gives the model its
+# sandbox instructions (scripts/sandbox-instructions.sh).
 set -euo pipefail
 
 LOG_FILE="$HOME/.cache/autopilot/error.log"
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
 
-# Capture all stderr to the log file
 exec 2>>"$LOG_FILE"
 
 STATE_FILE="$CLAUDE_PROJECT_DIR/.claude/autopilot/state.json"

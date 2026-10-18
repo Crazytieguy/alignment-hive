@@ -1,7 +1,7 @@
 #!/bin/bash
+# Sandboxed Deno runner: runs one script under .claude/deno-sandbox/ with read access to the cwd
+# plus the session's grants (deno-sandbox-grant), never writing .claude or .git. See --help.
 set -euo pipefail
-
-# Sandboxed Deno runner. See --help for usage.
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'HELP'

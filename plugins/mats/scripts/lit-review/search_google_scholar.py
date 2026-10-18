@@ -98,7 +98,6 @@ async def search_query(
                 articles = soup.select(".gs_ri")
 
                 if not articles:
-                    # No more results
                     return results, True
 
                 for article in articles:
@@ -107,26 +106,21 @@ async def search_query(
                         # Skip entries without title links (citations, etc.)
                         continue
 
-                    # Extract metadata
                     title = title_elem.get_text(strip=True)
                     url = title_elem.get("href", "")
 
-                    # Author/publication info
                     meta_elem = article.select_one(".gs_a")
                     meta_text = meta_elem.get_text(strip=True) if meta_elem else ""
 
-                    # Snippet/abstract
                     snippet_elem = article.select_one(".gs_rs")
                     snippet = (
                         snippet_elem.get_text(strip=True) if snippet_elem else ""
                     )
 
-                    # Citation info
                     footer_elem = article.select_one(".gs_fl")
                     footer_text = footer_elem.get_text() if footer_elem else ""
                     citation_count = parse_citation_count(footer_text)
 
-                    # PDF link if available
                     pdf_elem = article.select_one(".gs_or_ggsm a")
                     pdf_url = pdf_elem.get("href") if pdf_elem else None
 

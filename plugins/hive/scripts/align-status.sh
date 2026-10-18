@@ -1,6 +1,6 @@
 #!/bin/bash
-set -euo pipefail
 # Status block for /hive:align.
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"

@@ -1,4 +1,8 @@
 #!/bin/bash
+# PermissionRequest hook: in autonomous mode (state.json's autonomous_mode, with the session in
+# acceptEdits) a permission prompt is answered with a deny, so the session keeps working
+# unattended; the message tells the model why and how to resolve it. The cases below that exit
+# without a decision still reach the user as a prompt.
 
 input=$(cat)
 
@@ -29,7 +33,6 @@ if [ "$permission_mode" != "acceptEdits" ]; then
   exit 0
 fi
 
-# Check state file
 STATE_FILE="$CLAUDE_PROJECT_DIR/.claude/autopilot/state.json"
 if ! "$JQ" -e '.autonomous_mode == true' "$STATE_FILE" >/dev/null 2>&1; then
   exit 0
@@ -61,7 +64,6 @@ else
   message="Command denied in autonomous mode. Command likely contains command substitution or ambiguous syntax that conflicts with permission matching."
 fi
 
-# Output deny decision using jq to ensure valid JSON
 "$JQ" -n --arg msg "$message" '{
   hookSpecificOutput: {
     hookEventName: "PermissionRequest",

@@ -1,4 +1,6 @@
 #!/bin/bash
+# Async SessionStart hook: downloads jq into ~/.cache/autopilot when none is found, since
+# every autopilot hook needs it (find-jq.sh looks there).
 set -euo pipefail
 
 # shellcheck source=find-jq.sh

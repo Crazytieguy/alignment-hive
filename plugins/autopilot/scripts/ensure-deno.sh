@@ -1,8 +1,9 @@
 #!/bin/bash
-set -euo pipefail
-
+# Async SessionStart hook: installs the latest deno into ~/.deno/bin when none is found.
 # Runs on every session start regardless of sandbox state, so deno is already
 # there in the first session after the sandbox is enabled.
+set -euo pipefail
+
 # shellcheck source=find-deno.sh
 if source "$(dirname "${BASH_SOURCE[0]}")/find-deno.sh"; then
   exit 0

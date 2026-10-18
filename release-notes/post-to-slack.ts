@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
- * Post plugin updates to Slack
+ * Post plugin updates to Slack (.github/workflows/release-notes.yml).
  *
- * Compares current plugin versions to last announced versions,
- * extracts commit messages for changed plugins, and posts to Slack.
+ * Compares current plugin versions to last announced versions (state.json),
+ * extracts commit messages for changed plugins, and posts to Slack. Without
+ * SLACK_WEBHOOK_URL it is a dry run that leaves state.json as it was.
  */
 
 import { $ } from "bun";
@@ -73,7 +74,6 @@ async function getCommitsSinceLastRun(
   const pluginPath = `plugins/${pluginName}`;
 
   try {
-    // Get commits that touched the plugin directory since last run
     const result =
       await $`git log --since="${lastTimestamp}" --pretty=format:"%s" -- ${pluginPath}`.text();
 
@@ -143,7 +143,6 @@ async function main(): Promise<void> {
   const state = await readState();
   console.log("Last announced versions:", state.lastAnnouncedVersions);
 
-  // Find plugins with version changes
   const updates: PluginUpdate[] = [];
 
   for (const [name, newVersion] of Object.entries(currentVersions)) {
@@ -184,7 +183,6 @@ async function main(): Promise<void> {
   await postToSlack(message);
   console.log("Posted successfully!");
 
-  // Update state
   const newState: State = {
     lastAnnouncedVersions: currentVersions,
     lastRunTimestamp: new Date().toISOString(),

@@ -1,9 +1,8 @@
 #!/bin/bash
-set -euo pipefail
-
 # Runs the hive CLI this plugin pins, with all arguments and stdin passed through: the session
 # start hook and the plugin's band (hooks/register.tsx) both go through here. Needs
 # CLAUDE_PLUGIN_ROOT, and CLAUDE_PROJECT_DIR for the dev binary.
+set -euo pipefail
 
 source "${CLAUDE_PLUGIN_ROOT}/scripts/common.sh"
 

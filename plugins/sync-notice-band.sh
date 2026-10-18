@@ -1,8 +1,7 @@
 #!/bin/bash
-set -euo pipefail
-
 # Copies one plugin's hooks/notice-band.tsx over every other plugin's copy, which
 # notice-band.test.ts keeps identical. Usage: sync-notice-band.sh <plugin you edited>
+set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 SOURCE="${1:?usage: sync-notice-band.sh <plugin you edited>}/hooks/notice-band.tsx"

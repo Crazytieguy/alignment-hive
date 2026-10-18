@@ -1,3 +1,5 @@
+// remote-kernels as a mod: scripts/check.sh's rows (wrong platform variant, not configured) in the
+// band above the prompt, checked at startup and /clear; a row's button runs /remote-kernels:setup.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 

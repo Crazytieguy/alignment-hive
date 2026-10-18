@@ -1,4 +1,6 @@
 #!/bin/bash
+# SessionStart hook: tells the model its own session id, which a debrief it writes records as the
+# parent `session` (references/authoring.md). Prints nothing unless session_id is a UUID.
 set -euo pipefail
 
 jq -ce '

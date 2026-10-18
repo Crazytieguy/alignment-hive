@@ -1,6 +1,4 @@
 #!/bin/bash
-set -euo pipefail
-
 # Bootstrap script for the model-router gateway: resolves the pinned binary
 # (downloading it on first use) and execs it with all arguments.
 #
@@ -14,6 +12,7 @@ set -euo pipefail
 # state dir (binary-version next to this script). `model-router service`
 # maintains the launcher copy; OS service units exec it so they never point
 # at ephemeral per-version plugin directories.
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/binary-version" ]; then

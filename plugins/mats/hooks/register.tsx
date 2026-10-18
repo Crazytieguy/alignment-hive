@@ -1,3 +1,5 @@
+// mats as a mod: scripts/check.sh's install row in the band above the prompt, checked at startup
+// and /clear. Left to the hive plugin when that is enabled, since hive draws the same row.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 

@@ -53,7 +53,6 @@ async def search_query(
                 for paper in batch:
                     paper["source"] = "semantic_scholar"
                     paper["search_query"] = query
-                    # Extract DOI from externalIds
                     if paper.get("externalIds"):
                         paper["doi"] = paper["externalIds"].get("DOI")
                         paper["arxiv_id"] = paper["externalIds"].get("ArXiv")

@@ -1,3 +1,6 @@
+// model-router as a mod: scripts/check.sh's rows (router down, settings to migrate, not set up,
+// wrong platform variant) in the band above the prompt, checked at startup and /clear. Buttons
+// retry the check, run setup, or have the binary edit the settings, saying what it did in a toast.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
@@ -31,6 +34,7 @@ async function check($: EngineInterface): Promise<void> {
   }
 }
 
+/** Try again on `row`: runs the check once more (one more restart attempt), the row busy meanwhile. */
 async function retry($: EngineInterface, row: string): Promise<void> {
   await update($, retrying, () => row)
   try {

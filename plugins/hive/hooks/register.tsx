@@ -1,3 +1,6 @@
+// hive as a mod: its rows in the band above the prompt. `hive notices` (through scripts/hive.sh)
+// decides them for this session and is asked again only when they can have changed; the buttons
+// copy a terminal command, run a slash command, or run the CLI's upload commands.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 

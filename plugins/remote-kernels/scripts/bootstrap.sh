@@ -1,6 +1,4 @@
 #!/bin/bash
-set -euo pipefail
-
 # Bootstrap script for remote-kernels MCP server.
 # Resolves the prebuilt binary (cached locally), then exec's it so signals
 # propagate correctly for graceful shutdown.
@@ -8,8 +6,9 @@ set -euo pipefail
 # The platform-specific marketplace entries ship the binary inside the plugin
 # zip, at bin/remote-kernels-<target>.tar.xz. When it is there the binary comes
 # from the plugin itself, so plugin and binary are never out of step. The plain
-# (path-source) plugin has no bin/ and downloads from GitHub releases as before.
+# (path-source) plugin has no bin/ and downloads from GitHub releases.
 # A bin/ that holds some other platform's binary is an error, not a fallback.
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -24,7 +23,6 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-# Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
@@ -63,7 +61,6 @@ if [ -n "${REMOTE_KERNELS_DEV:-}" ] && [ -x "$REMOTE_KERNELS_DEV" ]; then
   exec "$REMOTE_KERNELS_DEV" "$@"
 fi
 
-# Cache directory
 CACHE_DIR="$HOME/.cache/remote-kernels/v${VERSION}"
 BINARY="$CACHE_DIR/remote-kernels"
 # Written only after the binary is fully in place. An executable at $BINARY is

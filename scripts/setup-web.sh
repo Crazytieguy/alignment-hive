@@ -1,8 +1,7 @@
 #!/bin/bash
-set -euo pipefail
-
 # Sets up the web app for local development.
 # Run from the repo root: bash scripts/setup-web.sh
+set -euo pipefail
 
 WEB_DIR="packages/web"
 WEB_ENV="$WEB_DIR/.env.local"

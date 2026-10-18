@@ -1,13 +1,12 @@
 #!/bin/bash
-set -euo pipefail
-
-# Auto-allow:
+# PermissionRequest hook, active while the deno sandbox is on. Auto-allows:
 # 1. deno-sandbox-grant help/no-args (read-only)
 # 2. Read/Write/Edit to registered sandbox script files
 # 3. Read/Grep/Glob on directories granted via deno-sandbox-grant
 #
 # deno-sandbox execution is handled by the Bash(deno-sandbox *) permission rule
 # added during /autopilot:setup — not validated here.
+set -euo pipefail
 
 input=$(cat)
 

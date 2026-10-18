@@ -1,5 +1,3 @@
-import type { EngineInterface, RenderElement } from 'claude-code'
-
 // One plugin's rows in the band above the prompt, drawn without `$`: each
 // plugin's own `ui.render` hook reads its state and stacks this over what the
 // plugins beneath drew, so third-party plugins on the band keep working.
@@ -7,6 +5,7 @@ import type { EngineInterface, RenderElement } from 'claude-code'
 // A plugin cannot import another's files, so each plugin that shows notices
 // carries this file; plugins/notice-band.test.ts keeps the copies identical.
 // The `notices` its check prints are this file's `Notice` as JSON.
+import type { EngineInterface, RenderElement } from 'claude-code'
 
 export type Severity = 'urgent' | 'problem' | 'action' | 'info'
 
@@ -45,6 +44,7 @@ const MARK: Record<Severity, { rank: number; glyph: string; color: string }> = {
   info: { rank: 3, glyph: '↑', color: 'ide' },
 }
 
+/** Draws `notices` as band rows, most severe first, each keyed and labeled by `plugin`. */
 export function noticeRows(
   ui: ReturnType<EngineInterface['ui']['resolve']>,
   plugin: string,

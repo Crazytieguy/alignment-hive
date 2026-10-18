@@ -39,9 +39,6 @@ def get_pdf_url(paper: dict) -> str | None:
     return (paper.get("openAccessPdf") or {}).get("url")
 
 
-# --- Atomic writes ---
-
-
 def write_atomic_text(path: Path, text: str) -> None:
     """Write text via a temp file + atomic rename so partial files never land."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.part")
@@ -49,11 +46,7 @@ def write_atomic_text(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-# --- PDF conversion ---
-
-
 def convert_pdf_to_markdown(pdf_path: Path, md_output_path: Path) -> bool:
-    """Convert a PDF to markdown using pymupdf4llm."""
     try:
         md_text = pymupdf4llm.to_markdown(
             str(pdf_path), write_images=False, embed_images=False
@@ -63,9 +56,6 @@ def convert_pdf_to_markdown(pdf_path: Path, md_output_path: Path) -> bool:
     except Exception as e:
         print(f"  Error converting {pdf_path.name}: {e}", file=sys.stderr)
         return False
-
-
-# --- LW/AF HTML conversion ---
 
 
 def format_comment(comment: dict, indent_level: int = 0) -> str:
@@ -110,12 +100,7 @@ def convert_lw_post(post: dict) -> str:
     return "\n".join(lines)
 
 
-# --- Pipeline ---
-
-
-async def download_pdf(
-    client: httpx.AsyncClient, url: str, output_path: Path, paper_id: str
-) -> str | None:
+async def download_pdf(client: httpx.AsyncClient, url: str, output_path: Path) -> str | None:
     """Download to output_path; returns None on success, else a one-line reason."""
     for attempt in range(MAX_RETRIES):
         try:
@@ -166,7 +151,7 @@ async def run_pipeline(
             {"id": paper_id, "title": paper.get("title"), "stage": stage, "reason": reason}
         )
 
-    # Separate LW/AF posts (HTML conversion) from PDF papers
+    # Forum posts that carry their HTML are converted from it; the rest go through a PDF.
     lw_posts = []
     pdf_papers = []
     for paper in papers:
@@ -175,7 +160,6 @@ async def run_pipeline(
         else:
             pdf_papers.append(paper)
 
-    # Queue for PDF paths waiting to be converted
     convert_queue: asyncio.Queue[Path | None] = asyncio.Queue()
 
     # Thread pool for CPU-bound PDF→markdown conversion
@@ -198,7 +182,6 @@ async def run_pipeline(
         md_path = output_dir / f"{paper_id}.md"
         pdf_by_path[pdf_path] = paper
 
-        # Skip if markdown already exists
         if md_path.exists():
             stats["convert_skipped"] += 1
             stats["ready_files"].append(str(md_path))
@@ -213,7 +196,7 @@ async def run_pipeline(
             return
 
         async with download_semaphore:
-            error = await download_pdf(http_client, pdf_url, pdf_path, paper_id)
+            error = await download_pdf(http_client, pdf_url, pdf_path)
 
         if error is None:
             stats["downloaded"] += 1
@@ -243,7 +226,6 @@ async def run_pipeline(
                 convert_queue.task_done()
                 continue
 
-            # Run CPU-bound conversion in thread pool
             success = await loop.run_in_executor(
                 executor, convert_pdf_to_markdown, pdf_path, md_path
             )
@@ -283,14 +265,12 @@ async def run_pipeline(
             print(str(md_path), flush=True)
             print(f"  Converted LW/AF: {title[:50]}...", file=sys.stderr)
 
-    # --- Run everything ---
     print(
         f"Pipeline: {len(pdf_papers)} PDFs to download/convert, "
         f"{len(lw_posts)} LW/AF posts ({max_converters} converter threads)",
         file=sys.stderr,
     )
 
-    # Start converter workers
     converter_tasks = [
         asyncio.create_task(converter_worker()) for _ in range(max_converters)
     ]
@@ -306,10 +286,8 @@ async def run_pipeline(
     for _ in range(max_converters):
         await convert_queue.put(None)
 
-    # Wait for all conversions to finish
     await asyncio.gather(*converter_tasks)
 
-    # Wait for LW/AF processing
     await lw_future
 
     await http_client.aclose()
@@ -360,7 +338,6 @@ def main():
         run_pipeline(papers, args.output_dir, args.max_downloads, args.max_converters)
     )
 
-    # Print summary to stderr
     print("", file=sys.stderr)
     print("Pipeline Summary:", file=sys.stderr)
     print(f"  Total papers: {stats['total']}", file=sys.stderr)
@@ -376,7 +353,6 @@ def main():
     for failure in stats["failed"]:
         print(f"  Failed ({failure['stage']}): {failure['id']} - {failure['reason']}", file=sys.stderr)
 
-    # Save stats
     stats_path = args.output_dir / "pipeline_stats.json"
     with open(stats_path, "w") as f:
         json.dump(stats, f, indent=2)

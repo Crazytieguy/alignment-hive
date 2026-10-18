@@ -1,7 +1,6 @@
 #!/bin/bash
-set -euo pipefail
-
 # SubagentStart hook: inject deno-sandbox instructions and register agent ID.
+set -euo pipefail
 
 STATE_FILE="$CLAUDE_PROJECT_DIR/.claude/autopilot/state.json"
 

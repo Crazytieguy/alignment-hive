@@ -1,6 +1,4 @@
 #!/bin/bash
-set -euo pipefail
-
 # Bootstrap script for hive CLI binary.
 # Ensures the correct version is cached and that ~/.local/bin/hive points at it, then exec's
 # the binary with all arguments, so the caller can pipe stdin to it.
@@ -8,6 +6,7 @@ set -euo pipefail
 # For expected issues (not installed, download failed) it prints the plugin band's row as JSON
 # ({"notices": [...]}, the Notice shape in hooks/notice-band.tsx) in place of the CLI's output.
 # Unexpected errors go to stderr (caller redirects to error log).
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
