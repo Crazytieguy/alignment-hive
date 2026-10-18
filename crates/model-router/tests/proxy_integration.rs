@@ -1,3 +1,7 @@
+//! End-to-end tests of the gateway: each runs the real router (`proxy::app`
+//! or `serve_listener`) against in-process fakes standing in for Anthropic
+//! and `CLIProxyAPI`, and asserts on what the fakes saw and the client got.
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

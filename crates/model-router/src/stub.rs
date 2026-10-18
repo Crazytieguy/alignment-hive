@@ -1,3 +1,6 @@
+//! The canned reply `mode = "stub"` serves on the GPT branch: a protocol
+//! smoke test that needs no `CLIProxyAPI`.
+
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use serde_json::json;
@@ -14,15 +17,5 @@ pub fn response(model: &str, streaming: bool) -> (HeaderMap, Vec<Bytes>) {
         "stop_sequence": null,
         "usage": {"input_tokens":1,"output_tokens":4}
     });
-    if streaming {
-        (
-            crate::proxy::sse_headers(),
-            crate::websearch::message_to_sse(&message),
-        )
-    } else {
-        (
-            crate::proxy::json_headers(),
-            vec![Bytes::from(message.to_string())],
-        )
-    }
+    crate::proxy::frame_message(&message, streaming)
 }

@@ -22,6 +22,20 @@
 use bytes::Bytes;
 use serde_json::{Value, json};
 
+mod origin;
+mod xai;
+
+#[cfg(test)]
+use origin::{MAX_PENDING_TOTAL, SniffedSearch};
+pub use origin::{
+    Origin, PendingKey, PendingSearches, ToolUseSniffer, declares_websearch_tool, session_id,
+};
+#[cfg(test)]
+use xai::MAX_REQUEST_ALLOWED_DOMAINS;
+pub use xai::{
+    DomainPolicy, Harvested, InvalidDomainRule, XaiSourceHarvester, xai_search_request_body,
+};
+
 /// Claude Code's fixed user-message prefix for the `WebSearch` sub-call.
 const QUERY_PREFIX: &str = "Perform a web search for the query: ";
 
@@ -310,282 +324,6 @@ pub fn links_from_alpha_results(results: &[Value]) -> Vec<Link> {
     links.links
 }
 
-// ---------------------------------------------------------------------------
-// xAI-native search (Grok origins)
-// ---------------------------------------------------------------------------
-
-/// xAI caps a hosted `web_search` allow-list; beyond this the filter is left
-/// off the request and enforced locally instead (a rejected field would turn a
-/// working search into a failed one).
-const MAX_REQUEST_ALLOWED_DOMAINS: usize = 5;
-
-/// The domain constraints a harvested URL must satisfy, taken from the
-/// sub-call's `allowed_domains` / `blocked_domains`.
-///
-/// This is the authoritative filter: the request-side `filters.allowed_domains`
-/// only steers the upstream search, and blocked domains are never sent at all.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DomainPolicy {
-    allowed: Vec<String>,
-    blocked: Vec<String>,
-}
-
-/// Canonical form of a domain rule or a URL host: IDNA/punycode, lowercase,
-/// no trailing root dot. `None` for anything that is not a bare hostname.
-///
-/// Rules and hosts go through the same function on purpose — comparing a
-/// human-typed rule against a parsed host is only sound if both are in the
-/// same form. Parsing through a URL is what applies IDNA, so `рф.example` and
-/// its punycode spelling canonicalize alike.
-fn canonical_domain(domain: &str) -> Option<String> {
-    let domain = domain.trim().trim_start_matches('.');
-    // A rule is a bare hostname: no scheme, path, userinfo, port, or query.
-    // Backslash matters as much as slash — for special schemes the URL parser
-    // treats `\` as a path separator, so `example.com\evil` would otherwise
-    // canonicalize to `example.com` and turn a malformed restriction into
-    // whole-domain permission. Control characters matter too: the parser
-    // strips tabs and newlines outright, so `exa<TAB>mple.com` would parse as
-    // `example.com`.
-    if domain.is_empty()
-        || domain.contains(['/', '\\', '@', ':', '?', '#'])
-        || domain
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return None;
-    }
-    let url = reqwest::Url::parse(&format!("https://{domain}/")).ok()?;
-    // The rule must have been exactly a host, not something the parser
-    // rearranged into other components.
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-    let host = url.host_str()?;
-    let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
-    (!host.is_empty() && host != ".").then_some(host)
-}
-
-/// A domain rule the sub-call asked for that cannot be honored.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvalidDomainRule(pub String);
-
-impl std::fmt::Display for InvalidDomainRule {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "unusable domain filter {:?}", self.0)
-    }
-}
-
-impl DomainPolicy {
-    /// The policy this sub-call asks for.
-    ///
-    /// # Errors
-    /// Returns the offending rule when any filter cannot be canonicalized. A
-    /// filter that cannot be honored must fail the search: silently dropping
-    /// a malformed allow-list would widen it to allow-all, and dropping a
-    /// malformed block-list would admit what the caller excluded.
-    pub fn from_subcall(subcall: &Subcall) -> Result<Self, InvalidDomainRule> {
-        fn normalize(domains: Option<&Vec<String>>) -> Result<Vec<String>, InvalidDomainRule> {
-            domains
-                .into_iter()
-                .flatten()
-                .map(|domain| {
-                    canonical_domain(domain).ok_or_else(|| InvalidDomainRule(domain.clone()))
-                })
-                .collect()
-        }
-        Ok(Self {
-            allowed: normalize(subcall.allowed_domains.as_ref())?,
-            blocked: normalize(subcall.blocked_domains.as_ref())?,
-        })
-    }
-
-    /// The allow-list to put on the request, when it is small enough to be
-    /// accepted; `None` leaves filtering entirely to [`Self::admits`].
-    #[must_use]
-    pub fn request_filter(&self) -> Option<&[String]> {
-        (!self.allowed.is_empty() && self.allowed.len() <= MAX_REQUEST_ALLOWED_DOMAINS)
-            .then_some(self.allowed.as_slice())
-    }
-
-    /// Whether a harvested URL may be shown.
-    ///
-    /// Host-based, never substring-based: the URL is parsed and only its
-    /// canonical host is compared, so `https://allowed.example@evil.example/`,
-    /// `https://allowed.example.evil.example/` and `https://evil.example./`
-    /// are all rejected for an `allowed.example` allow-list. Comparison is by
-    /// whole label. Blocked wins over allowed.
-    #[must_use]
-    pub fn admits(&self, url: &str) -> bool {
-        let Ok(parsed) = reqwest::Url::parse(url) else {
-            return false;
-        };
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return false;
-        }
-        let Some(host) = parsed.host_str().and_then(canonical_domain) else {
-            return false;
-        };
-        // Whole-label suffix match without building a string per rule.
-        let matches = |domain: &String| {
-            host == *domain
-                || host
-                    .strip_suffix(domain.as_str())
-                    .is_some_and(|parent| parent.ends_with('.'))
-        };
-        if self.blocked.iter().any(matches) {
-            return false;
-        }
-        self.allowed.is_empty() || self.allowed.iter().any(matches)
-    }
-}
-
-/// Builds the xAI Responses body that runs one hosted `web_search`.
-///
-/// Mirrors the shape the official grok-build CLI's fallback search client
-/// sends, plus the streaming fields the harvest depends on. `tool_choice`
-/// is `required` so a missing `web_search_call` means the search failed
-/// rather than that the model chose not to search — verified against a child
-/// whose advertised hosted-tool set is exactly `web_search`.
-#[must_use]
-pub fn xai_search_request_body(
-    subcall: &Subcall,
-    policy: &DomainPolicy,
-    upstream_model: &str,
-) -> Value {
-    let mut tool = json!({"type": "web_search"});
-    if let Some(allowed) = policy.request_filter() {
-        tool["filters"] = json!({"allowed_domains": allowed});
-    }
-    json!({
-        "model": upstream_model,
-        "input": subcall.query,
-        "instructions": "Search the web for the query. Reply with the source URLs only.",
-        "tools": [tool],
-        "tool_choice": "required",
-        "stream": true,
-        "stream_tool_calls": true,
-        "store": false,
-        "temperature": 0.1,
-        "top_p": 0.95,
-        "max_output_tokens": 8192,
-    })
-}
-
-/// What a chunk fed to [`XaiSourceHarvester`] produced.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Harvested {
-    /// The first completed hosted search carrying admissible URLs.
-    Sources(Vec<Link>),
-    /// A terminal event arrived with no admissible URL; the reason is for logs.
-    Ended(&'static str),
-}
-
-/// Streams an xAI Responses SSE body and yields the source URLs of the first
-/// completed hosted `web_search_call` that carries any admissible one.
-///
-/// Event-name agnostic — only the `data:` payload's `type` field is trusted.
-/// The child has always been observed to send `event:` lines; tolerating their
-/// absence is defensive, since SSE permits it.
-pub struct XaiSourceHarvester {
-    policy: DomainPolicy,
-    events: crate::usage::SseEventBuffer,
-}
-
-impl XaiSourceHarvester {
-    #[must_use]
-    pub fn new(policy: DomainPolicy) -> Self {
-        Self {
-            policy,
-            events: crate::usage::SseEventBuffer::default(),
-        }
-    }
-
-    /// Feeds raw response bytes in arrival order.
-    ///
-    /// Returns `Some` exactly once: either the harvest, or the terminal state
-    /// that rules one out. Items that complete with no admissible source
-    /// (`open_page` actions, fully filtered searches) are skipped and the
-    /// stream keeps being read.
-    pub fn push(&mut self, chunk: &[u8]) -> Option<Harvested> {
-        if self.events.is_disabled() {
-            return None;
-        }
-        if !self.events.push(chunk) {
-            return Some(Harvested::Ended("oversized stream"));
-        }
-        let Self { policy, events } = self;
-        let found = events.drain(|event| {
-            let payload = crate::usage::parse_event(event)?.data;
-            if payload.trim() == "[DONE]" {
-                return Some(Harvested::Ended("stream done without sources"));
-            }
-            let data = serde_json::from_str::<Value>(&payload).ok()?;
-            match data.get("type").and_then(Value::as_str) {
-                Some("response.output_item.done") => {
-                    let links = links_from_item(policy, data.get("item"));
-                    (!links.is_empty()).then_some(Harvested::Sources(links))
-                }
-                Some("response.failed" | "response.error" | "error") => {
-                    Some(Harvested::Ended("stream failed"))
-                }
-                Some("response.completed" | "response.incomplete") => {
-                    Some(Harvested::Ended("stream completed without sources"))
-                }
-                _ => None,
-            }
-        });
-        if found.is_some() {
-            // One outcome per stream: everything after it is the drain's
-            // business, not the harvest's.
-            self.events.disable();
-        }
-        found
-    }
-}
-
-/// The admissible, deduplicated URLs of a completed `web_search_call` item.
-/// Titles do not exist on this path, so the URL is its own label.
-fn links_from_item(policy: &DomainPolicy, item: Option<&Value>) -> Vec<Link> {
-    let Some(item) = item else {
-        return Vec::new();
-    };
-    if item.get("type").and_then(Value::as_str) != Some("web_search_call")
-        || item.get("status").and_then(Value::as_str) != Some("completed")
-    {
-        return Vec::new();
-    }
-    let Some(sources) = item
-        .get("action")
-        .and_then(|action| action.get("sources"))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let mut links = Links::default();
-    for source in sources {
-        let kind = source.get("type").and_then(Value::as_str);
-        if !matches!(kind, None | Some("url")) {
-            continue;
-        }
-        let Some(url) = source.get("url").and_then(Value::as_str) else {
-            continue;
-        };
-        if policy.admits(url) {
-            links.push(url, url);
-        }
-        if links.full() {
-            break;
-        }
-    }
-    links.links
-}
-
 /// Anthropic's error codes for a server-side search that could not run.
 pub mod search_error {
     pub const UNAVAILABLE: &str = "unavailable";
@@ -681,135 +419,6 @@ fn websearch_message(
     })
 }
 
-/// Byte prefilter for the response tap: does this request declare Claude
-/// Code's client-side `WebSearch` tool? Keyed on the serialized `"name"`
-/// field (the harness emits compact JSON); false positives merely enable the
-/// passive tap, false negatives degrade to main-model-matched routing.
-#[must_use]
-pub fn declares_websearch_tool(body: &[u8]) -> bool {
-    memchr::memmem::find(body, b"\"name\":\"WebSearch\"").is_some()
-}
-
-/// Extracts the session id from a Messages request's top-level
-/// `metadata.user_id` (a JSON-encoded string). The `metadata` value is
-/// located with the DOM-free top-level scanner, so multi-megabyte main-loop
-/// bodies are never fully parsed and session-id-shaped text inside message
-/// content cannot spoof the key.
-#[must_use]
-pub fn session_id(body: &[u8]) -> Option<String> {
-    let range = crate::routing::find_top_level_value_range(body, "metadata")?;
-    let metadata = serde_json::from_slice::<Value>(&body[range]).ok()?;
-    let user_id = metadata.get("user_id")?.as_str()?;
-    let user_id = serde_json::from_str::<Value>(user_id).ok()?;
-    user_id.get("session_id")?.as_str().map(ToOwned::to_owned)
-}
-
-/// A `WebSearch` tool invocation observed in a model response.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SniffedSearch {
-    pub query: String,
-    pub allowed_domains: Option<Vec<String>>,
-    pub blocked_domains: Option<Vec<String>>,
-}
-
-impl SniffedSearch {
-    fn from_input(input: &Value) -> Option<Self> {
-        let query = input.get("query")?.as_str()?.trim().to_string();
-        (!query.is_empty()).then(|| Self {
-            query,
-            allowed_domains: string_list(input.get("allowed_domains")),
-            blocked_domains: string_list(input.get("blocked_domains")),
-        })
-    }
-}
-
-/// Cap on one accumulated `tool_use` input.
-const MAX_SNIFF_INPUT_BYTES: usize = 64 * 1024;
-
-/// Passive observer of a streamed `/v1/messages` response, yielding
-/// `WebSearch` tool invocations as they complete. Feed the raw SSE bytes in
-/// arrival order; the caller must commit the yielded searches BEFORE
-/// forwarding the chunk that produced them (the client can act on the
-/// completing event the moment it sees it). Claude Code streams every turn
-/// that declares the tool, so a buffered response is not tapped.
-pub struct ToolUseSniffer {
-    events: crate::usage::SseEventBuffer,
-    /// `content_block` index → accumulated `input_json_delta` fragments for
-    /// blocks named `WebSearch`.
-    pending_inputs: std::collections::HashMap<u64, String>,
-}
-
-impl ToolUseSniffer {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            events: crate::usage::SseEventBuffer::default(),
-            pending_inputs: std::collections::HashMap::new(),
-        }
-    }
-
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<SniffedSearch> {
-        if !self.events.push(chunk) {
-            self.pending_inputs.clear();
-            return Vec::new();
-        }
-        let Self {
-            events,
-            pending_inputs,
-        } = self;
-        let mut found = Vec::new();
-        // The closure never returns `Some`, so every buffered event is seen.
-        events.drain(|event| {
-            let data =
-                serde_json::from_str::<Value>(&crate::usage::parse_event(event)?.data).ok()?;
-            let index = data.get("index").and_then(Value::as_u64);
-            match data.get("type").and_then(Value::as_str) {
-                Some("content_block_start") => {
-                    let block = data.get("content_block")?;
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                        && block.get("name").and_then(Value::as_str) == Some("WebSearch")
-                        && let Some(index) = index
-                    {
-                        pending_inputs.insert(index, String::new());
-                    }
-                }
-                Some("content_block_delta") => {
-                    if let Some(index) = index
-                        && let Some(accumulated) = pending_inputs.get_mut(&index)
-                        && let Some(fragment) = data
-                            .get("delta")
-                            .filter(|delta| {
-                                delta.get("type").and_then(Value::as_str)
-                                    == Some("input_json_delta")
-                            })
-                            .and_then(|delta| delta.get("partial_json"))
-                            .and_then(Value::as_str)
-                    {
-                        if accumulated.len().saturating_add(fragment.len()) > MAX_SNIFF_INPUT_BYTES
-                        {
-                            pending_inputs.remove(&index);
-                        } else {
-                            accumulated.push_str(fragment);
-                        }
-                    }
-                }
-                Some("content_block_stop") => {
-                    if let Some(index) = index
-                        && let Some(accumulated) = pending_inputs.remove(&index)
-                        && let Ok(input) = serde_json::from_str::<Value>(&accumulated)
-                        && let Some(search) = SniffedSearch::from_input(&input)
-                    {
-                        found.push(search);
-                    }
-                }
-                _ => {}
-            }
-            None::<()>
-        });
-        found
-    }
-}
-
 /// Builds the normalized Anthropic-native request that answers a sub-call on
 /// behalf of a Claude-origin agent. Fields are allowlisted from the original
 /// body because its tuning fields (`output_config.effort`, `thinking`, ...)
@@ -843,150 +452,6 @@ pub fn native_request_body(original: &[u8], origin_model: &str) -> Option<Vec<u8
         .min(MAX_NATIVE_OUTPUT_TOKENS);
     normalized.insert("max_tokens".into(), json!(max_tokens));
     serde_json::to_vec(&Value::Object(normalized)).ok()
-}
-
-/// Which model asked for a pending web search.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Origin {
-    /// Any routed model — GPT, Grok, or open-weights — by its routing ID.
-    Gpt {
-        routing_id: String,
-    },
-    Claude {
-        model: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PendingKey {
-    pub session_id: String,
-    pub query: String,
-    pub allowed_domains: Vec<String>,
-    pub blocked_domains: Vec<String>,
-}
-
-impl PendingKey {
-    /// The key a sub-call is looked up by; must derive exactly as
-    /// [`Self::for_sniffed`] does or the two sides never match.
-    #[must_use]
-    pub fn for_subcall(session_id: String, subcall: &Subcall) -> Self {
-        Self::new(
-            session_id,
-            &subcall.query,
-            subcall.allowed_domains.as_deref(),
-            subcall.blocked_domains.as_deref(),
-        )
-    }
-
-    /// The key an observed `tool_use` is recorded under.
-    #[must_use]
-    pub fn for_sniffed(session_id: String, search: &SniffedSearch) -> Self {
-        Self::new(
-            session_id,
-            &search.query,
-            search.allowed_domains.as_deref(),
-            search.blocked_domains.as_deref(),
-        )
-    }
-
-    #[must_use]
-    pub fn new(
-        session_id: String,
-        query: &str,
-        allowed_domains: Option<&[String]>,
-        blocked_domains: Option<&[String]>,
-    ) -> Self {
-        fn canonical(domains: Option<&[String]>) -> Vec<String> {
-            let mut domains = domains
-                .unwrap_or_default()
-                .iter()
-                .map(|domain| domain.to_lowercase())
-                .collect::<Vec<_>>();
-            domains.sort();
-            domains
-        }
-        Self {
-            session_id,
-            query: query.trim().to_string(),
-            allowed_domains: canonical(allowed_domains),
-            blocked_domains: canonical(blocked_domains),
-        }
-    }
-}
-
-/// Entries expire after this long; the harness issues the sub-call within
-/// seconds of the `tool_use` reaching it.
-const PENDING_TTL: std::time::Duration = std::time::Duration::from_mins(2);
-/// Total queued entries across all keys; oldest dropped first.
-const MAX_PENDING_TOTAL: usize = 256;
-
-struct PendingEntry {
-    origin: Origin,
-    inserted: std::time::Instant,
-}
-
-/// Observed-but-not-yet-consumed `WebSearch` invocations, keyed by session,
-/// query, and domain filters. Same-key entries queue FIFO so concurrent
-/// identical queries degrade to an ordering heuristic instead of losing
-/// entries.
-#[derive(Default)]
-pub struct PendingSearches {
-    inner: std::sync::Mutex<
-        std::collections::HashMap<PendingKey, std::collections::VecDeque<PendingEntry>>,
-    >,
-}
-
-impl PendingSearches {
-    pub fn insert(&self, key: PendingKey, origin: Origin) {
-        let now = std::time::Instant::now();
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        inner.retain(|_, queue| {
-            queue.retain(|entry| now.duration_since(entry.inserted) < PENDING_TTL);
-            !queue.is_empty()
-        });
-        let total: usize = inner.values().map(std::collections::VecDeque::len).sum();
-        if total >= MAX_PENDING_TOTAL {
-            // Drop the globally oldest entry.
-            if let Some(oldest_key) = inner
-                .iter()
-                .filter_map(|(key, queue)| queue.front().map(|entry| (key, entry.inserted)))
-                .min_by_key(|(_, inserted)| *inserted)
-                .map(|(key, _)| key.clone())
-                && let Some(queue) = inner.get_mut(&oldest_key)
-            {
-                queue.pop_front();
-                if queue.is_empty() {
-                    inner.remove(&oldest_key);
-                }
-            }
-        }
-        inner.entry(key).or_default().push_back(PendingEntry {
-            origin,
-            inserted: now,
-        });
-    }
-
-    pub fn consume(&self, key: &PendingKey) -> Option<Origin> {
-        let now = std::time::Instant::now();
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let queue = inner.get_mut(key)?;
-        while let Some(entry) = queue.pop_front() {
-            if now.duration_since(entry.inserted) < PENDING_TTL {
-                if queue.is_empty() {
-                    inner.remove(key);
-                }
-                return Some(entry.origin);
-            }
-        }
-        inner.remove(key);
-        None
-    }
 }
 
 /// Strips the search backend's private-use citation markers
@@ -1533,7 +998,7 @@ mod tests {
         let events: Vec<(String, Value)> = frames
             .iter()
             .map(|frame| {
-                let parsed = crate::usage::parse_event(frame).unwrap();
+                let parsed = crate::sse::parse_event(frame).unwrap();
                 (
                     parsed.name.unwrap().to_string(),
                     serde_json::from_str(&parsed.data).unwrap(),
@@ -1663,7 +1128,7 @@ mod tests {
     #[test]
     fn sniffer_disables_itself_on_oversized_buffers() {
         let mut sniffer = ToolUseSniffer::new();
-        let big = vec![b'x'; crate::usage::MAX_SCAN_BUFFER_BYTES + 1];
+        let big = vec![b'x'; crate::sse::MAX_SCAN_BUFFER_BYTES + 1];
         assert_eq!(sniffer.push(&big), vec![]);
         // Later well-formed events are ignored once disabled.
         let event = sse_event(&json!({"type":"content_block_start","index":0,
@@ -1896,7 +1361,7 @@ mod tests {
     #[test]
     fn oversized_streams_end_the_harvest() {
         let mut harvester = XaiSourceHarvester::new(DomainPolicy::default());
-        let big = vec![b'x'; crate::usage::MAX_SCAN_BUFFER_BYTES + 1];
+        let big = vec![b'x'; crate::sse::MAX_SCAN_BUFFER_BYTES + 1];
         assert_eq!(
             harvester.push(&big),
             Some(Harvested::Ended("oversized stream"))

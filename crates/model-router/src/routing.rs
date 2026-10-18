@@ -1,3 +1,9 @@
+//! Reading a request body just enough to route it: the top-level `model`
+//! (exact match against the configured routes), `stream`, and
+//! `output_config.effort`, and rewriting only the `model` token. A DOM-free
+//! scan, because main-loop bodies run to megabytes and the Claude branch
+//! forwards them byte-exact.
+
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -27,6 +33,7 @@ impl RoutingDecision<'_> {
     }
 }
 
+/// Matches the top-level `model` exactly against every served route.
 #[must_use]
 pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
     // The streaming scanner skips every value except the top-level `model`

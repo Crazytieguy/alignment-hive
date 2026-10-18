@@ -1,3 +1,8 @@
+//! The `model-router` binary: CLI parsing and the glue from each subcommand
+//! to the library. `serve` owns the startup order: bind the port first so a
+//! taken one fails fast, then discover provider windows, then start the
+//! managed child, serving Claude traffic even when the child cannot start.
+
 #![warn(clippy::pedantic)]
 
 use std::path::PathBuf;

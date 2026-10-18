@@ -1,3 +1,8 @@
+//! Header policy at the router's boundaries: hop-by-hop headers are never
+//! forwarded, and GPT-bound requests lose every Claude credential (and
+//! `anthropic-beta`), carry the local gateway credential instead when one is
+//! configured, and get the shared prompt-cache identity.
+
 use std::collections::HashSet;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
@@ -31,6 +36,8 @@ pub fn is_credential_header(name: &str) -> bool {
     CREDENTIAL_HEADERS.contains(&name)
 }
 
+/// The local gateway secret GPT-bound requests present to `CLIProxyAPI`, in
+/// both the `x-api-key` and bearer forms, each marked sensitive.
 #[derive(Clone)]
 pub struct GptUpstreamCredential {
     api_key: HeaderValue,
@@ -60,6 +67,7 @@ impl GptUpstreamCredential {
         headers.insert(header::AUTHORIZATION, self.authorization.clone());
     }
 
+    /// [`Self::insert_into`] for a reqwest side call.
     pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut headers = HeaderMap::new();
         self.insert_into(&mut headers);
@@ -85,6 +93,11 @@ pub fn with_cache_identity(input: &HeaderMap, key: &str) -> HeaderMap {
     output
 }
 
+/// The inbound headers to forward upstream: hop-by-hop headers (and those
+/// `Connection` names) and `Host` dropped, and `Content-Length` too when the
+/// body was rewritten. With `strip_credentials` (the GPT branch), every
+/// credential header and `anthropic-beta` are dropped as well, and
+/// `gpt_credential`, if any, is attached.
 #[must_use]
 pub fn request_headers(
     input: &HeaderMap,
@@ -104,6 +117,9 @@ pub fn request_headers(
     output
 }
 
+/// The upstream response headers to pass on: hop-by-hop headers (and those
+/// `Connection` names) dropped, and `Content-Length` and `Content-Encoding`
+/// too when the body was rewritten.
 #[must_use]
 pub fn response_headers(input: &HeaderMap, body_changed: bool) -> HeaderMap {
     filter(input, |name| {

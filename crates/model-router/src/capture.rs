@@ -1,3 +1,8 @@
+//! Opt-in request/response capture (`[capture]`): one JSON line per request,
+//! appended to a `0600` file, with credential header values redacted. The
+//! recorded response body stops at a configured bound; the client stream
+//! never does. A stream the client drops mid-response is still recorded.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

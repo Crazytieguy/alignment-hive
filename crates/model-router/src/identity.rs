@@ -1,3 +1,7 @@
+//! The honest-identity system block the GPT branch prepends to every routed
+//! request, so a routed model reads Claude Code's system prompt as addressed
+//! to it without presenting itself as Claude.
+
 use serde_json::{Value, json};
 
 /// Builds the honest-identity system text for a routed model.
