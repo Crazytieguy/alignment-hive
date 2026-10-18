@@ -1,3 +1,13 @@
+//! MCP server for cloud GPU machines with persistent Jupyter kernels.
+//!
+//! `server` holds the MCP tools. `runtime` abstracts the machine providers
+//! (`RunPod`, vast.ai, Kubernetes, and a local fake for tests) over the raw API
+//! clients in `runpod` and `vast`. `state` and `ledger` are the durable
+//! per-machine records and spend accounting; `heartbeat` and
+//! `machine_scripts` supervise each machine from the server and from the
+//! machine itself. This file also holds the provider-HTTP helpers every
+//! client shares.
+
 #![warn(clippy::pedantic)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::module_name_repetitions)]

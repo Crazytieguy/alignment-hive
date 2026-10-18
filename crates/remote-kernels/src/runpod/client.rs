@@ -1,3 +1,7 @@
+//! HTTP calls to `RunPod` v2. Errors keep their HTTP status
+//! ([`RunPodError::Api`]) so callers classify outcomes by status, never by
+//! message text.
+
 use reqwest::Client;
 use serde::Deserialize;
 

@@ -1,3 +1,6 @@
+//! Binary entry point: serves the MCP server over stdio, or prints the
+//! config template (`config-template`).
+
 use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use std::path::PathBuf;

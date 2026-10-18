@@ -1,3 +1,8 @@
+//! The local `.ipynb` transcript of everything executed on a kernel, saved
+//! atomically after every change so it survives crashes and can be read back
+//! to recover context. Cells are addressed by 1-indexed position
+//! (`cell_number`), never by execution count.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -18,8 +23,7 @@ impl Notebook {
     /// otherwise falls back to a short prefix of the kernel ID.
     /// `notebook_dir` is the directory to store notebooks in (absolute path).
     pub fn new(notebook_dir: &Path, kernel_id: &str, name: Option<&str>) -> anyhow::Result<Self> {
-        let dir = notebook_dir;
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(notebook_dir)?;
 
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let label = match name {
@@ -28,13 +32,13 @@ impl Notebook {
         };
         let kernel_fragment = sanitize_filename(&kernel_id[..8.min(kernel_id.len())]);
         let unique = &uuid::Uuid::new_v4().simple().to_string()[..8];
-        let path = dir.join(format!(
+        let path = notebook_dir.join(format!(
             "{timestamp}_{label}_{kernel_fragment}_{unique}.ipynb"
         ));
 
         let notebook = Self {
             path,
-            metadata: notebook_metadata(kernel_id, None),
+            metadata: notebook_metadata(kernel_id),
             cells: Vec::new(),
             execution_count: 0,
         };
@@ -268,8 +272,8 @@ impl Notebook {
     }
 }
 
-fn notebook_metadata(kernel_id: &str, continuation: Option<&str>) -> Value {
-    let mut metadata = json!({
+fn notebook_metadata(kernel_id: &str) -> Value {
+    json!({
         "kernelspec": {
             "display_name": "Python 3",
             "language": "python",
@@ -282,11 +286,7 @@ fn notebook_metadata(kernel_id: &str, continuation: Option<&str>) -> Value {
         "remote_kernels": {
             "kernel_id": kernel_id
         }
-    });
-    if let Some(reason) = continuation {
-        metadata["remote_kernels"]["continuation"] = json!(reason);
-    }
-    metadata
+    })
 }
 
 fn validate_cell(cell: &Value) -> anyhow::Result<()> {

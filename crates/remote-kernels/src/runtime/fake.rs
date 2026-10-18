@@ -194,7 +194,8 @@ impl Default for FakeRuntime {
 }
 
 /// Runtime capabilities, exposed credential-free so config validation can
-/// consult them at load time (see [`super::validate_config`]). Meteredness is
+/// consult them at load time (see
+/// [`super::validate_config_with_budget_source`]). Meteredness is
 /// per-instance for the fake runtime (e2e tests simulate billing); validation
 /// treats it as unmetered since fake machines never cost real money.
 pub(crate) fn capabilities(metered: bool) -> Capabilities {

@@ -4,7 +4,7 @@
 # fenced finalizing state, then executes the provider action. Exit codes: 0
 # success/already installed, 11 bad config, 12 missing flock, 13 unusable state
 # directory, 14 missing dependency; lease exits 9/10 abort an action cleanly.
-# This file contains no single quotes for later single-quote-wrapped SSH transport.
+# This file contains no single quotes so it can travel inside single-quote-wrapped SSH.
 # heartbeat is "<generation> <epoch>"; budget_deadline is one absolute epoch.
 # install is the supported entry; supervise is internal. An optional final
 # install argument supplies the hourly storage rate written for stop outcomes.

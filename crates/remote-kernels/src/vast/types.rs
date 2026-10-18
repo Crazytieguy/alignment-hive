@@ -1,17 +1,18 @@
-// vast.ai API types — hand-written against the official OpenAPI spec
-// (docs.vast.ai/api-reference/openapi.yaml, vendored at tests/vast-openapi.yaml).
-// The spec has almost no operationIds, which rules out clean codegen; these
-// models cover exactly the endpoints we use and are validated against the
-// vendored spec by tests/vast_spec.rs.
-//
-// Base URL: https://console.vast.ai
-// - POST /api/v0/bundles/            search offers
-// - PUT  /api/v0/asks/{id}/          create instance from an offer
-// - GET  /api/v1/instances/          list/query instances (note: v1)
-// - PUT  /api/v0/instances/{id}/     change state (running/stopped) or label
-// - DELETE /api/v0/instances/{id}/   destroy
-// - GET  /api/v0/users/current/      account (balance)
-// - POST /api/v0/ssh/ + DELETE /api/v0/ssh/{id}/  account SSH keys
+//! vast.ai API types — hand-written against the official `OpenAPI` spec
+//! (docs.vast.ai/api-reference/openapi.yaml, vendored at `tests/vast-openapi.yaml`).
+//! The spec has almost no operationIds, which rules out clean codegen; these
+//! models cover exactly the endpoints we use and are validated against the
+//! vendored spec by `tests/vast_spec.rs`.
+//!
+//! Base URL: <https://console.vast.ai>
+//! - `POST /api/v0/bundles/`            search offers
+//! - `PUT  /api/v0/asks/{id}/`          create instance from an offer
+//! - `GET  /api/v1/instances/`          list/query instances (note: v1)
+//! - `PUT  /api/v0/instances/{id}/`     change state (running/stopped) or label
+//! - `DELETE /api/v0/instances/{id}/`   destroy
+//! - `GET  /api/v0/users/current/`      account (balance)
+//! - `GET`/`POST /api/v0/ssh/` + `DELETE /api/v0/ssh/{id}/`  account SSH keys
+//! - `POST /api/v0/instances/{id}/ssh/` attach a key to one instance
 
 use std::collections::HashMap;
 

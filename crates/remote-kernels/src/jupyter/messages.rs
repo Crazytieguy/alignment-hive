@@ -1,3 +1,8 @@
+//! Jupyter wire messages and [`ExecutionOutput`], which folds one
+//! execution's `IOPub` stream into ordered outputs that render both into the
+//! notebook (full mime bundles) and into the reply to the model (text plus
+//! returned images).
+
 use serde::{Deserialize, Serialize};
 
 use crate::images::ImageCollector;

@@ -1,7 +1,7 @@
 //! Live RunPod regression — SPENDS REAL MONEY (cents; the instance is
-//! terminated on the way out, including on panic). Validates that the ported
-//! RunPod backend behaves like the pre-refactor implementation, including the
-//! stop/resume path (which RunPod supports fully).
+//! terminated on the way out, including on panic). Exercises the RunPod
+//! backend end to end, including the stop/resume path (which RunPod supports
+//! fully).
 //!
 //! Requires `RUNPOD_API_KEY` (read from the repo root .env.local when present).
 //!
@@ -377,8 +377,8 @@ volume-gb = 0
     assert!(text.contains("Attached"), "{text}");
     eprintln!("resumed: {text}");
 
-    // The resumed pod must expose ssh.direct again — the resume leg is where
-    // v1's GraphQL lookup used to be re-run.
+    // The resumed pod must expose ssh.direct again: resume is where the SSH
+    // endpoint has to be rediscovered.
     let pod = client.get_pod(&pod_id).await.expect("get_pod after resume");
     assert!(
         pod.direct_ssh().is_some(),

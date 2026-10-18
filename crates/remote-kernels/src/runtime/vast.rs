@@ -859,7 +859,7 @@ impl Runtime for VastRuntime {
 
         self.wait_ssh_reachable(id, ctx, &ssh).await?;
 
-        // SSH readiness no longer implies onstart completion (the key
+        // SSH readiness does not imply onstart completion (the key
         // re-assert makes SSH usable within seconds of boot), and user
         // onstart lines often install what the jupyter command runs (uv,
         // docker, envs). Block on the marker our generated onstart touches
@@ -1041,11 +1041,11 @@ impl Connection for VastConnection {
         project_dir: &Path,
         extra_includes: &[String],
     ) -> anyhow::Result<String> {
-        crate::sync::sync_to_pod(project_dir, &self.ssh, &self.workdir, extra_includes).await
+        crate::sync::upload_over_ssh(project_dir, &self.ssh, &self.workdir, extra_includes).await
     }
 
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        crate::sync::download_from_pod(&self.ssh, remote_path, local_path, &self.workdir).await
+        crate::sync::download_over_ssh(&self.ssh, remote_path, local_path, &self.workdir).await
     }
 
     /// Best-effort finalize: there is no credential-free way to destroy a
@@ -1305,7 +1305,6 @@ mod tests {
                     let Ok(mut stream) = stream else { break };
                     let mut buf = Vec::new();
                     let mut tmp = [0u8; 4096];
-                    // Read headers.
                     let header_end = loop {
                         use std::io::Read;
                         let Ok(n) = stream.read(&mut tmp) else {

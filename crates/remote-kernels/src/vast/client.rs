@@ -1,3 +1,7 @@
+//! HTTP calls to vast.ai. Non-2xx responses surface as [`ApiStatusError`]
+//! so callers can tell a dead credential or bad config apart from one
+//! unavailable offer.
+
 use reqwest::Client;
 use serde_json::json;
 

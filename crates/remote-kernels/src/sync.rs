@@ -1,3 +1,8 @@
+//! Moving project files between this machine and a remote one: the rsync
+//! upload/download used by the SSH runtimes, the rsync filter every runtime's
+//! upload shares, and the path-containment checks every tool parameter that
+//! names a local path goes through.
+
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 
@@ -42,7 +47,7 @@ pub fn rsync_upload_args(extra_includes: &[String]) -> Vec<String> {
 pub fn validate_project_relative(path: &str) -> Result<(), String> {
     let has_parent_component = Path::new(path)
         .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir));
+        .any(|c| matches!(c, Component::ParentDir));
     if path.starts_with('/') || has_parent_component {
         return Err(format!(
             "Invalid path: {path:?}. Paths must be relative to the project root. Absolute paths and '..' are not allowed.",
@@ -167,21 +172,18 @@ pub fn validate_include_paths(includes: &[String]) -> Result<(), String> {
         .try_for_each(|path| validate_project_relative(path))
 }
 
-/// rsync local project files to the pod.
+/// rsync local project files to an SSH machine (`RunPod`, vast.ai), with the
+/// shared [`rsync_upload_args`] filtering.
 ///
-/// Uses the ephemeral SSH key generated at pod creation.
-/// Respects `.gitignore` via rsync's `--filter=':- .gitignore'`.
-/// Extra include paths are added before the gitignore filter so they take priority.
-///
-/// Ensures rsync is available on the pod before syncing (installed lazily
-/// here — it is not part of the base `runpod/pytorch` image).
-pub async fn sync_to_pod(
+/// Ensures rsync is available on the machine first (installed lazily here:
+/// it is not part of the base `runpod/pytorch` image).
+pub async fn upload_over_ssh(
     project_dir: &Path,
     ssh: &crate::ssh_exec::SshEndpoint,
     remote_path: &str,
     extra_includes: &[String],
 ) -> anyhow::Result<String> {
-    ensure_rsync_on_pod(ssh).await?;
+    ensure_remote_rsync(ssh).await?;
 
     let ssh_cmd = ssh.rsync_transport();
 
@@ -214,8 +216,8 @@ pub async fn sync_to_pod(
     Ok("Files synced successfully.".to_string())
 }
 
-/// Ensure rsync is installed on the pod. No-op if already present.
-async fn ensure_rsync_on_pod(ssh: &crate::ssh_exec::SshEndpoint) -> anyhow::Result<()> {
+/// Ensure rsync is installed on the machine. No-op if already present.
+async fn ensure_remote_rsync(ssh: &crate::ssh_exec::SshEndpoint) -> anyhow::Result<()> {
     ssh.cmd(
         "which rsync || (apt-get update -qq && apt-get install -y -qq rsync)",
         std::time::Duration::from_mins(2),
@@ -240,16 +242,16 @@ pub fn resolve_remote_path(remote_workdir: &str, remote_path: &str) -> String {
     }
 }
 
-/// Download a file or directory from the pod to a local path. Path
+/// Download a file or directory from an SSH machine to a local path. Path
 /// semantics come from [`resolve_remote_path`] so all backends behave
 /// identically.
-pub async fn download_from_pod(
+pub async fn download_over_ssh(
     ssh: &crate::ssh_exec::SshEndpoint,
     remote_path: &str,
     local_path: &Path,
     remote_workdir: &str,
 ) -> anyhow::Result<String> {
-    ensure_rsync_on_pod(ssh).await?;
+    ensure_remote_rsync(ssh).await?;
 
     let ssh_cmd = ssh.rsync_transport();
 
@@ -257,7 +259,6 @@ pub async fn download_from_pod(
     let source = format!("{}@{}:{remote_path}", ssh.user, ssh.host);
     let destination = local_path.display().to_string();
 
-    // Ensure parent directory exists.
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -175,7 +175,7 @@ async fn establish_and_run(
     // oplock across it starves explicit stop()/terminate() of the one lock
     // they need to END a billing machine (observed live on RunPod). The lock
     // is dropped here and re-acquired only around the lease-acquire critical
-    // section, then held through watchdog install as before.
+    // section, then held through watchdog install.
     drop(operation_lock);
     let project_dir = state.lock().await.project_dir.clone();
     let (lease, mut operation_lock) = loop {

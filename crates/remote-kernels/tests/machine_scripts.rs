@@ -1,3 +1,8 @@
+//! Behavior tests for the machine-side lease and watchdog scripts, run
+//! locally under bash. The helpers in `scripts/machine/test-support` stand in
+//! for `flock`, Jupyter's kernel list, finalize commands, and the provider
+//! action.
+
 use std::ffi::OsString;
 use std::fs;
 use std::net::{TcpListener, TcpStream};

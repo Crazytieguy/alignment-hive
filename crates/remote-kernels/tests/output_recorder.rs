@@ -1,3 +1,6 @@
+//! Unit tests for `rk-output-recorder.py`: each test loads the script as a
+//! Python module and asserts against its functions directly.
+
 use std::process::Command;
 
 fn run_python(body: &str) {

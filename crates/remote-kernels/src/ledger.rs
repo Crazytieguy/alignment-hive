@@ -1,4 +1,16 @@
 //! Crash-safe, per-machine provider spend accounting.
+//!
+//! Spend is derived rather than kept as a running total: each machine has an
+//! append-only `<machine_id>.jsonl` of billing events, and [`fold_events`]
+//! integrates their rates over time up to "now". An append goes through a
+//! write-ahead record in `wal/` (prepare, then commit), and every event
+//! carries a uuid, so a crashed or retried append lands exactly once.
+//!
+//! Events belong to the epoch named in `epoch.json`. When the last instance
+//! record is cleared the epoch closes: per-owner totals merge into
+//! `owner-rollups.json` (so a session's budget survives the GC) and the
+//! epoch's ledgers become deletable. Every operation holds [`EpochGuard`],
+//! an exclusive flock on `.epoch-lock`.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;

@@ -1,3 +1,8 @@
+//! SSH key material for machine access: per-instance and stable keypairs,
+//! crash-atomic key migration, and the permission check every key passes
+//! before it is handed to `ssh`. Command execution over SSH lives in
+//! [`crate::ssh_exec`].
+
 use std::path::{Path, PathBuf};
 
 use ssh_key::private::Ed25519Keypair;

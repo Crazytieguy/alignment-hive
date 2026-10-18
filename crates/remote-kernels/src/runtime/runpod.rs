@@ -1423,7 +1423,7 @@ impl Connection for RunPodConnection {
         project_dir: &Path,
         extra_includes: &[String],
     ) -> anyhow::Result<String> {
-        crate::sync::sync_to_pod(
+        crate::sync::upload_over_ssh(
             project_dir,
             self.ssh_endpoint()?,
             &self.remote_workdir,
@@ -1433,7 +1433,7 @@ impl Connection for RunPodConnection {
     }
 
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
-        crate::sync::download_from_pod(
+        crate::sync::download_over_ssh(
             self.ssh_endpoint()?,
             remote_path,
             local_path,

@@ -1,13 +1,12 @@
-// RunPod REST API v2 types (https://api.runpod.io/v2).
-//
-// OpenAPI spec at https://api.runpod.io/v2/openapi.json; a verbatim copy is
-// vendored at tests/runpod-v2-openapi.json and pinned by tests/runpod_spec.rs
-// (every field we send must exist in the spec; every response shape we parse
-// comes from the spec's own examples).
-//
-// v2 replaced the v1 REST + GraphQL pair: the pod GET now carries the runtime
-// port mappings and SSH endpoints (`ssh.direct`) that only GraphQL used to
-// expose, so there is exactly one API to speak.
+//! `RunPod` REST API v2 types (<https://api.runpod.io/v2>).
+//!
+//! `OpenAPI` spec at <https://api.runpod.io/v2/openapi.json>; a verbatim copy
+//! is vendored at `tests/runpod-v2-openapi.json` and pinned by
+//! `tests/runpod_spec.rs` (every field we send must exist in the spec; every
+//! response shape we parse comes from the spec's own examples).
+//!
+//! The pod GET carries the runtime port mappings and SSH endpoints
+//! (`ssh.direct`), so this one API covers everything the backend needs.
 
 use std::collections::HashMap;
 
@@ -344,8 +343,7 @@ impl Pod {
             .unwrap_or("unknown")
     }
 
-    /// Public `(host, port)` for direct SSH, once the pod has one. This is
-    /// the fact the deleted GraphQL query used to fetch.
+    /// Public `(host, port)` for direct SSH, once the pod has one.
     pub fn direct_ssh(&self) -> Option<(String, u16)> {
         let direct = self.ssh.as_ref()?.direct.as_ref()?;
         Some((direct.host.clone()?, direct.port?))

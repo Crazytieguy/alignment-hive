@@ -1,4 +1,11 @@
 //! Embedded machine-side lifecycle scripts and their server-side client.
+//!
+//! The scripts in `scripts/machine/` are compiled in and run over the
+//! runtime's command transport: `rk-lease.sh` is the fenced lease state
+//! machine (active, armed, finalizing), `rk-watchdog.sh` the detached
+//! supervisor that cleans the machine up when the server goes quiet or the
+//! budget runs out. Everything they share lives under [`state_dir`] on the
+//! machine.
 
 use std::time::Duration;
 
@@ -19,14 +26,6 @@ pub const OUTPUT_RECORDER: &str = include_str!("../scripts/machine/rk-output-rec
 pub const EXIT_FENCED: i32 = 9;
 /// The terminal `finalizing` state refuses the requested operation.
 pub const EXIT_REFUSED: i32 = 10;
-/// The operation, arguments, or persisted lease are invalid.
-pub const EXIT_INVALID: i32 = 11;
-/// Bootstrap cannot find the required util-linux `flock` binary.
-pub const EXIT_NO_FLOCK: i32 = 12;
-/// Bootstrap cannot use the persistent state directory.
-pub const EXIT_BAD_STATE_DIR: i32 = 13;
-/// Bootstrap cannot find another required machine-side dependency.
-pub const EXIT_MISSING_DEPENDENCY: i32 = 14;
 
 const EXIT_SENTINEL: &str = "__RK_LEASE_EXIT__=";
 
@@ -71,12 +70,14 @@ pub fn state_dir(workdir: &str) -> String {
 }
 
 pub async fn read(conn: &AnyConnection) -> Result<LeaseState, LeaseError> {
-    let output = invoke(conn, &["read"]).await?;
-    serde_json::from_str(output.trim()).map_err(|error| LeaseError::Invalid(error.to_string()))
+    parse_json(&invoke(conn, &["read"]).await?)
 }
 
 pub async fn acquire(conn: &AnyConnection, owner_uuid: &str) -> Result<LeaseState, LeaseError> {
-    let output = invoke(conn, &["acquire", owner_uuid]).await?;
+    parse_json(&invoke(conn, &["acquire", owner_uuid]).await?)
+}
+
+fn parse_json<T: serde::de::DeserializeOwned>(output: &str) -> Result<T, LeaseError> {
     serde_json::from_str(output.trim()).map_err(|error| LeaseError::Invalid(error.to_string()))
 }
 
@@ -136,13 +137,7 @@ pub async fn complete_stop(conn: &AnyConnection, op_id: &str) -> Result<(), Leas
 /// machine's NEXT finalize (the watchdog refuses a new provider action while
 /// an unresolved outcome exists) — so a resumed machine must shed it.
 pub async fn clear_outcome<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    let path = format!("{}/outcome.json", state_dir(conn.workdir()));
-    conn.exec(
-        &format!("rm -f {}", shell_quote(&path)),
-        Duration::from_secs(10),
-    )
-    .await?;
-    Ok(())
+    remove_state_file(conn, "outcome.json").await
 }
 
 pub async fn read_outcome(conn: &AnyConnection) -> Result<crate::state::OutcomeMarker, LeaseError> {
@@ -152,7 +147,7 @@ pub async fn read_outcome(conn: &AnyConnection) -> Result<crate::state::OutcomeM
         .exec(&command, Duration::from_secs(10))
         .await
         .map_err(LeaseError::Transport)?;
-    serde_json::from_str(output.trim()).map_err(|error| LeaseError::Invalid(error.to_string()))
+    parse_json(&output)
 }
 
 pub async fn install_watchdog<C: Connection + ?Sized>(
@@ -229,19 +224,17 @@ pub async fn write_intent<C: Connection + ?Sized>(
 
 /// Remove the intent marker (queued finish completed or cancelled).
 pub async fn clear_intent<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    let path = format!("{}/intent.json", state_dir(conn.workdir()));
-    conn.exec(
-        &format!("rm -f {}", shell_quote(&path)),
-        Duration::from_secs(10),
-    )
-    .await?;
-    Ok(())
+    remove_state_file(conn, "intent.json").await
 }
 
 /// Remove the persisted budget deadline (a session with no budget must not
 /// run under a previous owner's window).
 pub async fn clear_budget_deadline<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    let path = format!("{}/budget_deadline", state_dir(conn.workdir()));
+    remove_state_file(conn, "budget_deadline").await
+}
+
+async fn remove_state_file<C: Connection + ?Sized>(conn: &C, name: &str) -> anyhow::Result<()> {
+    let path = format!("{}/{name}", state_dir(conn.workdir()));
     conn.exec(
         &format!("rm -f {}", shell_quote(&path)),
         Duration::from_secs(10),

@@ -2,8 +2,8 @@
 # Three-state fenced lease: active -> armed -> finalizing. Every read/check/write
 # is serialized by lease.lock; lease.json is replaced atomically. Exit codes:
 # 0 success, 9 fenced generation/operation, 10 finalizing refusal, 11 bad input
-# or corrupt state. This file contains no single quotes so it can later be
-# embedded in the existing single-quote-wrapped SSH transport. A numeric
+# or corrupt state. This file contains no single quotes so it can travel inside
+# the single-quote-wrapped SSH transport. A numeric
 # enter-finalizing authority is an explicit live-owner operation and may
 # override active, disconnect-armed, or budget-armed state.
 

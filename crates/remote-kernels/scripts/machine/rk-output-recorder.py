@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Persist IOPub JSONL (64 MiB + one predecessor); diagnostics (1 MiB + one)."""
+"""Machine-side recorder for one kernel's IOPub stream.
+
+Holds its own WebSocket to the kernel and appends every IOPub message to
+<state-dir>/kernel-output/<kernel-id>.jsonl, so outputs produced while no
+server is connected can be recovered later. The log rotates at 64 MiB and the
+diagnostic log at 1 MiB, each keeping one predecessor.
+"""
 
 import argparse
 import base64
@@ -56,12 +62,7 @@ class RotatingJsonl:
         line = json.dumps(value, separators=(",", ":")) + "\n"
         if self.output.tell() + len(line.encode("utf-8")) > self.max_bytes:
             self.output.close()
-            predecessor = self.path + ".1"
-            try:
-                os.unlink(predecessor)
-            except FileNotFoundError:
-                pass
-            os.replace(self.path, predecessor)
+            replace_predecessor(self.path)
             self.output = open(self.path, "a", encoding="utf-8", buffering=1)
         self.output.write(line)
         self.output.flush()
@@ -100,6 +101,10 @@ def rotate_path(path, max_bytes):
             return
     except FileNotFoundError:
         return
+    replace_predecessor(path)
+
+
+def replace_predecessor(path):
     predecessor = path + ".1"
     try:
         os.unlink(predecessor)

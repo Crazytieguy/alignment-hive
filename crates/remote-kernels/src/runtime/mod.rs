@@ -1,9 +1,9 @@
 //! Generic machine-provider abstraction.
 //!
 //! A [`Runtime`] provisions and manages machine lifecycles for one provider
-//! (`RunPod` today; vast.ai and Kubernetes planned). A [`Connection`] is the live
-//! transport to one machine: how to reach its Jupyter server, run infra
-//! commands, sync files, and install the on-machine watchdog.
+//! (`RunPod`, vast.ai, Kubernetes, and the test-only fake). A [`Connection`]
+//! is the live transport to one machine: how to reach its Jupyter server, run
+//! infra commands, sync files, and install the on-machine watchdog.
 //!
 //! The Jupyter kernel execution model is shared across all runtimes — only
 //! Claude's `execute()` code runs in kernels; infrastructure runs through
@@ -74,16 +74,13 @@ impl Capabilities {
     }
 }
 
-/// Validate the config's cleanup settings against runtime capabilities at
-/// load time: an explicit per-runtime `cleanup` key must be supported by its
-/// runtime, and a budget requires every metered runtime's effective cleanup
-/// to be enforceable (not "disabled"). The deprecated global `cleanup` is
-/// only validated per-runtime lazily at `start()` — a global value may be a
-/// leftover that never applies to the runtime it would conflict with.
-pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
-    validate_config_with_budget_source(config, has_budget.then_some(BudgetSource::Environment))
-}
-
+/// Validate the config at load time: money-window sanity bounds, `RunPod`
+/// preflight, and cleanup settings against runtime capabilities. An explicit
+/// per-runtime `cleanup` key must be supported by its runtime, and a budget
+/// requires every metered runtime's effective cleanup to be enforceable (not
+/// "disabled"). The deprecated global `cleanup` is only validated per-runtime
+/// lazily at `start()`: a global value may be a leftover that never applies
+/// to the runtime it would conflict with.
 pub fn validate_config_with_budget_source(
     config: &Config,
     budget_source: Option<BudgetSource>,
@@ -603,11 +600,6 @@ pub trait Runtime: Send + Sync {
     ) -> impl Future<Output = anyhow::Result<Self::Conn>> + Send;
 }
 
-// --- Enum dispatch ---
-//
-// The backend set is closed, so heterogeneous storage uses enums instead of
-// trait objects (async-fn traits are not dyn-compatible).
-
 macro_rules! dispatch {
     ($self:ident, $inner:ident => $body:expr) => {
         match $self {
@@ -849,6 +841,10 @@ mod tests {
 
     fn config(toml: &str) -> Config {
         toml::from_str(toml).unwrap()
+    }
+
+    fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
+        validate_config_with_budget_source(config, has_budget.then_some(BudgetSource::Environment))
     }
 
     #[test]

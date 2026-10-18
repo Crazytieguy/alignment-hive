@@ -1,3 +1,8 @@
+//! One WebSocket per kernel. A background task owns the socket and runs
+//! executions one at a time: queued requests wait in a bounded channel until
+//! the current execution has both its `execute_reply` and its `IOPub` idle
+//! status (or a short grace after the reply, since idle can be lost).
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -139,29 +144,6 @@ impl KernelConnection {
             parent_msg_id,
             result_rx,
         })
-    }
-
-    /// Execute code and wait for the result with a timeout.
-    pub async fn execute(
-        &self,
-        session_id: &str,
-        code: &str,
-        timeout: std::time::Duration,
-    ) -> anyhow::Result<ExecutionOutput> {
-        let result_rx = self.start_execution(session_id, code).await?.result_rx;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(output)) => Ok(output),
-            Ok(Err(_)) => anyhow::bail!("Kernel connection dropped before execution completed"),
-            Err(_) => {
-                let mut output = ExecutionOutput::default();
-                output.push_stream(
-                    true,
-                    "Execution timed out. The code may still be running on the kernel.",
-                );
-                Ok(output)
-            }
-        }
     }
 
     /// Background task: handles sending requests and reading responses.
