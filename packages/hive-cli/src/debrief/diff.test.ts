@@ -191,7 +191,7 @@ describe('vendored DiffView review disclosure', () => {
   });
 
   test('step buttons reveal ten rows from either end and keep neighbouring folds', () => {
-    const { render, host, api } = setup();
+    const { render, host } = setup();
     render({ old: lines(45), new: lines(45), focus: [23, 23] });
     expect(numbers(host, 'new')).toEqual([20, 21, 22, 23, 24, 25, 26]);
     click(host, '↑ 10');

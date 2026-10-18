@@ -1,3 +1,7 @@
+// The renderer: prepares a debrief (parse, review context, evidence), assembles the page (styles, evidence and
+// scripts inline; the renderer's own remote loads are only the pinned CDN libraries and fonts, though trusted author
+// scripts may fetch more), and writes `page.html` and `manifest.json` together, the manifest last. A secret that
+// reaches the page or manifest fails the render.
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';

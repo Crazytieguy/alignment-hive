@@ -1,3 +1,5 @@
+// Transcript evidence through the shared session-data parser and locator resolver: cited entries with their role
+// labels, Write calls, key asks and the user's other messages. Locators into another session are refused.
 import { readFile } from 'node:fs/promises';
 import { hiddenBy, isHumanMessage, parseTranscript } from '@alignment-hive/session-data';
 import { claudeProjectsRoot } from '../lib/config';

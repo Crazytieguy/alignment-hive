@@ -1,3 +1,6 @@
+// Resolves each parsed ref into the evidence the page shows (diff, file, transcript, image, git) and the page
+// header's asks. Textual evidence is redacted as it is read, before anything hashes it; images are hashed and
+// embedded unchanged. The hashes are evidence identity in the manifest, which later rounds compare.
 import { createHash } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';

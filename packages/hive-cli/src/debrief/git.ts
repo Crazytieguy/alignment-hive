@@ -1,3 +1,5 @@
+// Git for evidence and coverage, through `git -C` with arguments passed directly, and the review context: which
+// commits base and head are (base defaults to the session's commit stamp), or no git outside a repository.
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { runCommand } from '../lib/spawn';

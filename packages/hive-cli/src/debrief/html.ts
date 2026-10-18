@@ -1,10 +1,14 @@
+// Escaping and Markdown rendering for the page. Item bodies may carry raw HTML, checked statically: URL attributes
+// must be data URIs or href fragments (a script src may also be one of the pinned SCRIPT_URLS), no embedding or
+// document-wrapper tags, and CSS parsed to refuse imports and remote URLs. Author scripts and handlers are trusted.
+// Evidence and one-line fields render with raw HTML off.
 import { randomUUID } from 'node:crypto';
 // Official self-contained ESM bundle: the Node entry dynamically requires JSON
 // relative to import.meta.url, which is unavailable inside a Bun executable.
 import * as css from 'css-tree/dist/csstree.esm';
 import MarkdownIt from 'markdown-it';
 import { Parser } from 'parse5';
-import { isMap, isScalar, parseDocument } from 'yaml';
+import { isMap, parseDocument } from 'yaml';
 import { reviewHtmlMessages as msg } from '../lib/messages';
 import type { DefaultTreeAdapterMap } from 'parse5';
 

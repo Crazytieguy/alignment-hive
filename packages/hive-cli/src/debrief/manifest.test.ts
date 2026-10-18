@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
 import { parseHTML } from 'linkedom';

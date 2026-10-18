@@ -1,3 +1,9 @@
+/**
+ * What the review page treats as a secret: the repository's gitleaks rules (the upload
+ * sanitizer's list), minus its fuzzy ones, plus the shapes gitleaks has no rule for.
+ * Evidence is redacted with these before it is hashed; authored text and the finished page
+ * are checked with the same rules and refused.
+ */
 import { createHash } from 'node:crypto';
 import { parse } from 'parse5';
 import { SECRET_NAME, SECRET_SHAPES, namedScan, secretSpans } from '../lib/sanitize';
@@ -6,12 +12,6 @@ import type { ShapeId } from '../lib/sanitize';
 import type { SecretRule } from '../lib/secret-rules';
 import type { DefaultTreeAdapterMap } from 'parse5';
 
-/**
- * What the review page treats as a secret: the repository's gitleaks rules (the upload
- * sanitizer's list), minus its fuzzy ones, plus the shapes gitleaks has no rule for.
- * Evidence is redacted with these before it is hashed; authored text and the finished page
- * are checked with the same rules and refused.
- */
 export type SecretKind = ShapeId | 'jwt' | 'key' | 'privateKey';
 export type SecretHits = Partial<Record<SecretKind, number>>;
 export interface SecretFound { kind: SecretKind; start: number; end: number; match: string }

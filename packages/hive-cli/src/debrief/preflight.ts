@@ -1,3 +1,5 @@
+// `hive debrief preflight`: the `hive` on PATH meets a minimum version, and the review context resolves, which in a
+// repository means the session's commit stamp exists.
 import { runCommand } from '../lib/spawn';
 import { reviewCliMessages } from '../lib/messages';
 import { resolveReviewContext } from './git';

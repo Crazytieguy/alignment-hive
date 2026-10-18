@@ -1,3 +1,5 @@
+// Disk reads for evidence, and the path and text rules git reads share: repository paths are relative with no `..`,
+// and text is strict UTF-8 without NULs.
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, posix, resolve } from 'node:path';
 import { review as msg } from '../lib/messages';

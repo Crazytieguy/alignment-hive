@@ -1,3 +1,5 @@
+// Test fixtures: a temporary git repository with a session stamp, transcript and debrief builders, the kitchen-sink
+// page the browser gates measure, and snapshot helpers.
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

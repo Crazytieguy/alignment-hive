@@ -1,3 +1,6 @@
+// Parses a debrief file: YAML front matter for the page, then one `##` item per heading, each with a ```yaml
+// metadata fence and any ```ref evidence fences. Errors name the item and source line; authored text holding a
+// secret is refused, never rewritten.
 import MarkdownIt from 'markdown-it';
 import { LineCounter, isAlias, isNode, isScalar, parseDocument, visit } from 'yaml';
 import { z } from 'zod';

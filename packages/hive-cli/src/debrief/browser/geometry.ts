@@ -71,7 +71,7 @@ export async function keepMeasurements(name: string, table: unknown): Promise<vo
   await writeFile(join(dir, `${name}.json`), JSON.stringify(table, null, 2) + '\n');
 }
 
-/* ---------- G-C: diff tabs keep one geometry folded and open (c003) ---------- */
+/* ---------- G-C: diff tabs keep one geometry folded and open ---------- */
 
 export interface TabSnapshot { labels: Array<[number, number, number]>; chip: [number, number] | null; title: [number, number] | null; header: number }
 export interface TabPanel { id: string; folded: TabSnapshot; open: TabSnapshot; all: TabSnapshot | null; opened: boolean }
@@ -129,7 +129,7 @@ export function tabDeltas(panel: TabPanel): TabDeltas {
   };
 }
 
-/* ---------- G-A: item chevrons centred on the heading's cap band (c001) ---------- */
+/* ---------- G-A: item chevrons centred on the heading's cap band ---------- */
 
 export interface ChevronRow { id: string; open: boolean; offset: number | null; inkTop: number | null; inkBottom: number | null; capCentre: number }
 
@@ -194,7 +194,7 @@ export async function measureChevrons(page: Page, scale: number, selector = 'det
   return rows;
 }
 
-/* ---------- G-B: opening or closing anything moves nothing already on screen (c001, c003) ---------- */
+/* ---------- G-B: opening or closing anything moves nothing already on screen ---------- */
 
 /**
  * A control kind: its selector, how a viewer toggles it, and whether a second press undoes it. `exempt`: allowed to

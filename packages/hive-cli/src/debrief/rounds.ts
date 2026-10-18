@@ -1,3 +1,6 @@
+// Rounds: this round's manifest against the previous one (item states, the footer for dropped items), and the page
+// overlay marking items new or changed since the viewer's last visit. computeSeen and installSeenOverlay ship into
+// the page as source, so they reference nothing outside themselves.
 import { reviewRoundMessages as msg } from '../lib/messages';
 import { escapeHtml, escapeJson } from './html';
 import { reviewError } from './parse';

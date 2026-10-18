@@ -1,3 +1,5 @@
+// The viewer's seen marks and last visit. createSeenStore and pageSeenEnv ship into the page as source (see
+// seenStoreScript), so they reference nothing outside themselves; tests run the same functions.
 import type { SeenStore } from './rounds';
 
 /** A seen mark records the item's hash when it was ticked: a later change to the item makes it unseen again. */

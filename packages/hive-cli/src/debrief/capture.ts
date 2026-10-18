@@ -1,3 +1,5 @@
+// `hive debrief capture`: runs a command (argv directly, never a shell) and records its exit code, stdout and stderr
+// as `captures/<name>.json`, which a transcript ref cites as `capture:<name>`. An existing capture is never overwritten.
 import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';

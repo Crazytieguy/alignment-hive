@@ -1,3 +1,5 @@
+// `manifest.json`, written beside each round's page: each item's content hash and evidence identities, plus earlier
+// rounds' item hashes. The next round compares against it; the page embeds it for the viewer's seen state.
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';

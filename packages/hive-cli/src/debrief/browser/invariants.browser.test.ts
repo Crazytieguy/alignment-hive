@@ -2,7 +2,7 @@
  * The owner's layout invariants, measured rather than eyeballed: opening or
  * closing anything moves nothing already on screen; item chevrons sit on the
  * heading's cap band within ±0.5px; diff tabs keep one geometry folded and
- * open (c001, c003).
+ * open.
  *
  * Run: REVIEW_BROWSER_TESTS=1 bun test src/debrief/browser/invariants.browser.test.ts
  * REVIEW_FONTS=local|network|none (default local); REVIEW_MEASURE_OUT=<dir> keeps every table.

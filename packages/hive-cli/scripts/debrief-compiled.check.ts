@@ -1,5 +1,7 @@
+// The renderer built with `bun build --compile`, as the shipped binary is, since embedded assets and css-tree's ESM
+// bundle must load inside an executable. `bun test` does not pick it up; the hive-cli release workflow runs it:
+// bun test ./scripts/debrief-compiled.check.ts
 import { runCommand } from '../src/lib/spawn';
-// Run explicitly: bun test ./scripts/debrief-compiled.check.ts
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';

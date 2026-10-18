@@ -1,3 +1,5 @@
+// Evidence as HTML, one `<figure>` per ref: transcript entries (known tools in their own views), file views, images
+// and the git card. A diff is only a mount point here; its spec goes to the page as JSON for review-diff.js to render.
 import { dirname, extname, isAbsolute, resolve } from 'node:path';
 import { reviewPageMessages as msg } from '../lib/messages';
 import { hashEvidence } from './evidence';
@@ -23,7 +25,7 @@ function pathHtml(path: string): string {
 }
 /** Text for a `pre`: the parser drops one leading newline after the tag. */
 const preText = (text: string) => (text.startsWith('\n') ? '\n' : '') + escapeHtml(text);
-export const lineCount = (text: string) => text.replace(/\n$/, '').split('\n').length;
+const lineCount = (text: string) => text.replace(/\n$/, '').split('\n').length;
 /** Outputs clip past this many lines; replies and prompts past it or past CLIP_CHARS characters. */
 const CLIP_LINES = 30, CLIP_CHARS = 1800;
 /** The control that unclips a clipped block. */
