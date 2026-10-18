@@ -1,3 +1,5 @@
+// Data access home: section links, the OpenAPI spec link, and the WorkOS API Keys widget, whose
+// token is minted server-side for the user's first active org membership.
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { getAuth } from "@workos/authkit-tanstack-react-start";

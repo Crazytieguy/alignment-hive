@@ -132,7 +132,7 @@ export const listProjectsInternal = internalQuery({
   handler: async (ctx, args) => listProjectsImpl(ctx, args),
 });
 
-// --- Backfill (internal only, unchanged) ---
+// --- Backfill (internal only) ---
 
 export const updateSessionSummary = internalMutation({
   args: {

@@ -1,3 +1,5 @@
+// MATS consulting-feedback form (/feedback/mats?t=<token>). Checks the token's status first;
+// submission re-verifies the token server-side (src/lib/feedback/server.ts).
 import { createFileRoute } from "@tanstack/react-router";
 import { Loader2 } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";

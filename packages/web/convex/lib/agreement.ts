@@ -1,4 +1,5 @@
-// Keep consistent with ../../../src/components/consent/policy-content.ts —
+// Data accessor agreement: the version gate (CURRENT_AGREEMENT_VERSION) and the text shown at
+// /authorized/agreement. Keep consistent with ../../src/components/consent/policy-content.ts:
 // changes to access/use terms must be reflected in both files.
 
 import type { QueryCtx } from "../_generated/server";

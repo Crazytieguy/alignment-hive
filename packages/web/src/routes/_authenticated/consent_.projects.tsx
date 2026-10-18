@@ -1,3 +1,5 @@
+// /consent/projects: per-project sharing toggles, saved together as one batch, plus GitHub App
+// link status. Unlinked repos' visibility is probed client-side with the public GitHub API.
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation } from "convex/react";

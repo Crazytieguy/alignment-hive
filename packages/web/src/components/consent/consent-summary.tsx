@@ -1,3 +1,5 @@
+// Returning users' consent form: all preferences on one page; saving is enabled only when they
+// differ from the latest consent.
 import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import {

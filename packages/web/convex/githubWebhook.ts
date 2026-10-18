@@ -1,5 +1,7 @@
 "use node";
 
+// GitHub App webhook handler (routed from http.ts): verifies the HMAC signature, then mirrors
+// installation and repository-selection events through the github.ts mutations.
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -45,7 +47,6 @@ export const handleWebhook = internalAction({
       throw new Error("GITHUB_WEBHOOK_SECRET not configured");
     }
 
-    // Verify HMAC signature
     const expected =
       "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
 

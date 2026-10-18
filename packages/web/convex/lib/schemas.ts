@@ -1,6 +1,7 @@
 /**
- * Shared Zod schemas for request validation and OpenAPI spec generation.
- * Used by both Convex queries (via manual conversion) and Hono HTTP endpoints.
+ * Zod schemas for the HTTP API in http.ts: request validation and the OpenAPI spec. Handlers
+ * check the internal query results against the response schemas with `satisfies`; the Convex
+ * argument validators in authorized.ts are separate and kept in sync by hand.
  */
 import { z } from "zod";
 

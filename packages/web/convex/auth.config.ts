@@ -1,3 +1,5 @@
+// Convex accepts WorkOS AuthKit access tokens under either issuer below; both are verified
+// against the WorkOS client's JWKS.
 import type { AuthConfig } from "convex/server";
 
 const clientId = process.env.WORKOS_CLIENT_ID;

@@ -1,3 +1,5 @@
+// Router factory: one Convex client shared by React Query (SSR-aware via
+// setupRouterSsrQueryIntegration) and Convex's own provider, authenticated with WorkOS AuthKit tokens.
 import { createRouter } from "@tanstack/react-router";
 import { ConvexQueryClient } from "@convex-dev/react-query";
 import { QueryClient } from "@tanstack/react-query";

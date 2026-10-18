@@ -1,3 +1,5 @@
+// Root route: document shell and global head. beforeLoad reads the WorkOS session server-side,
+// hands the access token to Convex's SSR HTTP client, and puts userId/token in route context.
 import {
   HeadContent,
   Outlet,

@@ -1,7 +1,7 @@
 /**
  * Canonical consent visibility filter.
  * This is the SINGLE source of truth for determining which sessions
- * are visible. All read queries in authorized.ts must use this.
+ * are visible. Every session read (lib/authorizedQueries.ts) must use this.
  *
  * See consent-windows.ts in session-data for the window computation logic.
  */
@@ -38,7 +38,6 @@ interface SessionForVisibility {
 export async function buildConsentFilter(
   ctx: QueryCtx,
 ): Promise<(session: SessionForVisibility) => boolean> {
-  // Load all consent events
   const allGlobalConsent = await ctx.db
     .query("dataSharingConsent")
     .collect();

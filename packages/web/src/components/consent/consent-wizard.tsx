@@ -1,3 +1,6 @@
+// First-time consent flow: one step per policy section. Enabling sharing inserts a GitHub App step
+// (and an existing-projects step, if there are any) right after it; declining ends the flow there.
+// The current step and choices persist in localStorage.
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { CollapsibleAccessList } from "@/components/consent/access-list";
 import {
@@ -256,10 +259,6 @@ export default function ConsentWizard({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
 
 function SectionStep({
   step,

@@ -9,7 +9,7 @@ import type { PaginationOptions, PaginationResult } from "convex/server";
 import { stream } from "convex-helpers/server/stream";
 import schema from "../schema";
 import { buildConsentFilter } from "./consentVisibility";
-import { loadAndGroupUserConsent } from "./projectConsent";
+import { loadAndGroupUserConsent, summarizeProjectGroups } from "./projectConsent";
 
 // --- Formatting helpers ---
 
@@ -159,6 +159,28 @@ export async function listSessionsImpl(
     return hasUpload ? !!session.upload : !session.upload;
   };
 
+  const formatPage = async (
+    paginatedSessions: PaginationResult<Doc<"sessions">>,
+    ownerOf: (session: Doc<"sessions">) => Doc<"users"> | null,
+  ) => ({
+    ...paginatedSessions,
+    page: await Promise.all(
+      paginatedSessions.page.map(async (session: Doc<"sessions">) => {
+        const upload = await formatUpload(ctx, session.upload);
+        const user = ownerOf(session);
+        const agentSessions = await formatAgentSessions(
+          ctx,
+          session.sessionId,
+        );
+        return {
+          ...formatSessionBase(session, upload),
+          user: user ? formatUser(user) : null,
+          agentSessions,
+        };
+      }),
+    ),
+  });
+
   if (scope?.type === "include") {
     const projectDir =
       scope.project && "directory" in scope.project
@@ -183,49 +205,13 @@ export async function listSessionsImpl(
       .paginate(args.paginationOpts);
 
     const user = await ctx.db.get(scope.userId);
-
-    return {
-      ...paginatedSessions,
-      page: await Promise.all(
-        paginatedSessions.page.map(async (session) => {
-          const upload = await formatUpload(ctx, session.upload);
-          const agentSessions = await formatAgentSessions(
-            ctx,
-            session.sessionId,
-          );
-          return {
-            ...formatSessionBase(session, upload),
-            user: user ? formatUser(user) : null,
-            agentSessions,
-          };
-        }),
-      ),
-    };
+    return formatPage(paginatedSessions, () => user);
   }
 
-  // User map for resolving session owners (shared by no-scope and exclude paths)
+  // Session owners for the no-scope and exclude paths
   const userDocMap = new Map(allUsers.map((u) => [u._id as string, u]));
-
-  const formatPage = async (
-    paginatedSessions: PaginationResult<Doc<"sessions">>,
-  ) => ({
-    ...paginatedSessions,
-    page: await Promise.all(
-      paginatedSessions.page.map(async (session: Doc<"sessions">) => {
-        const upload = await formatUpload(ctx, session.upload);
-        const user = userDocMap.get(session.userDocId) ?? null;
-        const agentSessions = await formatAgentSessions(
-          ctx,
-          session.sessionId,
-        );
-        return {
-          ...formatSessionBase(session, upload),
-          user: user ? formatUser(user) : null,
-          agentSessions,
-        };
-      }),
-    ),
-  });
+  const ownerFromMap = (session: Doc<"sessions">) =>
+    userDocMap.get(session.userDocId) ?? null;
 
   // No-scope path — just consent + optional hasUpload
   if (!scope) {
@@ -239,7 +225,7 @@ export async function listSessionsImpl(
         uploadFilter(session) && consentFilter(session),
       )
       .paginate(args.paginationOpts);
-    return formatPage(paginatedSessions);
+    return formatPage(paginatedSessions, ownerFromMap);
   }
 
   // Exclude path
@@ -270,7 +256,7 @@ export async function listSessionsImpl(
     })
     .paginate(args.paginationOpts);
 
-  return formatPage(paginatedSessions);
+  return formatPage(paginatedSessions, ownerFromMap);
 }
 
 export async function getSessionImpl(
@@ -398,15 +384,5 @@ export async function listProjectsImpl(
 ) {
   const { groups } = await loadAndGroupUserConsent(ctx, args.userId);
 
-  return groups.map((group) => {
-    const latest = group.events.reduce((a, b) =>
-      a.timestamp > b.timestamp ? a : b,
-    );
-    return {
-      directories: [...group.directories],
-      gitRemotes: [...group.gitRemotes],
-      sessionSharing: latest.sessionSharing,
-      latestAt: latest.timestamp,
-    };
-  });
+  return summarizeProjectGroups(groups);
 }

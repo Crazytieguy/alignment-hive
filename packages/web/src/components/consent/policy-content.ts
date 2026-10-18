@@ -1,8 +1,7 @@
-// Keep consistent with ../../../convex/lib/agreement.ts —
-// changes to access/use terms must be reflected in both files.
-
-/** Single source of truth for user-facing data sharing policy text.
- *  CLI commands are wrapped in \u200B (zero-width space) delimiters for inline code rendering. */
+// Single source of truth for user-facing data sharing policy text. CLI commands are wrapped in
+// \u200B (zero-width space) delimiters for inline code rendering (see policy-paragraph.tsx).
+// Keep consistent with ../../../convex/lib/agreement.ts: changes to access/use terms must be
+// reflected in both files.
 
 export type ConsentQuestion =
   | "sessionSharing"

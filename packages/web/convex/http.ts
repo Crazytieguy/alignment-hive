@@ -1,3 +1,6 @@
+// HTTP routes on the Convex site domain: the data API (/api/*, OpenAPI spec at /api/doc) and the
+// GitHub App webhook. The API-key middleware below is the only auth for /api/*: handlers call the
+// *Internal queries in authorized.ts, which skip requireAuthorized() but still apply consent filtering.
 import { Hono } from "hono";
 import { HttpRouterWithHono } from "convex-helpers/server/hono";
 import { describeRoute, resolver, validator } from "hono-openapi";
@@ -24,7 +27,6 @@ const app: HonoWithConvex<ActionCtx> = new Hono();
 // --- API key auth middleware for /api/* (except /api/doc) ---
 
 app.use("/api/*", async (c, next) => {
-  // Skip auth for the OpenAPI spec endpoint
   if (c.req.path === "/api/doc") return next();
 
   const auth = c.req.header("Authorization");
@@ -277,7 +279,7 @@ app.get("/api/doc", async (c) => {
   return c.json(spec);
 });
 
-// --- GitHub webhook (existing, ported to Hono) ---
+// --- GitHub App webhook ---
 
 app.post("/github/webhook", async (c) => {
   const rawBody = await c.req.text();

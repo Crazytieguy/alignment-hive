@@ -1,3 +1,5 @@
+// Single-use state for consulting-feedback tokens: claim (pending) -> confirm (redeemed), or
+// release on a failure that wrote nothing. Called only by the web server (src/lib/feedback/server.ts).
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 

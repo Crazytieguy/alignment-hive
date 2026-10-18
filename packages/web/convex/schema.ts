@@ -1,3 +1,5 @@
+// Convex tables. dataSharingConsent and projectConsent are append-only event logs: consent
+// windows are computed from their full _creationTime history, so rows are inserted, never patched.
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 

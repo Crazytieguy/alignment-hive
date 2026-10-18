@@ -1,3 +1,6 @@
+// Sessions browser for data accessors. User and project filters are exclude-lists kept in the
+// URL search params; selected uploads download as one zip, retrying with a fresh signed URL when
+// a fetch fails (they expire).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePaginatedQuery } from "convex-helpers/react/cache";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";

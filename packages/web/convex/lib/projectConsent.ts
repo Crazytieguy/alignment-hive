@@ -1,9 +1,7 @@
 /**
- * Shared helpers for loading and grouping project consent events.
- *
- * Consolidates the "load all consent events → group by project identity →
- * find matching group" pattern used by verifyConsent, buildConsentFilter,
- * getProjectSharing, and getConsentHistory.
+ * One user's project consent: load their projectConsent rows, normalize identifiers, and group
+ * them by project identity (groupProjectConsentEvents in session-data). buildConsentFilter does
+ * the same grouping for every user at once, so it doesn't go through here.
  */
 import type { QueryCtx, MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
@@ -25,7 +23,6 @@ export async function loadAndGroupUserConsent(
 ): Promise<{
   groups: ProjectGroup[];
   lookup: Map<string, number>;
-  allEvents: ProjectConsentEvent[];
 }> {
   const rawEvents = await ctx.db
     .query("projectConsent")
@@ -38,8 +35,7 @@ export async function loadAndGroupUserConsent(
     timestamp: e._creationTime,
   }));
 
-  const { groups, lookup } = groupProjectConsentEvents(normalized);
-  return { groups, lookup, allEvents: normalized };
+  return groupProjectConsentEvents(normalized);
 }
 
 /**
@@ -55,4 +51,19 @@ export async function getMatchingConsentGroup(
   const idx = findGroupForIdentifiers(lookup, identifiers);
   if (idx === undefined) return null;
   return groups[idx];
+}
+
+/** Each project group's identifiers and current sharing state (its latest event). */
+export function summarizeProjectGroups(groups: ProjectGroup[]) {
+  return groups.map((group) => {
+    const latest = group.events.reduce((a, b) =>
+      a.timestamp > b.timestamp ? a : b,
+    );
+    return {
+      directories: [...group.directories],
+      gitRemotes: [...group.gitRemotes],
+      sessionSharing: latest.sessionSharing,
+      latestAt: latest.timestamp,
+    };
+  });
 }

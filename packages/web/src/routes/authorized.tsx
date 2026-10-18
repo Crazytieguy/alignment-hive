@@ -1,3 +1,5 @@
+// Data accessor area: layout plus the gate for every /authorized route (signed in, hasDataAccess,
+// then redirected to /authorized/agreement until the current agreement is signed).
 import {
   Link,
   Outlet,

@@ -12,6 +12,7 @@ export function SessionViewer({ url }: SessionViewerProps) {
       renderAgentLink={(agentId) => (
         <Link
           to="/authorized/sessions/$sessionId"
+          // Agent session rows are keyed `agent-<id>`; the transcript may give the bare id.
           params={{
             sessionId: agentId.startsWith("agent-")
               ? agentId

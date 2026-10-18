@@ -4,19 +4,6 @@ interface AccessListProps {
   accessList: Array<{ name: string | null; email: string }>;
 }
 
-export function AccessList({ accessList }: AccessListProps) {
-  if (accessList.length === 0) return null;
-
-  return (
-    <div className="rounded-lg border px-5 py-4">
-      <p className="text-sm font-medium mb-3">
-        Researchers with access
-      </p>
-      <AccessListItems accessList={accessList} />
-    </div>
-  );
-}
-
 export function CollapsibleAccessList({
   accessList,
   className,

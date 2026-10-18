@@ -1,3 +1,5 @@
+// Pure slot math for booking, shared by the page's time picker and the server's revalidation.
+// Slots are UTC epoch ms; office hours are wall-clock time in the office's timezone.
 import { DateTime, Interval } from "luxon";
 import { HORIZON_DAYS, MIN_NOTICE_HOURS, type OfficeConfig, isOfficeOpenOn } from "./offices";
 

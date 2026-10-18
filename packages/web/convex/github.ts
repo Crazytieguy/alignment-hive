@@ -1,3 +1,5 @@
+// GitHub App installations and the repos they grant, kept in sync by the webhook
+// (githubWebhook.ts). gitRemote is stored and looked up lowercased ("github.com/owner/repo").
 import { v } from "convex/values";
 import { internalMutation, query } from "./_generated/server";
 

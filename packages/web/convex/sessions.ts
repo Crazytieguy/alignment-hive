@@ -1,3 +1,6 @@
+// Session writes from the hive CLI: checkout and session heartbeats, upload URLs, and linking
+// uploaded transcripts and workflow-run blobs. Every session write goes through verifyConsent;
+// agent sessions and workflow runs inherit the parent session's consent.
 import { ConvexError, v } from "convex/values";
 import { mutation } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
@@ -43,7 +46,6 @@ async function verifyConsent(
     );
   }
 
-  // Find matching project consent group
   const displayName = identifiers.gitRemote ?? identifiers.directory ?? "unknown";
   const group = await getMatchingConsentGroup(ctx, userId, identifiers);
 
@@ -62,7 +64,6 @@ async function verifyConsent(
     );
   }
 
-  // If lastModified is provided, verify it falls within consent windows
   if (lastModified !== undefined) {
     const globalWindows = computeConsentWindows(
       allGlobalEvents.map((e) => ({
@@ -287,7 +288,6 @@ export const saveUploads = mutation({
     const identifiers = extractIdentifiers(args);
     await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
 
-    // Verify parent session ownership if it already exists
     const existingParent = await ctx.db
       .query("sessions")
       .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))

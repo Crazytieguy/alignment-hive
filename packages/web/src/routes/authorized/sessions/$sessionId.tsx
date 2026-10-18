@@ -1,3 +1,5 @@
+// One session for data accessors: transcript viewer, metadata, and its agent sessions grouped
+// by workflow run. The model shown is the most frequent one in the transcript's assistant turns.
 import { useSuspenseQuery, useQuery } from "@tanstack/react-query";
 import { convexQuery } from "@convex-dev/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";

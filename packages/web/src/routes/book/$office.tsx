@@ -1,3 +1,5 @@
+// Booking page for one office. Fetches the host's busy intervals once, computes slots locally
+// with the same generateSlots() the server revalidates with, and posts the booking.
 import { createFileRoute } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { DateTime } from "luxon";

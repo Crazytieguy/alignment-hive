@@ -1,3 +1,5 @@
+// GitHub App post-install redirect: sends the user back to the consent page that started the
+// install (state=projects means /consent/projects) with github_status for the banner.
 import { createFileRoute } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/api/github/installed")({

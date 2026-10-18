@@ -1,3 +1,5 @@
+// /consent: first-time users get the step-by-step ConsentWizard, returning users the
+// ConsentSummary form. This page owns the choices state and submission for both.
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation } from "convex/react";
 import { useSuspenseQuery } from "@tanstack/react-query";

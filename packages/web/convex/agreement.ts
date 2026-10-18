@@ -1,3 +1,5 @@
+// Data accessor agreement signing: records the agreement row, then grants the WorkOS
+// data-accessor role (which lets the user mint API keys). A failed grant rolls the row back.
 import { v } from "convex/values";
 import { query, action, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";

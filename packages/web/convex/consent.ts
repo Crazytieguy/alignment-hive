@@ -1,9 +1,15 @@
+// Contributor-side consent, called by the web consent pages and the hive CLI. Global consent
+// (dataSharingConsent) and per-project sharing (projectConsent) are append-only event logs:
+// the latest row is the current state, and the full history defines the consent windows.
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { extractIdentifiers } from "@alignment-hive/session-data";
 import { upsertUser } from "./lib/users";
-import { loadAndGroupUserConsent, getMatchingConsentGroup } from "./lib/projectConsent";
-
+import {
+  loadAndGroupUserConsent,
+  getMatchingConsentGroup,
+  summarizeProjectGroups,
+} from "./lib/projectConsent";
 
 /** Validator for project identifiers — at least one of directory/gitRemote required. */
 const projectIdentifierArgs = v.union(
@@ -80,7 +86,7 @@ export const getLatestConsent = query({
       return null;
     }
 
-    // Index sorts by timestamp — latest row is last
+    // Index ties are ordered by _creationTime, so desc puts the latest row first
     return await ctx.db
       .query("dataSharingConsent")
       .withIndex("by_user_id", (q) => q.eq("userId", user._id))
@@ -141,6 +147,7 @@ export const updateProjectSharing = mutation({
 
     for (const { identifier, sessionSharing } of changes) {
       validateIdentifiers(identifier);
+      // Same row either way; the branches let TypeScript match one projectConsent union variant.
       if (identifier.directory) {
         await ctx.db.insert("projectConsent", {
           userId,
@@ -180,17 +187,7 @@ export const getProjectSharing = query({
 
     const { groups } = await loadAndGroupUserConsent(ctx, user._id);
 
-    return groups.map((group) => {
-      const latest = group.events.reduce((a, b) =>
-        a.timestamp > b.timestamp ? a : b,
-      );
-      return {
-        directories: [...group.directories],
-        gitRemotes: [...group.gitRemotes],
-        sessionSharing: latest.sessionSharing,
-        latestAt: latest.timestamp,
-      };
-    });
+    return summarizeProjectGroups(groups);
   },
 });
 

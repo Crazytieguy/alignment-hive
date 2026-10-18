@@ -1,3 +1,5 @@
+// Public landing page (/). The kintsugi starfield behind it reads each section's
+// data-star-section rect, so section order and markers here shape the field.
 import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { getAuth, getSignInUrl } from "@workos/authkit-tanstack-react-start";
 import { z } from "zod";
@@ -67,10 +69,6 @@ const heroFontStyle: CSSProperties = {
   fontWeight: 520,
   letterSpacing: "-0.006em",
 };
-
-// ---------------------------------------------------------------------------
-// Shared copy (single source for all layout variants — do not fork strings)
-// ---------------------------------------------------------------------------
 
 // Shown one at a time, in this order.
 const TESTIMONIALS = [
@@ -267,16 +265,12 @@ function Home() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Page sections — label rail
-// ---------------------------------------------------------------------------
-
 function LandingSections() {
   return (
     <>
       {/* data-star-section: the starfield reads these rects for its
           per-section density plateaus and cell-size profile (see
-          kintsugi-hero.tsx). The testimonial section additionally skews the
+          kintsugi-hero.tsx and kintsugi-field.ts). The testimonial section additionally skews the
           field denser/warmer — no solid background. */}
       <section
         data-star-section="testimonials"
