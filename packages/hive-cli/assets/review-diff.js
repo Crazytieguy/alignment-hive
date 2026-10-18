@@ -20,7 +20,7 @@
    contents of review-diff.css, and four pinned CDN scripts, in order \u2014
    jsdiff 9.0.0, highlight.js 11.12.0, diff-match-patch 1.0.5
    (preceded by a one-line `var module = { exports: {} };` shim),
-   markdown-it 15.0.1. The file declares reviewDiff(global, copy); the
+   markdown-it 15.0.3. The file declares reviewDiff(global, copy); the
    page calls it once with window and its copy (reviewDiffMessages in
    messages.ts: `{name}` placeholders, {one, other} pairs by count),
    which defines global.DiffView. Then, once per diff:

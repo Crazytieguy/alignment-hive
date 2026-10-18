@@ -25,7 +25,7 @@ pub fn public_key_for(key_path: &Path) -> anyhow::Result<String> {
 }
 
 fn new_private_key() -> PrivateKey {
-    let keypair = Ed25519Keypair::random(&mut rand::thread_rng());
+    let keypair = Ed25519Keypair::random(&mut ssh_key::rand_core::OsRng);
     let mut private_key = PrivateKey::from(keypair);
     private_key.set_comment(KEY_COMMENT);
     private_key

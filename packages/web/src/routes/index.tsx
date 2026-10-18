@@ -1,7 +1,7 @@
 // Public landing page (/). The kintsugi starfield behind it reads each section's
 // data-star-section rect, so section order and markers here shape the field.
 import { createFileRoute, useSearch } from "@tanstack/react-router";
-import { getAuth, getSignInUrl } from "@workos/authkit-tanstack-react-start";
+import { getAuth } from "@workos/authkit-tanstack-react-start";
 import { z } from "zod";
 import { Button } from "@alignment-hive/ui";
 import { KintsugiHero } from "@/components/landing/kintsugi-hero";
@@ -38,9 +38,8 @@ export const Route = createFileRoute("/")({
   }),
   loader: async () => {
     const { user } = await getAuth();
-    const signInUrl = await getSignInUrl();
 
-    return { user: user ? { id: user.id } : null, signInUrl };
+    return { user: user ? { id: user.id } : null };
   },
 });
 
@@ -165,7 +164,7 @@ function AboutCopy() {
 }
 
 function Home() {
-  const { user, signInUrl } = Route.useLoaderData();
+  const { user } = Route.useLoaderData();
 
   return (
     <div className="theme-dark relative isolate min-h-screen bg-background text-foreground">
@@ -223,7 +222,7 @@ function Home() {
               </a>
             ) : (
               <a
-                href={signInUrl}
+                href="/auth/sign-in"
                 className="text-[0.95rem] text-muted-foreground hover:underline"
               >
                 Log in

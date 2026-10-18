@@ -18,7 +18,7 @@ const tool = (name: string, input: Record<string, unknown>, result?: string, err
 /** An entry of the fixture session, at minute `n` unless `time` says otherwise. */
 const entry = (n: number, extra: Pick<TranscriptEntry, 'label' | 'role'> & { summary?: string; time?: string; entry: Parsed }): TranscriptEntry => ({
   locator: `${FIXTURE_SESSION}:${n}`, transcript: FIXTURE_SESSION, source: 'parent', summary: extra.summary ?? `Entry ${n}`, label: extra.label, role: extra.role,
-  entry: { n, time: 'time' in extra ? extra.time : `2026-09-05T10:${String(n).padStart(2, '0')}:00.000Z`, ...extra.entry } as Entry,
+  entry: { n, time: 'time' in extra ? extra.time : `2026-09-05T10:${String(n).padStart(2, '0')}:00.000Z`, ...extra.entry },
 });
 const base = { line: 7, bodyLine: 0, oldHash: null, newHash: 'hash', selector: 'selector' };
 const page = (): PageState => ({ diffs: [], scope: 'review', files: new FileAnchors([]) });

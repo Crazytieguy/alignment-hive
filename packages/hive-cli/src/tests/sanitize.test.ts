@@ -196,7 +196,7 @@ describe('SAFE_KEYS', () => {
   test('sanitizes non-string safe key values', () => {
     // A safe key whose value is an object is still walked.
     const input = { type: { nested: TEST_GITHUB_TOKEN } };
-    const sanitized = sanitizeDeep(input) as { type: { nested: string } };
+    const sanitized = sanitizeDeep(input);
     expect(sanitized.type.nested).toContain('[REDACTED:');
   });
 });

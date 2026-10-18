@@ -5,7 +5,7 @@
 //! parseable-but-non-canonical form (e.g. lowercase) is rejected.
 
 pub fn new() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }
 
 pub fn is_valid(value: &str) -> bool {

@@ -17,6 +17,7 @@ import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticate
 import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
 import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
 import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
+import { Route as AuthSignInRouteImport } from './routes/auth/sign-in'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
 import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
 import { Route as AuthorizedAgreementRouteImport } from './routes/authorized/agreement'
@@ -74,6 +75,11 @@ const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
   id: '/welcome',
   path: '/welcome',
   getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthSignInRoute = AuthSignInRouteImport.update({
+  id: '/auth/sign-in',
+  path: '/auth/sign-in',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const AuthSignOutRoute = AuthSignOutRouteImport.update({
   id: '/auth/sign-out',
@@ -176,6 +182,7 @@ export interface FileRoutesByFullPath {
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
   '/welcome': typeof AuthenticatedWelcomeRoute
+  '/auth/sign-in': typeof AuthSignInRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
   '/book/$office': typeof BookOfficeRoute
@@ -202,6 +209,7 @@ export interface FileRoutesByTo {
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
   '/welcome': typeof AuthenticatedWelcomeRoute
+  '/auth/sign-in': typeof AuthSignInRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
   '/book/$office': typeof BookOfficeRoute
@@ -231,6 +239,7 @@ export interface FileRoutesById {
   '/_authenticated/install': typeof AuthenticatedInstallRoute
   '/_authenticated/policy': typeof AuthenticatedPolicyRoute
   '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
+  '/auth/sign-in': typeof AuthSignInRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
   '/book/$office': typeof BookOfficeRoute
@@ -260,6 +269,7 @@ export interface FileRouteTypes {
     | '/install'
     | '/policy'
     | '/welcome'
+    | '/auth/sign-in'
     | '/auth/sign-out'
     | '/authorized/agreement'
     | '/book/$office'
@@ -286,6 +296,7 @@ export interface FileRouteTypes {
     | '/install'
     | '/policy'
     | '/welcome'
+    | '/auth/sign-in'
     | '/auth/sign-out'
     | '/authorized/agreement'
     | '/book/$office'
@@ -314,6 +325,7 @@ export interface FileRouteTypes {
     | '/_authenticated/install'
     | '/_authenticated/policy'
     | '/_authenticated/welcome'
+    | '/auth/sign-in'
     | '/auth/sign-out'
     | '/authorized/agreement'
     | '/book/$office'
@@ -339,6 +351,7 @@ export interface RootRouteChildren {
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
   AuthorizedRoute: typeof AuthorizedRouteWithChildren
   CallbackRoute: typeof CallbackRoute
+  AuthSignInRoute: typeof AuthSignInRoute
   AuthSignOutRoute: typeof AuthSignOutRoute
   BookOfficeRoute: typeof BookOfficeRoute
   BookCancelRoute: typeof BookCancelRoute
@@ -409,6 +422,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/welcome'
       preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
       parentRoute: typeof AuthenticatedRoute
+    }
+    '/auth/sign-in': {
+      id: '/auth/sign-in'
+      path: '/auth/sign-in'
+      fullPath: '/auth/sign-in'
+      preLoaderRoute: typeof AuthSignInRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/auth/sign-out': {
       id: '/auth/sign-out'
@@ -586,6 +606,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
   AuthorizedRoute: AuthorizedRouteWithChildren,
   CallbackRoute: CallbackRoute,
+  AuthSignInRoute: AuthSignInRoute,
   AuthSignOutRoute: AuthSignOutRoute,
   BookOfficeRoute: BookOfficeRoute,
   BookCancelRoute: BookCancelRoute,

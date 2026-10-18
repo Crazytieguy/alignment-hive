@@ -20,7 +20,7 @@ export const SCRIPT_URLS = [
   'https://cdnjs.cloudflare.com/ajax/libs/jsdiff/9.0.0/diff.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.12.0/highlight.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/diff-match-patch/1.0.5/index.js',
-  'https://cdn.jsdelivr.net/npm/markdown-it@15.0.1/dist/browser/markdown-it.umd.min.js',
+  'https://cdn.jsdelivr.net/npm/markdown-it@15.0.3/dist/browser/markdown-it.umd.min.js',
 ] as const;
 
 export interface HtmlContext { itemId: string; line: number }

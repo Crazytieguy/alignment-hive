@@ -188,7 +188,7 @@ beforeEach(() => {
     errRows.push(row);
     err.push(row.note ?? row.warning ?? row.error ?? '');
     return true;
-  }) as typeof process.stderr.write);
+  }));
 });
 afterEach(() => {
   (stdout.write as unknown as { mockRestore: () => void }).mockRestore();
